@@ -43,6 +43,7 @@ def _select_backend_config() -> None:
     Python-path kernel. Both kernel sets are compiled into the wheel, so the
     choice is purely runtime:
 
+      * FLAGOS_USE_TILEOPS=1                   -> backends_tileops.conf
       * FLAGOS_USE_FLAGGEMS_CPP=1              -> backends_flaggems_cpp.conf
       * FLAGOS_USE_FLAGGEMS_CPP=1 + METAX_BOXING=1
                                                -> backends_metax_flaggems_cpp.conf
@@ -83,6 +84,14 @@ def _select_backend_config() -> None:
     """
     if os.environ.get("FLAGOS_BACKEND_CONFIG"):
         return
+    use_tileops = os.environ.get("FLAGOS_USE_TILEOPS", "0") not in (
+        "0",
+        "",
+        "off",
+        "OFF",
+        "false",
+        "FALSE",
+    )
     use_flaggems_cpp = os.environ.get("FLAGOS_USE_FLAGGEMS_CPP", "0") not in (
         "0",
         "",
@@ -146,7 +155,9 @@ def _select_backend_config() -> None:
             os.environ["FLAGOS_BACKEND_CONFIG"] = conf_path
         return
 
-    if use_flaggems_cpp and metax_boxing:
+    if use_tileops:
+        conf_name = "backends_tileops.conf"
+    elif use_flaggems_cpp and metax_boxing:
         conf_name = "backends_metax_flaggems_cpp.conf"
     elif use_flaggems_cpp:
         conf_name = "backends_flaggems_cpp.conf"

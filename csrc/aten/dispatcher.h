@@ -55,6 +55,7 @@ class Dispatcher {
       case Backend::kMetax:         metax_fn_ = fn;          break;
       case Backend::kTsingMicro:   tsingmicro_fn_ = fn;    break;
       case Backend::kGcu:           gcu_fn_ = fn;            break;
+      case Backend::kTileOps:       tileops_fn_ = fn;        break;
     }
   }
 
@@ -96,6 +97,14 @@ class Dispatcher {
       case Backend::kMetax:         return metax_fn_;
       case Backend::kTsingMicro:   return tsingmicro_fn_;
       case Backend::kGcu:           return gcu_fn_;
+      // TileOPs kernels live in Python and are bound via torch.library on
+      // PrivateUse1, which intercepts before this dispatcher is reached. A conf
+      // entry of "tileops" therefore only lands here when that registration did
+      // not happen (TileOPs missing, non-SM90 host, or the op was filtered out),
+      // so fall back instead of hard-failing on an empty slot.
+      case Backend::kTileOps:
+        if (tileops_fn_) return tileops_fn_;
+        return cuda_fn_ ? cuda_fn_ : flagos_fn_;
     }
     return nullptr;
   }
@@ -116,6 +125,7 @@ class Dispatcher {
       case Backend::kMetax:         name = "metax"; break;
       case Backend::kTsingMicro:   name = "tsingmicro"; break;
       case Backend::kGcu:           name = "gcu"; break;
+      case Backend::kTileOps:       name = "tileops"; break;
       default:                           name = "unknown"; break;
     }
     fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(), name);
@@ -134,6 +144,7 @@ class Dispatcher {
   FnPtr metax_fn_          = nullptr;
   FnPtr tsingmicro_fn_    = nullptr;
   FnPtr gcu_fn_            = nullptr;
+  FnPtr tileops_fn_        = nullptr;
 };
 
 namespace detail {

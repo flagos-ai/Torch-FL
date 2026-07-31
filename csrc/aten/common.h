@@ -29,12 +29,13 @@ enum class Backend {
   kMetax,
   kTsingMicro,
   kGcu,
+  kTileOps,
   kUncached
 };
 
 // Returns the backend for a given op name, loaded once from config file at startup.
 // Config file path: $FLAGOS_BACKEND_CONFIG or torch_fl/configs/backends.conf
-// Format: "op_name = backend"  (backend: "flagos" | "flaggems" | "cuda" | "metax")
+// Format: "op_name = backend"  (backend: "flagos" | "flaggems" | "cuda" | "metax" | "tileops")
 // Default when op is not listed: FlagOS.
 Backend GetBackendForOp(const std::string& op_name);
 
