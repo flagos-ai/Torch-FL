@@ -110,31 +110,45 @@ default**, with L2 only as a fallback.
 ## 2. Overall architecture
 
 ```
-tileops/manifest/*.yaml ──┐
-                          ├─► scripts/codegen_tileops.py ─┬─► torch_fl/generated/tileops_routes.py
-torch_fl/tileops_spec.py ─┘   (run offline, output committed)
-  (recipe table + alias table                             ├─► torch_fl/configs/backends_tileops.conf
+tileops/manifest/*.yaml ──┐                               ┌─► torch_fl/generated/tileops_routes.py
+                          ├─► scripts/codegen_tileops.py ─┼─► torch_fl/generated/tileops_shims.py
+torch_fl/tileops_spec.py ─┘   (run offline, output        ├─► csrc/aten/generated/tileops_python_kernels.cc
+  (recipe table + alias table    committed)               ├─► torch_fl/configs/backends_tileops.conf
    + exclusion table, hand-maintained)                    └─► tests/integration/ops/test_tileops_generated.py
 
                                           runtime
                                             │
-torch_fl/__init__.py ──FLAGOS_USE_TILEOPS=1──► tileops_backend.py
-                                                 ├─ SM90 + dependency gate (silently returns 0 if missing)
-                                                 ├─ instance cache (op_cls, ctor_key)
-                                                 ├─ boxing: _flagos_to_cuda_view / _cuda_to_flagos_view
-                                                 └─ torch.library.Library("aten","IMPL").impl(..., "PrivateUse1")
+aten::relu(flagos tensor)
+  └─► PrivateUse1 m.impl                    csrc/aten/generated/register.inc
+      └─► relu_dispatcher                   reads conf + FLAGOS_OP_relu, logs the decision
+          └─► ReluKernelTileOps             csrc/aten/generated/tileops_python_kernels.cc
+              └─► CallPythonOp_Generic      csrc/aten/backends/flagos/python_op_caller.cc
+                  └─► _shim_relu            torch_fl/generated/tileops_shims.py
+                      └─► resolve_impl      torch_fl/tileops_backend.py
+                            ├─ SM90 + dependency gate (falls back to aten if missing)
+                            ├─ instance cache (op_cls, ctor_key)
+                            ├─ boxing: _flagos_to_cuda_view / _cuda_to_flagos_view
+                            └─► ReluFwdOp / its compiled kernel
 ```
+
+`torch_fl/__init__.py` reads `FLAGOS_USE_TILEOPS=1` only to pick
+`backends_tileops.conf`. It performs no registration: the kernels are bound by
+static constructors when `libtorch_fl.so` loads, before Python runs.
 
 Three design principles:
 
 1. **The manifest is the only spec source.** `tileops_spec.py` holds only what
    the manifest does not have (recipe grouping, aten aliases, exclusion
    reasons). When TileOPs is upgraded, re-run codegen and diff.
-2. **Pure Python, no C++ changes.** Same rationale as integration_plan section
-   3.2: TileOPs objects are stateful and instances must be cached by shape, so
-   pushing them through the `python_op_caller.h` pybind bridge is not worth it.
-   `torch.library` PrivateUse1 registration was measured to take precedence over
-   the C++ dispatcher, which is sufficient.
+2. **Register through the C++ dispatcher, keep the kernels in Python.** The
+   generated `.cc` stubs bind `Backend::kTileOps`; the recipe builders and the
+   instance cache stay in Python behind module-level shims that
+   `CallPythonOp_Generic` resolves by qualname. This is the same shape FlagGems
+   uses for its 319 Python ops on `kFlagOsPython`. It is free of charge: a
+   `torch.library` PrivateUse1 binding *already* crosses C++ -> Python via
+   `PythonKernelHolder` (measured 0.96 us against 0.07 us for a bare Python
+   call), so `CallPythonOp_Generic` swaps one pybind crossing for another. See
+   integration_plan section 3.2.
 3. **Generated artifacts are committed** (not generated at build time),
    consistent with `csrc/aten/generated/`. This keeps route changes visible in
    review and avoids adding a TileOPs dependency to the build.
@@ -155,33 +169,41 @@ Reuse the existing machinery, adding `Backend::kTileOps`:
 - Add the `FLAGOS_USE_TILEOPS=1` branch to
   `torch_fl/__init__.py::_select_backend_config()`.
 
-The C++ side has **no kernels registered** at this stage (an empty slot means
-fallback). The value of the enum is that `FLAGOS_LOG_DISPATCH=1` can observe
-routing and `FLAGOS_OP_<op>=cuda` can revert individual operators -- complementing
-Python registration rather than competing with it.
+The C++ kernels are generated into
+`csrc/aten/generated/tileops_python_kernels.cc` (section 3.4a), so a route set
+to `= tileops` in the conf lands in a real `tileops_fn_` slot. An empty slot
+still means fallback, which is what a build with `TILEOPS_KERNEL=OFF` (every
+non-CUDA accelerator, since TileOPs is SM90 NVIDIA-only) produces.
 
-> **However, neither of those two features works automatically for TileOPs
-> routes on the C++ side; each has to be implemented again in Python.** The gaps
-> found by measurement (now fixed): a `torch.library` PrivateUse1 binding
-> **intercepts before the C++ dispatcher**, so a bound operator never reaches the
-> dispatcher at all. Even though `common.cc` correctly parses
-> `FLAGOS_OP_relu=cuda` and prints `[flagos] env override: relu -> cuda`,
-> `torch.relu` still built a TileOPs instance. Likewise `FLAGOS_LOG_DISPATCH=1`
-> only shows the operators that fell through to cuda, which reads as if TileOPs
-> were not wired up at all.
+Because the decision is made in `dispatcher.h` rather than in Python,
+`FLAGOS_LOG_DISPATCH=1` and `FLAGOS_OP_<op>=cuda` work for TileOPs with no extra
+code -- the same machinery that serves cuda and flaggems. Verified on H800:
+
+```console
+$ FLAGOS_USE_TILEOPS=1 FLAGOS_LOG_DISPATCH=1 python -c "..."
+[flagos dispatch] relu -> tileops
+
+$ FLAGOS_USE_TILEOPS=1 FLAGOS_LOG_DISPATCH=1 FLAGOS_OP_relu=cuda python -c "..."
+[flagos dispatch] relu -> cuda
+```
+
+> **This was not always true.** The first implementation registered the routes
+> from Python with `torch.library.Library("aten", "IMPL")`, and such a binding
+> **intercepts before the C++ dispatcher** -- a bound operator never reached
+> `relu_dispatcher` at all. `common.cc` parsed `FLAGOS_OP_relu=cuda` and printed
+> `[flagos] env override: relu -> cuda`, yet `torch.relu` still built a TileOPs
+> instance; `FLAGOS_LOG_DISPATCH=1` showed only the operators that fell through
+> to cuda, reading as if TileOPs were not wired up at all. Both features had to
+> be re-implemented in Python (`enable_tileops_for_flagos()` consulted an
+> `_env_override_backend()` helper and skipped binding overridden ops;
+> `build_impl()` wrapped the impl in a logging layer).
 >
-> The fix: `enable_tileops_for_flagos()` consults `_env_override_backend()`
-> before registering, and **does not bind** operators pointed elsewhere
-> (measured: under `FLAGOS_OP_relu=cuda`, registered drops 60 -> 59, relu builds
-> no instance, results are correct, and the un-overridden sigmoid still routes
-> through TileOPs). `build_impl()` wraps the impl in a logging layer when
-> `FLAGOS_LOG_DISPATCH=1` is set, and the fallback logs a line too, so int32 relu
-> prints `relu -> tileops` followed by `relu -> cuda (tileops declined)`.
->
-> The lesson: the "free reuse" the conf and enum provide only covers the C++
-> path. Any backend registered from Python has to wire up those two
-> cross-cutting features itself, or the escape hatches promised by the docs are
-> hollow.
+> Moving registration into `csrc/` deleted that duplicated logic. The lesson
+> stands as a general one: **anything registered on PrivateUse1 from Python
+> bypasses this plugin's dispatcher**, and every cross-cutting feature the
+> dispatcher provides then has to be rebuilt by hand. Only the `_declined` log
+> line remains in Python, because only the recipe builder knows that a dtype or
+> layout made TileOPs refuse the call after the routing decision was taken.
 
 ---
 
@@ -239,16 +261,18 @@ classify -> call a generator per category -> write files and conf):
 4. dtype guards: prefer `op_cls.kernel_cls.SUPPORTED_DTYPES`, falling back to
    parsing the manifest's `signature.inputs[].dtype` (tokenizing
    `"float16 | bfloat16 | float32"`).
-5. Apply `EXCLUDE`, render per recipe, write the three artifacts.
+5. Apply `EXCLUDE`, render per recipe, write the five artifacts.
 6. **Self-check**: assert that each generated entry's aten schema argument count
    matches what the recipe expects, failing outright rather than emitting broken
-   code.
-7. **Format**: pipe the two Python products through `ruff format` before writing
+   code. Additionally assert that every route has a `DECLARE_DISPATCHER` typedef
+   in `csrc/aten/generated/ops.h` -- a route with no dispatcher slot could never
+   be reached and is a spec error, not something to emit silently.
+7. **Format**: pipe the Python products through `ruff format` before writing
    or comparing. The repo's lint job runs `ruff format --check .` over
    everything including generated files, so without this step `ruff format .`
    rewrites them and `--check` immediately reports them stale -- the lint gate
-   and the codegen gate would contradict each other. The conf is not Python and
-   is written as-is.
+   and the codegen gate would contradict each other. The conf and the `.cc` are
+   not Python and are written as-is.
 
 ### 3.3 Output: `torch_fl/generated/tileops_routes.py`
 
@@ -439,7 +463,67 @@ semantics need checking), `TopkSelectorOp` (`forward(index_score, starts, ends)`
 does not align with `aten::topk`), `GemmFp8Op`, `Argmax`/`Argmin`, and
 `Cumsum`/`Cumprod` (reasons in `tileops_spec.EXCLUDE`).
 
-### 3.5 Runtime: `torch_fl/tileops_backend.py` (hand-written)
+### 3.4a Output: the C++ stubs and the Python shims
+
+Two generated files bridge the dispatcher to the recipe builders. They are
+produced together so their calling conventions cannot drift.
+
+**`csrc/aten/generated/tileops_python_kernels.cc`** -- one stub plus one
+`REGISTER_IMPL_TO_DISPATCHER` per route, all inside `#ifdef FLAGOS_TILEOPS`:
+
+```cpp
+at::Tensor ReluKernelTileOps(const at::Tensor & self) {
+  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_relu", {self});
+}
+...
+REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kTileOps, ReluKernelTileOps)
+```
+
+The stub signatures are not re-derived from torchgen. They are read back out of
+the committed `csrc/aten/generated/ops.h` (types, from the `DECLARE_DISPATCHER`
+typedef) and `register.inc` (parameter names), so a mismatch against the
+dispatcher slot is impossible by construction rather than by review.
+
+There is no `UnboxToFlagos` call on the result: the shim returns through
+`_cuda_to_flagos_view`, which builds a *new* tensor that is already on flagos,
+unlike the C++ boxing helpers that rewrite device metadata in place.
+
+**`torch_fl/generated/tileops_shims.py`** -- one module-level free function per
+route, which is the form `CallPythonOp_Generic` can resolve by qualname:
+
+```python
+def _shim_var_correction(self, dim, keepdim, correction=None):
+    """var.correction -> VarFwdOp."""
+    kwargs = {}
+    if correction is not None:
+        kwargs['correction'] = correction
+    return _impl('var.correction')(self, dim, keepdim, **kwargs)
+```
+
+Two details in that four-line function are load-bearing:
+
+- **`correction` is passed by keyword, not position.** aten orders
+  `var.correction` as `(self, dim, correction, keepdim)` while the recipe
+  builders take `(x, dim, keepdim)`. Forwarding positionally would silently put
+  the correction in the `keepdim` slot. The generator classifies `alpha`,
+  `correction` and `dtype` as `KEYWORD_PARAMS` and emits
+  `CallPythonOp_GenericKw` for any route that has one. `alpha` has the same
+  hazard in a different form: positionally it lands in `_binary_impl`'s `*rest`,
+  which makes the builder decline and fall back to aten on *every* call -- fast
+  enough to look like it works, and numerically correct, while never once
+  reaching TileOPs.
+- **An absent optional is dropped, not forwarded as `None`.** `_reduce_impl`
+  treats the mere presence of `dtype` as "TileOPs cannot serve this".
+
+`dtype` needs one more step on the C++ side. An `IValue` stores `ScalarType` as
+a plain int, indistinguishable at runtime from an ordinary int, so the stub
+tags it explicitly for `python_op_caller` to convert:
+
+```cpp
+PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(),
+        /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}
+```
+
 
 > The following is the design intent; the implementation deviates in three
 > necessary ways, see section 6.2 (the kernel fast path must be verified rather
@@ -459,7 +543,16 @@ def _get(op_cls, ctor_key, *args, **kw):
         op = op_cls(*args, **kw)
         ent = _INSTANCES[ck] = (op, getattr(op, "kernel", None))
     return ent
+```
 
+The implementation caps `_INSTANCES` at `_INSTANCE_CACHE_MAX` (512, overridable
+via `FLAGOS_TILEOPS_CACHE_MAX`). The key includes shape, so a dynamic-shape
+workload would otherwise grow the cache without bound, and each entry pins a
+compiled TileLang kernel -- the leak is device memory, not just a dict. Past the
+cap, `_get` builds and discards per call and warns once: slow, but bounded and
+still correct.
+
+```python
 def _box(t):
     return _C._flagos_to_cuda_view(t) if t is not None and t.device.type == "flagos" else t
 
@@ -493,14 +586,24 @@ def _unary(op_cls, dtypes, aten_fn):
 
 ### 3.6 Gates
 
-`enable_tileops_for_flagos()` **silently returns 0** if any condition is unmet
-(consistent with `is_flaggems_available()`, leaving `import torch_fl`
-unaffected):
+`is_tileops_available()` is consulted per route by `resolve_impl()`, which
+**falls back to aten** if any condition is unmet (consistent with
+`is_flaggems_available()`, leaving `import torch_fl` unaffected):
 
 1. `import tileops` succeeds;
 2. `torch.cuda.get_device_capability() == (9, 0)` (TileOPs is SM_90 only; on
    non-Hopper, warn and skip);
 3. Dependency versions match the pins in section 4.
+
+The gate is checked in Python rather than in the C++ stub because it depends on
+importing TileOPs, which the `.so` cannot do at static-constructor time. A route
+that is conf'd to `tileops` on a box without TileOPs therefore still enters the
+stub and crosses into Python before falling back -- correct, and the extra ~1 us
+only affects a misconfigured host.
+
+Build-side gating is separate: `TILEOPS_KERNEL` (CMake) defaults ON for CUDA and
+OFF for every other accelerator in `setup.py`, since TileOPs is SM90 NVIDIA-only.
+With it OFF, `tileops_fn_` is never populated and the dispatcher falls through.
 
 ---
 
@@ -609,6 +712,7 @@ the operator goes into `DEFAULT_OFF`.
 |---|---|---|
 | 1 | `Backend::kTileOps` enum + dispatcher slot + conf parsing + `FLAGOS_USE_TILEOPS` | **Done** |
 | 2 | `tileops_spec.py` + `codegen_tileops.py` + 4 recipes + generated artifacts | **Done, 60 routes** |
+| 2b | Move registration from `torch.library` into `csrc/aten/generated/tileops_python_kernels.cc` on `kTileOps`, via generated Python shims | **Done** |
 | 3 | Groups (1)(2)(3)(7) from section 3.4: `SCALAR_UNARY` 7 + `BROADCAST_TENSORS` 7 + `BINARY_EXTRA` 2 + `ROUND` 1 = **17** | To do, patterns measured |
 | 4 | Groups (4)(5)(6) from section 3.4: `SHAPELESS` 8 (mm/bmm/conv x6) + `POOL` 3 + `ORD_DISPATCH` 3, plus the newly admitted `max_pool*_with_indices` 3 = **17** | To do, patterns measured |
 | 5 | Upstream feedback: TileLang cache key collision (pure CUDA minimal repro), conv data-race warning, TileOPs norm `return_stats` request | To do |
@@ -639,9 +743,13 @@ validation in the generator:
   1-argument convention -> moved to hand-written.
 
 Verification results (H800, `FLAGOS_USE_TILEOPS=1`): **all 60 routes numerically
-correct** (42 floating-point routes via `assert_close`, 18 integer/bool routes
-required bit-exact), plus broadcasting, transposed non-contiguous inputs, int32
-dtype-guard fallback and registration idempotence -- all passing.
+correct** at `(64, 32)` (42 floating-point routes via `assert_close`, 18
+integer/bool routes required bit-exact), plus the int32 dtype-guard fallback,
+the presence of all 60 shims, and dispatch through the C++ path with and without
+`FLAGOS_OP_relu=cuda`. Broadcasting and transposed non-contiguous inputs were
+checked by hand during bring-up but are **not** in the generated test file; the
+larger manifest workload shapes are opt-in behind `FLAGOS_TILEOPS_FULL=1`
+because each distinct shape costs a full ~4 s TileLang compile.
 
 ### 6.2 Two runtime problems found during implementation (not anticipated in design)
 

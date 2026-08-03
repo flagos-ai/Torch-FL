@@ -102,9 +102,16 @@ def main() -> int:
         print("TileOPs unavailable or host is not SM90 -- nothing to check")
         return 0
 
-    registered = tileops_backend.enable_tileops_for_flagos()
-    again = tileops_backend.enable_tileops_for_flagos()
-    assert registered == again, f"enable not idempotent: {registered} then {again}"
+    # Registration itself now happens in C++ at .so load time, so there is no
+    # enable() call to exercise here. What is worth asserting is that the shim
+    # each generated stub resolves by name actually exists -- a rename that
+    # misses one side would otherwise surface only when that op is first called.
+    from torch_fl.generated import tileops_shims
+
+    for overload, shim in tileops_shims.SHIM_NAMES.items():
+        assert callable(getattr(tileops_shims, shim, None)), (
+            f"{overload}: C++ stub resolves {shim}, which is missing"
+        )
     bound = tileops_backend.registered_ops()
 
     selected = [r for r in ROUTES if args.filter is None or args.filter in r[0]]
@@ -138,7 +145,7 @@ def main() -> int:
 
     elapsed = time.perf_counter() - t0
     print(
-        f"\nregistered={registered} checked={len(selected)} passed={passed} "
+        f"\nroutes={len(bound)} checked={len(selected)} passed={passed} "
         f"skipped={skipped} failed={len(failures)}  ({elapsed:.0f}s)"
     )
     print("dtype-guard fallback: OK")

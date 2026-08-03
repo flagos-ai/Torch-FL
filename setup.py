@@ -332,6 +332,12 @@ def build_deps():
     ]
 
     cmake_args.append(f"-DACCELERATOR={ACCELERATOR}")
+    if ACCELERATOR != "cuda":
+        # TileOPs is TileLang on SM90 (Hopper) NVIDIA parts only. Its stubs are
+        # harmless on other vendors -- the shims fall back to aten -- but there
+        # is nothing for them to reach, so keep them out of vendor wheels. The
+        # generic pass-through below still honors an explicit TILEOPS_KERNEL=1.
+        cmake_args.append("-DTILEOPS_KERNEL=OFF")
     if ACCELERATOR == "metax":
         # Boxing mode reuses the generated CUDA boxing kernels (host g++) instead
         # of hand-written mxcc .cu kernels; leave METAX_KERNEL off so CMake picks
@@ -456,6 +462,7 @@ def build_deps():
     for kernel_opt in (
         "FLAGGEMS_KERNEL",
         "FLAGGEMS_PYTHON",
+        "TILEOPS_KERNEL",
         "CUDA_KERNEL",
         "METAX_KERNEL",
         "ASCEND_KERNEL",

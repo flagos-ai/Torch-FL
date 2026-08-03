@@ -26,19 +26,25 @@ namespace {
 struct PythonOpCache {
   py::module_ ops_module;
   std::unordered_map<std::string, py::object> func_cache;
-  bool initialized = false;
   std::mutex init_mutex;
 
-  void EnsureInitialized() {
-    if (initialized) return;
-    std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized) return;
-    py::gil_scoped_acquire gil;
-    ops_module = py::module_::import("flag_gems.ops");
-    initialized = true;
+  // Kept for call-site symmetry; the flag_gems.ops import it used to do eagerly
+  // now happens on first bare-name lookup (see GetFunc). This caller is shared
+  // with TileOPs, whose targets are dotted qualnames in torch_fl and need no
+  // flag_gems at all -- importing it up front made every TileOPs call fail on a
+  // host that has TileOPs but not FlagGems.
+  void EnsureInitialized() {}
+
+  // flag_gems.ops, imported once on demand. Only bare-name lookups need it.
+  py::module_& OpsModule() {
+    if (!ops_module) {
+      ops_module = py::module_::import("flag_gems.ops");
+    }
+    return ops_module;
   }
 
   py::object GetFunc(const char* name) {
+    std::lock_guard<std::mutex> lock(init_mutex);
     auto it = func_cache.find(name);
     if (it != func_cache.end()) return it->second;
     std::string qual(name);
@@ -46,7 +52,7 @@ struct PythonOpCache {
     auto dot = qual.rfind('.');
     if (dot == std::string::npos) {
       // Bare name: resolve from the flag_gems.ops module (legacy typed callers).
-      func = ops_module.attr(name);
+      func = OpsModule().attr(name);
     } else {
       // Dotted qualname "module.submodule.func": import the module, getattr func.
       // This is what the auto-discovered generic kernels pass, taken from

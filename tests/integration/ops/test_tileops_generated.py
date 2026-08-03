@@ -17,6 +17,8 @@
 """Numeric and dispatch coverage for generated TileOPs routes."""
 
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -24,6 +26,7 @@ import torch
 import torch_fl  # noqa: F401
 from torch_fl import tileops_backend
 from torch_fl.generated.tileops_routes import ROUTES, WORKLOADS
+from torch_fl.generated.tileops_shims import SHIM_NAMES
 
 pytestmark = pytest.mark.skipif(
     not tileops_backend.is_tileops_available(),
@@ -101,30 +104,69 @@ def test_dtype_guard_falls_back():
     assert torch.equal(torch.relu(x), x)
 
 
-def test_enable_is_idempotent():
-    """Re-enabling must not double-register or grow the instance cache."""
-    first = tileops_backend.enable_tileops_for_flagos()
-    second = tileops_backend.enable_tileops_for_flagos()
-    assert first == second
-
-
 @pytest.mark.parametrize("overload", [r[0] for r in ROUTES])
-def test_registered_on_privateuse1(overload):
-    """Every generated route is actually bound for the flagos key."""
-    tileops_backend.enable_tileops_for_flagos()
+def test_route_is_registered(overload):
+    """Every generated route is known to the runtime."""
     assert overload in tileops_backend.registered_ops()
 
 
-def test_env_override_is_consulted(monkeypatch):
-    """FLAGOS_OP_<op>=cuda must keep the op off the tileops path.
+@pytest.mark.parametrize("overload,shim", sorted(SHIM_NAMES.items()))
+def test_shim_exists_and_is_callable(overload, shim):
+    """Each route has the callable its C++ stub resolves by name.
 
-    A PrivateUse1 binding intercepts before the C++ dispatcher, so honoring
-    the override there alone is not enough -- the op has to stay unbound.
-    Only the decision is asserted here: a PrivateUse1 binding made by an
-    earlier test cannot be undone, so re-running enable() proves nothing.
+    CallPythonOp_Generic looks the function up by string on first call, so a
+    rename that misses one side fails at runtime, on that one op, only once
+    it is exercised. Checking the whole table here surfaces it immediately.
     """
-    monkeypatch.setenv("FLAGOS_OP_relu", "cuda")
-    monkeypatch.setenv("FLAGOS_OP_sum__dim_IntList", "cuda")
-    assert tileops_backend._env_override_backend("relu") == "cuda"
-    assert tileops_backend._env_override_backend("sum.dim_IntList") == "cuda"
-    assert tileops_backend._env_override_backend("sigmoid") is None
+    from torch_fl.generated import tileops_shims
+
+    assert callable(getattr(tileops_shims, shim)), f"{overload} -> {shim}"
+
+
+def test_dispatches_through_cpp():
+    """The route is reached via the C++ dispatcher, not just callable.
+
+    Every other test here calls build_impl or the shim directly, which
+    would keep passing if the generated .cc stubs were never compiled in
+    or the conf never routed to them. This one runs a subprocess with
+    FLAGOS_USE_TILEOPS=1 and reads the dispatcher's own log line, so it
+    fails if the C++ registration is missing. The FLAGOS_OP_ half proves
+    the per-op override reaches TileOPs routes -- the feature that had to
+    be reimplemented in Python back when registration lived there.
+    """
+    prog = (
+        "import torch, torch_fl; "
+        "torch.relu(torch.randn(64, 32, device='flagos', dtype=torch.float16))"
+    )
+    # Propagate this interpreter's import path: torch_fl and tileops are
+    # commonly run from a source checkout / PYTHONPATH rather than being
+    # installed, and a bare subprocess would just fail to import them --
+    # which would read as a dispatch failure.
+    base = dict(
+        os.environ,
+        FLAGOS_USE_TILEOPS="1",
+        FLAGOS_LOG_DISPATCH="1",
+        PYTHONPATH=os.pathsep.join(p for p in sys.path if p),
+    )
+    # importing torch_fl (which this module does at collection time) writes
+    # the resolved conf path back into os.environ. Inherited by the child it
+    # outranks FLAGOS_USE_TILEOPS, pinning it to whichever conf the *parent*
+    # happened to select.
+    base.pop("FLAGOS_BACKEND_CONFIG", None)
+
+    out = subprocess.run(
+        [sys.executable, "-c", prog], env=base, capture_output=True, text=True
+    )
+    assert "[flagos dispatch] relu -> tileops" in out.stdout + out.stderr, (
+        f"stdout={out.stdout}\nstderr={out.stderr}"
+    )
+
+    out = subprocess.run(
+        [sys.executable, "-c", prog],
+        env=dict(base, FLAGOS_OP_relu="cuda"),
+        capture_output=True,
+        text=True,
+    )
+    assert "[flagos dispatch] relu -> cuda" in out.stdout + out.stderr, (
+        f"stdout={out.stdout}\nstderr={out.stderr}"
+    )

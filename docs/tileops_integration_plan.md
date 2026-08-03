@@ -319,58 +319,67 @@ has mature templates) all come for free, without introducing a second mechanism.
 
 ### 3.2 Choosing between the two implementation paths
 
-**Recommendation: Stage A is pure Python registration, no C++ changes.**
+**Decision: register through the C++ dispatcher on `kTileOps`, with the kernels
+themselves staying in Python.** This is the same shape FlagGems already uses for
+the 319 ops it cannot serve from C++ (`kFlagOsPython`, generated into
+`csrc/aten/generated/flaggems_python_kernels.cc`).
 
-Rationale: TileOPs objects are stateful, so calling them from C++ requires the
-pybind bridge in `python_op_caller.h`, whose design assumes "module-level free
-functions reachable by qualname". That does not fit "instantiate first, then
-call, with instances cached by shape"; forcing it would push the instance cache
-into C++ for no worthwhile return.
+An earlier draft of this section recommended pure Python `torch.library`
+registration and argued the pybind bridge in `python_op_caller.h` could not host
+TileOPs, because it "assumes module-level free functions reachable by qualname"
+while TileOPs objects are stateful and cached by shape. **That argument was
+wrong**, on both halves:
 
-Stage A shape (new file `torch_fl/tileops_backend.py`):
+- The constraint is only that the *entry point* be reachable by qualname. It
+  says nothing about what that function does. The instance cache stays in Python
+  exactly as it was; `torch_fl/generated/tileops_shims.py` just gives each route
+  a module-level name for `GetFunc` to resolve. Verified by wrapping a stateful
+  `ReluFwdOp` plus its cache behind a free function and resolving it the way
+  `GetFunc` does.
+- The implied performance argument -- that Python registration avoids a
+  C++→Python crossing -- does not hold either. A `torch.library` PrivateUse1
+  binding is invoked through `PythonKernelHolder`, which crosses into the
+  interpreter on every call just as `CallPythonOp_Generic` does. Measured on
+  H800: an aten op whose PrivateUse1 impl is a Python no-op costs 0.96 µs
+  against 0.07 µs for calling the same function directly, i.e. **the crossing is
+  already being paid today**. Moving to C++ swaps one crossing for another of
+  the same order, not adding one.
 
-```python
-# pseudocode, structure only
-_INSTANCES: dict[tuple, object] = {}
+With the cost neutral, the dispatcher path wins on everything else. Registering
+on PrivateUse1 in Python intercepts *before* the C++ dispatcher runs, so a route
+bound that way never reaches its own routing config -- which meant
+`FLAGOS_OP_<op>=<backend>` and `FLAGOS_LOG_DISPATCH` had to be reimplemented in
+Python to work at all, and `FLAGOS_USE_TILEOPS=1` selected a conf file that
+nothing consulted (it needed a separate `enable_tileops_for_flagos()` call).
+Going through the dispatcher makes all three work by construction and deletes
+the duplicated logic.
 
-def _get_op(cls, key, *ctor_args, **ctor_kw):
-    """Cache Op instances by (class, shape/dtype key) -- see 2.6, the 645 ms
-    first call must not be paid repeatedly."""
-    ck = (cls, key)
-    op = _INSTANCES.get(ck)
-    if op is None:
-        op = _INSTANCES[ck] = cls(*ctor_args, **ctor_kw)
-    return op
+Shape of the result:
 
-def _box(t):
-    return _C._flagos_to_cuda_view(t) if t.device.type == "flagos" else t
-
-def _unbox(t, idx):
-    return _C._cuda_to_flagos_view(t, idx)
-
-def _mm(self, mat2):                       # aten::mm  -> GemmOp(NN)
-    idx = self.device.index or 0
-    op = _get_op(GemmOp, ("nn",), trans_a=False, trans_b=False)
-    return _unbox(op(_box(self).contiguous(), _box(mat2).contiguous()), idx)
-
-_ROUTES = {"mm": _mm, "bmm": _bmm, ...}    # allowlist, adapted one by one
-
-def enable_tileops_for_flagos(include=None, exclude=None) -> int:
-    lib = torch.library.Library("aten", "IMPL")
-    for name, fn in _selected(include, exclude):
-        lib.impl(name, fn, "PrivateUse1")
+```
+aten::relu(flagos tensor)
+  -> PrivateUse1 m.impl              csrc/aten/generated/register.inc
+  -> relu_dispatcher                 reads conf + FLAGOS_OP_relu, logs decision
+  -> ReluKernelTileOps               csrc/aten/generated/tileops_python_kernels.cc
+  -> CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_relu", {self})
+  -> _shim_relu                      torch_fl/generated/tileops_shims.py
+  -> resolve_impl -> _unary_impl     torch_fl/tileops_backend.py: instance cache,
+                                     ctor args from the call, zero-copy boxing
+  -> ReluFwdOp / its compiled kernel
 ```
 
-Note that `torch.library` PrivateUse1 registration **takes precedence over** the
-C++ dispatcher (confirmed in 2.3: the conf was still `backends_cuda.conf`, yet
-the Python-registered `mm` was hit). So Stage A works even without the conf; the
-conf and enum exist to make routing **observable and revertible per operator**.
-The two complement each other rather than compete.
+`torch_fl/tileops_backend.py` keeps everything that depends on runtime values --
+the instance cache, the per-recipe derivation of constructor arguments, the
+dtype/shape guard, and the aten fallback when TileOPs cannot serve a call. What
+it no longer contains is any dispatch *decision*: that is the dispatcher's job
+for every backend uniformly.
 
-Stage B (optional, only once Python overhead is proven to be the bottleneck):
-add C++ kernels in the `kTileOps` slot for the operators that have stabilized,
-going through `DeviceBoxingGuard` plus a TileOPs caller similar to
-`python_op_caller`. **Not to be done without profiling evidence.**
+A genuine Stage B remains open and is unrelated to this choice: TileOPs' L2 `Op`
+wrapper costs 50-90 µs of size-independent Python overhead (2.5), one to two
+orders of magnitude more than either crossing. Recovering it means calling the
+L1 `Kernel` from C++ directly, which needs TileOPs to expose a C++ entry point
+it does not have today. **Not to be attempted without that, and without
+profiling evidence.**
 
 ### 3.3 Allowlist selection criteria
 

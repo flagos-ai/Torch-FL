@@ -14,6 +14,18 @@
 
 """Runtime for the generated TileOPs routes.
 
+Routes reach aten through the C++ dispatcher on ``Backend::kTileOps``
+(``csrc/aten/generated/tileops_python_kernels.cc``), which calls back into
+``torch_fl.generated.tileops_shims`` -- TileOPs ships no C++ API, so the kernels
+stay in Python. This module is the runtime those shims land in: it owns the
+instance cache and turns an aten call into TileOPs constructor arguments.
+
+Dispatch decisions themselves are *not* made here. The dispatcher already
+consults the conf files and ``FLAGOS_OP_<op>``, and logs via
+``FLAGOS_LOG_DISPATCH``, so nothing in this module duplicates that. Only the
+per-call "can TileOPs actually serve these arguments" test is local, since it
+depends on the runtime dtype and shape.
+
 TileOPs ops are stateful Python objects whose constructors commit shape/dtype, and
 TileLang rejects PrivateUse1 tensors outright. Both are handled here:
 
@@ -50,6 +62,7 @@ __all__ = [
     "is_tileops_available",
     "registered_ops",
     "build_impl",
+    "resolve_impl",
     "sample_inputs",
     "warmup",
 ]
@@ -58,9 +71,17 @@ __all__ = [
 _REQUIRED_CAPABILITY = (9, 0)
 
 _instances: Dict[tuple, tuple] = {}
-_registered: Dict[str, str] = {}
-_library = None
 _available: Optional[bool] = None
+
+#: Ceiling on cached Op instances. The cache is keyed on ctor args, which
+#: include shape, so a workload with varying shapes (dynamic batch, ragged
+#: sequence lengths) would otherwise grow it without bound -- and each entry
+#: pins a compiled TileLang kernel, so the leak is device memory rather than
+#: just a dict. Beyond the cap, _get stops caching and rebuilds per call: slower
+#: (see the cold-ctor cost in the module docstring), but bounded. Raise it with
+#: FLAGOS_TILEOPS_CACHE_MAX if you have many static shapes and headroom.
+_INSTANCE_CACHE_MAX = int(os.environ.get("FLAGOS_TILEOPS_CACHE_MAX", "512"))
+_cache_full_warned = False
 
 
 def _use_l2() -> bool:
@@ -180,28 +201,45 @@ def _device_index(t: torch.Tensor) -> int:
 # --------------------------------------------------------------------------- #
 # instance cache
 # --------------------------------------------------------------------------- #
-def _log_dispatch(overload: str, target: str) -> None:
-    """Mirror the C++ FLAGOS_LOG_DISPATCH line for python-bound routes.
+def _log_declined(overload: str) -> None:
+    """Note a call TileOPs could not serve, under FLAGOS_LOG_DISPATCH=1.
 
-    Ops bound via torch.library on PrivateUse1 never reach the C++ dispatcher, so
-    they are invisible to its logging. Without this, ``FLAGOS_LOG_DISPATCH=1``
-    shows only the ops that fell through to cuda, which reads as if TileOPs were
-    not routing anything at all.
+    The dispatcher logs the routing decision, which is made before the arguments
+    are known. When a route then declines on dtype or argument shape the real
+    kernel is aten's, so this second line is what explains a "-> tileops" log
+    line followed by vendor-speed timings.
     """
     if os.environ.get("FLAGOS_LOG_DISPATCH") == "1":
-        print(f"[flagos dispatch] {overload} -> {target}", flush=True)
+        print(f"[flagos dispatch] {overload} -> cuda (tileops declined)", flush=True)
 
 
 def _get(op_cls, ctor_key: tuple, *args, **kwargs):
     """Return the cached ``_Entry`` for these ctor args, building at most once.
 
     Keyed on the ctor args themselves, so a new shape or dtype gets its own
-    instance while repeat calls stay on the warm path.
+    instance while repeat calls stay on the warm path. Caching stops at
+    ``_INSTANCE_CACHE_MAX`` entries; past that the entry is built and discarded
+    per call, which is slow but keeps a dynamic-shape workload from pinning an
+    unbounded number of compiled kernels.
     """
     key = (op_cls, ctor_key)
     entry = _instances.get(key)
     if entry is None:
-        entry = _instances[key] = _Entry(op_cls(*args, **kwargs))
+        entry = _Entry(op_cls(*args, **kwargs))
+        if len(_instances) < _INSTANCE_CACHE_MAX:
+            _instances[key] = entry
+        else:
+            global _cache_full_warned
+            if not _cache_full_warned:
+                _cache_full_warned = True
+                warnings.warn(
+                    f"tileops instance cache hit its {_INSTANCE_CACHE_MAX}-entry "
+                    "cap; further shapes rebuild their Op on every call. This "
+                    "usually means dynamic shapes. Raise "
+                    "FLAGOS_TILEOPS_CACHE_MAX if the shape set is finite.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
     return entry
 
 
@@ -271,7 +309,7 @@ def _make_fallback(overload: str):
     op = _aten_op(overload)
 
     def fallback(*args, **kwargs):
-        _log_dispatch(overload, "cuda (tileops declined)")
+        _log_declined(overload)
         index = next(
             (
                 a.device.index or 0
@@ -414,95 +452,81 @@ _BUILDERS = {
 
 
 def build_impl(recipe, module, cls_name, dtype_names, extra, overload):
-    """Build the callable for one generated route, or None if unavailable."""
+    """Build the callable for one generated route, or None if unavailable.
+
+    Returns None when the Op class cannot be imported; callers that need a
+    working callable regardless should use ``resolve_impl``, which substitutes
+    the aten fallback. No dispatch logging is added here -- the C++ dispatcher
+    already logs the decision, and only a decline needs explaining (see
+    ``_log_declined``).
+    """
     try:
         op_cls = getattr(importlib.import_module(module), cls_name)
     except Exception:
         return None
     dtypes = tuple(getattr(torch, name) for name in dtype_names)
-    impl = _BUILDERS[recipe](op_cls, dtypes, extra, overload)
-    if impl is None or os.environ.get("FLAGOS_LOG_DISPATCH") != "1":
-        return impl
-
-    # Logging wrapper, added only when asked for, so the hot path keeps its shape.
-    # The dtype guard inside `impl` may still divert to the fallback, which logs
-    # its own line -- so a route can print "tileops" and then "cuda (declined)".
-    def logged(*args, **kwargs):
-        _log_dispatch(overload, "tileops")
-        return impl(*args, **kwargs)
-
-    return logged
+    return _BUILDERS[recipe](op_cls, dtypes, extra, overload)
 
 
 # --------------------------------------------------------------------------- #
-# registration
+# resolution
 # --------------------------------------------------------------------------- #
-def _env_override_backend(overload: str) -> Optional[str]:
-    """Backend named by ``FLAGOS_OP_<overload>``, matching the C++ conf parser.
+def resolve_impl(overload, recipe, module, cls_name, dtype_names, extra):
+    """Callable for one generated route, for the C++ stub to call.
 
-    Dots become double underscores, per csrc/aten/common.cc.
+    Takes a ROUTES row so the generated shims can splat one straight in. Always
+    returns something callable: when TileOPs is unavailable or the Op class has
+    moved, the aten fallback is returned instead of raising, so the op degrades
+    to the vendor kernel rather than breaking.
+
+    Note the argument order differs from ``build_impl`` -- overload comes first
+    here, matching the ROUTES tuple.
     """
-    var = "FLAGOS_OP_" + overload.replace(".", "__")
-    val = os.environ.get(var)
-    return val.strip().lower() if val else None
+    if is_tileops_available():
+        impl = build_impl(recipe, module, cls_name, dtype_names, extra, overload)
+        if impl is not None:
+            return impl
+    return _make_fallback(overload)
 
 
 def enable_tileops_for_flagos(include=None, exclude=None) -> int:
-    """Bind generated TileOPs routes on the PrivateUse1 (flagos) key.
+    """Deprecated; TileOPs now registers in C++ and needs no Python call.
 
-    Returns the number of ops registered; 0 when TileOPs is unavailable or the
-    host is not SM90. Idempotent -- repeat calls re-report the same count without
-    rebinding.
+    Kernels register on ``Backend::kTileOps`` when the extension module loads,
+    and routing is decided by the conf files, so there is nothing to enable.
+    Retained because it was the documented entry point; returns the number of
+    routes so an existing truthiness check still behaves.
 
-    ``FLAGOS_OP_<overload>=<backend>`` is honored here, not just in the C++
-    dispatcher. It has to be: a torch.library PrivateUse1 binding intercepts
-    *before* the dispatcher runs, so an op bound here would never reach the
-    dispatcher to see its override, and the documented per-op escape hatch
-    would silently do nothing.
+    ``include``/``exclude`` no longer have anything to act on -- use
+    ``FLAGOS_OP_<overload>=cuda`` to divert a single op, which the dispatcher
+    honors for every backend uniformly.
     """
-    global _library
-
+    if include is not None or exclude is not None:
+        warnings.warn(
+            "enable_tileops_for_flagos(include=/exclude=) no longer filters "
+            "registration; use FLAGOS_OP_<overload>=<backend> instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if not is_tileops_available():
         return 0
-    if _library is not None:
-        return len(_registered)
-
     from torch_fl.generated.tileops_routes import ROUTES
 
-    library = torch.library.Library("aten", "IMPL")
-    count = 0
-    for overload, recipe, module, cls_name, dtype_names, extra in ROUTES:
-        if include is not None and overload not in include:
-            continue
-        if exclude is not None and overload in exclude:
-            continue
-        override = _env_override_backend(overload)
-        if override is not None and override != "tileops":
-            # Routed elsewhere on purpose: leave the key unbound so dispatch
-            # falls through to the conf-selected backend.
-            continue
-        impl = build_impl(recipe, module, cls_name, dtype_names, extra, overload)
-        if impl is None:
-            continue
-        try:
-            library.impl(overload, impl, "PrivateUse1")
-        except RuntimeError as exc:
-            # Another backend already claimed this key; leave it alone rather than
-            # fight over the registration.
-            warnings.warn(
-                f"TileOPs: skipping {overload}: {exc}", RuntimeWarning, stacklevel=2
-            )
-            continue
-        _registered[overload] = cls_name
-        count += 1
-
-    _library = library
-    return count
+    return len(ROUTES)
 
 
 def registered_ops() -> Dict[str, str]:
-    """aten overload -> TileOPs class name, for everything bound so far."""
-    return dict(_registered)
+    """aten overload -> TileOPs class name for every generated route.
+
+    Reports what the build can route, not what a given process has routed:
+    whether a call lands on TileOPs is a per-op conf decision the dispatcher
+    makes, and the kernels are registered unconditionally.
+    """
+    if not is_tileops_available():
+        return {}
+    from torch_fl.generated.tileops_routes import ROUTES
+
+    return {overload: cls_name for overload, _, _, cls_name, _, _ in ROUTES}
 
 
 # --------------------------------------------------------------------------- #

@@ -17,6 +17,7 @@ set(LIBRARY_NAME torch_fl)
 option(CUDA_KERNEL "Build CUDA kernel implementations" ON)
 option(FLAGGEMS_KERNEL "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGGEMS_PYTHON "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
+option(TILEOPS_KERNEL "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 option(METAX_KERNEL "Build MetaX kernel implementations" OFF)
 option(ASCEND_KERNEL "Build Ascend kernel implementations" OFF)
 option(GCU_KERNEL "Build Enflame GCU (topsaten) kernel implementations" OFF)
@@ -177,6 +178,8 @@ endif()
 #
 #   * the FlagGems dispatch paths (FLAGGEMS_KERNEL / FLAGGEMS_PYTHON), which call
 #     into Python through it;
+#   * the TileOPs path (TILEOPS_KERNEL), which reaches its TileLang kernels the
+#     same way;
 #   * generated/cuda_kernels.cc, whose native RNG kernels call
 #     GetFlagosDefaultCudaGenerator() unconditionally since the unified-RNG
 #     generator injection, regardless of the FlagGems dispatch path;
@@ -191,7 +194,7 @@ endif()
 # the DTK torch wheel is hipified and registers HIP kernels under the CUDA key)
 # linking with an undefined GetFlagosDefaultCudaGenerator.
 set(_needs_python_op_caller OFF)
-if(FLAGGEMS_KERNEL OR FLAGGEMS_PYTHON)
+if(FLAGGEMS_KERNEL OR FLAGGEMS_PYTHON OR TILEOPS_KERNEL)
   set(_needs_python_op_caller ON)
 endif()
 if(ACCELERATOR STREQUAL "metax" AND FLAGOS_METAX_BOXING)
@@ -368,6 +371,16 @@ endif()
 # this macro) only when linking against liboperators.so is requested.
 if(FLAGGEMS_KERNEL)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_CPP)
+endif()
+
+# Compile the generated TileOPs kernels (guarded by this macro). Like the
+# FlagGems Python path they call into the interpreter via python_op_caller, so
+# there is nothing to link against -- TileOPs is a pure-Python (TileLang)
+# package, and its absence at runtime is handled by the shims falling back to
+# aten. Building them in costs nothing when unused: the conf files decide
+# whether any op actually routes to Backend::kTileOps.
+if(TILEOPS_KERNEL)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
 endif()
 
 # The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
