@@ -17,11 +17,11 @@
 """TileOPs -> aten routing table generated from the TileOPs manifest.
 
 Modules are named as strings so importing this file never pulls in TileOPs;
-torch_fl.tileops_backend imports them lazily once the SM90/dependency gate
+torch_fl.tileops.runtime imports them lazily once the SM90/dependency gate
 passes.
 """
 
-from torch_fl.tileops_spec import BINARY, REDUCE, SOFTMAX, UNARY
+from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY
 
 _DT0 = ("float16", "bfloat16", "float32")
 _DT1 = (
@@ -385,7 +385,7 @@ WORKLOADS = {
     "var_mean.correction": (2048, 4096),
 }
 
-#: ops deliberately not routed, with the reason (see tileops_spec.EXCLUDE).
+#: ops deliberately not routed, with the reason (see tileops.spec.EXCLUDE).
 NOT_ROUTED = {
     "ArgmaxFwdOp": "perf 0.01x (7.826 ms vs torch 0.044 ms @ 8192x4096 fp16)",
     "ArgminFwdOp": "same argreduce kernel family as ArgmaxFwdOp; excluded by association",

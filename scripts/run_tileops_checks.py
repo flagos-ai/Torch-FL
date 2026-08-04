@@ -35,8 +35,8 @@ import time
 import torch
 
 import torch_fl  # noqa: F401  (registers the flagos device)
-from torch_fl import tileops_backend
-from torch_fl.generated.tileops_routes import ROUTES, WORKLOADS
+from torch_fl.tileops import runtime as tileops_runtime
+from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
 
 TOL = {
     torch.float16: (1e-2, 1e-2),
@@ -62,11 +62,11 @@ def check_route(overload, recipe, module, cls_name, dtypes, extra, full: bool):
     shape = WORKLOADS.get(overload, SMALL_SHAPE) if full else SMALL_SHAPE
     dtype = getattr(torch, dtypes[0])
 
-    impl = tileops_backend.build_impl(recipe, module, cls_name, dtypes, extra, overload)
+    impl = tileops_runtime.build_impl(recipe, module, cls_name, dtypes, extra, overload)
     if impl is None:
         return "skip", "not constructible"
 
-    cpu_args = tileops_backend.sample_inputs(
+    cpu_args = tileops_runtime.sample_inputs(
         recipe, shape, dtype, device="cpu", overload=overload
     )
     dev_args = tuple(
@@ -98,7 +98,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not tileops_backend.is_tileops_available():
+    if not tileops_runtime.is_tileops_available():
         print("TileOPs unavailable or host is not SM90 -- nothing to check")
         return 0
 
@@ -106,13 +106,13 @@ def main() -> int:
     # enable() call to exercise here. What is worth asserting is that the shim
     # each generated stub resolves by name actually exists -- a rename that
     # misses one side would otherwise surface only when that op is first called.
-    from torch_fl.generated import tileops_shims
+    from torch_fl.tileops.generated import shims as tileops_shims
 
     for overload, shim in tileops_shims.SHIM_NAMES.items():
         assert callable(getattr(tileops_shims, shim, None)), (
             f"{overload}: C++ stub resolves {shim}, which is missing"
         )
-    bound = tileops_backend.registered_ops()
+    bound = tileops_runtime.registered_ops()
 
     selected = [r for r in ROUTES if args.filter is None or args.filter in r[0]]
     passed, skipped, failures = 0, 0, []

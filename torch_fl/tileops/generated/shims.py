@@ -21,8 +21,8 @@ csrc/aten/generated/tileops_python_kernels.cc. Keep the names in sync:
 the C++ side resolves them by string at first call.
 """
 
-from torch_fl.generated.tileops_routes import ROUTES
-from torch_fl.tileops_backend import resolve_impl
+from torch_fl.tileops.generated.routes import ROUTES
+from torch_fl.tileops.runtime import resolve_impl
 
 _ROUTES = {r[0]: r for r in ROUTES}
 _CACHE = {}

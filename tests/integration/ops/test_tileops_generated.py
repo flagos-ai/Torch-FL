@@ -24,12 +24,12 @@ import pytest
 import torch
 
 import torch_fl  # noqa: F401
-from torch_fl import tileops_backend
-from torch_fl.generated.tileops_routes import ROUTES, WORKLOADS
-from torch_fl.generated.tileops_shims import SHIM_NAMES
+from torch_fl.tileops import runtime as tileops_runtime
+from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
+from torch_fl.tileops.generated.shims import SHIM_NAMES
 
 pytestmark = pytest.mark.skipif(
-    not tileops_backend.is_tileops_available(),
+    not tileops_runtime.is_tileops_available(),
     reason="TileOPs unavailable or host is not SM90",
 )
 
@@ -71,11 +71,11 @@ def test_matches_aten(overload, recipe, module, cls_name, dtypes, extra):
         shape = WORKLOADS.get(overload, shape)
     dtype = getattr(torch, dtypes[0])
 
-    fn = tileops_backend.build_impl(recipe, module, cls_name, dtypes, extra, overload)
+    fn = tileops_runtime.build_impl(recipe, module, cls_name, dtypes, extra, overload)
     if fn is None:
         pytest.skip("route not constructible on this host")
 
-    cpu_args = tileops_backend.sample_inputs(
+    cpu_args = tileops_runtime.sample_inputs(
         recipe, shape, dtype, device="cpu", overload=overload
     )
     dev_args = tuple(
@@ -107,7 +107,7 @@ def test_dtype_guard_falls_back():
 @pytest.mark.parametrize("overload", [r[0] for r in ROUTES])
 def test_route_is_registered(overload):
     """Every generated route is known to the runtime."""
-    assert overload in tileops_backend.registered_ops()
+    assert overload in tileops_runtime.registered_ops()
 
 
 @pytest.mark.parametrize("overload,shim", sorted(SHIM_NAMES.items()))
@@ -118,7 +118,7 @@ def test_shim_exists_and_is_callable(overload, shim):
     rename that misses one side fails at runtime, on that one op, only once
     it is exercised. Checking the whole table here surfaces it immediately.
     """
-    from torch_fl.generated import tileops_shims
+    from torch_fl.tileops.generated import shims as tileops_shims
 
     assert callable(getattr(tileops_shims, shim)), f"{overload} -> {shim}"
 

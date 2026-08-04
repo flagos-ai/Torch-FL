@@ -12,4 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generated Python-side routing tables. Regenerate, do not hand-edit."""
+"""Products of ``scripts/codegen_tileops.py``. Regenerate, do not hand-edit.
+
+  - :mod:`~torch_fl.tileops.generated.routes`  the routing table (``ROUTES``)
+  - :mod:`~torch_fl.tileops.generated.shims`   one free function per route, the
+    form ``CallPythonOp_Generic`` resolves by qualname from the C++ stubs
+
+``shims`` is imported by name from C++, never by Python code, so the module
+names here are load-bearing: renaming one without regenerating the ``.cc``
+breaks that route at first call rather than at import.
+"""
+
+__all__ = ["routes", "shims"]

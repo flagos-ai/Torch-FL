@@ -16,7 +16,7 @@
 
 Routes reach aten through the C++ dispatcher on ``Backend::kTileOps``
 (``csrc/aten/generated/tileops_python_kernels.cc``), which calls back into
-``torch_fl.generated.tileops_shims`` -- TileOPs ships no C++ API, so the kernels
+``torch_fl.tileops.generated.shims`` -- TileOPs ships no C++ API, so the kernels
 stay in Python. This module is the runtime those shims land in: it owns the
 instance cache and turns an aten call into TileOPs constructor arguments.
 
@@ -55,7 +55,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 
-from torch_fl.tileops_spec import BINARY, REDUCE, SOFTMAX, UNARY
+from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY
 
 __all__ = [
     "enable_tileops_for_flagos",
@@ -510,7 +510,7 @@ def enable_tileops_for_flagos(include=None, exclude=None) -> int:
         )
     if not is_tileops_available():
         return 0
-    from torch_fl.generated.tileops_routes import ROUTES
+    from torch_fl.tileops.generated.routes import ROUTES
 
     return len(ROUTES)
 
@@ -524,7 +524,7 @@ def registered_ops() -> Dict[str, str]:
     """
     if not is_tileops_available():
         return {}
-    from torch_fl.generated.tileops_routes import ROUTES
+    from torch_fl.tileops.generated.routes import ROUTES
 
     return {overload: cls_name for overload, _, _, cls_name, _, _ in ROUTES}
 
@@ -614,7 +614,7 @@ def warmup(overloads=None, dtype=torch.float16) -> int:
     """
     if not is_tileops_available():
         return 0
-    from torch_fl.generated.tileops_routes import ROUTES, WORKLOADS
+    from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
 
     want = str(dtype).replace("torch.", "")
     built = 0

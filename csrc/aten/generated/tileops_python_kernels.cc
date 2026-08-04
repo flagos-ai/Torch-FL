@@ -38,302 +38,302 @@ namespace {
 
 // ---- _log_softmax (SOFTMAX, LogSoftmaxFwdOp)
 at::Tensor LogSoftmaxKernelTileOps(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_log_softmax", {self, dim, half_to_float});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_log_softmax", {self, dim, half_to_float});
 }
 
 // ---- _softmax (SOFTMAX, SoftmaxFwdOp)
 at::Tensor SoftmaxKernelTileOps(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_softmax", {self, dim, half_to_float});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_softmax", {self, dim, half_to_float});
 }
 
 // ---- abs (UNARY, AbsFwdOp)
 at::Tensor AbsKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_abs", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_abs", {self});
 }
 
 // ---- add.Tensor (BINARY, AddFwdOp)
 at::Tensor AddTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_add_tensor", {self, other}, {PyKwarg{"alpha", alpha}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_add_tensor", {self, other}, {PyKwarg{"alpha", alpha}});
 }
 
 // ---- all.dim (REDUCE, AllFwdOp)
 at::Tensor AllDimKernelTileOps(const at::Tensor & self, int64_t dim, bool keepdim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_all_dim", {self, dim, keepdim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_all_dim", {self, dim, keepdim});
 }
 
 // ---- amax (REDUCE, AmaxFwdOp)
 at::Tensor AmaxKernelTileOps(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_amax", {self, dim, keepdim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_amax", {self, dim, keepdim});
 }
 
 // ---- amin (REDUCE, AminFwdOp)
 at::Tensor AminKernelTileOps(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_amin", {self, dim, keepdim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_amin", {self, dim, keepdim});
 }
 
 // ---- any.dim (REDUCE, AnyFwdOp)
 at::Tensor AnyDimKernelTileOps(const at::Tensor & self, int64_t dim, bool keepdim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_any_dim", {self, dim, keepdim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_any_dim", {self, dim, keepdim});
 }
 
 // ---- bitwise_and.Tensor (BINARY, BitwiseAndFwdOp)
 at::Tensor BitwiseAndTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_bitwise_and_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_bitwise_and_tensor", {self, other});
 }
 
 // ---- bitwise_not (UNARY, BitwiseNotFwdOp)
 at::Tensor BitwiseNotKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_bitwise_not", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_bitwise_not", {self});
 }
 
 // ---- bitwise_or.Tensor (BINARY, BitwiseOrFwdOp)
 at::Tensor BitwiseOrTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_bitwise_or_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_bitwise_or_tensor", {self, other});
 }
 
 // ---- bitwise_xor.Tensor (BINARY, BitwiseXorFwdOp)
 at::Tensor BitwiseXorTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_bitwise_xor_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_bitwise_xor_tensor", {self, other});
 }
 
 // ---- ceil (UNARY, CeilFwdOp)
 at::Tensor CeilKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_ceil", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_ceil", {self});
 }
 
 // ---- cos (UNARY, CosFwdOp)
 at::Tensor CosKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_cos", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_cos", {self});
 }
 
 // ---- count_nonzero.dim_IntList (REDUCE, CountNonzeroFwdOp)
 at::Tensor CountNonzeroDimIntlistKernelTileOps(const at::Tensor & self, at::IntArrayRef dim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_count_nonzero_dim_intlist", {self, dim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_count_nonzero_dim_intlist", {self, dim});
 }
 
 // ---- eq.Tensor (BINARY, EqFwdOp)
 at::Tensor EqTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_eq_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_eq_tensor", {self, other});
 }
 
 // ---- erf (UNARY, ErfFwdOp)
 at::Tensor ErfKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_erf", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_erf", {self});
 }
 
 // ---- exp (UNARY, ExpFwdOp)
 at::Tensor ExpKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_exp", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_exp", {self});
 }
 
 // ---- expm1 (UNARY, Expm1FwdOp)
 at::Tensor Expm1KernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_expm1", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_expm1", {self});
 }
 
 // ---- floor (UNARY, FloorFwdOp)
 at::Tensor FloorKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_floor", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_floor", {self});
 }
 
 // ---- floor_divide (BINARY, FloorDivideFwdOp)
 at::Tensor FloorDivideKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_floor_divide", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_floor_divide", {self, other});
 }
 
 // ---- ge.Tensor (BINARY, GeFwdOp)
 at::Tensor GeTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_ge_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_ge_tensor", {self, other});
 }
 
 // ---- gt.Tensor (BINARY, GtFwdOp)
 at::Tensor GtTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_gt_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_gt_tensor", {self, other});
 }
 
 // ---- hardsigmoid (UNARY, HardsigmoidFwdOp)
 at::Tensor HardsigmoidKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_hardsigmoid", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_hardsigmoid", {self});
 }
 
 // ---- hardswish (UNARY, HardswishFwdOp)
 at::Tensor HardswishKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_hardswish", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_hardswish", {self});
 }
 
 // ---- isinf (UNARY, IsinfFwdOp)
 at::Tensor IsinfKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_isinf", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_isinf", {self});
 }
 
 // ---- isnan (UNARY, IsnanFwdOp)
 at::Tensor IsnanKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_isnan", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_isnan", {self});
 }
 
 // ---- le.Tensor (BINARY, LeFwdOp)
 at::Tensor LeTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_le_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_le_tensor", {self, other});
 }
 
 // ---- log (UNARY, LogFwdOp)
 at::Tensor LogKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_log", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_log", {self});
 }
 
 // ---- log1p (UNARY, Log1pFwdOp)
 at::Tensor Log1pKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_log1p", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_log1p", {self});
 }
 
 // ---- logical_and (BINARY, LogicalAndFwdOp)
 at::Tensor LogicalAndKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_logical_and", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_logical_and", {self, other});
 }
 
 // ---- logical_not (UNARY, LogicalNotFwdOp)
 at::Tensor LogicalNotKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_logical_not", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_logical_not", {self});
 }
 
 // ---- logical_or (BINARY, LogicalOrFwdOp)
 at::Tensor LogicalOrKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_logical_or", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_logical_or", {self, other});
 }
 
 // ---- logsumexp (REDUCE, LogSumExpFwdOp)
 at::Tensor LogsumexpKernelTileOps(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_logsumexp", {self, dim, keepdim});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_logsumexp", {self, dim, keepdim});
 }
 
 // ---- lt.Tensor (BINARY, LtFwdOp)
 at::Tensor LtTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_lt_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_lt_tensor", {self, other});
 }
 
 // ---- maximum (BINARY, MaximumFwdOp)
 at::Tensor MaximumKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_maximum", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_maximum", {self, other});
 }
 
 // ---- mean.dim (REDUCE, MeanFwdOp)
 at::Tensor MeanDimKernelTileOps(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
 }
 
 // ---- minimum (BINARY, MinimumFwdOp)
 at::Tensor MinimumKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_minimum", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_minimum", {self, other});
 }
 
 // ---- mish (UNARY, MishFwdOp)
 at::Tensor MishKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_mish", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_mish", {self});
 }
 
 // ---- mul.Tensor (BINARY, MulFwdOp)
 at::Tensor MulTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_mul_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_mul_tensor", {self, other});
 }
 
 // ---- ne.Tensor (BINARY, NeFwdOp)
 at::Tensor NeTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_ne_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_ne_tensor", {self, other});
 }
 
 // ---- neg (UNARY, NegFwdOp)
 at::Tensor NegKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_neg", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_neg", {self});
 }
 
 // ---- pow.Tensor_Tensor (BINARY, PowFwdOp)
 at::Tensor PowTensorTensorKernelTileOps(const at::Tensor & self, const at::Tensor & exponent) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_pow_tensor_tensor", {self, exponent});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_pow_tensor_tensor", {self, exponent});
 }
 
 // ---- prod.dim_int (REDUCE, ProdFwdOp)
 at::Tensor ProdDimIntKernelTileOps(const at::Tensor & self, int64_t dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_prod_dim_int", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_prod_dim_int", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
 }
 
 // ---- reciprocal (UNARY, ReciprocalFwdOp)
 at::Tensor ReciprocalKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_reciprocal", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_reciprocal", {self});
 }
 
 // ---- relu (UNARY, ReluFwdOp)
 at::Tensor ReluKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_relu", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_relu", {self});
 }
 
 // ---- remainder.Tensor (BINARY, RemainderFwdOp)
 at::Tensor RemainderTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_remainder_tensor", {self, other});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_remainder_tensor", {self, other});
 }
 
 // ---- rsqrt (UNARY, RsqrtFwdOp)
 at::Tensor RsqrtKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_rsqrt", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_rsqrt", {self});
 }
 
 // ---- sigmoid (UNARY, SigmoidFwdOp)
 at::Tensor SigmoidKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_sigmoid", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_sigmoid", {self});
 }
 
 // ---- sign (UNARY, SignFwdOp)
 at::Tensor SignKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_sign", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_sign", {self});
 }
 
 // ---- silu (UNARY, SiluFwdOp)
 at::Tensor SiluKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_silu", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_silu", {self});
 }
 
 // ---- sin (UNARY, SinFwdOp)
 at::Tensor SinKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_sin", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_sin", {self});
 }
 
 // ---- sqrt (UNARY, SqrtFwdOp)
 at::Tensor SqrtKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_sqrt", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_sqrt", {self});
 }
 
 // ---- std.correction (REDUCE, StdFwdOp)
 at::Tensor StdCorrectionKernelTileOps(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_std_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_std_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}});
 }
 
 // ---- sub.Tensor (BINARY, SubFwdOp)
 at::Tensor SubTensorKernelTileOps(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_sub_tensor", {self, other}, {PyKwarg{"alpha", alpha}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_sub_tensor", {self, other}, {PyKwarg{"alpha", alpha}});
 }
 
 // ---- sum.dim_IntList (REDUCE, SumFwdOp)
 at::Tensor SumDimIntlistKernelTileOps(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_sum_dim_intlist", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_sum_dim_intlist", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
 }
 
 // ---- tanh (UNARY, TanhFwdOp)
 at::Tensor TanhKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_tanh", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_tanh", {self});
 }
 
 // ---- trunc (UNARY, TruncFwdOp)
 at::Tensor TruncKernelTileOps(const at::Tensor & self) {
-  return CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_trunc", {self});
+  return CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_trunc", {self});
 }
 
 // ---- var.correction (REDUCE, VarFwdOp)
 at::Tensor VarCorrectionKernelTileOps(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  return CallPythonOp_GenericKw("torch_fl.generated.tileops_shims._shim_var_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}});
+  return CallPythonOp_GenericKw("torch_fl.tileops.generated.shims._shim_var_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}});
 }
 
 // ---- var_mean.correction (REDUCE, VarMeanFwdOp)
 ::std::tuple<at::Tensor,at::Tensor> VarMeanCorrectionKernelTileOps(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  auto result = CallPythonOp_GenericKwTuple("torch_fl.generated.tileops_shims._shim_var_mean_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}}, 2);
+  auto result = CallPythonOp_GenericKwTuple("torch_fl.tileops.generated.shims._shim_var_mean_correction", {self, dim, keepdim}, {PyKwarg{"correction", correction}}, 2);
   return {result[0], result[1]};
 }
 

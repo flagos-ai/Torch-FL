@@ -263,7 +263,7 @@ the disk kernel cache layer:
   no-ops (equivalent to #2363) and **keep the kernel disk cache**. Measured: all
   shapes correct, and a second process drops from 12.0s to 0.3s (14.2s to 1.2s
   through the full aten route). See
-  `torch_fl/tileops_backend.py::_disable_frontend_cache()`, with escape hatch
+  `torch_fl/tileops/runtime.py::_disable_frontend_cache()`, with escape hatch
   `FLAGOS_TILEOPS_DISABLE_ALL_CACHE=1`.
 - Disposition: **no new issue needed**. Once the pin moves to 0.1.12 (both
   packages together, see 2.1) the workaround function can be deleted.
@@ -332,7 +332,7 @@ wrong**, on both halves:
 
 - The constraint is only that the *entry point* be reachable by qualname. It
   says nothing about what that function does. The instance cache stays in Python
-  exactly as it was; `torch_fl/generated/tileops_shims.py` just gives each route
+  exactly as it was; `torch_fl/tileops/generated/shims.py` just gives each route
   a module-level name for `GetFunc` to resolve. Verified by wrapping a stateful
   `ReluFwdOp` plus its cache behind a free function and resolving it the way
   `GetFunc` does.
@@ -361,14 +361,14 @@ aten::relu(flagos tensor)
   -> PrivateUse1 m.impl              csrc/aten/generated/register.inc
   -> relu_dispatcher                 reads conf + FLAGOS_OP_relu, logs decision
   -> ReluKernelTileOps               csrc/aten/generated/tileops_python_kernels.cc
-  -> CallPythonOp_Generic("torch_fl.generated.tileops_shims._shim_relu", {self})
-  -> _shim_relu                      torch_fl/generated/tileops_shims.py
-  -> resolve_impl -> _unary_impl     torch_fl/tileops_backend.py: instance cache,
+  -> CallPythonOp_Generic("torch_fl.tileops.generated.shims._shim_relu", {self})
+  -> _shim_relu                      torch_fl/tileops/generated/shims.py
+  -> resolve_impl -> _unary_impl     torch_fl/tileops/runtime.py: instance cache,
                                      ctor args from the call, zero-copy boxing
   -> ReluFwdOp / its compiled kernel
 ```
 
-`torch_fl/tileops_backend.py` keeps everything that depends on runtime values --
+`torch_fl/tileops/runtime.py` keeps everything that depends on runtime values --
 the instance cache, the per-recipe derivation of constructor arguments, the
 dtype/shape guard, and the aten fallback when TileOPs cannot serve a call. What
 it no longer contains is any dispatch *decision*: that is the dispatcher's job
@@ -437,7 +437,7 @@ That work should be a separate PR, after the Stage A skeleton lands.
 1. **PR1 skeleton**: `Backend::kTileOps` enum, dispatcher slot, conf parsing,
    `backends_tileops.conf`, and the `FLAGOS_USE_TILEOPS` switch. Plumbing only,
    no operators.
-2. **PR2 Stage A**: `torch_fl/tileops_backend.py` (instance cache, boxing,
+2. **PR2 Stage A**: `torch_fl/tileops/runtime.py` (instance cache, boxing,
    `mm`/`bmm` adapters), dispatch and numerical tests following the
    `tests/integration/ops/test_*_dispatch.py` template, the SM90 gate, plus docs
    and dependency pins.

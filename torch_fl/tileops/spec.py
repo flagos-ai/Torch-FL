@@ -23,7 +23,7 @@ refuse to route (each with the measurement that justifies it).
 See ``docs/tileops_codegen_design.md``.
 """
 
-# --- recipe names, shared with torch_fl.tileops_backend ---------------------
+# --- recipe names, shared with torch_fl.tileops.runtime ---------------------
 UNARY = "UNARY"
 BINARY = "BINARY"
 REDUCE = "REDUCE"
