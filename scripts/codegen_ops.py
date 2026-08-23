@@ -2469,6 +2469,20 @@ def main():
             # (3) DTK triton cannot compile the gems kernel
             "gcd",
             "gcd.out",
+            # (3b) kernel dtype/value limits, measured on the 5060 survey:
+            # tl.dot rejects int64, tl.atomic_add rejects bool, cummax/cummin
+            # bool loop types clash, randint high=1 hits a gems constexpr gap.
+            "mm",
+            "mm.out",
+            "addmm",
+            "addmm.out",
+            "addmm_",
+            "index_add",
+            "index_add_",
+            "cummax",
+            "cummin",
+            "randint",
+            "randint_like",
             # (4) wrong numerics or memory safety on the gems path
             "adaptive_max_pool3d_backward",
             "leaky_relu_",
