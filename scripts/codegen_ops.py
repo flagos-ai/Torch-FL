@@ -586,6 +586,15 @@ FLAGGEMS_PYTHON_SKIP = {
     "i0_",
     "zero",
     "zero.out",
+    # Same CUDA-device assert family (measured on the 5060 survey): the gems
+    # kernels raise on flagos and fall back to the boxed CUDA kernels.
+    "i0",
+    "i0.out",
+    "special_i0e",
+    "special_i0e.out",
+    "special_i1",
+    "upsample_bicubic2d",
+    "soft_margin_loss",
     # rand/randn/rand_like/randn_like/randperm/multinomial are now ROUTED (not
     # skipped). gems' internal philox_backend_seed_offset(increment) reads
     # torch_device_fn.default_generators[device] (torch.cuda for the nvidia/metax
@@ -2399,7 +2408,8 @@ def main():
             "im2col",
             "smooth_l1_loss",
             "smooth_l1_loss_backward",
-            "special_i1.out",
+            # special_i1.out has no kernel under flag_gems 7fb49bad (its parent
+            # is skipped above); the out variant routes to cuda via plain conf.
             "_upsample_bilinear2d_aa",
             "_upsample_nearest_exact2d_backward",
             "upsample_trilinear3d",
