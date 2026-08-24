@@ -1,0 +1,36 @@
+# Keep the docker build context small and free of host-local / CI-only state.
+# The image is rebuilt from source; it never needs the wheel artifacts, the
+# extracted libtorch_cuda assets (those were the old CPU-torch hack), or any
+# agent/tooling directories.
+
+# VCS
+.git/
+.gitignore
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+wheelhouse/
+.libtorch_cuda_assets/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE / agent / tooling (host-local, never needed inside the image)
+.claude/
+.serena/
+.spec-workflow/
+.codex/
+.agents/
+.vscode/
+.idea/
+
+# CI-only scratch
+.github/
+!docker/

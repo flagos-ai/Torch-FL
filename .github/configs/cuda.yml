@@ -17,6 +17,12 @@ display_name: CUDA
 # Platform-specific preparation is implemented outside the common workflows.
 setup_script: .github/scripts/set_env_cuda.sh
 
+# The standalone .github/workflows/integration-test-cuda.yml (the path the 2.9
+# branch actually runs via ci.yml's cuda_only policy) now builds a native
+# torch-2.9 ABI image from docker/cuda/Dockerfile and references it locally
+# (torch-fl/cuda-2.9:ci). This ci_image stays pinned to the vendor digest for
+# the dormant common-workflow path (all-tests-common), which the 2.9 branch
+# skips; re-enable that path only after pointing it at a locally built image.
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:8f6aec7fbd4b56c8d925169029462a09a0a58758fde0576b1509b2eed7627e25
 
 runner_labels:
@@ -54,16 +60,16 @@ integration_tests:
       import torch
 
       torch_path = Path(torch.__file__).resolve()
-      package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
+      torch_lib = torch_path.parent / "lib"
 
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
+      assert torch.__version__.startswith("2.9.0+cu130"), torch.__version__
+      assert torch.version.cuda == "13.0", torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
-      assert (package_lib / "libtorch_cuda.so").is_file(), package_lib
+      assert (torch_lib / "libtorch_cuda.so").is_file(), torch_lib
       assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      print(f"CPU PyTorch: {torch.__version__}")
+      print(f"GPU PyTorch: {torch.__version__}")
       print(f"torch path: {torch_path}")
-      print(f"CUDA assets: {package_lib}")
+      print(f"torch lib: {torch_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
   - name: Run operator tests (vendor backend, main ops)

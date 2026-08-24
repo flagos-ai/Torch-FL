@@ -14,6 +14,9 @@
 
 name: Integration Tests (CUDA)
 
+# The CUDA line builds its own native torch-2.9 ABI image from
+# docker/cuda/Dockerfile and runs the integration suite inside it.
+
 on:
   workflow_call:
     inputs:
@@ -29,50 +32,81 @@ on:
         required: false
         type: number
         default: 60
+  # Direct pushes to the fork branch are useful for testing this workflow.
+  # Once merged into upstream/2.9, ci.yml is the single entry point and calls
+  # this file through workflow_call, so do not add 2.9 here.
+  push:
+    branches:
+      - build_cuda_docker
+    paths:
+      - "docker/**"
+      - ".github/scripts/set_env_cuda.sh"
+      - ".github/workflows/integration-test-cuda.yml"
+      - "cmake/**"
+      - "csrc/**"
+      - "include/**"
+      - "tests/**"
+      - "torch_fl/**"
+      - "CMakeLists.txt"
+      - "pyproject.toml"
+      - "setup.py"
 
 jobs:
-  integration-tests:
+  build-and-test:
     name: Build and test (CUDA)
     runs-on:
       - torch-fl-nv
-    timeout-minutes: ${{ inputs['timeout-minutes'] }}
-    container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:8f6aec7fbd4b56c8d925169029462a09a0a58758fde0576b1509b2eed7627e25
-      volumes:
-        - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
-      options: >-
-        --gpus all
-        --ipc=host
-        --shm-size=512g
-        --ulimit memlock=-1
-        --cap-add=SYS_PTRACE
-    defaults:
-      run:
-        shell: bash
-
+    timeout-minutes: ${{ inputs.timeout-minutes || 60 }}
     steps:
+      # Previous container runs may have left root-owned build artifacts in the
+      # persistent self-hosted workspace. Restore ownership before checkout so
+      # actions/checkout can clean the repository as the runner user.
+      - name: Repair workspace ownership
+        run: |
+          set -euo pipefail
+          sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+
       - uses: actions/checkout@v4
 
-      - name: Prepare CUDA build environment
+      - name: Build CUDA base image
         env:
-          CI_STAGE: integration
-        run: bash .github/scripts/set_env_cuda.sh
-
-      - name: Build wheel
-        run: python -m build --wheel --no-isolation
-
-      - name: Install wheel
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
-
-      - name: Prepare wheel-only test workspace
+          DOCKER_BUILDKIT: "1"
         run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-cuda.XXXXXX")
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
+          docker build \
+            -t torch-fl/cuda-2.9:ci \
+            -f docker/cuda/Dockerfile \
+            .
 
       - name: Run CUDA integration tests
         env:
           INTEGRATION_ENVIRONMENT: '{"MODEL_PATH":"/models/Qwen3-0.6B"}'
           INTEGRATION_TESTS: >-
-            [{"name":"Check model availability","command":"test -d \"$MODEL_PATH\""},{"name":"Check device availability","command":"python - <<'PY'\nfrom pathlib import Path\n\nimport torch_fl\nimport torch\n\ntorch_path = Path(torch.__file__).resolve()\npackage_lib = Path(torch_fl.__file__).resolve().parent / \"lib\"\n\nassert torch.__version__.startswith(\"2.10.0+cpu\"), torch.__version__\nassert torch.version.cuda is None, torch.version.cuda\nassert \"/opt/conda/\" not in str(torch_path), torch_path\nassert (package_lib / \"libtorch_cuda.so\").is_file(), package_lib\nassert torch_fl.flagos.is_available(), \"flagos device is unavailable\"\nprint(f\"CPU PyTorch: {torch.__version__}\")\nprint(f\"torch path: {torch_path}\")\nprint(f\"CUDA assets: {package_lib}\")\nprint(f\"flagos devices: {torch_fl.flagos.device_count()}\")\nPY\n"},{"name":"Run operator tests (vendor backend, main ops)","command":"python -m pytest tests/integration/ops/ -m \"main_ops and not flaggems_python and not flaggems_cpp\" -v -s --tb=short"},{"name":"Run operator tests (FlagGems runtime path, main ops)","command":"FLAGOS_USE_FLAGGEMS=1 python -m pytest tests/integration/ops/ -m \"flaggems and main_ops\" -v -s --tb=short"},{"name":"Run general tests","command":"python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"},{"name":"Profiler parity test","command":"python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops --tb=short"},{"name":"Run inference tests","command":"python -m pytest tests/integration/test_qwen3_infer.py --model \"$MODEL_PATH\" -v -s --tb=short"},{"name":"Run training tests","command":"python -m pytest tests/integration/test_qwen3_train.py --model \"$MODEL_PATH\" -v -s --tb=short"}]
-        run: python .github/scripts/run_integration_tests.py
+            [{"name":"Check model availability","command":"test -d \"$MODEL_PATH\""},{"name":"Check device availability","command":"python - <<'PY'\nfrom pathlib import Path\n\nimport torch\nimport torch_fl\n\ntorch_path = Path(torch.__file__).resolve()\ntorch_lib = torch_path.parent / \"lib\"\n\nassert torch.__version__.startswith(\"2.9.0+cu130\"), torch.__version__\nassert torch.version.cuda == \"13.0\", torch.version.cuda\nassert \"/opt/conda/\" not in str(torch_path), torch_path\nassert (torch_lib / \"libtorch_cuda.so\").is_file(), torch_lib\nassert torch_fl.flagos.is_available(), \"flagos device is unavailable\"\nprint(f\"GPU PyTorch: {torch.__version__}\")\nprint(f\"torch path: {torch_path}\")\nprint(f\"torch lib: {torch_lib}\")\nprint(f\"flagos devices: {torch_fl.flagos.device_count()}\")\nPY\n"},{"name":"Run operator tests (vendor backend, main ops)","command":"python -m pytest tests/integration/ops/ -m \"main_ops and not flaggems_python and not flaggems_cpp\" -v -s --tb=short"},{"name":"Run operator tests (FlagGems runtime path, main ops)","command":"FLAGOS_USE_FLAGGEMS=1 python -m pytest tests/integration/ops/ -m \"flaggems and main_ops\" -v -s --tb=short"},{"name":"Run general tests","command":"python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"},{"name":"Profiler parity test","command":"python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops --tb=short"},{"name":"Run inference tests","command":"python -m pytest tests/integration/test_qwen3_infer.py --model \"$MODEL_PATH\" -v -s --tb=short"},{"name":"Run training tests","command":"python -m pytest tests/integration/test_qwen3_train.py --model \"$MODEL_PATH\" -v -s --tb=short"}]
+        run: |
+          docker run --rm \
+            --gpus all \
+            --ipc=host \
+            --shm-size=512g \
+            --ulimit memlock=-1 \
+            --cap-add=SYS_PTRACE \
+            -v "$GITHUB_WORKSPACE:/source:ro" \
+            -v /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro \
+            -w /workspace \
+            -e INTEGRATION_ENVIRONMENT \
+            -e INTEGRATION_TESTS \
+            -e MODEL_PATH=/models/Qwen3-0.6B \
+            -e RUNNER_TEMP=/tmp \
+            torch-fl/cuda-2.9:ci \
+            bash -se <<'CONTAINER_SCRIPT'
+          set -euo pipefail
+          find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          cp -a /source/. /workspace/
+          export CI_STAGE=integration
+          source .github/scripts/set_env_cuda.sh
+          python -m build --wheel --no-isolation
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          TEST_ROOT=$(mktemp -d /tmp/torch-fl-cuda.XXXXXX)
+          cp -a tests pyproject.toml "$TEST_ROOT/"
+          export INTEGRATION_WORKDIR="$TEST_ROOT"
+          python .github/scripts/run_integration_tests.py
+          CONTAINER_SCRIPT
