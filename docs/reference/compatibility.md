@@ -107,12 +107,12 @@ build against the PPU's CUDA-13-compatible SDK. There is no CI manifest for this
 The shared `AutocastPrivateUse1` policies and CUDA-boxing AMP routes expose
 `torch.autocast("flagos")` and `torch.amp.GradScaler("flagos")`, with FP16 and
 BF16 as the advertised target dtypes. The AMP contract is covered by
-`tests/integration/test_amp.py`, but its runtime results are only PPU evidence
-when run with `PPU_SDK` or `PPU_HOME` against a real PPU device; ordinary NVIDIA
-CUDA and CPU runs do not validate this row. The current PPU validation covered
-both FP16 and BF16 autocast, the mutable `found_inf` unscale path, finite scale
-growth, overflow backoff, and an autocast training step. The result remains
-experimental because it is not covered by CI.
+`tests/integration/test_amp_contract.py` (`-m amp`), but its runtime results are
+only PPU evidence when run with `PPU_SDK` or `PPU_HOME` against a real PPU
+device; ordinary NVIDIA CUDA and CPU runs do not validate this row. The current
+PPU validation covered both FP16 and BF16 autocast, the mutable `found_inf`
+unscale path, finite scale growth, overflow backoff, and an autocast training
+step. The result remains experimental because it is not covered by CI.
 FlagGems requires a vendor-index Triton build whose version string does not satisfy the
 project's `triton>=3.5.1` pin (see [`setup.py`](../../setup.py), lines 790-807). Distributed
 support is described as working via the NCCL fallback with a vendor-adapted `libnccl.so.2`, but
@@ -160,8 +160,9 @@ image does not install that stack, so the operator step excludes FlagGems marker
 
 The CI steps are the same contract suites the other platforms run, selected by marker rather than
 by a file allowlist: the operator suite (568 passed, 33 skipped on S60), the full
-`test_rng_dispatch.py` (111 passed), `test_factory_ops.py` (46 passed), and `test_amp.py`
-(25 passed). RNG is native: seeds are reserved from the flagos PrivateUse1 generator via
+`test_rng_dispatch.py` (111 passed), `test_factory_ops.py` (46 passed), and the shared AMP
+contract `test_amp_contract.py` (measured as `test_amp.py`, 25 passed, before the suites were
+unified). RNG is native: seeds are reserved from the flagos PrivateUse1 generator via
 `c10::flagos::ReserveSeed`, so `torch.Generator(device="flagos")`, `manual_seed`,
 `manual_seed_all`, `get_rng_state`, and `set_rng_state` all drive the same per-device stream, and
 `random_` follows ATen's default integer bounds.

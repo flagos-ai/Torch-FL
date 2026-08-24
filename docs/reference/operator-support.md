@@ -18,6 +18,13 @@ composite decomposition or fallback. See the [Compatibility Matrix](compatibilit
 [no-dispatcher analysis](../vendors/flaggems/no-dispatcher-analysis.md) for those
 separate concerns.
 
+Historical evidence entries cite `tests/integration/test_amp.py` and the
+per-vendor `tests/integration/test_profiler_*.py` modules under the names used
+when the measurement was taken. Those suites are now the single cross-backend
+contracts `tests/integration/test_amp_contract.py` (`-m amp`) and
+`tests/integration/test_profiler_contract.py` (`-m profiler`); the recorded
+results are unchanged.
+
 ## Verdicts
 
 The manual survey first rejects synthesized invocations that are invalid on the

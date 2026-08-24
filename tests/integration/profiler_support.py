@@ -15,12 +15,13 @@
 """Shared fixtures and helpers for the cross-backend profiler contract."""
 
 import json
-import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from platform_support import detect_platform
 
 
 @dataclass(frozen=True)
@@ -36,33 +37,6 @@ class ProfilerCapabilities:
     flow: bool
     linkage: bool
     metadata: bool
-
-
-def detect_platform() -> str:
-    """Reuse the integration platform conventions for profiler selection."""
-    accelerator = os.environ.get("ACCELERATOR", "").lower()
-    if accelerator in {"ascend", "metax", "maca", "musa", "gcu"}:
-        return "metax" if accelerator == "maca" else accelerator
-    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
-        return "ppu"
-    if Path("/usr/local/PPU_SDK").is_dir():
-        return "ppu"
-
-    try:
-        import torch_fl
-
-        marker = Path(torch_fl.__file__).resolve().parent / "lib" / "flagos_platform"
-        platform = marker.read_text().strip().lower()
-        if platform:
-            return platform
-    except (ImportError, OSError):
-        pass
-
-    config = os.environ.get("FLAGOS_BACKEND_CONFIG", "").lower()
-    for platform in ("ascend", "metax", "musa", "gcu", "cuda"):
-        if platform in config:
-            return platform
-    return "cuda"
 
 
 def _torch_device():

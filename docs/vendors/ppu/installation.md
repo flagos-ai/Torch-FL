@@ -135,7 +135,7 @@ for validation on an ordinary NVIDIA CUDA build:
 ```bash
 FLAGOS_DISABLE_CUDA_ASSETS=1 \
   PPU_SDK=/usr/local/PPU_SDK \
-  pytest tests/integration/test_amp.py -v --tb=short
+  pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
 ```
 
 This test requires a real PPU device. A CPU-only environment or a stock NVIDIA

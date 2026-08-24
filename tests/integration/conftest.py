@@ -19,7 +19,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-pytest_plugins = ("profiler_support",)
+pytest_plugins = ("profiler_support", "amp_support")
 
 
 def _ensure_backend_config() -> None:
@@ -109,6 +109,13 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "profiler_metadata: requires profiler device metadata"
+    )
+    config.addinivalue_line("markers", "amp: shared public torch.amp contract")
+    config.addinivalue_line(
+        "markers", "amp_device: requires AMP compute on the flagos device"
+    )
+    config.addinivalue_line(
+        "markers", "amp_grad_scaler: requires the GradScaler unscale/update routes"
     )
 
     import torch_fl

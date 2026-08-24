@@ -32,6 +32,21 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `flaggems_python` | Requires FlagGems Python wrapper backend | Tests checking Python-layer integration (dispatch overhead, GIL behavior) |
 | `flaggems_cpp` | Requires FlagGems C++ runtime (`FLAGOS_USE_FLAGGEMS_CPP=1` + wheel built with `FLAGGEMS_KERNEL=ON`) | Tests asserting `-> kFlagOs` (C++) dispatch |
 
+### Cross-backend Contract Markers
+
+Public PyTorch APIs whose behavior must be identical on every backend are tested once, by a single contract module, rather than copied per vendor. These markers are registered in `tests/integration/conftest.py` so they work for direct `tests/integration/` invocation:
+
+| Marker | Meaning |
+|--------|---------|
+| `profiler` | Selects the whole `torch.profiler` contract (`tests/integration/test_profiler_contract.py`) |
+| `profiler_device`, `profiler_kernel`, `profiler_runtime`, `profiler_memcpy`, `profiler_memset`, `profiler_flow`, `profiler_linkage`, `profiler_metadata` | Individual tracer capabilities |
+| `amp` | Selects the whole `torch.amp` contract (`tests/integration/test_amp_contract.py`) |
+| `amp_device`, `amp_grad_scaler` | AMP device compute and GradScaler route capabilities |
+
+Each contract has a support module (`profiler_support.py`, `amp_support.py`) holding a frozen capability dataclass resolved from the active platform. A test that needs a capability the backend does not provide skips with a reason naming the platform, so an unimplemented vendor route reports as an intentional skip instead of a fabricated pass. Adding a backend means extending one capability table, not adding a test file.
+
+Both support modules share `platform_support.detect_platform()` and must not import torch at module scope: they are loaded as pytest plugins before `torch_fl` preloads its device assets, and importing torch first breaks the required library initialization order.
+
 ### Platform Detection
 
 Test filtering is automatic: `conftest.py` detects the active platform from `ACCELERATOR`, `lib/flagos_platform`, or `FLAGOS_BACKEND_CONFIG` and skips tests marked for unavailable backends.
@@ -136,13 +151,23 @@ pytest tests/integration/test_compile.py -v
 
 ### Profiler Tests
 
-Profiler tests validate CUPTI integration and device timeline capture.
+One contract validates the public `torch.profiler` API, Chrome trace export, and device timeline capture on every backend:
 
 ```bash
-pytest tests/integration/test_profiler.py -v
+pytest tests/integration/test_profiler_contract.py -m profiler -v
 ```
 
-**Hardware requirement**: NVIDIA GPU with CUDA toolkit installed (CUPTI library).
+Device-only cases (kernel, runtime, memcpy, memset, flow, linkage, metadata) skip on a backend whose tracer does not emit that category. Low-level PrivateUse1 dispatcher and CUPTI-bridge regressions stay in `tests/unit/test_profiler_privateuse1.py`.
+
+### AMP Tests
+
+One contract validates `torch.autocast("flagos")`, the shared `AutocastPrivateUse1` policy groups, and `torch.amp.GradScaler("flagos")` on every backend:
+
+```bash
+pytest tests/integration/test_amp_contract.py -m amp -v
+```
+
+The autocast API and policy-state cases are device-independent. Device compute, convolution, and GradScaler cases skip on a backend without those routes.
 
 ## Code Generation
 
@@ -206,5 +231,6 @@ GitHub Actions CI runs a subset of tests based on pytest marks:
 - **Smoke tests**: `-m main_ops` (CUDA boxing kernels only)
 - **FlagGems tests**: `-m "flaggems and main_ops"` (when `FLAGOS_USE_FLAGGEMS=1`)
 - **Platform tests**: Vendor-specific runners filter by platform marker (e.g., `-m "ascend and main_ops"`)
+- **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
 
 To replicate CI behavior locally, use the same mark expressions shown above.

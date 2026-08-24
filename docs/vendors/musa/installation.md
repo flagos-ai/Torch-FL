@@ -104,7 +104,7 @@ Run the autocast and GradScaler suite:
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa \
   LD_LIBRARY_PATH=/usr/local/musa/lib:$LD_LIBRARY_PATH \
-  pytest tests/integration/test_amp.py -v
+  pytest tests/integration/test_amp_contract.py -m amp -v
 ```
 
 Run common operator smoke tests:
@@ -229,7 +229,7 @@ MUSA has no CI runner (no `.github/configs/musa.yml` config exists), so all test
 
 The native RNG and hybrid FlagGems implementation were measured on 2026-08-17 on an eight-device Moore Threads MTT S5000 host. Device 0 reported capability 3.1, 60 multiprocessors, and 85,813,358,592 bytes of memory. The environment used CPU PyTorch 2.10.0, the installed `/usr/local/musa` toolkit (`mudnn` v3300), FlagGems 5.0.2, and the vendor `flagtree-0.5.0+mthreads3.1` wheel (Triton 3.1.0, backend `mthreads`). Results:
 
-- `pytest tests/integration/test_amp.py -v`: **25 passed** in 9.00 seconds. Both FP16 and BF16 passed lower-precision matmul/linear/convolution, float32 and promote policies, nested state, mutable non-finite unscale, finite scale growth, overflow backoff, optimizer-step skipping, and autocast/GradScaler training.
+- `pytest tests/integration/test_amp.py -v` (now `test_amp_contract.py -m amp`): **25 passed** in 9.00 seconds. Both FP16 and BF16 passed lower-precision matmul/linear/convolution, float32 and promote policies, nested state, mutable non-finite unscale, finite scale growth, overflow backoff, optimizer-step skipping, and autocast/GradScaler training.
 - `pytest tests/integration/ops/test_rng_dispatch.py -m "main_ops" -v`: the unified RNG suite passed, including explicit generators, state round trips, `torch.manual_seed`, full-width int64 ranges, native dropout, shared native/FlagGems reservation ordering, and multi-device sequence isolation. MUSA-only generator and reservation cases are selected by the `musa` mark.
 - `pytest tests/integration/ops/test_musa_dispatch.py -v`: **89 passed** in 36.31 seconds.
 - `pytest tests/unit/test_vendor_routing.py tests/unit/test_musa_rng_bridge.py -v`: **24 passed** in 2.19 seconds.

@@ -81,6 +81,14 @@ pytest tests/integration/test_factory_ops.py -v -s --tb=short
 pytest tests/integration/ops/test_common_ops.py -v -s --tb=short
 ```
 
+Run the shared AMP contract, which every supported platform executes with the same command:
+
+```bash
+pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
+```
+
+Cases needing a capability GCU does not provide skip with a reason naming the platform.
+
 The same suites run in CI through [`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml); see [CI scope](#ci-scope) for what that manifest covers and what it deliberately leaves out.
 
 ## Platform-specific Behavior
@@ -117,7 +125,7 @@ The FlagGems path remains experimental and requires validation on the target S60
 
 ### CI scope
 
-[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite, the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, and `tests/integration/test_amp.py`. FlagGems markers are excluded because the CI image does not install the vendor Triton stack. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
+[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite, the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, and the shared `tests/integration/test_amp_contract.py`. FlagGems markers are excluded because the CI image does not install the vendor Triton stack. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
 
 ### Distributed support not validated
 

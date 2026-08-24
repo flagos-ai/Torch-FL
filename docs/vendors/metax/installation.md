@@ -178,7 +178,7 @@ Run the complete autocast and GradScaler contract on MetaX hardware:
 
 ```bash
 export FLAGOS_METAX_BOXING=1
-pytest tests/integration/test_amp.py -v --tb=short
+pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
 ```
 
 The measured C550/MACA 3.8.0 coverage includes FP16 and BF16 lower-precision,

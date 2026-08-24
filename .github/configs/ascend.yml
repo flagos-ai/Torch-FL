@@ -106,6 +106,11 @@ integration_tests:
   - name: Run general factory ops
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
 
+  - name: Unified AMP contract
+    command: >-
+      python -m pytest tests/integration/test_amp_contract.py
+      -v -m amp --tb=short
+
   - name: Unified profiler contract
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py

@@ -92,8 +92,14 @@ integration_tests:
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
 
-  - name: Run AMP tests
-    command: python -m pytest tests/integration/test_amp.py -v --tb=short
+  # #160 measured the full AMP suite on S60 (25 passed): both autocast dtypes,
+  # native unscale routes, `convolution_overrideable`, and the GradScaler
+  # finite/overflow paths. float64 is stored natively and computed through the
+  # CPU fallback, which the contract's float64 cases rely on.
+  - name: Unified AMP contract
+    command: >-
+      python -m pytest tests/integration/test_amp_contract.py
+      -v -m amp --tb=short
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:

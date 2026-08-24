@@ -88,7 +88,7 @@ scaler.update()
 Run the DCU AMP coverage, including both autocast dtypes and finite/non-finite GradScaler paths:
 
 ```bash
-pytest tests/integration/test_amp.py -v
+pytest tests/integration/test_amp_contract.py -m amp -v
 ```
 
 ### `torch.compile` with FlagTree
