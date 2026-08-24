@@ -23,6 +23,7 @@ import sys
 import types
 
 import pytest
+import torch
 
 from torch_fl import flagos
 from torch_fl.compile import flagtree_shim
@@ -118,6 +119,21 @@ def test_capability_comes_from_the_device(monkeypatch):
 
     assert flagtree_shim.get_musa_device_capability() == (3, 1)
     assert flagtree_shim.get_musa_device_capability(1) == (3, 1)
+
+
+@pytest.mark.parametrize(
+    "given, expected",
+    [(None, 2), (1, 1), ("flagos:1", 1), (torch.device("flagos"), 2)],
+)
+def test_device_arguments_normalize_to_an_index(monkeypatch, given, expected):
+    """The MUSA runtime takes ints; Inductor passes str/torch.device/None.
+
+    Resolved through the device interface's existing ``_vendor_device`` helper, so
+    this pins the contract rather than a second copy of the normalization.
+    """
+    monkeypatch.setattr(flagos, "current_device", lambda: 2)
+
+    assert flagtree_shim._musa_device_index(given) == expected
 
 
 def test_compile_path_does_not_import_the_torch_musa_plugin(monkeypatch):

@@ -120,6 +120,19 @@ def require_flagtree() -> None:
     )
 
 
+def _musa_device_index(device: Any = None) -> int:
+    """Resolve any device spelling to the plain index the MUSA runtime takes.
+
+    Inductor hands these entry points ``None``, an ``int``, or a ``torch.device``
+    depending on the call site, while ``torch_fl._C`` accepts an ``int`` only.
+    Delegates to the device interface's existing normalizer rather than carrying
+    another copy of it.
+    """
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+    return int(FlagOSDeviceInterface._vendor_device(device))
+
+
 def get_musa_device_capability(device: Any = None) -> Tuple[int, int]:
     """``(major, minor)`` for FlagTree's ``GPUTarget``, read from the device.
 
@@ -128,9 +141,7 @@ def get_musa_device_capability(device: Any = None) -> Tuple[int, int]:
     """
     from torch_fl import flagos
 
-    if device is None:
-        device = flagos.current_device()
-    props = flagos.get_device_properties(device)
+    props = flagos.get_device_properties(_musa_device_index(device))
     return props.major, props.minor
 
 
@@ -142,11 +153,9 @@ def get_musa_current_raw_stream(device: Any = None) -> int:
     synchronize between them. Also the import target of the raw-stream line
     inductor writes into generated code (see ``inductor_codegen.py``).
     """
-    from torch_fl import _C, flagos
+    from torch_fl import _C
 
-    if device is None:
-        device = flagos.current_device()
-    return _C._get_musa_current_raw_stream(int(device))
+    return _C._get_musa_current_raw_stream(_musa_device_index(device))
 
 
 _musa_driver_bound = False
