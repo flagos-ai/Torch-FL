@@ -2421,10 +2421,11 @@ def main():
         # `device.type != "cuda"` guard whose body re-enters torch.<same op>:
         # mul is the only one. as_strided_copy / conv_transpose2d / scaled_mm
         # have the same guard but return a clone / None / False, so they degrade
-        # safely. mul_.Tensor is also safe: it calls the gems helper with out=A,
-        # which exits via `torch.mul(..., out=)` -> mul.out -> cuda.
+        # mul_.Tensor is not safe: measured NotImplementedError on flagos
+        # (gems mul_ re-enters torch.mul and hits the PrivateUse1 fallback).
         flaggems_recursive_fallback = {
             "mul.Tensor",
+            "mul_.Tensor",
         }
 
         # Ops the auto-discovery routes to flagos_python but whose gems call
