@@ -941,6 +941,50 @@ def discover_flaggems_ops(codegen_ops, funcs):
     return result
 
 
+def _scan_flaggems_cuda_guards(flaggems_py, exempt, flag_gems_pkg=None):
+    """Warn about routed ops whose gems source hard-codes a CUDA guard.
+
+    flag_gems.device guards are ignored: torch_fl re-points that to "flagos".
+    """
+    import re
+    import pathlib
+
+    if flag_gems_pkg is None:
+        import flag_gems
+
+        flag_gems_pkg = flag_gems
+
+    pats = (
+        re.compile(r"assert\s+(?!not\s+)[^\n]*\.is_cuda", re.I),
+        re.compile(r"raise\s+\w+\([^)]*(?:cuda|CUDA)[^)]*\)"),
+        re.compile(r"\.device\.type\s*!=\s*['\"]cuda['\"]", re.I),
+    )
+    ops_dir = pathlib.Path(flag_gems_pkg.__file__).resolve().parent / "ops"
+    flagged = {}
+    for op, (qualname, _cat, _kw) in sorted(flaggems_py.items()):
+        mod = qualname.split(".")
+        if len(mod) < 4 or mod[1] != "ops":
+            continue
+        src = ops_dir / f"{mod[2]}.py"
+        if not src.is_file():
+            continue
+        for line in src.read_text(errors="ignore").splitlines():
+            code = line.split("#", 1)[0].strip()
+            if not code:
+                continue
+            if any(p.search(code) for p in pats):
+                flagged[op] = code[:80]
+                break
+    unhandled = {op: r for op, r in flagged.items() if op not in exempt}
+    if unhandled:
+        print(
+            "WARNING: routed ops whose gems source guards on CUDA but are not "
+            f"exempt: {unhandled}",
+            file=sys.stderr,
+        )
+    return flagged
+
+
 def _flaggems_gems_byname_params(fn):
     """Names of gems params that can be passed BY NAME (keyword-only OR
     positional-or-keyword, i.e. anything except positional-only). Used to promote
@@ -2574,6 +2618,9 @@ def main():
         # Both sets force a route back to cuda, for different reasons; the conf
         # builders only need the union.
         flaggems_forced_cuda = flaggems_recursive_fallback | flaggems_runtime_broken
+        _scan_flaggems_cuda_guards(
+            flaggems_py, flaggems_forced_cuda | FLAGGEMS_PYTHON_SKIP
+        )
         n_fg_fallback = 0
         for op in sorted(op_info):
             if op in flaggems_forced_cuda:
