@@ -2530,6 +2530,10 @@ def main():
             "_fused_rms_norm",
             "_conj",
             "_pdist_forward",
+            # Same stride blindness as softmax, measured on transposed inputs.
+            "topk",
+            "_weight_norm_interface",
+            "special_chebyshev_polynomial_v",
             # (4) wrong numerics or memory safety on the gems path
             "adaptive_max_pool3d_backward",
             "leaky_relu_",
