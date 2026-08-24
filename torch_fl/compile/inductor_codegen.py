@@ -71,8 +71,17 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
         return "torch.flagos.synchronize()"
 
     def import_get_raw_stream_as(self, name: str) -> str:
-        # flagos streams are the CUDA streams of the same GPU, and this handle
-        # is what gets handed to the Triton kernel launcher.
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            # MThreads FlagTree's launcher consumes a raw musaStream_t.  Do not
+            # import the CUDA binding on native MUSA, where CPU PyTorch has no
+            # CUDA runtime symbols.
+            return (
+                "from torch_fl.compile.musa_runtime import "
+                f"get_current_raw_stream as {name}"
+            )
+        # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 
 

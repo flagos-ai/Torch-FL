@@ -127,13 +127,20 @@ validation.
 ## Limitations
 
 1. Single device - multi-GPU compilation not yet exercised
-2. FlagTree is validated on NVIDIA `sm90`, Hygon `gfx936` with the HCU
-   backend, and MetaX C550 with MACA 3.8.0; other vendor backends remain
-   untested here
+2. FlagTree is validated on NVIDIA `sm90`, Hygon `gfx936` with the HCU backend,
+   MetaX C550 with MACA 3.8.0, and Moore Threads MTT S5000 with the MThreads
+   backend. Other vendor combinations remain untested here
+3. MThreads FlagTree compilation is serialized by default because the vendor
+   driver queries MUSA runtime state in compiler setup; explicit compile-thread
+   settings remain available
+4. On MUSA, `mode="max-autotune"` compiles but does not runtime-tune: Inductor's
+   coordinate-descent tuner benchmarks with CUDA events the CPU torch wheel
+   cannot provide. See `flagtree_shim.py` for how FlagTree reaches MUSA through
+   `torch_fl` rather than the `torch_musa` plugin
 
 ## Future Work
 
 - [x] Exercise `torch.compile(backend="flagos")` on FlagTree-built NVIDIA,
-      Hygon HCU, and MetaX environments
+      Hygon HCU, MetaX, and MThreads MUSA environments
 - [ ] Benchmark fusion gains against stock inductor+triton on cuda
 - [ ] Multi-GPU compilation support

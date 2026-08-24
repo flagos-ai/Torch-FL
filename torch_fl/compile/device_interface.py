@@ -49,17 +49,18 @@ DEVICE_TYPE = "flagos"
 
 
 def _triton_backend() -> tuple[str, str]:
-    """Return ``(device_type, triton_backend)`` to report to the Triton layer.
+    """Return ``(device_type, triton_backend)`` for the active accelerator.
 
-    flagos has no triton backend of its own, so inductor must report the
-    backend of the *underlying hardware* when it asks triton to compile a
-    kernel: triton selects its backend from ``DeviceProperties.type`` (which
-    becomes ``GPUTarget.backend``). On MetaX the toolchain is triton-metax
-    (``MACABackend.supports_target == 'maca'``), on the CUDA build it is stock
-    triton's ``nvidia`` backend (``supports_target == 'cuda'``).
+    The type is the target name passed to Triton through Inductor's
+    ``DeviceProperties``.  It must match the ``GPUTarget.backend`` understood by
+    the installed compiler: MThreads FlagTree calls this ``musa`` (the Python
+    backend package is named ``mthreads``), while MetaX and NVIDIA use their
+    respective vendor-neutral target names.
     """
     from torch_fl._build_config import ACCELERATOR
 
+    if ACCELERATOR == "musa":
+        return "musa", "mthreads"
     if ACCELERATOR == "metax":
         return "maca", "metax"
     return "cuda", "nvidia"
@@ -115,66 +116,149 @@ class FlagOSDeviceInterface(DeviceInterface):
                 idx = FlagOSDeviceInterface.Worker.current_device()
 
             if DEVICE_TYPE not in caching_worker_device_properties:
-                caching_worker_device_properties[DEVICE_TYPE] = [
-                    torch.cuda.get_device_properties(i)
-                    for i in range(torch.cuda.device_count())
-                ]
+                from torch_fl._build_config import ACCELERATOR
+
+                if ACCELERATOR == "musa":
+                    caching_worker_device_properties[DEVICE_TYPE] = [
+                        torch.flagos.get_device_properties(i)
+                        for i in range(torch.flagos.device_count())
+                    ]
+                else:
+                    caching_worker_device_properties[DEVICE_TYPE] = [
+                        torch.cuda.get_device_properties(i)
+                        for i in range(torch.cuda.device_count())
+                    ]
 
             return caching_worker_device_properties[DEVICE_TYPE][idx]
 
     # --- device state: flagos ------------------------------------------------
     current_device = staticmethod(torch.flagos.current_device)
-    set_device = staticmethod(torch.flagos.set_device)
     device_count = staticmethod(torch.flagos.device_count)
     synchronize = staticmethod(torch.flagos.synchronize)
 
-    # --- streams: flagos shims proxy the CUDA stream of the same GPU ---------
+    # --- streams: use the vendor stream for native MUSA/FlagTree, and proxy
+    # CUDA's stream state for the boxing-backed accelerators. -----------------
     stream = staticmethod(torch.flagos.stream)  # type: ignore[assignment]
     current_stream = staticmethod(torch.flagos.current_stream)  # type: ignore[assignment]
-    set_stream = staticmethod(torch.cuda.set_stream)  # type: ignore[assignment]
     _set_stream_by_id = staticmethod(torch.cuda._set_stream_by_id)  # type: ignore[assignment]
-    # Generated Triton launch code passes this raw stream handle to the kernel.
-    get_raw_stream = staticmethod(torch._C._cuda_getCurrentRawStream)  # type: ignore[assignment]
-
-    # --- hardware: same physical GPU as cuda --------------------------------
-    get_device_properties = staticmethod(torch.cuda.get_device_properties)  # type: ignore[assignment]
-    memory_allocated = staticmethod(torch.flagos.memory_allocated)
-    exchange_device = staticmethod(torch.cuda._exchange_device)  # type: ignore[assignment]
-    maybe_exchange_device = staticmethod(torch.cuda._maybe_exchange_device)  # type: ignore[assignment]
 
     @staticmethod
-    def is_available() -> bool:
-        return torch.flagos.device_count() > 0
+    def get_raw_stream(device_idx: int) -> int:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            from torch_fl.compile.musa_runtime import get_current_raw_stream
+
+            return get_current_raw_stream(device_idx)
+        return torch._C._cuda_getCurrentRawStream(device_idx)
+
+    # --- hardware: same physical GPU as cuda for boxing, native properties
+    # for MUSA where torch.cuda is deliberately unavailable. ------------------
+    @staticmethod
+    def get_device_properties(device: Any = None) -> Any:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            return torch.flagos.get_device_properties(
+                FlagOSDeviceInterface._vendor_device(device)
+            )
+        return torch.cuda.get_device_properties(device)
+
+    memory_allocated = staticmethod(torch.flagos.memory_allocated)
+
+    @staticmethod
+    def _vendor_device(device: Any = None) -> Any:
+        """Device index for the vendor runtime, which takes ints only."""
+        if device is None:
+            return torch.flagos.current_device()
+        if isinstance(device, str):
+            device = torch.device(device)
+        if isinstance(device, torch.device):
+            if device.index is None:
+                return torch.flagos.current_device()
+            return device.index
+        return int(device)
+
+    @staticmethod
+    def set_stream(stream: Any) -> None:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            native = getattr(stream, "_stream", stream)
+            if hasattr(native, "set_current"):
+                native.set_current()
+                return
+            # Native MUSA currently exposes the default stream only.  Reject a
+            # foreign stream instead of silently switching CUDA state.
+            if getattr(stream, "musa_stream", None) is not None:
+                return
+        torch.cuda.set_stream(stream)
+
+    @staticmethod
+    def set_device(device: Any) -> None:
+        torch.flagos.set_device(device)
+
+    @staticmethod
+    def exchange_device(device: int) -> int:
+        previous = torch.flagos.current_device()
+        torch.flagos.set_device(device)
+        return previous
+
+    @staticmethod
+    def maybe_exchange_device(device: int) -> int:
+        return FlagOSDeviceInterface.exchange_device(device)
 
     @staticmethod
     def is_bf16_supported(including_emulation: bool = True) -> bool:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            return torch.bfloat16 in torch.flagos.get_amp_supported_dtype()
         return torch.cuda.is_bf16_supported()
 
     @staticmethod
     def get_compute_capability(device: Any = None) -> Union[int, str]:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            props = torch.flagos.get_device_properties(
+                FlagOSDeviceInterface._vendor_device(device)
+            )
+            return props.major * 10 + props.minor
         major, minor = torch.cuda.get_device_capability(_device_index(device))
         return major * 10 + minor
 
     @staticmethod
     def is_triton_capable(device: Any = None) -> bool:
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa":
+            return True
         return torch.cuda.get_device_properties(_device_index(device)).major >= 7
 
     @staticmethod
     def raise_if_triton_unavailable(device: Any = None) -> None:
-        from torch._inductor.exc import GPUTooOldForTriton
         import inspect
+        import triton.backends
 
         if not FlagOSDeviceInterface.is_triton_capable(device):
+            from torch._inductor.exc import GPUTooOldForTriton
+
             raise GPUTooOldForTriton(
-                torch.cuda.get_device_properties(_device_index(device)),
+                FlagOSDeviceInterface.get_device_properties(device),
                 inspect.currentframe(),
             )
 
-        import triton.backends
-
         _, triton_backend = _triton_backend()
         if triton_backend not in triton.backends.backends:
-            raise RuntimeError(f"triton not built with the '{triton_backend}' backend")
+            raise RuntimeError(
+                f"triton not built with the '{triton_backend}' backend; "
+                "install the MThreads FlagTree runtime for MUSA"
+            )
+
+    @staticmethod
+    def is_available() -> bool:
+        return torch.flagos.device_count() > 0
 
 
 def _register_gpu_type() -> None:
@@ -232,13 +316,30 @@ def _patch_device_properties() -> None:
     def create(device: Any) -> Any:
         is_flagos = device is not None and getattr(device, "type", None) == DEVICE_TYPE
         if is_flagos:
-            # Interface/property lookup goes through torch.cuda (same GPU); only
-            # the type reported onward becomes `maca`/`cuda`.
-            device = torch.device("cuda", device.index or 0)
-        result = original(device)
-        if is_flagos:
-            result = result._replace(type=device_type)
-        return result
+            from torch_fl._build_config import ACCELERATOR
+
+            if ACCELERATOR != "musa":
+                # Boxing-backed accelerators expose CUDA properties; only the
+                # target type changes at the Triton boundary.
+                device = torch.device("cuda", device.index or 0)
+                result = original(device)
+                return result._replace(type=device_type)
+
+            interface = FlagOSDeviceInterface
+            props = interface.get_device_properties(device)
+            return DeviceProperties(
+                type=device_type,
+                index=device.index,
+                multi_processor_count=props.multi_processor_count,
+                cc=interface.get_compute_capability(device),
+                major=getattr(props, "major", None),
+                regs_per_multiprocessor=getattr(props, "regs_per_multiprocessor", None),
+                max_threads_per_multi_processor=getattr(
+                    props, "max_threads_per_multi_processor", None
+                ),
+                warp_size=getattr(props, "warp_size", 32),
+            )
+        return original(device)
 
     create._flagos_patched = True  # type: ignore[attr-defined]
     DeviceProperties.create = create  # type: ignore[method-assign, assignment]
@@ -331,3 +432,35 @@ def register_flagos_device_interface() -> None:
     device_type, _ = _triton_backend()
     if device_type != "cuda":  # "cuda" is already registered by inductor
         register_interface_for_device(device_type, FlagOSDeviceInterface)
+
+    # torch.utils._triton caches this result and may have been queried during
+    # torch import, before torch_fl registered PrivateUse1. Invalidate it after
+    # publishing the native MUSA interface so Inductor accepts the vendor Triton
+    # package for the custom GPU device.
+    try:
+        from torch.utils import _triton as triton_utils
+
+        triton_utils.has_triton.cache_clear()
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR == "musa" and triton_utils.has_triton_package():
+            # PyTorch's helper only knows CUDA/XPU/PrivateUse1 at import time;
+            # the CPU wheel's CUDA probe is false even though MUSA owns
+            # PrivateUse1. Inductor imports this helper into several modules,
+            # so update those bound references as well as the canonical helper.
+            def has_musa_triton() -> bool:
+                return True
+
+            triton_utils.has_triton = has_musa_triton
+            import sys
+
+            for module_name in (
+                "torch._inductor.scheduler",
+                "torch._inductor.compile_fx",
+                "torch._inductor.async_compile",
+            ):
+                module = sys.modules.get(module_name)
+                if module is not None and hasattr(module, "has_triton"):
+                    module.has_triton = has_musa_triton
+    except (ImportError, AttributeError):
+        pass

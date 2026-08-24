@@ -26,6 +26,7 @@ FLAGOS_USE_FLAGTREE=1 can assert FlagTree is really in use instead of silently
 compiling with stock Triton.
 """
 
+import importlib.metadata
 import importlib.util
 from typing import Optional
 
@@ -37,11 +38,26 @@ _FLAGTREE_MARKER = "triton._flagtree_spec"
 
 
 def is_flagtree_active() -> bool:
-    """Whether the importable ``triton`` is FlagTree rather than stock Triton."""
+    """Whether the importable ``triton`` is FlagTree rather than stock Triton.
+
+    Newer FlagTree releases carry ``triton._flagtree_spec``. The MThreads 3.1
+    wheel predates that marker but still publishes the ``flagtree`` distribution,
+    so use package metadata as a compatibility fallback and verify that the
+    distribution owns the active ``triton`` package path.
+    """
     try:
-        return importlib.util.find_spec(_FLAGTREE_MARKER) is not None
+        if importlib.util.find_spec(_FLAGTREE_MARKER) is not None:
+            return True
     except (ImportError, ValueError):
-        # No triton at all, or a triton too broken to introspect.
+        pass
+
+    try:
+        import triton
+
+        distribution = importlib.metadata.distribution("flagtree")
+        root = str(distribution.locate_file("triton"))
+        return any(str(path).startswith(root) for path in triton.__path__)
+    except (ImportError, importlib.metadata.PackageNotFoundError, ValueError):
         return False
 
 
@@ -57,9 +73,23 @@ def flagtree_backend() -> Optional[str]:
     try:
         from triton._flagtree_backend import FLAGTREE_BACKEND
 
-        return FLAGTREE_BACKEND
+        if FLAGTREE_BACKEND:
+            return FLAGTREE_BACKEND
     except ImportError:
-        return ""
+        pass
+
+    # The MThreads Triton 3.1 wheel predates _flagtree_backend but exposes a
+    # single discoverable backend package. Infer only the unambiguous vendor
+    # names needed by runtime workarounds; an unknown build remains empty.
+    try:
+        import triton.backends
+
+        names = set(triton.backends.backends)
+        if names == {"mthreads"}:
+            return "mthreads"
+    except (ImportError, AttributeError):
+        pass
+    return ""
 
 
 def require_flagtree() -> None:

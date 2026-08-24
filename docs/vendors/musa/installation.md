@@ -235,7 +235,7 @@ The native RNG and hybrid FlagGems implementation were measured on 2026-08-17 on
 - `pytest tests/unit/test_vendor_routing.py tests/unit/test_musa_rng_bridge.py -v`: **24 passed** in 2.19 seconds.
 - `pytest tests/integration/ops/test_musa_flaggems.py -q`: **2 passed** in 5.33 seconds with `FLAGOS_USE_FLAGGEMS=1`. The test instruments and observes all seven selected Python callables (`all`, `all.dims`, `any`, `any.dims`, `repeat_interleave.Tensor`, `index_add`, and `index_add_`) on `flagos:0`, verifies CPU-equivalent outputs including duplicate indices, and executes FlagGems `randn` on `flagos:0` between native `rand` calls. Repeating the sequence after `torch.flagos.manual_seed(20260817)` reproduces all three outputs and confirms two shared C++ generator reservations.
 - Native and hybrid suites ran in separate pytest processes. Backend configuration is cached by the process-static C++ `BackendTable()`, so changing `FLAGOS_USE_FLAGGEMS` after a native import cannot switch the active routes.
-- The MThreads driver obtained the same nonzero raw `musaStream_t` from `torch_musa._MUSAC._musa_getCurrentRawStream(0)` and `torch.musa.current_stream(0).musa_stream`, so native mudnn/muRAND and FlagGems launches use the shared torch-fl stream.
+- The MThreads driver obtained the same nonzero raw `musaStream_t` that native mudnn/muRAND uses, so native and FlagGems launches share the torch-fl stream. In the `torch.compile` path this handle comes from `torch_fl.compile.musa_runtime.get_current_raw_stream()`, with no `torch_musa` module involved.
 
 The generic `triton` 3.7.1 installation remains unsuitable because it does not ship the MThreads backend. FlagGems stochastic ATen routing is intentionally still native-first; the end-to-end FlagGems RNG evidence comes from its real `flag_gems.ops.randn.randn` kernel and the shared reservation bridge, not an expanded RNG dispatcher route.
 
@@ -276,7 +276,53 @@ an MUPTI device-timeline validation rather than a claim of full torch-cuda profi
 Useful diagnostics are `FLAGOS_MUPTI_DEBUG=1` for activity setup and session lifecycle logging and
 `FLAGOS_MUPTI_LIBRARY=/path/to/libmupti.so` to select a specific MUPTI library. MUPTI subscriber
 ownership remains process-global; an external MUSA profiling tool may therefore reject a concurrent
-`torch.profiler` session. `torch.compile` remains unvalidated on MUSA.
+`torch.profiler` session. `torch.compile` with the vendor FlagTree runtime is
+validated separately below; a stock Triton wheel remains insufficient for MUSA.
+
+### FlagTree and `torch.compile`
+
+MUSA `torch.compile(backend="flagos")` uses TorchInductor without rewriting the
+graph to CUDA. The graph and autograd device stay `flagos`, while the MThreads
+FlagTree runtime receives a native `musa` target and launches through the shared
+`musaStream_t`. The tested compiler is `flagtree-0.5.0+mthreads3.1` (Triton 3.1,
+backend `mthreads`); generic Triton 3.7.1 is not MUSA compiler evidence.
+
+**`torch_musa` is not required and must not be installed in the same process.**
+FlagTree reaches the MUSA device through `torch_fl` alone: the vendor MThreads
+driver normally reads device availability, current device, capability, and the
+raw stream from `torch_musa`, and `torch_fl.compile.musa_runtime` rebinds those
+lookups onto its own runtime before the first Triton driver is created. See
+[torch-compile-integration.md](../../architecture/torch-compile-integration.md)
+for why the plugin cannot coexist with `torch_fl`.
+
+`mode="max-autotune"` compiles and runs, but its runtime coordinate-descent
+tuning is disabled on MUSA: it times candidate configurations through Inductor's
+CUDA benchmarker (`torch.cuda.synchronize` plus `torch.cuda.Event`), which the
+CPU PyTorch wheel cannot provide. Kernels are compiled and executed, just not
+runtime-tuned.
+
+Use a process with the vendor runtime before running the focused compile tests:
+
+```bash
+PYTHONPATH=/path/to/flagtree-mthreads-runtime:$PWD \\
+LD_LIBRARY_PATH=/path/to/flagtree-mthreads-runtime/triton/_C:/usr/local/musa/lib:$LD_LIBRARY_PATH \\
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \\
+pytest tests/integration/test_compile.py -v
+```
+
+On the MTT S5000 this suite passed in full (22 tests), covering eager
+equivalence, forward/backward compilation, FP32/FP16 paths, max-autotune,
+recompilation, FakeTensor tracing, output/gradient placement, and the assertion
+that `torch_musa` is absent from `sys.modules` throughout. MThreads FlagTree queries
+the MUSA runtime during compiler setup, so `torch_fl` serializes compilation to
+one Inductor worker by default. Set `TORCHINDUCTOR_COMPILE_THREADS` or the
+`compile_threads` option only when the installed vendor driver is known to be
+fork-safe. `FLAGOS_COMPILE_FALLBACK_EAGER=1` is useful for diagnosing an
+unsupported graph, but a fallback pass does not count as compiler validation.
+
+The result is specific to the measured MTT S5000, MUSA 5.1.0, CPU PyTorch 2.10,
+and the vendor FlagTree wheel above; it does not imply support for other MUSA
+SDK, PyTorch, or FlagTree combinations.
 
 ### FlagGems runtime prerequisite
 

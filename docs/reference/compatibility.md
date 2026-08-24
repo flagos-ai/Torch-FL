@@ -28,7 +28,7 @@
 | PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
 | Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Experimental (FP16/BF16 autocast and GradScaler measured on S60, not in CI) | Not validated | Not validated | Not validated | Experimental (Python dispatch, requires vendor Triton) | Experimental |
-| Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Not validated | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
+| Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
 | D-Robotics BPU | `ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
 | TsingMicro | `ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | Runtime only | Not validated | Not validated | Not validated | Not applicable | Runtime only |
 
@@ -172,7 +172,15 @@ GradScaler unscale operation currently follows the correctness-oriented CPU fall
 its mutated tensors and `found_inf` flag back to MUSA rather than using a native mudnn foreach
 kernel. Distributed support remains unvalidated on hardware. The optional MUPTI tracer has been
 measured on the available MTT S5000 host and emits real positive-duration kernel, runtime, and
-memcpy activities with device, stream, name, and Chrome-trace metadata. CPU-to-device linkage
+memcpy activities with device, stream, name, and Chrome-trace metadata. `torch.compile` is
+validated on this host against the vendor `flagtree-0.5.0+mthreads3.1` runtime and is not
+established by stock Triton: the 22-case `tests/integration/test_compile.py` suite passed on the
+MTT S5000, covering forward and backward execution, FP32/FP16 inputs, max-autotune,
+recompilation, FakeTensor tracing, and output/gradient placement on `flagos`. FlagTree reaches the
+device through `torch_fl.compile.musa_runtime`, so the separate `torch_musa` plugin is neither
+installed nor imported — the suite asserts its absence, since PrivateUse1 admits only one owner.
+Runtime coordinate-descent autotuning is disabled on MUSA because it benchmarks through CUDA
+events the CPU PyTorch wheel does not provide. CPU-to-device linkage
 depends on whether the installed PyTorch/Kineto build supplies the PrivateUse1 resolver; the
 CPU-only PyTorch 2.10 wheel used for this measurement does not justify a general parity claim.
 

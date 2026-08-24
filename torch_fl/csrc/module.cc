@@ -251,8 +251,12 @@ static PyObject* _getMusaDeviceProperties(PyObject* self, PyObject* arg) {
       ": ",
       musaGetErrorString(err));
 
+  // The trailing fields are what Inductor's Triton heuristics and its
+  // benchmarking buffer read. Report the SDK's own values rather than letting
+  // Python invent them: a fabricated zero L2 size produces an empty flush
+  // buffer, which mudnn's Fill rejects with NOT_SUPPORTED.
   return Py_BuildValue(
-      "{s:s,s:K,s:i,s:i,s:i}",
+      "{s:s,s:K,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:K}",
       "name",
       prop.name,
       "total_memory",
@@ -262,7 +266,17 @@ static PyObject* _getMusaDeviceProperties(PyObject* self, PyObject* arg) {
       "major",
       prop.major,
       "minor",
-      prop.minor);
+      prop.minor,
+      "warp_size",
+      prop.warpSize,
+      "l2_cache_size",
+      prop.l2CacheSize,
+      "max_threads_per_multi_processor",
+      prop.maxThreadsPerMultiProcessor,
+      "regs_per_block",
+      prop.regsPerBlock,
+      "shared_memory_per_multiprocessor",
+      static_cast<unsigned long long>(prop.sharedMemPerMultiprocessor));
 #else
   TORCH_CHECK(false, "MUSA device properties are unavailable in this build");
 #endif

@@ -629,6 +629,24 @@ class _DeviceProperties:
             self.total_memory = props["total_memory"]
             self.major = props["major"]
             self.minor = props["minor"]
+            # Inductor's cache fingerprint reads this ROCm-shaped optional
+            # attribute even for custom GPU devices. Keep it descriptive rather
+            # than pretending that MUSA is a GCN target.
+            self.gcnArchName = self.name
+            # Compiler-facing fields, all reported by musaGetDeviceProperties.
+            # Inductor sizes its Triton launch grids and its benchmarking L2
+            # flush buffer from these, so they must be the device's real values
+            # (an invented zero L2 size yields an empty buffer that mudnn's
+            # Fill rejects). Older builds of the extension did not return them.
+            self.warp_size = props.get("warp_size", 128)
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.max_threads_per_multi_processor = props.get(
+                "max_threads_per_multi_processor", 2048
+            )
+            self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
+            self.shared_memory_per_multiprocessor = props.get(
+                "shared_memory_per_multiprocessor", 0
+            )
             return
 
         # Ascend analogue: use the AICore count reported by triton-ascend.

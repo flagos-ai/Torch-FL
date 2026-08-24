@@ -36,6 +36,82 @@ import torch.fx
 import torch.cuda
 
 
+def _patch_musa_triton_autotune() -> None:
+    """Select the first compiled MUSA config without CUDA benchmarking.
+
+    Inductor's generic runtime autotuner allocates a CUDA L2-cache buffer and
+    records ``torch.cuda.Event`` pairs. Neither API exists on native MUSA, and
+    the MThreads driver already compiles a valid launch configuration for each
+    kernel. Selecting the first compiled configuration keeps execution native;
+    it does not claim autotuning performance parity.
+    """
+    from torch_fl._build_config import ACCELERATOR
+
+    if ACCELERATOR != "musa":
+        return
+    try:
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    except ImportError:
+        return
+    if getattr(CachingAutotuner, "_flagos_musa_patched", False):
+        return
+
+    def autotune_to_one_config(self, *args, **kwargs):
+        del args, kwargs
+        if not self.launchers:
+            self.precompile()
+        if not self.launchers:
+            raise RuntimeError("MThreads FlagTree produced no valid MUSA launchers")
+        self.launchers = [self.launchers[0]]
+
+    CachingAutotuner.autotune_to_one_config = autotune_to_one_config
+    CachingAutotuner._flagos_musa_patched = True
+
+
+def _patch_native_musa_cuda_probe() -> None:
+    """Make Inductor's CUDA-shaped FakeTensor probe see native MUSA devices.
+
+    CPU-only PyTorch reports ``torch.cuda.is_available() == False`` even when
+    the PrivateUse1 MUSA runtime is active. Inductor uses that probe to decide
+    whether FakeTensor should initialize a GPU context; without this bridge it
+    skips the registered flagos device and later attempts CPU-torch CUDA lazy
+    initialization. The compiler still receives a ``flagos`` device and never
+    executes a CUDA kernel.
+    """
+    from torch_fl._build_config import ACCELERATOR
+
+    if ACCELERATOR != "musa" or getattr(torch.cuda, "_flagos_musa_patched", False):
+        return
+    if not torch.flagos.is_available():
+        return
+
+    original = torch.cuda.is_available
+    torch.cuda.is_available = torch.flagos.is_available
+    torch.cuda._flagos_original_is_available = original
+    torch.cuda._flagos_musa_patched = True
+
+
+def _bind_musa_flagtree_runtime() -> None:
+    """Bind MThreads FlagTree to torch_fl's MUSA runtime, not to torch_musa.
+
+    The vendor driver reads its device/stream/capability from the separate
+    ``torch_musa`` plugin, which cannot coexist with torch_fl (PrivateUse1 has a
+    single owner). ``musa_runtime`` rebinds those lookups onto torch_fl, so the
+    compiler and the native mudnn kernels share one device and one stream. This
+    must run before any Triton driver instance exists, hence module load time.
+    """
+    from torch_fl._build_config import ACCELERATOR
+
+    if ACCELERATOR != "musa":
+        return
+    try:
+        from torch_fl.compile.musa_runtime import bind_flagtree_musa_driver
+
+        bind_flagtree_musa_driver()
+    except ImportError:
+        pass
+
+
 def _patch_cuda_rng_for_cpu_torch():
     """
     Workaround for CPU torch + external libtorch_cuda.so setup.
@@ -66,7 +142,12 @@ def _patch_cuda_rng_for_cpu_torch():
     cuda_module.set_rng_state = _stub_set_rng_state
 
 
-# Apply CPU torch workaround at module load time
+# Apply runtime probes at module load time, before FakeTensor is imported by
+# the first compile. Native MUSA is not CUDA, but Inductor's GPU probe is the
+# shared gate for CUDA-shaped GPU devices.
+_patch_native_musa_cuda_probe()
+_patch_musa_triton_autotune()
+_bind_musa_flagtree_runtime()
 _patch_cuda_rng_for_cpu_torch()
 
 
@@ -90,6 +171,24 @@ def _resolve_config_patches(
     if options:
         patches.update({k.replace("-", "_"): v for k, v in options.items()})
 
+    from torch_fl._build_config import ACCELERATOR
+
+    # Native MUSA has no CUDA implementation for Inductor's CUDA-only pattern
+    # registration (for example SDPA replacement construction). Keep the
+    # general joint-graph passes, but skip that optional pattern bundle until
+    # FlagTree/MUSA supplies an equivalent lowering.
+    if ACCELERATOR == "musa":
+        patches["use_joint_graph_passes"] = False
+        patches["max_autotune"] = False
+        patches["max_autotune_pointwise"] = False
+        patches["max_autotune_gemm"] = False
+        patches["max_autotune_gemm_backends"] = "TRITON"
+        # Coordinate-descent tuning times candidate configs through Inductor's
+        # CUDA benchmarker (torch.cuda.synchronize plus torch.cuda.Event), which
+        # the CPU torch wheel cannot provide. mode="max-autotune" enables it, so
+        # turn it back off; the kernels still compile and run, just untuned.
+        patches["coordinate_descent_tuning"] = False
+
     # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
     # wheel ("Tried to instantiate dummy base class CUDAGraph"). mode=
     # "max-autotune" turns them on, so force them back off.
@@ -104,24 +203,31 @@ def _resolve_config_patches(
     return patches
 
 
-def _patch_ppu_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
-    """Keep PPU FlagTree compilation in the parent process by default.
+def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Avoid unsafe vendor-driver initialization in compile workers.
 
-    FlagTree's PPU driver queries ``torch.cuda.current_device()`` while choosing
-    compiler hints. Inductor's asynchronous workers may be forked after the PPU
-    CUDA context is initialized, where that query triggers PyTorch's fork-safety
-    error. Serial compilation avoids the unsafe reinitialization until the
-    upstream driver can discover its device without touching CUDA in the worker.
+    PPU and MThreads FlagTree drivers query a vendor runtime while creating
+    compiler hints. Keeping the first implementation conservative is important
+    for MUSA: the vendor runtime owns the current device and stream, while
+    Inductor workers may be forked after the parent has initialized it. Explicit
+    per-compile and environment settings remain authoritative.
     """
     if "compile_threads" in config_patches:
         return
     if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
         return
 
+    from torch_fl._build_config import ACCELERATOR
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if flagtree_backend() == "ppu":
+    backend = flagtree_backend()
+    if backend == "ppu" or (ACCELERATOR == "musa" and backend == "mthreads"):
         config_patches["compile_threads"] = 1
+
+
+# Keep the old helper name for downstream callers and the PPU regression tests.
+def _patch_ppu_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
+    _patch_vendor_flagtree_compile_workers(config_patches)
 
 
 def flagos_compile_backend(
@@ -171,7 +277,10 @@ def flagos_compile_backend(
 
         require_flagtree()
 
-    _patch_ppu_flagtree_compile_workers(config_patches)
+    # Idempotent: module load already tried this, but a process that imported
+    # the backend before FlagTree was importable gets its second chance here.
+    _bind_musa_flagtree_runtime()
+    _patch_vendor_flagtree_compile_workers(config_patches)
 
     # Make inductor treat flagos as a GPU device. Order matters: is_gpu() must
     # answer True and the device interface must be resolvable before the
