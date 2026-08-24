@@ -465,41 +465,59 @@ def test_flagtree_compiles_correct_results(device):
 def test_musa_flagtree_binds_to_torch_fl_runtime():
     """FlagTree must reach MUSA through torch_fl, never through torch_musa.
 
-    torch_musa cannot coexist with torch_fl: PrivateUse1 has one owner and
-    torch_fl claims it. The vendor MThreads driver nevertheless reads its
-    device/stream/capability from ``torch_musa``, so torch_fl rebinds those
-    lookups onto its own runtime. This asserts the binding rather than the
-    absence of a crash -- an accidental re-introduction of a ``torch_musa``
-    compatibility module would still compile, just against a fabricated runtime.
+    The torch_musa plugin cannot coexist with torch_fl: its ``__init__`` claims
+    the process-global PrivateUse1 hooks torch_fl must own. The vendor MThreads
+    driver nevertheless reads its device/stream/capability from ``torch_musa``,
+    so torch_fl rebinds those lookups onto its own runtime. This asserts the
+    binding rather than the absence of a crash -- a driver reading from some
+    other runtime would still compile, just not against the device that owns the
+    tensors.
     """
     from torch_fl._build_config import ACCELERATOR
-    from torch_fl.compile import musa_runtime
-    from torch_fl.compile.flagtree_shim import flagtree_backend, is_flagtree_active
+    from torch_fl.compile import flagtree_shim
 
     if ACCELERATOR != "musa":
         pytest.skip("MUSA build required")
-    if not is_flagtree_active() or flagtree_backend() != "mthreads":
+    if (
+        not flagtree_shim.is_flagtree_active()
+        or flagtree_shim.flagtree_backend() != "mthreads"
+    ):
         pytest.skip("MThreads FlagTree runtime required")
 
-    assert "torch_musa" not in sys.modules
-    assert musa_runtime.bind_flagtree_musa_driver()
+    assert flagtree_shim.bind_flagtree_musa_driver()
 
     # The driver's own target resolution now runs entirely through torch_fl.
-    target = musa_runtime.flagtree_musa_driver_target()
+    target = flagtree_shim.flagtree_musa_driver_target()
     assert target is not None
     backend, capability, warp_size = target
-    major, minor = musa_runtime.get_device_capability()
+    major, minor = flagtree_shim.get_musa_device_capability()
     assert backend == "musa"
     assert capability == major * 10 + minor
     assert warp_size == (32 if major > 2 else 128)
 
     # The compiled kernels launch on the same stream the mudnn kernels use, so
     # this handle must be torch_fl's, and it must be a real stream.
-    raw_stream = musa_runtime.get_current_raw_stream()
+    raw_stream = flagtree_shim.get_musa_current_raw_stream()
     assert raw_stream == torch_fl.flagos.current_stream().musa_stream
     assert raw_stream != 0
 
-    assert "torch_musa" not in sys.modules
+    # Every lookup the driver now performs resolves inside torch_fl. Asserted on
+    # the module of the bound callables rather than on ``torch_musa`` being
+    # absent from sys.modules: FlagGems discovery legitimately publishes a small
+    # compatibility surface under that name (_install_musa_flaggems_compat), and
+    # this test must hold whether or not FlagGems is enabled.
+    from triton.backends import backends as triton_backends
+
+    driver_cls = triton_backends["mthreads"].driver
+    for attr in (
+        "is_active",
+        "_get_device_capability",
+        "_get_current_stream",
+        "_get_current_device",
+        "_set_current_device",
+    ):
+        func = getattr(driver_cls, attr)
+        assert func.__module__.startswith("torch_fl"), (attr, func)
 
 
 @pytest.mark.musa
@@ -522,8 +540,10 @@ def test_musa_flagtree_compiles_forward_backward(device):
     compiled.sum().backward()
     assert x.grad is not None
     assert_on_flagos(x.grad, "gradient")
-    # A full compile+launch cycle must not have needed the torch_musa plugin.
-    assert "torch_musa" not in sys.modules
+    # A full compile+launch cycle must not have imported the real plugin. Only
+    # torch_fl's own shim may hold this name (see the binding test above).
+    plugin = sys.modules.get("torch_musa")
+    assert plugin is None or plugin.__spec__.origin == "torch_fl_shim"
 
 
 # The generic FlagTree test above also covers the MThreads runtime when the

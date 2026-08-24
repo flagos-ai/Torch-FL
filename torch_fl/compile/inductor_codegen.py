@@ -78,8 +78,8 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
             # import the CUDA binding on native MUSA, where CPU PyTorch has no
             # CUDA runtime symbols.
             return (
-                "from torch_fl.compile.musa_runtime import "
-                f"get_current_raw_stream as {name}"
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_musa_current_raw_stream as {name}"
             )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"

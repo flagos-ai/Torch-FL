@@ -147,9 +147,9 @@ class FlagOSDeviceInterface(DeviceInterface):
         from torch_fl._build_config import ACCELERATOR
 
         if ACCELERATOR == "musa":
-            from torch_fl.compile.musa_runtime import get_current_raw_stream
+            from torch_fl.compile.flagtree_shim import get_musa_current_raw_stream
 
-            return get_current_raw_stream(device_idx)
+            return get_musa_current_raw_stream(device_idx)
         return torch._C._cuda_getCurrentRawStream(device_idx)
 
     # --- hardware: same physical GPU as cuda for boxing, native properties

@@ -95,17 +95,18 @@ def _bind_musa_flagtree_runtime() -> None:
     """Bind MThreads FlagTree to torch_fl's MUSA runtime, not to torch_musa.
 
     The vendor driver reads its device/stream/capability from the separate
-    ``torch_musa`` plugin, which cannot coexist with torch_fl (PrivateUse1 has a
-    single owner). ``musa_runtime`` rebinds those lookups onto torch_fl, so the
-    compiler and the native mudnn kernels share one device and one stream. This
-    must run before any Triton driver instance exists, hence module load time.
+    ``torch_musa`` plugin, whose ``__init__`` claims the process-global
+    PrivateUse1 hooks torch_fl must own. ``flagtree_shim`` rebinds those lookups
+    onto torch_fl, so the compiler and the native mudnn kernels share one device
+    and one stream. This must run before any Triton driver instance exists, hence
+    module load time.
     """
     from torch_fl._build_config import ACCELERATOR
 
     if ACCELERATOR != "musa":
         return
     try:
-        from torch_fl.compile.musa_runtime import bind_flagtree_musa_driver
+        from torch_fl.compile.flagtree_shim import bind_flagtree_musa_driver
 
         bind_flagtree_musa_driver()
     except ImportError:

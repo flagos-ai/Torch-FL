@@ -235,7 +235,7 @@ The native RNG and hybrid FlagGems implementation were measured on 2026-08-17 on
 - `pytest tests/unit/test_vendor_routing.py tests/unit/test_musa_rng_bridge.py -v`: **24 passed** in 2.19 seconds.
 - `pytest tests/integration/ops/test_musa_flaggems.py -q`: **2 passed** in 5.33 seconds with `FLAGOS_USE_FLAGGEMS=1`. The test instruments and observes all seven selected Python callables (`all`, `all.dims`, `any`, `any.dims`, `repeat_interleave.Tensor`, `index_add`, and `index_add_`) on `flagos:0`, verifies CPU-equivalent outputs including duplicate indices, and executes FlagGems `randn` on `flagos:0` between native `rand` calls. Repeating the sequence after `torch.flagos.manual_seed(20260817)` reproduces all three outputs and confirms two shared C++ generator reservations.
 - Native and hybrid suites ran in separate pytest processes. Backend configuration is cached by the process-static C++ `BackendTable()`, so changing `FLAGOS_USE_FLAGGEMS` after a native import cannot switch the active routes.
-- The MThreads driver obtained the same nonzero raw `musaStream_t` that native mudnn/muRAND uses, so native and FlagGems launches share the torch-fl stream. In the `torch.compile` path this handle comes from `torch_fl.compile.musa_runtime.get_current_raw_stream()`, with no `torch_musa` module involved.
+- The MThreads driver obtained the same nonzero raw `musaStream_t` that native mudnn/muRAND uses, so native and FlagGems launches share the torch-fl stream. In the `torch.compile` path this handle comes from `torch_fl.compile.flagtree_shim.get_musa_current_raw_stream()`, without consulting the `torch_musa` plugin.
 
 The generic `triton` 3.7.1 installation remains unsuitable because it does not ship the MThreads backend. FlagGems stochastic ATen routing is intentionally still native-first; the end-to-end FlagGems RNG evidence comes from its real `flag_gems.ops.randn.randn` kernel and the shared reservation bridge, not an expanded RNG dispatcher route.
 
@@ -287,11 +287,16 @@ FlagTree runtime receives a native `musa` target and launches through the shared
 `musaStream_t`. The tested compiler is `flagtree-0.5.0+mthreads3.1` (Triton 3.1,
 backend `mthreads`); generic Triton 3.7.1 is not MUSA compiler evidence.
 
-**`torch_musa` is not required and must not be installed in the same process.**
-FlagTree reaches the MUSA device through `torch_fl` alone: the vendor MThreads
-driver normally reads device availability, current device, capability, and the
-raw stream from `torch_musa`, and `torch_fl.compile.musa_runtime` rebinds those
-lookups onto its own runtime before the first Triton driver is created. See
+**The `torch_musa` plugin is not required, and importing it in this process
+breaks `torch_fl`.** FlagTree reaches the MUSA device through `torch_fl` alone:
+the vendor MThreads driver normally reads device availability, current device,
+capability, and the raw stream from `torch_musa`, and
+`torch_fl.compile.flagtree_shim` rebinds those lookups onto its own runtime
+before the first Triton driver is created. The plugin may remain installed on
+disk — `torch_fl` never imports its `__init__`, and with
+`FLAGOS_USE_FLAGGEMS=1` it publishes a small compatibility surface under that
+module name for FlagGems backend discovery, which is `torch_fl`'s own code
+rather than the vendor plugin. See
 [torch-compile-integration.md](../../architecture/torch-compile-integration.md)
 for why the plugin cannot coexist with `torch_fl`.
 

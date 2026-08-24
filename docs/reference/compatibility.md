@@ -177,8 +177,11 @@ validated on this host against the vendor `flagtree-0.5.0+mthreads3.1` runtime a
 established by stock Triton: the 22-case `tests/integration/test_compile.py` suite passed on the
 MTT S5000, covering forward and backward execution, FP32/FP16 inputs, max-autotune,
 recompilation, FakeTensor tracing, and output/gradient placement on `flagos`. FlagTree reaches the
-device through `torch_fl.compile.musa_runtime`, so the separate `torch_musa` plugin is neither
-installed nor imported — the suite asserts its absence, since PrivateUse1 admits only one owner.
+device through `torch_fl.compile.flagtree_shim`, which rebinds the vendor MThreads driver's runtime
+lookups onto `torch_fl`; the separate `torch_musa` plugin is not installed and its `__init__` is
+never imported, since PrivateUse1 admits only one owner. The suite asserts that every rebound
+driver callable resolves inside `torch_fl` rather than asserting the module name is absent, because
+`torch_fl` publishes its own small compatibility surface under that name for FlagGems discovery.
 Runtime coordinate-descent autotuning is disabled on MUSA because it benchmarks through CUDA
 events the CPU PyTorch wheel does not provide. CPU-to-device linkage
 depends on whether the installed PyTorch/Kineto build supplies the PrivateUse1 resolver; the

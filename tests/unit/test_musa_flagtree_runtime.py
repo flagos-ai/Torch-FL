@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for the MUSA FlagTree runtime binding.
+"""Unit coverage for the MUSA FlagTree driver binding in ``flagtree_shim``.
 
 These run on any host: the point is the *wiring* -- that FlagTree's MThreads
-driver ends up calling torch_fl instead of the torch_musa plugin. The
+driver ends up calling torch_fl instead of importing the torch_musa plugin. The
 on-hardware behaviour is covered by tests/integration/test_compile.py.
 """
 
@@ -24,7 +24,8 @@ import types
 
 import pytest
 
-from torch_fl.compile import musa_runtime
+from torch_fl import flagos
+from torch_fl.compile import flagtree_shim
 
 
 def _fake_mthreads_backend(monkeypatch):
@@ -68,31 +69,29 @@ def _fake_mthreads_backend(monkeypatch):
     triton.backends = backends
     monkeypatch.setitem(sys.modules, "triton", triton)
     monkeypatch.setitem(sys.modules, "triton.backends", backends)
-    monkeypatch.setattr(musa_runtime, "_bound", False)
+    monkeypatch.setattr(flagtree_shim, "_musa_driver_bound", False)
     return FakeDriver
 
 
 def test_binding_replaces_every_torch_musa_lookup(monkeypatch):
     """All four vendor runtime lookups must come from torch_fl after binding."""
     driver_cls = _fake_mthreads_backend(monkeypatch)
-    monkeypatch.setattr(musa_runtime.flagos, "device_count", lambda: 1)
-    monkeypatch.setattr(musa_runtime.flagos, "current_device", lambda: 0)
 
-    assert musa_runtime.bind_flagtree_musa_driver()
+    assert flagtree_shim.bind_flagtree_musa_driver()
 
     driver = driver_cls()
-    assert driver_cls.is_active is musa_runtime.is_available
-    assert driver.get_device_capability is musa_runtime.get_device_capability
-    assert driver.get_current_stream is musa_runtime.get_current_raw_stream
-    assert driver.get_current_device is musa_runtime.current_device
-    assert driver.set_current_device is musa_runtime.set_device
+    assert driver_cls.is_active is flagos.is_available
+    assert driver.get_device_capability is flagtree_shim.get_musa_device_capability
+    assert driver.get_current_stream is flagtree_shim.get_musa_current_raw_stream
+    assert driver.get_current_device is flagos.current_device
+    assert driver.set_current_device is flagos.set_device
 
 
 def test_binding_is_idempotent(monkeypatch):
     driver_cls = _fake_mthreads_backend(monkeypatch)
-    assert musa_runtime.bind_flagtree_musa_driver()
-    assert musa_runtime.bind_flagtree_musa_driver()
-    assert driver_cls.is_active is musa_runtime.is_available
+    assert flagtree_shim.bind_flagtree_musa_driver()
+    assert flagtree_shim.bind_flagtree_musa_driver()
+    assert driver_cls.is_active is flagos.is_available
 
 
 def test_binding_is_a_noop_without_the_mthreads_backend(monkeypatch):
@@ -103,43 +102,48 @@ def test_binding_is_a_noop_without_the_mthreads_backend(monkeypatch):
     triton.backends = backends
     monkeypatch.setitem(sys.modules, "triton", triton)
     monkeypatch.setitem(sys.modules, "triton.backends", backends)
-    monkeypatch.setattr(musa_runtime, "_bound", False)
+    monkeypatch.setattr(flagtree_shim, "_musa_driver_bound", False)
 
-    assert musa_runtime.bind_flagtree_musa_driver() is False
+    assert flagtree_shim.bind_flagtree_musa_driver() is False
 
 
 def test_capability_comes_from_the_device(monkeypatch):
     """FlagTree derives its target arch and warp size from these two numbers."""
     monkeypatch.setattr(
-        musa_runtime.flagos,
+        flagos,
         "get_device_properties",
         lambda idx: types.SimpleNamespace(major=3, minor=1),
     )
-    monkeypatch.setattr(musa_runtime.flagos, "current_device", lambda: 0)
+    monkeypatch.setattr(flagos, "current_device", lambda: 0)
 
-    assert musa_runtime.get_device_capability() == (3, 1)
-
-
-@pytest.mark.parametrize(
-    "given, expected",
-    [(None, 2), (1, 1), ("flagos:1", 1), ("flagos", 2)],
-)
-def test_device_index_normalization(monkeypatch, given, expected):
-    """The vendor runtime takes ints; Inductor passes str/torch.device/None."""
-    monkeypatch.setattr(musa_runtime.flagos, "current_device", lambda: 2)
-
-    assert musa_runtime._device_index(given) == expected
+    assert flagtree_shim.get_musa_device_capability() == (3, 1)
+    assert flagtree_shim.get_musa_device_capability(1) == (3, 1)
 
 
-def test_no_torch_musa_module_is_created():
-    """The whole point: torch_fl must never publish a torch_musa stand-in.
+def test_compile_path_does_not_import_the_torch_musa_plugin(monkeypatch):
+    """The binding must not reach the plugin, even as a fabricated module.
 
-    A fabricated module would let the vendor driver "work" while reading from
-    something other than the runtime that owns PrivateUse1.
+    torch_fl does publish a small ``torch_musa`` compatibility surface for
+    FlagGems discovery (``_install_musa_flaggems_compat``), so the claim here is
+    narrower than "no such module ever exists": the FlagTree binding resolves
+    every lookup through ``torch_fl.flagos`` and never consults that name.
     """
-    import torch_fl  # noqa: F401
+    driver_cls = _fake_mthreads_backend(monkeypatch)
+    monkeypatch.delitem(sys.modules, "torch_musa", raising=False)
+
+    assert flagtree_shim.bind_flagtree_musa_driver()
+    driver_cls()
 
     assert "torch_musa" not in sys.modules
+    bound = (
+        driver_cls.is_active,
+        driver_cls._get_device_capability,
+        driver_cls._get_current_stream,
+        driver_cls._get_current_device,
+        driver_cls._set_current_device,
+    )
+    for func in bound:
+        assert func.__module__.startswith("torch_fl"), func
 
 
 if __name__ == "__main__":
