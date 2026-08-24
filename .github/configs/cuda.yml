@@ -90,6 +90,10 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py
       --model "$MODEL_PATH" -v -s --tb=short
+  - name: Run torch.compile tests
+    command: >-
+      python -m pytest tests/integration/test_compile.py
+      -v -s --tb=short
   - name: Run training tests
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py
