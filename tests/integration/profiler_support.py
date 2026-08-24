@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-import torch
 
 
 @dataclass(frozen=True)
@@ -49,9 +48,6 @@ def detect_platform() -> str:
     if Path("/usr/local/PPU_SDK").is_dir():
         return "ppu"
 
-    if accelerator == "cuda":
-        return "cuda"
-
     try:
         import torch_fl
 
@@ -67,6 +63,18 @@ def detect_platform() -> str:
         if platform in config:
             return platform
     return "cuda"
+
+
+def _torch_device():
+    import torch
+
+    return torch.device("flagos", 0)
+
+
+def _torch_module():
+    import torch
+
+    return torch
 
 
 def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
@@ -100,7 +108,8 @@ def profiler_capabilities():
 @pytest.fixture(scope="module")
 def profile_result():
     """Capture one common workload and export it as a Chrome trace."""
-    device = torch.device("flagos", 0)
+    torch = _torch_module()
+    device = _torch_device()
     x = torch.randn(256, 256, device=device)
     y = torch.randn(256, 256, device=device)
     small = torch.randn(16, device=device)
