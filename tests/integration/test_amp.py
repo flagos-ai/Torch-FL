@@ -28,10 +28,20 @@ AMP_DTYPES = (torch.float16, torch.bfloat16)
 # enforced by integration conftest.
 BUILD_ACCELERATOR = torch_fl._build_accelerator()
 PPU_RUNTIME = bool(os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"))
-AMP_RUNTIME = BUILD_ACCELERATOR in {"ascend", "dcu", "metax", "musa"} or PPU_RUNTIME
+AMP_RUNTIME = (
+    BUILD_ACCELERATOR
+    in {
+        "ascend",
+        "dcu",
+        "gcu",
+        "metax",
+        "musa",
+    }
+    or PPU_RUNTIME
+)
 pytestmark = pytest.mark.skipif(
     not AMP_RUNTIME,
-    reason="AMP tests require an Ascend, DCU, MetaX, MUSA, or PPU runtime",
+    reason="AMP tests require an Ascend, DCU, GCU, MetaX, MUSA, or PPU runtime",
 )
 
 

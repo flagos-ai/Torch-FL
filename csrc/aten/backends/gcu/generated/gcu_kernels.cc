@@ -12,7 +12,12 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
+#include <ATen/ops/convolution.h>
+#include <ATen/ops/convolution_backward.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/zeros.h>
+#include <ATen/native/ConvUtils.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
 #include <string>
@@ -1733,6 +1738,162 @@ at::Tensor MseLossBackwardKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(MseLossBackwardFn, mse_loss_backward_dispatcher, Backend::kGcu, MseLossBackwardKernelGcu)
+
+void PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu(at::TensorList self, at::Tensor& found_inf, const at::Tensor& inv_scale) {
+  if (self.empty() || !gcu::IsForeachEligible(self) ||
+      !found_inf.defined() || !inv_scale.defined() ||
+      !found_inf.is_contiguous() || !inv_scale.is_contiguous() ||
+      found_inf.device() != self[0].device() ||
+      inv_scale.device() != self[0].device() ||
+      !gcu::TopsatenSupportsDtype(found_inf.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(inv_scale.scalar_type())) {
+    std::vector<at::Tensor> cpu_self;
+    cpu_self.reserve(self.size());
+    for (const auto& tensor : self) cpu_self.push_back(tensor.cpu());
+    auto cpu_found_inf = found_inf.cpu();
+    auto cpu_inv_scale = inv_scale.cpu();
+    at::_amp_foreach_non_finite_check_and_unscale_(
+        cpu_self, cpu_found_inf, cpu_inv_scale);
+    for (size_t i = 0; i < self.size(); ++i) self[i].copy_(cpu_self[i]);
+    found_inf.copy_(cpu_found_inf);
+    return;
+  }
+
+  std::vector<at::Tensor> out;
+  out.reserve(self.size());
+  for (const auto& tensor : self) out.push_back(at::empty_like(tensor));
+  gcu::TopsatenTensorList t_self(self);
+  gcu::TopsatenTensorList t_out(out);
+  gcu::TopsatenTensorWrapper t_found_inf(found_inf);
+  gcu::TopsatenTensorWrapper t_inv_scale(inv_scale);
+  EXEC_TOPSATEN_CMD(
+      topsatenAmpForeachNonFiniteCheckAndUnscale, self[0], t_out.get(), t_found_inf.get(), t_self.get(),
+      t_inv_scale.get());
+  for (size_t i = 0; i < self.size(); ++i) self[i].copy_(out[i]);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleInplaceFn, priv_amp_foreach_non_finite_check_and_unscale_inplace_dispatcher, Backend::kGcu, PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu)
+
+void PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu(at::TensorList self, at::Tensor& found_inf,
+             const at::Tensor& inv_scale, at::TensorList out) {
+  TORCH_CHECK(self.size() == out.size(),
+              "priv_amp_foreach_non_finite_check_and_unscale_out_dispatcher: tensor lists must match in length");
+  if (self.empty() || !gcu::IsForeachEligible(self) ||
+      !gcu::IsForeachEligible(out) || !found_inf.defined() ||
+      !inv_scale.defined() || !found_inf.is_contiguous() ||
+      !inv_scale.is_contiguous() || found_inf.device() != self[0].device() ||
+      inv_scale.device() != self[0].device() ||
+      !gcu::TopsatenSupportsDtype(found_inf.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(inv_scale.scalar_type())) {
+    std::vector<at::Tensor> cpu_self;
+    cpu_self.reserve(self.size());
+    for (const auto& tensor : self) cpu_self.push_back(tensor.cpu());
+    auto cpu_found_inf = found_inf.cpu();
+    auto cpu_inv_scale = inv_scale.cpu();
+    std::vector<at::Tensor> cpu_out;
+    cpu_out.reserve(out.size());
+    for (const auto& tensor : out) cpu_out.push_back(tensor.cpu());
+    at::_amp_foreach_non_finite_check_and_unscale_outf(
+        cpu_self, cpu_found_inf, cpu_inv_scale, cpu_out);
+    for (size_t i = 0; i < out.size(); ++i) out[i].copy_(cpu_out[i]);
+    // The reference leaves found_inf alone for this overload; propagate only
+    // what it actually wrote so both routes agree.
+    found_inf.copy_(cpu_found_inf);
+    return;
+  }
+
+  // The CPU reference for the .out overload writes the unscaled values but
+  // leaves found_inf untouched; topsaten updates it. Give the vendor call a
+  // scratch flag so the observable contract matches the other backends.
+  // GradScaler uses the in-place overload for overflow detection.
+  auto scratch_found_inf = at::empty_like(found_inf);
+  scratch_found_inf.copy_(found_inf);
+  gcu::TopsatenTensorList t_self(self);
+  gcu::TopsatenTensorList t_out(out);
+  gcu::TopsatenTensorWrapper t_found_inf(scratch_found_inf);
+  gcu::TopsatenTensorWrapper t_inv_scale(inv_scale);
+  EXEC_TOPSATEN_CMD(
+      topsatenAmpForeachNonFiniteCheckAndUnscale, self[0], t_out.get(), t_found_inf.get(), t_self.get(),
+      t_inv_scale.get());
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleOutFn, priv_amp_foreach_non_finite_check_and_unscale_out_dispatcher, Backend::kGcu, PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu)
+
+at::Tensor ConvolutionOverrideableKernelGcu(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const ::std::optional<at::Tensor>& bias,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups) {
+  if (!gcu::TopsatenSupportsDtype(input.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(weight.scalar_type()) || transposed) {
+    auto r = at::convolution(
+        input.cpu(), weight.cpu(),
+        bias.has_value() && bias->defined()
+            ? ::std::optional<at::Tensor>(bias->cpu())
+            : ::std::nullopt,
+        stride, padding, dilation, transposed, output_padding, groups);
+    return r.to(input.device());
+  }
+  auto input_c = input.contiguous();
+  auto weight_c = weight.contiguous();
+
+  auto out_sizes = at::native::conv_output_size(
+      input_c.sizes(), weight_c.sizes(), padding, stride, dilation);
+  auto out = at::empty(out_sizes, input_c.options());
+
+  // topsaten has no "absent bias" sentinel usable from here, so a zero bias
+  // reproduces the unbiased result.
+  at::Tensor bias_c = bias.has_value() && bias->defined()
+      ? bias->contiguous()
+      : at::zeros({weight_c.size(0)}, weight_c.options());
+
+  gcu::TopsatenTensorWrapper t_out(out);
+  gcu::TopsatenTensorWrapper t_input(input_c);
+  gcu::TopsatenTensorWrapper t_weight(weight_c);
+  gcu::TopsatenTensorWrapper t_bias(bias_c);
+  gcu::TopsatenSizeWrapper w_stride(stride);
+  gcu::TopsatenSizeWrapper w_padding(padding);
+  gcu::TopsatenSizeWrapper w_dilation(dilation);
+  gcu::TopsatenSizeWrapper w_output_padding(output_padding);
+  EXEC_TOPSATEN_CMD(
+      topsatenConvolution, input_c, t_out.get(), t_input.get(), t_weight.get(),
+      t_bias.get(), w_stride.get(), w_padding.get(), w_dilation.get(),
+      transposed, w_output_padding.get(), groups);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kGcu, ConvolutionOverrideableKernelGcu)
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> ConvolutionBackwardOverrideableKernelGcu(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups,
+    ::std::array<bool, 3> output_mask) {
+  std::vector<int64_t> bias_sizes{weight.size(0)};
+  auto r = at::convolution_backward(
+      grad_output.cpu(), input.cpu(), weight.cpu(),
+      ::std::optional<at::IntArrayRef>(at::IntArrayRef(bias_sizes)),
+      stride, padding, dilation, transposed, output_padding, groups,
+      output_mask);
+  auto to_dev = [&](const at::Tensor& t) {
+    return t.defined() ? t.to(input.device()) : t;
+  };
+  return {to_dev(std::get<0>(r)), to_dev(std::get<1>(r)),
+          to_dev(std::get<2>(r))};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardOverrideableFn, convolution_backward_overrideable_dispatcher, Backend::kGcu, ConvolutionBackwardOverrideableKernelGcu)
 
 void ForeachAddInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {

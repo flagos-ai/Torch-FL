@@ -9,6 +9,8 @@
 // "backend not registered" check, whereas an unregistered op simply reaches
 // the cpu_fallback. So this file is exactly the GCU coverage set.
 
+  m.impl("_amp_foreach_non_finite_check_and_unscale.out", WrapperPrivAmpForeachNonFiniteCheckAndUnscaleOut);
+  m.impl("_amp_foreach_non_finite_check_and_unscale_", WrapperPrivAmpForeachNonFiniteCheckAndUnscaleInplace);
   m.impl("_foreach_add_.List", WrapperForeachAddInplaceList);
   m.impl("_foreach_add_.Scalar", WrapperForeachAddInplaceScalar);
   m.impl("_foreach_add_.Tensor", WrapperForeachAddInplaceTensor);
@@ -46,6 +48,8 @@
   m.impl("cat", WrapperCat);
   m.impl("ceil", WrapperCeil);
   m.impl("clamp", WrapperClamp);
+  m.impl("convolution_backward_overrideable", WrapperConvolutionBackwardOverrideable);
+  m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
   m.impl("cosh", WrapperCosh);
   m.impl("div.Scalar", WrapperDivScalar);

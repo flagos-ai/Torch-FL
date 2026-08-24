@@ -79,12 +79,15 @@ inline topsatenDataType_t ToTopsatenDataType(at::ScalarType type) {
   }
 }
 
-// topsaten has no int64 kernels: every op returns NOT_SUPPORT for an I64
-// operand (verified across add/mul/eq/abs/sum). Callers check this and run the
-// op on CPU instead, which keeps int64 tensors (indices, masks, counters)
-// working instead of raising.
+// topsaten has no int64 or float64 kernels: every op returns NOT_SUPPORT for an
+// I64 operand (verified across add/mul/eq/abs/sum), and an F64 operand fails the
+// same way (measured on S60 across add/abs/reciprocal, vendor log "datatype not
+// support yet"). Callers check this and run the op on CPU instead, which keeps
+// int64 tensors (indices, masks, counters) and float64 tensors working instead
+// of raising. GradScaler depends on the float64 path: it computes the inverse
+// scale as `scale.double().reciprocal().float()`.
 inline bool TopsatenSupportsDtype(at::ScalarType type) {
-  return type != at::kLong;
+  return type != at::kLong && type != at::kDouble;
 }
 
 // A tops device pointer resolves only against the *current* device, so an op
@@ -250,6 +253,9 @@ inline bool IsForeachEligible(at::TensorList tensors) {
     return false;
   }
   auto device = tensors[0].device();
+  if (device.type() != c10::kPrivateUse1) {
+    return false;
+  }
   for (const at::Tensor& t : tensors) {
     if (!t.defined() || !TopsatenSupportsDtype(t.scalar_type()) ||
         !t.is_contiguous() || t.storage_offset() != 0 || t.numel() == 0 ||

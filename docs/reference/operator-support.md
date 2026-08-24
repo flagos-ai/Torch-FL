@@ -144,6 +144,44 @@ The generic FlagGems survey above does not exercise vendor-native routes such as
 `ascend` or `gcu`. Native route changes are tracked here separately so they are
 not misrepresented as part of the 546-overload FlagGems cohort.
 
+### Enflame GCU S60 AMP routes (2026-08-24)
+
+The GCU backend now routes both GradScaler unscale overloads through the
+native `topsatenAmpForeachNonFiniteCheckAndUnscale` API when tensor lists are
+contiguous, non-empty, same-device, and use supported dtypes. Unsupported
+layouts and dtypes retain the CPU correctness fallback. The shared
+`AutocastPrivateUse1` policy registration covers FP16/BF16 autocast.
+
+Measured on S60 against the installed TopsRider release:
+`tests/integration/test_amp.py` is `25 passed`. Three things were needed beyond
+the unscale routes themselves:
+
+- **float64 gate.** topsaten has no F64 kernels, so `TopsatenSupportsDtype` now
+  excludes `at::kDouble` as well as `at::kLong`, sending float64 to the CPU
+  fallback across all gated kernels. GradScaler needs this: it computes the
+  inverse scale as `scale.double().reciprocal().float()`.
+- **`.out` overload semantics.** topsaten writes `found_inf` for the `.out`
+  overload; the CPU reference does not. The native path now passes a scratch
+  flag so the observable contract matches other backends. GradScaler itself uses
+  the in-place overload for overflow detection.
+- **convolution routes.** `aten::convolution` dispatches PrivateUse1 to
+  `convolution_overrideable`, which has no composite fallback, so conv2d raised
+  `NotImplementedError` and the autocast lower-precision policy could not be
+  exercised. Added `convolution_overrideable` (native `topsatenConvolution`,
+  within 3.9e-6 of the CPU reference across stride/padding/dilation/group/bias
+  variants) and `convolution_backward_overrideable` (CPU fallback; grads match
+  the reference exactly).
+
+`topsatenConvolutionBackward` is exported by `libtopsaten.so.3` but returns
+`NOT_SUPPORT` for every input measured — fp32 and fp16, grouped and ungrouped,
+padded and unpadded, with both the caller's `output_mask` and an all-true mask —
+hence the CPU fallback for that one route. Switch it to native once a TopsRider
+release implements it.
+
+Not fixed here and still failing: `torch.neg` on uint8 and bool
+(`topsatenNeg` returns `NOT_SUPPORT` and those dtypes are not routed to the
+fallback). Pre-existing and outside the AMP contract.
+
 ### Enflame GCU S60 RNG routes (2026-08-17)
 
 The GCU backend added native topsaten routes for the following RNG overloads:
@@ -319,6 +357,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 |---|---|---|---|---|
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 527-route config | Rerouted eleven ops whose gems Triton kernels fail to compile for specific dtypes/values (`mm`/`mm.out`/`addmm`/`addmm.out`/`addmm_` int64 `tl.dot`, `index_add`/`index_add_` bool `tl.atomic_add`, `cummax`/`cummin` bool loop types, `randint`/`randint_like` high=1 constexpr gap) from `flagos_python` to `cuda` boxing via `flaggems_runtime_broken`. Cohort 538 -> 527 active routes. Four-platform 546-route rows **not revalidated**. | Full 527-overload survey on RTX 5060: 347 STRICT / 45 BASIC_ONLY / 38 FAILED / 97 UNTESTED; zero new failures vs the 538 cohort; all eleven ops verified on the boxing route (int64 mm now raises the same error as stock PyTorch on CUDA). |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 538-route config | Rerouted seven device-assert ops (`i0`, `i0.out`, `special_i0e`, `special_i0e.out`, `special_i1`, `upsample_bicubic2d`, `soft_margin_loss`) from `flagos_python` to `cuda` boxing (gems kernels hard-assert `tensor.is_cuda`); regenerated all configs/kernels against flag_gems `7fb49bad`. Cohort 546 -> 538 active routes. Four-platform 546-route rows **not revalidated** (A100/mc550/810e/bw1000 unavailable). | Full 538-overload survey on RTX 5060: 347 STRICT / 54 BASIC_ONLY / 40 FAILED / 97 UNTESTED; manual verification that all seven ops now execute correctly on `flagos` via the boxing route. |
+| 2026-08-24 | Enflame S60 | Native GCU AMP, convolution, and dtype routes | Added native AMP unscale routes (both overloads), native `convolution_overrideable`, and a CPU-fallback `convolution_backward_overrideable`; gated float64 to the CPU fallback since topsaten has no F64 kernels. Generic FlagGems cohort **not revalidated**. | `tests/integration/test_amp.py`: 25 passed. `test_conv1d_dispatch.py`: 8 passed. Conv forward within 3.9e-6 of CPU across stride/padding/dilation/group/bias variants; conv grads exact. Pre-existing, unrelated failures remain in `test_compile.py`, `test_profiler_parity.py`, `test_rng_dispatch.py`, and `neg` on uint8/bool. |
 | 2026-08-21 | MetaX C550 (MACA 3.8.0) | CUDA-boxing AMP routes | Enabled the shared AMP integration contract for MetaX and added it to the MetaX CI manifest; no operator route changed. Generic FlagGems routes were **not revalidated**. | `tests/integration/test_amp.py`: 25 passed, covering FP16/BF16 autocast policies and GradScaler finite/overflow training paths. |
 | 2026-08-19 | Hygon DCU bw1000 | Generic FlagGems routes | Rerouted `index_select` from `flagos_python` to `cuda` in all FlagGems configs (cross-stream launch race drops output stores under load); generic cohort 546 -> 545 active routes, 26 -> 27 forced CUDA fallbacks. Four-platform rows **not revalidated** (A100/mc550/810e unavailable). | Targeted survey `--ops index_select` on the flagos_python route: STRICT (standalone math correct); three failing HF v5.5.0 UT nodes (T5/Qwen3/Gemma3 beam search) pass after the reroute; tiny-T5 NaN reproducer clean 3/3. |
 | 2026-08-18 | MTT S5000 (8 devices) | Native MUSA RNG, MThreads FlagGems hybrid, and MUPTI profiler | Added optional MUPTI activity tracing; the operator route cohort is unchanged. | `tests/integration/test_profiler_musa.py`: 1 passed with real positive-duration MUPTI kernel/runtime/memcpy activities and valid Chrome JSON. CPU-only Kineto resolver behavior remains environment-dependent; generic FlagGems operator coverage was not revalidated by this profiler change. |

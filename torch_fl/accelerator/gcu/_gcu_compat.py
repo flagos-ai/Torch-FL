@@ -50,12 +50,26 @@ import time
 
 _gcu_generators = {}
 
+_UINT64_MASK = (1 << 64) - 1
+
+
+def _as_int64_bits(value):
+    """Reinterpret a uint64 seed as the signed value with the same bit pattern.
+
+    ``torch.initial_seed()`` and CUDA's philox seed are unsigned 64-bit, so a
+    default seed routinely exceeds ``int64`` max. ``torch.tensor(..., int64)``
+    raises ``ValueError: Overflow when unpacking long long`` on those values,
+    which would break every RNG call on the device.
+    """
+    value &= _UINT64_MASK
+    return value - (1 << 64) if value >= (1 << 63) else value
+
 
 class _GcuPhiloxGenerator:
     """Minimal generator implementing FlagGems' seed/offset protocol."""
 
     def __init__(self, seed):
-        self._seed = int(seed)
+        self._seed = int(seed) & _UINT64_MASK
         self._offset = 0
 
     def get_state(self):
@@ -63,7 +77,9 @@ class _GcuPhiloxGenerator:
 
         # 16 bytes of seed+offset, the same layout a CUDA generator exposes.
         return torch.tensor(
-            [self._seed, self._offset], dtype=torch.int64, device="cpu"
+            [_as_int64_bits(self._seed), _as_int64_bits(self._offset)],
+            dtype=torch.int64,
+            device="cpu",
         ).view(torch.uint8)
 
     def set_state(self, state):
@@ -74,13 +90,14 @@ class _GcuPhiloxGenerator:
             values = values.view(torch.int64)
         if values.numel() != 2:
             raise ValueError("GCU philox state must contain seed and offset")
+        # The state carries the unsigned bit pattern in a signed container.
         self._seed, self._offset = (
-            int(values[0].item()),
-            int(values[1].item()),
+            int(values[0].item()) & _UINT64_MASK,
+            int(values[1].item()) & _UINT64_MASK,
         )
 
     def manual_seed(self, seed):
-        self._seed = int(seed)
+        self._seed = int(seed) & _UINT64_MASK
         self._offset = 0
         return self
 
