@@ -304,3 +304,27 @@ def current_acl_stream(device=None):
     if not handle:
         raise RuntimeError("torch_fl ACL current stream is unavailable")
     return AclStream.borrowed(handle, device=idx)
+
+
+def current_acl_raw_stream(device=None) -> int:
+    """Return the current aclrtStream for `device` as a plain int.
+
+    This is the handle Triton's generated launcher passes to rtKernelLaunch, so
+    it must be the *same* stream torch_fl's aclnn ops run on: torch_fl creates
+    its own stream, and a kernel launched on rt stream 0 has no ordering against
+    the ops producing its inputs (see the nan-loss regression documented in
+    scripts/patch_triton_ascend.py).
+
+    Kept separate from `current_acl_stream` because callers on the launch path
+    only need the integer and must not pay for an AclStream wrapper per kernel.
+    """
+    from torch_fl.flagos import current_device
+
+    idx = current_device() if device is None else int(device)
+    api = _stream_api()
+    if api is None:
+        raise RuntimeError("torch_fl ACL stream registry is unavailable")
+    handle = api.GetCurrentStream(idx)
+    if not handle:
+        raise RuntimeError("torch_fl ACL current stream is unavailable")
+    return int(handle)

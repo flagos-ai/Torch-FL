@@ -657,6 +657,15 @@ class _DeviceProperties:
         self.major = 8
         self.minor = 0
 
+        # Inductor's cache key reads the device name from `gcnArchName` whenever
+        # `torch.version.cuda` is None (codecache.py CacheBase.get_system), which
+        # is the case for the CPU torch wheel these backends run on -- upstream
+        # only reaches that branch on ROCm, where the field exists. Without it
+        # every compile_fx dies with AttributeError while hashing the graph.
+        # The value is used purely as a string in that hash, so the device name
+        # is the honest answer.
+        self.gcnArchName = self.name
+
 
 def _aicore_count(_cache=[]):
     """AICore count for this chip, queried once from triton-ascend."""

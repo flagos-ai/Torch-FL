@@ -182,6 +182,52 @@ With `FLAGOS_USE_FLAGGEMS=1`, the runtime loads `backends_ascend_flagos_py.conf`
 
 Without `FLAGOS_USE_FLAGGEMS`, all ops use the pure ACLNN backend.
 
+## Optional: torch.compile via triton-ascend
+
+`torch.compile(backend="flagos")` compiles inductor's fused Triton kernels with
+`triton-ascend`. It needs the same environment as the FlagGems route above — the
+patched `triton-ascend` and its `libstdc++` preload — but not `FLAGOS_USE_FLAGGEMS`
+and not `FLAGOS_USE_FLAGTREE`; the profile is picked from the `ACCELERATOR=ascend`
+build. Eager ACLNN keeps working unchanged if `triton-ascend` is absent.
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c "
+import torch, torch_fl
+
+def f(x):
+    return torch.nn.functional.relu(x + 1.0) * 2.0
+
+x = torch.randn(64, 64, device='flagos:0')
+print('compile matches eager:', torch.allclose(torch.compile(f, backend='flagos')(x), f(x)))
+"
+```
+
+`TORCH_DEVICE_BACKEND_AUTOLOAD=0` matters if `torch_npu` is installed in the same
+environment: `import torch` autoloads it, it claims PrivateUse1, and `torch_fl`
+then refuses to register `flagos`.
+
+Support is **experimental**. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
+triton-ascend 3.2.0, torch 2.10.0+cpu, Python 3.10):
+`tests/integration/test_compile.py` passes 29 of 30 with a cold inductor cache,
+the remaining case being FlagTree-only. Run it with the cache cleared —
+
+```bash
+rm -rf /tmp/torchinductor_root
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest tests/integration/test_compile.py -v
+```
+
+— because a warm cache hides the compile-worker crash described below.
+
+Three triton-ascend defects are worked around in
+`torch_fl/compile/`, each documented with its measured evidence in
+[`docs/architecture/torch-compile-integration.md`](../../architecture/torch-compile-integration.md):
+a masked 2-D byte load that silently reads wrong data (this produced incorrect
+`relu` gradients), `ub overflow` raised as a hard compile error rather than a
+resource limit, and a segfault when the parent process launches a kernel built in
+an inductor compile worker. The last one makes Ascend default to
+`compile_threads=1`; an explicit `compile_threads` option or
+`TORCHINDUCTOR_COMPILE_THREADS` still wins.
+
 ## Limitations
 
 ### No model mount in CI
@@ -191,6 +237,13 @@ Without `FLAGOS_USE_FLAGGEMS`, all ops use the pure ACLNN backend.
 ### No device-side profiler parity yet
 
 The Ascend profiler path does not yet emit device-side event categories (kernel, gpu_memcpy, gpu_memset, runtime, ac2g flows). The flagos trace has only `['Trace', 'cpu_op']` versus the torch-cuda baseline. `test_profiler_parity.py` is excluded from CI until device/runtime events are implemented (`.github/configs/ascend.yml` lines 112-117).
+
+### torch.compile is not covered in CI
+
+The Ascend CI runner image does not carry `triton-ascend`, so
+`tests/integration/test_compile.py` has no CI step and the compile path is
+validated only by hand on hardware that has the toolchain installed. The results
+quoted above are point measurements, not a continuously enforced gate.
 
 ### Distributed support is architectural only
 

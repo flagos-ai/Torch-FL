@@ -342,6 +342,34 @@ def _patch_ppu_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
     _patch_vendor_flagtree_compile_workers(config_patches)
 
 
+def _patch_ascend_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Keep Ascend compilation in the parent process by default.
+
+    A kernel built in an inductor compile worker segfaults when the *parent* later
+    launches it, inside triton-ascend's `NPULauncher.__call__`
+    (`triton/backends/ascend/driver.py`). Measured on a 910 with
+    triton-ascend 3.2.0 and a cold inductor cache: `compile_threads=1` runs the
+    whole compile suite (25 passed), while 2 or more crashes on the second compile
+    in a process. One compile per process survives either way, which is why a warm
+    cache or a single test hides it. The start method makes no difference (`fork`
+    and `spawn` both crash), so this is not the CUDA-after-fork problem the PPU
+    path above works around.
+
+    Serial compilation costs compile time and nothing else. An explicit
+    `compile_threads` or `TORCHINDUCTOR_COMPILE_THREADS` still wins, so the
+    parallel path stays reachable for anyone testing a fixed toolchain.
+    """
+    if "compile_threads" in config_patches:
+        return
+    if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
+        return
+
+    from torch_fl.compile.platform_profile import platform_profile
+
+    if not platform_profile().is_cuda_like:
+        config_patches["compile_threads"] = 1
+
+
 def flagos_compile_backend(
     gm: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor],
@@ -393,6 +421,7 @@ def flagos_compile_backend(
     # the backend before FlagTree was importable gets its second chance here.
     _bind_musa_flagtree_runtime()
     _patch_vendor_flagtree_compile_workers(config_patches)
+    _patch_ascend_compile_workers(config_patches)
 
     # Make inductor treat flagos as a GPU device. Order matters: is_gpu() must
     # answer True and the device interface must be resolvable before the
@@ -402,10 +431,18 @@ def flagos_compile_backend(
         publish_codegen_on_device_module,
         register_flagos_codegen,
     )
+    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
+    from torch_fl.compile.triton_libdevice import patch_triton_libdevice_module_map
+    from torch_fl.compile.triton_resource_limits import (
+        patch_triton_resource_limit_errors,
+    )
 
     register_flagos_device_interface()
     publish_codegen_on_device_module()
     register_flagos_codegen()
+    patch_triton_libdevice_module_map()
+    patch_triton_resource_limit_errors()
+    patch_triton_byte_load_workarounds()
 
     # Hand the graph to inductor untouched -- it is on flagos and stays there.
     try:

@@ -200,6 +200,34 @@ The focused FlagTree test must compare compiled output with eager output and
 assert that outputs and gradients remain on `flagos`; CPU-only tests can cover
 registration and vendor target selection but do not establish MUSA compiler
 support.
+### Ascend (triton-ascend)
+
+Ascend compiles through `triton-ascend`, which installs itself as the `triton`
+package and registers an `AscendBackend`; it is not a FlagTree build, so
+`FLAGOS_USE_FLAGTREE=1` does not apply. No extra configuration is needed beyond
+the environment FlagGems already requires
+([vendor setup](../vendors/ascend/installation.md)) — `torch.compile(backend="flagos")`
+picks the Ascend profile from `ACCELERATOR=ascend`.
+
+Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0,
+torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and
+matmul+normalization graphs all compile and match eager. Support is
+**experimental** — three vendor-toolchain defects had to be worked around, and
+each workaround is a place where a toolchain upgrade should let us delete code:
+
+| Defect | Symptom | Workaround |
+|---|---|---|
+| Masked 2-D load of an 8-bit dtype is miscompiled | Silently reads only the first two elements of each row, repeated. Surfaced as wrong `relu` gradients (4090/4096 elements off, max abs diff 3.05), no error raised | `triton_byte_loads.py`: pass `enable_linearize=True` on every compile, **and** rewrite bool kernel args from `*i1` to `*i8`. Both are needed — linearize does not fix the `*i1` pointer type, and the identical bytes read correctly through `*i8` |
+| `ub overflow` is raised as a generic compilation error | An oversized autotune config fails the whole compile instead of being dropped | `triton_resource_limits.py`: parse `requires N bits while M bits available` and re-raise as Triton's `OutOfResources`, which inductor already knows to skip |
+| A kernel built in a compile worker segfaults when the parent launches it | Crash in `NPULauncher.__call__` (`triton/backends/ascend/driver.py`), only with a cold inductor cache and two or more compiles in one process | `inductor_backend.py` defaults Ascend to `compile_threads=1`. `fork` and `spawn` both crash, so this is not the CUDA-after-fork problem the PPU path above hits |
+
+`triton_libdevice.py` additionally fills the Ascend backend's libdevice module
+map, which the vendor backend leaves empty.
+
+The first row's `enable_linearize` requirement is exercised directly by
+`test_ascend_masked_byte_load_requires_linearize`, which asserts the bug is
+*still present* without the option. That test failing is the signal that the
+toolchain was fixed and the workaround can go.
 
 ## Architecture
 
@@ -215,18 +243,40 @@ inductor generates Triton kernels that operate on flagos tensors directly.
    - Expands `mode` / `options` into inductor `config_patches`
    - Delegates to `compile_fx` with no graph rewriting
 
-2. **Device interface** (`torch_fl/compile/device_interface.py`)
-   - `DeviceInterface` subclass: device state from `torch.flagos`, hardware
-     properties from `torch.cuda` (the same physical GPU)
+2. **Platform profile** (`torch_fl/compile/platform_profile.py`)
+   - flagos has no Triton backend of its own, so the compile path must name the
+     *hardware's* backend. The profile carries the three facts that differ per
+     vendor: the name reported as `DeviceProperties.type` (and therefore as
+     `GPUTarget.backend`), the key that backend is registered under in
+     `triton.backends.backends`, and whether the runtime is CUDA-like at all
+   - The two names are not the same string everywhere. On Ascend the driver
+     reports `GPUTarget(backend="npu", ...)` and `AscendBackend.supports_target`
+     accepts only `"npu"`, but the package key is `"ascend"`
+   - `is_cuda_like=False` (Ascend only) routes hardware queries, raw streams and
+     generated device snippets away from `torch.cuda`, which does not exist there
+
+3. **Device interface** (`torch_fl/compile/device_interface.py`)
+   - `DeviceInterface` subclass: device state always from `torch.flagos`;
+     hardware properties from `torch.cuda` on CUDA-like builds (the same physical
+     GPU), from `torch.flagos` plus the ACL runtime on Ascend
    - Adds `"flagos"` to inductor's `GPU_TYPES` so `is_gpu()` is True and the
      Triton codegen path is taken instead of C++/CPU
-   - Reports the underlying compiler target at the Triton boundary
-     (`DeviceProperties.create`): `cuda`/`nvidia` on CUDA-compatible builds and
-     `maca`/`metax` on MetaX
+   - Reports the hardware's backend name at the Triton boundary
+     (`DeviceProperties.create`), because each vendor backend hard-checks
+     `target.backend`. Target and package key per vendor: `cuda`/`nvidia` on
+     CUDA-compatible builds, `maca`/`metax` on MetaX, `npu`/`ascend` on Ascend
+   - On Ascend, `get_compute_capability` returns the SoC name (e.g.
+     `Ascend910_9382`) rather than a number, because that is what reaches Triton
+     as `GPUTarget.arch`
 
-3. **Codegen registration** (`torch_fl/compile/inductor_codegen.py`)
-   - Device op overrides (guards, streams, sync) inheriting the CUDA ones
-   - Scheduling + wrapper codegen: the stock CUDA/Triton pipeline
+4. **Codegen registration** (`torch_fl/compile/inductor_codegen.py`)
+   - CUDA-like builds: device op overrides inheriting the CUDA ones, and the
+     stock CUDA/Triton scheduling + wrapper pipeline
+   - Ascend: overrides that emit the ACL raw stream and `torch.flagos` device
+     calls, plain `TritonScheduling`, and *no* C++ wrapper — `CppWrapperGpu`
+     emits CUDA-runtime C++, so the slot is left unregistered rather than
+     pointing at something that cannot build. The C++ members raise
+     `NotImplementedError` instead of emitting a translation unit CANN rejects
 
 4. **Dispatch integration**
    - Ops inductor does not fuse fall back to eager flagos dispatch
@@ -353,6 +403,15 @@ pytest tests/integration/ops/test_clamp_dispatch.py -v
 
 # Test FlagTree compilation (requires a FlagTree-built env)
 FLAGOS_USE_FLAGTREE=1 pytest tests/integration/test_compile.py::test_flagtree_compiles_correct_results
+
+# Platform-profile selection and the vendor workarounds, on any platform
+# including plain CPU -- these test the selection logic, not the toolchain
+pytest tests/unit/test_compile_platform_profile.py -v
+
+# Ascend, on a real 910. Clear the inductor cache first: a warm cache hides the
+# compile-worker crash the serial-compile default exists for
+rm -rf /tmp/torchinductor_root
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest tests/integration/test_compile.py -v
 ```
 
 ### Codegen fixes this integration required
@@ -382,6 +441,11 @@ tests live alongside it:
 5. **FlagTree maturity**: Backend support varies by hardware; Hygon HCU is
    validated on `gfx936` and MetaX on C550/MACA 3.8.0, while other vendor
    backends remain untested here
+6. **Ascend is experimental**: compiles serially by default, has no C++ wrapper
+   codegen (`CppWrapperGpu` emits CUDA-runtime C++), and carries three
+   toolchain workarounds — see [Ascend](#ascend-triton-ascend) above. Only the
+   graphs in `tests/integration/test_compile.py` are validated; whole-model
+   compilation is not yet exercised there
 
 ## Roadmap
 
@@ -393,7 +457,14 @@ tests live alongside it:
       backward compile and match eager on NVIDIA and MetaX, with outputs and
       gradients remaining on `flagos`. The complete compile suite passes on both
       targets (the MetaX-specific event regression adds one case there).
+- [x] Ascend via triton-ascend — experimental. Forward, backward, fused
+      elementwise and matmul+normalization compile and match eager on a real 910
+      (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0, torch 2.10.0+cpu);
+      `test_compile.py` passes 29/30 with a cold cache, the one skip being the
+      FlagTree-only case
 - [ ] Benchmark fusion gains vs. stock inductor+triton on cuda
+- [ ] Benchmark Ascend compile vs. the aclnn eager path
+- [ ] Retire the Ascend workarounds as triton-ascend fixes land
 - [ ] Phase 3: FlagGems-aware fusion (recognize pre-optimized patterns)
 - [ ] Phase 4: Custom fusion patterns for flagos-specific ops
 

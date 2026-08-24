@@ -9,10 +9,20 @@ device**, then hands the traced graph to `compile_fx` unchanged. Inductor
 generates Triton kernels that operate on flagos tensors directly -- there is no
 conversion to cuda and no copy at the graph boundary.
 
-This works because flagos runs on the physical GPU that `torch.cuda` describes:
-its allocator delegates to `c10::cuda::CUDACachingAllocator`, so a flagos
-tensor's storage already *is* CUDA memory, and device indices line up
-(`flagos.set_device(i)` moves the CUDA current device).
+On CUDA-like builds (NVIDIA, MetaX, PPU) this works because flagos runs on the
+physical GPU that `torch.cuda` describes: its allocator delegates to
+`c10::cuda::CUDACachingAllocator`, so a flagos tensor's storage already *is* CUDA
+memory, and device indices line up (`flagos.set_device(i)` moves the CUDA current
+device).
+
+Ascend has no CUDA runtime at all, so what differs per vendor is factored into a
+**platform profile** (`platform_profile.py`): the name reported at the Triton
+boundary, the key that backend is registered under in `triton.backends.backends`,
+and whether the runtime is CUDA-like. `is_cuda_like=False` routes hardware
+queries, raw streams and generated device snippets through `torch.flagos` and the
+ACL runtime instead. Ascend compile support is **experimental**; see
+[`docs/architecture/torch-compile-integration.md`](../../docs/architecture/torch-compile-integration.md)
+for the toolchain defects it works around.
 
 ## Usage
 
@@ -56,14 +66,29 @@ Keeping the graph on flagos avoids that, and removes a copy-in/copy-out per call
 |---|---|
 | `GPU_TYPES.append("flagos")` | `is_gpu()` is a membership test on this list; without it inductor picks the C++/CPU codegen path and never emits Triton. Must be in place -- callers captured the list object at import. |
 | Prime `get_gpu_type()`'s cache | It asserts at most one GPU type is available, and the torch.cuda shim reports available alongside flagos. |
-| `register_interface_for_device` | Inductor's `DeviceInterface`: device state from `torch.flagos`, hardware properties from `torch.cuda` (same GPU). |
-| `DeviceProperties.create` wrap | Reports the underlying compiler target at the Triton boundary: `cuda` for NVIDIA or `maca` for MetaX. A literal `flagos` target finds no compatible Triton backend. |
-| `register_device_op_overrides` | Device guard / stream / synchronize snippets spliced into generated code. Inherits the CUDA ones; only Python-level device manipulation routes through `torch.flagos`. |
-| `register_backend_for_device` | Scheduling + wrapper codegen -- the stock CUDA/Triton pipeline under the `"flagos"` key. |
+| `register_interface_for_device` | Inductor's `DeviceInterface`: device state always from `torch.flagos`; hardware properties from `torch.cuda` (same GPU) on CUDA-like builds, from `torch.flagos` plus the ACL runtime on Ascend. |
+| `DeviceProperties.create` wrap | Reports the *hardware's* backend name at the Triton boundary, because each vendor backend hard-checks `target.backend`: `cuda` for NVIDIA, `maca` on MetaX, `npu` on Ascend. A literal `"flagos"` finds zero compatible backends. Inductor already does this in the opposite direction for ROCm (`hints.py:149`). |
+| `register_device_op_overrides` | Device guard / stream / synchronize snippets spliced into generated code. CUDA-like builds inherit the CUDA ones, with Python-level device manipulation routed through `torch.flagos`; Ascend emits the ACL raw stream instead, and its C++ members raise `NotImplementedError` rather than emit C++ that CANN rejects. |
+| `register_backend_for_device` | Scheduling + wrapper codegen under the `"flagos"` key: the stock CUDA/Triton pipeline on CUDA-like builds, plain `TritonScheduling` and no C++ wrapper on Ascend. |
 
-The four codegen classes are also published on `torch.flagos` so inductor's
-official PrivateUse1 hook (`init_backend_registration`, `codegen/common.py:578`)
-can register flagos on its own.
+On CUDA-like builds the four codegen classes are also published on
+`torch.flagos` so inductor's official PrivateUse1 hook
+(`init_backend_registration`, `codegen/common.py:578`) can register flagos on its
+own. Ascend has only three of the four, and publishing a partial set would make
+that hook fail on the missing name, so there `register_flagos_codegen` is the only
+registration route.
+
+### Vendor toolchain workarounds
+
+Three modules exist only to compensate for the active Triton build and are no-ops
+on CUDA-like profiles. `triton_libdevice.py` fills the Ascend backend's empty
+libdevice module map; `triton_resource_limits.py` translates `ub overflow` into
+Triton's `OutOfResources` so inductor drops an oversized autotune config instead
+of failing the compile; `triton_byte_loads.py` works around a masked byte-load
+miscompile that silently produced wrong `relu` gradients. All three are
+idempotent — registration runs before every `compile_fx` — with their flags on the
+`triton` module rather than on the wrapped function, since two of them wrap the
+same `triton.compile`.
 
 ### CPU-torch wheel accommodations
 
@@ -137,10 +162,17 @@ validation.
    coordinate-descent tuner benchmarks with CUDA events the CPU torch wheel
    cannot provide. See `flagtree_shim.py` for how FlagTree reaches MUSA through
    `torch_fl` rather than the `torch_musa` plugin
+5. Ascend is experimental: serial compilation by default, no C++ wrapper codegen,
+   and three toolchain workarounds. Validated on a real 910 (`Ascend910_9382`,
+   CANN 9.0.0, triton-ascend 3.2.0, torch 2.10.0+cpu) for the graphs in
+   `tests/integration/test_compile.py`; whole-model compilation is not yet
+   exercised
 
 ## Future Work
 
 - [x] Exercise `torch.compile(backend="flagos")` on FlagTree-built NVIDIA,
       Hygon HCU, MetaX, and MThreads MUSA environments
+- [x] Ascend via triton-ascend (experimental)
+- [ ] Retire the Ascend workarounds as triton-ascend fixes land
 - [ ] Benchmark fusion gains against stock inductor+triton on cuda
 - [ ] Multi-GPU compilation support
