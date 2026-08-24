@@ -197,12 +197,12 @@ class TestMmDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, mm routes to flagos_python."""
+        """With the FlagGems runtime path on, mm routes to cuda boxing."""
         result = _run_mm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] mm -> flagos_python" in result.stderr, (
-            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
+        assert "[flagos dispatch] mm -> cuda" in result.stderr, (
+            f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
