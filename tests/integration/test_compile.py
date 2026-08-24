@@ -200,11 +200,18 @@ def test_inductor_benchmark_accepts_triton_backend_name():
     if device_type == "cuda":
         pytest.skip("triton backend name is already a valid torch device type")
 
-    # The name inductor would hand over is not a torch device on its own ...
-    with pytest.raises(RuntimeError, match="device type at start of device string"):
-        torch.device(device_type)
+    # The name inductor would hand over is normally not a torch device at all
+    # (``maca``). On native MUSA it happens to parse, because torch_fl's
+    # FLAGOS_ALIAS_CUDA mode deliberately aliases the ``musa`` spelling onto
+    # flagos -- so only assert the rejection where the name is not an alias.
+    try:
+        aliased_to = torch.device(device_type)
+    except RuntimeError as exc:
+        assert "device type at start of device string" in str(exc)
+    else:
+        assert aliased_to.type == torch._C._get_privateuse1_backend_name()
 
-    # ... so benchmark() must translate it rather than pass it through.
+    # Either way, benchmark() must translate the name rather than pass it through.
     assert benchmarking.Benchmarker.benchmark._flagos_patched
 
     recorded = {}

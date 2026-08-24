@@ -358,7 +358,11 @@ def _patch_inductor_benchmark_device() -> None:
     The vendor MetaX torch build patches this in-tree (a ``# USE_MACA`` branch
     mapping ``maca`` -> ``cuda`` in ``Benchmarker.benchmark``). The official CPU
     wheel we ship against has no such patch, so we apply the same mapping here.
-    Benchmarking on cuda is correct: flagos and cuda are the same physical GPU.
+    In a boxing build the target is right for the direct reason that flagos and
+    cuda are the same physical GPU. On native MUSA there is no CUDA runtime, and
+    the mapping is only harmless because torch_fl's FLAGOS_ALIAS_CUDA mode
+    resolves the ``cuda`` spelling back to flagos as well; MUSA does not reach
+    this path in practice, since coordinate-descent tuning is disabled there.
 
     No-op when the Triton backend name is already a valid torch device (the CUDA
     build reports ``cuda``), so this costs nothing off MetaX.
