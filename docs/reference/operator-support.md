@@ -75,6 +75,7 @@ decimal place.
 | NVIDIA RTX 5060 (2026-08-24) | 538 | 347 | 54 | 40 | 97 | 401 | 74.5% | 64.5% |
 | NVIDIA RTX 5060 (2026-08-24) | 527 | 347 | 45 | 38 | 97 | 392 | 74.4% | 65.8% |
 | NVIDIA RTX 5060 (2026-08-24) | 489 | 346 | 43 | 16 | 84 | 389 | 79.6% | 70.8% |
+| NVIDIA RTX 5060 (2026-08-25) | 481 | 344 | 41 | 12 | 84 | 385 | 80.0% | 71.5% |
 
 The 5060 rows are separate cohorts: the 489-route configuration (2026-08-24)
 additionally reroutes the 22 ops whose 7fb49bad-generated routes regressed
@@ -107,6 +108,7 @@ summary.
 | NVIDIA RTX 5060 (2026-08-24) | 2152 | 1292 | 0 | 153 | 155 | 14 | 0 | 0 |
 | NVIDIA RTX 5060 (2026-08-24) | 2113 | 1277 | 0 | 130 | 155 | 14 | 0 | 0 |
 | NVIDIA RTX 5060 (2026-08-24) | 2112 | 1132 | 0 | 52 | 120 | 7 | 0 | 0 |
+| NVIDIA RTX 5060 (2026-08-25) | 2099 | 1120 | 0 | 40 | 101 | 7 | 0 | 0 |
 
 The bw1000 baseline excludes 108 initial records that failed before operator
 execution because the child process could not load its MPI runtime. Exactly
@@ -361,6 +363,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-08-25 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 481-route config | Rerouted `mul_.Tensor` (recursion, #166), the softmax family (strided inputs, #172) and topk/`_weight_norm_interface`/`special_chebyshev_polynomial_v` (strided inputs, #174) to CUDA boxing. Cohort 489 -> 481. Zero new failures vs the 489 cohort; 4 FAILED routes removed. Remaining 12 FAILED routes were already `flagos_python` on main (elu/histc/sum.out fixed upstream in flag_gems, pending the next flag_gems bump; the rest are synthesis edge artifacts). | Full 481-overload survey on RTX 5060: 344 STRICT / 41 BASIC_ONLY / 12 FAILED / 84 UNTESTED. |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 489-route config | Rerouted the 22 ops whose 7fb49bad-generated routes regressed vs main (nan, wrong shape/dtype, recursion, compile errors), the remaining tl.dot int64 family (`addbmm`/`bmm`/`bmm.out`/`baddbmm`/`mv`/`dot`/`addmm.dtype`), three wrong-semantics gems kernels (`_conj`, `_fused_rms_norm`, `_pdist_forward`), the device-guarded bessel/pad families and `_embedding_bag_dense_backward`, and `gcd_` on DCU; synced the hand-maintained `*_cpp.conf` files. Cohort 527 -> 489. Zero route regressions vs main (all remaining 16 FAILED routes were already `flagos_python` on main). | Full 489-overload survey on RTX 5060: 346 STRICT / 43 BASIC_ONLY / 16 FAILED / 84 UNTESTED; conf/cpp-conf kernel consistency verified. |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 527-route config | Rerouted eleven ops whose gems Triton kernels fail to compile for specific dtypes/values (`mm`/`mm.out`/`addmm`/`addmm.out`/`addmm_` int64 `tl.dot`, `index_add`/`index_add_` bool `tl.atomic_add`, `cummax`/`cummin` bool loop types, `randint`/`randint_like` high=1 constexpr gap) from `flagos_python` to `cuda` boxing via `flaggems_runtime_broken`. Cohort 538 -> 527 active routes. Four-platform 546-route rows **not revalidated**. | Full 527-overload survey on RTX 5060: 347 STRICT / 45 BASIC_ONLY / 38 FAILED / 97 UNTESTED; zero new failures vs the 538 cohort; all eleven ops verified on the boxing route (int64 mm now raises the same error as stock PyTorch on CUDA). |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 538-route config | Rerouted seven device-assert ops (`i0`, `i0.out`, `special_i0e`, `special_i0e.out`, `special_i1`, `upsample_bicubic2d`, `soft_margin_loss`) from `flagos_python` to `cuda` boxing (gems kernels hard-assert `tensor.is_cuda`); regenerated all configs/kernels against flag_gems `7fb49bad`. Cohort 546 -> 538 active routes. Four-platform 546-route rows **not revalidated** (A100/mc550/810e/bw1000 unavailable). | Full 538-overload survey on RTX 5060: 347 STRICT / 54 BASIC_ONLY / 40 FAILED / 97 UNTESTED; manual verification that all seven ops now execute correctly on `flagos` via the boxing route. |
