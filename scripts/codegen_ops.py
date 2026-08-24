@@ -2530,6 +2530,12 @@ def main():
             "_fused_rms_norm",
             "_conj",
             "_pdist_forward",
+            # softmax kernels ignore input strides: wrong results on transposed
+            # inputs, silently wrong gradients (measured).
+            "_softmax",
+            "_softmax_backward_data",
+            "_log_softmax",
+            "_log_softmax_backward_data",
             # (4) wrong numerics or memory safety on the gems path
             "adaptive_max_pool3d_backward",
             "leaky_relu_",
