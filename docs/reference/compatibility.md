@@ -27,7 +27,7 @@
 | Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, optional FlagGems via triton-ascend | Stable (CI-covered ops, RNG suite) | Not validated | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Experimental (Python dispatch; not CI-tested on Ascend) | Beta |
 | PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
-| Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Experimental (FP16/BF16 autocast and GradScaler measured on S60, not in CI) | Not validated | Not validated | Not validated | Experimental (Python dispatch, requires vendor Triton) | Experimental |
+| Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
 | Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
 | D-Robotics BPU | `ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
 | TsingMicro | `ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | Runtime only | Not validated | Not validated | Not validated | Not applicable | Runtime only |
@@ -149,12 +149,27 @@ uses DTK Triton and does not exercise this path.
 
 ### Enflame GCU
 
-No CI manifest exists for this platform. GCU takes the native operator route through
-`libtopsaten.so`, with ops lacking a topsaten kernel reaching `cpu_fallback` instead of raising,
-and int64 operands always falling back to CPU because topsaten has no int64 kernels (see
-[`setup.py`](../../setup.py), lines 414-439). FlagGems can reach GCU only through the Python
-dispatch layer with Enflame's `triton_gcu` plugin, and registration is skipped when it or the
-toolchain is missing (same file, lines 420-429). Distributed and profiler support are not
+[`.github/configs/gcu.yml`](../../.github/configs/gcu.yml) builds an isolated CPU-PyTorch wheel
+and runs it against an S60 runner without importing the vendor `torch-gcu` plugin. GCU takes the
+native operator route through `libtopsaten.so`, with ops lacking a topsaten kernel reaching
+`cpu_fallback` instead of raising, and int64 operands always falling back to CPU because
+topsaten has no int64 kernels (see [`setup.py`](../../setup.py), lines 414-439). FlagGems can
+reach GCU only through the Python dispatch layer with Enflame's `triton_gcu` plugin, and
+registration is skipped when it or the toolchain is missing (same file, lines 420-429); the CI
+image does not install that stack, so the operator step excludes FlagGems markers.
+
+The CI steps are the same contract suites the other platforms run, selected by marker rather than
+by a file allowlist: the operator suite (568 passed, 33 skipped on S60), the full
+`test_rng_dispatch.py` (111 passed), `test_factory_ops.py` (46 passed), and `test_amp.py`
+(25 passed). RNG is native: seeds are reserved from the flagos PrivateUse1 generator via
+`c10::flagos::ReserveSeed`, so `torch.Generator(device="flagos")`, `manual_seed`,
+`manual_seed_all`, `get_rng_state`, and `set_rng_state` all drive the same per-device stream, and
+`random_` follows ATen's default integer bounds.
+
+`test_profiler_contract.py` is excluded. The TOPSPTI tracer does collect activities on S60 (229
+for a three-iteration matmul loop), but none surface as device events, because the CPU-only
+PyTorch 2.10 wheel used here provides no PrivateUse1 Kineto resolver — the same environment
+limitation recorded for MUSA rather than a GCU tracer defect. Distributed support is not
 represented in tests or docs for this platform.
 
 ### Moore Threads MUSA

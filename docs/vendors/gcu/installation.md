@@ -81,7 +81,7 @@ pytest tests/integration/test_factory_ops.py -v -s --tb=short
 pytest tests/integration/ops/test_common_ops.py -v -s --tb=short
 ```
 
-**Note**: GCU has no CI configuration file (`.github/configs/gcu.yml` does not exist), so these tests must be run manually on GCU hardware.
+The same suites run in CI through [`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml); see [CI scope](#ci-scope) for what that manifest covers and what it deliberately leaves out.
 
 ## Platform-specific Behavior
 
@@ -115,17 +115,17 @@ The FlagGems path remains experimental and requires validation on the target S60
 
 ## Limitations
 
-### No continuous validation
+### CI scope
 
-GCU has no CI runner (no `.github/configs/gcu.yml` config exists), so all tests are manual. The platform status is **Experimental** (see [`docs/reference/compatibility.md`](../../reference/compatibility.md) line 30).
+[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite, the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, and `tests/integration/test_amp.py`. FlagGems markers are excluded because the CI image does not install the vendor Triton stack. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
 
 ### Distributed support not validated
 
 Distributed collectives are not validated on GCU hardware. The `_VENDOR_PROFILES` routing table in `torch_fl/comm/process_group.py` lists GCU as FlagCX-only unless live evidence proves otherwise.
 
-### Profiler and torch.compile not validated
+### Profiler is runtime only; torch.compile not validated
 
-Neither `torch.compile` nor profiler-tracer parity has been validated on GCU.
+The TOPSPTI tracer collects activities on S60, but none surface as device events on the CPU-only PyTorch/Kineto build used here, which supplies no PrivateUse1 resolver. This is an environment limitation rather than a tracer defect, so `test_profiler_contract.py` stays out of CI until it is measured end to end. `torch.compile` has not been validated on GCU.
 
 ## Build without native kernels
 

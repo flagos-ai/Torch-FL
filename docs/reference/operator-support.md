@@ -150,6 +150,53 @@ The generic FlagGems survey above does not exercise vendor-native routes such as
 `ascend` or `gcu`. Native route changes are tracked here separately so they are
 not misrepresented as part of the 546-overload FlagGems cohort.
 
+### Enflame GCU S60 unified RNG parity routes (2026-08-24)
+
+The GCU RNG route set went from 15 to 47 overloads so the platform answers the
+same unified RNG contract the other backends do. The 32 newly routed overloads,
+all declared in `HANDWRITTEN_OPS` in
+[`scripts/codegen_gcu.py`](../../scripts/codegen_gcu.py) with the registration and
+conf lines regenerated (idempotent on a repeat run):
+
+- uniform family: `uniform_`, `rand`, `rand.generator`, `rand.out`,
+  `rand.names_out`, `rand_like`, `rand_like.generator`, `rand_like.out`
+- normal family: `normal_`, `normal.float_float`, `normal.Tensor_float`,
+  `normal.Tensor_Tensor`, `randn.names_out`, `randn_like`, `randn_like.out`
+- integer family: `randint`, `randint.low`, `randint.out`,
+  `randint.low_out`, `randint_like`, `randint_like.low_dtype`,
+  `randint_like.out`, `randint_like.low_dtype_out`, `randperm`,
+  `randperm.out`, `random_.from`
+- dropout and discrete: `native_dropout`, `native_dropout_backward`,
+  `bernoulli_.Tensor`, `binomial`
+- CPU-reference distributions (no topsaten entry point, seeded from the flagos
+  generator exactly as Ascend does): `_standard_gamma`, `_sample_dirichlet`
+
+Two correctness fixes came with the routing, both reported in
+[issue #161](https://github.com/flagos-ai/Torch-FL/issues/161):
+
+- **Generator identity.** Seeds are now reserved through
+  `c10::flagos::ReserveSeed` instead of a private philox state. The previous code
+  path went through `at::check_generator<at::CPUGeneratorImpl>`, which compares
+  `device_type()` — kCPU for the flagos generator — so an explicit
+  `torch.Generator(device="flagos")` was rejected outright, and generator-less
+  draws advanced a second state that `torch.flagos.manual_seed`,
+  `get_rng_state`, and `set_rng_state` never touched. All three now drive the
+  same per-device stream. A flagos generator paired with a CPU tensor raises
+  instead of silently redispatching.
+- **`random_` default bounds.** `topsatenRandom`'s no-bound overload fills the
+  dtype's full signed range; ATen's contract is `[0, iinfo(dtype).max]`. The
+  default overloads now pass an explicit per-dtype upper bound (the same table
+  Ascend uses) through the bounded overload.
+
+Measured on S60 against the installed TopsRider release, running the CI steps
+verbatim: `tests/integration/ops/test_rng_dispatch.py` is
+`111 passed, 5 skipped, 1 xpassed` (was `7 failed, 104 passed, 5 skipped,
+1 xpassed`), the full operator suite is `568 passed, 33 skipped, 4 xpassed`,
+`test_factory_ops.py` is `46 passed`, and `test_amp.py` is `25 passed`.
+The generic FlagGems cohort was **not revalidated** — the standard
+`flaggems_overload_survey.py` harness selects only `flagos_python` overloads and
+does not exercise these native routes.
+
 ### Enflame GCU S60 AMP routes (2026-08-24)
 
 The GCU backend now routes both GradScaler unscale overloads through the
@@ -364,6 +411,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 489-route config | Rerouted the 22 ops whose 7fb49bad-generated routes regressed vs main (nan, wrong shape/dtype, recursion, compile errors), the remaining tl.dot int64 family (`addbmm`/`bmm`/`bmm.out`/`baddbmm`/`mv`/`dot`/`addmm.dtype`), three wrong-semantics gems kernels (`_conj`, `_fused_rms_norm`, `_pdist_forward`), the device-guarded bessel/pad families and `_embedding_bag_dense_backward`, and `gcd_` on DCU; synced the hand-maintained `*_cpp.conf` files. Cohort 527 -> 489. Zero route regressions vs main (all remaining 16 FAILED routes were already `flagos_python` on main). | Full 489-overload survey on RTX 5060: 346 STRICT / 43 BASIC_ONLY / 16 FAILED / 84 UNTESTED; conf/cpp-conf kernel consistency verified. |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 527-route config | Rerouted eleven ops whose gems Triton kernels fail to compile for specific dtypes/values (`mm`/`mm.out`/`addmm`/`addmm.out`/`addmm_` int64 `tl.dot`, `index_add`/`index_add_` bool `tl.atomic_add`, `cummax`/`cummin` bool loop types, `randint`/`randint_like` high=1 constexpr gap) from `flagos_python` to `cuda` boxing via `flaggems_runtime_broken`. Cohort 538 -> 527 active routes. Four-platform 546-route rows **not revalidated**. | Full 527-overload survey on RTX 5060: 347 STRICT / 45 BASIC_ONLY / 38 FAILED / 97 UNTESTED; zero new failures vs the 538 cohort; all eleven ops verified on the boxing route (int64 mm now raises the same error as stock PyTorch on CUDA). |
 | 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 538-route config | Rerouted seven device-assert ops (`i0`, `i0.out`, `special_i0e`, `special_i0e.out`, `special_i1`, `upsample_bicubic2d`, `soft_margin_loss`) from `flagos_python` to `cuda` boxing (gems kernels hard-assert `tensor.is_cuda`); regenerated all configs/kernels against flag_gems `7fb49bad`. Cohort 546 -> 538 active routes. Four-platform 546-route rows **not revalidated** (A100/mc550/810e/bw1000 unavailable). | Full 538-overload survey on RTX 5060: 347 STRICT / 54 BASIC_ONLY / 40 FAILED / 97 UNTESTED; manual verification that all seven ops now execute correctly on `flagos` via the boxing route. |
+| 2026-08-24 | Enflame S60 | Native GCU unified RNG routes | Grew the GCU RNG route set from 15 to 47 overloads (uniform, normal, integer, dropout, discrete, and two CPU-reference distribution families) through `scripts/codegen_gcu.py`; switched seeding to `c10::flagos::ReserveSeed` so explicit `torch.Generator(device="flagos")` works and `manual_seed`/`get_rng_state`/`set_rng_state` share one per-device stream; gave `random_` ATen's per-dtype default upper bound. Generic FlagGems cohort **not revalidated**. | `test_rng_dispatch.py`: `111 passed, 5 skipped, 1 xpassed` (was `7 failed, 104 passed`). No regressions: operator suite `568 passed, 33 skipped, 4 xpassed`; `test_factory_ops.py` 46 passed; `test_amp.py` 25 passed. Generator ran twice with an empty second diff. |
 | 2026-08-24 | Enflame S60 | Native GCU AMP, convolution, and dtype routes | Added native AMP unscale routes (both overloads), native `convolution_overrideable`, and a CPU-fallback `convolution_backward_overrideable`; gated float64 to the CPU fallback since topsaten has no F64 kernels. Generic FlagGems cohort **not revalidated**. | `tests/integration/test_amp.py`: 25 passed. `test_conv1d_dispatch.py`: 8 passed. Conv forward within 3.9e-6 of CPU across stride/padding/dilation/group/bias variants; conv grads exact. Pre-existing, unrelated failures remain in `test_compile.py`, `test_profiler_parity.py`, `test_rng_dispatch.py`, and `neg` on uint8/bool. |
 | 2026-08-21 | MetaX C550 (MACA 3.8.0) | CUDA-boxing AMP routes | Enabled the shared AMP integration contract for MetaX and added it to the MetaX CI manifest; no operator route changed. Generic FlagGems routes were **not revalidated**. | `tests/integration/test_amp.py`: 25 passed, covering FP16/BF16 autocast policies and GradScaler finite/overflow training paths. |
 | 2026-08-19 | Hygon DCU bw1000 | Generic FlagGems routes | Rerouted `index_select` from `flagos_python` to `cuda` in all FlagGems configs (cross-stream launch race drops output stores under load); generic cohort 546 -> 545 active routes, 26 -> 27 forced CUDA fallbacks. Four-platform rows **not revalidated** (A100/mc550/810e unavailable). | Targeted survey `--ops index_select` on the flagos_python route: STRICT (standalone math correct); three failing HF v5.5.0 UT nodes (T5/Qwen3/Gemma3 beam search) pass after the reroute; tiny-T5 NaN reproducer clean 3/3. |

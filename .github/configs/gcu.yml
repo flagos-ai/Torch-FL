@@ -69,26 +69,39 @@ integration_tests:
       print(f"GCU devices: {count}")
       PY
 
-  # Initial GCU CI scope is limited to the operator files already passing on
-  # the S60 runner. conv1d has no GCU convolution_overrideable implementation;
-  # the RNG generator contract is tracked separately. The factory suite below
-  # is intentionally run as a gap detector: its randn-dependent cases expose
-  # the current GCU Philox state overflow instead of silently hiding it.
-  - name: Run validated GCU operator tests
+  # Marker selection, not a file allowlist: the earlier nine-file list was a
+  # bring-up scaffold, and pinning an allowlist hides every operator added
+  # after it. FlagGems is excluded because it needs the vendor Triton stack,
+  # which this image does not install (the same exclusion CUDA/DCU apply to
+  # their non-FlagGems step).
+  - name: Run operator tests (vendor backend, main ops)
     command: >-
-      python -m pytest
-      tests/integration/ops/test_abs_dispatch.py
-      tests/integration/ops/test_acos_dispatch.py
-      tests/integration/ops/test_add_dispatch.py
-      tests/integration/ops/test_all_dispatch.py
-      tests/integration/ops/test_bitwise_and_dispatch.py
-      tests/integration/ops/test_bmm_dispatch.py
-      tests/integration/ops/test_cat_dispatch.py
-      tests/integration/ops/test_clamp_dispatch.py
-      tests/integration/ops/test_constant_pad_nd_dispatch.py
-      -m "anyplatform or main_ops" -v -s --tb=short
-
-  - name: Expose GCU factory and RNG gaps
-    command: >-
-      python -m pytest tests/integration/test_factory_ops.py
+      python -m pytest tests/integration/ops/
+      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
+
+  # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX. The generator
+  # contract, the shared-state round trip, and the integer range semantics are
+  # implemented natively on GCU, so this is a contract check rather than a gap
+  # detector.
+  - name: Run unified RNG tests
+    command: >-
+      python -m pytest tests/integration/ops/test_rng_dispatch.py
+      -m "main_ops" -v -s --tb=short
+
+  - name: Run general tests
+    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+
+  - name: Run AMP tests
+    command: python -m pytest tests/integration/test_amp.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Deliberately not included yet, so the gap is recorded rather than implied:
+  #   - tests/integration/test_profiler_contract.py. The TOPSPTI tracer does
+  #     collect activities on S60 (229 for a three-iteration matmul loop), but
+  #     none reach the profiler as device events on a CPU-only PyTorch/Kineto
+  #     build, which supplies no PrivateUse1 resolver. This is the same
+  #     environment limitation recorded for MUSA, not a GCU tracer defect, and
+  #     the step is withheld until it is measured end to end.
+  #   - Qwen3 inference/training smoke, pending a model mount on the runner.
+  # ---------------------------------------------------------------------------
