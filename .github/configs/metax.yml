@@ -131,3 +131,8 @@ integration_tests:
 
   - name: Run AMP tests
     command: python -m pytest tests/integration/test_amp.py -v --tb=short
+
+  - name: Unified profiler contract
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short

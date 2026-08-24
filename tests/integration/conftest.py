@@ -19,6 +19,8 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+pytest_plugins = ("profiler_support",)
+
 
 def _ensure_backend_config() -> None:
     """Ensure MetaX backend config is set before importing torch_fl (if not already specified).
@@ -71,6 +73,9 @@ def pytest_configure(config):
     # tests/integration/ raised PytestUnknownMarkWarning -- and would hard-error
     # under --strict-markers. Registering it here covers the whole directory.
     config.addinivalue_line(
+        "markers", "anyplatform: runs on every supported hardware platform"
+    )
+    config.addinivalue_line(
         "markers",
         "main_ops: representative test in the CI smoke subset "
         "(select with -m main_ops)",
@@ -78,6 +83,33 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ascend: requires Ascend NPU hardware")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA hardware")
     config.addinivalue_line("markers", "gcu: requires Enflame GCU hardware")
+    config.addinivalue_line(
+        "markers", "profiler: shared public torch.profiler contract"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_device: requires device activity from the profiler"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_kernel: requires profiler kernel activities"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_runtime: requires profiler runtime activities"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_memcpy: requires profiler memcpy activities"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_memset: requires profiler memset activities"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_flow: requires CPU-to-device profiler flows"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_linkage: requires profiler device-time linkage"
+    )
+    config.addinivalue_line(
+        "markers", "profiler_metadata: requires profiler device metadata"
+    )
 
     import torch_fl
 

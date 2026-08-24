@@ -99,7 +99,7 @@ integration_tests:
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
   - name: Run AMP tests
     command: python -m pytest tests/integration/test_amp.py -v --tb=short
-  - name: Profiler parity test
+  - name: Unified profiler contract
     command: >-
-      python -m pytest tests/integration/test_profiler_parity.py
-      -v -m main_ops --tb=short
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short

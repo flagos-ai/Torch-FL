@@ -106,24 +106,16 @@ integration_tests:
   - name: Run general factory ops
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
 
+  - name: Unified profiler contract
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short
+
+  # Device-only contract cases skip through profiler capabilities while the
+  # Ascend tracer exposes CPU/Trace records only. CPU/API coverage still runs.
   # ---------------------------------------------------------------------------
   # Follow-up (not part of first-version acceptance). Tracked here so the
   # upstream gaps not yet covered by CI are not lost:
-  #   - Ascend RNG overload coverage (normal_ / uniform_ / exponential_ /
-  #     bernoulli_ / random_ / log_normal_ / cauchy_ / geometric_ / poisson /
-  #     _standard_gamma / _sample_dirichlet / binomial / randint_like /
-  #     randperm + *_like / *.out / *.names_out variants), the native_dropout
-  #     kernel, and Ascend generator parity: RESOLVED upstream by #70, which
-  #     routes 33 RNG ops and fixes the generator-contract assertions. The full
-  #     test_rng_dispatch.py suite now runs in CI (see "Run Ascend RNG tests"
-  #     above); the prior allowlist is retired.
   #   - Qwen3 inference/training smoke once a model is mounted on the Ascend
   #     runner (deferred; not required for the first-version op contract).
-  #   - Ascend profiler parity: the ascend profiler path does not yet emit
-  #     device-side events (kernel / gpu_memcpy / gpu_memset / runtime /
-  #     ac2g flows); the flagos trace has only ['Trace','cpu_op'] vs the
-  #     torch-cuda baseline. test_profiler_parity.py (7 tests) is therefore
-  #     excluded from first-version CI; re-add the step once the ascend
-  #     profiler emits the expected device/runtime categories.
-  # None of the above may be unblocked by adding a CPU fallback or faking a pass.
   # ---------------------------------------------------------------------------

@@ -82,13 +82,10 @@ integration_tests:
       -m "main_ops" -v -s --tb=short
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-  # Needs its own entry: `-m main_ops` above is scoped to tests/integration/ops/,
-  # so a marked test outside that directory is silently collected as zero tests
-  # rather than erroring.
-  - name: Profiler parity test
+  - name: Unified profiler contract
     command: >-
-      python -m pytest tests/integration/test_profiler_parity.py
-      -v -m main_ops --tb=short
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short
   - name: Run inference tests
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py
