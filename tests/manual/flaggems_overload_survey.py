@@ -505,12 +505,22 @@ def summarize(routes: list[str], results: dict[str, dict]) -> dict:
             else:
                 verdict = "FAILED"
         counts[verdict] = counts.get(verdict, 0) + 1
+    strided_fail = sorted(
+        op
+        for op in routes
+        if any(
+            c.get("profile") == "2d-f32-strided"
+            and c["status"] in ("WRONG", "ERROR", "CRASH")
+            for c in results.get(op, {}).get("cases", [])
+        )
+    )
     return {
         "registered": len(routes),
         "tested": tested,
         "basic_executable": basic,
         "strict_support": strict,
         "verdicts": counts,
+        "strided_failures": strided_fail,
     }
 
 
