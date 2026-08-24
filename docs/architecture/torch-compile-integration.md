@@ -7,8 +7,8 @@ This document describes the `torch.compile` integration for the flagos device, e
 The flagos device now supports PyTorch 2.0+ `torch.compile` for automatic performance optimization:
 
 ```python
+import torch_fl  # Import first on MetaX.
 import torch
-import torch_fl
 
 model = MyModel().to("flagos:0")
 compiled_model = torch.compile(model, backend="flagos")
@@ -29,8 +29,8 @@ output = compiled_model(input)
 ### Basic Usage
 
 ```python
+import torch_fl  # Import first on MetaX.
 import torch
-import torch_fl
 
 # Standard model definition
 model = torch.nn.Sequential(
@@ -164,8 +164,9 @@ inductor generates Triton kernels that operate on flagos tensors directly.
      properties from `torch.cuda` (the same physical GPU)
    - Adds `"flagos"` to inductor's `GPU_TYPES` so `is_gpu()` is True and the
      Triton codegen path is taken instead of C++/CPU
-   - Reports flagos as cuda at the Triton boundary (`DeviceProperties.create`),
-     because Triton's NVIDIA backend hard-checks `target.backend == "cuda"`
+   - Reports the underlying compiler target at the Triton boundary
+     (`DeviceProperties.create`): `cuda`/`nvidia` on CUDA-compatible builds and
+     `maca`/`metax` on MetaX
 
 3. **Codegen registration** (`torch_fl/compile/inductor_codegen.py`)
    - Device op overrides (guards, streams, sync) inheriting the CUDA ones
@@ -323,7 +324,8 @@ tests live alongside it:
 4. **CUDA graphs off**: `torch.cuda.CUDAGraph` is a dummy class in the CPU torch
    wheel, so `triton.cudagraphs` is forced off even under `mode="max-autotune"`
 5. **FlagTree maturity**: Backend support varies by hardware; Hygon HCU is
-   validated on `gfx936`, while other vendor backends remain untested here
+   validated on `gfx936` and MetaX on C550/MACA 3.8.0, while other vendor
+   backends remain untested here
 
 ## Roadmap
 
@@ -332,8 +334,9 @@ tests live alongside it:
       triton at install time, so inductor picks it up unaided. Built from source
       on H800 (`flagtree-0.6.0`, Triton 3.6, nvidia backend).
 - [x] `torch.compile(backend="flagos")` end-to-end on FlagTree — forward and
-      backward compile and match eager, with inductor's fused kernels built to
-      PTX/cubin by FlagTree. Full `test_compile.py` passes 15/15 there.
+      backward compile and match eager on NVIDIA and MetaX, with outputs and
+      gradients remaining on `flagos`. The complete compile suite passes on both
+      targets (the MetaX-specific event regression adds one case there).
 - [ ] Benchmark fusion gains vs. stock inductor+triton on cuda
 - [ ] Phase 3: FlagGems-aware fusion (recognize pre-optimized patterns)
 - [ ] Phase 4: Custom fusion patterns for flagos-specific ops

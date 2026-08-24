@@ -136,3 +136,6 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
+
+  - name: Run torch.compile tests
+    command: python -m pytest tests/integration/test_compile.py -v --tb=short

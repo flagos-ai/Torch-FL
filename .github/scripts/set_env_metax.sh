@@ -84,6 +84,52 @@ print(f"Build PyTorch: {torch.__version__}")
 print(f"Build torch path: {torch_path}")
 PY
 
+# Expose the vendor Triton (triton-metax) to the CPU torch venv. torch.compile
+# needs it: the active torch is the CPU wheel, which ships no Triton, so
+# inductor raises TritonMissing without this. The vendor package lives in the
+# image's MetaX torch install, which we otherwise deliberately do not use --
+# only libtorch is consumed, from /opt/vendor-libtorch.
+#
+# Linked rather than copied: the metax backend carries ~2.4GB of device
+# libraries and a cp -a of that is pure CI wall time. set_env_cuda.sh copies
+# because it also relocates FlagGems/FlagCX; here only Triton is needed.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  VENDOR_TRITON=""
+  for candidate in /opt/conda/lib/python3.*/site-packages \
+                   /opt/vendor-torch/lib/python3.*/site-packages \
+                   /usr/lib/python3.*/site-packages \
+                   /usr/local/lib/python3.*/site-packages; do
+    if [[ -d "$candidate/triton" ]]; then
+      VENDOR_TRITON="$candidate/triton"
+      break
+    fi
+  done
+
+  if [[ -z "$VENDOR_TRITON" ]]; then
+    echo "::error::Vendor Triton (triton-metax) was not found in the image;" \
+         "torch.compile tests cannot run. Searched /opt/conda, /opt/vendor-torch," \
+         "/usr and /usr/local site-packages."
+    exit 1
+  fi
+
+  if [[ ! -e "$VENV_SITE/triton" ]]; then
+    ln -s "$VENDOR_TRITON" "$VENV_SITE/triton"
+  fi
+  for metadata in "$(dirname "$VENDOR_TRITON")"/triton-*.dist-info; do
+    [[ -e "$metadata" ]] || continue
+    [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
+  done
+
+  # Confirm the vendor Triton actually imports against the CPU torch wheel,
+  # rather than discovering it at test time.
+  python - <<'PY'
+import triton
+
+print(f"Vendor Triton: {triton.__version__} ({triton.__file__})")
+PY
+fi
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' \
     /opt/venv/bin \

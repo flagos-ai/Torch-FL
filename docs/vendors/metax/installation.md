@@ -187,6 +187,51 @@ unscale; finite scale growth; overflow backoff; and a forward/backward optimizer
 step. This validation applies to the boxing path, not the legacy handwritten
 MetaX kernel mode.
 
+### torch.compile and FlagTree
+
+The boxing path supports `torch.compile(backend="flagos")` with either the MetaX
+Triton distribution or a MetaX-enabled [FlagTree](https://github.com/flagos-ai/FlagTree)
+build. FlagTree installs the module named `triton`; `FLAGOS_USE_FLAGTREE=1`
+asserts that this replacement is active rather than switching it at runtime.
+
+A Triton is required: the official `torch==2.10.0+cpu` wheel this path installs
+against ships none, and Inductor raises `TritonMissing` without one. Install or
+expose the MetaX Triton distribution (`triton-3.6.0+metax*`) alongside the CPU
+wheel; linking just the `triton` package and its `.dist-info` is enough, and the
+`.dist-info` is required because Triton discovers its hardware backends through
+`importlib.metadata` entry points.
+
+Inductor forwards the Triton backend name (`maca` on MetaX) to its benchmarker as
+a torch device during autotuning. The vendor MetaX torch build patches that
+in-tree; the official CPU wheel does not, so torch_fl maps `maca` back to `cuda`
+itself (`torch_fl/compile/device_interface.py`). Both refer to the same physical
+GPU, so no separate configuration is needed.
+Build FlagTree main (Triton 3.6 for PyTorch 2.10) in a separate environment:
+
+```bash
+git clone https://github.com/flagos-ai/FlagTree.git
+cd FlagTree
+export FLAGTREE_BACKEND=metax
+MAX_JOBS=64 python -m pip install . --no-build-isolation -v
+```
+
+Then run the compile contract with that environment's site-packages ahead of the
+normal MetaX Triton installation:
+
+```bash
+PYTHONPATH=/path/to/flagtree-venv/lib/python3.12/site-packages \
+  FLAGOS_USE_FLAGTREE=1 \
+  FLAGOS_METAX_BOXING=1 \
+  pytest tests/integration/test_compile.py -v --tb=short
+```
+
+On C550 with MACA 3.8.0, the full suite passed with FlagTree revision
+`140bd6ab1ad86c5df4b07b76d9c722e357a9166d` (Triton 3.6, MetaX backend),
+covering forward, backward, FP32/FP16, max-autotune, recompilation, FakeTensor
+tracing, and output/gradient residency on `flagos`. The installed MetaX Triton
+path passed the same applicable tests; only the FlagTree-identity test is skipped
+outside a FlagTree environment.
+
 ## Optional: FlagGems on MetaX
 
 The MetaX boxing wheel compiles FlagGems Python-dispatch kernels by default, so FlagGems is a runtime switch. Enabling it requires two additional target-side dependencies:

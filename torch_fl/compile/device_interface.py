@@ -244,6 +244,51 @@ def _patch_device_properties() -> None:
     DeviceProperties.create = create  # type: ignore[method-assign, assignment]
 
 
+def _patch_inductor_benchmark_device() -> None:
+    """Teach inductor's benchmarker that the Triton backend name is not a device.
+
+    ``_patch_device_properties`` reports ``DeviceProperties.type`` as the *Triton*
+    backend name so triton picks the right backend -- ``maca`` on MetaX. But
+    inductor also forwards that same string to its benchmarker as a **torch**
+    device (triton_heuristics.py:933 -> benchmarking.py `torch.device(device)`),
+    and ``maca`` is not a torch device type, so autotuning dies with
+    "Expected one of cpu, cuda, ... at start of device string: maca".
+
+    The vendor MetaX torch build patches this in-tree (a ``# USE_MACA`` branch
+    mapping ``maca`` -> ``cuda`` in ``Benchmarker.benchmark``). The official CPU
+    wheel we ship against has no such patch, so we apply the same mapping here.
+    Benchmarking on cuda is correct: flagos and cuda are the same physical GPU.
+
+    No-op when the Triton backend name is already a valid torch device (the CUDA
+    build reports ``cuda``), so this costs nothing off MetaX.
+    """
+    device_type, _ = _triton_backend()
+    if device_type == "cuda":
+        return
+
+    from torch._inductor.runtime import benchmarking
+
+    benchmarker_cls = benchmarking.Benchmarker
+    original = benchmarker_cls.benchmark
+    if getattr(original, "_flagos_patched", False):
+        return
+
+    def benchmark(
+        self: Any,
+        fn: Any,
+        fn_args: Any = None,
+        fn_kwargs: Any = None,
+        device: Optional[Union[str, torch.device]] = None,
+        **kwargs: Any,
+    ) -> float:
+        if isinstance(device, str) and device == device_type:
+            device = "cuda"
+        return original(self, fn, fn_args, fn_kwargs, device=device, **kwargs)
+
+    benchmark._flagos_patched = True  # type: ignore[attr-defined]
+    benchmarker_cls.benchmark = benchmark  # type: ignore[method-assign]
+
+
 def _repair_cuda_interface_raw_stream() -> None:
     """Give the stock CudaInterface its raw-stream getter back.
 
@@ -277,6 +322,7 @@ def register_flagos_device_interface() -> None:
 
     _register_gpu_type()
     _patch_device_properties()
+    _patch_inductor_benchmark_device()
     _repair_cuda_interface_raw_stream()
     register_interface_for_device(DEVICE_TYPE, FlagOSDeviceInterface)
     # The triton-reported device type ("maca" on MetaX) is what the runtime

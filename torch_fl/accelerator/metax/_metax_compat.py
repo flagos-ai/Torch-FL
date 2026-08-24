@@ -265,6 +265,13 @@ def is_metax_available():
     return _load_mcruntime(metax_path) is not None
 
 
+def _patch_inductor_event():
+    """Make Inductor events bypass the lightweight CUDA stream shim."""
+    flagos = getattr(torch, "flagos", None)
+    if flagos is not None and getattr(flagos, "Event", None) is not None:
+        torch.cuda.Event = flagos.Event
+
+
 def patch_torch_cuda_for_metax():
     """
     Monkey-patch torch.cuda functions to work on MetaX hardware.
@@ -281,6 +288,10 @@ def patch_torch_cuda_for_metax():
     global _mcruntime, _patched
 
     if _patched:
+        # FLAGOS_METAX_COMPAT can call us once before torch.flagos is registered
+        # and again afterward. Keep this late-bound patch outside the one-time
+        # runtime setup so the second call can install the real Event wrapper.
+        _patch_inductor_event()
         return True
 
     metax_path = _find_metax_path()
@@ -404,6 +415,11 @@ def patch_torch_cuda_for_metax():
     torch.cuda.default_stream = lambda device=None: _MetaxStreamShim(
         _device_index(device)
     )
+
+    # Inductor's autotuner constructs torch.cuda.Event directly. Its default
+    # record path rejects the lightweight stream shim above, while flagos.Event
+    # resolves the real underlying stream before recording the same MetaX event.
+    _patch_inductor_event()
 
     # Device context exchange: extract index for flagos/privateuseone tensors.
     def _exchange_device(idx):

@@ -23,7 +23,7 @@
 | Platform | Build selector | Execution path | Eager and autograd | `torch.compile` | Distributed | Profiler | FlagGems | Status |
 |---|---|---|---|---|---|---|---|---|
 | NVIDIA CUDA | `ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
-| MetaX | `ACCELERATOR=metax` | CUDA-boxing reuse via `cu-bridge`/mxcc, or native MetaX kernels | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Not validated | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
+| MetaX | `ACCELERATOR=metax` | CUDA-boxing reuse via `cu-bridge`/mxcc, or native MetaX kernels | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
 | Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, optional FlagGems via triton-ascend | Stable (CI-covered ops, RNG suite) | Not validated | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Experimental (Python dispatch; not CI-tested on Ascend) | Beta |
 | PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
@@ -53,23 +53,32 @@ parity with torch-cuda via CUPTI (see
 ### MetaX
 
 [`.github/configs/metax.yml`](../../.github/configs/metax.yml) runs representative
-operator dispatch, factory/autograd, RNG, and AMP tests in CI. The operator command explicitly
-excludes all FlagGems tests, so FlagGems on MetaX has no CI validation. The shared
-`AutocastPrivateUse1` policy registrations dispatch FP16/BF16 lower-precision, FP32,
+operator dispatch, factory/autograd, RNG, AMP, and `torch.compile` tests in CI. The operator
+command explicitly excludes all FlagGems tests, so FlagGems on MetaX has no CI validation. The
+shared `AutocastPrivateUse1` policy registrations dispatch FP16/BF16 lower-precision, FP32,
 optional-dtype, and promote groups through the existing CUDA-boxing kernels. On a C550 with
 MACA 3.8.0, the 25-case AMP suite passed, including nested autocast state, non-finite unscale,
 finite scale growth, overflow backoff, and a forward/backward optimizer step. This evidence is
 specific to MetaX boxing mode; the legacy handwritten MetaX kernels were not revalidated.
+
+`torch.compile(backend="flagos")` is experimentally validated in the same C550/MACA 3.8.0
+boxing environment with both the installed vendor Triton and FlagTree main at revision
+`140bd6ab1ad86c5df4b07b76d9c722e357a9166d` (Triton 3.6, MetaX backend). The complete compile
+suite passes with outputs and gradients remaining on `flagos`, including forward, backward,
+FP32/FP16, max-autotune, recompilation, FakeTensor tracing, and the FlagTree-specific result
+check. MetaX CI continuously exercises the vendor Triton path; FlagTree remains a manual
+measurement because it replaces the environment's installed `triton` distribution.
+
 MetaX carries FSDP2 and Qwen3 training parity work (see repository history). Distributed
 support routes through the same NCCL-shaped fallback as CUDA (`_VENDOR_PROFILES["metax"]` in
 [`torch_fl/comm/process_group.py`](../../torch_fl/comm/process_group.py), line 93), but that is
-architectural routing, not a CI-verified collective test on this platform. `torch.compile` is
-not validated. Profiler-tracer parity was measured locally on a C550 with MACA 3.8.0 MCPTI:
-the seven-case `tests/integration/test_profiler_parity.py` suite passed in MetaX boxing mode,
-covering kernel, memcpy, memset, and runtime events, flow pairing, device-time attribution,
-kernel metadata, runtime callback names, and capture-window filtering. This is not yet a CI
-result, and the scanner remains unvalidated across multiple MetaX SDK versions, devices, and
-non-default streams.
+architectural routing, not a CI-verified collective test on this platform. Profiler-tracer
+parity was measured locally on a C550 with MACA 3.8.0 MCPTI: the seven-case
+`tests/integration/test_profiler_parity.py` suite passed in MetaX boxing mode, covering kernel,
+memcpy, memset, and runtime events, flow pairing, device-time attribution, kernel metadata,
+runtime callback names, and capture-window filtering. This is not yet a CI result, and the
+scanner remains unvalidated across multiple MetaX SDK versions, devices, and non-default
+streams.
 
 ### Ascend
 

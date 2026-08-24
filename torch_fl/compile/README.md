@@ -17,8 +17,8 @@ tensor's storage already *is* CUDA memory, and device indices line up
 ## Usage
 
 ```python
+import torch_fl  # Import first on MetaX.
 import torch
-import torch_fl
 
 def my_model(x):
     z = x + 1.0
@@ -57,7 +57,7 @@ Keeping the graph on flagos avoids that, and removes a copy-in/copy-out per call
 | `GPU_TYPES.append("flagos")` | `is_gpu()` is a membership test on this list; without it inductor picks the C++/CPU codegen path and never emits Triton. Must be in place -- callers captured the list object at import. |
 | Prime `get_gpu_type()`'s cache | It asserts at most one GPU type is available, and the torch.cuda shim reports available alongside flagos. |
 | `register_interface_for_device` | Inductor's `DeviceInterface`: device state from `torch.flagos`, hardware properties from `torch.cuda` (same GPU). |
-| `DeviceProperties.create` wrap | Reports flagos as cuda at the Triton boundary. Triton's NVIDIA backend hard-checks `target.backend == "cuda"`, so a literal `"flagos"` finds zero compatible backends. Inductor already does this in the opposite direction for ROCm (`hints.py:149`). |
+| `DeviceProperties.create` wrap | Reports the underlying compiler target at the Triton boundary: `cuda` for NVIDIA or `maca` for MetaX. A literal `flagos` target finds no compatible Triton backend. |
 | `register_device_op_overrides` | Device guard / stream / synchronize snippets spliced into generated code. Inherits the CUDA ones; only Python-level device manipulation routes through `torch.flagos`. |
 | `register_backend_for_device` | Scheduling + wrapper codegen -- the stock CUDA/Triton pipeline under the `"flagos"` key. |
 
@@ -77,7 +77,8 @@ backend compensates:
 - `CudaInterface.get_raw_stream` is re-attached -- the binding exists, but the
   import-time `torch.cuda._is_compiled()` probe left it at `None`.
 
-See `torch_fl/accelerator/cuda/_cuda_compat.py` for the memory-stats and
+See `torch_fl/accelerator/cuda/_cuda_compat.py` and
+`torch_fl/accelerator/metax/_metax_compat.py` for the memory-stats and
 Event/Stream shims that inductor's autotuner needs.
 
 ## AMP and Dtype Support
@@ -126,12 +127,13 @@ validation.
 ## Limitations
 
 1. Single device - multi-GPU compilation not yet exercised
-2. FlagTree is validated on NVIDIA `sm90` and Hygon `gfx936` with the HCU
-   backend; other vendor backends remain untested here
+2. FlagTree is validated on NVIDIA `sm90`, Hygon `gfx936` with the HCU
+   backend, and MetaX C550 with MACA 3.8.0; other vendor backends remain
+   untested here
 
 ## Future Work
 
-- [x] Exercise `torch.compile(backend="flagos")` on FlagTree-built NVIDIA and
-      Hygon HCU environments
+- [x] Exercise `torch.compile(backend="flagos")` on FlagTree-built NVIDIA,
+      Hygon HCU, and MetaX environments
 - [ ] Benchmark fusion gains against stock inductor+triton on cuda
 - [ ] Multi-GPU compilation support
