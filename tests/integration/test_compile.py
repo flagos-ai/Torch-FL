@@ -558,11 +558,24 @@ def test_musa_flagtree_compiles_forward_backward(device):
     assert plugin is None or plugin.__spec__.origin == "torch_fl_shim"
 
 
-def _skip_unless_gcu():
+def _skip_unless_gcu(*, needs_triton: bool = True):
+    """Gate the GCU tests on the build and, by default, on triton_gcu.
+
+    Compiling anything on GCU needs Enflame's triton_gcu plugin, which the CI
+    image does not install (see the FLAGGEMS_KERNEL=0 note in set_env_gcu.sh).
+    Checking the accelerator alone would turn a missing vendor Triton stack into
+    a test failure rather than a skip. ``needs_triton=False`` is for the checks
+    that only read torch_fl's own state.
+    """
     from torch_fl._build_config import ACCELERATOR
 
     if ACCELERATOR != "gcu":
         pytest.skip("GCU build required")
+    if needs_triton:
+        from torch_fl.accelerator.gcu._gcu_compat import is_triton_gcu_available
+
+        if not is_triton_gcu_available():
+            pytest.skip("triton_gcu required (vendor Triton stack not installed)")
 
 
 @pytest.mark.gcu
@@ -601,8 +614,10 @@ def test_gcu_cache_key_survives_pickling():
     takes the HIP branch into ``gcnArchName``. And ``torch.device`` is replaced
     by a function-local class that pickle cannot resolve by name, which
     downgrades every compile to BypassFxGraphCache.
+
+    Both are torch_fl-side, so this holds without the vendor Triton stack.
     """
-    _skip_unless_gcu()
+    _skip_unless_gcu(needs_triton=False)
     import pickle
 
     from torch._inductor.codecache import CacheBase
@@ -682,7 +697,11 @@ def test_gcu_compiles_forward_backward(device):
 
 @pytest.mark.gcu
 def test_gcu_defaults_to_serial_compile(monkeypatch):
-    """A tops pointer only resolves against the current device, so no forking."""
+    """A tops pointer only resolves against the current device, so no forking.
+
+    This is a configuration check on torch_fl's side; triton_gcu need not be
+    installed for the rule to hold.
+    """
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
@@ -696,6 +715,8 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
     assert patches["compile_threads"] == 4
+
+    _skip_unless_gcu(needs_triton=False)
 
 
 # The generic FlagTree test above also covers the MThreads runtime when the
