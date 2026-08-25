@@ -50,9 +50,17 @@ import pytest
 # tests/integration/ops/<this file> -> repo root is three levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONF = _REPO_ROOT / "torch_fl" / "configs" / "backends_flaggems.conf"
+_KUNLUN_CONF = _REPO_ROOT / "torch_fl" / "configs" / "backends_kunlun_flaggems.conf"
 _REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
 _KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
 _CODEGEN = _REPO_ROOT / "scripts" / "codegen_ops.py"
+_KUNLUN_VERIFIED = {
+    "add.Tensor",
+    "add_.Tensor",
+    "cos",
+    "div.Tensor",
+    "mean",
+}
 
 
 def _read(path: Path) -> str:
@@ -60,10 +68,10 @@ def _read(path: Path) -> str:
     return path.read_text()
 
 
-def _conf_flagos_python_ops() -> set[str]:
-    """Op names that backends_flaggems.conf routes to the flagos_python slot."""
+def _conf_flagos_python_ops(path: Path = _CONF) -> set[str]:
+    """Op names in a config that route to the flagos_python slot."""
     ops: set[str] = set()
-    for raw in _read(_CONF).splitlines():
+    for raw in _read(path).splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -239,3 +247,17 @@ class TestFlagGemsConfConsistency:
             f"flagos_python route count mismatch: conf={len(conf_disp)} "
             f"override_only={len(override_disp)} kernels={len(cc_disp)}"
         )
+
+    @pytest.mark.anyplatform
+    def test_kunlun_config_has_only_measured_routes(self):
+        """Kunlun's default FlagGems config stays within measured evidence."""
+        assert _conf_flagos_python_ops(_KUNLUN_CONF) == _KUNLUN_VERIFIED
+
+    @pytest.mark.anyplatform
+    def test_kunlun_routes_have_flaggems_kernels(self):
+        """Every measured Kunlun route has a generated Python kernel."""
+        ops = _conf_flagos_python_ops(_KUNLUN_CONF)
+        dispatchers, unmapped = _ops_to_dispatchers(ops)
+        assert not unmapped, f"Kunlun routes are not registered: {unmapped}"
+        missing = sorted(dispatchers - _cc_flagos_python_dispatchers())
+        assert not missing, f"Kunlun routes lack Python kernels: {missing}"

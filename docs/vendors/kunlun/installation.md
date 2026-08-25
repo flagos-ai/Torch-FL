@@ -42,9 +42,12 @@ ACCELERATOR=kunlun \
 ```
 
 The build uses the host compiler and does not require `nvcc`. It enables the
-CUDA boxing kernels and disables both FlagGems C++ and Python kernel builds until
-those paths have a measured P800 survey. The SDK libraries remain supplied by
-the target installation; they are not copied into the wheel.
+CUDA boxing kernels and the FlagGems Python wrappers; FlagGems C++ remains
+disabled because the Kunlun stack does not provide the required `liboperators.so`.
+The runtime default remains CUDA boxing. Set `FLAGOS_USE_FLAGGEMS=1` to select
+the Kunlun-specific config, which enables only the overloads measured on P800
+and keeps the remaining generated operators on CUDA boxing. The SDK libraries
+remain supplied by the target installation; they are not copied into the wheel.
 
 For an in-place source checkout, use `setup.py build_ext --inplace` instead of
 `pip install`.
@@ -96,22 +99,52 @@ intentional: the vendor torch exposes CUDA registrations, so a route to `cuda`
 reaches the vendor kernel through the generated boxing implementation. A measured
 8x8 float32 matrix multiplication passed against the CPU reference.
 
-This initial port does not enable FlagGems. Do not infer full operator support
-from the presence of CUDA registrations or from the `mm` result. Run the manual
-FlagGems overload survey on the target hardware before publishing an operator
-support claim:
+## Optional: FlagGems on Kunlun
+
+The vendor stack ships a FlagTree Triton at `/opt/flagtree` that `flag_gems`
+imports and runs on. Enable it per process:
+
+```bash
+export PYTHONPATH=/opt/flagtree:$PYTHONPATH
+export FLAGOS_USE_FLAGGEMS=1
+```
+
+`import torch_fl` then selects `torch_fl/configs/backends_kunlun_flaggems.conf`.
+That config is deliberately narrow: only the overloads with measured CPU-reference
+evidence on P800 route to `flagos_python`, and every other generated operator
+uses CUDA boxing. The generic `backends_flaggems.conf` is **not** the Kunlun
+default, because several of its routes fail on the current XPU stack:
+
+| Route | Observed failure on P800 |
+|---|---|
+| `exp`, `exp.out` | `xpuLaunchKernel("exp_func_kernel_rank_1", ...) -> Operation not permitted` |
+| `mm`, `mm.out` | Triton `OutOfResources: out of resource: uni_sram` |
+| `addmm` | Compiler abort inside the FlagTree LLVM backend |
+| `mul_.Tensor` | gems exits via `torch.mul(..., out=)`, which the XPU path leaves unregistered |
+
+Do not add a route to the Kunlun config from FlagGems availability alone.
+Extend `kunlun_verified_flaggems` in [`scripts/codegen_ops.py`](../../../scripts/codegen_ops.py),
+regenerate, and re-run the survey on hardware:
 
 ```bash
 python tests/manual/flaggems_overload_survey.py \
-  --conf torch_fl/configs/backends_flaggems.conf \
+  --conf torch_fl/configs/backends_kunlun_flaggems.conf \
   --out /tmp/kunlun-flaggems-overloads.json
 ```
 
+An individual overload can still be forced onto FlagGems for debugging with
+`FLAGOS_OP_<op>=flaggems_python`, because every discovered wrapper stays compiled.
+
+FlagGems RNG is **not** validated on this hardware.
+`tests/integration/ops/test_rng_dispatch.py` currently fails and segfaults on
+P800, so no RNG overload is part of the measured Kunlun scope. A focused
+seed-replay probe passed, which is not a substitute for the suite.
+
 Record the torch-fl revision, FlagGems revision, hardware model, date, config
 hashes, harness version, and raw JSON evidence in
-[`operator-support.md`](../../reference/operator-support.md). Until that survey
-is completed, Kunlun remains **not revalidated** in the aggregate FlagGems
-cohort.
+[`operator-support.md`](../../reference/operator-support.md). Kunlun remains
+**not revalidated** against the aggregate 546-overload FlagGems cohort; its
+measured scope is the Kunlun config only.
 
 ## Troubleshooting
 

@@ -38,9 +38,10 @@ CPU reference. It then classifies each overload from the remaining valid cases:
 
 ## Baseline Cohort
 
-All hardware rows in this baseline use the same active route set and survey
-methodology. These revisions identify the measured cohort; they do not describe
-the current repository HEAD.
+The NVIDIA, MetaX, PPU, and Hygon rows below use the same generic active route
+set and survey methodology. Kunlun is reported separately with its measured
+five-route cohort. These revisions identify the measured cohorts; they do not
+describe the current repository HEAD.
 
 | Field | Value |
 |---|---|
@@ -63,8 +64,9 @@ which explains the 546-route survey denominator.
 
 ## Hardware Summary
 
-Rates use all 546 active routes as the denominator and are rounded to one
-decimal place.
+Rates use each row's own active route count as the denominator and are rounded
+to one decimal place. That denominator is 546 for every row except Kunlun P800,
+which is a separate five-route cohort.
 
 | Hardware | Total | STRICT | BASIC_ONLY | FAILED | UNTESTED | Basic executable | Basic rate | Strict rate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -72,11 +74,20 @@ decimal place.
 | MetaX mc550 | 546 | 260 | 33 | 155 | 98 | 293 | 53.7% | 47.6% |
 | PPU 810e | 546 | 347 | 54 | 47 | 98 | 401 | 73.4% | 63.6% |
 | Hygon DCU bw1000 | 546 | 321 | 53 | 74 | 98 | 374 | 68.5% | 58.8% |
-| Kunlun P800 | 546 | — | — | — | — | — | — | — |
+| Kunlun P800 | 5* | 4 | 1 | 0 | 0 | 5 | 100.0% | 80.0% |
 
-The Kunlun P800 row is **not revalidated**. The initial port measured the CUDA-boxing
-runtime and a targeted `mm` smoke test, but did not run the FlagGems overload survey;
-dashes are therefore not zeroes and must not be used in cohort-rate arithmetic.
+*Kunlun uses a separate five-overload measured cohort, not the generic 546-route
+cohort above. The active routes are `add.Tensor`, `add_.Tensor`, `cos`,
+`div.Tensor`, and `mean`. `add_.Tensor` is `BASIC_ONLY` because its float16
+case was `WRONG` (`max_diff=1.8424072265625`); all other valid cases passed.
+The unvalidated generic routes remain on CUDA boxing in
+`backends_kunlun_flaggems.conf` and are not included in this row. Evidence
+provenance: config SHA-256
+`db34e51d1fcdb06f778ff84475fc77c41ac24b9bd6db8235de37227932dd4fa3`, active
+route-set SHA-256
+`0f29789c27931e007ff189272a5f0f8f0b07473d265a8b23e0109e66ee2ba1f4`, and raw
+survey JSON SHA-256
+`9d4e746d3566ea1a39601815e190aa6332ac41abd5f72f82c16e1767c53936c6`.
 
 For every measured row, `STRICT + BASIC_ONLY + FAILED + UNTESTED = Total`, and
 `Basic executable = STRICT + BASIC_ONLY`.
@@ -93,6 +104,7 @@ summary.
 | MetaX mc550 | 1597 | 1309 | 0 | 812 | 90 | 14 | 0 | 0 |
 | PPU 810e | 2158 | 1305 | 0 | 184 | 154 | 21 | 0 | 0 |
 | Hygon DCU bw1000 | 2016 | 1309 | 0 | 337 | 146 | 14 | 0 | 0 |
+| Kunlun P800 (5-route cohort) | 28 | 6 | 0 | 0 | 1 | 0 | 0 | 0 |
 
 The bw1000 baseline excludes 108 initial records that failed before operator
 execution because the child process could not load its MPI runtime. Exactly
@@ -200,6 +212,7 @@ evidence is the targeted FSDP2/DDP/collective workload described above.
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
 | 2026-08-17 | Enflame S60 | Native GCU RNG routes | Added 16 topsaten RNG routes; generic FlagGems cohort not revalidated. | Targeted mixed native/FlagGems probe verified shared seed/offset progression and replay; `tests/integration/ops/test_rng_dispatch.py`: `104 passed, 2 skipped, 1 xpassed`. |
+| 2026-08-19 | Kunlun P800 | Kunlun FlagGems cohort (5 routes) | Enabled the FlagGems Python build and added `backends_kunlun_flaggems.conf` with 5 measured routes; the generic 546-route cohort stays **not revalidated** on this hardware. | `flaggems_overload_survey.py` on P800 OAM (XPU-RT 5.37.1, driver 5.0.21.43, torch 2.9.0+cu129, FlagTree Triton at `/opt/flagtree`, harness v4, 7 profiles): `registered=5, tested=5, basic_executable=5, strict_support=4`; raw cases `28 PASS / 6 INVALID_CASE / 1 WRONG`. `exp`, `mm`, `mm.out`, `addmm`, and `mul_.Tensor` measured as FAILED on the generic config and are routed to CUDA boxing instead. `test_flaggems_conf_consistency.py`: `8 passed`. The RNG dispatch suite is **not** part of this evidence: it currently fails and segfaults on this host, so Kunlun FlagGems RNG remains unvalidated. |
 | 2026-08-18 | Kunlun P800 | Generic FlagGems cohort | Added Kunlun CUDA-boxing support; overload cohort **not revalidated**. | P800 runtime smoke measured 8 devices, allocation, H2D/D2H, stream creation, synchronization, cache release, and float32 `mm` against CPU reference. The build disables FlagGems pending a dedicated survey. |
 | 2026-08-14 | Ascend 910 (2 devices) | Native Ascend FSDP2 routes | Added `_chunk_cat`, `_chunk_cat.out`, `_foreach_copy_`, `cat.out`, `split.Tensor`, `split_with_sizes`, and `split_with_sizes_copy.out`; generic FlagGems cohort not revalidated because it is unchanged. | Manual FlagCX collective, DDP, and FSDP2 tests on CANN 9.0; standard FlagGems harness is not applicable to native routes. |
 | 2026-08-13 | A100, mc550, 810e, bw1000 | torch-fl `fe2272b5`, FlagGems `7fb49bad`, harness v4 | Established the verified 546-overload four-platform baseline. | Manual survey JSON; aggregate and raw counts recorded above. |
