@@ -90,6 +90,16 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
+
+  # Structural comparison against tests/data/profiler_cuda_baseline.json, which
+  # the shared contract does not cover: it asserts the public API surface, while
+  # this checks tracer output against stock torch+cuda. Carried over from the
+  # inline step this manifest replaces.
+  - name: Profiler parity test
+    command: >-
+      python -m pytest tests/integration/test_profiler_parity.py
+      -v -m main_ops --tb=short
+
   - name: Run inference tests
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py

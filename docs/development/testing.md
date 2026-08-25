@@ -234,3 +234,11 @@ GitHub Actions CI runs a subset of tests based on pytest marks:
 - **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
 
 To replicate CI behavior locally, use the same mark expressions shown above.
+
+`.github/configs/<platform>.yml` is the only place that defines what a platform runs. Platforms
+without dedicated hardware requirements go through `all-tests-common.yml`; ascend, cuda, dcu, and
+metax keep their own pipelines (hardcoded runner labels and container images) but pull the test
+list through `load-platform-tests.yml`, an `ubuntu-latest` job that parses the config with `yq`
+and hands the result to the hardware job. Adding or renaming a step means editing only the
+config: nothing lists tests inline. Keeping `yq` off the vendor images is deliberate, so no
+accelerator container needs a YAML dependency.

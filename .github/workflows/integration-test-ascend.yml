@@ -31,8 +31,16 @@ on:
         default: 60
 
 jobs:
+  # The test list lives in .github/configs/ascend.yml, not inline here. See
+  # load-platform-tests.yml for why.
+  load-tests:
+    uses: ./.github/workflows/load-platform-tests.yml
+    with:
+      platform: ascend
+
   integration-tests:
     name: Build and test (Ascend)
+    needs: load-tests
     runs-on:
       - flagcicd-910c
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
@@ -82,7 +90,6 @@ jobs:
 
       - name: Run Ascend integration tests
         env:
-          INTEGRATION_ENVIRONMENT: "{}"
-          INTEGRATION_TESTS: >-
-            [{"name":"Check device availability","command":"python - <<'PY'\nfrom pathlib import Path\n\nimport torch_fl\nimport torch\n\ntorch_path = Path(torch.__file__).resolve()\npackage_lib = Path(torch_fl.__file__).resolve().parent / \"lib\"\n\nassert torch.__version__.startswith(\"2.10.0+cpu\"), torch.__version__\nassert torch.version.cuda is None, torch.version.cuda\nassert \"/opt/conda/\" not in str(torch_path), torch_path\nassert not (package_lib / \"libtorch_cuda.so\").is_file(), package_lib\nassert torch_fl.flagos.is_available(), \"flagos device is unavailable\"\nn = torch_fl.flagos.device_count()\nassert n >= 8, f\"expected at least 8 Ascend logical devices, got {n}\"\nprint(f\"CPU PyTorch: {torch.__version__}\")\nprint(f\"torch path: {torch_path}\")\nprint(f\"flagos logical devices: {n}\")\nPY"},{"name":"Run Ascend backend operator tests","command":"python -m pytest tests/integration/ops/ -m \"ascend\" -v -s --tb=short"},{"name":"Run Ascend RNG tests","command":"python -m pytest tests/integration/ops/test_rng_dispatch.py -m \"main_ops\" -v -s --tb=short"},{"name":"Run general factory ops","command":"python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"}]
+          INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
+          INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
         run: python .github/scripts/run_integration_tests.py
