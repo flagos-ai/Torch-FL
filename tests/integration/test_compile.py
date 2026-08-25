@@ -34,6 +34,14 @@ try:
 except ImportError:
     HAS_COMPILE = False
 
+# Check if any Triton is available (vanilla or vendor)
+try:
+    import triton
+
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
 pytestmark = pytest.mark.skipif(
     not HAS_COMPILE, reason="torch.compile not available (torch < 2.0)"
 )
@@ -105,6 +113,9 @@ def test_compile_backend_registered():
 
 def test_basic_compile(device):
     """Test basic torch.compile with flagos backend."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = SimpleModel().to(device)
     x = torch.randn(32, 128, device=device)
 
@@ -126,6 +137,9 @@ def test_basic_compile(device):
 
 def test_compile_vs_eager_correctness(device):
     """Test numerical correctness of compiled vs eager execution."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = MatMulModel().to(device)
     a = torch.randn(64, 64, device=device)
     b = torch.randn(64, 64, device=device)
@@ -145,6 +159,9 @@ def test_compile_vs_eager_correctness(device):
 
 def test_compile_with_max_autotune(device):
     """Test torch.compile with max-autotune mode."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = SimpleModel().to(device)
     x = torch.randn(32, 128, device=device)
 
@@ -232,6 +249,9 @@ def test_inductor_benchmark_accepts_triton_backend_name():
 
 def test_compile_multiple_inputs(device):
     """Test compilation with multiple input tensors."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = MatMulModel().to(device)
     a = torch.randn(32, 32, device=device)
     b = torch.randn(32, 32, device=device)
@@ -247,6 +267,9 @@ def test_compile_multiple_inputs(device):
 
 def test_compile_backward(device):
     """Test that compiled model supports backward pass."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = SimpleModel().to(device)
     x = torch.randn(32, 128, device=device, requires_grad=True)
 
@@ -268,6 +291,9 @@ def test_compile_backward(device):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_compile_dtypes(device, dtype):
     """Test compilation with different dtypes."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = SimpleModel().to(device).to(dtype)
     x = torch.randn(32, 128, device=device, dtype=dtype)
 
@@ -285,6 +311,9 @@ def test_compile_dtypes(device, dtype):
 
 def test_compile_recompile(device):
     """Test that recompiling doesn't break."""
+    if not HAS_TRITON:
+        pytest.skip("Triton required for compilation")
+
     model = SimpleModel().to(device)
     x = torch.randn(32, 128, device=device)
 
