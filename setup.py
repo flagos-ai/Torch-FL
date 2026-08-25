@@ -428,13 +428,21 @@ def build_deps():
     elif ACCELERATOR == "kunlun":
         # Kunlun's vendor torch provides CUDA-key registrations backed by the
         # XPU CUDA compatibility runtime. Build the generated CUDA boxing path
-        # with the host compiler and keep FlagGems disabled until it is measured
-        # against the target's vendor Triton stack.
+        # with the host compiler.
+        #
+        # FLAGGEMS_PYTHON defaults ON, same as cuda/metax/dcu: the vendor stack
+        # ships a FlagTree Triton that flag_gems imports and runs on, so the
+        # wheel compiles the FlagGems Python-path kernels. Runtime routing uses
+        # the Kunlun-specific config, which contains only measured routes.
+        # python_op_caller links torch_python_library, already in the link set,
+        # so this adds nothing to the wheel size. FLAGGEMS_KERNEL stays OFF: it
+        # needs liboperators.so, which is not built for the XPU stack. Set
+        # FLAGGEMS_PYTHON=0 for a slim pure-boxing build; the generic
+        # pass-through below honors that.
         cmake_args.extend(
             [
                 "-DCUDA_KERNEL=ON",
                 "-DFLAGGEMS_KERNEL=OFF",
-                "-DFLAGGEMS_PYTHON=OFF",
                 "-DMETAX_KERNEL=OFF",
                 "-DASCEND_KERNEL=OFF",
             ]

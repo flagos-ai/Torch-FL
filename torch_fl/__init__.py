@@ -48,6 +48,8 @@ def _select_backend_config() -> None:
                                                -> backends_metax_flaggems_cpp.conf
       * FLAGOS_USE_FLAGGEMS=1                  -> backends_flaggems.conf
       * FLAGOS_USE_FLAGGEMS=1 + METAX_BOXING=1 -> backends_metax_flaggems.conf
+      * FLAGOS_USE_FLAGGEMS=1 + ACCELERATOR=kunlun
+                                               -> backends_kunlun_flaggems.conf
       * FLAGOS_USE_FLAGGEMS=1 + ACCELERATOR=dcu -> backends_dcu_flaggems.conf
       * unset / 0                              -> backends_cuda.conf (pure boxing)
 
@@ -147,6 +149,8 @@ def _select_backend_config() -> None:
         conf_name = "backends_flaggems_cpp.conf"
     elif use_flaggems and metax_boxing:
         conf_name = "backends_metax_flaggems.conf"
+    elif use_flaggems and _build_accelerator() == "kunlun":
+        conf_name = "backends_kunlun_flaggems.conf"
     elif use_flaggems and _build_accelerator() == "dcu":
         conf_name = "backends_dcu_flaggems.conf"
     elif use_flaggems:

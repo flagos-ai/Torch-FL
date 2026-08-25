@@ -160,8 +160,28 @@ The runtime config is selected by `torch_fl/__init__.py`:
 - Platform-specific combinations select the MetaX, DCU, or other vendor config.
 - A platform config must not claim a Python route that its compiler cannot run.
 
-For a new platform, follow the existing config pattern and keep the generated
-block clearly identified. Ensure that:
+For a new platform, prefer an allowlist config over the generic one. Generate
+the platform config from an explicit set of overloads that already have measured
+CPU-reference evidence on that chip, and route every other generated operator to
+the platform's fallback backend. The generic config is a candidate route table
+produced from `flag_gems._FULL_CONFIG`; shipping it as a platform default
+promotes unmeasured routes into the default dispatch path, where a vendor
+compiler failure becomes a user-visible regression instead of a boxing call.
+Expand the allowlist only from new survey data, and keep the allowlist in the
+generator so the config stays reproducible:
+
+```python
+# in scripts/codegen_ops.py, next to the other generated config writers
+<platform>_verified_flaggems = {"add.Tensor", "cos"}  # measured overloads only
+backend = "flagos_python" if op in <platform>_verified_flaggems else "cuda"
+```
+
+Pin the allowlist in `tests/integration/ops/test_flaggems_conf_consistency.py`
+so an accidental widening fails in CI, and assert that each allowlisted route has
+a generated Python kernel.
+
+Follow the existing config pattern and keep the generated block clearly
+identified. Ensure that:
 
 1. every `flagos_python` route has a generated wrapper and dispatcher;
 2. C++ routes are disjoint from Python routes unless the dispatch priority is
@@ -189,6 +209,11 @@ Use the repository RNG tests where available:
 python -m pytest tests/integration/ops/test_rng_dispatch.py -q
 ```
 
+If this suite fails or crashes on the target, that is an open finding, not a
+detail to omit. A focused seed-replay probe passing does not substitute for the
+suite: record the suite as unvalidated for that platform in the support report
+and the PR, and keep FlagGems RNG out of the platform's claimed scope.
+
 Then run a focused mixed-route probe. Verify same-seed replay, different-seed
 sensitivity, stream advancement across repeated calls, explicit-generator
 isolation, and replay after mixing FlagGems with a native or CUDA route. A
@@ -197,9 +222,28 @@ failure.
 
 ## Step 6 — validate cases against CPU
 
-Routing presence and import success are not operator support. Start with the
-small dispatch suite, then run the manual overload survey on each affected
-hardware platform:
+Routing presence and import success are not operator support.
+
+Before trusting any survey result, confirm that the loaded extension is the one
+built from the current source. A stale worktree or an older copied
+`torch_fl/lib` produces a whole-cohort `<op>: backend not registered` result that
+looks like a routing bug but is only an old shared library. When every route
+fails identically, check the built artifact before changing the generator:
+
+```bash
+python -c "import torch_fl, torch_fl._C as c; print(torch_fl.__file__); print(c.__file__)"
+grep -c KernelPython csrc/aten/generated/flaggems_python_kernels.cc
+ls -l --time-style=full-iso torch_fl/lib/*.so build/CMakeCache.txt
+grep -E 'FLAGGEMS_PYTHON|FLAGGEMS_KERNEL|CUDA_KERNEL' build/CMakeCache.txt
+```
+
+If `FLAGGEMS_PYTHON` was `OFF` in the build that produced the loaded library, the
+run is not evidence at all: discard it and rebuild. The generated source
+containing `<Op>KernelPython` and a matching `REGISTER_IMPL_TO_DISPATCHER` proves
+only that the source is correct, never that the loaded binary contains it.
+
+Then start with the small dispatch suite, and run the manual overload survey on
+each affected hardware platform:
 
 ```bash
 python tests/integration/ops/test_flaggems_conf_consistency.py -v
@@ -209,6 +253,19 @@ python tests/manual/flaggems_overload_survey.py \
   --conf torch_fl/configs/backends_flaggems.conf \
   --out /tmp/flaggems-overloads.json
 ```
+
+Survey the config the platform actually selects at runtime. When the platform
+ships an allowlist config, pass it with `--conf`; a generic-config survey
+measures routes the platform will never take. To decide what belongs in the
+allowlist, survey the generic config once as an exploratory pass, then promote
+only the overloads that came back `STRICT` or `BASIC_ONLY`.
+
+Typical vendor-compiler failures at this stage are properties of the vendor
+Triton stack, not of the routing table, and each one means the operator stays on
+the fallback backend: a kernel launch rejected by the driver, a Triton
+`OutOfResources` for a vendor SRAM limit, a compiler assertion or abort in the
+vendor LLVM backend, and a gem that re-enters an `out=` overload that the active
+config did not register.
 
 The survey first rejects synthesized inputs that fail on CPU. Recompute each
 operator verdict from the remaining cases:
@@ -227,6 +284,12 @@ Triton revisions, config and active route-set hashes, survey harness version,
 profiles per overload, raw JSON, and aggregate counts. If hardware is absent,
 mark the row **not revalidated**. Do not copy another platform's rate.
 
+A platform measured on an allowlist config is a separate cohort. Report it in its
+own row with its own denominator, state that denominator explicitly, and say in
+the table note that the generic cohort remains not revalidated on that hardware.
+Never merge an allowlist result into a generic-cohort rate, and re-check the row's
+cell count against the header after editing the table.
+
 ## Step 7 — update evidence and review the boundary
 
 Update `docs/reference/operator-support.md` in the same change when routing or
@@ -244,6 +307,11 @@ Before opening a PR, verify:
 - RNG state and mixed-route behavior passed where supported;
 - the survey JSON and aggregate arithmetic agree;
 - unavailable hardware is labeled **not revalidated**;
+- the surveyed config is the one the platform selects at runtime, and the loaded
+  extension was built from the committed source with the intended build flags;
+- regenerated artifacts caused by a torch/FlagGems environment change are either
+  reviewed as part of this change or split into a separate codegen-only change,
+  never mixed in unexplained;
 - `ruff check .` and `ruff format --check .` pass;
 - no vendor runtime, driver, XMLIR, or Python environment was copied into a
   wheel without a measured minimal dependency set;
