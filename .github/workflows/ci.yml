@@ -16,7 +16,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev, devops, dev-hygon]
+    branches: ["2.9"]
     paths:
       - "cmake/**"
       - "csrc/**"
@@ -31,7 +31,7 @@ on:
       - ".github/scripts/**"
       - ".github/workflows/**"
   pull_request:
-    branches: [main, dev, devops, dev-hygon]
+    branches: ["2.9"]
     paths:
       - "cmake/**"
       - "csrc/**"
@@ -67,6 +67,7 @@ jobs:
       has_ascend: ${{ steps.detect.outputs.has_ascend }}
       has_dcu: ${{ steps.detect.outputs.has_dcu }}
       has_metax: ${{ steps.detect.outputs.has_metax }}
+      cuda_only: ${{ steps.policy.outputs.cuda_only }}
     steps:
       - uses: actions/checkout@v4
 
@@ -91,10 +92,22 @@ jobs:
           echo "has_dcu=$has_dcu" >> "$GITHUB_OUTPUT"
           echo "has_metax=$has_metax" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve watch policy
+        id: policy
+        run: |
+          # The 2.9 stable branch only guards the CUDA line.
+          # Ascend/DCU/MetaX are exercised on their own development branches.
+          ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME}}"
+          if [[ "$ref" == "2.9" ]]; then
+            echo "cuda_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cuda_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.common_platforms != '[]'
+    if: needs.discover-platforms.outputs.common_platforms != '[]' && needs.discover-platforms.outputs.cuda_only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -106,7 +119,7 @@ jobs:
   ascend-pipeline:
     name: Platform pipeline (ascend)
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_ascend == 'true'
+    if: needs.discover-platforms.outputs.has_ascend == 'true' && needs.discover-platforms.outputs.cuda_only != 'true'
     uses: ./.github/workflows/integration-test-ascend.yml
 
   cuda-pipeline:
@@ -118,11 +131,11 @@ jobs:
   dcu-pipeline:
     name: Platform pipeline (dcu)
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_dcu == 'true'
+    if: needs.discover-platforms.outputs.has_dcu == 'true' && needs.discover-platforms.outputs.cuda_only != 'true'
     uses: ./.github/workflows/integration-test-dcu.yml
 
   metax-pipeline:
     name: Platform pipeline (metax)
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_metax == 'true'
+    if: needs.discover-platforms.outputs.has_metax == 'true' && needs.discover-platforms.outputs.cuda_only != 'true'
     uses: ./.github/workflows/integration-test-metax.yml

@@ -56,7 +56,7 @@ integration_tests:
       torch_path = Path(torch.__file__).resolve()
       package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
 
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
+      assert torch.__version__.startswith("2.9.0+cpu"), torch.__version__
       assert torch.version.cuda is None, torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert (package_lib / "libtorch_cuda.so").is_file(), package_lib
