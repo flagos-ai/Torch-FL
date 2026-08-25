@@ -18,6 +18,7 @@ Integration tests for torch.compile on flagos device.
 Tests basic compilation, fusion gains, and FlagTree detection.
 """
 
+import importlib.util
 import os
 import sys
 
@@ -34,13 +35,10 @@ try:
 except ImportError:
     HAS_COMPILE = False
 
-# Check if any Triton is available (vanilla or vendor)
-try:
-    import triton
-
-    HAS_TRITON = True
-except ImportError:
-    HAS_TRITON = False
+# Inductor needs a Triton to generate kernels with. The GCU CI image ships
+# neither stock Triton nor Enflame's triton_gcu, so the compile tests have to
+# skip there rather than fail with TritonMissing.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
 
 pytestmark = pytest.mark.skipif(
     not HAS_COMPILE, reason="torch.compile not available (torch < 2.0)"
