@@ -26,6 +26,8 @@ import pytest
 import torch_fl
 import torch
 
+from torch_fl._build_config import ACCELERATOR
+
 
 # Skip all tests if torch.compile not available (torch < 2.0)
 try:
@@ -395,7 +397,14 @@ class NormalizedModel(torch.nn.Module):
 # passing.
 
 
+ascend_only = pytest.mark.skipif(
+    ACCELERATOR != "ascend",
+    reason="Ascend build required",
+)
+
+
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_profile_selected():
     """A flagos build on Ascend must not present itself as CUDA-like."""
     from torch_fl.compile.platform_profile import platform_profile
@@ -407,6 +416,7 @@ def test_ascend_profile_selected():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_triton_backend_present():
     """The Ascend toolchain has to be installed for any of this to compile.
 
@@ -422,6 +432,7 @@ def test_ascend_triton_backend_present():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_reports_soc_arch_to_triton():
     """`cc` reaches Triton as GPUTarget.arch, and Ascend wants a SoC name there.
 
@@ -436,6 +447,7 @@ def test_ascend_reports_soc_arch_to_triton():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_raw_stream_matches_torch_fl_stream():
     """The launch stream must be the one torch_fl's aclnn ops run on.
 
@@ -455,6 +467,7 @@ def test_ascend_raw_stream_matches_torch_fl_stream():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_registration_uses_ascend_codegen():
     """Registration must install the ACL snippets, not the CUDA ones."""
     from torch._inductor.codegen.common import (
@@ -480,6 +493,7 @@ def test_ascend_registration_uses_ascend_codegen():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_compile_fused_elementwise(device):
     """One Triton kernel for the whole pointwise chain, matching eager."""
     model = SimpleModel().to(device)
@@ -494,6 +508,7 @@ def test_ascend_compile_fused_elementwise(device):
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_compile_matmul_and_normalization(device):
     """Reduction codegen: matmul feeding a LayerNorm."""
     model = NormalizedModel().to(device)
@@ -509,6 +524,7 @@ def test_ascend_compile_matmul_and_normalization(device):
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_compile_backward_stays_on_flagos(device):
     """AOT autograd's backward must stay on flagos, gradients included.
 
@@ -949,6 +965,7 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
 
 # Keep the fallback test below independent of vendor availability.
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_masked_byte_load_requires_linearize(device):
     """Reduction of the miscompile behind wrong `relu` gradients on Ascend.
 
@@ -985,6 +1002,7 @@ def test_ascend_masked_byte_load_requires_linearize(device):
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_bool_tensors_declared_as_byte_pointers():
     """Bool tensor args must reach Triton as ``*i8``, not ``*i1``.
 
@@ -1017,6 +1035,7 @@ def test_ascend_bool_tensors_declared_as_byte_pointers():
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_oversized_config_does_not_fail_compile(device):
     """A tile that overflows UB must cost one autotune config, not the compile.
 
@@ -1044,6 +1063,7 @@ def test_ascend_oversized_config_does_not_fail_compile(device):
 
 
 @pytest.mark.ascend
+@ascend_only
 def test_ascend_defaults_to_serial_compile():
     """Ascend compiles in the parent process unless told otherwise.
 
