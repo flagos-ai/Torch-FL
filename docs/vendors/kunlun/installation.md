@@ -135,10 +135,15 @@ python tests/manual/flaggems_overload_survey.py \
 An individual overload can still be forced onto FlagGems for debugging with
 `FLAGOS_OP_<op>=flaggems_python`, because every discovered wrapper stays compiled.
 
-FlagGems RNG is **not** validated on this hardware.
-`tests/integration/ops/test_rng_dispatch.py` currently fails and segfaults on
-P800, so no RNG overload is part of the measured Kunlun scope. A focused
-seed-replay probe passed, which is not a substitute for the suite.
+FlagGems RNG is **not** validated on this hardware, so no RNG overload is part
+of the measured Kunlun scope. `tests/integration/ops/test_rng_dispatch.py` gives
+`51 failed, 41 passed, 11 skipped, 1 xfailed` on P800 with `TestRngMultiDevice`
+deselected, and aborts inside that class when it is not
+(`test_reproducible_on_second_device`: a `randn` on `flagos:1` returns garbage
+such as `1.4013e-45` once device 0 has been used). Those results are identical
+with FlagGems on and off, and identical at the branch base, so they are a
+pre-existing Kunlun RNG gap rather than a FlagGems regression. A focused
+seed-replay probe on device 0 passed, which is not a substitute for the suite.
 
 Record the torch-fl revision, FlagGems revision, hardware model, date, config
 hashes, harness version, and raw JSON evidence in

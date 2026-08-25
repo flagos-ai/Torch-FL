@@ -50,6 +50,30 @@ import torch
 import torch_fl  # noqa: F401
 
 
+def _dropout_on_flaggems() -> bool:
+    """True when `native_dropout` actually routes to the FlagGems Triton kernel.
+
+    `FLAGOS_USE_FLAGGEMS=1` alone is not enough to answer this. An allowlist
+    config (Kunlun) switches FlagGems on for a measured handful of overloads and
+    leaves everything else, `native_dropout` included, on the vendor path. So
+    read the selected config's route instead of inferring it from the env var:
+    dropout reproducibility follows the route, not the switch.
+    """
+    if not _flaggems_on():
+        return False
+    conf = os.environ.get("FLAGOS_BACKEND_CONFIG", "")
+    if not conf or not os.path.exists(conf):
+        # Switch is on with no resolved config: assume the generic config, whose
+        # native_dropout is flagos_python.
+        return True
+    with open(conf) as f:
+        for line in f:
+            name, _, backend = line.partition("=")
+            if name.strip() == "native_dropout":
+                return backend.strip() == "flagos_python"
+    return False
+
+
 def _flaggems_on() -> bool:
     """Mirrors conftest._flaggems_enabled, for the one xfail whose *expected*
     outcome (not merely whether it runs) depends on the active backend config."""
@@ -594,6 +618,12 @@ class TestRngDropout:
 
     @pytest.mark.flaggems
     @pytest.mark.main_ops
+    @pytest.mark.skipif(
+        not _dropout_on_flaggems(),
+        reason="the active FlagGems config leaves native_dropout on the vendor "
+        "path (allowlist config), so there is no FlagGems dropout to assert; "
+        "test_dropout_reproducible covers that case as a non-strict xfail.",
+    )
     def test_dropout_reproducible_on_flaggems_path(self):
         assert torch.equal(_draw(self._dropout, SEED), _draw(self._dropout, SEED))
         assert not torch.equal(
@@ -603,7 +633,7 @@ class TestRngDropout:
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
     @pytest.mark.xfail(
-        condition=not _flaggems_on(),
+        condition=not _dropout_on_flaggems(),
         reason="native_dropout has no `Generator?` in its ATen schema, so there is "
         "no argument for the generated kernel to inject into -- the vendor path "
         "draws from ATen's own default CUDA generator, which torch.manual_seed "

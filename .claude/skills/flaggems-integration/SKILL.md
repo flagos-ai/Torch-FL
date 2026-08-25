@@ -214,6 +214,17 @@ detail to omit. A focused seed-replay probe passing does not substitute for the
 suite: record the suite as unvalidated for that platform in the support report
 and the PR, and keep FlagGems RNG out of the platform's claimed scope.
 
+Attribute the failures before reporting them. Run the suite with FlagGems on and
+off, and once at the branch base; only a delta is caused by the change under
+review. Report counts and the crashing test by name, not just "fails and
+segfaults" — a later upstream commit may skip the exact test named, which
+silently invalidates the wording.
+
+A whole-cohort gate on `FLAGOS_USE_FLAGGEMS` is wrong under an allowlist config.
+Tests that assert FlagGems-specific behavior for one operator must read that
+operator's route out of `FLAGOS_BACKEND_CONFIG`, because the switch can be on
+while that operator stays on the vendor path.
+
 Then run a focused mixed-route probe. Verify same-seed replay, different-seed
 sensitivity, stream advancement across repeated calls, explicit-generator
 isolation, and replay after mixing FlagGems with a native or CUDA route. A
