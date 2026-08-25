@@ -107,11 +107,23 @@ def profiler_capabilities():
 
 @pytest.fixture(scope="module")
 def profile_result():
-    """Capture one common workload and export it as a Chrome trace."""
+    """Capture one common workload and export it as a Chrome trace.
+
+    The 1024x1024 matmul size is load-bearing. Device memset records only exist
+    when a vendor library issues an async memset to zero a workspace or
+    reduction buffer, and for matmul the BLAS heuristic picks such a path only
+    at larger shapes: at 256x256 the trace contains zero ``cudaMemsetAsync``
+    runtime calls, so there is nothing for the tracer to record. This is not a
+    record-size effect -- 4-byte memsets are captured whenever they are issued
+    -- and stock torch+CUDA emits the same counts for the same shapes.
+
+    Explicit zero-filling (``torch.zeros``, ``Tensor.zero_``, ``torch.full``)
+    is not an alternative: those run a fill kernel, not a device memset.
+    """
     torch = _torch_module()
     device = _torch_device()
-    x = torch.randn(256, 256, device=device)
-    y = torch.randn(256, 256, device=device)
+    x = torch.randn(1024, 1024, device=device)
+    y = torch.randn(1024, 1024, device=device)
     small = torch.randn(16, device=device)
 
     with torch.profiler.profile(
