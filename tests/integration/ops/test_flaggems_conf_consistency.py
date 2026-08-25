@@ -54,6 +54,19 @@ _REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
 _KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
 _CODEGEN = _REPO_ROOT / "scripts" / "codegen_ops.py"
 
+# The generated C++ sources this check parses exist only in a repo checkout; they
+# are never shipped in a wheel. Pipelines that stage a wheel-only workspace (the
+# Enflame GCU pipeline copies just `tests/` and `pyproject.toml`) therefore have
+# nothing to compare, so the module skips rather than reporting drift it cannot
+# see. `scripts/` and `csrc/` are the markers: if the checkout is present, every
+# individual file below must be too, and a missing one still fails.
+if not (_REPO_ROOT / "scripts").is_dir() or not (_REPO_ROOT / "csrc").is_dir():
+    pytest.skip(
+        "FlagGems conf/codegen consistency needs a repo checkout; this workspace "
+        f"has no scripts/ or csrc/ under {_REPO_ROOT}",
+        allow_module_level=True,
+    )
+
 
 def _read(path: Path) -> str:
     assert path.is_file(), f"expected generated/config file is missing: {path}"
