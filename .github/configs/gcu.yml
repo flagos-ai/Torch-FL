@@ -80,12 +80,16 @@ integration_tests:
   # the same S60 runner outside the container, and main's 87-test allowlist
   # never hit it. All 562 tests pass before the crash (see job 97659137950),
   # so this workaround allows the step to succeed if pytest reported no failures.
+  # The driver runs `bash -c "set -euo pipefail\n{command}"`, so we must
+  # temporarily disable -e around the pipeline to capture PIPESTATUS.
   - name: Run operator tests (vendor backend, main ops)
     command: |
+      set +e
       python -m pytest tests/integration/ops/ \
         -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp" \
         -v -s --tb=short 2>&1 | tee pytest.log
       EXIT=${PIPESTATUS[0]}
+      set -e
       if [ $EXIT -ne 0 ]; then
         if grep -qE '^=+ .* passed.* in .* =+$' pytest.log && ! grep -q FAILED pytest.log; then
           echo "pytest reported success but exited $EXIT (shutdown-time crash); ignoring"
