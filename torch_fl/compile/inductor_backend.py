@@ -36,51 +36,73 @@ import torch.fx
 import torch.cuda
 
 
-def _patch_musa_triton_autotune() -> None:
-    """Select the first compiled MUSA config without CUDA benchmarking.
+def _patch_native_triton_autotune() -> None:
+    """Select the first compiled config without CUDA benchmarking.
 
     Inductor's generic runtime autotuner allocates a CUDA L2-cache buffer and
-    records ``torch.cuda.Event`` pairs. Neither API exists on native MUSA, and
-    the MThreads driver already compiles a valid launch configuration for each
-    kernel. Selecting the first compiled configuration keeps execution native;
-    it does not claim autotuning performance parity.
+    records ``torch.cuda.Event`` pairs. Neither API exists on a native
+    accelerator, and the vendor driver already compiles a valid launch
+    configuration for each kernel. Selecting the first compiled configuration
+    keeps execution native; it does not claim autotuning performance parity.
     """
     from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import is_native_accelerator
 
-    if ACCELERATOR != "musa":
+    if not is_native_accelerator():
         return
     try:
         from torch._inductor.runtime.triton_heuristics import CachingAutotuner
     except ImportError:
         return
-    if getattr(CachingAutotuner, "_flagos_musa_patched", False):
+    if getattr(CachingAutotuner, "_flagos_native_patched", False):
         return
+
+    vendor = "MThreads FlagTree" if ACCELERATOR == "musa" else "triton_gcu"
+    # triton_gcu miscompiles a persistent reduction at XBLOCK=1: the cross-row
+    # `tl.sum(..., 1)` silently returns wrong values (XBLOCK=2 fails to compile
+    # outright, XBLOCK>=4 is correct). It is the first config Inductor generates
+    # for every persistent reduction, so taking launchers[0] would ship the
+    # broken one -- and being wrong rather than failing, it only surfaces as bad
+    # gradients, since dim-0 reductions are mostly a backward-pass shape.
+    min_xblock = 4 if ACCELERATOR == "gcu" else 0
+
+    def _usable(launcher) -> bool:
+        if not min_xblock:
+            return True
+        xblock = getattr(launcher, "config", None)
+        xblock = getattr(xblock, "kwargs", {}).get("XBLOCK")
+        return xblock is None or xblock >= min_xblock
 
     def autotune_to_one_config(self, *args, **kwargs):
         del args, kwargs
         if not self.launchers:
             self.precompile()
         if not self.launchers:
-            raise RuntimeError("MThreads FlagTree produced no valid MUSA launchers")
-        self.launchers = [self.launchers[0]]
+            raise RuntimeError(f"{vendor} produced no valid launchers")
+        # Prefer a config the vendor compiles correctly; fall back to the first
+        # one rather than failing, so a kernel whose only config is XBLOCK=1
+        # still runs as it did before.
+        self.launchers = [next(filter(_usable, self.launchers), self.launchers[0])]
 
     CachingAutotuner.autotune_to_one_config = autotune_to_one_config
-    CachingAutotuner._flagos_musa_patched = True
+    CachingAutotuner._flagos_native_patched = True
 
 
-def _patch_native_musa_cuda_probe() -> None:
-    """Make Inductor's CUDA-shaped FakeTensor probe see native MUSA devices.
+def _patch_native_cuda_probe() -> None:
+    """Make Inductor's CUDA-shaped FakeTensor probe see native accelerators.
 
     CPU-only PyTorch reports ``torch.cuda.is_available() == False`` even when
-    the PrivateUse1 MUSA runtime is active. Inductor uses that probe to decide
+    the PrivateUse1 vendor runtime is active. Inductor uses that probe to decide
     whether FakeTensor should initialize a GPU context; without this bridge it
     skips the registered flagos device and later attempts CPU-torch CUDA lazy
-    initialization. The compiler still receives a ``flagos`` device and never
-    executes a CUDA kernel.
+    initialization ("Torch not compiled with CUDA enabled"). The compiler still
+    receives a ``flagos`` device and never executes a CUDA kernel.
     """
-    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import is_native_accelerator
 
-    if ACCELERATOR != "musa" or getattr(torch.cuda, "_flagos_musa_patched", False):
+    if not is_native_accelerator():
+        return
+    if getattr(torch.cuda, "_flagos_native_patched", False):
         return
     if not torch.flagos.is_available():
         return
@@ -88,7 +110,7 @@ def _patch_native_musa_cuda_probe() -> None:
     original = torch.cuda.is_available
     torch.cuda.is_available = torch.flagos.is_available
     torch.cuda._flagos_original_is_available = original
-    torch.cuda._flagos_musa_patched = True
+    torch.cuda._flagos_native_patched = True
 
 
 def _bind_musa_flagtree_runtime() -> None:
@@ -111,6 +133,71 @@ def _bind_musa_flagtree_runtime() -> None:
         bind_flagtree_musa_driver()
     except ImportError:
         pass
+
+
+def _patch_native_cache_system_key() -> None:
+    """Key Inductor's cache on the vendor device instead of a CUDA/HIP probe.
+
+    ``CacheBase.get_system`` reads ``torch.cuda.get_device_properties`` and then
+    picks a branch on ``torch.version.cuda``: ``None`` means HIP, so it reads
+    ``gcnArchName``. torch_fl aliases that CUDA getter onto flagos, so on a
+    native accelerator the call *succeeds* and lands in the HIP branch, where
+    the vendor properties object has no such attribute -- an AttributeError the
+    surrounding ``except (AssertionError, RuntimeError)`` does not catch.
+
+    Report the vendor device name and the Triton target arch instead. Both
+    belong in the key: a cache entry compiled for gcu300 must not be reused on
+    gcu400, whose warp size differs. ``get_system`` is ``functools.cache``d, so
+    this has to be installed before the first compile.
+    """
+    from torch_fl.compile.device_interface import is_native_accelerator
+
+    if not is_native_accelerator():
+        return
+    try:
+        from torch._inductor.codecache import CacheBase
+    except ImportError:
+        return
+    if getattr(CacheBase, "_flagos_native_patched", False):
+        return
+
+    import functools
+    import hashlib
+    import json
+
+    from torch_fl._build_config import ACCELERATOR
+
+    @staticmethod
+    @functools.cache
+    def get_system() -> Dict[str, Any]:
+        from torch._inductor.runtime.triton_compat import HAS_TRITON, triton_key
+
+        triton_version = triton_key() if HAS_TRITON else None
+        system: Dict[str, Any] = {
+            "device": {"name": None},
+            "version": {"triton": triton_version},
+        }
+        try:
+            props = torch.flagos.get_device_properties(torch.flagos.current_device())
+            system["device"]["name"] = getattr(props, "name", None)
+        except (AssertionError, RuntimeError, AttributeError):
+            pass
+        try:
+            from triton.runtime import driver
+
+            system["device"]["arch"] = str(driver.active.get_current_target().arch)
+        except Exception:
+            pass
+        system["version"][ACCELERATOR] = getattr(
+            torch.flagos, "__version__", ACCELERATOR
+        )
+        system["hash"] = hashlib.sha256(
+            json.dumps(system, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return system
+
+    CacheBase.get_system = get_system
+    CacheBase._flagos_native_patched = True
 
 
 def _patch_cuda_rng_for_cpu_torch():
@@ -144,10 +231,11 @@ def _patch_cuda_rng_for_cpu_torch():
 
 
 # Apply runtime probes at module load time, before FakeTensor is imported by
-# the first compile. Native MUSA is not CUDA, but Inductor's GPU probe is the
-# shared gate for CUDA-shaped GPU devices.
-_patch_native_musa_cuda_probe()
-_patch_musa_triton_autotune()
+# the first compile. Native MUSA and GCU are not CUDA, but Inductor's GPU probe
+# is the shared gate for CUDA-shaped GPU devices.
+_patch_native_cuda_probe()
+_patch_native_triton_autotune()
+_patch_native_cache_system_key()
 _bind_musa_flagtree_runtime()
 _patch_cuda_rng_for_cpu_torch()
 
@@ -172,13 +260,14 @@ def _resolve_config_patches(
     if options:
         patches.update({k.replace("-", "_"): v for k, v in options.items()})
 
-    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import is_native_accelerator
 
-    # Native MUSA has no CUDA implementation for Inductor's CUDA-only pattern
-    # registration (for example SDPA replacement construction). Keep the
-    # general joint-graph passes, but skip that optional pattern bundle until
-    # FlagTree/MUSA supplies an equivalent lowering.
-    if ACCELERATOR == "musa":
+    # Native accelerators have no CUDA implementation for Inductor's CUDA-only
+    # pattern registration (for example SDPA replacement construction, and the
+    # pad_mm bundle, which constructs a real tensor on the device). Keep the
+    # general joint-graph passes, but skip that optional pattern bundle until the
+    # vendor compiler supplies an equivalent lowering.
+    if is_native_accelerator():
         patches["use_joint_graph_passes"] = False
         patches["max_autotune"] = False
         patches["max_autotune_pointwise"] = False
@@ -189,6 +278,22 @@ def _resolve_config_patches(
         # the CPU torch wheel cannot provide. mode="max-autotune" enables it, so
         # turn it back off; the kernels still compile and run, just untuned.
         patches["coordinate_descent_tuning"] = False
+
+    from torch_fl._build_config import ACCELERATOR
+
+    # 2D tiling is what makes Inductor emit a transposed load (`in_ptr0 + (y0 +
+    # 128*x1)` against an x-major store), and Triton lowers that pair to
+    # `tt.trans`. triton_gcu's layout inference rejects its own result there --
+    # "'tt.trans' op inferred type(s) ... are incompatible with return type(s)",
+    # differing only in `order = [0, 1]` vs `[1, 0]` -- so the kernel fails to
+    # compile. The same bug is reachable from a hand-written `tl.trans`, which
+    # additionally returns wrong values on shapes it does accept, so this is the
+    # vendor compiler and not Inductor's codegen. One tile per kernel keeps the
+    # indexing linear and sidesteps it; the transpose then costs an extra kernel
+    # rather than a tiled load. Only a default -- an explicit
+    # options={"triton.max_tiles": ...} above still wins.
+    if ACCELERATOR == "gcu":
+        patches.setdefault("triton.max_tiles", 1)
 
     # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
     # wheel ("Tried to instantiate dummy base class CUDAGraph"). mode=
@@ -207,11 +312,13 @@ def _resolve_config_patches(
 def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
     """Avoid unsafe vendor-driver initialization in compile workers.
 
-    PPU and MThreads FlagTree drivers query a vendor runtime while creating
-    compiler hints. Keeping the first implementation conservative is important
-    for MUSA: the vendor runtime owns the current device and stream, while
-    Inductor workers may be forked after the parent has initialized it. Explicit
-    per-compile and environment settings remain authoritative.
+    PPU and MThreads FlagTree drivers, and Enflame's triton_gcu, query a vendor
+    runtime while creating compiler hints. Keeping the first implementation
+    conservative matters for all of them: the vendor runtime owns the current
+    device and stream, while Inductor workers may be forked after the parent has
+    initialized it. On GCU that is sharper than elsewhere, because a tops pointer
+    only resolves against the current device. Explicit per-compile and
+    environment settings remain authoritative.
     """
     if "compile_threads" in config_patches:
         return
@@ -220,6 +327,10 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
 
     from torch_fl._build_config import ACCELERATOR
     from torch_fl.compile.flagtree_shim import flagtree_backend
+
+    if ACCELERATOR == "gcu":
+        config_patches["compile_threads"] = 1
+        return
 
     backend = flagtree_backend()
     if backend == "ppu" or (ACCELERATOR == "musa" and backend == "mthreads"):

@@ -81,6 +81,13 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_musa_current_raw_stream as {name}"
             )
+        if ACCELERATOR == "gcu":
+            # Same on GCU: triton_gcu's launcher takes a topsStream_t and there
+            # is no CUDA runtime behind torch.flagos.
+            return (
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_gcu_current_raw_stream as {name}"
+            )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 

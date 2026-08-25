@@ -398,6 +398,11 @@ def test_non_ppu_flagtree_keeps_default_compile_threads(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "hcu"
     )
+    # The serialization decision is per accelerator as well as per FlagTree
+    # backend, so pin it: on a GCU build the vendor driver serializes regardless
+    # of the FlagTree backend name, which is a different rule than the one under
+    # test here.
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
 
     patches = {}
     inductor_backend._patch_ppu_flagtree_compile_workers(patches)
@@ -551,6 +556,146 @@ def test_musa_flagtree_compiles_forward_backward(device):
     # torch_fl's own shim may hold this name (see the binding test above).
     plugin = sys.modules.get("torch_musa")
     assert plugin is None or plugin.__spec__.origin == "torch_fl_shim"
+
+
+def _skip_unless_gcu():
+    from torch_fl._build_config import ACCELERATOR
+
+    if ACCELERATOR != "gcu":
+        pytest.skip("GCU build required")
+
+
+@pytest.mark.gcu
+def test_gcu_raw_stream_is_the_eager_stream():
+    """Compiled GCU kernels must launch on the stream eager work already uses."""
+    _skip_unless_gcu()
+    from torch_fl.compile.flagtree_shim import get_gcu_current_raw_stream
+
+    raw_stream = get_gcu_current_raw_stream()
+    assert raw_stream == torch_fl.flagos.current_stream().gcu_stream
+    assert raw_stream != 0
+
+
+@pytest.mark.gcu
+def test_gcu_device_properties_use_vendor_warp_size():
+    """Inductor must size kernels by the GCU warp, not CUDA's 32.
+
+    ``_DeviceProperties`` carries no ``warp_size`` on GCU, and Inductor's default
+    is CUDA's. The authority is the Triton driver, since it compiles the kernel.
+    """
+    _skip_unless_gcu()
+    from torch._inductor.runtime.hints import DeviceProperties
+    from triton.runtime import driver
+
+    props = DeviceProperties.create(torch.device("flagos", 0))
+    assert props.type == "gcu"
+    assert props.warp_size == driver.active.get_current_target().warp_size
+
+
+@pytest.mark.gcu
+def test_gcu_cache_key_survives_pickling():
+    """Inductor's FX graph cache must not be bypassed on GCU.
+
+    Two things break this key. ``CacheBase.get_system`` reads the CUDA device
+    getter torch_fl aliases onto flagos and, with ``torch.version.cuda`` unset,
+    takes the HIP branch into ``gcnArchName``. And ``torch.device`` is replaced
+    by a function-local class that pickle cannot resolve by name, which
+    downgrades every compile to BypassFxGraphCache.
+    """
+    _skip_unless_gcu()
+    import pickle
+
+    from torch._inductor.codecache import CacheBase
+
+    system = CacheBase.get_system()
+    assert system["device"]["name"]
+    assert "hash" in system
+
+    assert pickle.loads(pickle.dumps(torch.device)) is torch.device
+    assert isinstance(torch.device("flagos:0"), torch.device)
+
+
+@pytest.mark.gcu
+def test_gcu_compiles_dim0_reduction(device):
+    """A reduction over the non-contiguous axis must match eager.
+
+    triton_gcu miscompiles a persistent reduction at XBLOCK=1 -- silently, with
+    wrong values rather than a failure. It is Inductor's first config for every
+    persistent reduction, and dim-0 reductions are mostly a backward-pass shape,
+    so unguarded this surfaces only as bad gradients.
+    """
+    _skip_unless_gcu()
+
+    def fn(a, b):
+        return (a * b).sum(dim=0)
+
+    x = torch.randn(16, 32, device=device)
+    y = torch.randn(16, 32, device=device)
+    compiled = torch.compile(fn, backend="flagos")(x, y)
+    assert_on_flagos(compiled)
+    torch.testing.assert_close(compiled, fn(x, y), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.gcu
+def test_gcu_compiles_transposed_load(device):
+    """A transposed load must compile despite the vendor's tt.trans bug.
+
+    2D tiling makes Inductor emit a transposed load, which Triton lowers to
+    ``tt.trans``; triton_gcu's layout inference rejects its own inferred type
+    there. One tile per kernel keeps the indexing linear.
+    """
+    _skip_unless_gcu()
+
+    def fn(a, b):
+        return a.t().contiguous() + b
+
+    x = torch.randn(128, 128, device=device)
+    y = torch.randn(128, 128, device=device)
+    compiled = torch.compile(fn, backend="flagos")(x, y)
+    assert_on_flagos(compiled)
+    torch.testing.assert_close(compiled, fn(x, y), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.gcu
+def test_gcu_compiles_forward_backward(device):
+    """The GCU path must preserve native autograd, gradients included."""
+    _skip_unless_gcu()
+
+    model = SimpleModel().to(device)
+    x = torch.randn(32, 128, device=device, requires_grad=True)
+    eager = model(x)
+    eager.sum().backward()
+    eager_grads = [p.grad.clone() for p in model.parameters()]
+    for param in model.parameters():
+        param.grad = None
+
+    compiled = torch.compile(model, backend="flagos")(x)
+    assert_on_flagos(compiled)
+    torch.testing.assert_close(compiled, eager, rtol=1e-4, atol=1e-4)
+
+    compiled.sum().backward()
+    assert x.grad is not None
+    assert_on_flagos(x.grad, "gradient")
+    for expected, param in zip(eager_grads, model.parameters()):
+        torch.testing.assert_close(param.grad, expected, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.gcu
+def test_gcu_defaults_to_serial_compile(monkeypatch):
+    """A tops pointer only resolves against the current device, so no forking."""
+    from torch_fl.compile import inductor_backend
+
+    monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "gcu")
+
+    patches = {}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert patches["compile_threads"] == 1
+
+    # An explicit request still wins.
+    patches = {"compile_threads": 4}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert patches["compile_threads"] == 4
 
 
 # The generic FlagTree test above also covers the MThreads runtime when the

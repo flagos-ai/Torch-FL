@@ -1015,6 +1015,20 @@ def _alias_cuda_to_flagos():
                 kwargs = {**kwargs, "device": _remap(kwargs["device"])}
             return _orig_device(*args, **kwargs)
 
+    # Pickle saves a *class* by reference, looking it up as
+    # ``__module__.__qualname__``. Left as defined, that is
+    # ``torch_fl._alias_cuda_to_flagos.<locals>.device``, which is unreachable,
+    # so ``pickle.dumps(torch.device)`` fails with "Can't get local object".
+    # That costs more than hand-pickling a device: Inductor pickles the graph
+    # module to build its FX graph cache key, and a device constant in the graph
+    # brings this class along, so every compile hits BypassFxGraphCache ("Failed
+    # to pickle cache key") and recompiles from scratch. Naming it ``torch.device``
+    # -- which is exactly what the next line makes it -- makes that lookup find
+    # this same object, so the reference round-trips.
+    device.__module__ = "torch"
+    device.__qualname__ = "device"
+    device.__name__ = "device"
+
     torch.device = device
     _keep_device_identity_checks_working(_orig_device, device)
 

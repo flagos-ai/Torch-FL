@@ -95,6 +95,16 @@ integration_tests:
   - name: Run AMP tests
     command: python -m pytest tests/integration/test_amp.py -v --tb=short
 
+  # torch.compile through triton_gcu. The GCU-marked tests are the regression
+  # guards for four vendor-specific defects, two of which are silent: a
+  # persistent reduction miscompiled at XBLOCK=1 (wrong values, and dim-0
+  # reductions are mostly a backward shape, so it surfaces only as bad
+  # gradients) and an FX cache key that failed to pickle, downgrading every
+  # compile to a full recompile. Neither is visible from forward output alone,
+  # so this step has to run the backward assertions to be worth anything.
+  - name: Run torch.compile tests
+    command: python -m pytest tests/integration/test_compile.py -v --tb=short
+
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
   #   - tests/integration/test_profiler_contract.py. The TOPSPTI tracer does
