@@ -54,7 +54,7 @@ CachingDeviceAllocator::CachingDeviceAllocator(
 }
 
 CachingDeviceAllocator::~CachingDeviceAllocator() {
-#if !defined(USE_TSINGMICRO) && !defined(USE_BPU)
+#if !defined(USE_TSINGMICRO) && !defined(USE_BPU) && !defined(USE_GCU)
   // Release all cached memory on destruction.
   // On TsingMicro, skip this — the TX runtime may already be shut down
   // at process exit, causing segfaults in txFree.
@@ -66,6 +66,14 @@ CachingDeviceAllocator::~CachingDeviceAllocator() {
   // confirms the free path itself is fine and only the exit ordering is not.
   // Leaking at process exit is harmless: the kernel reclaims the ION/UCP
   // carveout when the fd closes.
+  //
+  // GCU has the same exit-ordering problem, and it only shows up for blocks on
+  // a non-zero device: `torch.empty(8, device='flagos:1')` then exit aborts in
+  // topsFree with "corrupted double-linked list", while the identical call on
+  // flagos:0 exits cleanly. MALLOC_PERTURB_=42 makes it deterministic, which is
+  // why CI (glibc, no tcache reuse to mask it) hit it while a bare local run
+  // did not. `torch_fl._C._empty_cache()` before exit is clean here too, so as
+  // above this is teardown ordering rather than a bad free.
   for (auto& state_ptr : device_states_) {
     if (state_ptr) {
       release_cached_blocks(*state_ptr);
