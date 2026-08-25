@@ -357,6 +357,34 @@ def test_flagtree_requires_flagtree_install():
             require_flagtree()
 
 
+def test_torch_backends_entry_point_is_registered():
+    """A bare `import torch` must be able to initialize flagos.
+
+    Inductor's parallel compile workers are fresh interpreters that import torch
+    and triton but never torch_fl, so without this entry point they see the stock
+    `torch.cuda.is_available()` and Triton's driver probe finds no active GPU
+    backend -- every cold compile then dies in set_driver_to_gpu(). Asserting on
+    the installed metadata rather than on import side effects, because this test
+    process has already imported torch_fl the normal way.
+    """
+    from importlib.metadata import entry_points
+
+    registered = {ep.name: ep.value for ep in entry_points(group="torch.backends")}
+    assert registered.get("torch_fl") == "torch_fl._autoload:init", (
+        "torch_fl must register a torch.backends entry point; "
+        f"found {registered}. Reinstall the package if this is a stale env."
+    )
+
+
+def test_torch_backends_entry_point_init_is_idempotent():
+    """Calling the hook in a process that already has torch_fl is a no-op."""
+    from torch_fl._autoload import init
+
+    init()
+    init()
+    assert torch.flagos.is_available()
+
+
 def test_ppu_flagtree_defaults_to_serial_compile(monkeypatch):
     """PPU FlagTree must avoid CUDA initialization in forked compile workers."""
     from torch_fl.compile import inductor_backend

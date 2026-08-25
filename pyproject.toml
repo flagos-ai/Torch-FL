@@ -69,6 +69,14 @@ flagcx = [
     "flagcx",
 ]
 
+[project.entry-points."torch.backends"]
+# PyTorch calls this at the end of `import torch`, so processes torch_fl does not
+# start -- notably Inductor's parallel compile workers, which import torch and
+# triton but never torch_fl -- still get the flagos device registered. Without it
+# Triton's driver probe finds no active GPU backend in the worker and cold
+# compiles fail. See torch_fl/_autoload.py.
+torch_fl = "torch_fl._autoload:init"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
