@@ -1609,6 +1609,46 @@ def _register_bpu_compile_backend() -> None:
 _register_bpu_compile_backend()
 
 
+def runtime_identity():
+    """Return Torch-FL's logical-to-physical runtime identity.
+
+    The result is descriptive, not an attestation. Provisioners issue signed,
+    workload-scoped evidence through :mod:`torch_fl.provisioning.attestation`.
+    """
+
+    from torch_fl.provisioning.attestation import collect_runtime_identity
+
+    platform_hint = ""
+    marker = os.path.join(os.path.dirname(__file__), "lib", "flagos_platform")
+    try:
+        with open(marker) as stream:
+            platform_hint = stream.read().strip().lower()
+    except OSError:
+        pass
+
+    # PPU builds use ACCELERATOR=cuda. A Torch-FL-owned bundle is the durable
+    # signal that distinguishes them from a normal NVIDIA CUDA wheel.
+    if not platform_hint and os.path.isfile(
+        os.path.join(os.path.dirname(__file__), "lib_ppu", "libtorch_cuda.so")
+    ):
+        platform_hint = "ppu"
+
+    accelerator = _build_accelerator()
+    get_properties = None
+    if accelerator in ("cuda", "dcu", "metax") and hasattr(
+        torch.cuda, "get_device_properties"
+    ):
+        get_properties = torch.cuda.get_device_properties
+
+    return collect_runtime_identity(
+        torch_module=torch,
+        flagos_module=flagos,
+        build_accelerator=accelerator,
+        platform_hint=platform_hint,
+        device_properties_getter=get_properties,
+    )
+
+
 __all__ = [
     "flagos",
     "distributed",
@@ -1617,4 +1657,5 @@ __all__ = [
     "is_flaggems_available",
     "enable_flaggems_for_flagos",
     "use_flaggems",
+    "runtime_identity",
 ]

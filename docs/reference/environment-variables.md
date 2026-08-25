@@ -71,6 +71,8 @@ These variables control asset loading, bundled libtorch behavior, and import-tim
 | `FLAGOS_INSTALL_PATH` | Build | No default | FlagCX torch-fl compatibility install prefix containing `include/flagos.h` and `lib/libflagos.so` |
 | `FLAGOS_INCLUDE_DIR` / `FLAGOS_LIBRARY_DIR` | Build | Derived from `FLAGOS_INSTALL_PATH` or `torch_fl` | Override the FlagOS C ABI header and library directories when building FlagCX |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD` | Runtime | Set by torch_fl on MUSA builds | Stop vendor plugins (e.g., `torch_musa`) from claiming `PrivateUse1` during `import torch` |
+| `FLAGOS_LOG_FALLBACK` | Runtime | `0` (off) | Print CPU fallback operations to stderr; must be enabled before the FlagQuantum route-attestation probe starts |
+| `TORCH_FL_ATTESTATION_SIGNING_KEY` | Provisioning | No default | HMAC key used to sign provisioner-owned runtime attestations; keep it in secret management and do not pass it on the command line |
 
 ## Compiler and Feature Backends
 

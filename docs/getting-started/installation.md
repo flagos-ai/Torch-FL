@@ -47,4 +47,5 @@ The `--no-build-isolation` flag is required so that generated native bindings co
 - **First steps**: See the [Quick Start Guide](quickstart.md) for platform-independent usage examples.
 - **Platform support**: Review the [Compatibility Matrix](../reference/compatibility.md) to understand what capabilities are validated for your platform.
 - **Configuration**: Environment variables controlling runtime behavior are documented in the [Environment Variables Reference](../reference/environment-variables.md).
+- **Runtime attestation**: Provisioners integrating with FlagQuantum should use the [signed runtime-attestation probe](../reference/runtime-attestation.md).
 - **Testing**: Run the test suite following the [Testing Guide](../development/testing.md) to verify your installation.
