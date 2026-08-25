@@ -417,6 +417,16 @@ def flagos_compile_backend(
 
         require_flagtree()
 
+        # FlagTree's Ascend backend otherwise dispatches its host runtime
+        # through torch_npu, which would claim PrivateUse1 and lock torch_fl out
+        # of flagos. Swap in a policy backed by torch_fl's own runtime instead.
+        from torch_fl.compile.platform_profile import platform_profile
+
+        if platform_profile().vendor == "ascend":
+            from torch_fl.compile.flagtree_ascend_policy import install_policy
+
+            install_policy()
+
     # Idempotent: module load already tried this, but a process that imported
     # the backend before FlagTree was importable gets its second chance here.
     _bind_musa_flagtree_runtime()

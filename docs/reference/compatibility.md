@@ -99,8 +99,16 @@ routing, not on-hardware-verified collectives (same file, lines 67-75).
 
 `torch.compile(backend="flagos")` is experimentally validated on Ascend through
 `triton-ascend` 3.2.0, not FlagTree. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
-torch 2.10.0+cpu, Python 3.10): `tests/integration/test_compile.py` passes 29 of 30 with a
-cold inductor cache, the one skip being the FlagTree-only case. Forward, backward, fused
+torch 2.10.0+cpu, Python 3.10): `tests/integration/test_compile.py` passes 30 of 32 with a
+cold inductor cache, the two skips being the FlagTree-only and MetaX-only cases. FlagTree
+itself is **not** validated on Ascend: its Ascend backend exists only on the 3.5 line, and
+it routes its host runtime through `torch_npu`, which claims PrivateUse1 and so prevents
+`torch_fl` from registering `flagos` at all. `torch_fl/compile/flagtree_ascend_policy.py`
+registers a torch_npu-free backend policy to lift that block, but it is verified only up to
+compiling the emitted C++ against ATen and resolving every strategy through FlagTree's real
+registry — no FlagTree build carrying the Ascend backend is installed here, so end-to-end
+kernel execution through FlagTree remains unvalidated
+([upstream issue](https://github.com/flagos-ai/FlagTree/issues/1046)). Forward, backward, fused
 elementwise and matmul+normalization graphs match eager. Three triton-ascend defects are
 worked around rather than avoided — a miscompiled masked byte load, `ub overflow` raised as
 a hard error, and a compile-worker/parent launch segfault — so the platform compiles

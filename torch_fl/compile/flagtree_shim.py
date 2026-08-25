@@ -41,7 +41,7 @@ from typing import Any, Optional, Tuple
 # FlagTree-only module. Present regardless of which vendor backend was built,
 # unlike triton._flagtree_backend.FLAGTREE_BACKEND, which is the empty string on
 # nvidia/amd because upstream tells you not to set FLAGTREE_BACKEND for those.
-_FLAGTREE_MARKER = "triton._flagtree_spec"
+_FLAGTREE_MARKER = "triton.flagtree_spec"
 
 
 def is_flagtree_active() -> bool:
