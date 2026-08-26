@@ -20,7 +20,7 @@ module holds only what the manifest cannot tell us: how ``ref_api`` maps onto an
 aten name, which ctor shapes collapse into a shared recipe, and which ops we
 refuse to route (each with the measurement that justifies it).
 
-See ``docs/tileops_codegen_design.md``.
+See ``docs/architecture/tileops/codegen-design.md``.
 """
 
 # --- recipe names, shared with torch_fl.tileops.runtime ---------------------
@@ -80,7 +80,7 @@ EXCLUDE = {
     # above these are blocked on TileOPs, not on our side: forward() returns only
     # the normalized tensor, while aten::native_layer_norm / native_group_norm
     # must also return (mean, rstd). The Op keeps no mean/rstd attribute, so the
-    # statistics are unrecoverable. See tileops_codegen_design.md 3.4.
+    # statistics are unrecoverable. See docs/architecture/tileops/codegen-design.md section 3.4.
     "LayerNormFwdOp": "returns 1 tensor; aten::native_layer_norm needs (out, mean, rstd)",
     "GroupNormFwdOp": "returns 1 tensor; aten::native_group_norm needs (out, mean, rstd)",
     "GroupNormNoAffineFwdOp": "see GroupNormFwdOp -- statistics are discarded",
@@ -89,7 +89,7 @@ EXCLUDE = {
 #: Manual recipes still to be written, grouped the way the adapter code will be
 #: rather than by literal ctor signature. Every group below was verified on H800
 #: (fp16, L2 called on CUDA tensors, compared against CPU aten) before being
-#: written down; the numbers live in tileops_codegen_design.md 3.4.
+#: written down; the numbers live in docs/architecture/tileops/codegen-design.md 3.4.
 MANUAL_GROUPS = {
     # ctor (N_total, dtype, <scalars>), forward(x) -- UNARY plus ctor scalars.
     # NOTE: GeluFwdOp.__init__ is (*args, **kwargs); the real signature is on

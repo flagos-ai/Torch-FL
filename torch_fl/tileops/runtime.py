@@ -43,7 +43,7 @@ memory-bound op. The shortcut is verified per instance rather than assumed (see
 ``_Entry``), since L2 sometimes reshapes before dispatching. Set
 ``FLAGOS_TILEOPS_USE_L2=1`` to stay on ``Op.__call__`` when debugging.
 
-See ``docs/tileops_codegen_design.md``.
+See ``docs/architecture/tileops/codegen-design.md``.
 """
 
 from __future__ import annotations
@@ -393,8 +393,22 @@ def _reduce_impl(op_cls, dtypes, extra, overload):
 
     def impl(x, dim=None, keepdim=False, *rest, **kw):
         correction = kw.get("correction")
+
         # Pass the caller's args through untouched on the fallback path -- these
         # ops carry keyword-only correction/dtype that must not be dropped.
+        def fallback_reduce(*args, **kwargs):
+            # correction and keepdim are keyword-only in the var/std schemas,
+            # although the generated shim accepts keepdim positionally to match
+            # the C++ dispatcher signature. Reconstruct the ATen call here so a
+            # declined route follows the schema instead of passing keepdim as a
+            # third positional argument.
+            if overload in KEYWORD_ONLY_REDUCE:
+                kwargs["keepdim"] = keepdim
+                return fallback(x, *args, **kwargs)
+            if overload in NO_POSITIONAL_KEEPDIM:
+                return fallback(x, *args, **kwargs)
+            return fallback(x, *args, keepdim, **kwargs)
+
         if (
             x.dtype not in dtypes
             or rest
@@ -402,14 +416,14 @@ def _reduce_impl(op_cls, dtypes, extra, overload):
             or set(kw) - {"correction"}
             or (correction is not None and not takes_correction)
         ):
-            return fallback(x, dim, keepdim, *rest, **kw)
+            return fallback_reduce(dim, *rest, **kw)
         if isinstance(dim, (list, tuple)):
             if len(dim) != 1:
-                return fallback(x, dim, keepdim, **kw)
+                return fallback_reduce(dim, **kw)
             dim = dim[0]
         elif dim is None:
             # Full reduction; TileOPs wants an explicit axis.
-            return fallback(x, dim, keepdim, **kw)
+            return fallback_reduce(dim, **kw)
         index = _device_index(x)
         xb = _box(x).contiguous()
 

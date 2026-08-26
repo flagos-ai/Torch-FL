@@ -29,7 +29,7 @@ Nothing is imported eagerly: ``runtime`` pulls in TileOPs (and therefore
 TileLang) only once a route is first exercised, so ``import torch_fl`` stays
 cheap and works on hosts without TileOPs installed.
 
-See ``docs/tileops_codegen_design.md``.
+See ``docs/architecture/tileops/codegen-design.md``.
 """
 
 __all__ = ["generated", "runtime", "spec"]

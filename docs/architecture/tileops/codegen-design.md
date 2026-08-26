@@ -1,7 +1,7 @@
 # TileOPs integration design: generating aten-aligned operator routes by codegen
 
 This document is the implementation design derived from
-[`tileops_integration_plan.md`](./tileops_integration_plan.md). Its scope is
+[`integration-plan.md`](./integration-plan.md). Its scope is
 narrowed to: **take the TileOPs operators that align exactly with torch aten and
 generate them all at once by codegen, integrated as an optional operator
 library.** The fused and non-aten operators (sdpa, moe, mamba, SSD, lightning
@@ -99,7 +99,7 @@ are handled as "hand-written recipes"; see section 3.4.
 
 ### 1.4 The admission bar set by performance data
 
-See `tileops_integration_plan.md` section 2.5. The core fact: **the L2 `Op` layer
+See `integration-plan.md` section 2.5. The core fact: **the L2 `Op` layer
 carries a fixed Python overhead of roughly 0.05-0.09 ms independent of size**,
 and bypassing L2 to call `op.kernel(x)` directly turns softmax from 0.72x to
 1.11x. The generated adapter layer therefore **takes the direct-kernel path by
@@ -631,7 +631,7 @@ With it OFF, `tileops_fn_` is never populated and the dispatcher falls through.
 
 ## 4. Dependencies and known upstream issues
 
-Per `tileops_integration_plan.md` section 2.1, all three pins must be exact --
+Per `integration-plan.md` section 2.1, all three pins must be exact --
 do not use ranges:
 
 ```

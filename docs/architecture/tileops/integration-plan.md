@@ -9,7 +9,7 @@ verification scripts and measured numbers are in section 2.
 
 > Status: research and feasibility verification complete. The integration
 > implementation is described in
-> [`tileops_codegen_design.md`](./tileops_codegen_design.md) (PR1/PR2 landed,
+> [`codegen-design.md`](./codegen-design.md) (PR1/PR2 landed,
 > all 60 aten-aligned routes verified on hardware). Branch `h800-2.10`, based on
 > `flagos/main` (3fa2057).
 
@@ -459,4 +459,4 @@ collision repro). The parts worth keeping long-term now live in the repository:
 - `scripts/codegen_tileops.py --check` -- a gate on generated-artifact
   consistency.
 
-For the environment these need, see `tileops_codegen_design.md` section 6.3.
+For the environment these need, see `codegen-design.md` section 6.3.

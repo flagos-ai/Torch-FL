@@ -73,7 +73,7 @@ struct PythonOpCache {
         // every one of them, so retry there; the dotted path stays the preferred
         // lookup because it pins the exact _FULL_CONFIG entry when it does exist.
         PyErr_Clear();
-        func = ops_module.attr(func_name.c_str());
+        func = OpsModule().attr(func_name.c_str());
       }
     }
     func_cache[name] = func;

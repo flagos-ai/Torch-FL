@@ -62,9 +62,9 @@ def test_matches_aten(overload, recipe, module, cls_name, dtypes, extra):
     """Generated route agrees with the aten reference.
 
     Runs on a small shape by default. Every distinct shape costs a full
-    TileLang compile (~4 s, since the availability gate forces
-    TILELANG_DISABLE_CACHE=1 to dodge the upstream cache-key collision), so
-    the larger manifest workload shape is opt-in via FLAGOS_TILEOPS_FULL=1.
+    TileLang compile (~4 s on a cold shape; the availability gate disables only
+    the buggy frontend cache layer while preserving the kernel cache), so the
+    larger manifest workload shape is opt-in via FLAGOS_TILEOPS_FULL=1.
     """
     shape = (64, 32)
     if os.environ.get("FLAGOS_TILEOPS_FULL") == "1":
