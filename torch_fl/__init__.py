@@ -1388,26 +1388,46 @@ def _patch_ddp_for_flagos():
             h.remove()
         self._accum_grad_hooks.clear()
 
-        def _accum_grad_hook(param, *, ddp_model=self):
-            if not ddp_model.require_backward_grad_sync:
-                return
-            if param.grad is None:
-                return
+        sync_params = [
+            param for param in self._module_parameters if param.requires_grad
+        ]
+        completed_params = set()
+
+        def _sync_completed_grads(ddp_model):
+            """Reduce all gradients in a deterministic order after backward.
+
+            A collective per post-accumulate hook is unsafe: XPU autograd can
+            finish parameters in different orders on different ranks, pairing
+            the all-reduces for different parameters. Waiting until every
+            parameter hook has fired and then using module order keeps the
+            collective sequence identical across ranks.
+            """
             pg = ddp_model.process_group
             if ddp_model._comm_hooks:
-                for hook, state in ddp_model._comm_hooks:
-                    hook(state, (param.grad, param))
+                for param in sync_params:
+                    for hook, state in ddp_model._comm_hooks:
+                        hook(state, (param.grad, param))
             else:
-                param.grad.div_(pg.size())
-                _dist.all_reduce(param.grad, op=_dist.ReduceOp.SUM, group=pg)
+                for param in sync_params:
+                    param.grad.div_(pg.size())
+                    _dist.all_reduce(param.grad, op=_dist.ReduceOp.SUM, group=pg)
 
-        for param in self._module_parameters:
-            if param.requires_grad:
-                self._accum_grad_hooks.append(
-                    param.register_post_accumulate_grad_hook(
-                        functools.partial(_accum_grad_hook, ddp_model=self)
-                    )
+        def _accum_grad_hook(param, *, ddp_model=self):
+            if param.grad is None:
+                return
+            completed_params.add(id(param))
+            if len(completed_params) != len(sync_params):
+                return
+            if ddp_model.require_backward_grad_sync:
+                _sync_completed_grads(ddp_model)
+            completed_params.clear()
+
+        for param in sync_params:
+            self._accum_grad_hooks.append(
+                param.register_post_accumulate_grad_hook(
+                    functools.partial(_accum_grad_hook, ddp_model=self)
                 )
+            )
 
     _DDP.__init__ = _patched_init
 
