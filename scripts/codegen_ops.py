@@ -2005,6 +2005,48 @@ CATEGORY_GENERATORS = {
 # ============================================================================
 
 
+# Matrix operators whose vendor routes must not receive unsupported low-precision
+# tensors. Keep the list schema-specific because the generated wrapper is also used
+# for dtype/out variants whose names do not share one dispatcher signature.
+_SOFT_LOWP_DIRECT_CALLS = {
+    "addmm": "at::native::flagos::soft_lowp::Addmm(self, mat1, mat2, beta, alpha)",
+    "addmm.dtype": "at::native::flagos::soft_lowp::AddmmDtype(self, mat1, mat2, out_dtype, beta, alpha)",
+    "addmm.dtype_out": "at::native::flagos::soft_lowp::AddmmDtypeOut(self, mat1, mat2, out_dtype, beta, alpha, out)",
+    "addmm.out": "at::native::flagos::soft_lowp::AddmmOut(self, mat1, mat2, beta, alpha, out)",
+    "addmm_": "at::native::flagos::soft_lowp::AddmmInplace(self, mat1, mat2, beta, alpha)",
+    "bmm": "at::native::flagos::soft_lowp::Bmm(self, mat2)",
+    "bmm.dtype": "at::native::flagos::soft_lowp::BmmDtype(self, mat2, out_dtype)",
+    "bmm.dtype_out": "at::native::flagos::soft_lowp::BmmDtypeOut(self, mat2, out_dtype, out)",
+    "bmm.out": "at::native::flagos::soft_lowp::BmmOut(self, mat2, out)",
+    "mm": "at::native::flagos::soft_lowp::Mm(self, mat2)",
+    "mm.dtype": "at::native::flagos::soft_lowp::MmDtype(self, mat2, out_dtype)",
+    "mm.dtype_out": "at::native::flagos::soft_lowp::MmDtypeOut(self, mat2, out_dtype, out)",
+    "mm.out": "at::native::flagos::soft_lowp::MmOut(self, mat2, out)",
+}
+
+_SOFT_LOWP_GATE_OPS = {
+    "_scaled_grouped_mm",
+    "_scaled_grouped_mm_v2",
+    "_scaled_mm",
+    "_scaled_mm.out",
+    "_scaled_mm_v2",
+    *_SOFT_LOWP_DIRECT_CALLS,
+}
+
+
+def _plain_tensor_ref_names(args: List[Tuple[str, str]]) -> List[str]:
+    """Return non-optional Tensor references usable by the lowp dtype gate."""
+    return [
+        name
+        for cpp_type, name in args
+        if "at::Tensor" in cpp_type
+        and "const" in cpp_type
+        and "optional" not in cpp_type
+        and "TensorList" not in cpp_type
+        and "ArrayRef" not in cpp_type
+    ]
+
+
 def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
     """Wrapper<Name> that forwards into the dispatcher (used by TORCH_LIBRARY_IMPL)."""
     wname = "Wrapper" + fn_type[:-2]
@@ -2014,6 +2056,47 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
         body = f"  {call};"
     else:
         body = f"  return {call};"
+
+    # Vendor libraries generally do not accept PyTorch's FP8/FP4 scalar types.
+    # Keep the generated wrapper as the single dtype-aware gate so a future
+    # software-lowp implementation can bypass the static backend cache without
+    # changing every vendor configuration file. The gate must never allow a
+    # covered low-precision operation to reach the generic CPU fallback.
+    lowp_args = _plain_tensor_ref_names(args)
+    if op in _SOFT_LOWP_DIRECT_CALLS and lowp_args:
+        checks = " || ".join(
+            f"at::native::flagos::soft_lowp::IsLowPrecision({name}.scalar_type())"
+            for name in lowp_args
+        )
+        body = (
+            "#if defined(USE_DCU)\n"
+            f"  if ({checks}) {{\n"
+            f"    return {_SOFT_LOWP_DIRECT_CALLS[op]};\n"
+            "  }\n"
+            "#endif\n" + body
+        )
+    elif op in _SOFT_LOWP_GATE_OPS and lowp_args:
+        checks = " || ".join(
+            f"at::native::flagos::soft_lowp::IsLowPrecision({name}.scalar_type())"
+            for name in lowp_args
+        )
+        body = (
+            "#if defined(USE_DCU)\n"
+            f"  if ({checks}) {{\n"
+            f'    TORCH_CHECK(false, "soft-lowp {op} requires a device kernel for '
+            'the requested dtype; CPU fallback is disabled");\n'
+            "  }\n"
+            "#endif\n" + body
+        )
+    elif op in _SOFT_LOWP_GATE_OPS:
+        # A covered schema with no plain Tensor input (for example an out-only
+        # signature) must not silently fall through to the generic fallback.
+        body = (
+            "#if defined(USE_DCU)\n"
+            f'  TORCH_CHECK(false, "soft-lowp {op} requires Tensor inputs; '
+            'CPU fallback is disabled");\n'
+            "#endif\n" + body
+        )
     return f"{ret_type} {wname}({args_decl(args)}) {{\n{body}\n}}", wname
 
 

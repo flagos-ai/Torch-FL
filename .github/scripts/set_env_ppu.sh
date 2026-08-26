@@ -291,19 +291,29 @@ for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
   done
 done
 
-# CI image (harbor inference-xpu-pytorch) ships no flag_gems package -- the
-# site-packages has no .pth/finder/dist-info for it (verified: ls | grep is
-# empty). The source is mounted read-only at /workspace/FlagGems via
-# container_volumes (shared CPFS PV on the runner pod; verified: docker run -v
-# lists the tree). Dev pods have an editable .pth in their CPFS-backed
-# site-packages that resolves import to /workspace/FlagGems/src; the CI image
-# lacks it, so synthesize a plain path .pth in the venv site-packages. A
-# single path line in a .pth file is prepended to sys.path at Python startup,
-# letting `import flag_gems` resolve to /workspace/FlagGems/src/flag_gems with
-# no editable install (honours the "no editable install for acceptance" rule).
-if [[ -d /workspace/FlagGems/src/flag_gems ]]; then
-  printf '%s\n' "/workspace/FlagGems/src" > "$VENV_SITE/_flag_gems_mounted_source.pth"
+# CI image (harbor inference-xpu-pytorch) ships no flag_gems package. Discover
+# the mounted source in either the normal src layout or a repository-root
+# package layout, then fail during environment setup if neither is available.
+# A plain path .pth keeps the acceptance environment non-editable while making
+# the mounted source importable by the venv Python.
+_flaggems_sources=(
+  /workspace/FlagGems/src
+  /workspace/FlagGems
+)
+FLAGGEMS_SOURCE=""
+for _candidate in "${_flaggems_sources[@]}"; do
+  if [[ -d "$_candidate/flag_gems" ]]; then
+    FLAGGEMS_SOURCE="$_candidate"
+    break
+  fi
+done
+if [[ -z "$FLAGGEMS_SOURCE" ]]; then
+  echo "::error::FlagGems source is not available under /workspace/FlagGems"
+  echo "::error::Expected flag_gems under: ${_flaggems_sources[*]}"
+  exit 1
 fi
+printf '%s\n' "$FLAGGEMS_SOURCE" > "$VENV_SITE/_flag_gems_mounted_source.pth"
+echo "FlagGems source: $FLAGGEMS_SOURCE"
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -399,6 +409,22 @@ print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
 print(f"PPU bundle: {Path('torch_fl/lib_ppu').resolve()}")
 PY
+
+# Prove the mounted FlagGems source is importable in this venv, so a missing or
+# unreadable mount fails here instead of turning into a wall of identical
+# ModuleNotFoundError test failures in the FlagGems runtime step. flag_gems
+# queries torch.cuda at import time, so torch_fl must be imported first: that is
+# what swaps the stock CPU core libs for the PPU build bundled above. The check
+# therefore has to run after bundle_ppu_libtorch.sh, and only in the integration
+# stage, which is where flag_gems' pure Python deps are installed.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  python - <<'PY'
+import torch_fl  # noqa: F401  (swaps in the bundled PPU libtorch core)
+import flag_gems
+
+print(f"flag_gems: {flag_gems.__file__}")
+PY
+fi
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"

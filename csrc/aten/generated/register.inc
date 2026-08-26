@@ -1340,18 +1340,43 @@ at::Tensor & WrapperPrivSampleDirichletOut(const at::Tensor & self, ::std::optio
   return at::native::flagos::priv_scaled_dot_product_fused_attention_overrideable_backward_dispatcher(grad_out, query, key, value, attn_bias, grad_input_mask, out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, philox_seed, philox_offset, scale);
 }
 at::Tensor WrapperPrivScaledGroupedMm(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & offs, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_a.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_b.scalar_type())) {
+    TORCH_CHECK(false, "soft-lowp _scaled_grouped_mm requires a device kernel for the requested dtype; CPU fallback is disabled");
+  }
+#endif
   return at::native::flagos::priv_scaled_grouped_mm_dispatcher(self, mat2, scale_a, scale_b, offs, bias, scale_result, out_dtype, use_fast_accum);
 }
 at::Tensor WrapperPrivScaledGroupedMmV2(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & offs, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    TORCH_CHECK(false, "soft-lowp _scaled_grouped_mm_v2 requires a device kernel for the requested dtype; CPU fallback is disabled");
+  }
+#endif
   return at::native::flagos::priv_scaled_grouped_mm_v2_dispatcher(self, mat2, scale_a, recipe_a, swizzle_a, scale_b, recipe_b, swizzle_b, offs, bias, out_dtype, contraction_dim, use_fast_accum);
 }
 at::Tensor WrapperPrivScaledMm(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_a.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_b.scalar_type())) {
+    TORCH_CHECK(false, "soft-lowp _scaled_mm requires a device kernel for the requested dtype; CPU fallback is disabled");
+  }
+#endif
   return at::native::flagos::priv_scaled_mm_dispatcher(self, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum);
 }
 at::Tensor & WrapperPrivScaledMmOut(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_a.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(scale_b.scalar_type())) {
+    TORCH_CHECK(false, "soft-lowp _scaled_mm.out requires a device kernel for the requested dtype; CPU fallback is disabled");
+  }
+#endif
   return at::native::flagos::priv_scaled_mm_out_dispatcher(self, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
 }
 at::Tensor WrapperPrivScaledMmV2(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    TORCH_CHECK(false, "soft-lowp _scaled_mm_v2 requires a device kernel for the requested dtype; CPU fallback is disabled");
+  }
+#endif
   return at::native::flagos::priv_scaled_mm_v2_dispatcher(self, mat2, scale_a, recipe_a, swizzle_a, scale_b, recipe_b, swizzle_b, bias, out_dtype, contraction_dim, use_fast_accum);
 }
 at::Tensor WrapperPrivSegmentReduceBackward(const at::Tensor & grad, const at::Tensor & output, const at::Tensor & data, c10::string_view reduce, const ::std::optional<at::Tensor> & lengths, const ::std::optional<at::Tensor> & offsets, int64_t axis, const ::std::optional<at::Scalar> & initial) {
@@ -1799,18 +1824,43 @@ at::Tensor & WrapperAddcmulInplace(at::Tensor & self, const at::Tensor & tensor1
   return at::native::flagos::addcmul_inplace_dispatcher(self, tensor1, tensor2, value);
 }
 at::Tensor WrapperAddmm(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat1.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::Addmm(self, mat1, mat2, beta, alpha);
+  }
+#endif
   return at::native::flagos::addmm_dispatcher(self, mat1, mat2, beta, alpha);
 }
 at::Tensor WrapperAddmmDtype(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, at::ScalarType out_dtype, const at::Scalar & beta, const at::Scalar & alpha) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat1.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::AddmmDtype(self, mat1, mat2, out_dtype, beta, alpha);
+  }
+#endif
   return at::native::flagos::addmm_dtype_dispatcher(self, mat1, mat2, out_dtype, beta, alpha);
 }
 at::Tensor & WrapperAddmmDtypeOut(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, at::ScalarType out_dtype, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat1.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::AddmmDtypeOut(self, mat1, mat2, out_dtype, beta, alpha, out);
+  }
+#endif
   return at::native::flagos::addmm_dtype_out_dispatcher(self, mat1, mat2, out_dtype, beta, alpha, out);
 }
 at::Tensor & WrapperAddmmOut(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat1.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::AddmmOut(self, mat1, mat2, beta, alpha, out);
+  }
+#endif
   return at::native::flagos::addmm_out_dispatcher(self, mat1, mat2, beta, alpha, out);
 }
 at::Tensor & WrapperAddmmInplace(at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(mat1.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::AddmmInplace(self, mat1, mat2, beta, alpha);
+  }
+#endif
   return at::native::flagos::addmm_inplace_dispatcher(self, mat1, mat2, beta, alpha);
 }
 at::Tensor WrapperAddmv(const at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha) {
@@ -2279,15 +2329,35 @@ at::Tensor & WrapperBlockDiagOut(at::TensorList tensors, at::Tensor & out) {
   return at::native::flagos::block_diag_out_dispatcher(tensors, out);
 }
 at::Tensor WrapperBmm(const at::Tensor & self, const at::Tensor & mat2) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::Bmm(self, mat2);
+  }
+#endif
   return at::native::flagos::bmm_dispatcher(self, mat2);
 }
 at::Tensor WrapperBmmDtype(const at::Tensor & self, const at::Tensor & mat2, at::ScalarType out_dtype) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::BmmDtype(self, mat2, out_dtype);
+  }
+#endif
   return at::native::flagos::bmm_dtype_dispatcher(self, mat2, out_dtype);
 }
 at::Tensor & WrapperBmmDtypeOut(const at::Tensor & self, const at::Tensor & mat2, at::ScalarType out_dtype, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::BmmDtypeOut(self, mat2, out_dtype, out);
+  }
+#endif
   return at::native::flagos::bmm_dtype_out_dispatcher(self, mat2, out_dtype, out);
 }
 at::Tensor & WrapperBmmOut(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::BmmOut(self, mat2, out);
+  }
+#endif
   return at::native::flagos::bmm_out_dispatcher(self, mat2, out);
 }
 at::Tensor WrapperBucketizeScalar(const at::Scalar & self, const at::Tensor & boundaries, bool out_int32, bool right) {
@@ -4097,15 +4167,35 @@ at::Tensor & WrapperMkldnnReorderConv3dWeightOut(const at::Tensor & self, at::In
   return at::native::flagos::mkldnn_rnn_layer_backward_out_dispatcher(input, weight1, weight2, weight3, weight4, hx_, cx_tmp, output, hy_, cy_, grad_output, grad_hy, grad_cy, reverse, mode, hidden_size, num_layers, has_biases, train, bidirectional, batch_sizes, batch_first, workspace, out0, out1, out2, out3, out4, out5, out6);
 }
 at::Tensor WrapperMm(const at::Tensor & self, const at::Tensor & mat2) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::Mm(self, mat2);
+  }
+#endif
   return at::native::flagos::mm_dispatcher(self, mat2);
 }
 at::Tensor WrapperMmDtype(const at::Tensor & self, const at::Tensor & mat2, at::ScalarType out_dtype) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::MmDtype(self, mat2, out_dtype);
+  }
+#endif
   return at::native::flagos::mm_dtype_dispatcher(self, mat2, out_dtype);
 }
 at::Tensor & WrapperMmDtypeOut(const at::Tensor & self, const at::Tensor & mat2, at::ScalarType out_dtype, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::MmDtypeOut(self, mat2, out_dtype, out);
+  }
+#endif
   return at::native::flagos::mm_dtype_out_dispatcher(self, mat2, out_dtype, out);
 }
 at::Tensor & WrapperMmOut(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
+#if defined(USE_DCU)
+  if (at::native::flagos::soft_lowp::IsLowPrecision(self.scalar_type()) || at::native::flagos::soft_lowp::IsLowPrecision(mat2.scalar_type())) {
+    return at::native::flagos::soft_lowp::MmOut(self, mat2, out);
+  }
+#endif
   return at::native::flagos::mm_out_dispatcher(self, mat2, out);
 }
 ::std::tuple<at::Tensor,at::Tensor> WrapperMode(const at::Tensor & self, int64_t dim, bool keepdim) {
