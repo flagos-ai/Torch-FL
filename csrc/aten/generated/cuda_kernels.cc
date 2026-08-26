@@ -4,6 +4,7 @@
 #include "ops.h"
 #include "../device_boxing.h"
 #include "../backends/flagos/python_op_caller.h"
+#include "../amp_ops.h"
 
 #include <vector>
 #include <tuple>
@@ -951,11 +952,17 @@ void PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelCuda(at::TensorList self, at
 }
 
 void PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelCuda(at::TensorList self, at::Tensor & found_inf, const at::Tensor & inv_scale) {
+#if defined(USE_KUNLUN)
+  at::native::flagos::amp_foreach_non_finite_check_and_unscale(
+      self, found_inf, inv_scale);
+#else
   auto self_vec = MaterializeToTensorVec(self);
   TensorListBoxingGuard guard;
   guard.box(self_vec);
+  guard.box({found_inf});
   guard.box({inv_scale});
   at::_amp_foreach_non_finite_check_and_unscale_(self_vec, found_inf, inv_scale);
+#endif
 }
 
 ::std::tuple<at::Tensor,at::Tensor> PrivAmpUpdateScaleKernelCuda(const at::Tensor & self, const at::Tensor & growth_tracker, const at::Tensor & found_inf, double scale_growth_factor, double scale_backoff_factor, int64_t growth_interval) {

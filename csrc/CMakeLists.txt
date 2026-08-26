@@ -289,6 +289,13 @@ if(NOT ACCELERATOR STREQUAL "ascend")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
 endif()
 
+if(ACCELERATOR STREQUAL "dcu" OR ACCELERATOR STREQUAL "kunlun")
+  # Register the generic AutocastPrivateUse1 policy table for CUDA-compatible
+  # vendor runtimes. The policy redispatches to existing backend kernels and
+  # does not add handwritten vendor-specific operator implementations.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_FLAGOS_AUTOCAST=1)
+endif()
+
 if(ACCELERATOR STREQUAL "metax")
   # maca's torch headers are a hard fork gated on USE_MACA (e.g. C10_WARP_SIZE,
   # Context.h allow_tf32_cudnn). Without it the headers hit static_assert(0).
@@ -348,6 +355,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
 elseif(ACCELERATOR STREQUAL "kunlun")
   # Kunlun's vendor torch exposes CUDA registrations and uses the CUDA-shaped
   # runtime, so the standard allocator and generated CUDA boxing path apply.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_KUNLUN=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 elseif(ACCELERATOR STREQUAL "musa")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)

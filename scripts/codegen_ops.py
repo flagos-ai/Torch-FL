@@ -1726,6 +1726,20 @@ def gen_foreach(op, fn_type, ret_type, args, func=None):
 
     call_args_str = ", ".join(call_arg_names)
 
+    if op == "_amp_foreach_non_finite_check_and_unscale_":
+        return f"""{ret_type} {kn}({args_decl(args)}) {{
+#if defined(USE_KUNLUN)
+  at::native::flagos::amp_foreach_non_finite_check_and_unscale(
+      self, found_inf, inv_scale);
+#else
+{materialize_lines}  TensorListBoxingGuard guard;
+  guard.box(self_vec);
+  guard.box({{found_inf}});
+  guard.box({{inv_scale}});
+  {api}({call_args_str});
+#endif
+}}"""
+
     # Box the materialized vectors
     box_lines = ""
     for t, n in tensorlist_args:
@@ -2209,6 +2223,7 @@ def main():
         '#include "ops.h"',
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
+        '#include "../amp_ops.h"',
         "",
         "#include <vector>",
         "#include <tuple>",

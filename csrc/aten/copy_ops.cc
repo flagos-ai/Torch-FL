@@ -132,15 +132,19 @@ at::Tensor _copy_from(
       // this platform.
       musa_ops::MudnnCopy(self, const_cast<at::Tensor&>(dst));
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUN)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
       // strided copy kernel (handles strides, dtype casts on-device).
       DeviceBoxingGuard guard(self, dst);
       at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
 #else
-      // Ascend: copy on-device via aclnnInplaceCopy, which honors both src and
-      // dst strides/offset and casts dtype. Avoids the CPU round-trip below.
+      // Ascend uses aclnnInplaceCopy when available. Kunlun and the other
+      // non-CUDA backends use the portable CPU round-trip below because their
+      // CUDA-shaped copy kernels are not guaranteed to support these AMP
+      // tensor-list operations.
+#if defined(USE_ASCEND)
       if (!ascend::StridedCopy(dst, self)) {
+#endif
         // Fallback: CPU round-trip (device->host, strided copy on CPU, host->device).
         at::Tensor self_contig = self.is_contiguous()
             ? self
@@ -185,7 +189,9 @@ at::Tensor _copy_from(
               dst_storage_nbytes,
               MemcpyHostToDevice);
         }
+#if defined(USE_ASCEND)
       }
+#endif
 #endif
     }
     return dst;
@@ -214,7 +220,7 @@ at::Tensor _copy_from(
       auto tmp = at::empty(self_contig.sizes(), dst.options());
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU)
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUN)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -244,7 +250,7 @@ at::Tensor _copy_from(
       auto tmp = at::empty(self_contig.sizes(), dst.options());
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU)
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUN)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -408,9 +414,11 @@ at::Tensor _to_copy(
           .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
       musa_ops::MudnnCopy(self_contig, result);
 #elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU)
-      // No CUDA runtime on these backends, so the CUDA TensorIterator cast
-      // below is unavailable.
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUN)
+      // These backends do not provide a usable CUDA TensorIterator cast path.
+      // Kunlun exposes CUDA-shaped APIs, but its runtime rejects this cast
+      // kernel with cudaErrorInvalidDeviceFunction, so use the portable
+      // host-staged conversion below.
 #ifdef USE_ASCEND
       // Ascend casts on-device via aclnnCast, avoiding the D2H->CPU->H2D
       // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).
@@ -424,6 +432,7 @@ at::Tensor _to_copy(
         at::Tensor cpu_tensor =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
         if (nbytes > 0) {
+          SyncCurrentStreamBeforeBlockingCopy();
           Memcpy(
               cpu_tensor.data_ptr(),
               self_contig.data_ptr(),

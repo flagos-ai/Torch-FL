@@ -19,7 +19,10 @@ import torch_fl  # noqa: F401
 from torch_fl._build_config import ACCELERATOR
 
 
-pytestmark = pytest.mark.skipif(ACCELERATOR != "dcu", reason="DCU-specific AMP tests")
+pytestmark = pytest.mark.skipif(
+    ACCELERATOR not in ("dcu", "kunlun"),
+    reason="AMP tests for CUDA-compatible vendor runtimes (DCU, Kunlun XPU)",
+)
 DEVICE = "flagos:0"
 AMP_DTYPES = (torch.float16, torch.bfloat16)
 

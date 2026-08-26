@@ -99,6 +99,34 @@ intentional: the vendor torch exposes CUDA registrations, so a route to `cuda`
 reaches the vendor kernel through the generated boxing implementation. A measured
 8x8 float32 matrix multiplication passed against the CPU reference.
 
+## Automatic Mixed Precision
+
+The generic `AutocastPrivateUse1` policy table is compiled for Kunlun, so
+`torch.autocast("flagos")` and `torch.amp.GradScaler("flagos")` work on the
+`flagos` device. Run the AMP suite with:
+
+```bash
+ACCELERATOR=kunlun \
+  XPU_ENABLE_PROFILER_TRACING=1 \
+  /path/to/vendor/python -m pytest tests/integration/test_amp.py -v
+```
+
+The measured P800 result is `15 passed`, covering FP16 and BF16 autocast policy,
+FP32-preserving operators, explicit output dtype, type promotion, autocast
+nesting, `binary_cross_entropy` banning, non-finite gradient detection, and
+GradScaler finite/overflow behavior.
+
+Two Kunlun-specific routes make this work. The XPU runtime rejects the native
+CUDA TensorIterator cast kernel with `cudaErrorInvalidDeviceFunction`, so
+`_to_copy` and `_copy_from` use the portable host-staged conversion instead. The
+boxed `_amp_foreach_non_finite_check_and_unscale_` overload segfaults on this
+stack, so it routes to a Kunlun-safe helper that stages the check and unscale
+through the host. Both paths add host round-trips, so AMP throughput on Kunlun is
+not comparable to a native device-side implementation.
+
+Distributed AMP (DDP or FSDP2 combined with GradScaler) is **not validated** on
+Kunlun.
+
 ## Optional: FlagGems on Kunlun
 
 The vendor stack ships a FlagTree Triton at `/opt/flagtree` that `flag_gems`
