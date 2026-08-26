@@ -134,6 +134,11 @@ integration_tests:
       python -m pytest tests/integration/test_amp_contract.py
       -v -m amp --tb=short
 
+  - name: Unified math-bits contract
+    command: >-
+      python -m pytest tests/integration/test_math_bits_contract.py
+      -v -m math_bits --tb=short
+
   - name: Unified profiler contract
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py

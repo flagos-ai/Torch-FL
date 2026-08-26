@@ -15,6 +15,10 @@ at::Tensor contiguous(
     const at::Tensor& self,
     c10::MemoryFormat memory_format);
 
+at::Tensor materialize_math_bits(
+    const at::Tensor& self,
+    c10::MemoryFormat memory_format = c10::MemoryFormat::Preserve);
+
 at::Tensor clone(
     const at::Tensor& self,
     std::optional<c10::MemoryFormat> memory_format);

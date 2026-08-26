@@ -112,6 +112,17 @@ at::Tensor _copy_from(
   TORCH_CHECK(self.defined(), "Source tensor (self) is not defined.");
   TORCH_CHECK(dst.defined(), "Destination tensor (dst) is not defined.");
 
+  // Raw memcpy copies storage bytes and therefore bypasses lazy Conjugate and
+  // Negative math bits. Materialize those bits once before entering any of the
+  // device-copy fast paths, which otherwise intentionally operate on raw data.
+  if (self.is_conj() || self.is_neg()) {
+    return at::native::flagos::_copy_from(
+        at::native::flagos::materialize_math_bits(
+            self, c10::MemoryFormat::Preserve),
+        dst,
+        non_blocking);
+  }
+
   // Both flagos tensors: copy on-device.
   if (self.is_privateuseone() && dst.is_privateuseone()) {
     if (self.is_contiguous() && dst.is_contiguous() &&

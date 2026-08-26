@@ -110,6 +110,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "profiler_metadata: requires profiler device metadata"
     )
+    config.addinivalue_line(
+        "markers",
+        "math_bits: shared contract for PyTorch's lazy Conjugate/Negative bits",
+    )
     config.addinivalue_line("markers", "amp: shared public torch.amp contract")
     config.addinivalue_line(
         "markers", "amp_device: requires AMP compute on the flagos device"

@@ -21,9 +21,65 @@
 
 namespace at::native::flagos {
 
+namespace {
+
+// Temporarily expose the storage representation without lazy math bits so the
+// existing backend-specific clone path can copy it. The guard restores the
+// original metadata before returning to the caller; all operations performed
+// while it is active are synchronous with respect to tensor metadata.
+class MathBitsGuard {
+ public:
+  explicit MathBitsGuard(const at::Tensor& tensor)
+      : tensor_(tensor), conj_(tensor.is_conj()), neg_(tensor.is_neg()) {
+    if (conj_) tensor_._set_conj(false);
+    if (neg_) tensor_._set_neg(false);
+  }
+
+  ~MathBitsGuard() {
+    if (conj_) tensor_._set_conj(true);
+    if (neg_) tensor_._set_neg(true);
+  }
+
+  bool active() const { return conj_ || neg_; }
+  bool conj() const { return conj_; }
+  bool neg() const { return neg_; }
+
+ private:
+  at::Tensor tensor_;
+  bool conj_;
+  bool neg_;
+};
+
+// Materialize lazy math bits using the active backend's ordinary operators.
+// This deliberately avoids CUDA boxing: GCU, MUSA, Ascend, DCU and other
+// PrivateUse1 backends may not provide a CUDA runtime at all.
+at::Tensor materialize_math_bits_impl(
+    const at::Tensor& self,
+    c10::MemoryFormat memory_format) {
+  MathBitsGuard bits(self);
+  if (!bits.active()) return self;
+
+  auto result = self.clone(memory_format);
+  if (bits.conj()) result = at::_conj_physical(result);
+  if (bits.neg()) result = at::neg(result);
+  return result;
+}
+
+} // namespace
+
+at::Tensor materialize_math_bits(
+    const at::Tensor& self,
+    c10::MemoryFormat memory_format) {
+  return materialize_math_bits_impl(self, memory_format);
+}
+
 at::Tensor contiguous(
     const at::Tensor& self,
     c10::MemoryFormat memory_format) {
+  if ((self.is_conj() || self.is_neg()) &&
+      !self.is_contiguous(memory_format)) {
+    return materialize_math_bits_impl(self, memory_format);
+  }
   if (self.is_contiguous(memory_format)) {
     return self;
   }
@@ -82,6 +138,9 @@ at::Tensor clone(
     const at::Tensor& self,
     std::optional<c10::MemoryFormat> memory_format_opt) {
   auto memory_format = memory_format_opt.value_or(c10::MemoryFormat::Preserve);
+  if (self.is_conj() || self.is_neg()) {
+    return materialize_math_bits_impl(self, memory_format);
+  }
 
   if (memory_format == c10::MemoryFormat::Preserve) {
     if (self.is_contiguous()) {
