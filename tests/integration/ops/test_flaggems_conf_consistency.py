@@ -40,11 +40,18 @@ Usage:
     pytest tests/integration/ops/test_flaggems_conf_consistency.py -v
 """
 
+from __future__ import annotations
+
 import ast
 import re
 from pathlib import Path
 
 import pytest
+
+
+# ``special_i1.out`` is deliberately routed to CUDA in the generated config;
+# torchgen still emits the shared dispatcher wrapper, but no Python kernel.
+_SKIP_ROUTE_SET = {"special_i1_out_dispatcher"}
 
 
 # tests/integration/ops/<this file> -> repo root is three levels up.
@@ -248,7 +255,23 @@ class TestFlagGemsConfConsistency:
         override_disp, _ = _override_only_dispatchers()
         cc_disp = _cc_flagos_python_dispatchers()
         expected = conf_disp | override_disp
+        expected -= _SKIP_ROUTE_SET
         assert len(expected) == len(cc_disp), (
             f"flagos_python route count mismatch: conf={len(conf_disp)} "
             f"override_only={len(override_disp)} kernels={len(cc_disp)}"
+        )
+
+    def test_python_kernels_use_canonical_modules(self):
+        """Generated calls must not freeze a vendor architecture alias."""
+        paths = re.findall(
+            r'CallPythonOp_\w+\("([^"]+)"',
+            _read(_KERNELS_CC),
+        )
+        assert paths, f"no Python operation calls found in {_KERNELS_CC.name}"
+        noncanonical = sorted(
+            path for path in paths if not path.startswith("flag_gems.ops.")
+        )
+        assert not noncanonical, (
+            "generated FlagGems calls must use flag_gems.ops.* rather than a "
+            f"vendor-specific module path: {noncanonical}"
         )

@@ -91,7 +91,7 @@ at::Tensor PrivLinalgEigvalsKernelPython(const at::Tensor & self) {
 }
 
 at::Tensor PrivLogSoftmaxKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  auto result = CallPythonOp_Generic("gcu300.ops.log_softmax.log_softmax", {self, dim, half_to_float});
+  auto result = CallPythonOp_Generic("flag_gems.ops.log_softmax.log_softmax", {self, dim, half_to_float});
   UnboxToFlagos(result);
   return result;
 }
@@ -166,7 +166,7 @@ at::Tensor PrivPreluKernelKernelPython(const at::Tensor & self, const at::Tensor
 }
 
 at::Tensor PrivSoftmaxKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  auto result = CallPythonOp_Generic("gcu300.ops.softmax.softmax", {self, dim, half_to_float});
+  auto result = CallPythonOp_Generic("flag_gems.ops.softmax.softmax", {self, dim, half_to_float});
   UnboxToFlagos(result);
   return result;
 }
@@ -177,7 +177,7 @@ at::Tensor & PrivSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim, bo
 }
 
 at::Tensor PrivSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.softmax.softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.softmax.softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}});
   UnboxToFlagos(result);
   return result;
 }
@@ -210,7 +210,7 @@ at::Tensor PrivSparseSemiStructuredMmKernelPython(const at::Tensor & mat1, const
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivUnique2KernelPython(const at::Tensor & self, bool sorted, bool return_inverse, bool return_counts) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.unique._unique2", {self, sorted, return_inverse, return_counts}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.unique._unique2", {self, sorted, return_inverse, return_counts}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -256,13 +256,13 @@ at::Tensor PrivUpsampleNearestExact2dBackwardKernelPython(const at::Tensor & gra
 }
 
 at::Tensor AbsKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.abs.abs", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.abs.abs", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & AbsInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.abs.abs_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.abs.abs_", {self});
   self.copy_(result);
   return self;
 }
@@ -292,13 +292,13 @@ at::Tensor AdaptiveMaxPool3dBackwardKernelPython(const at::Tensor & grad_output,
 }
 
 at::Tensor AddTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.add.add", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.add.add", {self, other}, {PyKwarg{"alpha", alpha}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & AddInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.add.add_", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.add.add_", {self, other}, {PyKwarg{"alpha", alpha}});
   self.copy_(result);
   return self;
 }
@@ -338,7 +338,7 @@ at::Tensor & AddcmulInplaceKernelPython(at::Tensor & self, const at::Tensor & te
 }
 
 at::Tensor AddmmKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.addmm.addmm", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.addmm.addmm", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
   UnboxToFlagos(result);
   return result;
 }
@@ -367,13 +367,13 @@ at::Tensor & AddmmInplaceKernelPython(at::Tensor & self, const at::Tensor & mat1
 }
 
 at::Tensor AddmvKernelPython(const at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.addmv.addmv", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.addmv.addmv", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & AddmvOutKernelPython(const at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.addmv.addmv_out", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.addmv.addmv_out", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
   out.copy_(result);
   return out;
 }
@@ -391,25 +391,25 @@ at::Tensor AffineGridGeneratorKernelPython(const at::Tensor & theta, at::IntArra
 }
 
 at::Tensor AllKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.all.all", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.all.all", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AllDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.all.all_dim", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.all.all_dim", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AllDimsKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.all.all_dims", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.all.all_dims", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AmaxKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.amax.amax", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.amax.amax", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
@@ -428,25 +428,25 @@ at::Tensor AminKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool k
 }
 
 at::Tensor AngleKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.angle.angle", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.angle.angle", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AnyKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.any.any", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.any.any", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AnyDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.any.any_dim", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.any.any_dim", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor AnyDimsKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.any.any_dims", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.any.any_dims", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
@@ -455,7 +455,7 @@ at::Tensor ArangeKernelPython(const at::Scalar & end, ::std::optional<at::Scalar
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (end.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("gcu300.ops.arange.arange", {end}, _dt, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.arange.arange", {end}, _dt, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -464,7 +464,7 @@ at::Tensor ArangeStartKernelPython(const at::Scalar & start, const at::Scalar & 
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (start.isFloatingPoint() || end.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("gcu300.ops.arange.arange_start", {start, end}, _dt, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.arange.arange_start", {start, end}, _dt, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -473,19 +473,19 @@ at::Tensor ArangeStartStepKernelPython(const at::Scalar & start, const at::Scala
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (start.isFloatingPoint() || end.isFloatingPoint() || step.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("gcu300.ops.arange.arange_start", {start, end, step}, _dt, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.arange.arange_start", {start, end, step}, _dt, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ArgmaxKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.argmax.argmax", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.argmax.argmax", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ArgminKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.argmin.argmin", {self, dim, keepdim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.argmin.argmin", {self, dim, keepdim});
   UnboxToFlagos(result);
   return result;
 }
@@ -601,121 +601,121 @@ at::Tensor BinaryCrossEntropyWithLogitsKernelPython(const at::Tensor & self, con
 }
 
 at::Tensor BincountKernelPython(const at::Tensor & self, const ::std::optional<at::Tensor> & weights, int64_t minlength) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bincount.bincount", {self, weights, minlength});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bincount.bincount", {self, weights, minlength});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseAndScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_and.bitwise_and_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_and.bitwise_and_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseAndScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_and.bitwise_and_scalar_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_and.bitwise_and_scalar_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseAndTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_and.bitwise_and_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_and.bitwise_and_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & BitwiseAndInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_and.bitwise_and_scalar_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_and.bitwise_and_scalar_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & BitwiseAndInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_and.bitwise_and_tensor_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_and.bitwise_and_tensor_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor BitwiseNotKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_not.bitwise_not", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_not.bitwise_not", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & BitwiseNotInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_not.bitwise_not_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_not.bitwise_not_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor BitwiseOrScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_or.bitwise_or_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_or.bitwise_or_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseOrScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_or.bitwise_or_scalar_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_or.bitwise_or_scalar_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseOrTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_or.bitwise_or_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_or.bitwise_or_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & BitwiseOrInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_or.bitwise_or_scalar_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_or.bitwise_or_scalar_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & BitwiseOrInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_or.bitwise_or_tensor_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_or.bitwise_or_tensor_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor BitwiseXorScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_xor.bitwise_xor_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_xor.bitwise_xor_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseXorScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_xor.bitwise_xor_scalar_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_xor.bitwise_xor_scalar_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor BitwiseXorTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_xor.bitwise_xor_tensor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_xor.bitwise_xor_tensor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & BitwiseXorInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_xor.bitwise_xor_scalar_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_xor.bitwise_xor_scalar_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & BitwiseXorInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bitwise_xor.bitwise_xor_tensor_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bitwise_xor.bitwise_xor_tensor_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = CallPythonOp_Generic("gcu300.ops.bmm.bmm", {self, mat2});
+  auto result = CallPythonOp_Generic("flag_gems.ops.bmm.bmm", {self, mat2});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  CallPythonOp_Generic("gcu300.ops.bmm.bmm_out", {self, mat2, out});
+  CallPythonOp_Generic("flag_gems.ops.bmm.bmm_out", {self, mat2, out});
   return out;
 }
 
@@ -726,31 +726,31 @@ at::Tensor BucketizeTensorKernelPython(const at::Tensor & self, const at::Tensor
 }
 
 at::Tensor CeilKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ceil.ceil", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ceil.ceil", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & CeilOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ceil.ceil_out", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ceil.ceil_out", {self});
   out.copy_(result);
   return out;
 }
 
 at::Tensor & CeilInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ceil.ceil_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ceil.ceil_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor CeluKernelPython(const at::Tensor & self, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("gcu300.ops.celu.celu", {self, alpha});
+  auto result = CallPythonOp_Generic("flag_gems.ops.celu.celu", {self, alpha});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & CeluInplaceKernelPython(at::Tensor & self, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("gcu300.ops.celu.celu_", {self, alpha});
+  auto result = CallPythonOp_Generic("flag_gems.ops.celu.celu_", {self, alpha});
   self.copy_(result);
   return self;
 }
@@ -762,25 +762,25 @@ at::Tensor ChannelShuffleKernelPython(const at::Tensor & self, int64_t groups) {
 }
 
 at::Tensor ClampKernelPython(const at::Tensor & self, const ::std::optional<at::Scalar> & min, const ::std::optional<at::Scalar> & max) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp.clamp", {self, min, max});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp.clamp", {self, min, max});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ClampTensorKernelPython(const at::Tensor & self, const ::std::optional<at::Tensor> & min, const ::std::optional<at::Tensor> & max) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp.clamp_tensor", {self, min, max});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp.clamp_tensor", {self, min, max});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ClampInplaceKernelPython(at::Tensor & self, const ::std::optional<at::Scalar> & min, const ::std::optional<at::Scalar> & max) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp.clamp_", {self, min, max});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp.clamp_", {self, min, max});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & ClampInplaceTensorKernelPython(at::Tensor & self, const ::std::optional<at::Tensor> & min, const ::std::optional<at::Tensor> & max) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp.clamp_tensor_", {self, min, max});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp.clamp_tensor_", {self, min, max});
   self.copy_(result);
   return self;
 }
@@ -798,13 +798,13 @@ at::Tensor & ClampMaxInplaceKernelPython(at::Tensor & self, const at::Scalar & m
 }
 
 at::Tensor ClampMinKernelPython(const at::Tensor & self, const at::Scalar & min) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp_min.clamp_min", {self, min});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp_min.clamp_min", {self, min});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ClampMinInplaceKernelPython(at::Tensor & self, const at::Scalar & min) {
-  auto result = CallPythonOp_Generic("gcu300.ops.clamp_min.clamp_min_", {self, min});
+  auto result = CallPythonOp_Generic("flag_gems.ops.clamp_min.clamp_min_", {self, min});
   self.copy_(result);
   return self;
 }
@@ -834,37 +834,37 @@ at::Tensor & CopysignInplaceTensorKernelPython(at::Tensor & self, const at::Tens
 }
 
 at::Tensor CosKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.cos.cos", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.cos.cos", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & CosInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.cos.cos_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.cos.cos_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor CoshKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.cosh.cosh", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.cosh.cosh", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & CoshOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("gcu300.ops.cosh.cosh_out", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.cosh.cosh_out", {self});
   out.copy_(result);
   return out;
 }
 
 at::Tensor & CoshInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.cosh.cosh_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.cosh.cosh_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor CountNonzeroKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.count_nonzero.count_nonzero", {self, dim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.count_nonzero.count_nonzero", {self, dim});
   UnboxToFlagos(result);
   return result;
 }
@@ -884,14 +884,14 @@ at::Tensor CudnnConvolutionKernelPython(const at::Tensor & self, const at::Tenso
 }
 
 ::std::tuple<at::Tensor,at::Tensor> CummaxKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.cummax.cummax", {self, dim}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.cummax.cummax", {self, dim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 ::std::tuple<at::Tensor,at::Tensor> CumminKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.cummin.cummin", {self, dim}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.cummin.cummin", {self, dim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -910,13 +910,13 @@ at::Tensor & CumprodInplaceKernelPython(at::Tensor & self, int64_t dim, ::std::o
 }
 
 at::Tensor CumsumKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.cumsum.cumsum", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.cumsum.cumsum", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & CumsumOutKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("gcu300.ops.cumsum.cumsum_out", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  CallPythonOp_GenericKw("flag_gems.ops.cumsum.cumsum_out", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
   return out;
 }
 
@@ -944,7 +944,7 @@ at::Tensor DequantizeSelfKernelPython(const at::Tensor & self) {
 }
 
 at::Tensor DiagonalBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef input_sizes, int64_t offset, int64_t dim1, int64_t dim2) {
-  auto result = CallPythonOp_Generic("gcu300.ops.diagonal.diagonal_backward", {grad_output, input_sizes, offset, dim1, dim2});
+  auto result = CallPythonOp_Generic("flag_gems.ops.diagonal.diagonal_backward", {grad_output, input_sizes, offset, dim1, dim2});
   UnboxToFlagos(result);
   return result;
 }
@@ -962,7 +962,7 @@ at::Tensor & DigammaInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor DivScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.true_divide", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.true_divide", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -974,7 +974,7 @@ at::Tensor DivScalarModeKernelPython(const at::Tensor & self, const at::Scalar &
 }
 
 at::Tensor DivTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.true_divide", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.true_divide", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -991,7 +991,7 @@ at::Tensor & DivOutKernelPython(const at::Tensor & self, const at::Tensor & othe
 }
 
 at::Tensor & DivInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.true_divide_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.true_divide_", {self, other});
   self.copy_(result);
   return self;
 }
@@ -1003,7 +1003,7 @@ at::Tensor & DivInplaceScalarModeKernelPython(at::Tensor & self, const at::Scala
 }
 
 at::Tensor & DivInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.true_divide_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.true_divide_", {self, other});
   self.copy_(result);
   return self;
 }
@@ -1021,7 +1021,7 @@ at::Tensor DotKernelPython(const at::Tensor & self, const at::Tensor & tensor) {
 }
 
 at::Tensor EluKernelPython(const at::Tensor & self, const at::Scalar & alpha, const at::Scalar & scale, const at::Scalar & input_scale) {
-  auto result = CallPythonOp_Generic("gcu300.ops.elu.elu", {self, alpha, scale, input_scale});
+  auto result = CallPythonOp_Generic("flag_gems.ops.elu.elu", {self, alpha, scale, input_scale});
   UnboxToFlagos(result);
   return result;
 }
@@ -1039,31 +1039,31 @@ at::Tensor EluBackwardKernelPython(const at::Tensor & grad_output, const at::Sca
 }
 
 at::Tensor EmbeddingKernelPython(const at::Tensor & weight, const at::Tensor & indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
-  auto result = CallPythonOp_Generic("gcu300.ops.embedding.embedding", {weight, indices, padding_idx, scale_grad_by_freq, sparse});
+  auto result = CallPythonOp_Generic("flag_gems.ops.embedding.embedding", {weight, indices, padding_idx, scale_grad_by_freq, sparse});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor EqScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.eq.eq_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.eq.eq_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor EqTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.eq.eq", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.eq.eq", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ErfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.erf.erf", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.erf.erf", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ErfInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.erf.erf_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.erf.erf_", {self});
   self.copy_(result);
   return self;
 }
@@ -1081,107 +1081,107 @@ at::Tensor & ErfinvInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor ExpKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.exp.exp", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.exp.exp", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ExpOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("gcu300.ops.exp.exp_out", {self, out});
+  CallPythonOp_Generic("flag_gems.ops.exp.exp_out", {self, out});
   return out;
 }
 
 at::Tensor Exp2KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.exp2.exp2", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.exp2.exp2", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & Exp2InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.exp2.exp2_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.exp2.exp2_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & ExpInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.exp.exp_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.exp.exp_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor Expm1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.expm1.expm1", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.expm1.expm1", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & Expm1OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("gcu300.ops.expm1.expm1_out", {self, out});
+  CallPythonOp_Generic("flag_gems.ops.expm1.expm1_out", {self, out});
   return out;
 }
 
 at::Tensor & Expm1InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.expm1.expm1_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.expm1.expm1_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & ExponentialInplaceKernelPython(at::Tensor & self, double lambd, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_RandomInplace("gcu300.ops.exponential_.exponential_", {self, lambd});
+  auto result = CallPythonOp_RandomInplace("flag_gems.ops.exponential_.exponential_", {self, lambd});
   self.copy_(result);
   return self;
 }
 
 at::Tensor EyeKernelPython(int64_t n, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.eye.eye", {n}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.eye.eye", {n}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor EyeMKernelPython(int64_t n, int64_t m, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.eye_m.eye_m", {n, m}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.eye_m.eye_m", {n, m}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor FillScalarKernelPython(const at::Tensor & self, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_scalar", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_scalar", {self, value});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & FillScalarOutKernelPython(const at::Tensor & self, const at::Scalar & value, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_scalar_out", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_scalar_out", {self, value});
   out.copy_(result);
   return out;
 }
 
 at::Tensor FillTensorKernelPython(const at::Tensor & self, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_tensor", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_tensor", {self, value});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & FillTensorOutKernelPython(const at::Tensor & self, const at::Tensor & value, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_tensor_out", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_tensor_out", {self, value});
   out.copy_(result);
   return out;
 }
 
 at::Tensor & FillInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_scalar_", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_scalar_", {self, value});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & FillInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.fill.fill_tensor_", {self, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.fill.fill_tensor_", {self, value});
   self.copy_(result);
   return self;
 }
 
 at::Tensor FlipKernelPython(const at::Tensor & self, at::IntArrayRef dims) {
-  auto result = CallPythonOp_Generic("gcu300.ops.flip.flip", {self, dims});
+  auto result = CallPythonOp_Generic("flag_gems.ops.flip.flip", {self, dims});
   UnboxToFlagos(result);
   return result;
 }
@@ -1205,25 +1205,25 @@ at::Tensor & FloorInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor FloorDivideKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.floor_divide", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.floor_divide", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor FloorDivideScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.floor_divide", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.floor_divide", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & FloorDivideInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.floor_divide_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.floor_divide_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & FloorDivideInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.floor_divide_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.floor_divide_", {self, other});
   self.copy_(result);
   return self;
 }
@@ -1300,13 +1300,13 @@ at::Tensor FractionalMaxPool2dBackwardKernelPython(const at::Tensor & grad_outpu
 }
 
 at::Tensor FullKernelPython(at::IntArrayRef size, const at::Scalar & fill_value, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.full.full", {size, fill_value}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.full.full", {size, fill_value}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor FullLikeKernelPython(const at::Tensor & self, const at::Scalar & fill_value, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.full_like.full_like", {self, fill_value}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.full_like.full_like", {self, fill_value}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -1330,37 +1330,37 @@ at::Tensor & GcdInplaceKernelPython(at::Tensor & self, const at::Tensor & other)
 }
 
 at::Tensor GeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ge.ge_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ge.ge_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor GeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ge.ge", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ge.ge", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor GeluKernelPython(const at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.gelu.gelu", {self}, {PyKwarg{"approximate", approximate}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.gelu.gelu", {self}, {PyKwarg{"approximate", approximate}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & GeluInplaceKernelPython(at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.gelu.gelu_", {self}, {PyKwarg{"approximate", approximate}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.gelu.gelu_", {self}, {PyKwarg{"approximate", approximate}});
   self.copy_(result);
   return self;
 }
 
 at::Tensor GeluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.gelu.gelu_backward", {grad_output, self}, {PyKwarg{"approximate", approximate}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.gelu.gelu_backward", {grad_output, self}, {PyKwarg{"approximate", approximate}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor GluKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("gcu300.ops.glu.glu", {self, dim});
+  auto result = CallPythonOp_Generic("flag_gems.ops.glu.glu", {self, dim});
   UnboxToFlagos(result);
   return result;
 }
@@ -1372,13 +1372,13 @@ at::Tensor GluBackwardKernelPython(const at::Tensor & grad_output, const at::Ten
 }
 
 at::Tensor GtScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.gt.gt_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.gt.gt_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor GtTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.gt.gt", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.gt.gt", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1448,13 +1448,13 @@ at::Tensor Im2colKernelPython(const at::Tensor & self, at::IntArrayRef kernel_si
 }
 
 at::Tensor IndexAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("gcu300.ops.index_add.index_add", {self, dim, index, source, alpha});
+  auto result = CallPythonOp_Generic("flag_gems.ops.index_add.index_add", {self, dim, index, source, alpha});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & IndexAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("gcu300.ops.index_add.index_add_", {self, dim, index, source, alpha});
+  auto result = CallPythonOp_Generic("flag_gems.ops.index_add.index_add_", {self, dim, index, source, alpha});
   self.copy_(result);
   return self;
 }
@@ -1478,37 +1478,37 @@ at::Tensor & IndexReduceInplaceKernelPython(at::Tensor & self, int64_t dim, cons
 }
 
 at::Tensor IndexSelectKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index) {
-  auto result = CallPythonOp_Generic("gcu300.ops.index_select.index_select", {self, dim, index});
+  auto result = CallPythonOp_Generic("flag_gems.ops.index_select.index_select", {self, dim, index});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor IsinScalarTensorKernelPython(const at::Scalar & element, const at::Tensor & test_elements, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.isin.isin", {element, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.isin.isin", {element, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor IsinTensorScalarKernelPython(const at::Tensor & elements, const at::Scalar & test_element, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.isin.isin", {elements, test_element}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.isin.isin", {elements, test_element}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor IsinTensorTensorKernelPython(const at::Tensor & elements, const at::Tensor & test_elements, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.isin.isin", {elements, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.isin.isin", {elements, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor IsinfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.isinf.isinf", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.isinf.isinf", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor IsnanKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.isnan.isnan", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.isnan.isnan", {self});
   UnboxToFlagos(result);
   return result;
 }
@@ -1545,13 +1545,13 @@ at::Tensor & LcmInplaceKernelPython(at::Tensor & self, const at::Tensor & other)
 }
 
 at::Tensor LeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.le.le_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.le.le_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor LeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.le.le", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.le.le", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1575,25 +1575,25 @@ at::Tensor & LeakyReluInplaceKernelPython(at::Tensor & self, const at::Scalar & 
 }
 
 at::Tensor LerpScalarKernelPython(const at::Tensor & self, const at::Tensor & end, const at::Scalar & weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lerp.lerp_scalar", {self, end, weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lerp.lerp_scalar", {self, end, weight});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor LerpTensorKernelPython(const at::Tensor & self, const at::Tensor & end, const at::Tensor & weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lerp.lerp_tensor", {self, end, weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lerp.lerp_tensor", {self, end, weight});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & LerpInplaceScalarKernelPython(at::Tensor & self, const at::Tensor & end, const at::Scalar & weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lerp.lerp_scalar_", {self, end, weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lerp.lerp_scalar_", {self, end, weight});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & LerpInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & end, const at::Tensor & weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lerp.lerp_tensor_", {self, end, weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lerp.lerp_tensor_", {self, end, weight});
   self.copy_(result);
   return self;
 }
@@ -1637,36 +1637,36 @@ at::Tensor LinalgLdlSolveKernelPython(const at::Tensor & LD, const at::Tensor & 
 }
 
 at::Tensor LinalgVectorNormKernelPython(const at::Tensor & self, const at::Scalar & ord, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.vector_norm.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.vector_norm.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor LinspaceKernelPython(const at::Scalar & start, const at::Scalar & end, int64_t steps, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.linspace.linspace", {start, end, steps}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.linspace.linspace", {start, end, steps}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor LogKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.log.log", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.log.log", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor Log10KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.log10.log10", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.log10.log10", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & Log10OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("gcu300.ops.log10.log10_out", {self, out});
+  CallPythonOp_Generic("flag_gems.ops.log10.log10_out", {self, out});
   return out;
 }
 
 at::Tensor & Log10InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.log10.log10_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.log10.log10_", {self});
   self.copy_(result);
   return self;
 }
@@ -1701,7 +1701,7 @@ at::Tensor & Log2InplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor LogaddexpKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.logaddexp.logaddexp", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.logaddexp.logaddexp", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1734,7 +1734,7 @@ at::Tensor & LogcumsumexpOutKernelPython(const at::Tensor & self, int64_t dim, a
 }
 
 at::Tensor LogicalAndKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.logical_and.logical_and", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.logical_and.logical_and", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1746,7 +1746,7 @@ at::Tensor & LogicalAndInplaceKernelPython(at::Tensor & self, const at::Tensor &
 }
 
 at::Tensor LogicalNotKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.logical_not.logical_not", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.logical_not.logical_not", {self});
   UnboxToFlagos(result);
   return result;
 }
@@ -1758,7 +1758,7 @@ at::Tensor & LogicalNotInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor LogicalOrKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.logical_or.logical_or", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.logical_or.logical_or", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1770,7 +1770,7 @@ at::Tensor & LogicalOrInplaceKernelPython(at::Tensor & self, const at::Tensor & 
 }
 
 at::Tensor LogicalXorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.logical_xor.logical_xor", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.logical_xor.logical_xor", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1811,13 +1811,13 @@ at::Tensor LogsumexpKernelPython(const at::Tensor & self, at::IntArrayRef dim, b
 }
 
 at::Tensor LtScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lt.lt_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lt.lt_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor LtTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.lt.lt", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.lt.lt", {self, other});
   UnboxToFlagos(result);
   return result;
 }
@@ -1835,25 +1835,25 @@ at::Tensor & LtInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & o
 }
 
 at::Tensor MaskedFillScalarKernelPython(const at::Tensor & self, const at::Tensor & mask, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.masked_fill.masked_fill", {self, mask, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.masked_fill.masked_fill", {self, mask, value});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor MaskedFillTensorKernelPython(const at::Tensor & self, const at::Tensor & mask, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.masked_fill.masked_fill", {self, mask, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.masked_fill.masked_fill", {self, mask, value});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & MaskedFillInplaceScalarKernelPython(at::Tensor & self, const at::Tensor & mask, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.masked_fill.masked_fill_", {self, mask, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.masked_fill.masked_fill_", {self, mask, value});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & MaskedFillInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & mask, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.masked_fill.masked_fill_", {self, mask, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.masked_fill.masked_fill_", {self, mask, value});
   self.copy_(result);
   return self;
 }
@@ -1871,33 +1871,33 @@ at::Tensor & MaskedScatterInplaceKernelPython(at::Tensor & self, const at::Tenso
 }
 
 at::Tensor MaskedSelectKernelPython(const at::Tensor & self, const at::Tensor & mask) {
-  auto result = CallPythonOp_Generic("gcu300.ops.masked_select.masked_select", {self, mask});
+  auto result = CallPythonOp_Generic("flag_gems.ops.masked_select.masked_select", {self, mask});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor MaxKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.max.max", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.max.max", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> MaxDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.max.max_dim", {self, dim, keepdim}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.max.max_dim", {self, dim, keepdim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 ::std::tuple<at::Tensor,at::Tensor> MaxPool2dWithIndicesKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.max_pool2d_with_indices.max_pool2d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.max_pool2d_with_indices.max_pool2d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 ::std::tuple<at::Tensor,at::Tensor> MaxPool3dWithIndicesKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.max_pool3d_with_indices.max_pool3d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.max_pool3d_with_indices.max_pool3d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -1916,13 +1916,13 @@ at::Tensor MaxUnpool3dKernelPython(const at::Tensor & self, const at::Tensor & i
 }
 
 at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.mean.mean", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.mean.mean", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.mean.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.mean.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
@@ -1951,13 +1951,13 @@ at::Tensor & MedianOutKernelPython(const at::Tensor & self, at::Tensor & out) {
 }
 
 at::Tensor MinKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.min.min", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.min.min", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> MinDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.min.min_dim", {self, dim, keepdim}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.min.min_dim", {self, dim, keepdim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -1976,7 +1976,7 @@ at::Tensor & MishInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = CallPythonOp_Generic("gcu300.ops.mm.mm", {self, mat2});
+  auto result = CallPythonOp_Generic("flag_gems.ops.mm.mm", {self, mat2});
   UnboxToFlagos(result);
   return result;
 }
@@ -2006,55 +2006,55 @@ at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at:
 }
 
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.mul.mul", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.mul.mul", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & MulInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.mul.mul_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.mul.mul_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor MultinomialKernelPython(const at::Tensor & self, int64_t num_samples, bool replacement, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_Generic("gcu300.ops.multinomial.multinomial", {self, num_samples, replacement});
+  auto result = CallPythonOp_Generic("flag_gems.ops.multinomial.multinomial", {self, num_samples, replacement});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor MvKernelPython(const at::Tensor & self, const at::Tensor & vec) {
-  auto result = CallPythonOp_Generic("gcu300.ops.mv.mv", {self, vec});
+  auto result = CallPythonOp_Generic("flag_gems.ops.mv.mv", {self, vec});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor NanToNumKernelPython(const at::Tensor & self, ::std::optional<double> nan, ::std::optional<double> posinf, ::std::optional<double> neginf) {
-  auto result = CallPythonOp_Generic("gcu300.ops.nan_to_num.nan_to_num", {self, nan, posinf, neginf});
+  auto result = CallPythonOp_Generic("flag_gems.ops.nan_to_num.nan_to_num", {self, nan, posinf, neginf});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor NanmedianKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.nanmedian.nanmedian", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.nanmedian.nanmedian", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> NanmedianDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.nanmedian.nanmedian_dim", {self, dim, keepdim}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.nanmedian.nanmedian_dim", {self, dim, keepdim}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 ::std::tuple<at::Tensor &,at::Tensor &> NanmedianDimValuesKernelPython(const at::Tensor & self, int64_t dim, bool keepdim, at::Tensor & values, at::Tensor & indices) {
-  CallPythonOp_GenericKwTuple("gcu300.ops.nanmedian.nanmedian_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2);
+  CallPythonOp_GenericKwTuple("flag_gems.ops.nanmedian.nanmedian_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2);
   return {values, indices};
 }
 
 at::Tensor & NanmedianOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("gcu300.ops.nanmedian.nanmedian_out", {self}, {PyKwarg{"out", out}});
+  CallPythonOp_GenericKw("flag_gems.ops.nanmedian.nanmedian_out", {self}, {PyKwarg{"out", out}});
   return out;
 }
 
@@ -2075,7 +2075,7 @@ at::Tensor & NanmedianOutKernelPython(const at::Tensor & self, at::Tensor & out)
 }
 
 ::std::tuple<at::Tensor,at::Tensor> NativeDropoutKernelPython(const at::Tensor & input, double p, ::std::optional<bool> train) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.dropout.dropout", {input, p, train}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.dropout.dropout", {input, p, train}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -2088,7 +2088,7 @@ at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, con
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeGroupNormKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, int64_t N, int64_t C, int64_t HxW, int64_t group, double eps) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.groupnorm.group_norm", {input, weight, bias, N, C, HxW, group, eps}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.groupnorm.group_norm", {input, weight, bias, N, C, HxW, group, eps}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -2096,7 +2096,7 @@ at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, con
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeGroupNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, const at::Tensor & mean, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, int64_t N, int64_t C, int64_t HxW, int64_t group, ::std::array<bool,3> output_mask) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.groupnorm.group_norm_backward", {grad_out, input, mean, rstd, weight, N, C, HxW, group, output_mask}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.groupnorm.group_norm_backward", {grad_out, input, mean, rstd, weight, N, C, HxW, group, output_mask}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -2104,7 +2104,7 @@ at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, con
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeLayerNormKernelPython(const at::Tensor & input, at::IntArrayRef normalized_shape, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, double eps) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.layernorm.layer_norm", {input, normalized_shape, weight, bias, eps}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.layernorm.layer_norm", {input, normalized_shape, weight, bias, eps}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -2112,7 +2112,7 @@ at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, con
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeLayerNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, at::IntArrayRef normalized_shape, const at::Tensor & mean, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, ::std::array<bool,3> output_mask) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.layernorm.layer_norm_backward", {grad_out, input, normalized_shape, mean, rstd, weight, bias, output_mask}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.layernorm.layer_norm_backward", {grad_out, input, normalized_shape, mean, rstd, weight, bias, output_mask}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -2120,25 +2120,25 @@ at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, con
 }
 
 at::Tensor NeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ne.ne_scalar", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ne.ne_scalar", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor NeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.ne.ne", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.ne.ne", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor NegKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.neg.neg", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.neg.neg", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & NegInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.neg.neg_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.neg.neg_", {self});
   self.copy_(result);
   return self;
 }
@@ -2162,33 +2162,33 @@ at::Tensor & NextafterInplaceKernelPython(at::Tensor & self, const at::Tensor & 
 }
 
 at::Tensor NllLoss2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.nllloss.nll_loss2d_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.nllloss.nll_loss2d_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> NllLoss2dForwardKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.nllloss.nll_loss2d_forward", {self, target, weight, reduction, ignore_index}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.nllloss.nll_loss2d_forward", {self, target, weight, reduction, ignore_index}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 at::Tensor NllLossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
-  auto result = CallPythonOp_Generic("gcu300.ops.nllloss.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
+  auto result = CallPythonOp_Generic("flag_gems.ops.nllloss.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> NllLossForwardKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.nllloss.nll_loss_forward", {self, target, weight, reduction, ignore_index}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.nllloss.nll_loss_forward", {self, target, weight, reduction, ignore_index}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 at::Tensor NonzeroKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.nonzero.nonzero", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.nonzero.nonzero", {self});
   UnboxToFlagos(result);
   return result;
 }
@@ -2206,13 +2206,13 @@ at::Tensor NormScalaroptDimKernelPython(const at::Tensor & self, const ::std::op
 }
 
 at::Tensor OnesKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.ones.ones", {size}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.ones.ones", {size}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor OnesLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.ones_like.ones_like", {self}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.ones_like.ones_like", {self}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -2223,49 +2223,49 @@ at::Tensor & PixelUnshuffleOutKernelPython(const at::Tensor & self, int64_t down
 }
 
 at::Tensor PolarKernelPython(const at::Tensor & abs, const at::Tensor & angle) {
-  auto result = CallPythonOp_Generic("gcu300.ops.polar.polar", {abs, angle});
+  auto result = CallPythonOp_Generic("flag_gems.ops.polar.polar", {abs, angle});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor PowScalarKernelPython(const at::Scalar & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("gcu300.ops.pow.pow_scalar", {self, exponent});
+  auto result = CallPythonOp_Generic("flag_gems.ops.pow.pow_scalar", {self, exponent});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar & exponent) {
-  auto result = CallPythonOp_Generic("gcu300.ops.pow.pow_tensor_scalar", {self, exponent});
+  auto result = CallPythonOp_Generic("flag_gems.ops.pow.pow_tensor_scalar", {self, exponent});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor PowTensorTensorKernelPython(const at::Tensor & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("gcu300.ops.pow.pow_tensor_tensor", {self, exponent});
+  auto result = CallPythonOp_Generic("flag_gems.ops.pow.pow_tensor_tensor", {self, exponent});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & PowInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & exponent) {
-  auto result = CallPythonOp_Generic("gcu300.ops.pow.pow_tensor_scalar_", {self, exponent});
+  auto result = CallPythonOp_Generic("flag_gems.ops.pow.pow_tensor_scalar_", {self, exponent});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & PowInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("gcu300.ops.pow.pow_tensor_tensor_", {self, exponent});
+  auto result = CallPythonOp_Generic("flag_gems.ops.pow.pow_tensor_tensor_", {self, exponent});
   self.copy_(result);
   return self;
 }
 
 at::Tensor ProdKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.prod.prod", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.prod.prod", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ProdDimIntKernelPython(const at::Tensor & self, int64_t dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.prod.prod_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.prod.prod_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
@@ -2283,13 +2283,13 @@ at::Tensor & Rad2degInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor RandKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.rand.rand", {size}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.rand.rand", {size}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RandLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.rand_like.rand_like", {self}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.rand_like.rand_like", {self}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -2301,25 +2301,25 @@ at::Tensor RandintKernelPython(int64_t high, at::IntArrayRef size, ::std::option
 }
 
 at::Tensor RandintLikeKernelPython(const at::Tensor & self, int64_t high, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.randint_like.randint_like", {self, high}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.randint_like.randint_like", {self, high}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RandnKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.randn.randn", {size}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.randn.randn", {size}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RandnLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.randn_like.randn_like", {self}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.randn_like.randn_like", {self}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RandpermKernelPython(int64_t n, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.randperm.randperm", {n}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.randperm.randperm", {n}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
@@ -2331,13 +2331,13 @@ at::Tensor RangeKernelPython(const at::Scalar & start, const at::Scalar & end, :
 }
 
 at::Tensor ReciprocalKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.reciprocal.reciprocal", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.reciprocal.reciprocal", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ReciprocalInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.reciprocal.reciprocal_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.reciprocal.reciprocal_", {self});
   self.copy_(result);
   return self;
 }
@@ -2389,43 +2389,43 @@ at::Tensor ReflectionPad3dBackwardKernelPython(const at::Tensor & grad_output, c
 }
 
 at::Tensor ReluKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.relu.relu", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.relu.relu", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ReluInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.relu.relu_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.relu.relu_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor RemainderScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.remainder", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.remainder", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RemainderScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.remainder", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.remainder", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor RemainderTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.remainder", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.remainder", {self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & RemainderInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.remainder_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.remainder_", {self, other});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & RemainderInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.div.remainder_", {self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.div.remainder_", {self, other});
   self.copy_(result);
   return self;
 }
@@ -2443,7 +2443,7 @@ at::Tensor & RenormInplaceKernelPython(at::Tensor & self, const at::Scalar & p, 
 }
 
 at::Tensor RepeatInterleaveTensorKernelPython(const at::Tensor & repeats, ::std::optional<int64_t> output_size) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.repeat_interleave.repeat_interleave_tensor", {repeats}, {PyKwarg{"output_size", output_size}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.repeat_interleave.repeat_interleave_tensor", {repeats}, {PyKwarg{"output_size", output_size}});
   UnboxToFlagos(result);
   return result;
 }
@@ -2460,7 +2460,7 @@ at::Tensor & ReplicationPad1dOutKernelPython(const at::Tensor & self, at::IntArr
 }
 
 at::Tensor ReplicationPad3dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("gcu300.ops.replication_pad3d.replication_pad3d", {self, padding});
+  auto result = CallPythonOp_Generic("flag_gems.ops.replication_pad3d.replication_pad3d", {self, padding});
   UnboxToFlagos(result);
   return result;
 }
@@ -2502,13 +2502,13 @@ at::Tensor RreluWithNoiseBackwardKernelPython(const at::Tensor & grad_output, co
 }
 
 at::Tensor RsqrtKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.rsqrt.rsqrt", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.rsqrt.rsqrt", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & RsqrtInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.rsqrt.rsqrt_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.rsqrt.rsqrt_", {self});
   self.copy_(result);
   return self;
 }
@@ -2532,49 +2532,49 @@ at::Tensor ScalarTensorKernelPython(const at::Scalar & s, ::std::optional<at::Sc
 }
 
 at::Tensor ScatterReduceKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce) {
-  auto result = CallPythonOp_Generic("gcu300.ops.scatter.scatter", {self, dim, index, src, reduce});
+  auto result = CallPythonOp_Generic("flag_gems.ops.scatter.scatter", {self, dim, index, src, reduce});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ScatterSrcKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("gcu300.ops.scatter.scatter", {self, dim, index, src});
+  auto result = CallPythonOp_Generic("flag_gems.ops.scatter.scatter", {self, dim, index, src});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ScatterInplaceReduceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce) {
-  auto result = CallPythonOp_Generic("gcu300.ops.scatter.scatter_", {self, dim, index, src, reduce});
+  auto result = CallPythonOp_Generic("flag_gems.ops.scatter.scatter_", {self, dim, index, src, reduce});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & ScatterInplaceSrcKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("gcu300.ops.scatter.scatter_", {self, dim, index, src});
+  auto result = CallPythonOp_Generic("flag_gems.ops.scatter.scatter_", {self, dim, index, src});
   self.copy_(result);
   return self;
 }
 
 at::Tensor & ScatterAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("gcu300.ops.scatter_add_.scatter_add_", {self, dim, index, src});
+  auto result = CallPythonOp_Generic("flag_gems.ops.scatter_add_.scatter_add_", {self, dim, index, src});
   self.copy_(result);
   return self;
 }
 
 at::Tensor ScatterReduceTwoKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.scatter_reduce.scatter_reduce", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.scatter_reduce.scatter_reduce", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & ScatterReduceTwoOutKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.scatter_reduce.scatter_reduce_out", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.scatter_reduce.scatter_reduce_out", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
   out.copy_(result);
   return out;
 }
 
 at::Tensor & ScatterReduceInplaceTwoKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.scatter_reduce.scatter_reduce_", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.scatter_reduce.scatter_reduce_", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
   self.copy_(result);
   return self;
 }
@@ -2586,19 +2586,19 @@ at::Tensor & SgnInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor SigmoidKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sigmoid.sigmoid", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sigmoid.sigmoid", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SigmoidInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sigmoid.sigmoid_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sigmoid.sigmoid_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor SigmoidBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & output) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sigmoid.sigmoid_backward", {grad_output, output});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sigmoid.sigmoid_backward", {grad_output, output});
   UnboxToFlagos(result);
   return result;
 }
@@ -2616,31 +2616,31 @@ at::Tensor & SignbitOutKernelPython(const at::Tensor & self, at::Tensor & out) {
 }
 
 at::Tensor SiluKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.silu.silu", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.silu.silu", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SiluInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.silu.silu_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.silu.silu_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor SiluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.silu.silu_backward", {grad_output, self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.silu.silu_backward", {grad_output, self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor SinKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sin.sin", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sin.sin", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SinInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sin.sin_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sin.sin_", {self});
   self.copy_(result);
   return self;
 }
@@ -2670,7 +2670,7 @@ at::Tensor & SinhInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor SliceBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef input_sizes, int64_t dim, int64_t start, int64_t end, int64_t step) {
-  auto result = CallPythonOp_Generic("gcu300.ops.slice_backward.slice_backward", {grad_output, input_sizes, dim, start, end, step});
+  auto result = CallPythonOp_Generic("flag_gems.ops.slice_backward.slice_backward", {grad_output, input_sizes, dim, start, end, step});
   UnboxToFlagos(result);
   return result;
 }
@@ -2705,7 +2705,7 @@ at::Tensor SoftMarginLossBackwardKernelPython(const at::Tensor & grad_output, co
 }
 
 at::Tensor SoftplusKernelPython(const at::Tensor & self, const at::Scalar & beta, const at::Scalar & threshold) {
-  auto result = CallPythonOp_Generic("gcu300.ops.softplus.softplus", {self, beta, threshold});
+  auto result = CallPythonOp_Generic("flag_gems.ops.softplus.softplus", {self, beta, threshold});
   UnboxToFlagos(result);
   return result;
 }
@@ -2728,14 +2728,14 @@ at::Tensor & SoftshrinkOutKernelPython(const at::Tensor & self, const at::Scalar
 }
 
 ::std::tuple<at::Tensor,at::Tensor> SortKernelPython(const at::Tensor & self, int64_t dim, bool descending) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.sort.sort", {self, dim, descending}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.sort.sort", {self, dim, descending}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 ::std::tuple<at::Tensor,at::Tensor> SortStableKernelPython(const at::Tensor & self, ::std::optional<bool> stable, int64_t dim, bool descending) {
-  auto result = CallPythonOp_GenericKwTuple("gcu300.ops.sort.sort_stable", {self}, {PyKwarg{"stable", stable}, PyKwarg{"dim", dim}, PyKwarg{"descending", descending}}, 2);
+  auto result = CallPythonOp_GenericKwTuple("flag_gems.ops.sort.sort_stable", {self}, {PyKwarg{"stable", stable}, PyKwarg{"dim", dim}, PyKwarg{"descending", descending}}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -2859,13 +2859,13 @@ at::Tensor SpecialXlog1pyKernelPython(const at::Tensor & self, const at::Tensor 
 }
 
 at::Tensor SqrtKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sqrt.sqrt", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sqrt.sqrt", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SqrtInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.sqrt.sqrt_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.sqrt.sqrt_", {self});
   self.copy_(result);
   return self;
 }
@@ -2877,36 +2877,36 @@ at::Tensor StdCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArr
 }
 
 at::Tensor SubTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.sub.sub", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.sub.sub", {self, other}, {PyKwarg{"alpha", alpha}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SubInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.sub.sub_", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.sub.sub_", {self, other}, {PyKwarg{"alpha", alpha}});
   self.copy_(result);
   return self;
 }
 
 at::Tensor SumKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.sum.sum", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.sum.sum", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SumIntlistOutKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("gcu300.ops.sum.sum_dim_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  CallPythonOp_GenericKw("flag_gems.ops.sum.sum_dim_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
   return out;
 }
 
 at::Tensor SumDimIntlistKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("gcu300.ops.sum.sum_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CallPythonOp_GenericKw("flag_gems.ops.sum.sum_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & SumOutKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("gcu300.ops.sum.sum_out", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  CallPythonOp_GenericKw("flag_gems.ops.sum.sum_out", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
   return out;
 }
 
@@ -2923,25 +2923,25 @@ at::Tensor & TanInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor TanhKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tanh.tanh", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tanh.tanh", {self});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & TanhInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tanh.tanh_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tanh.tanh_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor TanhBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & output) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tanh.tanh_backward", {grad_output, output});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tanh.tanh_backward", {grad_output, output});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ThresholdKernelPython(const at::Tensor & self, const at::Scalar & threshold, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("gcu300.ops.threshold.threshold", {self, threshold, value});
+  auto result = CallPythonOp_Generic("flag_gems.ops.threshold.threshold", {self, threshold, value});
   UnboxToFlagos(result);
   return result;
 }
@@ -2953,20 +2953,20 @@ at::Tensor & ThresholdInplaceKernelPython(at::Tensor & self, const at::Scalar & 
 }
 
 at::Tensor ThresholdBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & threshold) {
-  auto result = CallPythonOp_Generic("gcu300.ops.threshold.threshold_backward", {grad_output, self, threshold});
+  auto result = CallPythonOp_Generic("flag_gems.ops.threshold.threshold_backward", {grad_output, self, threshold});
   UnboxToFlagos(result);
   return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> TopkKernelPython(const at::Tensor & self, int64_t k, int64_t dim, bool largest, bool sorted) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.topk.topk", {self, k, dim, largest, sorted}, 2);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.topk.topk", {self, k, dim, largest, sorted}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
 at::Tensor TraceKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.trace.trace", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.trace.trace", {self});
   UnboxToFlagos(result);
   return result;
 }
@@ -2978,25 +2978,25 @@ at::Tensor TransposeIntKernelPython(const at::Tensor & self, int64_t dim0, int64
 }
 
 at::Tensor TrilKernelPython(const at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tril.tril", {self, diagonal});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tril.tril", {self, diagonal});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & TrilOutKernelPython(const at::Tensor & self, int64_t diagonal, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tril.tril_out", {self, diagonal});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tril.tril_out", {self, diagonal});
   out.copy_(result);
   return out;
 }
 
 at::Tensor & TrilInplaceKernelPython(at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("gcu300.ops.tril.tril_", {self, diagonal});
+  auto result = CallPythonOp_Generic("flag_gems.ops.tril.tril_", {self, diagonal});
   self.copy_(result);
   return self;
 }
 
 at::Tensor TriuKernelPython(const at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("gcu300.ops.triu.triu", {self, diagonal});
+  auto result = CallPythonOp_Generic("flag_gems.ops.triu.triu", {self, diagonal});
   UnboxToFlagos(result);
   return result;
 }
@@ -3026,13 +3026,13 @@ at::Tensor UnfoldBackwardKernelPython(const at::Tensor & grad_in, at::IntArrayRe
 }
 
 at::Tensor & UniformInplaceKernelPython(at::Tensor & self, double from, double to, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_RandomInplace("gcu300.ops.uniform.uniform_", {self, from, to});
+  auto result = CallPythonOp_RandomInplace("flag_gems.ops.uniform.uniform_", {self, from, to});
   self.copy_(result);
   return self;
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> UniqueConsecutiveKernelPython(const at::Tensor & self, bool return_inverse, bool return_counts, ::std::optional<int64_t> dim) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.unique_consecutive.unique_consecutive", {self, return_inverse, return_counts, dim}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.unique_consecutive.unique_consecutive", {self, return_inverse, return_counts, dim}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -3040,7 +3040,7 @@ at::Tensor & UniformInplaceKernelPython(at::Tensor & self, double from, double t
 }
 
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> UniqueDimKernelPython(const at::Tensor & self, int64_t dim, bool sorted, bool return_inverse, bool return_counts) {
-  auto result = CallPythonOp_GenericTuple("gcu300.ops.unique_dim.unique_dim", {self, dim, sorted, return_inverse, return_counts}, 3);
+  auto result = CallPythonOp_GenericTuple("flag_gems.ops.unique_dim.unique_dim", {self, dim, sorted, return_inverse, return_counts}, 3);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -3084,7 +3084,7 @@ at::Tensor VarCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArr
 }
 
 ::std::tuple<at::Tensor,at::Tensor> VarMeanCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  auto result = CallPythonOp_GenericKwTuple("gcu300.ops.var_mean.var_mean", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}, 2);
+  auto result = CallPythonOp_GenericKwTuple("flag_gems.ops.var_mean.var_mean", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}, 2);
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
@@ -3097,13 +3097,13 @@ at::Tensor VdotKernelPython(const at::Tensor & self, const at::Tensor & other) {
 }
 
 at::Tensor WhereSelfKernelPython(const at::Tensor & condition, const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("gcu300.ops.where.where_self", {condition, self, other});
+  auto result = CallPythonOp_Generic("flag_gems.ops.where.where_self", {condition, self, other});
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor & WhereSelfOutKernelPython(const at::Tensor & condition, const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("gcu300.ops.where.where_self_out", {condition, self, other, out});
+  CallPythonOp_Generic("flag_gems.ops.where.where_self_out", {condition, self, other, out});
   return out;
 }
 
@@ -3141,19 +3141,19 @@ at::Tensor XlogyTensorKernelPython(const at::Tensor & self, const at::Tensor & o
 }
 
 at::Tensor & ZeroInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("gcu300.ops.zeros.zero_", {self});
+  auto result = CallPythonOp_Generic("flag_gems.ops.zeros.zero_", {self});
   self.copy_(result);
   return self;
 }
 
 at::Tensor ZerosKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("gcu300.ops.zeros.zeros", {size}, dtype, device);
+  auto result = CallPythonOp_Factory("flag_gems.ops.zeros.zeros", {size}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
 
 at::Tensor ZerosLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("gcu300.ops.zeros_like.zeros_like", {self}, dtype, device);
+  auto result = CallPythonOp_LikeFactory("flag_gems.ops.zeros_like.zeros_like", {self}, dtype, device);
   UnboxToFlagos(result);
   return result;
 }
