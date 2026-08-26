@@ -79,22 +79,6 @@ decimal place.
 | MetaX mc550 | 546 | 260 | 33 | 155 | 98 | 293 | 53.7% | 47.6% |
 | PPU 810e | 546 | 347 | 54 | 47 | 98 | 401 | 73.4% | 63.6% |
 | Hygon DCU bw1000 | 546 | 321 | 53 | 74 | 98 | 374 | 68.5% | 58.8% |
-| NVIDIA RTX 5060 (2026-08-24) | 538 | 347 | 54 | 40 | 97 | 401 | 74.5% | 64.5% |
-| NVIDIA RTX 5060 (2026-08-24) | 527 | 347 | 45 | 38 | 97 | 392 | 74.4% | 65.8% |
-| NVIDIA RTX 5060 (2026-08-24) | 489 | 346 | 43 | 16 | 84 | 389 | 79.6% | 70.8% |
-
-The 5060 rows are separate cohorts: the 489-route configuration (2026-08-24)
-additionally reroutes the 22 ops whose 7fb49bad-generated routes regressed
-from main (they were `cuda` on main and fail on the gems path -- nan, wrong
-shape/dtype, recursion, compile errors), plus the remaining `tl.dot` int64
-family (`addbmm`/`bmm`/`bmm.out`/`baddbmm`/`mv`/`dot`/`addmm.dtype`) and
-three ops with wrong gems semantics (`_conj`, `_fused_rms_norm`,
-`_pdist_forward`), the device-guarded bessel/pad families and
-`_embedding_bag_dense_backward`, and the `gcd_` DCU fallback. The
-538/527/489 denominators are not directly comparable with the 546-route rows
-above. The four 546-route rows are **not revalidated** against the new
-cohorts; the remaining 16 FAILED routes on the 5060 were already
-`flagos_python` on main (no regression vs main).
 
 For every row, `STRICT + BASIC_ONLY + FAILED + UNTESTED = Total`, and
 `Basic executable = STRICT + BASIC_ONLY`.
@@ -111,9 +95,6 @@ summary.
 | MetaX mc550 | 1597 | 1309 | 0 | 812 | 90 | 14 | 0 | 0 |
 | PPU 810e | 2158 | 1305 | 0 | 184 | 154 | 21 | 0 | 0 |
 | Hygon DCU bw1000 | 2016 | 1309 | 0 | 337 | 146 | 14 | 0 | 0 |
-| NVIDIA RTX 5060 (2026-08-24) | 2152 | 1292 | 0 | 153 | 155 | 14 | 0 | 0 |
-| NVIDIA RTX 5060 (2026-08-24) | 2113 | 1277 | 0 | 130 | 155 | 14 | 0 | 0 |
-| NVIDIA RTX 5060 (2026-08-24) | 2112 | 1132 | 0 | 52 | 120 | 7 | 0 | 0 |
 
 The bw1000 baseline excludes 108 initial records that failed before operator
 execution because the child process could not load its MPI runtime. Exactly
@@ -415,11 +396,6 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
-| 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 489-route config | Rerouted the 22 ops whose 7fb49bad-generated routes regressed vs main (nan, wrong shape/dtype, recursion, compile errors), the remaining tl.dot int64 family (`addbmm`/`bmm`/`bmm.out`/`baddbmm`/`mv`/`dot`/`addmm.dtype`), three wrong-semantics gems kernels (`_conj`, `_fused_rms_norm`, `_pdist_forward`), the device-guarded bessel/pad families and `_embedding_bag_dense_backward`, and `gcd_` on DCU; synced the hand-maintained `*_cpp.conf` files. Cohort 527 -> 489. Zero route regressions vs main (all remaining 16 FAILED routes were already `flagos_python` on main). | Full 489-overload survey on RTX 5060: 346 STRICT / 43 BASIC_ONLY / 16 FAILED / 84 UNTESTED; conf/cpp-conf kernel consistency verified. |
-| 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 527-route config | Rerouted eleven ops whose gems Triton kernels fail to compile for specific dtypes/values (`mm`/`mm.out`/`addmm`/`addmm.out`/`addmm_` int64 `tl.dot`, `index_add`/`index_add_` bool `tl.atomic_add`, `cummax`/`cummin` bool loop types, `randint`/`randint_like` high=1 constexpr gap) from `flagos_python` to `cuda` boxing via `flaggems_runtime_broken`. Cohort 538 -> 527 active routes. Four-platform 546-route rows **not revalidated**. | Full 527-overload survey on RTX 5060: 347 STRICT / 45 BASIC_ONLY / 38 FAILED / 97 UNTESTED; zero new failures vs the 538 cohort; all eleven ops verified on the boxing route (int64 mm now raises the same error as stock PyTorch on CUDA). |
-| 2026-08-24 | NVIDIA RTX 5060 Laptop (sm_120), torch 2.10.0+cu128 | Generic FlagGems routes, current 538-route config | Rerouted seven device-assert ops (`i0`, `i0.out`, `special_i0e`, `special_i0e.out`, `special_i1`, `upsample_bicubic2d`, `soft_margin_loss`) from `flagos_python` to `cuda` boxing (gems kernels hard-assert `tensor.is_cuda`); regenerated all configs/kernels against flag_gems `7fb49bad`. Cohort 546 -> 538 active routes. Four-platform 546-route rows **not revalidated** (A100/mc550/810e/bw1000 unavailable). | Full 538-overload survey on RTX 5060: 347 STRICT / 54 BASIC_ONLY / 40 FAILED / 97 UNTESTED; manual verification that all seven ops now execute correctly on `flagos` via the boxing route. |
-| 2026-08-24 | Enflame S60 | Native GCU unified RNG routes | Grew the GCU RNG route set from 15 to 47 overloads (uniform, normal, integer, dropout, discrete, and two CPU-reference distribution families) through `scripts/codegen_gcu.py`; switched seeding to `c10::flagos::ReserveSeed` so explicit `torch.Generator(device="flagos")` works and `manual_seed`/`get_rng_state`/`set_rng_state` share one per-device stream; gave `random_` ATen's per-dtype default upper bound. Generic FlagGems cohort **not revalidated**. | `test_rng_dispatch.py`: `111 passed, 5 skipped, 1 xpassed` (was `7 failed, 104 passed`). No regressions: operator suite `568 passed, 33 skipped, 4 xpassed`; `test_factory_ops.py` 46 passed; `test_amp.py` 25 passed. Generator ran twice with an empty second diff. |
-| 2026-08-24 | Enflame S60 | Native GCU AMP, convolution, and dtype routes | Added native AMP unscale routes (both overloads), native `convolution_overrideable`, and a CPU-fallback `convolution_backward_overrideable`; gated float64 to the CPU fallback since topsaten has no F64 kernels. Generic FlagGems cohort **not revalidated**. | `tests/integration/test_amp.py`: 25 passed. `test_conv1d_dispatch.py`: 8 passed. Conv forward within 3.9e-6 of CPU across stride/padding/dilation/group/bias variants; conv grads exact. Pre-existing, unrelated failures remain in `test_compile.py`, `test_profiler_parity.py`, `test_rng_dispatch.py`, and `neg` on uint8/bool. |
 | 2026-08-21 | MetaX C550 (MACA 3.8.0) | CUDA-boxing AMP routes | Enabled the shared AMP integration contract for MetaX and added it to the MetaX CI manifest; no operator route changed. Generic FlagGems routes were **not revalidated**. | `tests/integration/test_amp.py`: 25 passed, covering FP16/BF16 autocast policies and GradScaler finite/overflow training paths. |
 | 2026-08-19 | Hygon DCU bw1000 | Generic FlagGems routes | Rerouted `index_select` from `flagos_python` to `cuda` in all FlagGems configs (cross-stream launch race drops output stores under load); generic cohort 546 -> 545 active routes, 26 -> 27 forced CUDA fallbacks. Four-platform rows **not revalidated** (A100/mc550/810e unavailable). | Targeted survey `--ops index_select` on the flagos_python route: STRICT (standalone math correct); three failing HF v5.5.0 UT nodes (T5/Qwen3/Gemma3 beam search) pass after the reroute; tiny-T5 NaN reproducer clean 3/3. |
 | 2026-08-18 | MTT S5000 (8 devices) | Native MUSA RNG, MThreads FlagGems hybrid, and MUPTI profiler | Added optional MUPTI activity tracing; the operator route cohort is unchanged. | `tests/integration/test_profiler_musa.py`: 1 passed with real positive-duration MUPTI kernel/runtime/memcpy activities and valid Chrome JSON. CPU-only Kineto resolver behavior remains environment-dependent; generic FlagGems operator coverage was not revalidated by this profiler change. |
