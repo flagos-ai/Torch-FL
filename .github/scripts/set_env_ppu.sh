@@ -291,19 +291,36 @@ for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
   done
 done
 
-# CI image (harbor inference-xpu-pytorch) ships no flag_gems package -- the
-# site-packages has no .pth/finder/dist-info for it (verified: ls | grep is
-# empty). The source is mounted read-only at /workspace/FlagGems via
-# container_volumes (shared CPFS PV on the runner pod; verified: docker run -v
-# lists the tree). Dev pods have an editable .pth in their CPFS-backed
-# site-packages that resolves import to /workspace/FlagGems/src; the CI image
-# lacks it, so synthesize a plain path .pth in the venv site-packages. A
-# single path line in a .pth file is prepended to sys.path at Python startup,
-# letting `import flag_gems` resolve to /workspace/FlagGems/src/flag_gems with
-# no editable install (honours the "no editable install for acceptance" rule).
-if [[ -d /workspace/FlagGems/src/flag_gems ]]; then
-  printf '%s\n' "/workspace/FlagGems/src" > "$VENV_SITE/_flag_gems_mounted_source.pth"
+# CI image (harbor inference-xpu-pytorch) ships no flag_gems package. Discover
+# the mounted source in either the normal src layout or a repository-root
+# package layout, then make it importable when the mount is available. Some PPU
+# runners do not provide the optional FlagGems volume; the vendor-only tests and
+# the shared contracts remain valid without it, so setup must not fail there.
+_flaggems_sources=(
+  /workspace/FlagGems/src
+  /workspace/FlagGems
+)
+FLAGGEMS_SOURCE=""
+for _candidate in "${_flaggems_sources[@]}"; do
+  if [[ -d "$_candidate/flag_gems" ]]; then
+    FLAGGEMS_SOURCE="$_candidate"
+    break
+  fi
+done
+if [[ -n "$FLAGGEMS_SOURCE" ]]; then
+  printf '%s\n' "$FLAGGEMS_SOURCE" > "$VENV_SITE/_flag_gems_mounted_source.pth"
+  echo "FlagGems source: $FLAGGEMS_SOURCE"
+else
+  echo "FlagGems source: unavailable; skipping optional FlagGems runtime path"
 fi
+
+# The PPU manifest skips FlagGems tests when the source mount is absent. Export
+# this fact through the integration environment so the command can remain
+# explicit and fail closed if a future step accidentally enables that path.
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  printf 'FLAGGEMS_SOURCE=%s\n' "$FLAGGEMS_SOURCE" >> "$GITHUB_ENV"
+fi
+
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -407,7 +424,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
     PPU_SDK FLAGOS_PPU_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_WHEEL_LOCAL FLAGGEMS_KERNEL FLAGCX_PATH \
+    FLAGOS_WHEEL_LOCAL FLAGGEMS_KERNEL FLAGCX_PATH FLAGGEMS_SOURCE \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
