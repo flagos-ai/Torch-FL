@@ -284,6 +284,7 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         super().__init__(rank, world_size)
         self._store = store
         self._timeout = timeout
+        self._inner_backend = None
         self._view_fn = self._build_inner(store, rank, world_size, timeout)
         self._register_inner_backend()
 
@@ -335,12 +336,14 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # plain (store, rank, world_size) ctor, so we build the
         # _DistributedBackendOptions the same way c10d does.
         if self._try_build_flagcx(store, rank, world_size, timeout):
+            self._inner_backend = "flagcx"
             return self._resolve_view(prof, vendor, backend="flagcx")
 
         # --- Native vendor backend fallback (NCCL / HCCL) ---
         if prof.native is not None:
             native_fn = getattr(self, prof.native)
             if native_fn(store, rank, world_size, timeout):
+                self._inner_backend = f"native:{prof.native}"
                 return self._resolve_view(prof, vendor, backend="native")
 
         raise RuntimeError(
