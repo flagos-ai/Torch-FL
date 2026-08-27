@@ -32,6 +32,8 @@ def _detect_platform() -> str:
         return "metax"
     if accelerator == "musa":
         return "musa"
+    if accelerator == "dcu":
+        return "dcu"
 
     try:
         import torch_fl
@@ -58,15 +60,16 @@ def _detect_platform() -> str:
 
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa"),
-    "ascend": ("cuda", "metax", "musa"),
+    "metax": ("cuda", "ascend", "musa", "dcu"),
+    "ascend": ("cuda", "metax", "musa", "dcu"),
     # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
     # `-> cuda` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "flaggems_python"),
+    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa"),
-    "default": ("metax", "ascend", "musa"),
+    "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
+    "default": ("metax", "ascend", "musa", "dcu"),
+    "dcu": ("metax", "ascend", "musa", "gcu"),
 }
 
 
@@ -154,6 +157,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "metax: requires MetaX platform")
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
+    config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")
     config.addinivalue_line(
         "markers",
         "flaggems: requires the FlagGems runtime path on (FLAGOS_USE_FLAGGEMS=1)",

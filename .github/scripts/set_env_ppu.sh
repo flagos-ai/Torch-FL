@@ -293,9 +293,9 @@ done
 
 # CI image (harbor inference-xpu-pytorch) ships no flag_gems package. Discover
 # the mounted source in either the normal src layout or a repository-root
-# package layout, then make it importable when the mount is available. Some PPU
-# runners do not provide the optional FlagGems volume; the vendor-only tests and
-# the shared contracts remain valid without it, so setup must not fail there.
+# package layout, then fail during environment setup if neither is available.
+# A plain path .pth keeps the acceptance environment non-editable while making
+# the mounted source importable by the venv Python.
 _flaggems_sources=(
   /workspace/FlagGems/src
   /workspace/FlagGems
@@ -307,20 +307,13 @@ for _candidate in "${_flaggems_sources[@]}"; do
     break
   fi
 done
-if [[ -n "$FLAGGEMS_SOURCE" ]]; then
-  printf '%s\n' "$FLAGGEMS_SOURCE" > "$VENV_SITE/_flag_gems_mounted_source.pth"
-  echo "FlagGems source: $FLAGGEMS_SOURCE"
-else
-  echo "FlagGems source: unavailable; skipping optional FlagGems runtime path"
+if [[ -z "$FLAGGEMS_SOURCE" ]]; then
+  echo "::error::FlagGems source is not available under /workspace/FlagGems"
+  echo "::error::Expected flag_gems under: ${_flaggems_sources[*]}"
+  exit 1
 fi
-
-# The PPU manifest skips FlagGems tests when the source mount is absent. Export
-# this fact through the integration environment so the command can remain
-# explicit and fail closed if a future step accidentally enables that path.
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  printf 'FLAGGEMS_SOURCE=%s\n' "$FLAGGEMS_SOURCE" >> "$GITHUB_ENV"
-fi
-
+printf '%s\n' "$FLAGGEMS_SOURCE" > "$VENV_SITE/_flag_gems_mounted_source.pth"
+echo "FlagGems source: $FLAGGEMS_SOURCE"
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -417,6 +410,22 @@ print(f"CPU torch path: {torch_path}")
 print(f"PPU bundle: {Path('torch_fl/lib_ppu').resolve()}")
 PY
 
+# Prove the mounted FlagGems source is importable in this venv, so a missing or
+# unreadable mount fails here instead of turning into a wall of identical
+# ModuleNotFoundError test failures in the FlagGems runtime step. flag_gems
+# queries torch.cuda at import time, so torch_fl must be imported first: that is
+# what swaps the stock CPU core libs for the PPU build bundled above. The check
+# therefore has to run after bundle_ppu_libtorch.sh, and only in the integration
+# stage, which is where flag_gems' pure Python deps are installed.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  python - <<'PY'
+import torch_fl  # noqa: F401  (swaps in the bundled PPU libtorch core)
+import flag_gems
+
+print(f"flag_gems: {flag_gems.__file__}")
+PY
+fi
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
@@ -424,7 +433,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
     PPU_SDK FLAGOS_PPU_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_WHEEL_LOCAL FLAGGEMS_KERNEL FLAGCX_PATH FLAGGEMS_SOURCE \
+    FLAGOS_WHEEL_LOCAL FLAGGEMS_KERNEL FLAGCX_PATH \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
