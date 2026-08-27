@@ -549,6 +549,25 @@ TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
     return self.clone(memory_format);
   });
 
+  // narrow: same shape of problem as contiguous. aten::narrow is
+  // CompositeImplicitAutograd upstream, and the dispatcher only falls back to
+  // that math kernel for an autograd key when the matching backend slot is
+  // empty. Claiming `narrow` on PrivateUse1 above fills that slot, so
+  // AutogradPrivateUse1 stopped resolving to the composite and landed on
+  // torchgen's Autograd[alias] stub -- "derivative for aten::narrow is not
+  // implemented" -- as soon as the input required grad. The forward view still
+  // worked, so only backward regressed (flagos-ai/Torch-FL#205).
+  //
+  // The same WrapperNarrow body run one key higher fixes it: narrow_symint
+  // normalizes the bounds and calls at::slice_symint, a *dispatched* call that
+  // re-enters autograd from here and records SliceBackward0 -- exactly the graph
+  // PyTorch's composite builds, and the reason `x[:, 1:4]` never had this
+  // problem. slice_backward is itself differentiable, so double backward works.
+  //
+  // No AutoDispatchBelowADInplaceOrView guard here: the inner slice must keep
+  // its ADInplaceOrView kernel so the result carries proper view metadata.
+  m.impl("narrow", WrapperNarrow);
+
   // matmul: on Ascend the fused aclnnMatmul kernel is claimed on plain
   // PrivateUse1 (above), and the generated AutogradPrivateUse1 kernel
   // (csrc/aten/generated/variable_type.cc) sits in front of it to build the
