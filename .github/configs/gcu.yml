@@ -26,9 +26,11 @@ ci_image: harbor.baai.ac.cn/flagtree/flagtree-enflame3.6-py312-torch2.10.0-ubunt
 runner_labels:
   - sy-8g-cicd-pytorch
 
-container_volumes: []
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 container_options: >-
   --privileged
@@ -39,12 +41,29 @@ container_options: >-
 
 timeout_minutes: 60
 wheel_artifact_name: wheel-gcu
-# The GCU wheel is small and the integration job must test the exact artifact
-# produced by the build job.
-integration_wheel_source: artifact
+
+# TopsRider on a stock CPU Torch: the GCU runtime is reached through the vendor
+# libraries, not a CUDA-variant Torch.
+torch_contract:
+  base_version: "2.10.0"
+  cuda: none
+  forbidden_torch_paths:
+    - /usr/local/lib/python3.12/dist-packages
 
 integration_tests:
-  - name: Check isolated GCU environment
+  - id: model-availability
+    name: Check model availability
+    phase: preflight
+    failure_policy: fail-fast
+    command: |
+      test -f "$MODEL_PATH/config.json" || { echo "::error::Missing config.json"; exit 1; }
+      test -f "$MODEL_PATH/tokenizer_config.json" || { echo "::error::Missing tokenizer_config.json"; exit 1; }
+      ls "$MODEL_PATH"/*.safetensors >/dev/null 2>&1 || ls "$MODEL_PATH"/*.bin >/dev/null 2>&1 || { echo "::error::Missing weight files"; exit 1; }
+
+  - id: device-availability
+    name: Check device availability
+    phase: preflight
+    failure_policy: fail-fast
     command: |
       python - <<'PY'
       from pathlib import Path
@@ -55,7 +74,6 @@ integration_tests:
       torch_path = Path(torch.__file__).resolve()
       package_root = Path(torch_fl.__file__).resolve().parent
 
-      assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
       assert torch.version.cuda is None, torch.version.cuda
       assert "/usr/local/lib/python3.12/dist-packages" not in str(torch_path), torch_path
       assert not (package_root / "lib" / "libtorch_cuda.so").is_file(), package_root
@@ -74,32 +92,57 @@ integration_tests:
   # after it. FlagGems is excluded because it needs the vendor Triton stack,
   # which this image does not install (the same exclusion CUDA/DCU apply to
   # their non-FlagGems step).
-  - name: Run operator tests (vendor backend, main ops)
+  - id: operator-tests
+    name: Run operator tests (vendor backend, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
+      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not musa and not metax and not dcu and not ppu"
+      --tb=short
 
   # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX. The generator
   # contract, the shared-state round trip, and the integer range semantics are
   # implemented natively on GCU, so this is a contract check rather than a gap
   # detector.
-  - name: Run unified RNG tests
+  - id: rng-tests
+    name: Run unified RNG tests
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops" --tb=short
 
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+  - id: general-tests
+    name: Run general tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_factory_ops.py --tb=short
 
   # #160 measured the full AMP suite on S60 (25 passed): both autocast dtypes,
   # native unscale routes, `convolution_overrideable`, and the GradScaler
   # finite/overflow paths. float64 is stored natively and computed through the
   # CPU fallback, which the contract's float64 cases rely on.
-  - name: Unified AMP contract
+  - id: amp-contract
+    name: Unified AMP contract
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
+      -m amp --tb=short
+
+  # The TOPSPTI tracer does collect activities on S60 (229 for a three-iteration
+  # matmul loop), but none reach the profiler as device events on a CPU-only
+  # PyTorch/Kineto build, which supplies no PrivateUse1 resolver. The contract
+  # runs and fails on that gap rather than being withheld, so the failure is the
+  # record the platform owners act on.
+  - id: profiler-contract
+    name: Unified profiler contract
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -m profiler --tb=short
 
   # torch.compile through triton_gcu. The GCU-marked tests are the regression
   # guards for four vendor-specific defects, two of which are silent: a
@@ -108,16 +151,24 @@ integration_tests:
   # gradients) and an FX cache key that failed to pickle, downgrading every
   # compile to a full recompile. Neither is visible from forward output alone,
   # so this step has to run the backward assertions to be worth anything.
-  - name: Run torch.compile tests
-    command: python -m pytest tests/integration/test_compile.py -v --tb=short
+  - id: compile-tests
+    name: Run torch.compile tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_compile.py --tb=short
 
-  # ---------------------------------------------------------------------------
-  # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - tests/integration/test_profiler_contract.py. The TOPSPTI tracer does
-  #     collect activities on S60 (229 for a three-iteration matmul loop), but
-  #     none reach the profiler as device events on a CPU-only PyTorch/Kineto
-  #     build, which supplies no PrivateUse1 resolver. This is the same
-  #     environment limitation recorded for MUSA, not a GCU tracer defect, and
-  #     the step is withheld until it is measured end to end.
-  #   - Qwen3 inference/training smoke, pending a model mount on the runner.
-  # ---------------------------------------------------------------------------
+  - id: inference-tests
+    name: Run inference tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_infer.py
+      --model "$MODEL_PATH" --tb=short
+
+  - id: training-tests
+    name: Run training tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_train.py
+      --model "$MODEL_PATH" --tb=short

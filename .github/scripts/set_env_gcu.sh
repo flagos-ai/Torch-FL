@@ -172,6 +172,23 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
     "torch==$CPU_TORCH_VERSION"
 fi
 
+# Test dependencies, installed whether or not the venv was prebuilt: a prebuilt
+# venv missing them makes the inference and training groups fail as an
+# environment problem that reads as a topsaten problem.
+#
+# transformers is pinned to [4.51, 5) for Qwen3 model_type support, below the
+# 5.x TokenizersBackend regression; sentencepiece/tiktoken/protobuf drive the
+# slow-to-fast tokenizer conversion for a model dir with no tokenizer.json, and
+# numpy stays on 1.x so the +cpu torch C extensions keep importing.
+#
+# triton is not installed here. On GCU it comes from the vendor triton_gcu /
+# flagtree build in the image; stock PyPI triton targets NVIDIA and would shadow
+# it (see _vendor_supplies_triton in setup.py for the same rule on dcu/ascend).
+if [[ "$CI_STAGE" == "integration" ]]; then
+  "$VENV_PYTHON" -m pip install \
+    pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
+fi
+
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
@@ -209,16 +226,45 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   done
 fi
 
-cd "$REPO_ROOT"
-if [[ "$CI_STAGE" == "build" ]]; then
-  # Prebuild so package_data contains the generated libtorch_fl.so before the
-  # common wheel workflow stages the final artifact.
-  python setup.py build_ext --inplace
+# Expose the vendor Triton (triton_gcu / flagtree) to the isolated venv, matching
+# how set_env_metax.sh exposes triton-metax: the active torch is the CPU wheel and
+# ships no Triton, and the vendor build is installed in the image rather than
+# resolved by pip.
+#
+# A missing vendor Triton is a warning, not a setup failure: compile-tests then
+# fails on its own and the remaining nine groups still produce evidence, whereas
+# exiting here would take the whole run down over a torch.compile gap.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  if [[ ! -e "$VENV_SITE/triton" ]]; then
+    for candidate in /usr/local/lib/python3.*/dist-packages \
+                     /usr/local/lib/python3.*/site-packages \
+                     /usr/lib/python3.*/dist-packages \
+                     /usr/lib/python3.*/site-packages; do
+      if [[ -d "$candidate/triton" ]]; then
+        ln -s "$candidate/triton" "$VENV_SITE/triton"
+        for metadata in "$candidate"/triton*-*.dist-info; do
+          [[ -e "$metadata" ]] || continue
+          [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
+        done
+        echo "Vendor Triton linked from $candidate/triton"
+        break
+      fi
+    done
+  fi
 
-  python - <<'PY'
-import torch_fl
-
-assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-print(f"flagos devices: {torch_fl.flagos.device_count()}")
-PY
+  # Verify triton is available through vendor stack (triton_gcu/flagtree).
+  # Stock PyPI triton targets NVIDIA and is not a substitute. triton is not in
+  # the --require list: a missing vendor Triton is a warning, not a setup
+  # failure (the compile-tests group will fail on its own, documenting the gap).
+  "$VENV_PYTHON" .github/scripts/check_integration_deps.py \
+    --require pytest transformers safetensors
 fi
+
+cd "$REPO_ROOT"
+# build_ext runs in both stages: it produces the libtorch_fl.so that package_data
+# stages into the wheel, and build and test now share one container job, so
+# gating it to the build stage would leave the integration stage building a wheel
+# with no native library. The device is checked by the device-availability
+# preflight against the installed wheel.
+python setup.py build_ext --inplace

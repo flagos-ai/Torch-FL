@@ -17,7 +17,7 @@ name: CI
 on:
   push:
 
-    branches: [main, dev, devops, dev-hygon, dev-thead]
+    branches: [main, dev, devops, dev-hygon, dev-thead, ci-all]
 
     paths:
       - "cmake/**"
@@ -64,76 +64,37 @@ jobs:
     timeout-minutes: 5
     outputs:
       platforms: ${{ steps.detect.outputs.platforms }}
-      common_platforms: ${{ steps.detect.outputs.common_platforms }}
-      has_cuda: ${{ steps.detect.outputs.has_cuda }}
-      has_ascend: ${{ steps.detect.outputs.has_ascend }}
-      has_dcu: ${{ steps.detect.outputs.has_dcu }}
-      has_metax: ${{ steps.detect.outputs.has_metax }}
-      has_ppu: ${{ steps.detect.outputs.has_ppu }}
     steps:
       - uses: actions/checkout@v4
 
+      # Every .github/configs/*.yml is a platform, and every platform runs the
+      # same pipeline. Adding a config is the only step needed to add a platform:
+      # no per-vendor job, and no allowlist to keep in sync here.
       - name: Detect configured platforms
         id: detect
         run: |
+          set -euo pipefail
           platforms=$(find .github/configs -maxdepth 1 -type f -name '*.yml' \
             -exec basename {} .yml \; | sort | jq -R -s -c 'split("\n")[:-1]')
           if [[ "$platforms" == "[]" ]]; then
             echo "::error::No platform configs found"
             exit 1
           fi
-          common_platforms=$(jq -c 'map(select(. != "ascend" and . != "dcu" and . != "metax" and . != "cuda" and . != "ppu"))' <<<"$platforms")
-          has_cuda=$(jq -r 'index("cuda") != null' <<<"$platforms")
-          has_ascend=$(jq -r 'index("ascend") != null' <<<"$platforms")
-          has_dcu=$(jq -r 'index("dcu") != null' <<<"$platforms")
-          has_metax=$(jq -r 'index("metax") != null' <<<"$platforms")
-          has_ppu=$(jq -r 'index("ppu") != null' <<<"$platforms")
+          echo "Discovered platforms: $platforms"
           echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
-          echo "common_platforms=$common_platforms" >> "$GITHUB_OUTPUT"
-          echo "has_cuda=$has_cuda" >> "$GITHUB_OUTPUT"
-          echo "has_ascend=$has_ascend" >> "$GITHUB_OUTPUT"
-          echo "has_dcu=$has_dcu" >> "$GITHUB_OUTPUT"
-          echo "has_metax=$has_metax" >> "$GITHUB_OUTPUT"
-          echo "has_ppu=$has_ppu" >> "$GITHUB_OUTPUT"
 
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.common_platforms != '[]'
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJson(needs.discover-platforms.outputs.common_platforms) }}
+        platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
     uses: ./.github/workflows/all-tests-common.yml
     with:
       platform: ${{ matrix.platform }}
-
-  ascend-pipeline:
-    name: Platform pipeline (ascend)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_ascend == 'true'
-    uses: ./.github/workflows/integration-test-ascend.yml
-
-  cuda-pipeline:
-    name: Platform pipeline (cuda)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_cuda == 'true'
-    uses: ./.github/workflows/integration-test-cuda.yml
-
-  dcu-pipeline:
-    name: Platform pipeline (dcu)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_dcu == 'true'
-    uses: ./.github/workflows/integration-test-dcu.yml
-
-  metax-pipeline:
-    name: Platform pipeline (metax)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_metax == 'true'
-    uses: ./.github/workflows/integration-test-metax.yml
-
-  ppu-pipeline:
-    name: Platform pipeline (ppu)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_ppu == 'true'
-    uses: ./.github/workflows/integration-test-ppu.yml
+      # Debug-phase toggle: skip wheel artifact upload while iterating on the
+      # integration tests -- green-run wheels are unused during debugging and
+      # only consume storage. Flip to true (or drop this line) at final
+      # delivery so release/provenance wheels are retained again.
+      upload_artifact: false

@@ -179,15 +179,6 @@ for path in \
   fi
 done
 
-# Device nodes: three classes on the runner -- /dev/alixpu (base),
-# /dev/alixpu_ctl (control), /dev/alixpu_ppu0-15 (compute). The CI container
-# mounts all of them via container_options --device=...; probe alixpu_ppu0 as
-# the "devices are visible" canary.
-if [[ ! -c /dev/alixpu_ppu0 ]]; then
-  echo "::error::PPU device node /dev/alixpu_ppu0 is unavailable"
-  exit 1
-fi
-
 # PPU torch ships its own libtorch_cuda.so, so neither the build-time copy into
 # torch_fl/lib nor the runtime preload should run. Both kill switches are needed:
 #   FLAGOS_SKIP_CUDA_ASSETS  -> setup.py skips the libtorch_cuda.so copy + cu12 deps
@@ -250,7 +241,7 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # both ends must stay pinned. Revisit the upper bound once upstream ships a
   # fix for the 5.x regression.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
-    pytest "transformers>=4.51,<5" sentencepiece tiktoken protobuf
+    pytest "transformers>=4.51,<5" safetensors sentencepiece tiktoken protobuf
   # flag_gems runtime path (step 4) imports from the mounted source via the
   # _flag_gems_mounted_source.pth above. The CI image lacks flag_gems' pure
   # Python deps (sqlalchemy/PyYAML/packaging -- not in the image site-packages,
@@ -387,11 +378,25 @@ fi
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
 bash scripts/bundle_ppu_libtorch.sh
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "::error::nvidia-smi is unavailable"
-  exit 1
+# Device probes only run during integration tests. Build-only runs do not need
+# the device, and manifests have a more complete device-availability check.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  # Device node check: PPU exposes /dev/alixpu (base), /dev/alixpu_ctl (control),
+  # and /dev/alixpu_ppu0-15 (compute). The CI container mounts all of them via
+  # container_options --device=...; probe alixpu_ppu0 as the "devices are visible"
+  # canary.
+  if [[ ! -c /dev/alixpu_ppu0 ]]; then
+    echo "::error::PPU device node /dev/alixpu_ppu0 is unavailable"
+    exit 1
+  fi
+
+  # PPU is CUDA-compatible: nvidia-smi reports PPU devices through the compatibility layer
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "::error::nvidia-smi is unavailable"
+    exit 1
+  fi
+  nvidia-smi
 fi
-nvidia-smi
 
 python - <<'PY'
 from pathlib import Path
@@ -437,4 +442,12 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+fi
+
+# Report the integration stack once, here, rather than letting a group fail on a
+# missing import and read as a platform defect. Triton is the vendor build
+# copied into the venv by this script.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  "$VENV_PYTHON" .github/scripts/check_integration_deps.py \
+    --require pytest transformers safetensors triton
 fi

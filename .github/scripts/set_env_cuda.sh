@@ -178,8 +178,15 @@ fi
 "$VENV_PYTHON" -m pip install \
   --index-url "$CPU_TORCH_INDEX_URL" \
   "torch==$CPU_TORCH_VERSION"
+# transformers is pinned to [4.51, 5): 4.51 is where Qwen3 model_type support
+# landed, and 5.x carries a TokenizersBackend regression that breaks the Qwen3
+# slow-to-fast tokenizer conversion. sentencepiece/tiktoken/protobuf drive that
+# conversion when the mounted model dir has no tokenizer.json. numpy stays on 1.x
+# so the +cpu torch C extensions keep importing. triton is excluded: the vendor
+# Triton is carried in from VENDOR_SITE below.
 if [[ "$CI_STAGE" == "integration" ]]; then
-  "$VENV_PYTHON" -m pip install pytest transformers
+  "$VENV_PYTHON" -m pip install \
+    pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
 fi
 
 # Keep the vendor FlagGems/FlagCX Python packages available without copying the
@@ -252,11 +259,15 @@ if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   python setup.py build_ext --inplace
 fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "::error::nvidia-smi is unavailable"
-  exit 1
+# Device probes only run during integration tests. Build-only runs do not need
+# the device, and manifests have a more complete device-availability check.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "::error::nvidia-smi is unavailable"
+    exit 1
+  fi
+  nvidia-smi
 fi
-nvidia-smi
 
 python - <<'PY'
 from pathlib import Path
@@ -285,4 +296,12 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+fi
+
+# Report the integration stack once, here, rather than letting a group fail on a
+# missing import and read as a platform defect. Triton is carried in from the
+# vendor site-packages by this script.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  "$VENV_PYTHON" .github/scripts/check_integration_deps.py \
+    --require pytest transformers safetensors triton
 fi

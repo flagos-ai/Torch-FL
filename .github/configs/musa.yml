@@ -12,58 +12,62 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-display_name: Hygon DCU
+# MUSA runs native mudnn kernels, not CUDA boxing: the toolkit ships no cudart
+# and the wheel builds against stock CPU PyTorch 2.10 (see
+# docs/vendors/musa/installation.md). The vendor torch_musa in the base image is
+# never imported; set_env_musa.sh asserts it stayed out of the isolated venv.
+#
+# The operator group selects `(anyplatform or main_ops)` minus the FlagGems
+# markers, the same shape GCU and MetaX use. Those tests hold on MUSA because
+# conftest's platform gate only skips the cuda/metax/ascend/flaggems_python
+# markers on this backend. test_musa_dispatch.py runs as an additive group with
+# `-m musa`, asserting ops route to the musa backend and match the CPU reference.
+#
+# FlagGems is not wired here: this image ships no MThreads Triton/FlagGems stack
+# (the vendor flagtree wheel is absent). The hybrid routing can be added once
+# that backend is provisioned, the same way GCU defers it. A generic PyPI triton
+# is not a substitute and is not installed in its place.
+#
+# The compile, profiler, inference and training groups run for real. Where the
+# MThreads stack does not yet support them the group fails, and that failure is
+# the record for the platform owners: it is not skipped, deselected or xfailed.
 
-# Platform-specific preparation is implemented outside the common workflows.
-setup_script: .github/scripts/set_env_dcu.sh
+display_name: MUSA
 
-# Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
-# used by set_env_dcu.sh. The script still falls back to creating a fresh venv
-# when the prebuilt one is absent, but the CI image should avoid network installs.
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
+setup_script: .github/scripts/set_env_musa.sh
+
+ci_image: registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.1.0-v2.9.1-S5000-py310_tef
 
 runner_labels:
-  - hg-8g-cicd-pytorch
+  - mt-8g-cicd-pytorch
 
-# Bind-mount the host hyhal driver into the container. libhydmi.so (Hygon DMI
-# device management) and its sibling driver libs live here on the host, not in
-# the flagos image; set_env_dcu.sh probes /usr/local/hyhal/lib and prepends it
-# to LD_LIBRARY_PATH so flagos device init can dlopen libhydmi.so. Mount the
-# real path /usr/local/hyhal (not the /opt/hyhal symlink) -- docker does not
-# follow a symlink bind source. The runner host installs hyhal at the same
-# standard layout as any DCU box, so the source path is portable across hosts.
 container_volumes:
-  - /usr/local/hyhal:/usr/local/hyhal:ro
   - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 integration_environment:
   MODEL_PATH: /models/Qwen3-0.6B
 
-# DCU is non-NVIDIA: expose the /dev/kfd and /dev/dri device nodes through
-# --privileged (mirrors the MetaX layout) instead of --gpus all.
 container_options: >-
   --privileged
   --ipc=host
   --shm-size=512g
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
+  --env MTHREADS_VISIBLE_DEVICES=all
 
 timeout_minutes: 60
-wheel_artifact_name: wheel-dcu
+wheel_artifact_name: wheel-musa
 
-# DTK Torch is hipified but reports no CUDA version, and the HIP kernels reach
-# the process through the wheel's own assets rather than a CUDA-variant Torch.
+# Native mudnn kernels on a stock CPU Torch: no cudart, and the vendor 2.9.1
+# torch_musa ABI must never be the Torch under test.
 torch_contract:
   base_version: "2.10.0"
+  local_version: cpu
   cuda: none
   forbidden_torch_paths:
     - /opt/conda/
+    - torch_musa
 
-# The common workflow only executes this platform-provided test manifest.
-# DCU is a boxing build (DTK torch is hipified, HIP kernels live under the CUDA
-# dispatch key), so the vendor backend path and the FlagGems runtime path
-# (backends_dcu_flaggems.conf, DTK triton hcu + cuda boxing fallback) mirror
-# CUDA's manifest.
 integration_tests:
   - id: model-availability
     name: Check model availability
@@ -80,6 +84,7 @@ integration_tests:
     failure_policy: fail-fast
     command: |
       python - <<'PY'
+      import importlib.util
       from pathlib import Path
 
       import torch_fl
@@ -91,11 +96,15 @@ integration_tests:
       assert torch.version.cuda is None, torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert (package_lib / "libtorch_fl.so").is_file(), package_lib
+      # MUSA is native, not CUDA boxing: no cudart and no CUDA boxing kernels.
+      assert not (package_lib / "libtorch_cuda.so").is_file(), package_lib
+      # The vendor 2.9.1 libtorch ABI must not be reachable from this venv.
+      assert importlib.util.find_spec("torch_musa") is None, "torch_musa leaked into the venv"
       assert torch_fl.flagos.is_available(), "flagos device is unavailable"
       assert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()
       print(f"CPU PyTorch: {torch.__version__}")
       print(f"torch path: {torch_path}")
-      print(f"DCU assets: {package_lib}")
+      print(f"MUSA bundled libs: {package_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
@@ -105,7 +114,7 @@ integration_tests:
     failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not musa and not metax and not gcu and not ppu"
+      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
       --tb=short
 
   - id: rng-tests
@@ -120,16 +129,24 @@ integration_tests:
     name: Run general tests
     phase: functional
     failure_policy: continue-after-failure
-    command: python -m pytest tests/integration/test_factory_ops.py --tb=short
+    command: >-
+      python -m pytest
+      tests/integration/test_factory_ops.py
+      --tb=short
 
   - id: amp-contract
     name: Unified AMP contract
     phase: functional
     failure_policy: continue-after-failure
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -m amp --tb=short
+    command: python -m pytest tests/integration/test_amp_contract.py -m amp --tb=short
 
+  # The profiler is a Required Contract with no per-platform capability table
+  # (see profiler_support.py): it requires the full device/kernel/memcpy/memset
+  # event set everywhere. MUSA's mupti tracer is documented under
+  # docs/vendors/musa/installation.md. If it does not emit those events the
+  # contract fails loudly and the observed categories land in
+  # profiler-observations.json -- exactly the evidence an environment gap should
+  # produce.
   - id: profiler-contract
     name: Unified profiler contract
     phase: functional
@@ -138,6 +155,10 @@ integration_tests:
       python -m pytest tests/integration/test_profiler_contract.py
       -m profiler --tb=short
 
+  # A real gate, not a skip. The CPU wheel ships no Triton, so a compile needs
+  # the vendor flagtree wheel (flagtree-0.5.0+mthreads3.1) and the MThreads
+  # backend. Until that stack is provisioned on this line the group fails, and
+  # the failure is preserved as the environment-gap record.
   - id: compile-tests
     name: Run torch.compile tests
     phase: functional
@@ -160,30 +181,12 @@ integration_tests:
       python -m pytest tests/integration/test_qwen3_train.py
       --model "$MODEL_PATH" --tb=short
 
-  # Platform-specific groups, additive to the baseline above.
-  - id: operator-tests-flaggems
-    name: Run operator tests (FlagGems runtime path, main ops)
+  # Platform-specific group, additive to the baseline above: asserts ops route to
+  # the musa backend and match the CPU reference (it calls mudnn directly).
+  - id: musa-dispatch
+    name: Run MUSA dispatcher capability tests
     phase: functional
     failure_policy: continue-after-failure
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" --tb=short
-
-  - id: dcu-lowp-matrix-tests
-    name: Run DCU low-precision matrix tests
-    phase: functional
-    failure_policy: continue-after-failure
-    command: >-
-      python -m pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py
-      -m "dcu" --tb=short
-
-  # Structural comparison against tests/data/profiler_cuda_baseline.json, which
-  # the shared contract does not cover.
-  - id: profiler-parity
-    name: Profiler parity test
-    phase: functional
-    failure_policy: continue-after-failure
-    command: >-
-      python -m pytest tests/integration/test_profiler_parity.py
-      -m main_ops --tb=short
+      python -m pytest tests/integration/ops/test_musa_dispatch.py
+      -m musa --tb=short

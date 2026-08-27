@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# PPU (T-Head Jianwu ZW810E) single-job integration pipeline. Mirrors the
-# cuda/ascend/metax dedicated workflows: one self-contained job that prepares
-# the PPU environment, builds + installs the wheel, and runs the manifest via
-# run_integration_tests.py. PPU is a CUDA-ABI boxing backend on an Aliyun DSW
-# runner, so container_options uses --device= (authZ denies --privileged /
-# --ipc=host) and mounts the AliXPU device nodes explicitly. See
-# .github/configs/ppu.yml for the documented manifest this inlines.
+# Compatibility entry point. The pipeline now lives in all-tests-common.yml and
+# is driven entirely by .github/configs/ppu.yml, which used to be duplicated
+# inline here (image, AliXPU --device list, container options). This file keeps
+# the "Integration Tests (PPU)" workflow name and its manual dispatch working;
+# see .github/workflows/MIGRATION_NOTES.md for the required-check rename.
 
 name: Integration Tests (PPU)
 
@@ -39,69 +37,8 @@ on:
         default: 60
 
 jobs:
-  integration-tests:
-    name: Build and test (PPU)
-    runs-on:
-      - flagcicd-810e
-    timeout-minutes: ${{ inputs['timeout-minutes'] }}
-    container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
-      volumes:
-        - /workspace/FlagGems:/workspace/FlagGems:ro
-        - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
-      options: >-
-        --shm-size=4g
-        --device=/dev/alixpu
-        --device=/dev/alixpu_ctl
-        --device=/dev/alixpu_ppu0
-        --device=/dev/alixpu_ppu1
-        --device=/dev/alixpu_ppu2
-        --device=/dev/alixpu_ppu3
-        --device=/dev/alixpu_ppu4
-        --device=/dev/alixpu_ppu5
-        --device=/dev/alixpu_ppu6
-        --device=/dev/alixpu_ppu7
-        --device=/dev/alixpu_ppu8
-        --device=/dev/alixpu_ppu9
-        --device=/dev/alixpu_ppu10
-        --device=/dev/alixpu_ppu11
-        --device=/dev/alixpu_ppu12
-        --device=/dev/alixpu_ppu13
-        --device=/dev/alixpu_ppu14
-        --device=/dev/alixpu_ppu15
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare PPU build environment
-        env:
-          CI_STAGE: integration
-        run: bash .github/scripts/set_env_ppu.sh
-
-      - name: Build wheel
-        run: python -m build --wheel --no-isolation
-
-      - name: Install wheel
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
-
-      - name: Prepare wheel-only test workspace
-        run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-ppu.XXXXXX")
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
-
-      - name: Run PPU integration tests
-        env:
-          INTEGRATION_ENVIRONMENT: '{"MODEL_PATH":"/models/Qwen3-0.6B"}'
-          INTEGRATION_TESTS: >-
-            [{"name":"Check model availability","command":"test -d \"$MODEL_PATH\""},
-            {"name":"Check device availability","command":"python - <<'PY'\nfrom pathlib import Path\n\nimport torch_fl\nimport torch\n\ntorch_fl_path = Path(torch_fl.__file__).resolve()\ntorch_path = Path(torch.__file__).resolve()\nppu_bundle = torch_fl_path.parent / \"lib_ppu\"\n\nassert torch.__version__.startswith(\"2.10.0+cpu\"), torch.__version__\nassert torch.version.cuda is None, torch.version.cuda\nassert \"/opt/conda/\" not in str(torch_path), torch_path\nassert (ppu_bundle / \"libtorch_cuda.so\").is_file(), ppu_bundle\nassert torch.cuda.is_available(), \"PPU devices are unavailable\"\nassert torch.cuda.device_count() > 0, torch.cuda.device_count()\nassert torch_fl.flagos.is_available(), \"flagos device is unavailable\"\nassert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()\n\nprint(f\"PyTorch: {torch.__version__}\")\nprint(f\"torch: {torch_path}\")\nprint(f\"torch_fl: {torch_fl_path}\")\nprint(f\"PPU bundle: {ppu_bundle}\")\nprint(f\"PPU devices: {torch.cuda.device_count()}\")\nprint(f\"flagos devices: {torch_fl.flagos.device_count()}\")\nPY\n"},
-            {"name":"Run operator tests (vendor backend, main ops)","command":"python -m pytest tests/integration/ops/ -m \"main_ops and not flaggems_python and not flaggems_cpp\" -v -s --tb=short"},
-            {"name":"Run operator tests (FlagGems runtime path, main ops)","command":"FLAGOS_USE_FLAGGEMS=1 python -m pytest tests/integration/ops/ -m \"flaggems and main_ops\" --deselect tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_runtime --deselect tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_runtime -v -s --tb=short"},
-            {"name":"Run general tests","command":"python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"},
-            {"name":"Run inference tests","command":"python -m pytest tests/integration/test_qwen3_infer.py --model \"$MODEL_PATH\" -v -s --tb=short"},
-            {"name":"Run training tests","command":"python -m pytest tests/integration/test_qwen3_train.py --model \"$MODEL_PATH\" -v -s --tb=short"}]
-        run: python .github/scripts/run_integration_tests.py
+  pipeline:
+    uses: ./.github/workflows/all-tests-common.yml
+    with:
+      platform: ppu
+      timeout_minutes: ${{ inputs['timeout-minutes'] }}

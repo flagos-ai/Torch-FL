@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Single pipeline shared by every hardware platform. The platform name appears
+# only as an input used to select .github/configs/<platform>.yml; this file
+# contains no per-vendor branch. Hardware differences live in the platform
+# config and in the platform setup_script.
+#
+# Build and test run in ONE container job, so the wheel under test is the wheel
+# just built, in the environment the setup script prepared. The earlier split (a
+# build job plus a separate integration job) duplicated setup and could test a
+# wheel against a differently-prepared container.
+
 name: Common Platform Pipeline
 
 on:
@@ -32,12 +42,6 @@ on:
         required: false
         type: boolean
         default: true
-      integration_wheel_source:
-        required: false
-        type: string
-        default: auto
-        description: >-
-          Wheel source for integration tests: auto, artifact, or local-build.
       timeout_minutes:
         required: false
         type: number
@@ -61,9 +65,9 @@ jobs:
       container_options: ${{ steps.config.outputs.container_options }}
       timeout_minutes: ${{ steps.config.outputs.timeout_minutes }}
       wheel_artifact_name: ${{ steps.config.outputs.wheel_artifact_name }}
-      integration_wheel_source: ${{ steps.config.outputs.integration_wheel_source }}
       integration_tests: ${{ steps.config.outputs.integration_tests }}
       integration_environment: ${{ steps.config.outputs.integration_environment }}
+      torch_contract: ${{ steps.config.outputs.torch_contract }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,31 +98,7 @@ jobs:
           ARTIFACT_NAME=$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")
           INTEGRATION_TESTS=$(yq -o=json -I=0 '.integration_tests // []' "$CONFIG_FILE")
           INTEGRATION_ENVIRONMENT=$(yq -o=json -I=0 '.integration_environment // {}' "$CONFIG_FILE")
-          CONFIG_WHEEL_SOURCE=$(yq -r '.integration_wheel_source // "auto"' "$CONFIG_FILE")
-          INTEGRATION_WHEEL_SOURCE="${{ inputs.integration_wheel_source }}"
-
-          if [[ "$INTEGRATION_WHEEL_SOURCE" == "auto" ]]; then
-            INTEGRATION_WHEEL_SOURCE="$CONFIG_WHEEL_SOURCE"
-          fi
-          if [[ "$INTEGRATION_WHEEL_SOURCE" == "auto" ]]; then
-            if [[ "${{ inputs.run_build }}" == "true" ]]; then
-              INTEGRATION_WHEEL_SOURCE="artifact"
-            else
-              INTEGRATION_WHEEL_SOURCE="local-build"
-            fi
-          fi
-          if [[ "$INTEGRATION_WHEEL_SOURCE" != "artifact" &&
-                "$INTEGRATION_WHEEL_SOURCE" != "local-build" ]]; then
-            echo "::error::integration_wheel_source must be artifact or local-build"
-            exit 1
-          fi
-          if [[ "${{ inputs.run_integration_tests }}" == "true" &&
-                "$INTEGRATION_WHEEL_SOURCE" == "artifact" &&
-                ( "${{ inputs.run_build }}" != "true" ||
-                  "${{ inputs.upload_artifact }}" != "true" ) ]]; then
-            echo "::error::artifact integration requires run_build and upload_artifact"
-            exit 1
-          fi
+          TORCH_CONTRACT=$(yq -o=json -I=0 '.torch_contract // {}' "$CONFIG_FILE")
 
           if [[ "${{ inputs.timeout_minutes }}" -gt 0 ]]; then
             TIMEOUT_MINUTES="${{ inputs.timeout_minutes }}"
@@ -136,6 +116,30 @@ jobs:
             echo "::error::timeout_minutes must be a positive integer"
             exit 1
           fi
+          # Every platform declares its own Torch contract. There is no global
+          # default: a single assertion cannot describe both the CPU-wheel
+          # platforms and a CUDA-variant platform.
+          if [[ "$TORCH_CONTRACT" == "{}" || "$TORCH_CONTRACT" == "null" ]]; then
+            echo "::error::torch_contract is required in $CONFIG_FILE"
+            exit 1
+          fi
+
+          # Build and test share one container job, so the tested wheel is
+          # always the one built in this job. A test-only run has no wheel to
+          # install; rather than quietly building one and reporting it as an
+          # artifact-sourced test, the combination is rejected.
+          if [[ "${{ inputs.run_integration_tests }}" == "true" &&
+                "${{ inputs.run_build }}" != "true" ]]; then
+            echo "::error::run_integration_tests=true requires run_build=true."
+            echo "::error::Build and test share one job; there is no artifact-only test path."
+            exit 1
+          fi
+          if [[ "${{ inputs.run_build }}" == "false" &&
+                "${{ inputs.run_integration_tests }}" == "false" ]]; then
+            echo "::error::run_build=false and run_integration_tests=false leaves no work to do."
+            exit 1
+          fi
+
           VALIDATE_ARGS=(--validate-only)
           if [[ "${{ inputs.run_integration_tests }}" != "true" ]]; then
             VALIDATE_ARGS+=(--allow-empty)
@@ -144,54 +148,143 @@ jobs:
           INTEGRATION_ENVIRONMENT="$INTEGRATION_ENVIRONMENT" \
             python .github/scripts/run_integration_tests.py "${VALIDATE_ARGS[@]}"
 
+          python .github/scripts/validate_integration_manifests.py \
+            --configs-dir .github/configs
+
           printf '%s=%s\n' display_name "$DISPLAY_NAME" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' setup_script "$SETUP_SCRIPT" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' ci_image "$CI_IMAGE" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' container_options "$OPTIONS" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' timeout_minutes "$TIMEOUT_MINUTES" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' wheel_artifact_name "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
-          printf '%s=%s\n' integration_wheel_source "$INTEGRATION_WHEEL_SOURCE" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' runs_on "$RUNS_ON" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' container_volumes "$VOLUMES" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' integration_tests "$INTEGRATION_TESTS" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' integration_environment "$INTEGRATION_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' torch_contract "$TORCH_CONTRACT" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build
-    if: inputs.run_build
+  build-and-test:
+    name: Build and test (${{ needs.configuration.outputs.display_name }})
     needs: configuration
-    uses: ./.github/workflows/build-wheel-common.yml
-    with:
-      display_name: ${{ needs.configuration.outputs.display_name }}
-      setup_script: ${{ needs.configuration.outputs.setup_script }}
+    runs-on: ${{ fromJson(needs.configuration.outputs.runs_on) }}
+    timeout-minutes: ${{ fromJson(needs.configuration.outputs.timeout_minutes) }}
+    container:
       image: ${{ needs.configuration.outputs.ci_image }}
-      runs_on: ${{ needs.configuration.outputs.runs_on }}
-      container_volumes: ${{ needs.configuration.outputs.container_volumes }}
-      container_options: ${{ needs.configuration.outputs.container_options }}
-      timeout_minutes: ${{ fromJson(needs.configuration.outputs.timeout_minutes) }}
-      artifact_name: ${{ needs.configuration.outputs.wheel_artifact_name }}
-      upload_artifact: ${{ inputs.upload_artifact }}
+      volumes: ${{ fromJson(needs.configuration.outputs.container_volumes) }}
+      options: ${{ needs.configuration.outputs.container_options }}
+    defaults:
+      run:
+        shell: bash
 
-  integration-tests:
-    name: Integration tests
-    if: >-
-      always() &&
-      inputs.run_integration_tests &&
-      needs.configuration.result == 'success' &&
-      (inputs.run_build == false || needs.build.result == 'success')
-    needs:
-      - configuration
-      - build
-    uses: ./.github/workflows/integration-tests-common.yml
-    with:
-      display_name: ${{ needs.configuration.outputs.display_name }}
-      setup_script: ${{ needs.configuration.outputs.setup_script }}
-      image: ${{ needs.configuration.outputs.ci_image }}
-      runs_on: ${{ needs.configuration.outputs.runs_on }}
-      container_volumes: ${{ needs.configuration.outputs.container_volumes }}
-      container_options: ${{ needs.configuration.outputs.container_options }}
-      timeout_minutes: ${{ fromJson(needs.configuration.outputs.timeout_minutes) }}
-      artifact_name: ${{ needs.configuration.outputs.wheel_artifact_name }}
-      wheel_source: ${{ needs.configuration.outputs.integration_wheel_source }}
-      integration_tests: ${{ needs.configuration.outputs.integration_tests }}
-      integration_environment: ${{ needs.configuration.outputs.integration_environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare platform environment
+        env:
+          CI_STAGE: ${{ inputs.run_integration_tests && 'integration' || 'build' }}
+        run: bash "${{ needs.configuration.outputs.setup_script }}"
+
+      # Recorded before the wheel is installed so the post-install check can
+      # prove the wheel did not replace the interpreter's Torch.
+      - name: Record pre-install Torch identity
+        env:
+          TORCH_CONTRACT: ${{ needs.configuration.outputs.torch_contract }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/check_torch_contract.py --stage pre-install \
+            --state-file "$RUNNER_TEMP/torch-identity.json"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          python -m build --wheel --no-isolation
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}"
+            printf '::error::  %s\n' "${wheels[@]}"
+            exit 1
+          fi
+          WHEEL_PATH="${wheels[0]}"
+          echo "WHEEL_PATH=$WHEEL_PATH"
+          echo "WHEEL_SHA256=$(sha256sum "$WHEEL_PATH" | awk '{print $1}')"
+          echo "WHEEL_PATH=$WHEEL_PATH" >> "$GITHUB_ENV"
+
+      # --no-deps is mandatory. The wheel metadata carries torch>=2.10,<2.11
+      # (setup.py TORCH_PIN), and a dependency-resolving install re-resolves that
+      # pin against the default index, replacing the platform Torch the setup
+      # script installed with a generic PyPI build. The platform environment owns
+      # Torch; the wheel contributes only its own files.
+      - name: Install wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --force-reinstall --no-deps "$WHEEL_PATH"
+
+      # Fails the job when the install moved the interpreter, changed the Torch
+      # path/version, or altered the CUDA variant, and enforces the platform's
+      # declared torch_contract.
+      - name: Verify Torch contract after install
+        env:
+          TORCH_CONTRACT: ${{ needs.configuration.outputs.torch_contract }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/check_torch_contract.py --stage post-install \
+            --state-file "$RUNNER_TEMP/torch-identity.json"
+
+      - name: Verify installed package payload
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from importlib import metadata
+
+          files = metadata.files("torch_fl")
+          assert files is not None, "torch_fl has no RECORD in installed metadata"
+          names = {str(f) for f in files}
+          assert any(n.endswith("lib/libtorch_fl.so") for n in names), (
+              "installed torch_fl has no lib/libtorch_fl.so in RECORD"
+          )
+          print(f"wheel metadata RECORD OK: {len(names)} files")
+          PY
+
+      # Tests run against the installed wheel, not the source tree: only tests/
+      # and pyproject.toml (for pytest configuration) are copied out of the repo.
+      - name: Prepare wheel-only test workspace
+        if: inputs.run_integration_tests
+        run: |
+          set -euo pipefail
+          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-${{ inputs.platform }}.XXXXXX")
+          cp -a tests pyproject.toml "$TEST_ROOT/"
+          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
+
+      - name: Run integration tests
+        if: inputs.run_integration_tests
+        env:
+          INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
+          INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/run_integration_tests.py
+
+      - name: Upload wheel
+        if: always() && inputs.upload_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.configuration.outputs.wheel_artifact_name }}
+          path: ${{ env.WHEEL_PATH }}
+          if-no-files-found: warn
+
+      # if-no-files-found: warn, not error. The reports directory is missing only
+      # when the run failed before producing any, and a second failure here would
+      # replace the real test failure in the job log.
+      - name: Upload integration reports
+        if: always() && inputs.run_integration_tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-reports-${{ inputs.platform }}
+          path: ${{ env.INTEGRATION_WORKDIR }}/integration-reports/
+          if-no-files-found: warn

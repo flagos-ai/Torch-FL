@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Compatibility entry point. The pipeline now lives in all-tests-common.yml and
+# is driven entirely by .github/configs/cuda.yml, which used to be duplicated
+# inline here (image, volumes, container options). This file keeps the
+# "Integration Tests (CUDA)" workflow name and its manual dispatch working; see
+# .github/workflows/MIGRATION_NOTES.md for the required-check rename.
+
 name: Integration Tests (CUDA)
 
 on:
@@ -31,55 +37,8 @@ on:
         default: 60
 
 jobs:
-  # The test list lives in .github/configs/cuda.yml, not inline here. See
-  # load-platform-tests.yml for why.
-  load-tests:
-    uses: ./.github/workflows/load-platform-tests.yml
+  pipeline:
+    uses: ./.github/workflows/all-tests-common.yml
     with:
       platform: cuda
-
-  integration-tests:
-    name: Build and test (CUDA)
-    needs: load-tests
-    runs-on:
-      - torch-fl-nv
-    timeout-minutes: ${{ inputs['timeout-minutes'] }}
-    container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:8f6aec7fbd4b56c8d925169029462a09a0a58758fde0576b1509b2eed7627e25
-      volumes:
-        - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
-      options: >-
-        --gpus all
-        --ipc=host
-        --shm-size=512g
-        --ulimit memlock=-1
-        --cap-add=SYS_PTRACE
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare CUDA build environment
-        env:
-          CI_STAGE: integration
-        run: bash .github/scripts/set_env_cuda.sh
-
-      - name: Build wheel
-        run: python -m build --wheel --no-isolation
-
-      - name: Install wheel
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
-
-      - name: Prepare wheel-only test workspace
-        run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-cuda.XXXXXX")
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
-
-      - name: Run CUDA integration tests
-        env:
-          INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
-          INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
-        run: python .github/scripts/run_integration_tests.py
+      timeout_minutes: ${{ inputs['timeout-minutes'] }}

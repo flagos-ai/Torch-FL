@@ -37,15 +37,36 @@ container_options: >-
 
 timeout_minutes: 60
 wheel_artifact_name: wheel-cuda
-# Keep CUDA integration self-contained; transferring the ~475MB wheel through
-# the Actions artifact service can exceed the self-hosted runner job timeout.
-integration_wheel_source: local-build
 
-# The common workflow only executes this platform-provided test manifest.
+# The wheel is built against a stock CPU PyTorch and carries the CUDA kernels in
+# its own libtorch_cuda.so, so torch.version.cuda stays None: the CUDA runtime
+# reaches the process through the bundled assets, not through a CUDA-variant
+# Torch. The install step uses --no-deps, and this contract is what proves the
+# wheel did not pull a +cu build from the default index.
+torch_contract:
+  base_version: "2.10.0"
+  local_version: cpu
+  cuda: none
+  forbidden_torch_paths:
+    - /opt/conda/
+
+# The common workflow only executes this platform-provided test manifest. Every
+# entry declares id, phase and failure_policy; the ten baseline ids are the
+# cross-platform contract enforced by validate_integration_manifests.py.
 integration_tests:
-  - name: Check model availability
-    command: test -d "$MODEL_PATH"
-  - name: Check device availability
+  - id: model-availability
+    name: Check model availability
+    phase: preflight
+    failure_policy: fail-fast
+    command: |
+      test -f "$MODEL_PATH/config.json" || { echo "::error::Missing config.json"; exit 1; }
+      test -f "$MODEL_PATH/tokenizer_config.json" || { echo "::error::Missing tokenizer_config.json"; exit 1; }
+      ls "$MODEL_PATH"/*.safetensors >/dev/null 2>&1 || ls "$MODEL_PATH"/*.bin >/dev/null 2>&1 || { echo "::error::Missing weight files"; exit 1; }
+
+  - id: device-availability
+    name: Check device availability
+    phase: preflight
+    failure_policy: fail-fast
     command: |
       python - <<'PY'
       from pathlib import Path
@@ -56,59 +77,96 @@ integration_tests:
       torch_path = Path(torch.__file__).resolve()
       package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
 
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
       assert torch.version.cuda is None, torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert (package_lib / "libtorch_cuda.so").is_file(), package_lib
       assert torch_fl.flagos.is_available(), "flagos device is unavailable"
+      assert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()
       print(f"CPU PyTorch: {torch.__version__}")
       print(f"torch path: {torch_path}")
       print(f"CUDA assets: {package_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
-  - name: Run operator tests (vendor backend, main ops)
+
+  - id: operator-tests
+    name: Run operator tests (vendor backend, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
-  - name: Run operator tests (FlagGems runtime path, main ops)
+      -m "main_ops and not flaggems_python and not flaggems_cpp and not ascend and not musa and not metax and not gcu and not dcu and not ppu"
+      --tb=short
+
+  - id: rng-tests
+    name: Run unified RNG tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/ops/test_rng_dispatch.py
+      -m "main_ops" --tb=short
+
+  - id: general-tests
+    name: Run general tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_factory_ops.py --tb=short
+
+  - id: amp-contract
+    name: Unified AMP contract
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_amp_contract.py
+      -m amp --tb=short
+
+  - id: profiler-contract
+    name: Unified profiler contract
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -m profiler --tb=short
+
+  - id: compile-tests
+    name: Run torch.compile tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_compile.py --tb=short
+
+  - id: inference-tests
+    name: Run inference tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_infer.py
+      --model "$MODEL_PATH" --tb=short
+
+  - id: training-tests
+    name: Run training tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_train.py
+      --model "$MODEL_PATH" --tb=short
+
+  # Platform-specific groups, additive to the baseline above. They do not stand
+  # in for any baseline id.
+  - id: operator-tests-flaggems
+    name: Run operator tests (FlagGems runtime path, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-  - name: Run unified RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-  - name: Unified AMP contract
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
-  - name: Unified profiler contract
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
+      -m "flaggems and main_ops" --tb=short
 
   # Structural comparison against tests/data/profiler_cuda_baseline.json, which
   # the shared contract does not cover: it asserts the public API surface, while
-  # this checks tracer output against stock torch+cuda. Carried over from the
-  # inline step this manifest replaces.
-  - name: Profiler parity test
+  # this checks tracer output against stock torch+cuda.
+  - id: profiler-parity
+    name: Profiler parity test
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/test_profiler_parity.py
-      -v -m main_ops --tb=short
-
-  - name: Run inference tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_infer.py
-      --model "$MODEL_PATH" -v -s --tb=short
-  - name: Run torch.compile tests
-    command: >-
-      python -m pytest tests/integration/test_compile.py
-      -v -s --tb=short
-  - name: Run training tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_train.py
-      --model "$MODEL_PATH" -v -s --tb=short
+      -m main_ops --tb=short

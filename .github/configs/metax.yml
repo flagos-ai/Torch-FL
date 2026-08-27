@@ -21,9 +21,11 @@ ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-d
 runner_labels:
   - mx-8g-cicd-pytorch
 
-container_volumes: []
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 container_options: >-
   --privileged
@@ -34,43 +36,30 @@ container_options: >-
 
 timeout_minutes: 60
 wheel_artifact_name: wheel-metax
-# Keep MetaX integration self-contained; transferring the ~670MB wheel through
-# the Actions artifact service can exceed the self-hosted runner job timeout.
-integration_wheel_source: local-build
+
+# MetaX shims the CUDA runtime (cu-bridge) under a stock CPU Torch, so
+# torch.cuda.is_available() is true while torch.version.cuda stays None.
+torch_contract:
+  base_version: "2.10.0"
+  local_version: cpu
+  cuda: none
+  forbidden_torch_paths:
+    - /opt/conda/
 
 integration_tests:
-  - name: Diagnose bundled MetaX ELF symbols (temporary)
+  - id: model-availability
+    name: Check model availability
+    phase: preflight
+    failure_policy: fail-fast
     command: |
-      python - <<'PY'
-      from pathlib import Path
-      import sysconfig
+      test -f "$MODEL_PATH/config.json" || { echo "::error::Missing config.json"; exit 1; }
+      test -f "$MODEL_PATH/tokenizer_config.json" || { echo "::error::Missing tokenizer_config.json"; exit 1; }
+      ls "$MODEL_PATH"/*.safetensors >/dev/null 2>&1 || ls "$MODEL_PATH"/*.bin >/dev/null 2>&1 || { echo "::error::Missing weight files"; exit 1; }
 
-      package_root = Path(sysconfig.get_paths()["purelib"]) / "torch_fl"
-      symbol = "_ZN2at6native6flagos29GetFlagosDefaultCudaGeneratorEl"
-      libraries = [package_root / "lib" / "libtorch_fl.so"]
-      libraries.extend(sorted((package_root / "lib_maca").glob("*.so*")))
-
-      print(f"package_root={package_root}")
-      print(f"symbol={symbol}")
-      for library in libraries:
-          print(f"--- {library}")
-          print(f"exists={library.is_file()}")
-      PY
-      SYM='_ZN2at6native6flagos29GetFlagosDefaultCudaGeneratorEl'
-      ROOT="$(python -c 'import sysconfig; from pathlib import Path; print(Path(sysconfig.get_paths()["purelib"]) / "torch_fl")')"
-      for lib in "$ROOT/lib/libtorch_fl.so" "$ROOT"/lib_maca/*.so*; do
-        [[ -f "$lib" ]] || continue
-        echo "--- $lib"
-        nm -D --defined-only "$lib" 2>/dev/null | grep "$SYM" || true
-      done
-      for lib in "$ROOT/lib"/libflagos.so* "$ROOT/lib"/libtorch_bindings.so* \
-                 /opt/maca/lib/*.so* /opt/maca/tools/cu-bridge/lib/*.so*; do
-        [[ -f "$lib" ]] || continue
-        nm -D --defined-only "$lib" 2>/dev/null | grep "$SYM" && echo "provider=$lib" || true
-      done
-      readelf -d "$ROOT/lib/libtorch_fl.so" | grep 'NEEDED\|RPATH\|RUNPATH' || true
-
-  - name: Check isolated MetaX environment
+  - id: device-availability
+    name: Check device availability
+    phase: preflight
+    failure_policy: fail-fast
     command: |
       python - <<'PY'
       from pathlib import Path
@@ -81,7 +70,10 @@ integration_tests:
       torch_fl_path = Path(torch_fl.__file__).resolve()
       torch_path = Path(torch.__file__).resolve()
 
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
+      # MetaX shims the CUDA runtime through cu-bridge, so the CUDA dispatch key
+      # carries vendor kernels and torch.cuda reflects the real MetaX devices
+      # while the Torch build itself stays CPU (version.cuda is None).
+      assert torch.version.cuda is None, torch.version.cuda
       assert str(torch_path).startswith("/opt/venv/"), torch_path
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert torch.cuda.is_available(), "MetaX devices are unavailable"
@@ -96,48 +88,71 @@ integration_tests:
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
-  - name: Run representative MetaX operator tests
+  # Marker selection over the whole ops directory. The earlier sixteen-file
+  # allowlist was a bring-up scaffold: it hid every operator added after it was
+  # written, and --maxfail=1 stopped the run at the first failure so the rest of
+  # the operator surface went unmeasured. FlagGems markers stay excluded because
+  # this image does not install the vendor Triton stack.
+  - id: operator-tests
+    name: Run operator tests (vendor backend, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
-      python -m pytest
-      tests/integration/ops/test_abs_dispatch.py
-      tests/integration/ops/test_add_dispatch.py
-      tests/integration/ops/test_bmm_dispatch.py
-      tests/integration/ops/test_cat_dispatch.py
-      tests/integration/ops/test_div_scalar_dispatch.py
-      tests/integration/ops/test_embedding_dispatch.py
-      tests/integration/ops/test_mean_dispatch.py
-      tests/integration/ops/test_mm_dispatch.py
-      tests/integration/ops/test_mul_dispatch.py
-      tests/integration/ops/test_mul_scalar_dispatch.py
-      tests/integration/ops/test_neg_dispatch.py
-      tests/integration/ops/test_nll_loss_dispatch.py
-      tests/integration/ops/test_silu_dispatch.py
-      tests/integration/ops/test_softmax_dispatch.py
-      tests/integration/ops/test_sum_dispatch.py
-      tests/integration/ops/test_where_dispatch.py
-      -m "not flaggems and not flaggems_python and not flaggems_cpp"
-      --maxfail=1 -v -s --tb=long
+      python -m pytest tests/integration/ops/
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not musa and not dcu and not gcu and not ppu"
+      --tb=short
 
-  - name: Run unified RNG tests
+  - id: rng-tests
+    name: Run unified RNG tests
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops" --tb=short
 
-  - name: Run general factory and autograd tests
+  - id: general-tests
+    name: Run general tests
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest
       tests/integration/test_factory_ops.py
-      -v -s --tb=short
+      --tb=short
 
-  - name: Unified AMP contract
+  - id: amp-contract
+    name: Unified AMP contract
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
+      -m amp --tb=short
 
-  - name: Unified profiler contract
+  - id: profiler-contract
+    name: Unified profiler contract
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
+      -m profiler --tb=short
 
-  - name: Run torch.compile tests
-    command: python -m pytest tests/integration/test_compile.py -v --tb=short
+  - id: compile-tests
+    name: Run torch.compile tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_compile.py --tb=short
+
+  - id: inference-tests
+    name: Run inference tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_infer.py
+      --model "$MODEL_PATH" --tb=short
+
+  - id: training-tests
+    name: Run training tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_train.py
+      --model "$MODEL_PATH" --tb=short

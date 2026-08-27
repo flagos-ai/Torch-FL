@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Compatibility entry point. The pipeline now lives in all-tests-common.yml and
+# is driven entirely by .github/configs/dcu.yml, which used to be duplicated
+# inline here (image, volumes, container options). This file keeps the
+# "Integration Tests (DCU)" workflow name and its manual dispatch working; see
+# .github/workflows/MIGRATION_NOTES.md for the required-check rename.
+
 name: Integration Tests (DCU)
 
 on:
@@ -31,55 +37,8 @@ on:
         default: 60
 
 jobs:
-  # The test list lives in .github/configs/dcu.yml, not inline here. See
-  # load-platform-tests.yml for why.
-  load-tests:
-    uses: ./.github/workflows/load-platform-tests.yml
+  pipeline:
+    uses: ./.github/workflows/all-tests-common.yml
     with:
       platform: dcu
-
-  integration-tests:
-    name: Build and test (DCU)
-    needs: load-tests
-    runs-on:
-      - hg-8g-cicd-pytorch
-    timeout-minutes: ${{ inputs['timeout-minutes'] }}
-    container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
-      volumes:
-        - /usr/local/hyhal:/usr/local/hyhal:ro
-      options: >-
-        --privileged
-        --ipc=host
-        --shm-size=512g
-        --ulimit memlock=-1
-        --cap-add=SYS_PTRACE
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare DCU build environment
-        env:
-          CI_STAGE: integration
-        run: bash .github/scripts/set_env_dcu.sh
-
-      - name: Build wheel
-        run: python -m build --wheel --no-isolation
-
-      - name: Install wheel
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
-
-      - name: Prepare wheel-only test workspace
-        run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-dcu.XXXXXX")
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
-
-      - name: Run DCU integration tests
-        env:
-          INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
-          INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
-        run: python .github/scripts/run_integration_tests.py
+      timeout_minutes: ${{ inputs['timeout-minutes'] }}

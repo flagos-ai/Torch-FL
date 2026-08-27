@@ -66,21 +66,35 @@ container_options: >-
 
 timeout_minutes: 60
 wheel_artifact_name: wheel-ppu
-# Keep PPU integration self-contained; the bundled lib_ppu wheel is large and
-# transferring it through the Actions artifact service can exceed the
-# self-hosted runner job timeout.
-integration_wheel_source: local-build
+
+# PPU replaces libtorch_cuda.so inside an isolated venv holding a stock +cpu
+# Torch. Core replacement swaps the .so only, not torch/version.py, so the
+# version string stays +cpu and version.cuda stays None; the PPU takeover shows
+# up as torch.cuda.is_available() plus the bundled lib_ppu/libtorch_cuda.so.
+torch_contract:
+  base_version: "2.10.0"
+  local_version: cpu
+  cuda: none
+  forbidden_torch_paths:
+    - /opt/conda/
 
 # The common workflow only executes this platform-provided test manifest.
 integration_tests:
-  - name: Check model availability
-    command: test -d "$MODEL_PATH"
+  - id: model-availability
+    name: Check model availability
+    phase: preflight
+    failure_policy: fail-fast
+    command: |
+      test -f "$MODEL_PATH/config.json" || { echo "::error::Missing config.json"; exit 1; }
+      test -f "$MODEL_PATH/tokenizer_config.json" || { echo "::error::Missing tokenizer_config.json"; exit 1; }
+      ls "$MODEL_PATH"/*.safetensors >/dev/null 2>&1 || ls "$MODEL_PATH"/*.bin >/dev/null 2>&1 || { echo "::error::Missing weight files"; exit 1; }
 
   # PPU is a CUDA-ABI boxing backend, so the CUDA dispatch key carries vendor
   # kernels and torch.cuda.is_available() reflects the real PPU devices.
-  # Pod probe found 16 /dev/alixcu_ppu nodes; CI runner device count may
-  # differ. Adjust the literal after the first green run.
-  - name: Check device availability
+  - id: device-availability
+    name: Check device availability
+    phase: preflight
+    failure_policy: fail-fast
     command: |
       python - <<'PY'
       from pathlib import Path
@@ -99,7 +113,6 @@ integration_tests:
       # device_count(): the PPU libtorch_cuda.so is bundled in lib_ppu/ (not
       # torch_fl/lib/ like the cuda line's external asset) and loaded at import
       # via ensure_ppu_libtorch_links + _preload_global.
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
       assert torch.version.cuda is None, torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert (ppu_bundle / "libtorch_cuda.so").is_file(), ppu_bundle
@@ -116,47 +129,87 @@ integration_tests:
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
-  - name: Run operator tests (vendor backend, main ops)
+  - id: operator-tests
+    name: Run operator tests (vendor backend, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
+      -m "main_ops and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not musa and not metax and not dcu and not gcu"
+      --tb=short
 
-  # PPU triton (vendor build copied into the venv) does not recognise the
-  # `num_ldmatrixes` keyword that FlagGems' _hygon mm/bmm kernel passes to
-  # triton's mm_kernel -- KeyError at triton/runtime/jit.py:_pack_args (mm),
-  # and bmm hits the same kernel and times out at 60s inside triton
-  # compilation. The remaining 13 flaggems main_ops pass. Follow-up: track PPU
-  # triton alignment with upstream FlagGems _hygon mm op. No CPU fallback.
-  - name: Run operator tests (FlagGems runtime path, main ops)
+  - id: rng-tests
+    name: Run unified RNG tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/ops/test_rng_dispatch.py
+      -m "main_ops" --tb=short
+
+  - id: general-tests
+    name: Run general tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_factory_ops.py --tb=short
+
+  - id: amp-contract
+    name: Unified AMP contract
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_amp_contract.py
+      -m amp --tb=short
+
+  # The profiler contract is a Required Contract (see profiler_support.py): the
+  # step is not withheld, it runs and fails on an environment that cannot emit
+  # device events. PPU CUPTI Activity API is defective
+  # (CuptiActivityApi.cpp:298 logs "bufferCompleted called with unknown
+  # buffer"), so torch.profiler collects no device-side events; the failure and
+  # the observed report (profiler-observations.json) are the evidence for the
+  # functional team. This step must not be skipped or xfailed.
+  - id: profiler-contract
+    name: Unified profiler contract
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -m profiler --tb=short
+
+  - id: compile-tests
+    name: Run torch.compile tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: python -m pytest tests/integration/test_compile.py --tb=short
+
+  - id: inference-tests
+    name: Run inference tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_infer.py
+      --model "$MODEL_PATH" --tb=short
+
+  - id: training-tests
+    name: Run training tests
+    phase: functional
+    failure_policy: continue-after-failure
+    command: >-
+      python -m pytest tests/integration/test_qwen3_train.py
+      --model "$MODEL_PATH" --tb=short
+
+  # Platform-specific group, additive to the baseline above. PPU triton (the
+  # vendor build copied into the venv) does not recognise the `num_ldmatrixes`
+  # keyword that FlagGems' _hygon mm/bmm kernel passes to triton's mm_kernel --
+  # KeyError at triton/runtime/jit.py:_pack_args (mm), and bmm hits the same
+  # kernel and times out inside triton compilation. Those two cases used to be
+  # removed from the selection, which reported a pass for a path that never ran;
+  # they now fail visibly and the failures belong to the PPU triton owners.
+  - id: operator-tests-flaggems
+    name: Run operator tests (FlagGems runtime path, main ops)
+    phase: functional
+    failure_policy: continue-after-failure
     command: >-
       FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops"
-      --deselect tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_runtime
-      --deselect tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_runtime
-      -v -s --tb=short
-
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-
-  # ---------------------------------------------------------------------------
-  # Follow-up (not part of first-version acceptance). PPU CUPTI Activity API is
-  # defective: CuptiActivityApi.cpp:298 logs "bufferCompleted called with
-  # unknown buffer", so torch.profiler collects no device-side events. The
-  # flagos trace has only ['Trace','cpu_op'] vs the torch-cuda baseline
-  # ['Trace','cpu_op','cuda_runtime','gpu_memcpy','gpu_memset','kernel'].
-  # test_profiler_parity.py (7 tests) all fail on the missing categories, so
-  # the step is excluded from first-version CI. Re-add once the PPU CUPTI
-  # Activity path emits the expected device/runtime categories.
-  # This may not be unblocked by a CPU fallback or faking a pass.
-  # ---------------------------------------------------------------------------
-  - name: Run inference tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_infer.py
-      --model "$MODEL_PATH" -v -s --tb=short
-
-  - name: Run training tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_train.py
-      --model "$MODEL_PATH" -v -s --tb=short
+      --tb=short
