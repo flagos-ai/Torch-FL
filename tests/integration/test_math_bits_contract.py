@@ -41,18 +41,27 @@ _REAL_INPUT = [-0.4, 0.25]
 _REAL_NEG = [0.4, -0.25]
 
 
-def _complex_supported() -> bool:
-    """Report whether the active backend can hold a complex tensor at all."""
+def _conjugate_materialization_supported() -> bool:
+    """Report whether the backend can resolve a Conjugate bit on the device.
+
+    Allocating a complex tensor is not the capability under test: Ascend/CANN
+    accepts complex storage (a copy is dtype-agnostic bytes) while providing no
+    complex *compute*, so `_conj_physical` -- the operator that materializes the
+    bit -- has no kernel there. Probe the materialization itself, otherwise a
+    backend that can only hold complex tensors reports support it lacks.
+    """
     try:
-        torch.tensor([1 + 1j], dtype=torch.complex128, device="flagos:0")
+        torch.flagos.set_device(0)
+        probe = torch.tensor([1 + 1j], dtype=torch.complex128, device="flagos:0")
+        torch.resolve_conj(torch.conj(probe)).cpu()
     except Exception:
         return False
     return True
 
 
 requires_complex = pytest.mark.skipif(
-    not _complex_supported(),
-    reason="backend does not support complex dtypes on the flagos device",
+    not _conjugate_materialization_supported(),
+    reason="backend cannot materialize Conjugate bits on the flagos device",
 )
 
 

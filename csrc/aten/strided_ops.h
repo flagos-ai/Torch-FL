@@ -56,4 +56,8 @@ at::Tensor t(const at::Tensor& self);
 
 at::Tensor unfold(const at::Tensor& self, int64_t dimension, int64_t size, int64_t step);
 
+at::Tensor _conj(const at::Tensor& self);
+
+at::Tensor _neg_view(const at::Tensor& self);
+
 } // namespace at::native::flagos

@@ -282,6 +282,39 @@ active route cohort is unchanged. The evidence gap is that there is no
 per-overload synthesized survey for vendor-native Ascend routes; the available
 evidence is the targeted FSDP2/DDP/collective workload described above.
 
+### Ascend lazy math-bit view routes (2026-08-27)
+
+The Ascend backend adds the two lazy math-bit view operators:
+
+- `_conj`
+- `_neg_view`
+
+Both are metadata-only aliases that set PyTorch's Conjugate / Negative
+dispatcher bit and leave storage untouched, so they route to the same
+`at::native::` stride implementations as `alias` and `detach` rather than to an
+ACLNN kernel. They need an explicit route because a view operator cannot reach
+`cpu_fallback` -- storage is not shareable across devices -- so leaving them
+unregistered made the dispatcher raise `_conj: backend not registered` for every
+operation that resolves a math bit, including `copy_`, `clone`, `contiguous`,
+`resolve_conj`, and `resolve_neg`.
+
+Measured on Ascend 910 (CANN 9.0.0, torch 2.10.0+cpu) with
+`ASCEND_RT_VISIBLE_DEVICES=1`:
+
+- `tests/integration/test_math_bits_contract.py`: **5 passed, 7 skipped**. The
+  five Negative-bit cases (clone, device-to-host copy, device-to-device copy,
+  `resolve_neg`, and the plain-tensor fast-path regression) pass with bit-exact
+  values.
+
+The seven Conjugate cases skip: CANN 9.0.0 accepts complex *storage* but
+provides no complex *compute*, so `_conj_physical` -- the operator that
+materializes the bit -- has no ACLNN kernel, and `aclnnAdd`/`aclnnMul` reject
+`ComplexFloat` and `ComplexDouble` outright. Complex dtypes remain outside the
+Ascend cohort, unchanged from the 2026-08-18 dtype work below. The generic
+FlagGems rows are **not revalidated** by this change because no FlagGems route
+is affected; the evidence gap is that vendor-native Ascend view routes have no
+per-overload synthesized survey, so the shared contract above is the evidence.
+
 ### Ascend AMP and dtype routes (2026-08-18)
 
 The Ascend dtype work adds generated support for the PrivateUse1 AMP workflow
@@ -396,6 +429,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-08-27 | Ascend 910 (CANN 9.0.0) | Native Ascend view routes | Added `_conj` and `_neg_view` as metadata-only view routes; without them every math-bit resolution raised `backend not registered`. Generic FlagGems cohort **not revalidated** because no FlagGems route changed. | `tests/integration/test_math_bits_contract.py`: 5 passed, 7 skipped. Negative-bit clone/copy/resolve are bit-exact; the Conjugate cases skip because CANN 9.0.0 has no complex compute (`_conj_physical` absent, `aclnnAdd`/`aclnnMul` reject Complex{Float,Double}). |
 | 2026-08-21 | MetaX C550 (MACA 3.8.0) | CUDA-boxing AMP routes | Enabled the shared AMP integration contract for MetaX and added it to the MetaX CI manifest; no operator route changed. Generic FlagGems routes were **not revalidated**. | `tests/integration/test_amp.py`: 25 passed, covering FP16/BF16 autocast policies and GradScaler finite/overflow training paths. |
 | 2026-08-19 | Hygon DCU bw1000 | Generic FlagGems routes | Rerouted `index_select` from `flagos_python` to `cuda` in all FlagGems configs (cross-stream launch race drops output stores under load); generic cohort 546 -> 545 active routes, 26 -> 27 forced CUDA fallbacks. Four-platform rows **not revalidated** (A100/mc550/810e unavailable). | Targeted survey `--ops index_select` on the flagos_python route: STRICT (standalone math correct); three failing HF v5.5.0 UT nodes (T5/Qwen3/Gemma3 beam search) pass after the reroute; tiny-T5 NaN reproducer clean 3/3. |
 | 2026-08-18 | MTT S5000 (8 devices) | Native MUSA RNG, MThreads FlagGems hybrid, and MUPTI profiler | Added optional MUPTI activity tracing; the operator route cohort is unchanged. | `tests/integration/test_profiler_musa.py`: 1 passed with real positive-duration MUPTI kernel/runtime/memcpy activities and valid Chrome JSON. CPU-only Kineto resolver behavior remains environment-dependent; generic FlagGems operator coverage was not revalidated by this profiler change. |

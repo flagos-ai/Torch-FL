@@ -20,6 +20,8 @@
 #include <ATen/ops/t_native.h>
 #include <ATen/ops/unbind_native.h>
 #include <ATen/ops/unfold_native.h>
+#include <ATen/ops/_conj_native.h>
+#include <ATen/ops/_neg_view_native.h>
 
 namespace at::native::flagos {
 
@@ -137,6 +139,21 @@ at::Tensor t(const at::Tensor& self) {
   return at::native::unbind(self, dim);
 }
 
+// _conj / _neg_view are the lazy math-bit views: an alias of self carrying the
+// Conjugate / Negative bit, with storage untouched. Like alias() they are pure
+// metadata and need no vendor kernel, but a view op cannot reach cpu_fallback --
+// storage is not shareable across devices -- so without a backend registration
+// the dispatcher raises "_conj: backend not registered", and every path that
+// resolves a math bit (copy_, clone, contiguous, resolve_conj / resolve_neg)
+// fails with it. at::native:: avoids re-dispatching back through PrivateUse1.
+at::Tensor _conj(const at::Tensor& self) {
+  return at::native::_conj(self);
+}
+
+at::Tensor _neg_view(const at::Tensor& self) {
+  return at::native::_neg_view(self);
+}
+
 // View ops are pure metadata (stride) operations; they route through the
 // generated dispatchers but need a backend kernel registered. Register them
 // for the Ascend backend so the generated wrappers in register.inc resolve.
@@ -211,5 +228,17 @@ REGISTER_IMPL_TO_DISPATCHER(
     alias_dispatcher,
     Backend::kAscend,
     alias)
+
+REGISTER_IMPL_TO_DISPATCHER(
+    PrivConjFn,
+    priv_conj_dispatcher,
+    Backend::kAscend,
+    _conj)
+
+REGISTER_IMPL_TO_DISPATCHER(
+    PrivNegViewFn,
+    priv_neg_view_dispatcher,
+    Backend::kAscend,
+    _neg_view)
 
 } // namespace at::native::flagos
