@@ -80,7 +80,7 @@ Capability availability and validation status vary by platform. A feature existi
 | Ascend | Native ACLNN backend, optional FlagGems via triton-ascend | Eager, autograd, RNG suite | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
 | PPU | CUDA boxing against PPU's CUDA-13-compatible SDK | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
 | Hygon DCU | CUDA boxing over hipified DTK torch | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
-| Kunlun P800 | CUDA boxing over the XPU CUDA-compatibility runtime | Runtime, allocation, copies, streams/events, `mm` smoke test | **Experimental** | [Kunlun](docs/vendors/kunlun/installation.md) |
+| Kunlun P800 | CUDA boxing over the XPU CUDA-compatibility runtime | Runtime, allocation, copies, streams/events, `mm` smoke test, FP16/BF16 AMP | **Experimental** | [Kunlun](docs/vendors/kunlun/installation.md) |
 | Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | Native mudnn backend, CPU fallback for unrouted ops | Eager | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |
 | D-Robotics BPU | No eager kernels; `torch.compile` graph path via hbdk4 | Graph compilation only | **Runtime only** | [BPU](docs/vendors/bpu/installation.md) |

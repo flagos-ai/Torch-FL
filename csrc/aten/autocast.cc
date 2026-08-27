@@ -15,7 +15,7 @@
 #include <ATen/autocast_mode.h>
 #include <torch/library.h>
 
-#if defined(USE_DCU)
+#if defined(USE_DCU) || defined(USE_FLAGOS_AUTOCAST)
 
 namespace at::flagos {
 namespace {
