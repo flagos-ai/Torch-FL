@@ -161,6 +161,26 @@ def _get_profile(vendor: str) -> "_VendorProfile":
     return prof
 
 
+def is_cuda_alias_vendor(vendor: str) -> bool:
+    """True when this vendor's flagos tensors are a zero-copy CUDA alias.
+
+    The property is already recorded per vendor by ``_VENDOR_PROFILES``: a row
+    whose ``view`` is ``_flagos_to_cuda_view`` shares physical GPU memory with
+    CUDA, which is exactly what lets a flagos tensor be reinterpreted as a cuda
+    one without copying. Exposed here so other compatibility layers that need
+    that same guarantee -- the Apex multi-tensor shim in
+    ``torch_fl.accelerator.apex_compat`` -- gate on this table rather than
+    keeping a second, drift-prone vendor list.
+
+    Unknown vendors are rejected: ``_get_profile`` assumes CUDA-ABI for the comm
+    path because that is the only useful default there, but silently handing a
+    non-alias tensor to a foreign C++ extension would corrupt memory instead of
+    failing, so the conservative answer is the right one here.
+    """
+    prof = _VENDOR_PROFILES.get(vendor)
+    return prof is not None and prof.view == "_flagos_to_cuda_view"
+
+
 def _configure_flagcx_torch_backend(vendor: str) -> None:
     """Select torch-fl's FlagCX integration before importing the plugin."""
     if vendor == "enflame":

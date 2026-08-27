@@ -49,7 +49,10 @@ These variables control which backend implementation (CUDA boxing, vendor C++, F
 | `FLAGOS_LOG_DISPATCH` | Runtime | `0` (off) | Print backend selection to stderr for each operator dispatch |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Disable FlagGems Python-layer registration (C++ stub-only mode) |
 | `FLAGGEMS_SOURCE_DIR` | Runtime | Required when FlagGems is active | Absolute path to FlagGems source directory (Python Triton kernels); must match the version liboperators.so was built against |
+| `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable optional Apex multi-tensor compatibility layer; see Apex compatibility section below |
 | `GEMS_VENDOR` | Runtime | Auto-detected from hardware or build metadata | FlagGems vendor target: `cuda` (default), `metax`, `ascend`, `musa`, `cambricon`; controls distributed backend and device-specific Triton compilation |
+
+**Apex compatibility**: On CUDA-ABI boxing vendors, Torch-FL automatically patches Apex's common `MultiTensorApply` entry point when Apex is imported. The patch converts flagos tensors to zero-copy CUDA views for direct `amp_C` calls and converts CUDA results back to flagos views. It is optional and does not apply to native non-CUDA backends. Set `FLAGOS_DISABLE_APEX_COMPAT=1` to disable it.
 
 **Note on auto-detection**: `FLAGOS_BACKEND_CONFIG` is normally set by `torch_fl.__init__._select_backend_config()`, which detects the hardware platform (via `/dev/davinci*`, `/dev/mxcd`, or build-time `ACCELERATOR`) and applies the `FLAGOS_USE_FLAGGEMS` / `FLAGOS_USE_FLAGGEMS_CPP` / `FLAGOS_METAX_BOXING` switches to pick the correct config. Users should override `FLAGOS_BACKEND_CONFIG` only for testing or debugging.
 

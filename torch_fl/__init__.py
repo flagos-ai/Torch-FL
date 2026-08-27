@@ -561,6 +561,24 @@ _install_musa_flaggems_compat()
 sys.modules.setdefault("torch_flagos", flagos)
 
 
+# Apex's amp_C extension bypasses the ATen dispatcher and therefore cannot use
+# the normal DeviceBoxingGuard. Install an optional, CUDA-alias-only shim at the
+# common MultiTensorApply boundary; it remains lazy when Apex is not installed
+# and supports applications that import Apex either before or after torch_fl.
+try:
+    from torch_fl.compat.apex import install_apex_compat
+
+    install_apex_compat()
+except Exception as exc:  # noqa: BLE001 - Apex compatibility is optional
+    import warnings
+
+    warnings.warn(
+        f"[torch_fl] Apex compatibility setup was skipped: {exc}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 # Global library instance to keep registrations alive
 _flaggems_lib = None
 _autograd_lib = None
