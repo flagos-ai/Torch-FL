@@ -26,16 +26,6 @@
 #include "../../device_boxing.h"
 #include "../../../include/flagos.h"
 
-#if defined(USE_DCU)
-#include <cuda_runtime.h>
-#endif
-
-#if defined(USE_DCU)
-namespace {
-using ::Stream_t;
-}
-#endif
-
 namespace at::native::flagos::soft_lowp {
 namespace {
 
@@ -166,7 +156,11 @@ at::Tensor DecodeIfNeeded(const at::Tensor& input, bool packed_dim0 = false) {
   TORCH_CHECK(input.dim() == 2,
               "soft-lowp matrix decode supports only rank-2 tensors");
   if (input.numel() == 0) {
-    return at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
+    auto shape = input.sizes().vec();
+    if (IsPackedFp4(input.scalar_type())) {
+      (packed_dim0 ? shape[0] : shape.back()) *= 2;
+    }
+    return at::empty(shape, input.options().dtype(c10::kBFloat16));
   }
   return DecodeMatrix(input, packed_dim0);
 }
@@ -178,7 +172,11 @@ at::Tensor DecodeBatchIfNeeded(const at::Tensor& input, bool packed_dim1 = false
   TORCH_CHECK(input.dim() == 3,
               "soft-lowp batch matrix decode supports only rank-3 tensors");
   if (input.numel() == 0) {
-    return at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
+    auto shape = input.sizes().vec();
+    if (IsPackedFp4(input.scalar_type())) {
+      (packed_dim1 ? shape[1] : shape.back()) *= 2;
+    }
+    return at::empty(shape, input.options().dtype(c10::kBFloat16));
   }
   return DecodeBatchMatrix(input, packed_dim1);
 }

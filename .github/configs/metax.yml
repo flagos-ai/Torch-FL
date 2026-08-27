@@ -118,6 +118,11 @@ integration_tests:
       -m "not flaggems and not flaggems_python and not flaggems_cpp"
       --maxfail=1 -v -s --tb=long
 
+  - name: Run MetaX low-precision matrix tests
+    command: >-
+      python -m pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py
+      -m "soft_lowp" -v -s --tb=short
+
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py

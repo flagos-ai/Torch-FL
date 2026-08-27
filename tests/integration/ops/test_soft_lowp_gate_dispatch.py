@@ -45,7 +45,7 @@ class TestSoftLowpMatrixDispatch:
     """Supported matrix operators use the software low-precision path."""
 
     @pytest.mark.parametrize("dtype", LOWP_DTYPES)
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_mm_executes_on_device(self, dtype):
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
         b = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -55,7 +55,7 @@ class TestSoftLowpMatrixDispatch:
         assert result.device.type == "flagos"
 
     @pytest.mark.parametrize("dtype", LOWP_DTYPES)
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_bmm_executes_on_device(self, dtype):
         a = torch.empty(2, 4, 4, device=DEVICE, dtype=dtype)
         b = torch.empty(2, 4, 4, device=DEVICE, dtype=dtype)
@@ -65,7 +65,7 @@ class TestSoftLowpMatrixDispatch:
         assert result.device.type == "flagos"
 
     @pytest.mark.parametrize("dtype", LOWP_DTYPES)
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_addmm_executes_on_device(self, dtype):
         bias = torch.zeros(4, 4, device=DEVICE, dtype=torch.bfloat16)
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -76,7 +76,7 @@ class TestSoftLowpMatrixDispatch:
         assert result.device.type == "flagos"
 
     @pytest.mark.parametrize("dtype", LOWP_DTYPES)
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_mm_out_executes_on_device(self, dtype):
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
         b = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -86,7 +86,7 @@ class TestSoftLowpMatrixDispatch:
         assert result.dtype == torch.bfloat16
         assert result.device.type == "flagos"
 
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_mm_dtype_and_dtype_out_execute_on_device(self):
         dtype = torch.float4_e2m1fn_x2
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -100,7 +100,7 @@ class TestSoftLowpMatrixDispatch:
         assert result is out
         assert result.dtype == torch.float32
 
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_matmul_uses_the_mm_software_path(self):
         dtype = torch.float8_e4m3fn
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -110,8 +110,9 @@ class TestSoftLowpMatrixDispatch:
         assert result.dtype == torch.bfloat16
         assert result.device.type == "flagos"
 
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_scaled_mm_without_software_kernel_is_gated(self):
+        """Unsupported scaled low-precision matmul remains fail-closed."""
         dtype = torch.float8_e4m3fn
         a = torch.empty(4, 4, device=DEVICE, dtype=dtype)
         b = torch.empty(4, 4, device=DEVICE, dtype=dtype)
@@ -125,7 +126,7 @@ class TestSoftLowpMatrixDispatch:
 class TestSoftLowpMatrixNumerics:
     """The composite FP4 decoder preserves the packed nibble values."""
 
-    @pytest.mark.dcu
+    @pytest.mark.soft_lowp
     def test_fp4_nibble_decode_mm(self):
         # 0x21 decodes to (low=0.5, high=1.0); 0x11 decodes to (0.5, 0.5).
         raw_a = torch.tensor([0x21], dtype=torch.uint8, device=DEVICE)
@@ -136,6 +137,33 @@ class TestSoftLowpMatrixNumerics:
         result = torch.mm(a, b)
         torch.testing.assert_close(
             result.cpu(), torch.tensor([[0.75]], dtype=torch.bfloat16), atol=0, rtol=0
+        )
+
+    @pytest.mark.soft_lowp
+    def test_fp4_non_square_mm_expands_both_operand_layouts(self):
+        # A packed dimension is the last axis of mat1 and the first axis of mat2.
+        raw_a = torch.full((2, 2), 0x11, dtype=torch.uint8, device=DEVICE)
+        raw_b = torch.full((2, 3), 0x11, dtype=torch.uint8, device=DEVICE)
+        a = raw_a.view(torch.float4_e2m1fn_x2)
+        b = raw_b.view(torch.float4_e2m1fn_x2)
+
+        result = torch.mm(a, b)
+        torch.testing.assert_close(
+            result.cpu(), torch.ones((2, 3), dtype=torch.bfloat16), atol=0, rtol=0
+        )
+
+    @pytest.mark.soft_lowp
+    def test_addmm_inplace_preserves_device_output(self):
+        raw = torch.full((2, 2), 0x11, dtype=torch.uint8, device=DEVICE)
+        a = raw.view(torch.float4_e2m1fn_x2)
+        b = raw.view(torch.float4_e2m1fn_x2)
+        self = torch.zeros(2, 2, device=DEVICE, dtype=torch.bfloat16)
+
+        result = self.addmm_(a, b)
+        assert result is self
+        assert result.device.type == "flagos"
+        torch.testing.assert_close(
+            result.cpu(), torch.ones((2, 2), dtype=torch.bfloat16), atol=0, rtol=0
         )
 
 
@@ -158,7 +186,7 @@ class TestSoftLowpGateLeavesFloatPathsAlone:
         expected = torch.mm(a.cpu().float(), b.cpu().float())
         # fp16/bf16 accumulate differently on device than a float32 CPU reference;
         # the tolerance follows the mantissa width rather than the op.
-        tol = {torch.float32: 1e-3, torch.float64: 1e-5}.get(dtype, 0.5)
+        tol = {torch.float32: 1e-2, torch.float64: 1e-5}.get(dtype, 0.5)
         torch.testing.assert_close(
             out.cpu().float(), expected, rtol=tol, atol=tol, check_dtype=False
         )

@@ -398,7 +398,10 @@ if(ACCELERATOR STREQUAL "metax")
   # MCPTI callback ids use a different namespace from NVIDIA CUPTI ids.
   target_compile_definitions(${LIBRARY_NAME} PRIVATE
     USE_MACA=1
-    FLAGOS_METAX_MCPTI=1)
+    FLAGOS_METAX_MCPTI=1
+    FLAGOS_SOFT_LOWP=1)
+elseif(ACCELERATOR STREQUAL "dcu")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
