@@ -78,6 +78,17 @@ _CUDA_PROFILE = PlatformProfile(
     is_cuda_like=True,
 )
 
+# Hygon DCU: CUDA-like runtime (DTK wraps HIP with CUDA ABI), but FlagTree HCU
+# compiler requires GPUTarget.backend="hip". PyTorch upstream on DAS already
+# converts DeviceProperties.type from "cuda" to "hip" when torch.version.hip
+# exists, preserving that correct compiler target.
+_DCU_PROFILE = PlatformProfile(
+    triton_device_type="hip",
+    triton_backend_key="hcu",
+    is_cuda_like=True,
+    vendor="dcu",
+)
+
 # MetaX: triton-metax's MACABackend.supports_target checks for "maca", and it is
 # registered under the key "metax". Still CUDA-like underneath (boxing mode).
 _METAX_PROFILE = PlatformProfile(
@@ -116,6 +127,7 @@ _GCU_PROFILE = PlatformProfile(
 )
 
 _PROFILES = {
+    "dcu": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
     "ascend": _ASCEND_PROFILE,
     "musa": _MUSA_PROFILE,
