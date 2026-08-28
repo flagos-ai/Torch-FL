@@ -1395,6 +1395,37 @@ def _register_flaggems_operators():
             _registered_ops = []
             return 0
 
+    # MetaX (boxing + FlagGems): ops are dispatched through the C++ flagos_python
+    # path, which imports flag_gems.ops lazily and calls the generic kernels
+    # directly (no Python-layer registration, no flag_gems.enable()). Those
+    # kernels gate on `_DEVICE_NAME == runtime_device.name`, which the metax
+    # descriptor reports as "cuda" while torch_fl hands them "flagos" tensors --
+    # so the gate fails and every op falls through to the aten reference path,
+    # which lacks a `mul.out` fallback and crashes backward. Import flag_gems
+    # eagerly and retarget the identity name (keeping torch_device_fn=cuda).
+    if _build_accelerator() == "metax":
+        try:
+            import flag_gems  # noqa: F401  -- binds _DEVICE_NAME/device globals
+
+            from torch_fl.accelerator.metax._metax_compat import (
+                patch_flaggems_device_name,
+            )
+
+            patch_flaggems_device_name()
+            _registered_ops = []
+            return 0
+        except Exception as exc:
+            import warnings
+
+            warnings.warn(
+                f"FlagGems runtime preparation for MetaX failed "
+                f"({type(exc).__name__}: {exc}); flagos_python routes may "
+                f"fall back to aten.",
+                stacklevel=2,
+            )
+            _registered_ops = []
+            return 0
+
     _flaggems_lib = torch.library.Library("aten", "IMPL")
     _registered_ops = []
     return 0

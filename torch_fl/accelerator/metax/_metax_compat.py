@@ -505,6 +505,67 @@ def patch_torch_cuda_for_metax():
     return True
 
 
+def patch_flaggems_device_name() -> bool:
+    """Retarget FlagGems' device *identity* to ``flagos``, keep ``torch.cuda``.
+
+    MetaX's FlagGems descriptor declares ``device_name="cuda"`` so its runtime
+    picks ``torch.cuda`` as ``torch_device_fn`` (RNG, streams, and device guard
+    all run against maca's libtorch_cuda via the shims above). But torch_fl's
+    C++ ``flagos_python`` path hands the generic ops ``flagos``-typed
+    (PrivateUse1) tensors, so every op's identity gate
+    ``device.type != _DEVICE_NAME`` sees ``'flagos' != 'cuda'`` and wrongly
+    falls through to the aten reference path. That path is fine for ops that
+    have a CompositeExplicitAutograd fallback, but ``mul.out`` (used by the
+    generic ``mul_``) does not, so ``loss.backward()`` dies with
+    ``NotImplementedError: ... no fallback ... aten::mul.out``.
+
+    Only the *identity* name is retargeted here. ``runtime._state.device_name``
+    -- which ``set_torch_backend_device_fn``/``gen_torch_device_object`` read to
+    build ``torch.cuda``/``torch.backends.cuda`` -- is left at ``cuda``, so the
+    Triton path keeps launching through torch.cuda.
+
+    Must run *after* ``import flag_gems`` (which binds the ``_DEVICE_NAME`` /
+    ``device`` module globals) and before any flagos op runs. Idempotent.
+
+    Returns False if FlagGems is not installed or is not on the metax vendor.
+    """
+    import importlib.util
+    import sys
+
+    if importlib.util.find_spec("flag_gems") is None:
+        return False
+    try:
+        from flag_gems.runtime.backend.device_finder import DeviceDetector
+    except ImportError:
+        return False
+
+    detector = DeviceDetector()
+    if detector.vendor_name != "metax":
+        return False
+
+    stale = detector.name  # "cuda"
+    if stale == "flagos":
+        return True
+    detector.name = "flagos"
+
+    # Rewrite every flag_gems module global that captured the stale name at
+    # import time. Two bindings exist in the generic ops:
+    #   _DEVICE_NAME = runtime_device.name   (mul.py, ...)
+    #   device      = device.name            (minimum/maximum/eq/..., via
+    #                                         from flag_gems.runtime import device)
+    # flag_gems/__init__.py also binds `device = runtime.device.name`.
+    # Restrict to flag_gems namespaces: unlike GCU there are no bare-key vendor
+    # modules here, and "cuda" is far too common a string to match globally.
+    for module in list(sys.modules.values()):
+        name = getattr(module, "__name__", "")
+        if not name.startswith("flag_gems"):
+            continue
+        for attr in ("_DEVICE_NAME", "device"):
+            if getattr(module, attr, None) == stale:
+                setattr(module, attr, "flagos")
+    return True
+
+
 def _patch_triton_do_bench():
     """Replace triton.testing.do_bench to avoid CUDA Event timing (metax).
 
