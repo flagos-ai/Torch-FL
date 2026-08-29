@@ -2047,7 +2047,7 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
             for name in lowp_args
         )
         body = (
-            "#if defined(USE_DCU)\n"
+            "#if defined(FLAGOS_SOFT_LOWP)\n"
             f"  if ({checks}) {{\n"
             f"    return {_SOFT_LOWP_DIRECT_CALLS[op]};\n"
             "  }\n"
@@ -2059,7 +2059,7 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
             for name in lowp_args
         )
         body = (
-            "#if defined(USE_DCU)\n"
+            "#if defined(FLAGOS_SOFT_LOWP)\n"
             f"  if ({checks}) {{\n"
             f'    TORCH_CHECK(false, "soft-lowp {op} requires a device kernel for '
             'the requested dtype; CPU fallback is disabled");\n'
@@ -2070,7 +2070,7 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
         # A covered schema with no plain Tensor input (for example an out-only
         # signature) must not silently fall through to the generic fallback.
         body = (
-            "#if defined(USE_DCU)\n"
+            "#if defined(FLAGOS_SOFT_LOWP)\n"
             f'  TORCH_CHECK(false, "soft-lowp {op} requires Tensor inputs; '
             'CPU fallback is disabled");\n'
             "#endif\n" + body

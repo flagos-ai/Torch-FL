@@ -118,6 +118,13 @@ def pytest_collection_modifyitems(
     flaggems_on = _flaggems_enabled()
     flaggems_cpp_on = _flaggems_cpp_enabled()
     for item in items:
+        if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="software low-precision matrix path requires DCU or MetaX"
+                )
+            )
+            continue
         # The FlagGems C++ path requires a FLAGGEMS_KERNEL=ON wheel and runtime env.
         if item.get_closest_marker("flaggems_cpp") and not flaggems_cpp_on:
             item.add_marker(
@@ -158,6 +165,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")
+    config.addinivalue_line(
+        "markers", "soft_lowp: requires the DCU or MetaX software lowp path"
+    )
     config.addinivalue_line(
         "markers",
         "flaggems: requires the FlagGems runtime path on (FLAGOS_USE_FLAGGEMS=1)",

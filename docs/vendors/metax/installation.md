@@ -187,6 +187,32 @@ unscale; finite scale growth; overflow backoff; and a forward/backward optimizer
 step. This validation applies to the boxing path, not the legacy handwritten
 MetaX kernel mode.
 
+### Low-Precision Matrix Operations
+
+MetaX boxing also provides software emulation for scalar FP8 and packed FP4 matrix
+inputs. The supported dtypes are `float8_e4m3fn`, `float8_e5m2`,
+`float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu`, and
+`float4_e2m1fn_x2`. The shared device-side path decodes inputs to BF16 and uses
+ordinary device GEMM for `mm`, `bmm`, and `addmm`, including `dtype` and `out`
+variants and in-place `addmm_`. Without an explicit output dtype, results are BF16;
+an explicit output dtype is preserved.
+
+This support does not include block-scaled metadata formats such as MXFP4, NVFP4,
+or block FP4, and `_scaled_mm`/`_scaled_grouped_mm` remain fail-closed because no
+software kernel is provided for their scale metadata contract. Validate the path on
+a C550 target with:
+
+```bash
+export FLAGOS_METAX_BOXING=1
+pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py -m soft_lowp -v -s --tb=short
+```
+
+On the C550/MACA 3.8.0 environment used for this checkout, the complete marked suite
+passed (`37 passed`), including all five FP8 formats, packed FP4, `mm`/`bmm`/`addmm`,
+`dtype`/`out` variants, non-square packed layouts, in-place `addmm_`, and the fail-closed
+scaled-mm check. Re-run the command above after changing the build or vendor runtime;
+the result applies to the CUDA-boxing path and not the legacy handwritten MetaX kernel mode.
+
 ### torch.compile and FlagTree
 
 The boxing path supports `torch.compile(backend="flagos")` with either the MetaX

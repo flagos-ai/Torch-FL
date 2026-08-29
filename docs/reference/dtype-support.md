@@ -23,7 +23,7 @@ is not an AMP target and is not accepted by its native matmul API.
 | --- | --- | --- | --- | --- |
 | CUDA | Native PyTorch CUDA dtype support | Native CUDA coverage | Native CUDA coverage | float16, bfloat16 |
 | Ascend | float16, bfloat16, float32, float64, integer, uint8, bool | Vendor coverage; unsupported ACLNN combinations use the CPU fallback | float16, bfloat16, float32 natively; float64 and unsupported types use the CPU fallback | float16, bfloat16 |
-| MetaX boxing | MACA libtorch CUDA-compatible coverage | MACA libtorch CUDA-compatible coverage | MACA libtorch CUDA-compatible coverage | float16, bfloat16 |
+| MetaX boxing | MACA libtorch CUDA-compatible coverage; FP8 and packed FP4 storage | MACA libtorch CUDA-compatible coverage | MACA coverage plus software-emulated FP8/packed FP4 `mm`/`bmm`/`addmm` | float16, bfloat16 |
 | DCU | Vendor library coverage | Vendor library coverage | Vendor library coverage | Backend-specific |
 | MUSA | float16, bfloat16, float32, float64, integer, bool | mudnn coverage; unrouted operations use the CPU fallback | float16, bfloat16, and float32 measured for AMP paths; broader support is vendor-dependent | float16, bfloat16 |
 | Enflame GCU | float16, bfloat16, float32, float64, integer, bool | topsaten coverage; int64, float64, and unrouted operations use the CPU fallback | float16, bfloat16, float32 measured for AMP paths on S60 | float16, bfloat16 |
@@ -34,9 +34,17 @@ finite/overflow paths. topsaten has no float64 kernels, so float64 is stored
 natively but computed through the CPU fallback.
 
 The MetaX AMP entry is measured for the CUDA-boxing path on C550 with MACA
-3.8.0; it does not cover the legacy handwritten MetaX kernel mode. The DCU entry
-remains vendor-dependent. MUSA AMP coverage below is measured for the specific
-S5000 and mudnn release rather than inferred from its route configuration.
+3.8.0; it does not cover the legacy handwritten MetaX kernel mode. In boxing mode,
+FP8 (`float8_e4m3fn`, `float8_e5m2`, `float8_e4m3fnuz`, `float8_e5m2fnuz`, and
+`float8_e8m0fnu`) and packed FP4 (`float4_e2m1fn_x2`) matrix inputs use the shared
+device-side software path for `mm`, `bmm`, and `addmm`, including their `dtype`
+and `out` variants. Values are decoded and accumulated as BF16; an unspecified
+output dtype therefore defaults to BF16, while an explicit output dtype is honored.
+This path is a software emulation of scalar low-precision formats, not support for
+block-scaled metadata formats (`mxfp4`, `nvfp4`, or block FP4), and those formats
+remain unsupported by runtime conversion. The DCU entry remains vendor-dependent.
+MUSA AMP coverage below is measured for the specific S5000 and mudnn release rather
+than inferred from its route configuration.
 
 ## GCU Boundaries
 

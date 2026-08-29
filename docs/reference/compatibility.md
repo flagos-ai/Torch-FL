@@ -61,6 +61,19 @@ MACA 3.8.0, the 25-case AMP suite passed, including nested autocast state, non-f
 finite scale growth, overflow backoff, and a forward/backward optimizer step. This evidence is
 specific to MetaX boxing mode; the legacy handwritten MetaX kernels were not revalidated.
 
+MetaX boxing has a separate software-emulation path for scalar FP8 and packed FP4 matrix
+inputs. `mm`, `bmm`, and `addmm` (including `dtype`/`out` variants and in-place `addmm_`)
+decode `float8_e4m3fn`, `float8_e5m2`, `float8_e4m3fnuz`, `float8_e5m2fnuz`,
+`float8_e8m0fnu`, and `float4_e2m1fn_x2` to BF16 before invoking ordinary device GEMM.
+The default result is BF16 and an explicit output dtype is honored. Block-scaled metadata
+formats (MXFP4, NVFP4, and block FP4) and `_scaled_mm` families are not included. The
+marked C550/MACA 3.8.0 suite passes for this checkout (`37 passed`), covering all five FP8
+formats, packed FP4, matrix overloads, non-square packed layouts, and fail-closed scaled-mm.
+This evidence applies to CUDA-boxing mode, not the legacy handwritten MetaX kernel mode.
+
+**Evidence boundary:** this route change does not alter the generic FlagGems survey cohort;
+that survey was not rerun because it does not exercise the shared software matrix wrappers.
+
 `torch.compile(backend="flagos")` is experimentally validated in the same C550/MACA 3.8.0
 boxing environment with both the installed vendor Triton and FlagTree main at revision
 `140bd6ab1ad86c5df4b07b76d9c722e357a9166d` (Triton 3.6, MetaX backend). The complete compile
