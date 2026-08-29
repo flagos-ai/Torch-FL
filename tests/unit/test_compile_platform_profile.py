@@ -65,6 +65,7 @@ def as_cuda(monkeypatch):
     [
         ("ascend", pp._ASCEND_PROFILE),
         ("metax", pp._METAX_PROFILE),
+        ("dcu", pp._DCU_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -97,6 +98,28 @@ def test_only_ascend_is_not_cuda_like():
     assert not pp._ASCEND_PROFILE.is_cuda_like
     assert pp._CUDA_PROFILE.is_cuda_like
     assert pp._METAX_PROFILE.is_cuda_like
+    assert pp._DCU_PROFILE.is_cuda_like
+
+
+@pytest.mark.anyplatform
+def test_dcu_compiles_for_hip_on_a_cuda_like_runtime():
+    """DCU is the one build that is CUDA-like but must not compile for cuda.
+
+    DTK wraps HIP behind a CUDA ABI, so boxing, streams and device queries all go
+    through torch.cuda -- hence is_cuda_like. The Triton side is not CUDA at all:
+    FlagTree's HCU backend accepts only ``target.backend == "hip"`` and registers
+    itself under the key ``hcu``. Falling back to _CUDA_PROFILE here reports
+    ``cuda`` onward and inductor dies with "0 compatible backends for target
+    (cuda)"; measured on gfx936, that took 9 of the compile cases in
+    tests/integration/test_compile.py down with it.
+    """
+    profile = pp._DCU_PROFILE
+    assert profile.triton_device_type == "hip"
+    assert profile.triton_backend_key == "hcu"
+    assert profile.is_cuda_like is True
+    # Not the CUDA profile: the whole point is that the compiler target differs
+    # even though the runtime is shared.
+    assert profile.triton_device_type != pp._CUDA_PROFILE.triton_device_type
 
 
 # --- device interface -------------------------------------------------------

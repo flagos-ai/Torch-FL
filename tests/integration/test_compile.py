@@ -218,15 +218,22 @@ def test_inductor_benchmark_accepts_triton_backend_name():
         pytest.skip("triton backend name is already a valid torch device type")
 
     # The name inductor would hand over is normally not a torch device at all
-    # (``maca``). On native MUSA it happens to parse, because torch_fl's
-    # FLAGOS_ALIAS_CUDA mode deliberately aliases the ``musa`` spelling onto
-    # flagos -- so only assert the rejection where the name is not an alias.
+    # (``maca``). Two builds are exceptions. On native MUSA it parses because
+    # torch_fl's FLAGOS_ALIAS_CUDA mode deliberately aliases the ``musa``
+    # spelling onto flagos. On Hygon DCU it parses as a genuine, distinct device
+    # type: DAS PyTorch is a HIP build, so ``hip`` is a device type of its own
+    # (measured: ``torch.device("hip").type == "hip"``, while privateuse1 is
+    # ``flagos``). Either way the name is not the device the tensors live on, so
+    # what matters is that benchmark() translates it -- asserted below.
     try:
         aliased_to = torch.device(device_type)
     except RuntimeError as exc:
         assert "device type at start of device string" in str(exc)
     else:
-        assert aliased_to.type == torch._C._get_privateuse1_backend_name()
+        assert aliased_to.type in (
+            torch._C._get_privateuse1_backend_name(),
+            device_type,
+        )
 
     # Either way, benchmark() must translate the name rather than pass it through.
     assert benchmarking.Benchmarker.benchmark._flagos_patched
