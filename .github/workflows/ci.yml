@@ -17,7 +17,7 @@ name: CI
 on:
   push:
 
-    branches: [main, dev, devops, dev-hygon, dev-thead]
+    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa]
 
     paths:
       - "cmake/**"
@@ -70,6 +70,7 @@ jobs:
       has_dcu: ${{ steps.detect.outputs.has_dcu }}
       has_metax: ${{ steps.detect.outputs.has_metax }}
       has_ppu: ${{ steps.detect.outputs.has_ppu }}
+      has_musa: ${{ steps.detect.outputs.has_musa }}
     steps:
       - uses: actions/checkout@v4
 
@@ -82,12 +83,13 @@ jobs:
             echo "::error::No platform configs found"
             exit 1
           fi
-          common_platforms=$(jq -c 'map(select(. != "ascend" and . != "dcu" and . != "metax" and . != "cuda" and . != "ppu"))' <<<"$platforms")
+          common_platforms=$(jq -c 'map(select(. != "ascend" and . != "dcu" and . != "metax" and . != "cuda" and . != "ppu" and . != "musa"))' <<<"$platforms")
           has_cuda=$(jq -r 'index("cuda") != null' <<<"$platforms")
           has_ascend=$(jq -r 'index("ascend") != null' <<<"$platforms")
           has_dcu=$(jq -r 'index("dcu") != null' <<<"$platforms")
           has_metax=$(jq -r 'index("metax") != null' <<<"$platforms")
           has_ppu=$(jq -r 'index("ppu") != null' <<<"$platforms")
+          has_musa=$(jq -r 'index("musa") != null' <<<"$platforms")
           echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
           echo "common_platforms=$common_platforms" >> "$GITHUB_OUTPUT"
           echo "has_cuda=$has_cuda" >> "$GITHUB_OUTPUT"
@@ -95,6 +97,7 @@ jobs:
           echo "has_dcu=$has_dcu" >> "$GITHUB_OUTPUT"
           echo "has_metax=$has_metax" >> "$GITHUB_OUTPUT"
           echo "has_ppu=$has_ppu" >> "$GITHUB_OUTPUT"
+          echo "has_musa=$has_musa" >> "$GITHUB_OUTPUT"
 
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
@@ -131,6 +134,12 @@ jobs:
     needs: discover-platforms
     if: needs.discover-platforms.outputs.has_metax == 'true'
     uses: ./.github/workflows/integration-test-metax.yml
+
+  musa-pipeline:
+    name: Platform pipeline (musa)
+    needs: discover-platforms
+    if: needs.discover-platforms.outputs.has_musa == 'true'
+    uses: ./.github/workflows/integration-test-musa.yml
 
   ppu-pipeline:
     name: Platform pipeline (ppu)

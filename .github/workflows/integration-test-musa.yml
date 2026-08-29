@@ -1,0 +1,84 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Integration Tests (MUSA)
+
+on:
+  workflow_call:
+    inputs:
+      timeout-minutes:
+        description: "Timeout for the entire job in minutes"
+        required: false
+        type: number
+        default: 60
+  workflow_dispatch:
+    inputs:
+      timeout-minutes:
+        description: "Timeout for the entire job in minutes"
+        required: false
+        type: number
+        default: 60
+
+jobs:
+  # The test list lives in .github/configs/musa.yml, not inline here. See
+  # load-platform-tests.yml for why.
+  load-tests:
+    uses: ./.github/workflows/load-platform-tests.yml
+    with:
+      platform: musa
+
+  integration-tests:
+    name: Build and test (MUSA)
+    needs: load-tests
+    runs-on:
+      - mt-8g-cicd-pytorch
+    timeout-minutes: ${{ inputs['timeout-minutes'] }}
+    container:
+      image: registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.1.0-v2.9.1-S5000-py310_tef
+      options: >-
+        --privileged
+        --ipc=host
+        --shm-size=512g
+        --ulimit memlock=-1
+        --cap-add=SYS_PTRACE
+        --env MTHREADS_VISIBLE_DEVICES=all
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare MUSA build environment
+        env:
+          CI_STAGE: integration
+        run: bash .github/scripts/set_env_musa.sh
+
+      - name: Build wheel
+        run: python -m build --wheel --no-isolation
+
+      - name: Install wheel
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+
+      - name: Prepare wheel-only test workspace
+        run: |
+          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-musa.XXXXXX")
+          cp -a tests pyproject.toml "$TEST_ROOT/"
+          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
+
+      - name: Run MUSA integration tests
+        env:
+          INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
+          INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
+        run: python .github/scripts/run_integration_tests.py
