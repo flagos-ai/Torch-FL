@@ -53,7 +53,27 @@ def as_cuda(monkeypatch):
             lambda: pp._CUDA_PROFILE,
             raising=False,
         )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
     return pp._CUDA_PROFILE
+
+
+@pytest.fixture
+def as_musa(monkeypatch):
+    """Force every profile consumer onto the MUSA profile.
+
+    Not CUDA-like, but not Ascend either: the third shape, and the one a single
+    `is_cuda_like` boolean cannot express. ACCELERATOR is patched alongside the
+    profile because the generated-code snippets branch on it directly, so a run
+    on any other platform's CI would otherwise take the wrong branch.
+    """
+    for module in ("platform_profile", "device_interface", "inductor_codegen"):
+        monkeypatch.setattr(
+            f"torch_fl.compile.{module}.platform_profile",
+            lambda: pp._MUSA_PROFILE,
+            raising=False,
+        )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    return pp._MUSA_PROFILE
 
 
 # --- profile selection ------------------------------------------------------
@@ -66,6 +86,8 @@ def as_cuda(monkeypatch):
         ("ascend", pp._ASCEND_PROFILE),
         ("metax", pp._METAX_PROFILE),
         ("dcu", pp._DCU_PROFILE),
+        ("musa", pp._MUSA_PROFILE),
+        ("gcu", pp._GCU_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -337,10 +359,13 @@ def test_has_triton_priming_restores_the_device_table(as_ascend, monkeypatch):
 
     # A fresh cache over the same function, so the priming path is really taken
     # (it returns early when something is already memoized) without discarding
-    # the answer the rest of the process is using.
-    monkeypatch.setattr(
-        _triton, "has_triton", functools.cache(_triton.has_triton.__wrapped__)
-    )
+    # the answer the rest of the process is using. `__wrapped__` is only there
+    # while has_triton is still the functools.cache'd original: on a native
+    # accelerator host `import torch_fl` has already swapped in the plain
+    # has_native_triton override, and reaching through it raised AttributeError
+    # before the test could assert anything.
+    original = getattr(_triton.has_triton, "__wrapped__", _triton.has_triton)
+    monkeypatch.setattr(_triton, "has_triton", functools.cache(original))
     dyn_di.get_interface_for_device("cuda")
     before = dict(dyn_di.device_interfaces)
 
@@ -348,6 +373,32 @@ def test_has_triton_priming_restores_the_device_table(as_ascend, monkeypatch):
 
     assert dyn_di.device_interfaces == before
     assert _triton.has_triton.cache_info().currsize == 1
+
+
+@pytest.mark.anyplatform
+def test_has_triton_priming_tolerates_the_native_override(as_musa, monkeypatch):
+    """Priming must not assume has_triton is still the functools.cache'd original.
+
+    On a native accelerator the tail of register_flagos_device_interface()
+    replaces `_triton.has_triton` with a plain function. That function has no
+    `cache_info`, so reading it raises AttributeError -- and because the compile
+    backend re-registers before every compile_fx, this is what every
+    torch.compile after the first hits. It surfaced as
+    `BackendCompilerFailed: 'function' object has no attribute 'cache_info'`,
+    i.e. torch.compile broken outright on MUSA and GCU.
+    """
+    from torch.utils import _triton
+
+    from torch_fl.compile import device_interface as di
+
+    def has_native_triton() -> bool:
+        return True
+
+    monkeypatch.setattr(_triton, "has_triton", has_native_triton)
+
+    di._prime_has_triton()
+
+    assert _triton.has_triton is has_native_triton
 
 
 # --- codegen registration ---------------------------------------------------
@@ -400,6 +451,26 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
     for snippet in snippets:
         assert "cuda" not in snippet.lower(), snippet
     assert "current_acl_raw_stream" in snippets[-1]
+
+
+@pytest.mark.anyplatform
+def test_musa_device_op_overrides_emit_the_musa_raw_stream(as_musa):
+    """A non-CUDA build that is not Ascend must not get the ACL snippets.
+
+    MUSA and GCU are `is_cuda_like=False` like Ascend, but their raw-stream
+    getters are branches of FlagOSDeviceOpOverrides, so selecting on that boolean
+    emitted `current_acl_raw_stream` into generated MUSA code -- which dies at
+    call time on `libflagos.so: undefined symbol: GetCurrentStream`.
+    """
+    from torch_fl.compile import inductor_codegen as ic
+
+    overrides = ic._device_op_overrides()
+    assert isinstance(overrides, ic.FlagOSDeviceOpOverrides)
+    assert not isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
+
+    snippet = overrides.import_get_raw_stream_as("get_raw_stream")
+    assert "current_acl_raw_stream" not in snippet
+    assert "get_musa_current_raw_stream as get_raw_stream" in snippet
 
 
 @pytest.mark.anyplatform

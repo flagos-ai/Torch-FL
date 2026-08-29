@@ -96,6 +96,22 @@ integration_tests:
       python -m pytest tests/integration/test_math_bits_contract.py
       -v -m math_bits --tb=short
 
+  # Measured on the MTT S5000 on 2026-08-29: 11 passed, 1 skipped. The old
+  # withheld note incorrectly applied GCU's limitation to MUSA -- a CPU-only
+  # PyTorch/Kineto build supplying no PrivateUse1 resolver, so no device events
+  # reach the profiler. That does not hold here: the MUPTI tracer resolves
+  # device activity on this CPU 2.10 wheel, and the kernel, runtime, flow,
+  # linkage, metadata, demangling and capture-window cases all pass.
+  #
+  # Only gpu_memset skips, through the capability table in
+  # tests/integration/profiler_support.py rather than a deselect: MUPTI emits no
+  # memset records. gpu_memcpy is claimed for MUSA in that table because it is
+  # measured, so the memcpy case runs rather than skipping.
+  - name: Unified profiler contract
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short
+
   # Marker selection, not a file allowlist: the generic per-op dispatch files
   # carry @pytest.mark.anyplatform. The platform gate (conftest.py) skips the
   # cuda/metax/ascend/dcu/flaggems_python-marked cases on MUSA, so this selects
@@ -158,15 +174,26 @@ integration_tests:
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - tests/integration/test_profiler_contract.py. MUSA shares the same
-  #     environment limitation recorded for GCU: a CPU-only PyTorch/Kineto build
-  #     supplies no PrivateUse1 resolver, so device events never reach the
-  #     profiler. Withheld until measured end to end with a vendor Kineto build.
   #   - tests/integration/test_compile.py. torch.compile needs the vendor
   #     flagtree (flagtree-0.5.0+mthreads3.1, Triton 3.1, backend "mthreads");
-  #     set_env_musa.sh deliberately does not link one. Add when the image bakes
-  #     the vendor triton stack.
+  #     set_env_musa.sh deliberately does not link one, and stock PyPI triton is
+  #     not a substitute -- it ships no mthreads backend and cannot compile a
+  #     MUSA kernel at all. The suite itself is green on the MTT S5000 with that
+  #     runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1 failed, the
+  #     failure being the torch.backends entry-point case, which asserts an
+  #     installed wheel and cannot hold in a build-tree run). Add this group when
+  #     the image bakes the vendor triton stack; it is an image gap, not a code
+  #     one.
   #   - tests/integration/ops/test_musa_flaggems.py (FLAGOS_USE_FLAGGEMS=1
-  #     hybrid route). Same vendor-triton prerequisite as compile.
+  #     hybrid route). Same vendor-triton prerequisite as compile: its two cases
+  #     skip without FlagGems installed, so adding the group to this image would
+  #     record a pass that measured nothing.
+  #   - tests/integration/test_profiler_parity.py. Unlike the contract group
+  #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
+  #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,
+  #     dcu). Measured here on 2026-08-29 for completeness: 5 passed, 2 failed,
+  #     both on capabilities MUPTI does not report rather than on a torch_fl
+  #     defect -- no gpu_memset category, and no occupancy-derived kernel args
+  #     ('blocks per SM', 'warps per SM', 'est. achieved occupancy %').
   #   - Qwen3 inference/training smoke, pending a model mount on the runner.
   # ---------------------------------------------------------------------------
