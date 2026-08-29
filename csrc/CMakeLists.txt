@@ -535,12 +535,19 @@ install(TARGETS ${LIBRARY_NAME}
 )
 
 if(ACCELERATOR STREQUAL "gcu" OR ACCELERATOR STREQUAL "musa"
-   OR ACCELERATOR STREQUAL "bpu")
+   OR ACCELERATOR STREQUAL "bpu" OR ACCELERATOR STREQUAL "ascend")
   # torch_fl/__init__.py pins backends_cuda.conf by default, which on
-  # GCU/MUSA/BPU would route every op to the (absent) CUDA kernels. Record the
-  # platform next to the libs so the Python side can pick
+  # GCU/MUSA/BPU/Ascend would route every op to the (absent) CUDA kernels.
+  # Record the platform next to the libs so the Python side can pick
   # backends_<platform>.conf instead. BPU additionally uses the marker to decide
-  # whether to register the "bpu" torch.compile backend.
+  # whether to register the "bpu" torch.compile backend. Ascend previously
+  # relied on runtime /dev/davinci* detection in torch_fl/__init__.py instead of
+  # this marker (see _select_backend_config()); that detection can silently
+  # fall through on a build/host where /dev is not enumerable, which also
+  # makes tests/integration/platform_support.py misclassify the platform as
+  # "cuda". Writing the marker makes Ascend identification explicit, matching
+  # the other native platforms, while the davinci-based detection stays as a
+  # fallback for wheels built before this change.
   set(_flagos_platform_marker "${CMAKE_CURRENT_BINARY_DIR}/flagos_platform")
   file(WRITE "${_flagos_platform_marker}" "${ACCELERATOR}\n")
   install(FILES "${_flagos_platform_marker}"

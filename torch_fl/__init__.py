@@ -111,15 +111,19 @@ def _select_backend_config() -> None:
     metax_boxing = os.environ.get("FLAGOS_METAX_BOXING", "0") == "1"
 
     # A vendor build whose kernels are native (no CUDA boxing) records its
-    # platform in lib/flagos_platform. MUSA has an explicit opt-in hybrid
-    # config; all other native platforms retain their native-only config.
+    # platform in lib/flagos_platform. MUSA and Ascend each have an explicit
+    # opt-in hybrid config; all other native platforms retain their
+    # native-only config. This branch runs before the /dev/davinci* runtime
+    # check below, so it must reproduce that check's FlagGems opt-in itself --
+    # otherwise an Ascend build with the marker installed would silently drop
+    # FLAGOS_USE_FLAGGEMS=1 back to the native-only conf.
     marker = os.path.join(os.path.dirname(__file__), "lib", "flagos_platform")
     if os.path.exists(marker):
         with open(marker) as f:
             platform = f.read().strip().lower()
         platform_name = f"backends_{platform}"
-        if platform == "musa" and use_flaggems:
-            platform_name = "backends_musa_flagos_py"
+        if platform in ("musa", "ascend") and use_flaggems:
+            platform_name = f"backends_{platform}_flagos_py"
         platform_conf = os.path.join(
             os.path.dirname(__file__), "configs", f"{platform_name}.conf"
         )
