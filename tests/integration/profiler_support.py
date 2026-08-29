@@ -65,7 +65,7 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         device=device,
         kernel=device,
         runtime=runtime,
-        memcpy=device and platform in {"cuda", "metax", "ppu"},
+        memcpy=device and platform in {"cuda", "metax", "ppu", "musa"},
         memset=device and platform in {"cuda", "metax"},
         flow=device,
         linkage=device,

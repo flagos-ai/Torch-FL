@@ -208,7 +208,13 @@ represented in tests or docs for this platform.
 
 ### Moore Threads MUSA
 
-No CI manifest exists for this platform. MUSA takes the native operator route through `mudnn`,
+A CI manifest exists for this platform ([`.github/configs/musa.yml`](../../.github/configs/musa.yml)),
+covering the isolated-environment preflight, MUSA dispatch, general factory ops, the unified AMP,
+math-bits and profiler contracts, the native mudnn operator subset, and the RNG suite. Three groups
+other platforms run are withheld with the reason recorded in that manifest: `torch.compile` and the
+FlagGems hybrid route both need the vendor Triton stack the CI image does not bake, and profiler
+parity is a torch-cuda baseline diff that only the CUDA-boxing platforms can meaningfully run.
+MUSA takes the native operator route through `mudnn`,
 with a documented CPU fallback for ops the vendor kernel table does not cover (see
 [`setup.py`](../../setup.py), lines 440-457, and
 `tests/integration/ops/test_musa_dispatch.py`, lines 15-24). No CUDA boxing kernels or FlagGems
@@ -221,11 +227,16 @@ GradScaler unscale operation currently follows the correctness-oriented CPU fall
 its mutated tensors and `found_inf` flag back to MUSA rather than using a native mudnn foreach
 kernel. Distributed support remains unvalidated on hardware. The optional MUPTI tracer has been
 measured on the available MTT S5000 host and emits real positive-duration kernel, runtime, and
-memcpy activities with device, stream, name, and Chrome-trace metadata. `torch.compile` is
+memcpy activities with device, stream, name, and Chrome-trace metadata. The unified profiler
+contract runs in CI for this platform and passed 11 of 12 cases on the MTT S5000 on 2026-08-29,
+including device kernel and runtime events, flow pairing, CPU-to-device linkage, kernel-name
+demangling and capture-window containment. Only `gpu_memset` is skipped, through the capability
+table rather than a deselect, because MUPTI emits no memset records. `torch.compile` is
 validated on this host against the vendor `flagtree-0.5.0+mthreads3.1` runtime and is not
-established by stock Triton: the 22-case `tests/integration/test_compile.py` suite passed on the
-MTT S5000, covering forward and backward execution, FP32/FP16 inputs, max-autotune,
-recompilation, FakeTensor tracing, and output/gradient placement on `flagos`. FlagTree reaches the
+established by stock Triton: `tests/integration/test_compile.py` passed on the MTT S5000 (25 passed
+on 2026-08-29), covering forward and backward execution, FP32/FP16 inputs, max-autotune,
+recompilation, FakeTensor tracing, and output/gradient placement on `flagos`. It is not yet a CI
+group, because the CI image bakes no vendor Triton stack. FlagTree reaches the
 device through `torch_fl.compile.flagtree_shim`, which rebinds the vendor MThreads driver's runtime
 lookups onto `torch_fl`; the separate `torch_musa` plugin is not installed and its `__init__` is
 never imported, since PrivateUse1 admits only one owner. The suite asserts that every rebound
