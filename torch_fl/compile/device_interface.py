@@ -568,7 +568,18 @@ def _prime_has_triton() -> None:
 
     from torch.utils import _triton
 
-    if _triton.has_triton.cache_info().currsize:
+    # On a native accelerator this function has already been replaced outright by
+    # the `has_native_triton` override installed at the end of
+    # register_flagos_device_interface(), which is a plain function and answers
+    # True unconditionally. There is no cache left to prime, and nothing to gain
+    # from priming one: `cache_info` is absent, so probing it raises. This is the
+    # second and every later call -- `import torch_fl` registers once, and the
+    # compile backend re-registers before each compile_fx.
+    cache_info = getattr(_triton.has_triton, "cache_info", None)
+    if cache_info is None:
+        return
+
+    if cache_info().currsize:
         return
 
     import torch._dynamo.device_interface as di

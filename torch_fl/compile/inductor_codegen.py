@@ -134,10 +134,19 @@ class FlagOSAscendDeviceOpOverrides(DeviceOpOverrides):
 
 
 def _device_op_overrides() -> DeviceOpOverrides:
-    """Pick the overrides matching this build's runtime."""
-    if platform_profile().is_cuda_like:
-        return FlagOSDeviceOpOverrides()
-    return FlagOSAscendDeviceOpOverrides()
+    """Pick the overrides matching this build's runtime.
+
+    Keyed on the vendor rather than on ``is_cuda_like``. MUSA and GCU are not
+    CUDA-like either, but their raw-stream imports are the ``musa``/``gcu``
+    branches of ``FlagOSDeviceOpOverrides.import_get_raw_stream_as`` -- selecting
+    the Ascend class for them emits ``current_acl_raw_stream`` into generated
+    code, which fails at call time on ``libflagos.so: undefined symbol:
+    GetCurrentStream``. Ascend is the only build whose device snippets come from
+    the ACL runtime.
+    """
+    if platform_profile().vendor == "ascend":
+        return FlagOSAscendDeviceOpOverrides()
+    return FlagOSDeviceOpOverrides()
 
 
 def register_flagos_codegen() -> None:
