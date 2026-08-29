@@ -194,6 +194,71 @@ def test_metax_inductor_event_uses_real_stream(device):
     assert start.elapsed_time(end) >= 0
 
 
+metax_only = pytest.mark.skipif(
+    torch_fl._build_accelerator() != "metax",
+    reason="MetaX build required",
+)
+
+
+@metax_only
+def test_metax_stream_shim_supports_event_ordering(device):
+    """The stream shim must carry the event API, not just a raw handle.
+
+    Inductor's cudagraph manager runs
+    ``torch.cuda.Stream().wait_stream(torch.cuda.current_stream())``, and
+    ``wait_stream`` is ``self.wait_event(stream.record_event())`` -- so a shim
+    without ``record_event`` made torch.compile die with AttributeError before it
+    could run a single kernel (issue #157).
+    """
+    current = torch.cuda.current_stream()
+
+    # The launcher contract the shim exists for in the first place.
+    assert current.cuda_stream == 0
+    assert current.device == torch.device("cuda", torch_fl.flagos.current_device())
+
+    # The exact call from the traceback.
+    torch.cuda.Stream().wait_stream(current)
+
+    event = current.record_event()
+    assert isinstance(event, torch.cuda.Event)
+    event.synchronize()
+    assert event.query()
+
+    # An explicitly supplied event must be the one returned, as on a real Stream.
+    provided = torch.cuda.Event()
+    assert current.record_event(provided) is provided
+
+    current.wait_event(event)
+    assert isinstance(current.query(), bool)
+    current.synchronize()
+
+    output = torch.ones(1024, device=device) + 1
+    assert_on_flagos(output)
+
+
+@metax_only
+def test_metax_stream_context_selects_capture_stream(device):
+    """``get_raw_stream`` must follow the current stream, not always report 0.
+
+    Generated Inductor code launches every kernel on ``get_raw_stream(idx)``, and
+    ``torch.cuda.graph()`` makes its capture stream current before capturing. A
+    hardcoded 0 would send those launches to the default stream, silently leaving
+    them out of the captured graph rather than failing.
+    """
+    default_raw = torch._C._cuda_getCurrentRawStream(torch_fl.flagos.current_device())
+    assert default_raw == 0
+
+    side = torch.cuda.Stream()
+    with torch.cuda.stream(side):
+        assert torch.cuda.current_stream().cuda_stream == side.cuda_stream
+        assert torch._C._cuda_getCurrentRawStream(side.device_index) == side.cuda_stream
+        output = torch.ones(1024, device=device) + 1
+
+    # The context manager has to put the default stream back.
+    assert torch._C._cuda_getCurrentRawStream(torch_fl.flagos.current_device()) == 0
+    assert_on_flagos(output)
+
+
 def test_inductor_benchmark_accepts_triton_backend_name():
     """The Triton backend name must not reach torch.device() as a device type.
 
