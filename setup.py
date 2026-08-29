@@ -597,6 +597,17 @@ def _verify_built_native_libs() -> None:
             f"Native build finished but {lib} is missing. "
             "Check cmake/ninja output above."
         )
+    if ACCELERATOR == "dcu":
+        shim = os.path.join(
+            BASE_DIR, "torch_fl", "lib_dcu", "libflagos_dtk_core_compat.so"
+        )
+        if not os.path.isfile(shim):
+            raise RuntimeError(
+                f"DCU native build finished but {shim} is missing. The shim is "
+                "required when DTK's device libraries run on the official "
+                "PyTorch core. Check the flagos_dtk_core_compat cmake target."
+            )
+        return
     if ACCELERATOR != "metax":
         return
     try:
@@ -621,7 +632,14 @@ class BuildExtWithCmake(_build_ext):
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
         # list, so copy late-generated files explicitly into wheel staging.
         relative_paths = ["lib/flagos_platform", "include/flagos.h"]
-        for pattern in ("lib/*.so*", "lib/*.dylib*", "lib/*.dll", "lib/*.lib"):
+        patterns = ["lib/*.so*", "lib/*.dylib*", "lib/*.dll", "lib/*.lib"]
+        if ACCELERATOR == "dcu":
+            # cmake installs the core-ABI shim straight into lib_dcu during
+            # build_ext. build_py has already cached its file list by then, so
+            # copy it (and any pre-bundled device assets) into wheel staging just
+            # like the native libs under lib/.
+            patterns.extend(("lib_dcu/*.so*", "lib_dcu/vendor_version.py"))
+        for pattern in patterns:
             relative_paths.extend(
                 os.path.relpath(path, os.path.join(BASE_DIR, "torch_fl"))
                 for path in glob.glob(os.path.join(BASE_DIR, "torch_fl", pattern))
@@ -730,6 +748,10 @@ def _get_setup_kwargs():
             "lib_dcu/vendor_version.py",
             "lib_ppu/*.so*",
             "include/*.h",
+            # The DTK-private symbol manifest that libflagos_dtk_core_compat.so
+            # must export, shipped so an installed wheel can be re-audited with
+            # scripts/check_dcu_core_abi.py against a different DTK release.
+            "accelerator/dcu/dtk_core_compat_symbols.txt",
             # All backend configs, not just the default: runtime op-routing
             # configs selected via FLAGOS_USE_FLAGGEMS (backends_flaggems.conf)
             # and boxing modes via FLAGOS_BACKEND_CONFIG (backends_cuda.conf /

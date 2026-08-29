@@ -86,13 +86,21 @@ elseif(ACCELERATOR STREQUAL "tsingmicro")
 elseif(ACCELERATOR STREQUAL "dcu")
   # DTK's CUDA compatibility toolkit provides cuda_runtime.h and a libcudart
   # shim over libgalaxyhip, so the CUDA runtime sources build unchanged --
-  # no separate dcu/ directory, and no nvcc (plain host g++).
+  # no nvcc (plain host g++). dcu/ contains only the DTK-core ABI shim below.
   file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc")
 
   add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
+
+  add_library(flagos_dtk_core_compat SHARED
+      "${CMAKE_CURRENT_SOURCE_DIR}/dcu/dtk_core_compat.cc")
+  set_target_properties(flagos_dtk_core_compat PROPERTIES
+      POSITION_INDEPENDENT_CODE ON)
+  flagos_set_portable_rpath(flagos_dtk_core_compat)
+  install(TARGETS flagos_dtk_core_compat
+      LIBRARY DESTINATION lib_dcu)
 elseif(ACCELERATOR STREQUAL "gcu")
   file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gcu/*.cc")
 

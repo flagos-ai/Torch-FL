@@ -68,6 +68,9 @@ These variables control asset loading, bundled libtorch behavior, and import-tim
 | `FLAGOS_METAX_CUDART_SHIM` | Runtime | `0` (off) | Preload libcudart version-tag shim before `import torch` (MetaX-specific; required for generic PyTorch wheels) |
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for DCU runtime |
+| `FLAGOS_DCU_VENDOR_CORE` | Build & Runtime | `0` (off) | Use DTK's forked core libraries instead of the official PyTorch core: bundles the full vendor core and symlinks it over the installed torch wheel. Must match at build and import time. See [DCU without DTK's core libraries](../vendors/dcu/vendor-free-core-libs.md) |
+| `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence). For deliberately testing a non-matching wheel pair |
+| `FLAGOS_DCU_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to DTK's `torch/lib`, used when no bundled `lib_dcu/` is present |
 | `FLAGOS_SKIP_CUDA_ASSETS` | Build | `0` (off) | Skip bundling external `libtorch_cuda.so` into the wheel (for in-tree builds) |
 | `FLAGOS_WHEEL_LOCAL` | Build | `0` (off) | Build a wheel with machine-local paths (non-portable; for dev testing only) |
 | `FLAGCX_TORCH_BACKEND` | Build & Runtime | `torch_gcu` for Enflame FlagCX builds; torch-fl sets `flagos` by default | Select the Enflame FlagCX torch integration. `flagos` links `libflagos.so` and avoids the vendor `torch-gcu` package; an explicit value is preserved. |

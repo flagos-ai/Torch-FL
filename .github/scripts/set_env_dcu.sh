@@ -311,10 +311,158 @@ if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   python setup.py build_ext --inplace
 fi
 
-# Bundle DTK's forked libtorch core + HIP .so into torch_fl/lib_dcu for a
-# self-contained wheel (replaces CUDA's .libtorch_cuda_assets staging step).
+# Bundle DTK's device .so into torch_fl/lib_dcu for a self-contained wheel
+# (replaces CUDA's .libtorch_cuda_assets staging step). Default is the decoupled
+# mode: device libraries only, running on the official torch+cpu core installed
+# above, with the DTK-private ATen symbols supplied by
+# libflagos_dtk_core_compat.so. The script's own ABI guard fails the build if a
+# DTK release ever needs more from the vendor core than the shim covers.
+# FLAGOS_DCU_VENDOR_CORE=1 selects the legacy full-core bundle + relink; CI
+# smoke-tests that path separately below.
 DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
-  bash scripts/bundle_dcu_libtorch.sh
+  PYTHON="$VENV_PYTHON" bash scripts/bundle_dcu_libtorch.sh
+
+# Wheel invariants for the decoupled default. A vendor core .so in lib_dcu means
+# the wheel would shadow the official core through RPATH order, i.e. silently
+# fall back to the old coupled layout; the shim's absence means the DTK device
+# libraries have nothing to satisfy their DTK-private imports with.
+if [[ "${FLAGOS_DCU_VENDOR_CORE:-0}" != "1" ]]; then
+  python - <<'PY'
+from pathlib import Path
+import sys
+
+bundle = Path("torch_fl/lib_dcu")
+core = (
+    "libc10.so",
+    "libtorch_cpu.so",
+    "libtorch.so",
+    "libtorch_global_deps.so",
+    "libtorch_python.so",
+    "libshm.so",
+)
+leaked = [name for name in core if (bundle / name).exists()]
+if leaked:
+    print(f"::error::decoupled DCU bundle contains vendor core libs: {leaked}")
+    sys.exit(1)
+for required in ("libtorch_hip.so", "libc10_hip.so", "libflagos_dtk_core_compat.so"):
+    if not (bundle / required).is_file():
+        print(f"::error::{bundle / required} is missing from the DCU bundle")
+        sys.exit(1)
+print(f"Decoupled DCU bundle verified: {len(list(bundle.glob('*.so*')))} .so, no vendor core")
+PY
+
+  # Import gate: the device libraries must bind to the official core and register
+  # CUDA-key kernels. _validate_dcu_decoupled_runtime() in torch_fl/__init__.py
+  # enforces this, so a regression fails here rather than inside a later test's
+  # dispatch. Also checks the torch.cuda shim, which is what triton's hcu backend
+  # and therefore all of FlagGems gate on.
+  python - <<'PY'
+import torch_fl  # noqa: F401  (must precede torch: preload happens at import)
+import torch
+
+assert torch.cuda.is_available(), "torch.cuda shim did not activate on DCU"
+assert torch.version.hip, f"torch.version.hip not restored: {torch.version.hip!r}"
+# triton's autotuner times candidate configs with this, so every FlagGems op that
+# autotunes depends on it being constructible (the +cpu wheel ships a dummy).
+torch.cuda.Event(enable_timing=True)
+for op in ("aten::mm", "aten::add.Tensor", "aten::_softmax", "aten::bmm"):
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op, "CUDA"), op
+a = torch.randn(64, 64, device="flagos")
+b = torch.randn(64, 64, device="flagos")
+err = (a @ b).cpu() - (a.cpu() @ b.cpu())
+assert err.abs().max().item() < 1e-3, err.abs().max().item()
+props = torch.cuda.get_device_properties(0)
+print(
+    f"Decoupled DCU runtime OK: torch {torch.__version__} hip {torch.version.hip}, "
+    f"{props.name} {props.gcnArchName} x{props.multi_processor_count}, "
+    f"mm err {err.abs().max().item():.3g}"
+)
+PY
+
+  # Legacy-mode smoke path (FLAGOS_DCU_VENDOR_CORE=1). It is the documented
+  # rollback for anything the decoupled mode cannot express -- DTK-private
+  # schemas such as aten::native_fuse_rmsnorm, whose wrappers live in the core
+  # fork -- so it must not be allowed to rot. Two properties are checked:
+  #
+  #   1. Selecting legacy mode against a decoupled bundle fails fast with the
+  #      mode-mismatch message, before mutating torch/lib.
+  #   2. A full legacy bundle relinks, computes, and restores cleanly.
+  #
+  # Order matters: this runs *after* the decoupled gates because it rebuilds
+  # lib_dcu. The last step restores the decoupled bundle, which is what the wheel
+  # is built from, and re-runs the invariant check to prove it.
+  if [[ "${FLAGOS_DCU_SKIP_LEGACY_SMOKE:-0}" != "1" ]]; then
+    echo "Legacy-mode smoke: refusing a decoupled bundle"
+    FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
+try:
+    import torch_fl  # noqa: F401
+except RuntimeError as exc:
+    assert "bundled in decoupled mode" in str(exc), exc
+    print(f"Legacy mode correctly refused the decoupled bundle: {exc}")
+else:
+    raise SystemExit(
+        "::error::FLAGOS_DCU_VENDOR_CORE=1 silently accepted a decoupled bundle"
+    )
+PY
+
+    echo "Legacy-mode smoke: full-core bundle"
+    DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
+      PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
+      bash scripts/bundle_dcu_libtorch.sh
+    FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
+import torch_fl  # noqa: F401  (relinks torch/lib, then preloads DTK's core)
+import torch
+
+from torch_fl.accelerator.dcu._dcu_libtorch_link import restore_original_libtorch
+
+try:
+    assert torch.version.hip, f"torch.version.hip not restored: {torch.version.hip!r}"
+    a = torch.randn(64, 64, device="flagos")
+    b = torch.randn(64, 64, device="flagos")
+    err = (a @ b).cpu() - (a.cpu() @ b.cpu())
+    assert err.abs().max().item() < 1e-3, err.abs().max().item()
+    print(
+        f"Legacy DCU runtime OK: torch {torch.__version__} hip {torch.version.hip}, "
+        f"mm err {err.abs().max().item():.3g}"
+    )
+finally:
+    # Leave the venv's torch/lib as we found it: the symlinks point into a bundle
+    # that is about to be replaced by the decoupled one.
+    restore_original_libtorch()
+PY
+    CPU_TORCH_ROOT="$CPU_TORCH_ROOT" python - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+lib = Path(os.environ["CPU_TORCH_ROOT"]) / "lib"
+links = sorted(entry.name for entry in os.scandir(lib) if entry.is_symlink())
+if links or (lib / "_orig_backup").exists():
+    print(f"::error::legacy smoke left {lib} modified: {links}")
+    sys.exit(1)
+print(f"Legacy smoke rolled back cleanly: no symlinks or backup in {lib}")
+PY
+
+    echo "Restoring the decoupled bundle for the wheel"
+    DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
+      PYTHON="$VENV_PYTHON" bash scripts/bundle_dcu_libtorch.sh
+    python - <<'PY'
+from pathlib import Path
+import sys
+
+bundle = Path("torch_fl/lib_dcu")
+leaked = [
+    name
+    for name in ("libc10.so", "libtorch_cpu.so", "libtorch.so", "libtorch_python.so")
+    if (bundle / name).exists()
+]
+if leaked or not (bundle / "libflagos_dtk_core_compat.so").is_file():
+    print(f"::error::decoupled bundle not restored after the legacy smoke: {leaked}")
+    sys.exit(1)
+print("Decoupled bundle restored")
+PY
+  fi
+fi
 
 if ! command -v rocm-smi >/dev/null 2>&1; then
   echo "::error::rocm-smi is unavailable"
