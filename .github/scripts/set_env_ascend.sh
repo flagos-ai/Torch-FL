@@ -135,24 +135,24 @@ export LD_LIBRARY_PATH="$ASCEND_HOME/lib64:$ASCEND_HOME/acllib/lib64${DRIVER_LIB
 # still yields zero memcpy/memset records, while a process-start preload yields
 # real ones. Kernel and runtime activities are unaffected either way.
 #
-# This belongs here, next to every other Ascend prerequisite (CPATH,
-# LD_LIBRARY_PATH, the driver HAL paths), rather than on the profiler test
-# command: the profiler contract is then invoked with the exact same command on
-# every platform, and no CI step has to know a vendor-specific incantation.
-# libmspti.so is inert until a profiler session subscribes, so carrying it for
-# the whole job costs nothing observable.
+# Do NOT export this as LD_PRELOAD for the whole Ascend job. CANN 9.0's
+# interposer is not inert for ordinary operator processes: CI observed sporadic
+# SIGSEGV exits in add, embedding, le, mean, and mm subprocesses when every
+# process inherited it. Keep the prepared value under an inert variable; the
+# integration runner applies it only to the profiler contract process through
+# that test's `environment` mapping. The visible pytest command remains exactly
+# the same on every platform, without destabilizing unrelated Ascend tests.
 #
 # Guarded on the file existing so a CANN image without the profiling tools does
-# not get an LD_PRELOAD that ld.so can only warn about. See
-# docs/architecture/profiler.md.
-# LD_PRELOAD is always exported, empty when MSPTI is absent, because the
-# GITHUB_ENV loop below reads each name with ${!name} under `set -u`.
+# not get an LD_PRELOAD that ld.so can only warn about. The variable is always
+# assigned because the GITHUB_ENV loop reads each name with ${!name} under
+# `set -u`. See docs/architecture/profiler.md.
 ASCEND_MSPTI_LIB="$ASCEND_HOME/tools/mspti/lib64/libmspti.so"
 if [[ -f "$ASCEND_MSPTI_LIB" ]]; then
-  export LD_PRELOAD="$ASCEND_MSPTI_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
-  echo "MSPTI interposer preloaded: $ASCEND_MSPTI_LIB"
+  export ASCEND_MSPTI_PRELOAD="$ASCEND_MSPTI_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+  echo "MSPTI interposer prepared for profiler process: $ASCEND_MSPTI_LIB"
 else
-  export LD_PRELOAD="${LD_PRELOAD:-}"
+  export ASCEND_MSPTI_PRELOAD="${LD_PRELOAD:-}"
   echo "::warning::libmspti.so not found at $ASCEND_MSPTI_LIB; profiler memcpy/memset activity will be unavailable"
 fi
 
@@ -238,7 +238,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ASCEND_HOME \
     FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_USE_FLAGGEMS FLAGOS_USE_FLAGGEMS_CPP \
     FLAGGEMS_KERNEL FLAGGEMS_PYTHON PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
-    CPATH LIBRARY_PATH LD_LIBRARY_PATH LD_PRELOAD; do
+    CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
 fi

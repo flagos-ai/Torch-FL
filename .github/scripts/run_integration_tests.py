@@ -42,6 +42,7 @@ def load_configuration(allow_empty):
             raise SystemExit(f"integration_tests[{index}] must be an object")
         name = test.get("name")
         command = test.get("command")
+        test_environment = test.get("environment", {})
         if (
             not isinstance(name, str)
             or not name.strip()
@@ -55,23 +56,32 @@ def load_configuration(allow_empty):
             raise SystemExit(
                 f"integration_tests[{index}].command must be a non-empty string"
             )
+        validate_environment(
+            test_environment,
+            f"integration_tests[{index}].environment",
+        )
 
+    validate_environment(environment, "integration_environment")
+
+    return tests, environment
+
+
+def validate_environment(environment, field_name):
+    """Validate one integration-test environment mapping."""
     if not isinstance(environment, dict):
-        raise SystemExit("integration_environment must be an object")
+        raise SystemExit(f"{field_name} must be an object")
     for key, value in environment.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise SystemExit(f"invalid environment variable name: {key}")
+            raise SystemExit(
+                f"invalid environment variable name in {field_name}: {key}"
+            )
         if (
             not isinstance(value, str)
             or "\n" in value
             or "\r" in value
             or "\0" in value
         ):
-            raise SystemExit(
-                f"integration_environment[{key}] must be a single-line string"
-            )
-
-    return tests, environment
+            raise SystemExit(f"{field_name}[{key}] must be a single-line string")
 
 
 def main():
@@ -91,10 +101,13 @@ def main():
             f"===== [{index}/{len(tests)}] {test['name']} =====",
             flush=True,
         )
+        test_environment = command_environment.copy()
+        for key, value in test.get("environment", {}).items():
+            test_environment[key] = os.path.expandvars(value)
         result = subprocess.run(
             ["bash", "-c", f"set -euo pipefail\n{test['command']}"],
             check=False,
-            env=command_environment,
+            env=test_environment,
             cwd=workdir,
         )
         if result.returncode:

@@ -119,10 +119,12 @@ integration_tests:
   # Byte-identical to every other platform's profiler step. Ascend's extra
   # prerequisite -- the process-start libmspti.so that CANN 9.0 needs for
   # aclrtMemcpy*/aclrtMemset* interposition, which a later dlopen cannot supply
-  # -- is established by set_env_ascend.sh alongside every other Ascend
-  # environment prerequisite, so no vendor detail leaks into the test command.
-  # See docs/architecture/profiler.md.
+  # -- is attached as data to this process by the common integration runner, so
+  # no vendor detail leaks into the command and unrelated Ascend processes do
+  # not inherit CANN 9.0's unstable interposer. See docs/architecture/profiler.md.
   - name: Unified profiler contract
+    environment:
+      LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short

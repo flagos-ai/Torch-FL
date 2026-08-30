@@ -413,19 +413,22 @@ no LD_PRELOAD, dlopen(mspti) then dlopen(ascendcl):  gpu_memcpy=0 gpu_memset=0
 LD_PRELOAD=libmspti.so:                              gpu_memcpy=3 gpu_memset=3
 ```
 
-This is a *process startup* requirement, so it is satisfied where every other Ascend startup requirement already lives: `.github/scripts/set_env_ascend.sh`, next to `CPATH`, `LIBRARY_PATH`, `LD_LIBRARY_PATH`, and the driver HAL paths. The profiler contract is therefore invoked with the identical command on every platform:
+This is a *process startup* requirement. `.github/scripts/set_env_ascend.sh` therefore discovers the library next to every other Ascend startup prerequisite, but stores the prepared preload under the inert `ASCEND_MSPTI_PRELOAD` variable. The common integration runner supports a per-test `environment` mapping and expands that value into `LD_PRELOAD` only for the profiler contract process. The contract is still invoked with the identical command on every platform:
 
 ```bash
 python -m pytest tests/integration/test_profiler_contract.py -v -m profiler
 ```
 
-No CI step and no user command carries a vendor-specific preload prefix. Outside CI, exporting the same variable before starting Python has the same effect:
+This narrow scope is required for correctness, not merely tidiness. A CI run that exported MSPTI job-wide produced sporadic `SIGSEGV` (`-11`) exits in otherwise healthy add, embedding, le, mean, and mm subprocesses before the profiler test was reached. CANN 9.0's interposer is therefore not safe to impose on arbitrary operator processes. Attaching the prerequisite as structured per-test environment data preserves the uniform command without destabilizing unrelated tests.
+
+Outside CI, the equivalent remains an environment export before starting the profiled Python process:
 
 ```bash
 export LD_PRELOAD="$ASCEND_HOME/tools/mspti/lib64/libmspti.so${LD_PRELOAD:+:$LD_PRELOAD}"
+python workload.py
 ```
 
-The preload is applied for the whole Ascend job rather than one step. `libmspti.so` is inert until a profiler session subscribes, so this costs nothing observable, and scoping it to a single command would put an Ascend-only incantation back into the test invocation — the thing this design removes. The environment script skips the export when the file is absent, so a CANN image without the profiling tools does not get an `LD_PRELOAD` that `ld.so` can only warn about.
+The environment script skips the prepared preload when the file is absent, so a CANN image without the profiling tools does not get an `LD_PRELOAD` that `ld.so` can only warn about.
 
 If the library is absent, another MSPTI subscriber already owns the process, or activation fails, CPU profiling continues normally. MSPTI shutdown follows the measured order: unsubscribe first, then flush pending activity buffers; the tracer deliberately keeps the process-level MSPTI library loaded until process exit because CANN may retain interposed ACL function pointers.
 
@@ -438,9 +441,9 @@ The shared cross-backend profiler contract (`tests/integration/test_profiler_con
 - `test_profiler_memcpy_events` is gated on `mspti_preload_active()`, which checks `/proc/self/maps` for the actually loaded `libmspti.so` rather than trusting the `LD_PRELOAD` string. When the environment script has made the library available before process start, the workload's host-to-device copy produces a real positive-duration `gpu_memcpy` record; a missing or invalid library causes the test to skip explicitly instead of claiming a capability it does not have. The link map is sampled once at `profiler_support` import, which is the only moment that answers the question: the module is loaded as a pytest plugin before anything starts a profiler session, so a hit there can only come from a process-start preload. Sampling later would also see the lazy `dlopen` in `CannDeviceTracer::start()`, which does *not* enable interposition — measured on 910, a late check reports "preloaded" and then the memcpy assertion fails on a workload that produced no records.
 - `test_profiler_memset_events` stays disabled for Ascend regardless of preload. The direct `ctypes` probe above proves the CANN interception path itself works: `aclrtMemset`/`aclrtMemsetAsync` produce real `gpu_memset` records when called explicitly under preload. But nothing reachable from the shared workload calls that allocator path. `torch.zeros()` -- the only zeroing op the workload exercises -- routes to the `aclnnInplaceZero` kernel (`csrc/aten/backends/ascend/generated/ascend_kernels.cc`), not to the allocator's `aclrtMemset`/`aclrtMemsetAsync` calls in `csrc/runtime/accelerator/ascend/memory.cc`. Switching it only to make a profiler record appear would regress measured 910 latency from 12.7us to 133us at 1 MiB and from 17.4us to 9080us at 64 MiB (`aclrtMemsetAsync` is slower still). The high-performance kernel routing is therefore intentional, and the absent `gpu_memset` record is a correct-by-design capability difference.
 
-Every CI backend runs this contract with the same command; `.github/configs/ascend.yml` carries no platform-specific `LD_PRELOAD` prefix, because the preload is established job-wide by `.github/scripts/set_env_ascend.sh` together with the rest of the Ascend environment.
+Every CI backend runs this contract with the same command. `.github/configs/ascend.yml` carries no shell prefix; its structured `environment` field scopes the prepared preload to this process, and `.github/scripts/run_integration_tests.py` applies it without changing the command string.
 
-`import torch_fl` deliberately does not re-exec the process to install the preload. Doing so would disturb file descriptors, multiprocessing, `torchrun`, and debuggers, and it would make every Ascend process pay for a capability only profiling sessions use. The environment is the correct place to express a process-start requirement.
+`import torch_fl` deliberately does not re-exec the process to install the preload. Doing so would disturb file descriptors, multiprocessing, `torchrun`, and debuggers, and exporting the interposer job-wide demonstrably destabilizes unrelated CANN operator processes. Per-process integration environment data is the safe boundary at which to express this startup requirement.
 
 For hardware support reporting, the Ascend memcpy capability is measured only when MSPTI was actually loaded. An `LD_PRELOAD` environment variable by itself is not evidence of that; `ld.so` warns and continues for nonexistent paths.
 
