@@ -8,6 +8,10 @@
 // without a kernel behind it fails the dispatcher's "backend not registered"
 // check, whereas an unregistered op simply reaches the cpu_fallback. So this
 // file is exactly the MUSA coverage set.
+//
+// The list also covers the handwritten mudnn convolution and native
+// muRAND/mudnn RNG kernels. Unsupported RNG schemas stay unregistered and
+// continue through cpu_fallback.
 
   m.impl("_log_softmax", WrapperPrivLogSoftmax);
   m.impl("_log_softmax_backward_data", WrapperPrivLogSoftmaxBackwardData);
@@ -92,14 +96,39 @@
   m.impl("mm.out", WrapperMmOut);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("native_dropout", WrapperNativeDropout);
+  m.impl("native_dropout_backward", WrapperNativeDropoutBackward);
   m.impl("native_layer_norm", WrapperNativeLayerNorm);
   m.impl("native_layer_norm_backward", WrapperNativeLayerNormBackward);
   m.impl("ne.Scalar", WrapperNeScalar);
   m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg", WrapperNeg);
+  m.impl("normal_", WrapperNormalInplace);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("pow.Tensor_Tensor", WrapperPowTensorTensor);
   m.impl("prod.dim_int", WrapperProdDimInt);
+  m.impl("rand", WrapperRand);
+  m.impl("rand.generator", WrapperRandGenerator);
+  m.impl("rand.names_out", WrapperRandNamesOut);
+  m.impl("rand.out", WrapperRandOut);
+  m.impl("rand_like", WrapperRandLike);
+  m.impl("rand_like.generator", WrapperRandLikeGenerator);
+  m.impl("rand_like.out", WrapperRandLikeOut);
+  m.impl("randint", WrapperRandint);
+  m.impl("randint.generator", WrapperRandintGenerator);
+  m.impl("randint.low", WrapperRandintLow);
+  m.impl("randint.low_generator", WrapperRandintLowGenerator);
+  m.impl("randint.low_out", WrapperRandintLowOut);
+  m.impl("randint.out", WrapperRandintOut);
+  m.impl("randn", WrapperRandn);
+  m.impl("randn.generator", WrapperRandnGenerator);
+  m.impl("randn.names_out", WrapperRandnNamesOut);
+  m.impl("randn_like", WrapperRandnLike);
+  m.impl("randn_like.generator", WrapperRandnLikeGenerator);
+  m.impl("randn_like.out", WrapperRandnLikeOut);
+  m.impl("random_", WrapperRandomInplace);
+  m.impl("random_.from", WrapperRandomInplaceFrom);
+  m.impl("random_.to", WrapperRandomInplaceTo);
   m.impl("reciprocal", WrapperReciprocal);
   m.impl("relu", WrapperRelu);
   m.impl("remainder.Scalar", WrapperRemainderScalar);
@@ -131,35 +160,7 @@
   m.impl("threshold_backward", WrapperThresholdBackward);
   m.impl("topk", WrapperTopk);
   m.impl("trunc", WrapperTrunc);
+  m.impl("uniform_", WrapperUniformInplace);
   m.impl("var.correction", WrapperVarCorrection);
   m.impl("where.self", WrapperWhereSelf);
   m.impl("zero_", WrapperZeroInplace);
-
-  // Native muRAND/mudnn RNG kernels. Unsupported RNG schemas stay unregistered
-  // and continue through cpu_fallback.
-  m.impl("native_dropout", WrapperNativeDropout);
-  m.impl("native_dropout_backward", WrapperNativeDropoutBackward);
-  m.impl("normal_", WrapperNormalInplace);
-  m.impl("rand", WrapperRand);
-  m.impl("rand.generator", WrapperRandGenerator);
-  m.impl("rand.names_out", WrapperRandNamesOut);
-  m.impl("rand.out", WrapperRandOut);
-  m.impl("rand_like", WrapperRandLike);
-  m.impl("rand_like.generator", WrapperRandLikeGenerator);
-  m.impl("rand_like.out", WrapperRandLikeOut);
-  m.impl("randint", WrapperRandint);
-  m.impl("randint.generator", WrapperRandintGenerator);
-  m.impl("randint.low", WrapperRandintLow);
-  m.impl("randint.low_generator", WrapperRandintLowGenerator);
-  m.impl("randint.low_out", WrapperRandintLowOut);
-  m.impl("randint.out", WrapperRandintOut);
-  m.impl("randn", WrapperRandn);
-  m.impl("randn.generator", WrapperRandnGenerator);
-  m.impl("randn.names_out", WrapperRandnNamesOut);
-  m.impl("randn_like", WrapperRandnLike);
-  m.impl("randn_like.generator", WrapperRandnLikeGenerator);
-  m.impl("randn_like.out", WrapperRandnLikeOut);
-  m.impl("random_", WrapperRandomInplace);
-  m.impl("random_.from", WrapperRandomInplaceFrom);
-  m.impl("random_.to", WrapperRandomInplaceTo);
-  m.impl("uniform_", WrapperUniformInplace);

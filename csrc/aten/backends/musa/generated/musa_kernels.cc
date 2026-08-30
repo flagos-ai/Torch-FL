@@ -18,6 +18,7 @@
 #include <ATen/ops/result_type.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <vector>
 #include "../mudnn_common.h"
@@ -31,6 +32,10 @@ at::Tensor AbsKernelMusa(const at::Tensor& self) {
     return at::abs(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -46,6 +51,10 @@ at::Tensor SqrtKernelMusa(const at::Tensor& self) {
     return at::sqrt(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -61,6 +70,10 @@ at::Tensor RsqrtKernelMusa(const at::Tensor& self) {
     return at::rsqrt(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -76,6 +89,10 @@ at::Tensor ExpKernelMusa(const at::Tensor& self) {
     return at::exp(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -91,6 +108,10 @@ at::Tensor LogKernelMusa(const at::Tensor& self) {
     return at::log(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -106,6 +127,10 @@ at::Tensor Log2KernelMusa(const at::Tensor& self) {
     return at::log2(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -121,6 +146,10 @@ at::Tensor Log10KernelMusa(const at::Tensor& self) {
     return at::log10(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -136,6 +165,10 @@ at::Tensor Log1pKernelMusa(const at::Tensor& self) {
     return at::log1p(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -151,6 +184,10 @@ at::Tensor SinKernelMusa(const at::Tensor& self) {
     return at::sin(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -166,6 +203,10 @@ at::Tensor CosKernelMusa(const at::Tensor& self) {
     return at::cos(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -181,6 +222,10 @@ at::Tensor AcosKernelMusa(const at::Tensor& self) {
     return at::acos(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -196,6 +241,10 @@ at::Tensor AtanKernelMusa(const at::Tensor& self) {
     return at::atan(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -211,6 +260,10 @@ at::Tensor TanhKernelMusa(const at::Tensor& self) {
     return at::tanh(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -226,6 +279,10 @@ at::Tensor SigmoidKernelMusa(const at::Tensor& self) {
     return at::sigmoid(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -241,6 +298,10 @@ at::Tensor SiluKernelMusa(const at::Tensor& self) {
     return at::silu(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -256,6 +317,10 @@ at::Tensor ReluKernelMusa(const at::Tensor& self) {
     return at::relu(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -271,6 +336,10 @@ at::Tensor ReciprocalKernelMusa(const at::Tensor& self) {
     return at::reciprocal(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -286,6 +355,10 @@ at::Tensor ErfKernelMusa(const at::Tensor& self) {
     return at::erf(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -301,6 +374,10 @@ at::Tensor FloorKernelMusa(const at::Tensor& self) {
     return at::floor(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -316,6 +393,10 @@ at::Tensor CeilKernelMusa(const at::Tensor& self) {
     return at::ceil(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -331,6 +412,10 @@ at::Tensor SignKernelMusa(const at::Tensor& self) {
     return at::sign(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -346,6 +431,10 @@ at::Tensor NegKernelMusa(const at::Tensor& self) {
     return at::neg(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -366,6 +455,10 @@ at::Tensor TruncKernelMusa(const at::Tensor& self) {
     return at::trunc(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -386,6 +479,10 @@ at::Tensor Expm1KernelMusa(const at::Tensor& self) {
     return at::expm1(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary first;
@@ -420,6 +517,10 @@ at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -446,6 +547,10 @@ at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -472,6 +577,10 @@ at::Tensor MaximumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -498,6 +607,10 @@ at::Tensor MinimumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -524,6 +637,10 @@ at::Tensor RemainderTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -550,6 +667,10 @@ at::Tensor FmodTensorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -576,6 +697,10 @@ at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -602,6 +727,10 @@ at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -633,6 +762,10 @@ at::Tensor SubTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -664,6 +797,10 @@ at::Tensor EqTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -690,6 +827,10 @@ at::Tensor NeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -716,6 +857,10 @@ at::Tensor LtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -742,6 +887,10 @@ at::Tensor GtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -768,6 +917,10 @@ at::Tensor LeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -794,6 +947,10 @@ at::Tensor GeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -820,6 +977,10 @@ at::Tensor LogicalAndKernelMusa(const at::Tensor& self, const at::Tensor& other)
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -846,6 +1007,10 @@ at::Tensor LogicalOrKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -868,6 +1033,10 @@ at::Tensor MulScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -892,6 +1061,10 @@ at::Tensor DivScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -916,6 +1089,10 @@ at::Tensor PowTensorScalarKernelMusa(const at::Tensor& self, const at::Scalar& o
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -940,6 +1117,10 @@ at::Tensor RemainderScalarKernelMusa(const at::Tensor& self, const at::Scalar& o
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -964,6 +1145,10 @@ at::Tensor FmodScalarKernelMusa(const at::Tensor& self, const at::Scalar& other)
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -988,6 +1173,10 @@ at::Tensor AddScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, 
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1012,6 +1201,10 @@ at::Tensor SubScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, 
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1036,6 +1229,10 @@ at::Tensor EqScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1060,6 +1257,10 @@ at::Tensor NeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1084,6 +1285,10 @@ at::Tensor LtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1108,6 +1313,10 @@ at::Tensor GtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1132,6 +1341,10 @@ at::Tensor LeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1156,6 +1369,10 @@ at::Tensor GeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1180,6 +1397,10 @@ at::Tensor MmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   auto self_c = self.contiguous();
   auto mat2_c = mat2.contiguous();
 
@@ -1204,6 +1425,10 @@ at::Tensor BmmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   auto self_c = self.contiguous();
   auto mat2_c = mat2.contiguous();
 
@@ -1325,6 +1550,10 @@ at::Tensor SumDimIntlistKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -1392,6 +1621,10 @@ at::Tensor MeanDimKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -1433,6 +1666,18 @@ at::Tensor SumKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty({}, self.options().dtype(out_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
+
+  // Reducing an empty input into a scalar: mudnn rejects the zero-element
+  // operand, but aten's answer is the reduction's identity (sum -> 0).
+  // Fill it on-device rather than launching or detouring through the host.
+  if (self_c.numel() == 0) {
+    out.fill_(0);
+    return out;
+  }
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1473,6 +1718,18 @@ at::Tensor MeanKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty({}, self.options().dtype(out_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
+
+  // Reducing an empty input into a scalar: mudnn rejects the zero-element
+  // operand, but aten's answer is the reduction's identity (mean -> nan).
+  // Fill it on-device rather than launching or detouring through the host.
+  if (self_c.numel() == 0) {
+    out.fill_(std::numeric_limits<double>::quiet_NaN());
+    return out;
+  }
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1493,6 +1750,10 @@ at::Tensor GeluKernelMusa(const at::Tensor& self, c10::string_view approximate) 
     return at::gelu(self.cpu(), approximate).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1512,6 +1773,10 @@ at::Tensor PrivSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool half_
   }
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1530,6 +1795,10 @@ at::Tensor TanKernelMusa(const at::Tensor& self) {
     return at::tan(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1545,6 +1814,10 @@ at::Tensor RoundKernelMusa(const at::Tensor& self) {
     return at::round(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1560,6 +1833,10 @@ at::Tensor MishKernelMusa(const at::Tensor& self) {
     return at::mish(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1575,6 +1852,10 @@ at::Tensor HardswishKernelMusa(const at::Tensor& self) {
     return at::hardswish(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1590,6 +1871,10 @@ at::Tensor IsnanKernelMusa(const at::Tensor& self) {
     return at::isnan(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1605,6 +1890,10 @@ at::Tensor IsinfKernelMusa(const at::Tensor& self) {
     return at::isinf(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1620,6 +1909,10 @@ at::Tensor HardsigmoidKernelMusa(const at::Tensor& self) {
     return at::hardsigmoid(self.cpu()).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1637,6 +1930,10 @@ at::Tensor LeakyReluKernelMusa(const at::Tensor& self, const at::Scalar& negativ
     return at::leaky_relu(self.cpu(), negative_slope).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1659,6 +1956,10 @@ at::Tensor EluKernelMusa(
         .to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1678,6 +1979,10 @@ at::Tensor SoftplusKernelMusa(
     return at::softplus(self.cpu(), beta, threshold).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1698,6 +2003,10 @@ at::Tensor ClampKernelMusa(
     return at::clamp(self.cpu(), min, max).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1719,6 +2028,10 @@ at::Tensor ClampMinKernelMusa(const at::Tensor& self, const at::Scalar& min) {
     return at::clamp_min(self.cpu(), min).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1736,6 +2049,10 @@ at::Tensor ClampMaxKernelMusa(const at::Tensor& self, const at::Scalar& max) {
     return at::clamp_max(self.cpu(), max).to(self.device());
   }
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -1760,6 +2077,10 @@ at::Tensor LogicalXorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -1786,6 +2107,10 @@ at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -1814,6 +2139,10 @@ at::Tensor SigmoidBackwardKernelMusa(const at::Tensor& grad_output, const at::Te
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -1842,6 +2171,10 @@ at::Tensor TanhBackwardKernelMusa(const at::Tensor& grad_output, const at::Tenso
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -1870,6 +2203,10 @@ at::Tensor SiluBackwardKernelMusa(const at::Tensor& grad_output, const at::Tenso
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -1902,6 +2239,10 @@ at::Tensor GeluBackwardKernelMusa(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -1936,6 +2277,10 @@ at::Tensor ThresholdBackwardKernelMusa(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -1975,6 +2320,10 @@ at::Tensor LeakyReluBackwardKernelMusa(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -2016,6 +2365,10 @@ at::Tensor AddcmulKernelMusa(
   auto t1_b = t1_c.expand(out_shape);
   auto t2_b = t2_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_t1(t1_b);
@@ -2058,6 +2411,10 @@ at::Tensor AddcdivKernelMusa(
   auto t1_b = t1_c.expand(out_shape);
   auto t2_b = t2_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_t1(t1_b);
@@ -2097,6 +2454,10 @@ at::Tensor WhereSelfKernelMusa(
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_cond(cond_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -2128,6 +2489,10 @@ at::Tensor AddmmKernelMusa(
   std::vector<int64_t> out_shape = mat1.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, mat1.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   auto mat1_c = mat1.contiguous();
   auto mat2_c = mat2.contiguous();
 
@@ -2194,6 +2559,10 @@ at::Tensor BaddbmmKernelMusa(
   std::vector<int64_t> out_shape = mat1.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, mat1.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
   auto mat1_c = mat1.contiguous();
   auto mat2_c = mat2.contiguous();
 
@@ -2251,6 +2620,10 @@ at::Tensor PrivLogSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool ha
   }
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -2352,6 +2725,10 @@ at::Tensor AmaxKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2396,6 +2773,10 @@ at::Tensor AminKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2434,6 +2815,10 @@ at::Tensor ProdDimIntKernelMusa(
                                                    : self.scalar_type());
   auto self_c = self.scalar_type() == out_dtype ? self : self.to(out_dtype);
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   int mudnn_dim = static_cast<int>(d);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2464,6 +2849,10 @@ at::Tensor AnyDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
 
   auto self_b = self.scalar_type() == at::kBool ? self : self.ne(0);
   auto out = at::empty(squeezed_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   int mudnn_dim = static_cast<int>(d);
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -2494,6 +2883,10 @@ at::Tensor AllDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
 
   auto self_b = self.scalar_type() == at::kBool ? self : self.ne(0);
   auto out = at::empty(squeezed_shape, self.options().dtype(at::kBool));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   int mudnn_dim = static_cast<int>(d);
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
@@ -2542,6 +2935,10 @@ at::Tensor VarCorrectionKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2593,6 +2990,10 @@ at::Tensor StdCorrectionKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2648,6 +3049,10 @@ at::Tensor LinalgVectorNormKernelMusa(
     self_c = self_c.contiguous();
   }
   auto out = at::empty(squeezed_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return keepdim ? out.view(out_shape) : out;
   std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -2828,6 +3233,10 @@ at::Tensor CatKernelMusa(const at::ITensorListRef& tensors, int64_t dim) {
   for (const auto& t : kept) total += t.size(d);
   out_shape[d] = total;
   auto out = at::empty(out_shape, kept[0].options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   std::vector<at::Tensor> ins_c;
   std::vector<std::unique_ptr<musa_ops::MudnnTensorWrapper>> wraps;
@@ -2886,6 +3295,10 @@ at::Tensor StackKernelMusa(at::TensorList tensors, int64_t dim) {
   for (const auto& t : kept) total += t.size(d);
   out_shape[d] = total;
   auto out = at::empty(out_shape, kept[0].options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   std::vector<at::Tensor> ins_c;
   std::vector<std::unique_ptr<musa_ops::MudnnTensorWrapper>> wraps;
@@ -2922,6 +3335,10 @@ at::Tensor GatherKernelMusa(
   auto self_c = self.contiguous();
   auto index_c = index.contiguous();
   auto out = at::empty(index.sizes(), self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
@@ -2950,6 +3367,10 @@ at::Tensor IndexSelectKernelMusa(
   auto out_shape = self.sizes().vec();
   out_shape[d] = index.numel();
   auto out = at::empty(out_shape, self.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
@@ -2989,6 +3410,10 @@ at::Tensor EmbeddingKernelMusa(
   std::vector<int64_t> flat_shape = weight.sizes().vec();
   flat_shape[0] = index_c.numel();
   auto out = at::empty(flat_shape, weight.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out.view(out_shape);
 
   musa_ops::MudnnTensorWrapper t_weight(weight_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
@@ -3279,6 +3704,10 @@ at::Tensor CumsumKernelMusa(
   auto self_c = self.to(acc).contiguous();
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options().dtype(acc));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -3306,6 +3735,10 @@ at::Tensor CumprodKernelMusa(
   auto self_c = self.to(acc).contiguous();
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options().dtype(acc));
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);

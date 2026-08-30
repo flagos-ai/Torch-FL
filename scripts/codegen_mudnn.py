@@ -363,7 +363,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -384,7 +384,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -408,7 +408,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary first;
   first.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -462,7 +462,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -489,7 +489,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -521,7 +521,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -570,7 +570,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
     + _SCALAR_PROLOGUE
     + """\
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -600,7 +600,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
     + _SCALAR_PROLOGUE
     + """\
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -632,7 +632,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
     + _SCALAR_PROLOGUE
     + """\
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -662,7 +662,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   std::vector<int64_t> out_shape = self.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, self.options());
-  auto self_c = self.contiguous();
+{empty_guard}  auto self_c = self.contiguous();
   auto mat2_c = mat2.contiguous();
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
@@ -766,7 +766,7 @@ at::Tensor {kernel}(
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
+{empty_guard}  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -809,6 +809,14 @@ at::Tensor {kernel}(
     self_c = self_c.contiguous();
   }}
   auto out = at::empty({{}}, self.options().dtype(out_dtype));
+{empty_guard}
+  // Reducing an empty input into a scalar: mudnn rejects the zero-element
+  // operand, but aten's answer is the reduction's identity ({identity_note}).
+  // Fill it on-device rather than launching or detouring through the host.
+  if (self_c.numel() == 0) {{
+    out.fill_({identity});
+    return out;
+  }}
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -832,7 +840,7 @@ at::Tensor {kernel}(const at::Tensor& self, c10::string_view approximate) {{
     return at::{at_op}(self.cpu(), approximate).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
@@ -856,7 +864,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   }}
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options());
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Softmax op;
@@ -941,7 +949,7 @@ at::Tensor {kernel}(
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options());
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
+{empty_guard}  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -976,7 +984,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool keepdim) {{
 
   auto self_b = self.scalar_type() == at::kBool ? self : self.ne(0);
   auto out = at::empty(squeezed_shape, self.options().dtype(at::kBool));
-  int mudnn_dim = static_cast<int>(d);
+{empty_guard}  int mudnn_dim = static_cast<int>(d);
 
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1022,7 +1030,7 @@ at::Tensor {kernel}(
                                                    : self.scalar_type());
   auto self_c = self.scalar_type() == out_dtype ? self : self.to(out_dtype);
   auto out = at::empty(squeezed_shape, self.options().dtype(out_dtype));
-  int mudnn_dim = static_cast<int>(d);
+{empty_guard}  int mudnn_dim = static_cast<int>(d);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1076,7 +1084,7 @@ at::Tensor {kernel}(
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options());
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
+{empty_guard}  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1136,7 +1144,7 @@ at::Tensor {kernel}(
     self_c = self_c.contiguous();
   }}
   auto out = at::empty(squeezed_shape, self.options());
-  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
+{empty_guard}  std::vector<int> mudnn_dims = musa_ops::ToMudnnDims(norm_dims, ndim);
 
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1322,7 +1330,7 @@ at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& self) {{
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1357,7 +1365,7 @@ at::Tensor {kernel}(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1396,7 +1404,7 @@ at::Tensor {kernel}(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1441,7 +1449,7 @@ at::Tensor {kernel}(
   auto grad_b = grad_c.expand(out_shape);
   auto self_b = self_c.expand(out_shape);
   auto out = at::empty(out_shape, grad_output.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_grad(grad_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1488,7 +1496,7 @@ at::Tensor {kernel}(
   auto t1_b = t1_c.expand(out_shape);
   auto t2_b = t2_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_t1(t1_b);
   musa_ops::MudnnTensorWrapper t_t2(t2_b);
@@ -1531,7 +1539,7 @@ at::Tensor {kernel}(
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_cond(cond_b);
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -1578,7 +1586,7 @@ at::Tensor {kernel}(
   std::vector<int64_t> out_shape = mat1.sizes().vec();
   out_shape.back() = mat2.size(-1);
   auto out = at::empty(out_shape, mat1.options());
-  auto mat1_c = mat1.contiguous();
+{empty_guard}  auto mat1_c = mat1.contiguous();
   auto mat2_c = mat2.contiguous();
 
   musa_ops::MudnnTensorWrapper t_mat1(mat1_c);
@@ -1638,7 +1646,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1659,7 +1667,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1679,7 +1687,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& {param}) {{
     return at::{at_op}(self.cpu(), {param}).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1700,7 +1708,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& {param}) {{
     return at::{at_op}(self.cpu(), {param}).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1724,7 +1732,7 @@ at::Tensor {kernel}(
     return at::{at_op}(self.cpu(), min, max).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1753,7 +1761,7 @@ at::Tensor {kernel}(
     return at::{at_op}(self.cpu(), beta, threshold).to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1782,7 +1790,7 @@ at::Tensor {kernel}(
         .to(self.device());
   }}
   auto out = at::empty(self.sizes(), self.options());
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Unary op;
   op.SetMode(musa_ops::mudnn::Unary::Mode::{mode});
@@ -1855,7 +1863,7 @@ at::Tensor {kernel}({list_type} tensors, int64_t dim) {{
   for (const auto& t : kept) total += t.size(d);
   out_shape[d] = total;
   auto out = at::empty(out_shape, kept[0].options());
-
+{empty_guard}
   std::vector<at::Tensor> ins_c;
   std::vector<std::unique_ptr<musa_ops::MudnnTensorWrapper>> wraps;
   std::vector<musa_ops::mudnn::Tensor> raw;
@@ -1897,7 +1905,7 @@ at::Tensor {kernel}(
   auto self_c = self.contiguous();
   auto index_c = index.contiguous();
   auto out = at::empty(index.sizes(), self.options());
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1931,7 +1939,7 @@ at::Tensor {kernel}(
   auto out_shape = self.sizes().vec();
   out_shape[d] = index.numel();
   auto out = at::empty(out_shape, self.options());
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -1976,7 +1984,7 @@ at::Tensor {kernel}(
   std::vector<int64_t> flat_shape = weight.sizes().vec();
   flat_shape[0] = index_c.numel();
   auto out = at::empty(flat_shape, weight.options());
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_weight(weight_c);
   musa_ops::MudnnTensorWrapper t_index(index_c);
   musa_ops::MudnnTensorWrapper t_out(out);
@@ -2234,7 +2242,7 @@ at::Tensor {kernel}(
   auto self_c = self.to(acc).contiguous();
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options().dtype(acc));
-
+{empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Cum op;
@@ -2519,6 +2527,7 @@ FILE_HEADER = """\
 #include <ATen/ops/result_type.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <vector>
 #include "../mudnn_common.h"
@@ -2542,6 +2551,10 @@ INC_HEADER = """\
 // without a kernel behind it fails the dispatcher's "backend not registered"
 // check, whereas an unregistered op simply reaches the cpu_fallback. So this
 // file is exactly the MUSA coverage set.
+//
+// The list also covers the handwritten mudnn convolution and native
+// muRAND/mudnn RNG kernels. Unsupported RNG schemas stay unregistered and
+// continue through cpu_fallback.
 
 """
 
@@ -2564,6 +2577,51 @@ def symbols(lib: Path):
         ["nm", "-DC", "--defined-only", str(lib)], capture_output=True, text=True
     )
     return set(re.findall(r"musa::dnn::(\w+)::", out.stdout))
+
+
+# mudnn rejects zero-element operands outright -- every mode probed on v3300
+# (Unary, Binary, Reduce, Fill, MatMul) answers NOT_SUPPORTED rather than
+# no-opping, and mudnn's UncontigHandle additionally faults. Empty tensors are
+# not an exotic input: a zero-length slice and its backward produce them, so the
+# kernels must handle them instead of erroring (issue #214). Where the *output*
+# is empty the answer carries no elements, so returning the allocation
+# unwritten is exactly aten's result and no launch is needed. This must stay on
+# device: a cpu() detour would silently move the result off the accelerator.
+#
+# A dim-wise reduce over an empty axis into a non-empty output is a separate
+# case, and mudnn already answers it correctly (measured on v3300: (4,0) reduced
+# over dim 1 gives sum 0, prod 1, mean nan, any false, all true, norm 0, all
+# matching CPU), so it is left alone. The whole-tensor reduce is the exception
+# handled by EMPTY_ALL_REDUCE_IDENTITY below: its output is a non-empty scalar,
+# so the guard here cannot fire, yet the empty input still trips mudnn.
+def empty_guard(ret_expr: str) -> str:
+    return (
+        "  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty\n"
+        "  // output holds no elements, so the allocation above is already the\n"
+        "  // answer. Return it on-device without launching.\n"
+        f"  if (out.numel() == 0) return {ret_expr};\n"
+    )
+
+
+# What each guarded template returns, so the guard's early return matches the
+# kernel's own final return (keepdim views included) instead of assuming `out`.
+EMPTY_GUARD_RETURN = {
+    "embedding": "out.view(out_shape)",
+    "reduce_bool": "keepdim ? out.view(out_shape) : out",
+    "reduce_correction": "keepdim ? out.view(out_shape) : out",
+    "reduce_dims_dtype": "keepdim ? out.view(out_shape) : out",
+    "reduce_dims_plain": "keepdim ? out.view(out_shape) : out",
+    "reduce_norm": "keepdim ? out.view(out_shape) : out",
+    "reduce_prod": "keepdim ? out.view(out_shape) : out",
+}
+
+# aten's whole-tensor reduction of an empty input, measured on CPU: sum 0,
+# mean nan (0/0), prod 1. Only these three ops use reduce_all_dtype.
+EMPTY_ALL_REDUCE_IDENTITY = {
+    "ADD": ("0", "sum -> 0"),
+    "MEAN": ("std::numeric_limits<double>::quiet_NaN()", "mean -> nan"),
+    "PROD": ("1", "prod -> 1"),
+}
 
 
 def wrapper_map():
@@ -2624,6 +2682,7 @@ def main():
             fn=fn,
             disp=disp,
             at_op=AT_OP_OVERRIDES.get(op, base),
+            empty_guard=empty_guard(EMPTY_GUARD_RETURN.get(cat, "out")),
             promote_integral="true" if base == "sum" else "false",
             dtype_pred=(
                 "MudnnSupportsArithmeticDtype"
@@ -2631,6 +2690,14 @@ def main():
                 else "MudnnSupportsDtype"
             ),
         )
+        if cat == "reduce_all_dtype":
+            if mode_name not in EMPTY_ALL_REDUCE_IDENTITY:
+                raise SystemExit(
+                    f"{op}: reduce_all_dtype mode {mode_name} has no empty-input "
+                    "identity; add it to EMPTY_ALL_REDUCE_IDENTITY"
+                )
+            ident, note = EMPTY_ALL_REDUCE_IDENTITY[mode_name]
+            fmt["identity"], fmt["identity_note"] = ident, note
         if cat == "unary_alpha_const":
             fmt["alpha"] = extra[0]
         elif cat == "unary_two_pass":
