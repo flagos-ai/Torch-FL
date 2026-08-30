@@ -172,6 +172,16 @@ and forward/backward optimizer execution. CPU-to-DCU copies and representative e
 reduction, matrix multiplication, and backward operations preserve all tested PyTorch dtypes from
 bool through complex128, including float64.
 
+The DCU wheel runs DTK's device libraries on the **official** PyTorch core rather
+than DTK's forked one, so the installed `torch` must match the minor version the
+bundle was built against (`2.10.0` for DTK 2604), and `torch_fl` must be imported
+before `torch` in a fresh process. The 32 DTK-private ATen symbols the device
+libraries and the plugin import are supplied by `libflagos_dtk_core_compat.so`,
+whose coverage is re-proved from the binaries on every bundle; DTK's private fused
+ops (`aten::native_fuse_rmsnorm` and friends) are therefore unreachable unless the
+build and runtime both set `FLAGOS_DCU_VENDOR_CORE=1`. See
+[DCU without DTK's core libraries](../vendors/dcu/vendor-free-core-libs.md).
+
 `torch.compile(backend="flagos")` is experimentally validated on Hygon with a
 FlagTree 0.6.0 HCU build and PyTorch 2.10.0. The full compile integration suite
 passes on the `gfx936` target, including forward and backward execution, FP32

@@ -15,7 +15,10 @@ The build is **pure boxing**: `CUDA_KERNEL`, `FLAGGEMS_KERNEL`, and `FLAGGEMS_PY
 
 - Hygon DCU hardware with driver installed
 - DTK (Hygon Deep Learning Toolkit) installed at `/opt/dtk` (or `$DTK_ROOT`/`$ROCM_PATH`)
-- DTK torch wheel (hipified, registers kernels under CUDA dispatch key)
+- DTK torch wheel (hipified, registers kernels under CUDA dispatch key) — its
+  device libraries are bundled at build time; see [Vendor core libraries](#vendor-core-libraries)
+- The **official** `torch` wheel of the same minor version installed in the build
+  and runtime environment (the `+cpu` build is enough)
 - Python 3.8 or later matching the DTK torch build
 - `cmake >= 3.18`, `ninja`, `patchelf`
 
@@ -41,6 +44,40 @@ ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
 - **`ACCELERATOR=dcu` forces boxing mode:** `CUDA_KERNEL=OFF`, `FLAGGEMS_KERNEL=OFF`, `FLAGGEMS_PYTHON=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) are the only kernel set compiled.
 - **No `nvcc` or `hipcc` needed:** CUDA runtime sources compile with plain `g++` using DTK's CUDA compatibility toolkit headers.
 - **MIOpen CMake config fix:** DTK's exported MIOpen config bakes in `/usr/lib/x86_64-linux-gnu/librt.so`, which no longer exists on glibc ≥ 2.34 (librt was folded into libc). The `ACCELERATOR=dcu` branch rewrites that dangling path to `-lrt`.
+
+## Vendor core libraries
+
+The DCU wheel bundles DTK's **device** libraries (`libtorch_hip.so`,
+`libc10_hip.so`, `libmagma.so`) and runs them on the **official** PyTorch core.
+`torch_fl` dlopens them before `import torch`; your torch installation is not
+modified. Operator coverage is unchanged — the HIP kernels still register under
+the `CUDA` dispatch key.
+
+Two consequences worth knowing:
+
+- The installed torch must match the minor version the bundle was built against.
+  A mismatch is rejected at import with the required version named, because
+  `dlopen` accepts it silently (the symbol names match) and the failure would
+  otherwise appear as a wrong-looking result much later.
+- Import order matters: `import torch_fl` **before** `torch` in a fresh process.
+  PyTorch caches its CUDA hooks on first import, so a later preload registers
+  kernels that device init cannot reach.
+
+To build the bundle:
+
+```bash
+ACCELERATOR=dcu python setup.py build_ext --inplace   # builds the ABI shim
+bash scripts/bundle_dcu_libtorch.sh                    # stages DTK's device libs
+```
+
+`FLAGOS_DCU_VENDOR_CORE=1` on both commands selects the legacy mode, which
+bundles DTK's full core set and symlinks it over the installed torch wheel
+(reversible via `torch/lib/_orig_backup/`). Use it if you need DTK's private
+fused ops, which are unreachable in the default mode. The two bundle layouts are
+not interchangeable: selecting a mode that does not match the bundle on disk
+fails at import rather than half-wiring the process.
+
+Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 
 ## Verification
 
@@ -276,6 +313,7 @@ PyTorch's `register_privateuse1_backend` makes `at::getAccelerator()` return `Pr
 
 ## Further Reading
 
+- [DCU without DTK's core libraries](vendor-free-core-libs.md) — measured symbol attribution, the 32-symbol ABI shim, and the preload order
 - [Environment Variables](../../reference/environment-variables.md) — Complete runtime configuration reference
 - [Profiler Architecture](../../architecture/profiler.md) — Device event emission for DCU
 - [Distributed (FlagCX)](../../architecture/distributed-flagcx.md) — Multi-GPU collectives and RCCL fallback

@@ -232,11 +232,13 @@ def _relink_vendor_libtorch() -> None:
             return
 
     if accel == "dcu":
-        from torch_fl.accelerator.dcu._dcu_libtorch_link import (
-            ensure_dcu_libtorch_links,
-        )
+        # Decoupled by default: preload only DTK's device libraries on top of the
+        # official core, leaving torch/lib untouched. FLAGOS_DCU_VENDOR_CORE=1
+        # selects the legacy full-core relink. See
+        # torch_fl/accelerator/dcu/_dcu_libtorch_link.py.
+        from torch_fl.accelerator.dcu._dcu_libtorch_link import setup_dcu_runtime
 
-        ensure_dcu_libtorch_links()
+        setup_dcu_runtime()
         return
 
     # PPU builds as ACCELERATOR=cuda (it targets PPU_SDK/CUDA_SDK), so the only
@@ -373,6 +375,30 @@ def _disable_vendor_backend_autoload() -> None:
     os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 
 
+def _validate_dcu_decoupled_runtime() -> None:
+    """Prove the DTK device libs really bound to the official core.
+
+    Only runs for a decoupled DCU build (ACCELERATOR=dcu without
+    FLAGOS_DCU_VENDOR_CORE=1), right after `import torch`; the checks themselves
+    live in accelerator/dcu/_dcu_runtime_check.py. Set
+    FLAGOS_DCU_SKIP_RUNTIME_CHECK=1 to bypass (e.g. when deliberately testing a
+    non-matching wheel pair).
+    """
+    if _build_accelerator() != "dcu":
+        return
+    if os.environ.get("FLAGOS_DCU_SKIP_RUNTIME_CHECK", "0") == "1":
+        return
+
+    from torch_fl.accelerator.dcu._dcu_libtorch_link import vendor_core_mode
+
+    if vendor_core_mode():
+        return  # legacy mode replaces the core wholesale; nothing to reconcile.
+
+    from torch_fl.accelerator.dcu._dcu_runtime_check import validate_decoupled_runtime
+
+    validate_decoupled_runtime(os.path.join(os.path.dirname(__file__), "lib_dcu"))
+
+
 def _check_privateuse1_unclaimed() -> None:
     """Fail with an actionable message if a vendor plugin already took the key.
 
@@ -398,6 +424,10 @@ _preload_cuda_assets()
 _disable_vendor_backend_autoload()
 
 import torch  # noqa: E402
+
+# Immediately after `import torch`, and before anything relies on CUDA dispatch:
+# confirm the DTK device libraries actually bound to the official core.
+_validate_dcu_decoupled_runtime()
 
 if sys.platform == "win32":
     from ._utils import _load_dll_libraries
@@ -776,8 +806,18 @@ def _patch_flaggems_codegen_config():
         # from the bundled libtorch's own version so triton sees a HIP torch,
         # matching what the vendor wheel reported.
         _restore_dcu_hip_version()
-        from torch_fl.accelerator.dcu._dcu_compat import install_dcu_rng_bridge
+        from torch_fl.accelerator.dcu._dcu_compat import (
+            install_dcu_rng_bridge,
+            patch_torch_cuda_for_dcu,
+        )
 
+        # Order matters. A decoupled DCU wheel runs on the official torch+cpu
+        # wheel, whose torch.cuda reports is_available()=False and raises from
+        # _lazy_init() ("Torch not compiled with CUDA enabled") -- the other half
+        # of triton's hcu gate, alongside the torch.version.hip restored above. So
+        # patch torch.cuda first (a no-op when a real DTK torch is in front), then
+        # bridge the flagos RNG onto the CUDA generators it now exposes.
+        patch_torch_cuda_for_dcu()
         install_dcu_rng_bridge()
         return
 

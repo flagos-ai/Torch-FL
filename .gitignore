@@ -5,6 +5,8 @@ cmake-build*/
 torch_fl/lib/
 torch_fl/include/
 torch_fl/lib_maca/
+# DTK device-library bundle written by scripts/bundle_dcu_libtorch.sh; not source.
+torch_fl/lib_dcu/
 torch_fl/.nfs*
 # Machine-local staging dir/symlink for the external libtorch_cuda.so assets
 # (scripts/with_cuda_libtorch.sh, setup.py). Path differs per machine; not source.
