@@ -113,6 +113,71 @@ class TestPowTensorScalarCorrectness:
         torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-6, atol=1e-6)
 
 
+class TestPowZeroElement:
+    """Zero-element pow must stay on the device (regression for issue #214).
+
+    mudnn rejects zero-element operands with NOT_SUPPORTED, so the MUSA kernels
+    short-circuit before launching. The result must still be a correctly shaped
+    device tensor -- not a host tensor and not an error -- because empty
+    intermediates arise naturally from zero-length slices and their backward.
+    """
+
+    @pytest.mark.parametrize("shape", [(0,), (0, 8), (4, 0), (3, 0, 5)])
+    @pytest.mark.anyplatform
+    def test_pow_scalar_empty(self, shape):
+        a = torch.randn(*shape, device=DEVICE)
+        out = torch.pow(a, 2.0)
+        assert out.device.type == "flagos"
+        assert out.shape == shape
+        assert out.numel() == 0
+        assert out.dtype == a.dtype
+
+    @pytest.mark.parametrize("shape", [(0,), (0, 8), (4, 0)])
+    @pytest.mark.anyplatform
+    def test_pow_tensor_empty(self, shape):
+        a = torch.randn(*shape, device=DEVICE)
+        b = torch.randn(*shape, device=DEVICE)
+        out = torch.pow(a, b)
+        assert out.device.type == "flagos"
+        assert out.shape == shape
+        assert out.numel() == 0
+
+    @pytest.mark.anyplatform
+    def test_pow_tensor_empty_broadcast(self):
+        """Broadcasting a non-empty operand against an empty one still empties."""
+        a = torch.randn(4, 0, device=DEVICE)
+        b = torch.randn(4, 1, device=DEVICE)
+        out = torch.pow(a, b)
+        assert out.device.type == "flagos"
+        assert out.shape == (4, 0)
+
+    @pytest.mark.anyplatform
+    def test_pow_empty_backward(self):
+        """The zero-length-slice gradient path from issue #214."""
+        base = torch.randn(4, 8)
+        x_fl = base.to(DEVICE).detach().requires_grad_(True)
+        x_ref = base.clone().detach().requires_grad_(True)
+
+        torch.narrow(x_fl, 1, 2, 0).square().sum().backward()
+        torch.narrow(x_ref, 1, 2, 0).square().sum().backward()
+
+        assert x_fl.grad.device.type == "flagos"
+        torch.testing.assert_close(x_fl.grad.cpu(), x_ref.grad)
+
+    @pytest.mark.anyplatform
+    def test_pow_nonempty_unaffected(self):
+        """The empty guard must not perturb the ordinary path."""
+        torch.manual_seed(6)
+        a = torch.randn(16, 16, device=DEVICE).abs() + 0.1
+        b = torch.randn(16, 16, device=DEVICE).abs() + 0.1
+        torch.testing.assert_close(
+            torch.pow(a, 2.0).cpu(), torch.pow(a.cpu(), 2.0), rtol=1e-4, atol=1e-4
+        )
+        torch.testing.assert_close(
+            torch.pow(a, b).cpu(), torch.pow(a.cpu(), b.cpu()), rtol=1e-4, atol=1e-4
+        )
+
+
 class TestPowTensorScalarDispatch:
     """Verify dispatch routing for pow.Tensor_Scalar op."""
 

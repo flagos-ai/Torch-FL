@@ -118,15 +118,13 @@ integration_tests:
   # the anyplatform/main_ops subset that routes to the native mudnn backend.
   #
   # Ordered AFTER the contract groups (general/AMP/math-bits): this group has
-  # two known MUSA backend gaps (filed as issues; see issue_body.md):
-  #   1. narrow zero-length-slice backward -- mudnn pow rejects empty tensors
-  #      (test_narrow_backward_edge_cases[1-2-0]).
-  #   2. torch.mm on float64 -- mudnn GEMM has no double-precision path
+  # one known MUSA backend gap (filed as an issue; see issue_body.md):
+  #   1. torch.mm on float64 -- mudnn GEMM has no double-precision path
   #      (test_mm_still_runs[dtype3]).
-  # Both are deselected below so the pipeline can complete end to end while
-  # the dev fixes are queued. Remove each --deselect once the corresponding
-  # fix lands. run_integration_tests.py stops on the first non-zero group, so
-  # this ordering lets the contract groups above go green first.
+  # It is deselected below so the pipeline can complete end to end while the
+  # dev fix is queued. Remove the --deselect once the fix lands.
+  # run_integration_tests.py stops on the first non-zero group, so this
+  # ordering lets the contract groups above go green first.
   #
   # test_rng_dispatch.py is explicitly ignored here even though its tests carry
   # @pytest.mark.(anyplatform + main_ops) and would otherwise be collected:
@@ -145,7 +143,6 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/ops/
       --ignore=tests/integration/ops/test_rng_dispatch.py
-      --deselect "tests/integration/ops/test_narrow_dispatch.py::TestNarrowAutograd::test_narrow_backward_edge_cases[1-2-0]"
       --deselect "tests/integration/ops/test_soft_lowp_gate_dispatch.py::TestSoftLowpGateLeavesFloatPathsAlone::test_mm_still_runs[dtype3]"
       -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
       -v -s --tb=short
