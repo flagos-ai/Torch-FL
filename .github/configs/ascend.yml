@@ -116,6 +116,12 @@ integration_tests:
       python -m pytest tests/integration/test_math_bits_contract.py
       -v -m math_bits --tb=short
 
+  # Byte-identical to every other platform's profiler step. Ascend's extra
+  # prerequisite -- the process-start libmspti.so that CANN 9.0 needs for
+  # aclrtMemcpy*/aclrtMemset* interposition, which a later dlopen cannot supply
+  # -- is established by set_env_ascend.sh alongside every other Ascend
+  # environment prerequisite, so no vendor detail leaks into the test command.
+  # See docs/architecture/profiler.md.
   - name: Unified profiler contract
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
@@ -123,6 +129,11 @@ integration_tests:
 
   # Device-only contract cases skip through profiler capabilities while the
   # Ascend tracer exposes CPU/Trace records only. CPU/API coverage still runs.
+  # Memset stays off even with MSPTI loaded: torch.zeros() -- the only zeroing
+  # op reachable from the shared profile_result() workload -- routes through the
+  # aclnnInplaceZero kernel, not the allocator's aclrtMemset calls, because that
+  # kernel was measured far faster (12.7us vs 133us at 1 MiB on 910). The
+  # missing gpu_memset record is a consequence of that routing choice.
   # ---------------------------------------------------------------------------
   # Follow-up (not part of first-version acceptance). Tracked here so the
   # upstream gaps not yet covered by CI are not lost:
