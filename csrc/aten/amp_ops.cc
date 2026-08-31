@@ -39,7 +39,6 @@ void amp_foreach_non_finite_check_and_unscale(
       "flagos AMP non-finite check expects device tensors for found_inf and "
       "inv_scale");
 
-  auto found_inf_cpu = to_cpu_sync(found_inf);
   auto inv_scale_cpu = to_cpu_sync(inv_scale);
   bool any_non_finite = false;
 
@@ -55,12 +54,16 @@ void amp_foreach_non_finite_check_and_unscale(
     copy_cpu_to_device(tensor_cpu, mutable_tensor);
   }
 
+  // found_inf accumulates: the operator only ever sets it, and never clears a
+  // value written by an earlier call. GradScaler groups gradients by (device,
+  // dtype) and calls this once per group with one shared found_inf tensor, so
+  // clearing it here would discard an overflow found in a previous group and
+  // let the optimizer step apply non-finite gradients.
   if (any_non_finite) {
+    auto found_inf_cpu = to_cpu_sync(found_inf);
     found_inf_cpu.fill_(1);
-  } else {
-    found_inf_cpu.zero_();
+    copy_cpu_to_device(found_inf_cpu, found_inf);
   }
-  copy_cpu_to_device(found_inf_cpu, found_inf);
 }
 
 void amp_foreach_non_finite_check_and_unscale_out(
