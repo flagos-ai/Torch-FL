@@ -2563,6 +2563,24 @@ def main():
             # flag_gems launch integration. Keep on the CUDA boxing path until
             # launches are ordered with the flagos current stream.
             "index_select",
+            # (5) the recorded qualname names a gems callable that no longer
+            # exists. Discovery freezes `fn.__module__ + "." + fn.__name__` into
+            # the generated kernel, so a config is only valid against the exact
+            # FlagGems cohort it was generated from -- these 10 were present in
+            # the 7fb49bad cohort but not in 5.3.5. PythonOpCache::GetFunc then
+            # fails both its module import and its flag_gems.ops retry, and the
+            # op raises AttributeError on first call rather than degrading.
+            # `unsqueeze` is the worst of these: plain `x[None]` breaks.
+            "_embedding_bag_per_sample_weights_backward",
+            "_native_batch_norm_legit_functional",
+            "binary_cross_entropy_with_logits",
+            "cudnn_batch_norm_backward",
+            "igammac_",
+            "linalg_ldl_solve",
+            "max_unpool3d",
+            "special_bessel_j1",
+            "unsqueeze",
+            "unsqueeze_",
         }
 
         # backends_flaggems.conf: same cuda routes, but the auto-discovered
