@@ -43,8 +43,8 @@ Default to the latest `transformers`. Pin an older line only to reproduce a
 known-good state or to check a regression:
 
 ```bash
-python tests/manual/hf_model_probe.py --model qwen3
-python tests/manual/hf_model_probe.py --model qwen3 --transformers-version 4.50.2
+python tests/manual/transformers_model_probe.py --model qwen3
+python tests/manual/transformers_model_probe.py --model qwen3 --transformers-version 4.50.2
 ```
 
 Install each requested `transformers` into its own cached virtual environment
@@ -72,15 +72,22 @@ environment failure, not a coverage data point.
 
 ## Step 2 — inject `flagos` as the HF test device
 
-`transformers` supports a third-party device through two environment variables
-and a spec module. It validates only that the device name is constructible by
-`torch.device`, so `flagos` is accepted without patching HF:
+`transformers` supports a third-party device through a device-spec module.
+The spec imports `torch_fl`, registers the PrivateUse1 name, and supplies the
+backend hooks that HuggingFace needs:
 
 ```bash
-export TRANSFORMERS_TEST_DEVICE=flagos
 export TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py
-export RUN_THIRD_PARTY_DEVICE_TESTS=1
 ```
+
+Do not set `TRANSFORMERS_TEST_DEVICE=flagos` for Transformers 5.16.1: that
+release validates the variable with `torch.device()` before importing the spec,
+so a custom PrivateUse1 name is not accepted at that point. The spec's
+`DEVICE_NAME` becomes the effective test device after it is loaded.
+
+For built-in devices, `TRANSFORMERS_TEST_DEVICE` remains available as an
+alternative to a spec file.
+
 
 The spec module must define `DEVICE_NAME` plus the three backend hooks HF
 dispatches on; a missing hook raises at import unless HF has a default:
@@ -97,11 +104,29 @@ Note the gating split this produces, and do not try to defeat it:
 `require_torch_gpu` skips because it compares against `cuda` literally. Cases
 skipped by `require_torch_gpu` are CUDA-specific and are not coverage gaps.
 
-The `transformers` wheel ships no `tests/` directory. The per-model probe in
-this skill therefore does not need an HF source checkout. A checkout is required
-only for the optional `--hf-tests` mode, and its `git describe` must match the
-installed `transformers` version — a version-mismatched checkout produces
-failures that belong to HF, not to torch_fl.
+The `transformers` wheel ships no `tests/` directory. The synthetic probe
+(`tests/manual/transformers_model_probe.py`) does not need an HF source checkout.
+To run HuggingFace's own assertions, use the official runner:
+
+```bash
+python tests/manual/transformers_hf_tests.py --model qwen3
+```
+
+It obtains a cached source tree for the exact installed version, verifies the
+version declared by `src/transformers/__init__.py`, and runs only
+`tests/models/<module>/` for that architecture. Set `--source-dir` to use a
+prepared tree, or use `--offline` to require an existing versioned cache. A
+version-mismatched source tree produces failures that belong to HF, not to
+torch_fl. The runner injects `flagos` through
+`TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py`.
+
+The actual device contract used here is `TRANSFORMERS_TEST_DEVICE_SPEC` and
+the three hooks in the spec module. No third-party test switch or other
+pass-oriented environment override is added.
+
+The official runner preserves per-test JSON evidence and does not create issues.
+Baseline promotion, fingerprint deduplication, and GitHub issue creation remain
+a separate opt-in follow-up.
 
 ## Step 3 — probe one model in layers
 
@@ -227,13 +252,16 @@ The first run on a platform records a baseline and files nothing. Later runs
 file only fingerprints absent from the baseline. Issue filing stays opt-in:
 
 ```bash
-# first run on a platform: record the baseline, file nothing
-python tests/manual/hf_model_probe.py --model qwen3 --promote-baseline
-
-# later runs: file only newly appeared failures
-python tests/manual/hf_model_probe.py --model qwen3 \
-  --baseline docs/reference/hf-coverage-baseline-musa.json --file-issues
+# first run on a platform: keep the JSON as the baseline, file nothing
+python tests/manual/transformers_hf_tests.py --model qwen3 \
+  --out results/musa/qwen3.json
 ```
+
+Baseline promotion, fingerprint diffing, and issue filing are not implemented in
+either harness yet. Both write per-result JSON with normalized failure
+fingerprints; the reporter that compares against a baseline and writes to the
+tracker is a separate change. Until it exists, filing is a manual decision made
+from the JSON, not something a run performs.
 
 Default to report-only. Opening issues writes to a shared tracker and cannot be
 cleanly undone, so it must be requested explicitly rather than inferred.
