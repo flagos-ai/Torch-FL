@@ -1,0 +1,88 @@
+{
+  "composite_count": 878,
+  "dispatch_key": "PrivateUse1",
+  "dtypes": [
+    "float32",
+    "float64",
+    "int32",
+    "int64",
+    "bool"
+  ],
+  "evidence_gap": "Route classification is static. Generated SDK rows and every other category require DCU hardware validation before being advertised as supported.",
+  "fallback": "FlagGems-first, SDK-native category fallback, explicit unsupported",
+  "flaggems_count": 480,
+  "generated_kernel_count": 19,
+  "hardware_validation": {
+    "architecture": "gfx936",
+    "status": "not revalidated"
+  },
+  "known_slot_count": 2034,
+  "layouts": [
+    "contiguous",
+    "transposed",
+    "storage_offset"
+  ],
+  "library": "libdcu_aten_ops.so",
+  "offered_kernel_count": 19,
+  "operator_count": 19,
+  "operators": [
+    "abs.out",
+    "acos.out",
+    "acosh.out",
+    "asin.out",
+    "atan.out",
+    "atanh.out",
+    "bitwise_and.Tensor_out",
+    "bitwise_or.Tensor_out",
+    "bitwise_xor.Tensor_out",
+    "cos.out",
+    "erf.out",
+    "erfc.out",
+    "exp2.out",
+    "frac.out",
+    "gcd.out",
+    "hypot.out",
+    "log.out",
+    "log2.out",
+    "nextafter.out"
+  ],
+  "provenance": {
+    "evidence_gap": "SDK-native rows require per-category hardware validation before support is claimed.",
+    "hardware": "not revalidated",
+    "source": "scripts/codegen_dtk.py",
+    "validation": "static route classification only"
+  },
+  "real_kernel_target_count": 539,
+  "registration_abi": 2,
+  "route_count": 2034,
+  "route_states": {
+    "composite": 878,
+    "dcu_sdk": 19,
+    "flaggems": 480,
+    "structured_delegate": 133,
+    "unsupported": 520,
+    "view": 4
+  },
+  "schema_version": 2,
+  "sdk": "dtk",
+  "sdk_category_count": 19,
+  "sdk_only": {
+    "enabled": true,
+    "forbidden_routes": [
+      "cuda"
+    ],
+    "vendor_torch_libraries": false
+  },
+  "sdk_version": "DTK-26.04-rc4",
+  "stream_behavior": "caller-current-stream-asynchronous",
+  "structured_delegate_count": 133,
+  "torch_abi": "cxx11",
+  "torch_base": "2.10.0",
+  "torch_version": {
+    "major": 2,
+    "minor": 10,
+    "patch": 0
+  },
+  "unsupported_count": 520,
+  "view_count": 4
+}

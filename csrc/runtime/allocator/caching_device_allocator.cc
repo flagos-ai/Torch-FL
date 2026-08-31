@@ -119,9 +119,15 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
 
   // Delegation path: the backend ships its own caching allocator (e.g. CUDA).
   // Route the allocation through it so flagos `empty` and boxed-kernel outputs
-  // share one pool. We skip the built-in block pool entirely.
+  // share one pool. We skip the built-in block pool entirely. Pass the actual
+  // current stream on DCU: the SDK-native route and the HIP boxing route must
+  // both be able to associate allocations with the stream that consumes them.
+  Stream_t stream = nullptr;
+#if defined(USE_DCU)
+  stream = ::GetCurrentStreamForDevice(device);
+#endif
   if (backend_->provides_caching()) {
-    void* ptr = backend_->caching_alloc(nbytes, /*stream=*/nullptr);
+    void* ptr = backend_->caching_alloc(nbytes, stream);
     TORCH_CHECK(
         ptr != nullptr,
         "CachingDeviceAllocator (delegated): failed to allocate ",
@@ -133,11 +139,7 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
                         static_cast<c10::DeviceIndex>(device))};
   }
 
-  // Use nullptr as stream for default stream allocations.
-  // In a more complete implementation, we would get the current stream.
-  Stream_t stream = nullptr;
-
-  Block* block = alloc_block(nbytes, stream, device);
+  Block* block = alloc_block(nbytes, stream, device);  // built-in pool path
   TORCH_CHECK(
       block != nullptr,
       "CachingDeviceAllocator: failed to allocate ",

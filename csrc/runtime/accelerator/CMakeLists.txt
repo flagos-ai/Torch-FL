@@ -86,8 +86,13 @@ elseif(ACCELERATOR STREQUAL "tsingmicro")
 elseif(ACCELERATOR STREQUAL "dcu")
   # DTK's CUDA compatibility toolkit provides cuda_runtime.h and a libcudart
   # shim over libgalaxyhip, so the CUDA runtime sources build unchanged --
-  # no nvcc (plain host g++). dcu/ contains only the DTK-core ABI shim below.
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc")
+  # no nvcc (plain host g++). dcu/ adds the DTK-core ABI shim (a separate target
+  # below) plus stream_registry.cc, which supplies the per-device current-stream
+  # entry points the CUDA sources leave to c10::cuda on NVIDIA -- see the file's
+  # header comment and runtime/guard.h's USE_DCU branches.
+  file(GLOB SOURCE_FILES
+      "${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dcu/stream_registry.cc")
 
   add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 
