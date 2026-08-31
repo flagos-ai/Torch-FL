@@ -404,11 +404,49 @@ regressing into dangling halves is precisely the bug it guards against.
 
 Ascend profiling is implemented in `csrc/profiler/cann_device_tracer.cc` using CANN's public MSPTI activity API. It does not import `torch_npu`, parse file-oriented `msprof` output, or add CANN types to the generic Kineto adapter. MSPTI supplies epoch-nanosecond kernel, runtime/API, memcpy, and external-correlation records through asynchronous activity buffers; the tracer also decodes memset records when a CANN release emits them.
 
-`torch_fl` does not load `libmspti.so` during import. The C++ tracer resolves it lazily when a profiler session starts, so ordinary Ascend operator processes do not install the CANN interposer or pay its lifecycle cost. CANN 9.0 additionally checks the ELF process-start `LD_PRELOAD` state for memcpy and memset interception. A later `dlopen` cannot replace that requirement, so the memory-activity test is run with `LD_PRELOAD=/usr/local/Ascend/cann-9.0.0/tools/mspti/lib64/libmspti.so`. Without that process-start preload, the tracer degrades to kernel/runtime profiling and reports no memcpy/memset records. The library is optional: if it is absent, another MSPTI subscriber already owns the process, or activation fails, CPU profiling continues normally. MSPTI shutdown follows the measured order: unsubscribe first, then flush pending activity buffers; the tracer deliberately keeps the process-level MSPTI library loaded until process exit because CANN may retain interposed ACL function pointers.
+`torch_fl` does not load `libmspti.so` during import. The C++ tracer resolves it lazily when a profiler session starts, so ordinary Ascend operator processes do not install the CANN interposer or pay its lifecycle cost. Kernel and runtime/API records work under that lazy load.
+
+**Memcpy and memset are different**: CANN implements them by symbol interposition, so `libmspti.so` must already be in the ELF link map when `libascendcl.so` resolves those calls. A later `dlopen` cannot substitute, no matter how early it runs — measured with a standalone C program (no torch involved):
+
+```text
+no LD_PRELOAD, dlopen(mspti) then dlopen(ascendcl):  gpu_memcpy=0 gpu_memset=0
+LD_PRELOAD=libmspti.so:                              gpu_memcpy=3 gpu_memset=3
+```
+
+This is a *process startup* requirement. `.github/scripts/set_env_ascend.sh` therefore discovers the library next to every other Ascend startup prerequisite, but stores the prepared preload under the inert `ASCEND_MSPTI_PRELOAD` variable. The common integration runner supports a per-test `environment` mapping and expands that value into `LD_PRELOAD` only for the profiler contract process. The contract is still invoked with the identical command on every platform:
+
+```bash
+python -m pytest tests/integration/test_profiler_contract.py -v -m profiler
+```
+
+This narrow scope is required for correctness, not merely tidiness. A CI run that exported MSPTI job-wide produced sporadic `SIGSEGV` (`-11`) exits in otherwise healthy add, embedding, le, mean, and mm subprocesses before the profiler test was reached. CANN 9.0's interposer is therefore not safe to impose on arbitrary operator processes. Attaching the prerequisite as structured per-test environment data preserves the uniform command without destabilizing unrelated tests.
+
+Outside CI, the equivalent remains an environment export before starting the profiled Python process:
+
+```bash
+export LD_PRELOAD="$ASCEND_HOME/tools/mspti/lib64/libmspti.so${LD_PRELOAD:+:$LD_PRELOAD}"
+python workload.py
+```
+
+The environment script skips the prepared preload when the file is absent, so a CANN image without the profiling tools does not get an `LD_PRELOAD` that `ld.so` can only warn about.
+
+If the library is absent, another MSPTI subscriber already owns the process, or activation fails, CPU profiling continues normally. MSPTI shutdown follows the measured order: unsubscribe first, then flush pending activity buffers; the tracer deliberately keeps the process-level MSPTI library loaded until process exit because CANN may retain interposed ACL function pointers.
 
 MSPTI correlation IDs are remapped to nonzero 32-bit IDs for Kineto flow arrows. External-correlation records retain torch's profiler correlation ID separately, which enables linked ATen device-time attribution. Runtime records are coalesced per device correlation, preferring launch APIs for kernels and the corresponding copy/set API for transfers. Physical CANN device IDs are mapped to logical ordinals through `ASCEND_RT_VISIBLE_DEVICES` when set.
 
-The public CANN kernel record has no CUDA grid/block/occupancy fields; those fields are omitted rather than fabricated. CANN 9.0 declares `MSPTI_ACTIVITY_KIND_MEMSET` and emits real device records when the ACL memset symbols are resolved through the process-start MSPTI interposer. A direct global-symbol probe using `ctypes.CDLL(None)` produced positive-duration records for both `aclrtMemset` and `aclrtMemsetAsync`, including byte count, fill value, async flag, stream, device, and correlation metadata. A prior probe that called symbols through a separately loaded `libascendcl.so` handle bypassed the interposer and produced a false negative; it is not a valid capability test. Official Huawei MSPTI samples use the same process-start `LD_PRELOAD=libmspti.so` requirement. torch-fl therefore treats process-start preload as required for real memcpy/memset collection and verifies both memset variants in the Ascend integration gate. The implementation was measured on Ascend 910 hardware with CANN 9.0. Other CANN releases may remain unavailable until their MSPTI headers and runtime behavior are validated. Structural Ascend tests check real named positive-duration kernel/runtime/memcpy/memset activities, paired `ac2g` flows, external-correlation linkage, Chrome trace JSON, and repeated sessions.
+The public CANN kernel record has no CUDA grid/block/occupancy fields; those fields are omitted rather than fabricated. CANN 9.0 declares `MSPTI_ACTIVITY_KIND_MEMSET` and emits real device records when the ACL memset symbols are resolved through the process-start MSPTI interposer. A direct global-symbol probe using `ctypes.CDLL(None)` produced positive-duration records for both `aclrtMemset` and `aclrtMemsetAsync`, including byte count, fill value, async flag, stream, device, and correlation metadata. A prior probe that called symbols through a separately loaded `libascendcl.so` handle bypassed the interposer and produced a false negative; it is not a valid capability test. Other CANN releases may remain unavailable until their MSPTI headers and runtime behavior are validated.
+
+The shared cross-backend profiler contract (`tests/integration/test_profiler_contract.py` and `tests/integration/profiler_support.py`) exercises this on Ascend, but its memcpy and memset assertions are not symmetric. Both were measured on hardware against the same shared `profile_result()` workload (a small matmul+relu loop, a sort, and a host-to-device copy):
+
+- `test_profiler_memcpy_events` is gated on `mspti_preload_active()`, which checks `/proc/self/maps` for the actually loaded `libmspti.so` rather than trusting the `LD_PRELOAD` string. When the environment script has made the library available before process start, the workload's host-to-device copy produces a real positive-duration `gpu_memcpy` record; a missing or invalid library causes the test to skip explicitly instead of claiming a capability it does not have. The link map is sampled once at `profiler_support` import, which is the only moment that answers the question: the module is loaded as a pytest plugin before anything starts a profiler session, so a hit there can only come from a process-start preload. Sampling later would also see the lazy `dlopen` in `CannDeviceTracer::start()`, which does *not* enable interposition — measured on 910, a late check reports "preloaded" and then the memcpy assertion fails on a workload that produced no records.
+- `test_profiler_memset_events` stays disabled for Ascend regardless of preload. The direct `ctypes` probe above proves the CANN interception path itself works: `aclrtMemset`/`aclrtMemsetAsync` produce real `gpu_memset` records when called explicitly under preload. But nothing reachable from the shared workload calls that allocator path. `torch.zeros()` -- the only zeroing op the workload exercises -- routes to the `aclnnInplaceZero` kernel (`csrc/aten/backends/ascend/generated/ascend_kernels.cc`), not to the allocator's `aclrtMemset`/`aclrtMemsetAsync` calls in `csrc/runtime/accelerator/ascend/memory.cc`. Switching it only to make a profiler record appear would regress measured 910 latency from 12.7us to 133us at 1 MiB and from 17.4us to 9080us at 64 MiB (`aclrtMemsetAsync` is slower still). The high-performance kernel routing is therefore intentional, and the absent `gpu_memset` record is a correct-by-design capability difference.
+
+Every CI backend runs this contract with the same command. `.github/configs/ascend.yml` carries no shell prefix; its structured `environment` field scopes the prepared preload to this process, and `.github/scripts/run_integration_tests.py` applies it without changing the command string.
+
+`import torch_fl` deliberately does not re-exec the process to install the preload. Doing so would disturb file descriptors, multiprocessing, `torchrun`, and debuggers, and exporting the interposer job-wide demonstrably destabilizes unrelated CANN operator processes. Per-process integration environment data is the safe boundary at which to express this startup requirement.
+
+For hardware support reporting, the Ascend memcpy capability is measured only when MSPTI was actually loaded. An `LD_PRELOAD` environment variable by itself is not evidence of that; `ld.so` warns and continues for nonexistent paths.
+
 
 ## MUSA MUPTI integration
 

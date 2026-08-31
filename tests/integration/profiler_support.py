@@ -51,6 +51,44 @@ def _torch_module():
     return torch
 
 
+def _mspti_in_link_map() -> bool:
+    """Whether libmspti.so is mapped into this process right now."""
+    try:
+        maps = Path("/proc/self/maps").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "libmspti.so" in maps
+
+
+# Sampled at import, which is the only moment that answers the question being
+# asked. This module is loaded as a pytest plugin before torch_fl preloads its
+# device assets, so nothing has run a profiler session yet -- meaning a hit here
+# can only come from a process-start preload. Sampling later would also see the
+# lazy dlopen that CannDeviceTracer::start() performs, which does *not* enable
+# interposition; measured on 910, a late check reports "preloaded" and then the
+# memcpy assertion fails on a workload that produced no records.
+_MSPTI_PRELOADED_AT_STARTUP = _mspti_in_link_map()
+
+
+def mspti_preload_active() -> bool:
+    """Whether CANN's process-start MSPTI interposer was loaded at startup.
+
+    CANN 9.0 intercepts ``aclrtMemcpy*``/``aclrtMemset*`` by symbol
+    interposition, so ``libmspti.so`` must already be in the ELF link map when
+    ``libascendcl.so`` resolves those calls; a later ``dlopen`` cannot
+    substitute, even when it happens before the first ACL call. CI establishes
+    this in ``.github/scripts/set_env_ascend.sh``, alongside the other Ascend
+    environment prerequisites, so the profiler contract is invoked with the same
+    command on every platform.
+
+    This reads the link map rather than ``LD_PRELOAD`` on purpose: ``ld.so``
+    only warns and continues when a preloaded path does not exist, so a mistyped
+    ``LD_PRELOAD`` yields the env string without the library, and an env-based
+    check would claim a capability the process does not have.
+    """
+    return _MSPTI_PRELOADED_AT_STARTUP
+
+
 def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     """Describe public profiler features currently emitted by each tracer.
 
@@ -60,12 +98,34 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     """
     device = platform != "ascend"
     runtime = device
+    # Ascend memcpy interception is gated on process-start LD_PRELOAD rather
+    # than on `device` above: measured on Ascend 910 with CANN 9.0, the shared
+    # profile_result() workload produces a real positive-duration gpu_memcpy
+    # record when libmspti.so is preloaded at process start, and none at all
+    # otherwise. Treat that as the sole memcpy capability signal for ascend so
+    # the memcpy test skips (rather than silently passing or failing) when the
+    # prerequisite is absent.
+    ascend_memcpy = platform == "ascend" and mspti_preload_active()
     return ProfilerCapabilities(
         platform=platform,
         device=device,
         kernel=device,
         runtime=runtime,
-        memcpy=device and platform in {"cuda", "metax", "ppu", "musa"},
+        memcpy=(device and platform in {"cuda", "metax", "ppu", "musa"})
+        or ascend_memcpy,
+        # Ascend memset stays off even with the MSPTI preload present, and this
+        # is a deliberate backend property rather than a gap to close. A direct
+        # ctypes probe of aclrtMemset/aclrtMemsetAsync under process-start
+        # preload does produce real positive-duration, positive-byte memset
+        # records, so the CANN interception itself works. But torch.zeros() --
+        # the only zeroing op the shared profile_result() workload and any
+        # current Ascend op registration reach -- routes through the
+        # aclnnInplaceZero kernel, not the allocator's aclrtMemset calls in
+        # csrc/runtime/accelerator/ascend/memory.cc. Rerouting it to match the
+        # MetaX allocator-memset path would make this record appear, and was
+        # measured on Ascend 910 to cost 12.7us -> 133us at 1 MiB and
+        # 17.4us -> 9080us at 64 MiB (aclrtMemsetAsync is worse still), so the
+        # kernel routing stays and the capability stays off.
         memset=device and platform in {"cuda", "metax"},
         flow=device,
         linkage=device,
