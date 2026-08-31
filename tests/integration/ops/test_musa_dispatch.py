@@ -124,6 +124,34 @@ class TestMusaDispatch:
         )
 
 
+class TestMusaEmptyInplace:
+    """mudnn Fill must no-op safely for zero-element tensors."""
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("value", [0.0, 3.5])
+    def test_empty_fill_stays_on_device(self, value):
+        x = torch.empty(4, 0, device=DEVICE)
+        out = x.fill_(value)
+        assert out is x
+        assert out.device.type == "flagos"
+        assert out.shape == (4, 0)
+
+    @pytest.mark.musa
+    def test_empty_zero_stays_on_device(self):
+        x = torch.empty(4, 0, device=DEVICE)
+        out = x.zero_()
+        assert out is x
+        assert out.device.type == "flagos"
+        assert out.shape == (4, 0)
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
+    def test_nonempty_fill_regression(self, dtype):
+        x = torch.empty(4, device=DEVICE, dtype=dtype)
+        x.fill_(3)
+        torch.testing.assert_close(x.cpu(), torch.full((4,), 3, dtype=dtype))
+
+
 class TestMusaCorrectness:
     """mudnn kernels agree with a CPU reference."""
 

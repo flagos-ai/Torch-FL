@@ -1831,17 +1831,24 @@ at::Tensor {kernel}({list_type} tensors, int64_t dim) {{
   for (const at::Tensor& t : tensors) ins.push_back(t);
 {pre_unsqueeze}
   // aten's cat ignores empty tensors, and lets them disagree about ndim: the
-  // `torch.cat([torch.tensor([]), x], dim=-2)` that transformers' KV-cache
-  // does on the first step is legal even though the empty operand is 1-D and
-  // `x` is 4-D. Dropping them before anything looks at sizes keeps the shape
-  // arithmetic below on the real operands. (stack has already unsqueezed, and
-  // it does not accept empties, so this is a no-op there.)
+  // `torch.cat([empty_cache, value_states], dim=-2)` in transformers' KV
+  // cache is legal when the empty operand has the same rank as the real one.
+  // Dropping every zero-element operand before looking at sizes keeps the shape
+  // arithmetic on the real operands and avoids mudnn's unsupported empty input.
+  // If every operand is empty, retain aten's handling in the fallback below.
   std::vector<at::Tensor> kept;
   for (const auto& t : ins) {{
-    if (t.numel() != 0 || t.dim() != 1) kept.push_back(t);
+    if (t.numel() != 0) kept.push_back(t);
   }}
   if (kept.empty()) {{
-    return at::{at_op}(tensors, dim);
+    // Every operand is empty, so mudnn has nothing to concatenate and the
+    // result carries no elements. Re-dispatching at::{at_op} here would land
+    // back in this kernel and recurse until the stack is exhausted, so shape
+    // and dtype come from a host concat of zero-element operands (no data
+    // moves) and the result is placed back on the device.
+    std::vector<at::Tensor> cpu_empty;
+    for (const auto& t : ins) cpu_empty.push_back(t.cpu());
+    return at::cat(cpu_empty, dim).to(ins[0].device());
   }}
   bool ok = true;
   for (const auto& t : kept) {{
@@ -2092,6 +2099,9 @@ at::Tensor& {kernel}(at::Tensor& self{value_param}) {{
     self.copy_(cpu);
     return self;
   }}
+  // mudnn rejects zero-element tensors; the in-place result is already the
+  // correct device tensor, so do not launch Fill or fall back through the host.
+  if (self.numel() == 0) return self;
   musa_ops::MudnnTensorWrapper t_self(self);
   musa_ops::mudnn::Fill op;
   if (at::isIntegralType(self.scalar_type(), true)) {{
