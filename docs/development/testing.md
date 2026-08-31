@@ -144,6 +144,46 @@ in the installed version. Issue filing is intentionally not part of this probe;
 a future reporter consumes its JSON after fingerprint deduplication and a
 baseline comparison.
 
+### Official HuggingFace per-model tests
+
+`tests/manual/transformers_hf_tests.py` runs HuggingFace's official test files for
+one architecture at a time. It selects only
+`transformers/tests/models/<module>/`, where the module name is resolved by
+Transformers' `model_type_to_module_name()` (for example, `blip-2` maps to
+`blip_2`). Each invocation uses a fresh subprocess so an accelerator fault does
+not contaminate another model's result.
+
+The installed Transformers wheel does not include its `tests/` tree. The runner
+caches the complete, version-matched source tree under
+`~/.cache/torch_fl/hf-tests/transformers-<version>/` (or `HF_COVERAGE_CACHE` /
+`--cache-dir`) and verifies the source declaration against the installed wheel.
+Use `--source-dir` for an already prepared checkout. It never installs or
+upgrades torch or Transformers. Install the requested wheel without dependencies
+so the PyTorch build used by torch-fl remains unchanged:
+
+```bash
+python -m pip install --no-deps transformers==5.16.1
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_hf_tests.py \
+  --model qwen3 --transformers-version 5.16.1 --out /tmp/qwen3-official.json
+```
+
+The runner injects `flagos` through Transformers' official
+`TRANSFORMERS_TEST_DEVICE_SPEC` contract using
+`tests/manual/hf_device_spec.py`. The spec imports torch-fl before declaring the
+PrivateUse1 device name; this is required because Transformers 5.16.1 validates
+`TRANSFORMERS_TEST_DEVICE` with `torch.device()` before it loads a custom spec.
+CUDA-only tests remain upstream skips and are recorded separately from ordinary
+skips. Per-test JSON evidence includes the
+pytest node ID, status, duration, failure detail, and captured output; collection
+errors, missing optional dependencies, timeouts, and accelerator crashes are
+kept distinct. `--offline` requires a previously cached source tree and also
+sets the HuggingFace offline environment variables.
+
+This runner is an execution and evidence tool only. It does not create GitHub
+issues. Baseline promotion, failure fingerprinting, duplicate search, and issue
+comments/creation will consume these JSON results in a separate follow-up.
+
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
