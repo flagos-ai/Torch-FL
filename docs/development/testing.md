@@ -113,9 +113,41 @@ route-set hash, and harness version/hash with every published result. See
 [Operator Support](../reference/operator-support.md) for the current baseline
 and update procedure.
 
+### Per-model Transformers Coverage Probe
+
+`tests/manual/transformers_model_probe.py` measures one randomly initialized,
+tiny HuggingFace transformers architecture at a time on a real accelerator. It
+is deliberately separate from the model integration tests and from CI: a full
+architecture sweep is an external loop over isolated single-model runs, not one
+long process whose later results could be poisoned by an earlier device fault.
+
+The probe defaults to the latest installed `transformers` and accepts an older
+version explicitly. It does not install dependencies automatically; install the
+requested version in the active torch-fl environment without replacing its
+PyTorch:
+
+```bash
+python -m pip install --upgrade --no-deps transformers==5.16.1
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_model_probe.py \
+  --model qwen3 --device flagos --out /tmp/qwen3.json
+```
+
+The probe runs transfer, forward, backward/optimizer, and short deterministic
+generation layers in order, comparing the device result with a CPU result using
+the same weights, seed, and dtype. A failure stops that model's later layers.
+The JSON preserves layer status, CPU-fallback/native ATen observations, error
+text, and the environment versions needed to interpret the result. A parameter
+cap protects composite configurations whose top-level tiny overrides do not
+shrink nested configs. Use `--list-models` to inspect the model types available
+in the installed version. Issue filing is intentionally not part of this probe;
+a future reporter consumes its JSON after fingerprint deduplication and a
+baseline comparison.
+
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
+
 
 **Inference test**:
 
