@@ -110,6 +110,56 @@ def test_amp_unscale_detects_non_finite_values():
     assert found_inf.cpu().item() == 1.0
 
 
+def test_amp_unscale_accumulates_found_inf_across_calls():
+    # GradScaler splits gradients into (device, dtype) groups and calls the
+    # operator once per group with one shared found_inf tensor. A later finite
+    # group must not clear an overflow recorded by an earlier group.
+    found_inf = torch.zeros((), device=DEVICE)
+    inv_scale = torch.tensor(0.5, device=DEVICE)
+    overflow = torch.tensor([float("inf")], device=DEVICE, dtype=torch.bfloat16)
+    finite = torch.tensor([4.0], device=DEVICE, dtype=torch.float32)
+
+    torch._amp_foreach_non_finite_check_and_unscale_([overflow], found_inf, inv_scale)
+    assert found_inf.cpu().item() == 1.0
+
+    torch._amp_foreach_non_finite_check_and_unscale_([finite], found_inf, inv_scale)
+
+    assert found_inf.cpu().item() == 1.0
+    torch.testing.assert_close(finite.cpu(), torch.tensor([2.0]))
+
+
+def test_amp_unscale_leaves_found_inf_unset_for_finite_values():
+    found_inf = torch.zeros((), device=DEVICE)
+    inv_scale = torch.tensor(0.5, device=DEVICE)
+    values = torch.tensor([4.0, -8.0], device=DEVICE)
+
+    torch._amp_foreach_non_finite_check_and_unscale_([values], found_inf, inv_scale)
+
+    assert found_inf.cpu().item() == 0.0
+    torch.testing.assert_close(values.cpu(), torch.tensor([2.0, -4.0]))
+
+
+def test_grad_scaler_overflow_in_one_dtype_group_skips_step():
+    # Two parameter dtypes on one device produce two grad groups. The overflow
+    # lives in the bfloat16 group, the float32 group is finite.
+    p_bf16 = torch.nn.Parameter(
+        torch.tensor([2.0], device=DEVICE, dtype=torch.bfloat16)
+    )
+    p_fp32 = torch.nn.Parameter(torch.tensor([3.0], device=DEVICE, dtype=torch.float32))
+    optimizer = torch.optim.SGD([p_bf16, p_fp32], lr=0.1)
+    scaler = torch.amp.GradScaler("flagos", init_scale=8.0, backoff_factor=0.5)
+    inf = torch.tensor(float("inf"), device=DEVICE, dtype=torch.bfloat16)
+
+    loss = (p_bf16 * inf).sum().float() + p_fp32.sum()
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+
+    torch.testing.assert_close(p_bf16.detach().float().cpu(), torch.tensor([2.0]))
+    torch.testing.assert_close(p_fp32.detach().cpu(), torch.tensor([3.0]))
+    assert scaler.get_scale() == 4.0
+
+
 def test_autocast_grad_scaler_training_step():
     model = torch.nn.Linear(8, 4).to(DEVICE)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)

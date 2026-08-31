@@ -173,7 +173,10 @@ Run layer-isolating probes, not a large combined script. For a cast failure,
 run direct FP32->target and target->FP32 conversions without autocast. For a
 GradScaler failure, invoke `_amp_foreach_non_finite_check_and_unscale_` with
 one finite tensor and one tensor containing `inf` or `nan` before testing a
-model. For a training failure, first test a scalar parameter and SGD.
+model. Also invoke it twice with separate dtype groups and one shared
+`found_inf` tensor: GradScaler groups parameters by `(device, dtype)`, and a
+later finite group must not clear an overflow recorded by an earlier group. For
+a training failure, first test a scalar parameter and SGD.
 
 Do not change autocast policy to hide a vendor kernel failure. Do not route an
 operator to FlagGems merely because its native path failed; prove the selected
@@ -251,10 +254,16 @@ The minimum implementation contract is:
 _amp_foreach_non_finite_check_and_unscale_
   -> detect inf/nan
   -> unscale every finite gradient exactly once
-  -> write found_inf for both finite and overflow cases
+  -> preserve found_inf across all (device, dtype) gradient-group calls
   -> let scaler.step skip overflow updates
   -> let scaler.update grow/back off consistently
 ```
+
+`found_inf` is an accumulator for one optimizer unscale operation. The PyTorch
+GradScaler groups gradients by `(device, dtype)` and invokes the primitive once
+per group with the same `found_inf` tensor. A finite later group must not reset
+an overflow found by an earlier group; test this directly and with mixed
+parameter dtypes.
 
 If a generated wrapper is changed, modify `scripts/codegen_ops.py` first and
 regenerate `csrc/aten/generated/cuda_kernels.cc`. Include all output variants
@@ -359,9 +368,11 @@ Run checks in this order:
    preserving (`log`, `layer_norm`, loss/reduction), explicit dtype, promotion,
    and safety restrictions.
 4. **GradScaler primitive:** one finite and one non-finite gradient; assert
-   unscaled values and `found_inf`.
+   unscaled values and `found_inf`. Repeat across separate dtype groups with
+   one shared `found_inf` and assert overflow accumulation.
 5. **GradScaler semantics:** finite update/growth and overflow skip/backoff;
-   assert parameters before and after the optimizer step.
+   assert parameters before and after the optimizer step, including an
+   overflow in one dtype group with a finite second group.
 6. **Single-device training:** deterministic model, fixed inputs, CPU FP32
    reference, finite outputs/gradients/parameters, and optimizer state.
 7. **Distributed AMP, only if requested:** at least two ranks; use strict
