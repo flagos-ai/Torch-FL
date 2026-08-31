@@ -111,17 +111,23 @@ def test_profiler_device_time_linkage(profile_result, profiler_capabilities):
     to a fused kernel and never dispatches ``aten::mm`` (see
     ``torch_fl/configs/backends_ascend.conf``). Accept whichever operator the
     active backend actually dispatched instead of hardcoding one of them.
+
+    On the decomposing backends both ``aten::matmul`` and ``aten::mm`` appear in
+    ``key_averages()``, and only the inner ``aten::mm`` carries device time:
+    ``self_device_time_total`` excludes children, so the outer wrapper reads
+    0.0. Select on positive device time rather than on name, which picks the
+    dispatching operator on either topology.
     """
     if not profiler_capabilities.linkage:
         pytest.skip(f"{profiler_capabilities.platform} has no linkage contract")
 
     prof, trace = profile_result
     matmul_ops = {"aten::mm", "aten::matmul"}
-    mm = next((event for event in prof.key_averages() if event.key in matmul_ops), None)
+    candidates = [event for event in prof.key_averages() if event.key in matmul_ops]
+    mm = next((event for event in candidates if event.self_device_time_total > 0), None)
     assert mm is not None, (
-        "neither aten::mm nor aten::matmul is present in key_averages"
+        f"no matmul op with device time: {[(e.key, e.self_device_time_total) for e in candidates]}"
     )
-    assert mm.self_device_time_total > 0
 
     op_names = op_name_by_external_id(trace)
     linked = [
