@@ -104,23 +104,39 @@ def test_profiler_flow_events_are_paired(profile_result, profiler_capabilities):
 @pytest.mark.profiler_device
 @pytest.mark.profiler_linkage
 def test_profiler_device_time_linkage(profile_result, profiler_capabilities):
-    """key_averages device time equals the linked device events in the trace."""
+    """key_averages device time equals the linked device events in the trace.
+
+    ``x @ y`` decomposes to ``aten::mm`` under CompositeImplicitAutograd on
+    backends that don't intercept matmul, but Ascend routes matmul straight
+    to a fused kernel and never dispatches ``aten::mm`` (see
+    ``torch_fl/configs/backends_ascend.conf``). Accept whichever operator the
+    active backend actually dispatched instead of hardcoding one of them.
+
+    On the decomposing backends both ``aten::matmul`` and ``aten::mm`` appear in
+    ``key_averages()``, and only the inner ``aten::mm`` carries device time:
+    ``self_device_time_total`` excludes children, so the outer wrapper reads
+    0.0. Select on positive device time rather than on name, which picks the
+    dispatching operator on either topology.
+    """
     if not profiler_capabilities.linkage:
         pytest.skip(f"{profiler_capabilities.platform} has no linkage contract")
 
     prof, trace = profile_result
-    mm = next((event for event in prof.key_averages() if event.key == "aten::mm"), None)
-    assert mm is not None, "aten::mm is absent from key_averages"
-    assert mm.self_device_time_total > 0
+    matmul_ops = {"aten::mm", "aten::matmul"}
+    candidates = [event for event in prof.key_averages() if event.key in matmul_ops]
+    mm = next((event for event in candidates if event.self_device_time_total > 0), None)
+    assert mm is not None, (
+        f"no matmul op with device time: {[(e.key, e.self_device_time_total) for e in candidates]}"
+    )
 
     op_names = op_name_by_external_id(trace)
     linked = [
         event
         for category in ("kernel", "gpu_memcpy", "gpu_memset")
         for event in events_in(trace, category)
-        if op_names.get((event.get("args") or {}).get("External id")) == "aten::mm"
+        if op_names.get((event.get("args") or {}).get("External id")) == mm.key
     ]
-    assert linked, "no device events link to aten::mm"
+    assert linked, f"no device events link to {mm.key}"
     truth = sum(event.get("dur", 0) for event in linked)
     assert abs(mm.self_device_time_total - truth) <= max(1.0, truth * 0.01)
 

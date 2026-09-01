@@ -184,6 +184,23 @@ class MudnnTensorWrapper {
       sizes_.assign(1, 1);
       strides_.assign(1, 1);
     }
+    // PyTorch's is_contiguous() ignores the stride of any size-1 dimension
+    // (that dim contributes only index 0, so no read ever depends on it), so
+    // a transpose like `torch.randn(2, 1).t()` reports contiguous while
+    // leaving a degenerate stride behind -- e.g. shape (1, 2) stride (1, 1).
+    // mudnn's own validation is stricter (MatMul's lda check wants the
+    // leading dimension's stride >= the trailing extent) and rejects that
+    // degenerate value. Rewrite every size-1 dim's stride to the value a
+    // real C-contiguous tensor of this shape would carry there; the actual
+    // number is unconstrained for correctness since the dim has one
+    // element, so this only needs to satisfy mudnn's shape validation.
+    int64_t contiguous_stride = 1;
+    for (int64_t i = static_cast<int64_t>(sizes_.size()) - 1; i >= 0; --i) {
+      if (sizes_[i] == 1) {
+        strides_[i] = contiguous_stride;
+      }
+      contiguous_stride *= sizes_[i];
+    }
     tensor_.SetType(ToMudnnDataType(tensor.scalar_type()));
     // data_ptr() already accounts for storage_offset.
     tensor_.SetAddr(tensor.const_data_ptr());

@@ -124,6 +124,34 @@ class TestMusaDispatch:
         )
 
 
+class TestMusaEmptyInplace:
+    """mudnn Fill must no-op safely for zero-element tensors."""
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("value", [0.0, 3.5])
+    def test_empty_fill_stays_on_device(self, value):
+        x = torch.empty(4, 0, device=DEVICE)
+        out = x.fill_(value)
+        assert out is x
+        assert out.device.type == "flagos"
+        assert out.shape == (4, 0)
+
+    @pytest.mark.musa
+    def test_empty_zero_stays_on_device(self):
+        x = torch.empty(4, 0, device=DEVICE)
+        out = x.zero_()
+        assert out is x
+        assert out.device.type == "flagos"
+        assert out.shape == (4, 0)
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
+    def test_nonempty_fill_regression(self, dtype):
+        x = torch.empty(4, device=DEVICE, dtype=dtype)
+        x.fill_(3)
+        torch.testing.assert_close(x.cpu(), torch.full((4,), 3, dtype=dtype))
+
+
 class TestMusaCorrectness:
     """mudnn kernels agree with a CPU reference."""
 
@@ -413,6 +441,109 @@ class TestMusaConvolution:
             rtol=1e-3,
             atol=1e-3,
         )
+
+
+class TestMusaMixedDeviceOperandOrder:
+    """A wrapped-scalar CPU operand may land in either the `self` or `other`
+    slot of a binary op's Tensor overload (issue #238).
+
+    `rsub.Scalar(self, other, alpha)` decomposes to
+    `sub.Tensor(wrapped_scalar_tensor(other), self, alpha)`, so the CPU
+    scalar ends up as `self` and the device tensor as `other` -- the reverse
+    of the ordinary `tensor - scalar` call, where the device tensor is
+    `self`. The binary mudnn kernels must produce a device result and the
+    correct value in both orderings, not just the ordinary one.
+    """
+
+    @pytest.mark.musa
+    def test_rsub_scalar(self):
+        u = torch.ones(4, dtype=torch.long, device=DEVICE)
+        out = torch.rsub(u, 1)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), torch.zeros(4, dtype=torch.long))
+
+    @pytest.mark.musa
+    def test_sub_tensor_cpu_self_device_other(self):
+        u = torch.ones(4, device=DEVICE)
+        out = torch.sub(torch.tensor(1.0), u)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), torch.zeros(4))
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize(
+        "fn",
+        [
+            lambda scalar, t: scalar - t,
+            lambda scalar, t: scalar + t,
+            lambda scalar, t: scalar * t,
+            lambda scalar, t: torch.maximum(scalar, t),
+            lambda scalar, t: scalar > t,
+            lambda scalar, t: scalar == t,
+        ],
+    )
+    def test_binary_ops_with_cpu_scalar_self(self, fn):
+        """Sweep the binary op family with a CPU-origin `self` operand."""
+        t_cpu = torch.arange(1, 5, dtype=torch.float32)
+        t = t_cpu.to(DEVICE)
+        scalar = torch.tensor(2.0)
+        out = fn(scalar, t)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), fn(scalar, t_cpu))
+
+
+class TestMusaDegenerateStride:
+    """A transpose of a size-1 dimension is still `is_contiguous() == True`
+    (issue #240): PyTorch's contiguity check ignores the stride of any
+    size-1 dim, since no read ever depends on it, so `.contiguous()` is a
+    no-op and the degenerate stride reaches mudnn unchanged. mudnn's own
+    validation is stricter and rejects it (`MatMul` raised `INVALID_PARAMETER,
+    lda 1`); `MudnnTensorWrapper` must rewrite it before handing tensors to
+    any mudnn op, not just `mm`.
+    """
+
+    @pytest.mark.musa
+    def test_mm_transposed_size_one_dim(self):
+        # The degenerate stride only survives a transpose done *after* the
+        # tensor is already on-device -- moving a CPU tensor there via
+        # `.to()` renormalizes the stride, silently missing the bug.
+        a = torch.randn(2, 1, device=DEVICE)
+        b = torch.randn(2, 32, device=DEVICE)
+        at = a.t()
+        assert at.is_contiguous()
+        out = torch.mm(at, b)
+        torch.testing.assert_close(out.cpu(), torch.mm(a.cpu().t(), b.cpu()))
+
+    @pytest.mark.musa
+    def test_bmm_transposed_size_one_dim(self):
+        a = torch.randn(3, 2, 1, device=DEVICE)
+        b = torch.randn(3, 2, 32, device=DEVICE)
+        at = a.transpose(1, 2)
+        assert at.is_contiguous()
+        out = torch.bmm(at, b)
+        torch.testing.assert_close(
+            out.cpu(), torch.bmm(a.cpu().transpose(1, 2), b.cpu())
+        )
+
+    @pytest.mark.musa
+    def test_bert_regression_head_backward(self):
+        """BertForSequenceClassification with num_labels=1 (regression via
+        MSE loss) produces exactly this shape in the final linear layer's
+        weight gradient during backward."""
+        transformers = pytest.importorskip("transformers")
+        torch.manual_seed(0)
+        config = transformers.BertConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=128,
+            num_labels=1,
+        )
+        model = transformers.BertForSequenceClassification(config).to(DEVICE)
+        input_ids = torch.randint(0, config.vocab_size, (2, 8), device=DEVICE)
+        labels = torch.randn(2, 1, device=DEVICE)
+        loss = model(input_ids=input_ids, labels=labels).loss
+        loss.backward()
+        assert loss.device.type == "flagos"
 
 
 class TestMusaAutograd:
