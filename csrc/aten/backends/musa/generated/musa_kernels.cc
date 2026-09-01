@@ -508,15 +508,17 @@ REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kMusa, Expm1Kern
 at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::mul(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::mul(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -528,7 +530,7 @@ at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::MUL);
   EXEC_MUDNN_CMD(
-      "mul", self,
+      "mul", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -538,15 +540,17 @@ REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kMusa, 
 at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::div(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::div(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -558,7 +562,7 @@ at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::TRUEDIV);
   EXEC_MUDNN_CMD(
-      "div", self,
+      "div", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -568,15 +572,17 @@ REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kMusa, 
 at::Tensor MaximumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::maximum(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::maximum(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -588,7 +594,7 @@ at::Tensor MaximumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::MAX);
   EXEC_MUDNN_CMD(
-      "maximum", self,
+      "maximum", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -598,15 +604,17 @@ REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kMusa, Maxim
 at::Tensor MinimumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::minimum(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::minimum(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -618,7 +626,7 @@ at::Tensor MinimumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::MIN);
   EXEC_MUDNN_CMD(
-      "minimum", self,
+      "minimum", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -628,15 +636,17 @@ REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kMusa, Minim
 at::Tensor RemainderTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::remainder(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::remainder(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -648,7 +658,7 @@ at::Tensor RemainderTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::FLOORMOD);
   EXEC_MUDNN_CMD(
-      "remainder", self,
+      "remainder", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -658,15 +668,17 @@ REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Back
 at::Tensor FmodTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::fmod(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::fmod(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -678,7 +690,7 @@ at::Tensor FmodTensorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::TRUNCATEMOD);
   EXEC_MUDNN_CMD(
-      "fmod", self,
+      "fmod", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -688,15 +700,17 @@ REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kMusa
 at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::pow(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::pow(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -708,7 +722,7 @@ at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::POW);
   EXEC_MUDNN_CMD(
-      "pow", self,
+      "pow", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -718,15 +732,17 @@ REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Bac
 at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::add(self.cpu(), other.cpu(), alpha).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -743,7 +759,7 @@ at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
     op.SetAlpha(alpha.to<double>());
   }
   EXEC_MUDNN_CMD(
-      "add", self,
+      "add", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -753,15 +769,17 @@ REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kMusa, 
 at::Tensor SubTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::sub(self.cpu(), other.cpu(), alpha).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::sub(self.cpu(), other.cpu(), alpha).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -778,7 +796,7 @@ at::Tensor SubTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
     op.SetAlpha(alpha.to<double>());
   }
   EXEC_MUDNN_CMD(
-      "sub", self,
+      "sub", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -788,15 +806,17 @@ REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kMusa, 
 at::Tensor EqTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::eq(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::eq(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -808,7 +828,7 @@ at::Tensor EqTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::EQ);
   EXEC_MUDNN_CMD(
-      "eq", self,
+      "eq", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -818,15 +838,17 @@ REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kMusa, Eq
 at::Tensor NeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::ne(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::ne(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -838,7 +860,7 @@ at::Tensor NeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::NE);
   EXEC_MUDNN_CMD(
-      "ne", self,
+      "ne", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -848,15 +870,17 @@ REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kMusa, Ne
 at::Tensor LtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::lt(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::lt(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -868,7 +892,7 @@ at::Tensor LtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::LT);
   EXEC_MUDNN_CMD(
-      "lt", self,
+      "lt", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -878,15 +902,17 @@ REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kMusa, Lt
 at::Tensor GtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::gt(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::gt(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -898,7 +924,7 @@ at::Tensor GtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::GT);
   EXEC_MUDNN_CMD(
-      "gt", self,
+      "gt", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -908,15 +934,17 @@ REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kMusa, Gt
 at::Tensor LeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::le(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::le(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -928,7 +956,7 @@ at::Tensor LeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::LE);
   EXEC_MUDNN_CMD(
-      "le", self,
+      "le", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -938,15 +966,17 @@ REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kMusa, Le
 at::Tensor GeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::ge(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::ge(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -958,7 +988,7 @@ at::Tensor GeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::GE);
   EXEC_MUDNN_CMD(
-      "ge", self,
+      "ge", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -968,15 +998,17 @@ REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kMusa, Ge
 at::Tensor LogicalAndKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::logical_and(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::logical_and(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -988,7 +1020,7 @@ at::Tensor LogicalAndKernelMusa(const at::Tensor& self, const at::Tensor& other)
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::LOGICAL_AND);
   EXEC_MUDNN_CMD(
-      "logical_and", self,
+      "logical_and", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -998,15 +1030,17 @@ REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kMusa
 at::Tensor LogicalOrKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::logical_or(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::logical_or(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -1018,7 +1052,7 @@ at::Tensor LogicalOrKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::LOGICAL_OR);
   EXEC_MUDNN_CMD(
-      "logical_or", self,
+      "logical_or", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -2068,15 +2102,17 @@ REGISTER_IMPL_TO_DISPATCHER(ClampMaxFn, clamp_max_dispatcher, Backend::kMusa, Cl
 at::Tensor LogicalXorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsDtype(other.scalar_type())) {
-    return at::logical_xor(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::logical_xor(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -2088,7 +2124,7 @@ at::Tensor LogicalXorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::LOGICAL_XOR);
   EXEC_MUDNN_CMD(
-      "logical_xor", self,
+      "logical_xor", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
@@ -2098,15 +2134,17 @@ REGISTER_IMPL_TO_DISPATCHER(LogicalXorFn, logical_xor_dispatcher, Backend::kMusa
 at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
       !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
-    return at::floor_divide(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::floor_divide(self.cpu(), other.cpu()).to(fallback_device);
   }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
@@ -2118,7 +2156,7 @@ at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::FLOORDIV);
   EXEC_MUDNN_CMD(
-      "floor_divide", self,
+      "floor_divide", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }
