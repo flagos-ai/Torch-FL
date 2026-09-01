@@ -28,6 +28,10 @@ Complete these first:
 - [[native-op-backend]] or [[cuda-compat-vendor]] — an operator path must exist.
   A platform whose every compute op reaches `cpu_fallback` will "pass" this
   survey while measuring nothing about the accelerator.
+- [[test-dependencies]] — install and validate the requested Transformers test
+  packages without replacing the torch build used by torch_fl. In particular,
+  install `accelerate` before official tests that exercise a device context,
+  `device_map`, `tp_plan`, or `torch.set_default_device`.
 
 The unit of work is **one architecture**. `transformers-test <model>` runs every
 official test under that architecture's `tests/models/<module>/` directory. Use

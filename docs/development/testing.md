@@ -122,12 +122,14 @@ architecture sweep is an external loop over isolated single-model runs, not one
 long process whose later results could be poisoned by an earlier device fault.
 
 The probe defaults to the latest installed `transformers` and accepts an older
-version explicitly. It does not install dependencies automatically; install the
-requested version in the active torch-fl environment without replacing its
-PyTorch:
+version explicitly. Prepare the environment with the `.claude/skills/test-dependencies/SKILL.md` guidance first:
+install the requested Transformers wheel without dependencies, then install its
+validated non-torch dependencies such as `accelerate` without replacing the
+PyTorch build used by torch-fl:
 
 ```bash
-python -m pip install --upgrade --no-deps transformers==5.16.1
+python -m pip install --no-deps transformers==5.16.1
+python -m pip install accelerate tokenizers safetensors huggingface_hub
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
 python tests/manual/transformers_model_probe.py \
   --model qwen3 --device flagos --out /tmp/qwen3.json
@@ -159,11 +161,14 @@ caches the complete, version-matched source tree under
 `~/.cache/torch_fl/hf-tests/transformers-<version>/` (or `HF_COVERAGE_CACHE` /
 `--cache-dir`) and verifies the source declaration against the installed wheel.
 Use `--source-dir` for an already prepared checkout. It never installs or
-upgrades torch or Transformers. Install the requested wheel without dependencies
-so the PyTorch build used by torch-fl remains unchanged:
+upgrades packages. Prepare the environment with [[test-dependencies]] first;
+install the requested wheel without dependencies and install required optional
+packages such as `accelerate` explicitly, so the PyTorch build used by torch-fl
+remains unchanged:
 
 ```bash
 python -m pip install --no-deps transformers==5.16.1
+python -m pip install accelerate tokenizers safetensors huggingface_hub
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
 python tests/manual/transformers_hf_tests.py \
   --model qwen3 --transformers-version 5.16.1 --out /tmp/qwen3-official.json
@@ -206,7 +211,6 @@ as `NOT_IN_VERSION` rather than as a failure.
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
-
 
 **Inference test**:
 
