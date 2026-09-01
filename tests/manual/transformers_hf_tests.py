@@ -31,7 +31,13 @@ Usage:
   python tests/manual/transformers_hf_tests.py --model qwen3
   python tests/manual/transformers_hf_tests.py --model qwen3 --out /tmp/qwen3.json
   python tests/manual/transformers_hf_tests.py --model blip-2 --collect-only
+  python tests/manual/transformers_hf_tests.py --all --out /tmp/transformers-all.json
   python tests/manual/transformers_hf_tests.py --list-models
+
+``--model`` runs every official test under one architecture directory. ``--all``
+iterates all architecture keys exposed by the installed Transformers version,
+with one isolated subprocess per architecture; it does not enumerate Hub
+checkpoints or download model weights.
 
 Issue filing is deliberately not part of this runner. It writes an auditable
 JSON result that a later reporter consumes, so that executing tests and writing
@@ -315,6 +321,11 @@ def verdict(result: dict) -> str:
     support or as a defect.
     """
     run = result["run"]
+    # An architecture the pinned version does not ship is neither support nor a
+    # defect, and a sweep must be able to tell it apart from a run that started
+    # and executed nothing.
+    if run.get("status") == "NOT_IN_VERSION":
+        return "NOT_IN_VERSION"
     if run.get("timed_out"):
         return "TIMEOUT"
     if run.get("context_poison"):
@@ -408,6 +419,21 @@ def known_models() -> list[str]:
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     return sorted(CONFIG_MAPPING_NAMES)
+
+
+def sweep_models() -> list[str]:
+    """Pick one architecture key per test directory for a full sweep.
+
+    Several registry keys share a directory: transformers 5.16.1 exposes 709
+    keys over 492 test directories, because component configs such as
+    ``blip_text_model`` and ``blip_vision_model`` map to ``tests/models/blip``
+    alongside ``blip`` itself. Sweeping the raw key list would run those
+    directories two or three times and count one failure as several.
+    """
+    seen: dict[str, str] = {}
+    for model in known_models():
+        seen.setdefault(module_name(model), model)
+    return [seen[module] for module in sorted(seen)]
 
 
 def test_dir(source: Path, model: str) -> Path:
@@ -575,6 +601,111 @@ def fingerprint(model: str, device: str, test: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
+def prepare_result(
+    model: str, source: Path, args: argparse.Namespace, environment_data: dict
+) -> dict:
+    """Run one model and attach the stable top-level result metadata."""
+    result = run_tests(model, source, args)
+    result["schema_version"] = SCHEMA_VERSION
+    result["model"] = {"requested": model, "module": module_name(model)}
+    result["environment"] = dict(environment_data)
+    result["verdict"] = verdict(result)
+    for test in result["tests"]:
+        if test["status"] in ("FAIL", "ERROR", "ENVIRONMENT_ERROR"):
+            test["fingerprint"] = fingerprint(model, args.device, test)
+    return result
+
+
+def all_verdict(summary: dict, expected: int, completed: int) -> str:
+    """Return the aggregate verdict for an all-architecture run.
+
+    Ordered like the per-model verdict: the outcome that most invalidates the
+    sweep wins. ``NOT_IN_VERSION`` is not a failure --- the registry lists
+    architecture keys that the pinned version ships no test directory for, and
+    counting those as defects would inflate every sweep.
+    """
+    if completed < expected:
+        return "INCOMPLETE"
+    for status in (
+        "TIMEOUT",
+        "CRASH",
+        "COLLECT_ERROR",
+        "ENVIRONMENT_ERROR",
+        "FAIL",
+        "NO_TESTS_RUN",
+    ):
+        if summary.get(status):
+            return status
+    if any(status not in ("PASS", "NOT_IN_VERSION") for status in summary):
+        return "INCOMPLETE"
+    return "PASS"
+
+
+def aggregate_results(results: list[dict], architectures: list[str]) -> dict:
+    """Build the stable all-architecture aggregate from completed model results.
+
+    ``attempted`` is the number of architectures whose tests actually ran, which
+    is the only denominator a coverage rate may use.
+    """
+    verdicts: dict[str, int] = {}
+    for result in results:
+        model_verdict = result["verdict"]
+        verdicts[model_verdict] = verdicts.get(model_verdict, 0) + 1
+    absent = verdicts.get("NOT_IN_VERSION", 0)
+    return {
+        "expected": len(architectures),
+        "completed": len(results),
+        "attempted": len(results) - absent,
+        "not_in_version": absent,
+        "architectures": architectures,
+        "verdicts": verdicts,
+    }
+
+
+def all_result(
+    results: list[dict], architectures: list[str], environment_data: dict
+) -> dict:
+    """Assemble the all-architecture result, writable while the sweep is running."""
+    aggregate = aggregate_results(results, architectures)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": "all",
+        "environment": dict(environment_data),
+        "models": results,
+        "aggregate": aggregate,
+        "verdict": all_verdict(
+            aggregate["verdicts"], aggregate["expected"], aggregate["completed"]
+        ),
+    }
+
+
+def summarize_all(result: dict) -> str:
+    """Render a compact aggregate summary without hiding per-model JSON."""
+    aggregate = result["aggregate"]
+    lines = [
+        f"mode       {result['mode']}",
+        f"device     {result['environment']['device']}",
+        f"verdict    {result['verdict']}",
+        f"completed  {aggregate['completed']}/{aggregate['expected']}",
+        f"attempted  {aggregate['attempted']}"
+        f"  (not in version {aggregate['not_in_version']})",
+    ]
+    counts = aggregate["verdicts"]
+    if counts:
+        lines.append("")
+        lines.append("  " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    interesting = [
+        model
+        for model in result["models"]
+        if model["verdict"] not in ("PASS", "NOT_IN_VERSION")
+    ]
+    if interesting:
+        lines.append("")
+        for model in interesting:
+            lines.append(f"  {model['verdict']:<18} {model['model']['requested']}")
+    return "\n".join(lines)
+
+
 def summarize(result: dict) -> str:
     run = result["run"]
     lines = [
@@ -619,10 +750,21 @@ def summarize(result: dict) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run HuggingFace's official tests for one model on an accelerator"
+        description="Run HuggingFace's official Transformers tests on an accelerator"
     )
-    parser.add_argument("--model", help="architecture key, e.g. qwen3 or blip-2")
-    parser.add_argument("--list-models", action="store_true", help="list architectures")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--model", help="run every official test for one architecture, e.g. qwen3"
+    )
+    selection.add_argument(
+        "--all",
+        dest="all_models",
+        action="store_true",
+        help="run every architecture in the installed Transformers registry",
+    )
+    selection.add_argument(
+        "--list-models", action="store_true", help="list available architectures"
+    )
     parser.add_argument("--device", default="flagos")
     parser.add_argument(
         "--transformers-version",
@@ -661,8 +803,8 @@ def main(argv: list[str] | None = None) -> int:
         for name in known_models():
             print(name)
         return 0
-    if not args.model:
-        parser.error("--model is required (or use --list-models)")
+    if not args.model and not args.all_models:
+        parser.error("choose exactly one of --model, --all, or --list-models")
 
     try:
         resolution = resolve_version(args.transformers_version, args.offline)
@@ -682,22 +824,32 @@ def main(argv: list[str] | None = None) -> int:
     env["source_path"] = source["path"]
     env["source_version"] = source["version"]
 
-    result = run_tests(args.model, Path(source["path"]), args)
-    result["schema_version"] = SCHEMA_VERSION
-    result["model"] = {"requested": args.model, "module": module_name(args.model)}
-    result["environment"] = env
-    result["verdict"] = verdict(result)
-    for test in result["tests"]:
-        if test["status"] in ("FAIL", "ERROR", "ENVIRONMENT_ERROR"):
-            test["fingerprint"] = fingerprint(args.model, args.device, test)
-
+    source_path = Path(source["path"])
     print(
         f"transformers {env['transformers']}  torch {env['torch']}"
         f"  torch_fl {env['torch_fl_commit']}"
     )
     print(f"source       {source['path']}")
     print()
-    print(summarize(result))
+
+    if args.all_models:
+        models = sweep_models()
+        results: list[dict] = []
+        print(f"sweeping {len(models)} architectures, one subprocess each\n")
+        for index, model in enumerate(models, start=1):
+            print(f"[{index}/{len(models)}] {model}")
+            results.append(prepare_result(model, source_path, args, env))
+            print(summarize(results[-1]))
+            print()
+            # A full sweep is long enough that an interrupted run must still
+            # leave the architectures already measured on disk.
+            if args.out:
+                atomic_write(args.out, all_result(results, models, env))
+        result = all_result(results, models, env)
+        print(summarize_all(result))
+    else:
+        result = prepare_result(args.model, source_path, args, env)
+        print(summarize(result))
 
     if args.out:
         atomic_write(args.out, result)

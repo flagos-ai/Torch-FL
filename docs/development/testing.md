@@ -144,10 +144,11 @@ in the installed version. Issue filing is intentionally not part of this probe;
 a future reporter consumes its JSON after fingerprint deduplication and a
 baseline comparison.
 
-### Official HuggingFace per-model tests
+### Official HuggingFace Transformers tests
 
-`tests/manual/transformers_hf_tests.py` runs HuggingFace's official test files for
-one architecture at a time. It selects only
+`transformers-test <model>` (implemented by
+`tests/manual/transformers_hf_tests.py`) runs HuggingFace's complete official test
+files for one architecture at a time. It selects only
 `transformers/tests/models/<module>/`, where the module name is resolved by
 Transformers' `model_type_to_module_name()` (for example, `blip-2` maps to
 `blip_2`). Each invocation uses a fresh subprocess so an accelerator fault does
@@ -182,7 +183,25 @@ sets the HuggingFace offline environment variables.
 
 This runner is an execution and evidence tool only. It does not create GitHub
 issues. Baseline promotion, failure fingerprinting, duplicate search, and issue
-comments/creation will consume these JSON results in a separate follow-up.
+comments/creation consume these JSON results separately. To run every architecture
+in the pinned Transformers registry, use the explicit all mode:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_hf_tests.py \
+  --all --transformers-version 5.16.1 --out /tmp/transformers-all.json
+```
+
+All mode is a long hardware sweep, but each architecture still runs in its own
+subprocess. "All" means the architecture test directories of the installed
+Transformers registry; it does not enumerate Hub checkpoints or download
+pretrained weights. Registry keys that share a test directory are visited once:
+transformers 5.16.1 exposes 709 keys over 492 directories, because component
+configs such as `blip_text_model` map to `tests/models/blip`. With `--out`, the
+aggregate JSON is rewritten after every architecture, so an interrupted sweep
+keeps what it already measured. The aggregate reports `attempted` separately
+from `completed`, and an architecture absent from the pinned version is recorded
+as `NOT_IN_VERSION` rather than as a failure.
 
 ### Model Tests
 
