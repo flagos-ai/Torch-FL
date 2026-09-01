@@ -15,6 +15,7 @@
 
 import importlib.util
 import io
+import json
 import os
 import sys
 import tarfile
@@ -198,6 +199,95 @@ def test_known_model_listing_delegates_to_mapping(monkeypatch):
     assert runner.known_models() == ["bert", "qwen3"]
 
 
+def test_sweep_runs_each_test_directory_once(monkeypatch):
+    # blip_text_model and blip_vision_model share tests/models/blip upstream.
+    monkeypatch.setattr(
+        runner, "known_models", lambda: ["blip", "blip_text_model", "blip-2", "bert"]
+    )
+    monkeypatch.setattr(
+        runner,
+        "module_name",
+        lambda model: {
+            "blip": "blip",
+            "blip_text_model": "blip",
+            "blip-2": "blip_2",
+            "bert": "bert",
+        }[model],
+    )
+    assert runner.sweep_models() == ["bert", "blip", "blip-2"]
+
+
+def test_parser_selects_one_model_or_all():
+    args = runner.build_parser().parse_args(["--model", "bert"])
+    assert args.model == "bert"
+    assert not args.all_models
+
+    args = runner.build_parser().parse_args(["--all"])
+    assert args.all_models
+    assert args.model is None
+
+
+def test_parser_rejects_multiple_selection_modes():
+    with pytest.raises(SystemExit):
+        runner.build_parser().parse_args(["--model", "bert", "--all"])
+
+
+def test_aggregate_results_preserves_order_and_verdict_counts():
+    results = [
+        {"model": {"requested": "bert"}, "verdict": "PASS"},
+        {"model": {"requested": "qwen3"}, "verdict": "CRASH"},
+    ]
+    aggregate = runner.aggregate_results(results, ["bert", "qwen3", "gemma3"])
+    assert aggregate == {
+        "expected": 3,
+        "completed": 2,
+        "attempted": 2,
+        "not_in_version": 0,
+        "architectures": ["bert", "qwen3", "gemma3"],
+        "verdicts": {"PASS": 1, "CRASH": 1},
+    }
+
+
+def test_aggregate_excludes_absent_architectures_from_attempted():
+    results = [
+        {"model": {"requested": "bert"}, "verdict": "PASS"},
+        {"model": {"requested": "exotic"}, "verdict": "NOT_IN_VERSION"},
+    ]
+    aggregate = runner.aggregate_results(results, ["bert", "exotic"])
+    assert aggregate["attempted"] == 1
+    assert aggregate["not_in_version"] == 1
+    # An architecture the pinned version does not ship is not a defect.
+    assert runner.all_verdict(aggregate["verdicts"], 2, 2) == "PASS"
+
+
+def test_all_verdict_orders_by_how_much_it_invalidates_the_sweep():
+    assert runner.all_verdict({"PASS": 1, "FAIL": 1, "CRASH": 1}, 2, 2) == "CRASH"
+    assert runner.all_verdict({"PASS": 1, "FAIL": 1}, 2, 2) == "FAIL"
+    assert runner.all_verdict({"PASS": 1, "NO_TESTS_RUN": 1}, 2, 2) == "NO_TESTS_RUN"
+    # A sweep that stopped early is never a pass, whatever it measured.
+    assert runner.all_verdict({"PASS": 2}, 5, 2) == "INCOMPLETE"
+
+
+def test_all_result_is_writable_mid_sweep():
+    env = {"device": "flagos"}
+    partial = runner.all_result(
+        [
+            {"model": {"requested": "bert"}, "verdict": "PASS"},
+            {"model": {"requested": "qwen3"}, "verdict": "CRASH"},
+        ],
+        ["bert", "qwen3", "gemma3"],
+        env,
+    )
+    assert partial["mode"] == "all"
+    assert partial["schema_version"] == runner.SCHEMA_VERSION
+    assert partial["verdict"] == "INCOMPLETE"
+    assert partial["aggregate"]["completed"] == 2
+    # The roll-up names what needs attention; passes stay in the JSON only.
+    rendered = runner.summarize_all(partial)
+    assert "qwen3" in rendered
+    assert "bert" not in rendered
+
+
 # --- report reduction ---------------------------------------------------------
 
 
@@ -318,6 +408,8 @@ def test_not_in_version_result_has_no_tests(monkeypatch, tmp_path):
     result = runner.run_tests("bert", tmp_path, args)
     assert result["run"]["status"] == "NOT_IN_VERSION"
     assert result["tests"] == []
+    # Distinct from NO_TESTS_RUN: nothing was attempted, so nothing failed.
+    assert runner.verdict(result) == "NOT_IN_VERSION"
 
 
 def test_collect_only_with_collected_tests_is_a_pass():
@@ -353,3 +445,69 @@ def test_atomic_result_write(tmp_path):
     runner.atomic_write(target, {"verdict": "PASS"})
     assert target.exists()
     assert [p.name for p in target.parent.iterdir()] == ["result.json"]
+
+
+# --- all mode -----------------------------------------------------------------
+
+
+def test_all_mode_runs_each_architecture_and_writes_progressively(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        runner,
+        "resolve_version",
+        lambda version, offline: {
+            "version": "5.16.1",
+            "requested": version,
+            "latest": "5.16.1",
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "use_source",
+        lambda *a, **k: {"path": str(tmp_path / "src"), "version": "5.16.1"},
+    )
+    monkeypatch.setattr(
+        runner,
+        "environment",
+        lambda device: {
+            "device": device,
+            "torch": "2.10.0",
+            "transformers": "5.16.1",
+            "torch_fl_commit": "abc1234",
+        },
+    )
+    monkeypatch.setattr(runner, "sweep_models", lambda: ["bert", "qwen3"])
+    monkeypatch.setattr(runner, "module_name", lambda model: model)
+
+    snapshots = []
+    verdicts = {"bert": "PASS", "qwen3": "FAIL"}
+
+    def fake_run_tests(model, source, args):
+        # Each architecture must see its own subprocess-scoped result.
+        snapshots.append(json.loads(out.read_text()) if out.exists() else None)
+        failed = 1 if verdicts[model] == "FAIL" else 0
+        return {
+            "run": {
+                "status": "RAN",
+                "target": f"tests/models/{model}",
+                "duration_s": 1.0,
+            },
+            "tests": [],
+            "collect_errors": [],
+            "summary": {"PASS": 1} if not failed else {"FAIL": 1},
+        }
+
+    monkeypatch.setattr(runner, "run_tests", fake_run_tests)
+
+    out = tmp_path / "all.json"
+    assert runner.main(["--all", "--out", str(out)]) == 1
+
+    written = json.loads(out.read_text())
+    assert written["mode"] == "all"
+    assert written["verdict"] == "FAIL"
+    assert [m["model"]["requested"] for m in written["models"]] == ["bert", "qwen3"]
+    assert written["aggregate"]["attempted"] == 2
+    # The partial file existed before the last architecture ran.
+    assert snapshots[0] is None
+    assert snapshots[1]["aggregate"]["completed"] == 1
