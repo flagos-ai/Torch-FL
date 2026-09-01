@@ -113,6 +113,101 @@ route-set hash, and harness version/hash with every published result. See
 [Operator Support](../reference/operator-support.md) for the current baseline
 and update procedure.
 
+### Per-model Transformers Coverage Probe
+
+`tests/manual/transformers_model_probe.py` measures one randomly initialized,
+tiny HuggingFace transformers architecture at a time on a real accelerator. It
+is deliberately separate from the model integration tests and from CI: a full
+architecture sweep is an external loop over isolated single-model runs, not one
+long process whose later results could be poisoned by an earlier device fault.
+
+The probe defaults to the latest installed `transformers` and accepts an older
+version explicitly. Prepare the environment with the `.claude/skills/test-dependencies/SKILL.md` guidance first:
+install the requested Transformers wheel without dependencies, then install its
+validated non-torch dependencies such as `accelerate` without replacing the
+PyTorch build used by torch-fl:
+
+```bash
+python -m pip install --no-deps transformers==5.16.1
+python -m pip install accelerate tokenizers safetensors huggingface_hub
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_model_probe.py \
+  --model qwen3 --device flagos --out /tmp/qwen3.json
+```
+
+The probe runs transfer, forward, backward/optimizer, and short deterministic
+generation layers in order, comparing the device result with a CPU result using
+the same weights, seed, and dtype. A failure stops that model's later layers.
+The JSON preserves layer status, CPU-fallback/native ATen observations, error
+text, and the environment versions needed to interpret the result. A parameter
+cap protects composite configurations whose top-level tiny overrides do not
+shrink nested configs. Use `--list-models` to inspect the model types available
+in the installed version. Issue filing is intentionally not part of this probe;
+a future reporter consumes its JSON after fingerprint deduplication and a
+baseline comparison.
+
+### Official HuggingFace Transformers tests
+
+`transformers-test <model>` (implemented by
+`tests/manual/transformers_hf_tests.py`) runs HuggingFace's complete official test
+files for one architecture at a time. It selects only
+`transformers/tests/models/<module>/`, where the module name is resolved by
+Transformers' `model_type_to_module_name()` (for example, `blip-2` maps to
+`blip_2`). Each invocation uses a fresh subprocess so an accelerator fault does
+not contaminate another model's result.
+
+The installed Transformers wheel does not include its `tests/` tree. The runner
+caches the complete, version-matched source tree under
+`~/.cache/torch_fl/hf-tests/transformers-<version>/` (or `HF_COVERAGE_CACHE` /
+`--cache-dir`) and verifies the source declaration against the installed wheel.
+Use `--source-dir` for an already prepared checkout. It never installs or
+upgrades packages. Prepare the environment with [[test-dependencies]] first;
+install the requested wheel without dependencies and install required optional
+packages such as `accelerate` explicitly, so the PyTorch build used by torch-fl
+remains unchanged:
+
+```bash
+python -m pip install --no-deps transformers==5.16.1
+python -m pip install accelerate tokenizers safetensors huggingface_hub
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_hf_tests.py \
+  --model qwen3 --transformers-version 5.16.1 --out /tmp/qwen3-official.json
+```
+
+The runner injects `flagos` through Transformers' official
+`TRANSFORMERS_TEST_DEVICE_SPEC` contract using
+`tests/manual/hf_device_spec.py`. The spec imports torch-fl before declaring the
+PrivateUse1 device name; this is required because Transformers 5.16.1 validates
+`TRANSFORMERS_TEST_DEVICE` with `torch.device()` before it loads a custom spec.
+CUDA-only tests remain upstream skips and are recorded separately from ordinary
+skips. Per-test JSON evidence includes the
+pytest node ID, status, duration, failure detail, and captured output; collection
+errors, missing optional dependencies, timeouts, and accelerator crashes are
+kept distinct. `--offline` requires a previously cached source tree and also
+sets the HuggingFace offline environment variables.
+
+This runner is an execution and evidence tool only. It does not create GitHub
+issues. Baseline promotion, failure fingerprinting, duplicate search, and issue
+comments/creation consume these JSON results separately. To run every architecture
+in the pinned Transformers registry, use the explicit all mode:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+python tests/manual/transformers_hf_tests.py \
+  --all --transformers-version 5.16.1 --out /tmp/transformers-all.json
+```
+
+All mode is a long hardware sweep, but each architecture still runs in its own
+subprocess. "All" means the architecture test directories of the installed
+Transformers registry; it does not enumerate Hub checkpoints or download
+pretrained weights. Registry keys that share a test directory are visited once:
+transformers 5.16.1 exposes 709 keys over 492 directories, because component
+configs such as `blip_text_model` map to `tests/models/blip`. With `--out`, the
+aggregate JSON is rewritten after every architecture, so an interrupted sweep
+keeps what it already measured. The aggregate reports `attempted` separately
+from `completed`, and an architecture absent from the pinned version is recorded
+as `NOT_IN_VERSION` rather than as a failure.
+
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
