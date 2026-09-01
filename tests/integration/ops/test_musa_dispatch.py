@@ -491,6 +491,61 @@ class TestMusaMixedDeviceOperandOrder:
         torch.testing.assert_close(out.cpu(), fn(scalar, t_cpu))
 
 
+class TestMusaDegenerateStride:
+    """A transpose of a size-1 dimension is still `is_contiguous() == True`
+    (issue #240): PyTorch's contiguity check ignores the stride of any
+    size-1 dim, since no read ever depends on it, so `.contiguous()` is a
+    no-op and the degenerate stride reaches mudnn unchanged. mudnn's own
+    validation is stricter and rejects it (`MatMul` raised `INVALID_PARAMETER,
+    lda 1`); `MudnnTensorWrapper` must rewrite it before handing tensors to
+    any mudnn op, not just `mm`.
+    """
+
+    @pytest.mark.musa
+    def test_mm_transposed_size_one_dim(self):
+        # The degenerate stride only survives a transpose done *after* the
+        # tensor is already on-device -- moving a CPU tensor there via
+        # `.to()` renormalizes the stride, silently missing the bug.
+        a = torch.randn(2, 1, device=DEVICE)
+        b = torch.randn(2, 32, device=DEVICE)
+        at = a.t()
+        assert at.is_contiguous()
+        out = torch.mm(at, b)
+        torch.testing.assert_close(out.cpu(), torch.mm(a.cpu().t(), b.cpu()))
+
+    @pytest.mark.musa
+    def test_bmm_transposed_size_one_dim(self):
+        a = torch.randn(3, 2, 1, device=DEVICE)
+        b = torch.randn(3, 2, 32, device=DEVICE)
+        at = a.transpose(1, 2)
+        assert at.is_contiguous()
+        out = torch.bmm(at, b)
+        torch.testing.assert_close(
+            out.cpu(), torch.bmm(a.cpu().transpose(1, 2), b.cpu())
+        )
+
+    @pytest.mark.musa
+    def test_bert_regression_head_backward(self):
+        """BertForSequenceClassification with num_labels=1 (regression via
+        MSE loss) produces exactly this shape in the final linear layer's
+        weight gradient during backward."""
+        transformers = pytest.importorskip("transformers")
+        torch.manual_seed(0)
+        config = transformers.BertConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=128,
+            num_labels=1,
+        )
+        model = transformers.BertForSequenceClassification(config).to(DEVICE)
+        input_ids = torch.randint(0, config.vocab_size, (2, 8), device=DEVICE)
+        labels = torch.randn(2, 1, device=DEVICE)
+        loss = model(input_ids=input_ids, labels=labels).loss
+        loss.backward()
+        assert loss.device.type == "flagos"
+
+
 class TestMusaAutograd:
     """Autograd works through the mudnn kernels.
 
