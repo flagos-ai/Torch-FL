@@ -443,6 +443,54 @@ class TestMusaConvolution:
         )
 
 
+class TestMusaMixedDeviceOperandOrder:
+    """A wrapped-scalar CPU operand may land in either the `self` or `other`
+    slot of a binary op's Tensor overload (issue #238).
+
+    `rsub.Scalar(self, other, alpha)` decomposes to
+    `sub.Tensor(wrapped_scalar_tensor(other), self, alpha)`, so the CPU
+    scalar ends up as `self` and the device tensor as `other` -- the reverse
+    of the ordinary `tensor - scalar` call, where the device tensor is
+    `self`. The binary mudnn kernels must produce a device result and the
+    correct value in both orderings, not just the ordinary one.
+    """
+
+    @pytest.mark.musa
+    def test_rsub_scalar(self):
+        u = torch.ones(4, dtype=torch.long, device=DEVICE)
+        out = torch.rsub(u, 1)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), torch.zeros(4, dtype=torch.long))
+
+    @pytest.mark.musa
+    def test_sub_tensor_cpu_self_device_other(self):
+        u = torch.ones(4, device=DEVICE)
+        out = torch.sub(torch.tensor(1.0), u)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), torch.zeros(4))
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize(
+        "fn",
+        [
+            lambda scalar, t: scalar - t,
+            lambda scalar, t: scalar + t,
+            lambda scalar, t: scalar * t,
+            lambda scalar, t: torch.maximum(scalar, t),
+            lambda scalar, t: scalar > t,
+            lambda scalar, t: scalar == t,
+        ],
+    )
+    def test_binary_ops_with_cpu_scalar_self(self, fn):
+        """Sweep the binary op family with a CPU-origin `self` operand."""
+        t_cpu = torch.arange(1, 5, dtype=torch.float32)
+        t = t_cpu.to(DEVICE)
+        scalar = torch.tensor(2.0)
+        out = fn(scalar, t)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(out.cpu(), fn(scalar, t_cpu))
+
+
 class TestMusaAutograd:
     """Autograd works through the mudnn kernels.
 

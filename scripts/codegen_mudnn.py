@@ -433,19 +433,29 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 
 # Output dtype follows at::result_type, matching PyTorch's promotion.
 #
+# `self` is normally the device tensor, but that assumption breaks for
+# rsub.Scalar: its sub.Tensor decomposition is
+# sub(wrapped_scalar_tensor(other), self, alpha), which puts the CPU wrapped
+# scalar in the `self` slot and the real device tensor in `other`. Picking the
+# compute device from whichever operand is not CPU (instead of hard-coding
+# self.device()) handles both orderings, and .to() is a no-op when a tensor
+# already has the target device/dtype, so the ordinary self-is-device path
+# pays no extra copy (issue #238).
+#
 # `other` may be a CPU tensor: PyTorch wraps a Python number operand into a
 # 0-dim CPU tensor and dispatches through the Tensor overload (a * 3.0 ->
 # mul.Tensor). Handing that host pointer to mudnn would fault, so any non-device
-# operand is moved onto self's device first.
+# operand is moved onto the compute device first.
 #
 # expand() to the broadcast shape stays a view (it only introduces 0-strides),
 # and mudnn reads 0-strides correctly -- verified: (2,3) + (3,) via strides
 # {0,1} gives 11 22 33 14 25 36. So unlike the GCU templates there is no
 # `.contiguous()` here and broadcasting costs no allocation.
 _BINARY_PROLOGUE = """\
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
@@ -456,12 +466,13 @@ T_BINARY = (
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
       !musa_ops::{dtype_pred}(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::{at_op}(self.cpu(), other.cpu()).to(fallback_device);
   }}
 """
     + _BINARY_PROLOGUE
     + """\
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
 {empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -469,7 +480,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::{mode});
   EXEC_MUDNN_CMD(
-      "{at_op}", self,
+      "{at_op}", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }}
@@ -483,12 +494,13 @@ T_BINARY_ALPHA = (
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {{
   if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
       !musa_ops::{dtype_pred}(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu(), alpha).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::{at_op}(self.cpu(), other.cpu(), alpha).to(fallback_device);
   }}
 """
     + _BINARY_PROLOGUE
     + """\
-  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto out = at::empty(out_shape, self_c.options());
 {empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -501,7 +513,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
     op.SetAlpha(alpha.to<double>());
   }}
   EXEC_MUDNN_CMD(
-      "{at_op}", self,
+      "{at_op}", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }}
@@ -515,12 +527,13 @@ T_BINARY_CMP = (
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
       !musa_ops::{dtype_pred}(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::{at_op}(self.cpu(), other.cpu()).to(fallback_device);
   }}
 """
     + _BINARY_PROLOGUE
     + """\
-  auto out = at::empty(out_shape, self.options().dtype(at::kBool));
+  auto out = at::empty(out_shape, self_c.options().dtype(at::kBool));
 {empty_guard}
   musa_ops::MudnnTensorWrapper t_self(self_b);
   musa_ops::MudnnTensorWrapper t_other(other_b);
@@ -528,7 +541,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   musa_ops::mudnn::Binary op;
   op.SetMode(musa_ops::mudnn::Binary::Mode::{mode});
   EXEC_MUDNN_CMD(
-      "{at_op}", self,
+      "{at_op}", self_c,
       op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
   return out;
 }}
