@@ -99,6 +99,27 @@ re-check the PR file list through the API. The PR body must contain the actual
 outputs of both `ruff check` and `ruff format --check`; a syntax check is not a
 substitute when Ruff is available.
 
+**PR body must be self-contained:**
+
+The PR body must contain the full description text inline, not a reference to an
+external file like `@pr_description.md`. File references are not rendered by
+GitHub and leave the PR body effectively empty for human reviewers. When creating
+or updating a PR:
+
+```bash
+# WRONG - leaves body as literal "@pr_description.md" text
+gh pr create --body "@pr_description.md"
+gh api -X PATCH repos/{owner}/{repo}/pulls/{n} -f body=@pr_description.md
+
+# CORRECT - reads file content and passes it inline
+gh pr create --body-file pr_description.md
+gh api -X PATCH repos/{owner}/{repo}/pulls/{n} --field body=@pr_description.md
+```
+
+Use `--body-file` for `gh pr create` and `--field body=@file` (not `-f body=@file`)
+for GitHub REST API calls. After updating, verify the body renders correctly with
+`gh pr view {n} --json body -q '.body' | head -20`.
+
 ### For Human Contributors
 
 Use standard templates:
