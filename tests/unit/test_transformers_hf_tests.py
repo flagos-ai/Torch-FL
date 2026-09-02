@@ -172,6 +172,7 @@ def test_child_env_sets_hf_device_contract(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
     env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", True)
     assert "TRANSFORMERS_TEST_DEVICE" not in env
+    assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert env["TRANSFORMERS_TEST_DEVICE_SPEC"] == "hf_device_spec.py"
     assert env["_HF_TESTS_SOURCE"] == str(tmp_path)
     assert env["HF_HUB_OFFLINE"] == "1"

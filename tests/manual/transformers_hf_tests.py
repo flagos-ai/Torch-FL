@@ -176,8 +176,20 @@ class Recorder:
 
 
 def pytest_configure(config):
+    import torch_fl  # noqa: F401 - register the custom device before collection
+
     path = os.environ["HF_TEST_REPORT"]
     config.pluginmanager.register(Recorder(path), "torch_fl_hf_recorder")
+
+
+def pytest_collection_modifyitems(config, items):
+    import pytest
+
+    if os.environ.get("HF_TEST_SKIP_FLEX_ATTENTION") == "1":
+        skip = pytest.mark.skip(reason="flex attention requires a CUDA Triton backend")
+        for item in items:
+            if "flex_attention" in item.nodeid:
+                item.add_marker(skip)
 """
 
 
@@ -376,6 +388,9 @@ def read_report(path: Path) -> list[dict]:
 
 def environment(device: str) -> dict:
     """Collect the versions a result cannot be interpreted without."""
+    # The device spec imports torch_fl after torch. Disable unrelated torch
+    # backend entry points first so a broken optional plugin cannot abort startup.
+    os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
     import torch
     import transformers
 
@@ -443,6 +458,7 @@ def test_dir(source: Path, model: str) -> Path:
 def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     # Custom PrivateUse1 names are registered by the spec. Transformers validates
     # TRANSFORMERS_TEST_DEVICE before importing that spec, so setting it to
     # ``flagos`` would fail at torch.device() validation.
@@ -459,7 +475,9 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     ]
     # HF's ``tests`` package must be importable by name: its model tests use
     # relative imports such as ``from ...causal_lm_tester import ...``.
-    env["PYTHONPATH"] = os.pathsep.join([str(source), *path_entries])
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(source), str(source / "utils"), *path_entries]
+    )
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
@@ -507,8 +525,13 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     report.touch()
     (workdir / "hf_report_plugin.py").write_text(PLUGIN)
     shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
-
+    (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+    (workdir / "src").symlink_to(source / "src", target_is_directory=True)
     env = child_env(source, args.device, report, args.offline)
+    env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(workdir), env["PYTHONPATH"]]
+    )
     command = pytest_command(
         target,
         args.marks,

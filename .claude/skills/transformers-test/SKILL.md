@@ -164,6 +164,24 @@ The actual device contract used here is `TRANSFORMERS_TEST_DEVICE_SPEC` and
 the three hooks in the spec module. No third-party test switch or other
 pass-oriented environment override is added.
 
+### Known test limitations on PrivateUse1 devices
+
+**Flex Attention tests are skipped on FlagOS/MUSA** because
+`torch.nn.attention.flex_attention` requires a CUDA or ROCm Triton backend.
+The runner sets `HF_TEST_SKIP_FLEX_ATTENTION=1` and the pytest plugin marks
+these tests as explicit skips with the reason "flex attention requires a CUDA
+Triton backend". These skips are **not** coverage gaps; they document a known
+PyTorch upstream limitation. See issue #246 for the full analysis.
+
+**SDPA eager-vs-SDPA precision tests may fail on fp16** if the platform's SDPA
+implementation (via `_fused_sdp_choice` and the efficient or math backend)
+produces output that differs from eager attention beyond HuggingFace's default
+tolerances (`atol=1e-7, rtol=1e-4` for unrecognized devices). These failures
+reflect real numerical differences and are **not** hidden by relaxing test
+thresholds. The root cause should be investigated: is the SDPA backend path
+correct? Does the vendor's fused kernel accumulate differently? Is the tolerance
+genuinely too strict for the measured difference?
+
 The official runner preserves per-test JSON evidence and never writes to
 GitHub. The skill may turn a verified finding into a tracker action only through
 the explicitly authorized workflow in Steps 7 and 8; normal architecture tests
@@ -261,6 +279,28 @@ a device failure. Then compare with dtype-scaled tolerances:
 Keep `NaN`/`Inf` separate from magnitude disagreement and rank it higher. A NaN
 is always a defect; a tolerance miss may be legitimate accumulation-order
 variance. Reporting both as one class hides the real bug.
+
+**Note on SDPA precision tests**: HuggingFace's official test suite includes
+parameterized tests that compare eager attention against SDPA (scaled dot
+product attention) across multiple dtypes, padding configurations, and kernel
+modes. These tests use device-specific tolerances for `cpu`, `cuda`, `hpu`,
+`npu`, and `xpu`, but fall back to strict defaults (`atol=1e-7, rtol=1e-4`) for
+unrecognized device names.
+
+If a PrivateUse1 device's SDPA backend produces numerically correct output that
+differs from eager mode beyond the strict tolerance, classify the failure as
+`PRECISION` and investigate the root cause:
+
+- Is the platform's `_fused_sdp_choice` returning the correct backend? (e.g.,
+  MUSA should return `SDPBackend::math` if no efficient SDPA kernel exists)
+- Does the vendor's fused attention kernel use different accumulation order or
+  reduced-precision intermediates?
+- Is the measured difference (`~6e-5` for MUSA BERT fp16) within the tolerance
+  used by the same test on CUDA (`atol=5e-3, rtol=5e-3` for fp16)?
+
+Do **not** patch `torch.allclose` in the test harness to hide these differences.
+If the tolerance should be device-specific, the fix belongs in the backend
+routing or in the upstream HuggingFace test, not in the measurement layer.
 
 ## Step 7 — deduplicate before filing anything
 
