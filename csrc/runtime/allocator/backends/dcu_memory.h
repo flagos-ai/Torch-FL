@@ -9,6 +9,11 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
 namespace c10::flagos {
 
 // DCU (Hygon, DTK) implementation of DeviceMemoryInterface.
@@ -32,7 +37,10 @@ namespace c10::flagos {
 //
 // Net effect: flagos tensors and the boxed kernels' outputs share ONE pool, so
 // memory_allocated()/memory_reserved()/empty_cache() report and act on real
-// usage -- matching backends/cuda_memory.h.
+// usage -- matching backends/cuda_memory.h. SDK-only mode is the exception:
+// the official CPU wheel has no CUDA hooks or caching allocator registered, so
+// it uses CachingDeviceAllocator's built-in pool below instead of touching the
+// absent ATen_cuda library.
 class DcuDeviceMemory final : public DeviceMemoryInterface {
  public:
   Error_t device_malloc(void** ptr, size_t size) override {
@@ -131,7 +139,12 @@ class DcuDeviceMemory final : public DeviceMemoryInterface {
 
   // --- Caching delegation to torch's own (HIP) device allocator ---
 
-  bool provides_caching() const override { return true; }
+  // The official CPU torch wheel deliberately has no CUDA hooks. In SDK-only
+  // mode, asking for the CUDA allocator would call CUDAHooksInterface::init()
+  // and fail before the SDK plugin ever sees a tensor. Keep the existing
+  // delegation for the DTK libtorch path, but use the allocator owned by
+  // CachingDeviceAllocator when no CUDA library is available.
+  bool provides_caching() const override { return !sdk_only_mode(); }
 
   void* caching_alloc(size_t nbytes, Stream_t stream) override {
     // CachingDeviceAllocator only ever asks for the current stream (it passes
@@ -177,6 +190,17 @@ class DcuDeviceMemory final : public DeviceMemoryInterface {
   }
 
  private:
+  static bool sdk_only_mode() {
+    const char* value = std::getenv("FLAGOS_DCU_SDK_ONLY");
+    if (!value) {
+      return false;
+    }
+    std::string flag(value);
+    std::transform(flag.begin(), flag.end(), flag.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return flag == "1" || flag == "on" || flag == "true" || flag == "yes";
+  }
+
   // The HIP caching allocator asserts unless its per-device tables are sized by
   // init(device_count). PyTorch normally does that during torch.cuda lazy init;
   // in the flagos external-libtorch scheme we may allocate before that runs, so

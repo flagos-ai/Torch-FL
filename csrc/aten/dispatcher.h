@@ -56,6 +56,7 @@ class Dispatcher {
       case Backend::kTsingMicro:   tsingmicro_fn_ = fn;    break;
       case Backend::kGcu:           gcu_fn_ = fn;            break;
       case Backend::kTileOps:       tileops_fn_ = fn;        break;
+      case Backend::kDcuSdk:        dcu_sdk_fn_ = fn;        break;
     }
   }
 
@@ -73,7 +74,9 @@ class Dispatcher {
     }
     LogDispatch(op_name_, backend);
     auto fn = GetFn(backend);
-    TORCH_CHECK(fn, op_name_, ": backend not registered");
+    if (__builtin_expect(fn == nullptr, 0)) {
+      ReportMissingKernel(op_name_, backend);
+    }
     return fn(std::forward<Args>(args)...);
   }
 
@@ -82,7 +85,9 @@ class Dispatcher {
     auto backend = GetBackendForOp(op_name);
     LogDispatch(op_name, backend);
     auto fn = GetFn(backend);
-    TORCH_CHECK(fn, op_name, ": backend not registered");
+    if (__builtin_expect(fn == nullptr, 0)) {
+      ReportMissingKernel(op_name, backend);
+    }
     return fn(std::forward<Args>(args)...);
   }
 
@@ -105,6 +110,13 @@ class Dispatcher {
       case Backend::kTileOps:
         if (tileops_fn_) return tileops_fn_;
         return cuda_fn_ ? cuda_fn_ : flagos_fn_;
+      // DCU SDK-native operators are registered at runtime by the plugin loaded
+      // via torch_fl/__init__.py when FLAGOS_DCU_SDK_OPS=1. The slot stays empty
+      // until that plugin is loaded and calls the registration ABI. If routing
+      // lands here without a kernel, return nullptr so the dispatcher can issue a
+      // clear "backend not registered" error rather than a segfault.
+      case Backend::kDcuSdk:
+        return dcu_sdk_fn_;
     }
     return nullptr;
   }
@@ -115,20 +127,8 @@ class Dispatcher {
       return v && std::string(v) == "1";
     }();
     if (!enabled) return;
-    const char* name;
-    switch (backend) {
-      case Backend::kCuda:          name = "cuda"; break;
-      case Backend::kFlagOs:        name = "flagos"; break;
-      case Backend::kFlagOsPython:  name = "flagos_python"; break;
-      case Backend::kAscend:        name = "ascend"; break;
-      case Backend::kMusa:          name = "musa"; break;
-      case Backend::kMetax:         name = "metax"; break;
-      case Backend::kTsingMicro:   name = "tsingmicro"; break;
-      case Backend::kGcu:           name = "gcu"; break;
-      case Backend::kTileOps:       name = "tileops"; break;
-      default:                           name = "unknown"; break;
-    }
-    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(), name);
+    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(),
+            BackendName(backend));
   }
 
   const char* op_name_ = nullptr;
@@ -145,6 +145,7 @@ class Dispatcher {
   FnPtr tsingmicro_fn_    = nullptr;
   FnPtr gcu_fn_            = nullptr;
   FnPtr tileops_fn_        = nullptr;
+  FnPtr dcu_sdk_fn_        = nullptr;
 };
 
 namespace detail {

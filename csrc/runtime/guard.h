@@ -11,7 +11,10 @@
 
 #include <flagos.h>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 
 #ifdef USE_ASCEND
 #include "runtime/accelerator/ascend/acl_stream.h"
@@ -57,6 +60,76 @@ inline c10::Stream MakeAscendStream(int device, aclrtStream stream) {
 inline aclrtStream AscendStreamHandle(const c10::Stream& stream) {
   return reinterpret_cast<aclrtStream>(
       static_cast<uintptr_t>(stream.id()));
+}
+#endif
+
+#ifdef USE_DCU
+// DCU has no usable c10::cuda:: stream API (see the guard above), so the current
+// stream is tracked by flagos itself in
+// runtime/accelerator/dcu/stream_registry.cc. These helpers translate between
+// that raw handle and c10::Stream using the same id-is-the-pointer convention as
+// the Ascend pair above and as WrapperRecordStream in csrc/aten/register.cc.
+//
+// Without this, the #else fallback below reported stream id 0 for every device,
+// which the SDK-native operators would read as "default stream" no matter what
+// stream the caller had made current.
+inline int ResolveDcuDevice(c10::Device d) {
+  if (d.index() >= 0) {
+    return d.index();
+  }
+  int device = 0;
+  ::GetDevice(&device);
+  return device;
+}
+
+inline c10::Stream MakeDcuStream(int device, Stream_t stream) {
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::DeviceType::PrivateUse1, device),
+      static_cast<c10::StreamId>(reinterpret_cast<uintptr_t>(stream)));
+}
+
+inline Stream_t DcuStreamHandle(const c10::Stream& stream) {
+  return reinterpret_cast<Stream_t>(static_cast<uintptr_t>(stream.id()));
+}
+
+// Fixed pool of side streams, handed out round-robin -- the same shape as
+// c10::cuda's stream pool and for the same reason: creating a stream per
+// getNewStream() call would leak one on every `torch.Stream(device="flagos")`,
+// while returning the default stream would silently serialize code that asked
+// for a side stream. Streams are created once and intentionally never destroyed;
+// they live for the process, so there is no teardown ordering hazard against
+// pending work.
+inline Stream_t DcuStreamFromPool(int device) {
+  constexpr int kPoolSize = 32;
+  struct Pool {
+    Stream_t streams[kPoolSize] = {};
+    std::atomic<unsigned> next{0};
+  };
+  // Per-device pools, initialized on first use for that device.
+  static std::array<std::once_flag, 64> once;
+  static std::array<Pool, 64> pools;
+  if (device < 0 || device >= static_cast<int>(pools.size())) {
+    return nullptr;
+  }
+  std::call_once(once[device], [device]() {
+    // Create on the target device: stream creation is device-scoped.
+    int prev = -1;
+    ::GetDevice(&prev);
+    if (prev != device) {
+      ::SetDevice(device);
+    }
+    for (auto& s : pools[device].streams) {
+      if (::StreamCreate(&s) != Success) {
+        s = nullptr; // fall back to the default stream for this slot
+      }
+    }
+    if (prev >= 0 && prev != device) {
+      ::SetDevice(prev);
+    }
+  });
+  unsigned i = pools[device].next.fetch_add(1, std::memory_order_relaxed);
+  return pools[device].streams[i % kPoolSize];
 }
 #endif
 
@@ -126,6 +199,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return MakeAscendStream(
         device,
         at::native::flagos::ascend::GetCurrentAclStreamForDevice(device));
+#elif defined(USE_DCU)
+    auto device = ResolveDcuDevice(d);
+    return MakeDcuStream(device, ::GetCurrentStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -143,6 +219,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return MakeAscendStream(
         device,
         at::native::flagos::ascend::GetDefaultAclStream());
+#elif defined(USE_DCU)
+    auto device = ResolveDcuDevice(d);
+    return MakeDcuStream(device, ::GetDefaultStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -160,6 +239,13 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
     return MakeAscendStream(device, stream);
+#elif defined(USE_DCU)
+    // DTK's runtime exposes no stream priorities through the compat layer, so
+    // isHighPriority cannot be honored; a normal-priority pool stream is the
+    // closest correct answer.
+    (void)isHighPriority;
+    auto device = ResolveDcuDevice(d);
+    return MakeDcuStream(device, DcuStreamFromPool(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -191,6 +277,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     at::native::flagos::ascend::SetCurrentAclStreamForDevice(
         device, AscendStreamHandle(s));
     return MakeAscendStream(device, old);
+#elif defined(USE_DCU)
+    auto device = ResolveDcuDevice(s.device());
+    auto old = ::GetCurrentStreamForDevice(device);
+    ::SetCurrentStreamForDevice(device, DcuStreamHandle(s));
+    return MakeDcuStream(device, old);
 #else
     return c10::Stream(c10::Stream::UNSAFE, s.device(), 0);
 #endif
@@ -208,6 +299,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
     return MakeAscendStream(device, stream);
+#elif defined(USE_DCU)
+    (void)priority; // no priority control through DTK's compat runtime
+    auto device = ResolveDcuDevice(d);
+    return MakeDcuStream(device, DcuStreamFromPool(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -221,6 +316,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       return false;
     }
     return status == ACL_STREAM_STATUS_COMPLETE;
+#elif defined(USE_DCU)
+    // Query the one stream instead of draining the device: the ids are real
+    // handles here (see the registry above), and a device-wide sync would both
+    // over-synchronize and report "complete" for work on other streams.
+    return ::StreamQuery(DcuStreamHandle(stream)) == Success;
 #else
     ::DeviceSynchronize();
     return true;
@@ -230,6 +330,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void synchronizeStream(const c10::Stream& stream) const override {
 #ifdef USE_ASCEND
     aclrtSynchronizeStream(AscendStreamHandle(stream));
+#elif defined(USE_DCU)
+    ::StreamSynchronize(DcuStreamHandle(stream));
 #else
     ::DeviceSynchronize();
 #endif
@@ -297,6 +399,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     ::EventRecord(*(Event_t*)event, (Stream_t)cs.stream());
 #elif defined(USE_ASCEND)
     ::EventRecord(*(Event_t*)event, (Stream_t)AscendStreamHandle(stream));
+#elif defined(USE_DCU)
+    // Record on the stream actually passed in. The nullptr fallback below would
+    // pin every event to the default stream, so an event recorded inside a side
+    // stream would order against the wrong queue.
+    ::EventRecord(*(Event_t*)event, DcuStreamHandle(stream));
 #else
     ::EventRecord(*(Event_t*)event, nullptr);
 #endif
@@ -306,6 +413,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #ifdef USE_ASCEND
     ::StreamWaitEvent(
         (Stream_t)AscendStreamHandle(stream), (Event_t)event, 0);
+#elif defined(USE_DCU)
+    ::StreamWaitEvent(DcuStreamHandle(stream), (Event_t)event, 0);
 #else
     ::StreamWaitEvent(nullptr, (Event_t)event, 0);
 #endif

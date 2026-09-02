@@ -607,6 +607,22 @@ def _verify_built_native_libs() -> None:
                 "required when DTK's device libraries run on the official "
                 "PyTorch core. Check the flagos_dtk_core_compat cmake target."
             )
+        sdk_plugin = os.path.join(BASE_DIR, "torch_fl", "lib_dcu", "libdcu_aten_ops.so")
+        sdk_manifest = os.path.join(
+            BASE_DIR, "torch_fl", "lib_dcu", "dcu_sdk_manifest.json"
+        )
+        if not os.path.isfile(sdk_plugin):
+            raise RuntimeError(
+                f"DCU native build finished but {sdk_plugin} is missing. "
+                "FLAGOS_DCU_SDK_OPS_BUILD must produce the SDK-native plugin."
+            )
+        if not os.path.isfile(sdk_manifest):
+            raise RuntimeError(
+                f"DCU native build finished but {sdk_manifest} is missing. The "
+                "loader refuses to run a plugin with no coverage/ABI manifest."
+            )
+        checker = os.path.join(BASE_DIR, "scripts", "check_dcu_sdk_abi.py")
+        subprocess.check_call([sys.executable, checker, sdk_plugin])
         return
     if ACCELERATOR != "metax":
         return
@@ -638,7 +654,15 @@ class BuildExtWithCmake(_build_ext):
             # build_ext. build_py has already cached its file list by then, so
             # copy it (and any pre-bundled device assets) into wheel staging just
             # like the native libs under lib/.
-            patterns.extend(("lib_dcu/*.so*", "lib_dcu/vendor_version.py"))
+            patterns.extend(
+                (
+                    "lib_dcu/*.so*",
+                    "lib_dcu/vendor_version.py",
+                    # The SDK plugin's coverage/ABI manifest, also cmake-installed
+                    # during build_ext and therefore invisible to build_py.
+                    "lib_dcu/dcu_sdk_manifest.json",
+                )
+            )
         for pattern in patterns:
             relative_paths.extend(
                 os.path.relpath(path, os.path.join(BASE_DIR, "torch_fl"))
@@ -746,6 +770,10 @@ def _get_setup_kwargs():
             # torch in front does not have. Needed explicitly: the globs above
             # only match *.so*.
             "lib_dcu/vendor_version.py",
+            # Coverage/ABI manifest for the SDK-native GEMM plugin. The loader
+            # treats a missing manifest as a hard error rather than assuming the
+            # plugin covers anything, so it has to be in the wheel.
+            "lib_dcu/dcu_sdk_manifest.json",
             "lib_ppu/*.so*",
             "include/*.h",
             # The DTK-private symbol manifest that libflagos_dtk_core_compat.so

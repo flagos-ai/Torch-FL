@@ -49,6 +49,7 @@ def _select_backend_config() -> None:
                                                -> backends_metax_flaggems_cpp.conf
       * FLAGOS_USE_FLAGGEMS=1                  -> backends_flaggems.conf
       * FLAGOS_USE_FLAGGEMS=1 + METAX_BOXING=1 -> backends_metax_flaggems.conf
+      * FLAGOS_DCU_SDK_OPS=1                  -> backends_dcu_sdk.conf
       * FLAGOS_USE_FLAGGEMS=1 + ACCELERATOR=dcu -> backends_dcu_flaggems.conf
       * unset / 0                              -> backends_cuda.conf (pure boxing)
 
@@ -108,6 +109,17 @@ def _select_backend_config() -> None:
         "false",
         "FALSE",
     )
+    use_dcu_sdk = os.environ.get("FLAGOS_DCU_SDK_OPS", "0").strip().lower() in (
+        "1",
+        "on",
+        "true",
+        "yes",
+    ) or os.environ.get("FLAGOS_DCU_SDK_ONLY", "0").strip().lower() in (
+        "1",
+        "on",
+        "true",
+        "yes",
+    )
     metax_boxing = os.environ.get("FLAGOS_METAX_BOXING", "0") == "1"
 
     # A vendor build whose kernels are native (no CUDA boxing) records its
@@ -159,7 +171,17 @@ def _select_backend_config() -> None:
             os.environ["FLAGOS_BACKEND_CONFIG"] = conf_path
         return
 
-    if use_tileops:
+    if use_dcu_sdk and _build_accelerator() == "dcu":
+        if os.environ.get("FLAGOS_DCU_SDK_ONLY", "0").strip().lower() in (
+            "1",
+            "on",
+            "true",
+            "yes",
+        ):
+            conf_name = "backends_dcu_sdk_only.conf"
+        else:
+            conf_name = "backends_dcu_sdk.conf"
+    elif use_tileops:
         conf_name = "backends_tileops.conf"
     elif use_flaggems_cpp and metax_boxing:
         conf_name = "backends_metax_flaggems_cpp.conf"
@@ -394,6 +416,14 @@ def _validate_dcu_decoupled_runtime() -> None:
     if vendor_core_mode():
         return  # legacy mode replaces the core wholesale; nothing to reconcile.
 
+    from torch_fl.accelerator.dcu._dcu_sdk_ops import sdk_only
+
+    if sdk_only():
+        # No DTK libtorch is mapped in this mode, so the decoupled checks would
+        # fail by design. Its own validation needs the plugin loaded, which only
+        # happens after torch_fl._C, so it runs from there instead.
+        return
+
     from torch_fl.accelerator.dcu._dcu_runtime_check import validate_decoupled_runtime
 
     validate_decoupled_runtime(os.path.join(os.path.dirname(__file__), "lib_dcu"))
@@ -473,6 +503,37 @@ if _os.path.exists(_stream_api_path):
 _check_privateuse1_unclaimed()
 
 import torch_fl._C  # type: ignore[misc]  # noqa: E402, F401
+
+
+# SDK-native DCU operators are registered only after the core extension is loaded:
+# the plugin calls an explicit ABI bridge exported by libtorch_fl.so, and must not
+# create a competing PrivateUse1 registration. SDK-only mode also checks the
+# process map here, before any user operation can accidentally load libtorch_hip.
+if _build_accelerator() == "dcu":
+    from torch_fl.accelerator.dcu._dcu_sdk_ops import (
+        assert_sdk_only_process as _assert_dcu_sdk_only_process,
+        enabled as _dcu_sdk_ops_enabled,
+        load_and_register as _load_dcu_sdk_ops,
+    )
+
+    if _dcu_sdk_ops_enabled():
+        _dcu_sdk_manifest = _load_dcu_sdk_ops()
+        _assert_dcu_sdk_only_process()
+        if os.environ.get("FLAGOS_DCU_SDK_ONLY", "0").strip().lower() in (
+            "1",
+            "on",
+            "true",
+            "yes",
+        ):
+            from torch_fl.accelerator.dcu._dcu_runtime_check import (
+                validate_sdk_only_runtime,
+            )
+
+            validate_sdk_only_runtime()
+            del validate_sdk_only_runtime
+        del _dcu_sdk_manifest
+
+    del _assert_dcu_sdk_only_process, _dcu_sdk_ops_enabled, _load_dcu_sdk_ops
 
 
 from . import flagos  # noqa: E402
