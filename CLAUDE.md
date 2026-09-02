@@ -82,6 +82,23 @@ gh pr create \
   --label "ai-generated"
 ```
 
+**Mandatory PR completeness gate:**
+
+Before creating or updating a PR, verify the complete diff against the intended
+base branch and confirm that every intended file is present:
+
+```bash
+git diff --stat <base-branch>...HEAD
+git diff --name-status <base-branch>...HEAD
+gh api repos/{owner}/{repo}/pulls/{number}/files --paginate
+```
+
+Do not create or update the PR until all required files are included in the
+branch diff. After any formatting or follow-up change, push the new commit and
+re-check the PR file list through the API. The PR body must contain the actual
+outputs of both `ruff check` and `ruff format --check`; a syntax check is not a
+substitute when Ruff is available.
+
 ### For Human Contributors
 
 Use standard templates:
