@@ -35,9 +35,21 @@ was:
 ```
 
 Because the device context was poisoned, failures after the first accelerator
-fault are not yet considered independently verified findings. No GitHub issues
-were filed from this first sweep. The raw JSON report remains outside the
-repository at `/tmp/qwen3.json`.
+fault are not considered independently verified findings. The device-poisoning
+finding was filed as issue #250 after the run-level poison signal was confirmed;
+the remaining test failures were not filed individually. The raw JSON report
+remains outside the repository at `/tmp/qwen3.json`.
+
+This first sweep is both the initial baseline and the source of one verified
+tracker finding. It is recorded as an observed defect on the pinned tuple, not
+as a regression claim.
+
+The issue reference is retained here so future runs can distinguish the known
+poisoning cause from new findings:
+
+| Fingerprint | Class | Subject | Issue |
+| --- | --- | --- | --- |
+| Pending cause-level fingerprint | `CRASH` | qwen3 device context poisoning | [#250](https://github.com/flagos-ai/Torch-FL/issues/250) |
 
 ### Failed test inventory
 

@@ -8,7 +8,7 @@ description: >
   after a transformers version change. Covers: per-model probing without real
   weights, the HF custom-device injection contract, CPU same-dtype precision
   baselines, aten attribution through TorchDispatchMode, root-cause fingerprint
-  dedup, and a baseline-first gate for explicitly authorized tracker writes.
+  dedup, and a baseline-aware gate for explicitly authorized tracker writes.
   Do not use this to infer model support from a routing table or from a passing
   operator suite.
 ---
@@ -186,6 +186,26 @@ The official runner preserves per-test JSON evidence and never writes to
 GitHub. The skill may turn a verified finding into a tracker action only through
 the explicitly authorized workflow in Steps 7 and 8; normal architecture tests
 and `--all` sweeps remain report-only.
+
+A baseline is evidence for comparison, not permission to suppress a first
+finding. A first sweep may produce an actionable issue when the individual
+finding passes the evidence, deduplication, and authorization gates below. Record
+the first sweep as the initial baseline before or alongside any filing.
+
+The baseline is scoped to the measured `(chip, device, transformers version,
+torch_fl commit)` tuple. It is required when claiming a regression, but a
+verified first-sweep defect must not be blocked merely because no earlier
+measurement exists. Report a first-sweep defect as observed on the pinned tuple,
+not as a regression.
+
+Do not wait for a second full sweep solely to satisfy a baseline requirement.
+Use later sweeps to establish regressions, confirm persistence after a fix, and
+measure coverage changes.
+
+If a run poisons the device, isolate the first fault before filing. Treat later
+failures as collateral until they independently reproduce in fresh subprocesses.
+A model-level crash finding can be filed when the poisoning and its trigger are
+reproduced; do not file a generic issue based only on a truncated suite summary.
 
 ## Step 3 — probe one model in layers
 
@@ -408,50 +428,66 @@ Before any tracker write, read `.github/AI_AGENT_GUIDE.md`,
 `.github/ISSUE_TEMPLATE/ai_agent_issue.md`. Include a self-contained reproducer
 and the environment block, and write everything in English per `CLAUDE.md`.
 
-## Step 8 — baseline first, then authorize each tracker action
+## Step 8 — record the baseline, then authorize each tracker action
 
 A first sweep on a new platform can produce hundreds of failures at once.
-Writing all of them to the tracker would hide the signal under a flood. Neither
-harness writes to GitHub or promotes a baseline; the agent performs the steps
-below deliberately from the report JSON.
+Writing all of them to the tracker would hide the signal under a flood. The
+baseline and the tracker are separate outputs: the baseline records what was
+measured, while an issue records a verified, root-caused defect. The first sweep
+may produce tracker issues; it is not required to wait for a second full sweep.
+Neither the harness writes to GitHub nor promotes a baseline; the agent performs
+the steps below deliberately from the report JSON.
 
 ### Evidence gate
 
-All four conditions must hold before any tracker write is considered. If one
-fails, stop and report instead:
+All of these conditions must hold before a tracker write is considered. If one
+fails, stop and report or prepare the issue without publishing it:
 
-1. **A pre-existing baseline exists for this chip.** Before the current run,
-   `docs/reference/hf-coverage.md` already contained a measurement for this chip
-   with an earlier run date and cause fingerprints. The first sweep is the
-   baseline: record it, perform no tracker writes, and say so. Recording the
-   current sweep immediately before filing does not turn it into an earlier
-   baseline.
-2. **The finding survived isolation.** It reproduces in its own process with a
-   passing CPU same-dtype baseline and, for a poisoned run, is confirmed as the
-   first fault rather than collateral damage.
-3. **A standalone reproducer runs.** Prefer fewer than 30 lines importing only
-   `torch` and `torch_fl`, with no `transformers` or pytest. If reduction is not
-   possible, explain why and retain the exact isolated single-test command.
-4. **The count is sane.** More than five apparently new causes from one sweep
-   triggers another classification and dedup pass; do not publish a batch whose
-   causes may have collapsed incorrectly.
+1. The result belongs to the pinned `(chip, device, transformers version,
+   torch_fl commit)` tuple, and the raw report is retained outside the
+   repository. Record the first sweep as the initial baseline before or
+   alongside any filing.
+2. The finding survives isolation in its own process. For precision findings,
+   validate the CPU same-dtype baseline first. If the run poisoned the device,
+   identify the first fault; treat later failures as collateral until they
+   independently reproduce in fresh subprocesses. A model-level crash issue is
+   valid when the poisoning itself and its trigger are reproduced.
+3. A standalone reproducer runs, preferably in fewer than 30 lines importing
+   only `torch` and `torch_fl`. If reduction is not possible, retain the exact
+   isolated test command and explain why.
+4. The cause is named, fingerprinted, and deduplicated against issue bodies,
+   comments, and relevant semantic matches.
+5. If more than five causes appear in one sweep, perform an additional
+   classification and deduplication pass before filing. This is a review step,
+   not a blanket ban on first-sweep issues.
+6. The requested GitHub action is explicitly authorized for that finding.
 
-After that gate, compare the cause fingerprint with both the pre-existing
-baseline and the tracker:
+A pre-existing baseline is required only when the claim is specifically a
+regression, a newly introduced failure, or a change from a prior measurement.
+For a first-sweep defect, report the defect on the pinned tuple rather than
+calling it a regression. A baseline from a different chip, model, software
+version, or commit does not satisfy a regression comparison.
 
-- present in the baseline: a known cause, never a new issue;
+After that gate, compare the cause fingerprint with the baseline when one exists
+and with the tracker:
+
+- present in the baseline: a known cause, never a new regression issue;
 - absent from the baseline but present in an open issue: a duplicate, optionally
   eligible for a new-evidence comment;
 - absent from the baseline but present in a closed issue: report the issue and
   its closing disposition; optionally eligible for a comment or reopen request;
-- absent from both: a regression or newly discovered cause eligible for a new
-  issue.
+- absent from both: eligible for a new issue if the evidence and authorization
+  gates pass.
+
+The initial baseline may include issue references for findings filed from the
+same run. This preserves the starting point and the audit trail for future
+comparisons.
 
 ### Authorization gate
 
 Every GitHub write is a separate outward-facing action. Perform only the action
-the user explicitly requests in the current session, and only for the named
-finding or issue:
+that the user explicitly requests in the current session, and only for the
+named, verified finding:
 
 - "file/open/create an issue" authorizes creating the specified new issue; it
   does not authorize commenting on or reopening an existing issue;
@@ -473,34 +509,25 @@ Write the body to a file — never pass a multi-line body as a shell argument,
 where a backtick or `$` in a traceback could be interpreted:
 
 ```bash
-gh issue create \
-  --repo flagos-ai/Torch-FL \
-  --title "[AI][MUSA MTT S5000] bert: aten::rsub.Scalar illegal memory access (transformers 5.16.1)" \
-  --body-file /tmp/issue-cce6ae545772.md \
-  --label ai-generated --label bug
+ gh issue create \
+   --repo flagos-ai/Torch-FL \
+   --title "[AI][MUSA MTT S5000] bert: aten::rsub.Scalar illegal memory access (transformers 5.16.1)" \
+   --body-file /tmp/issue-cce6ae545772.md \
+   --label ai-generated --label bug
 ```
 
-Map the finding onto `.github/ISSUE_TEMPLATE/ai_agent_issue.md` section by
-section. The template's rejection criteria decide whether the issue is useful;
-in particular:
-
-- **Root Cause Analysis** — the template forbids "unknown". Name the mechanism
-  and cite `file:line` of the code responsible, e.g. "`SubTensorKernelMusa`
-  moves only `other` to the device (`csrc/aten/backends/musa/generated/musa_kernels.cc:760`)
-  and allocates `out` from `self.options()` (line 764), so a CPU wrapped scalar
-  in the `self` slot reaches muDNN as a host pointer." If the mechanism is not
-  established, the finding is not ready to publish.
-- **Expected vs Actual** — include the verbatim error text and relevant
-  traceback, not a paraphrase.
-- **Environment** — include the pinned Step 1 block: chip, driver, vendor
-  library, Python, `torch`, `transformers`, and the torch_fl commit SHA.
-- **Proposed Solution and Verification Plan** — give a concrete implementation
-  direction and the unit, integration, and hardware regression checks needed.
+Map the finding onto `.github/AI_AGENT_GUIDE.md`, `.github/CLAUDE_CODE_GUIDE.md`,
+and `.github/ISSUE_TEMPLATE/ai_agent_issue.md` section by section. The
+template's rejection criteria decide whether the issue is useful; in particular,
+name the root-cause mechanism and cite the responsible `file:line`, include a
+verbatim error and relevant traceback, include the pinned environment block,
+and give a concrete solution plus unit, integration, and hardware verification
+plan.
 
 Add the fingerprint line from Step 7 and state the model and test node ID that
-led to the finding. Keep the raw JSON out of the issue; quote only the relevant
-evidence. Assign an issue owner only if the user names one or repository policy
-requires one; an issue assignee is not a PR reviewer.
+led to the finding. Keep raw JSON out of the issue. Assign an issue owner only
+if the user names one or repository policy requires one; an issue assignee is
+not a PR reviewer.
 
 Nothing here bypasses the report-only default. When in doubt, produce the
 ready-to-file text and wait.
@@ -536,8 +563,9 @@ Before opening a PR:
   fallback for pre-fingerprint issues;
 - duplicate issues were commented on or reopened only when that exact action was
   separately authorized;
-- no tracker write occurred without both Step 8 gates passing, and the first
-  sweep on a chip performed no tracker writes;
+- no tracker write occurred without the Step 8 evidence and authorization
+  gates passing; a first sweep may file verified findings;
+- any regression claim has a matching earlier baseline for the same pinned tuple;
 - raw JSON and vendor core dumps are not in the commit;
 - unavailable hardware is marked **not revalidated**;
 - `ruff check .` and `ruff format --check .` pass.
@@ -545,6 +573,11 @@ Before opening a PR:
 Coverage may be claimed only for the models measured on that chip. A passing
 operator suite, a populated routing table, and another platform's rate are all
 not evidence.
+
+Coverage records and issue records are linked but independent. A missing prior
+coverage record blocks a regression claim, not a verified first-sweep issue. The
+first-sweep coverage entry is updated with any issue number and cause
+fingerprint produced from that run.
 
 ## Related
 
