@@ -72,6 +72,9 @@ SCHEMA_VERSION = 1
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = Path(__file__).resolve().parent / "hf_device_spec.py"
+# Filename the spec is staged under inside the pinned Transformers source tree.
+# Prefixed so it cannot collide with anything HF ships or later adds.
+STAGED_SPEC_NAME = "torch_fl_hf_device_spec.py"
 
 # One illegal access poisons the device context for the rest of the process.
 # Same pattern set as the model probe, so both harnesses call a fault a fault.
@@ -440,14 +443,19 @@ def test_dir(source: Path, model: str) -> Path:
     return source / "tests" / "models" / module_name(model)
 
 
-def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
+def child_env(
+    source: Path, device: str, report: Path, offline: bool, workdir: Path
+) -> dict:
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
     # Custom PrivateUse1 names are registered by the spec. Transformers validates
     # TRANSFORMERS_TEST_DEVICE before importing that spec, so setting it to
     # ``flagos`` would fail at torch.device() validation.
     env.pop("TRANSFORMERS_TEST_DEVICE", None)
-    env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
+    # Transformers 5.16.1 rejects this value unless it names an existing file
+    # relative to the child's cwd, then strips ``.py`` and imports the remainder.
+    # A repository-relative path satisfies neither step, so pass the staged name.
+    env["TRANSFORMERS_TEST_DEVICE_SPEC"] = STAGED_SPEC_NAME
     env["HF_TEST_REPORT"] = str(report)
     # This repository also has a top-level ``tests`` package. If it stays
     # importable, HF's ``tests.models...`` imports resolve into the wrong tree
@@ -459,7 +467,7 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     ]
     # HF's ``tests`` package must be importable by name: its model tests use
     # relative imports such as ``from ...causal_lm_tester import ...``.
-    env["PYTHONPATH"] = os.pathsep.join([str(source), *path_entries])
+    env["PYTHONPATH"] = os.pathsep.join([str(source), str(workdir), *path_entries])
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
@@ -498,17 +506,26 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             "summary": {},
         }
 
-    # Transformers resolves TRANSFORMERS_TEST_DEVICE_SPEC by importing the value
-    # as a module name after appending its directory to sys.path, so the spec has
-    # to be importable from the child's working directory. Running from a private
-    # directory keeps the shared source cache unmodified.
+    # A private directory holds the per-run report and the recording plugin, so
+    # concurrent runs never share either and the source cache keeps no artifacts.
     workdir = Path(tempfile.mkdtemp(prefix=f"hf-tests-{model.replace('/', '_')}-"))
     report = workdir / "report.jsonl"
     report.touch()
     (workdir / "hf_report_plugin.py").write_text(PLUGIN)
-    shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
+    # Transformers imports the spec as a module name, so it must sit on the
+    # child's sys.path. The child runs from the source root (see below), so the
+    # spec is staged there under a torch_fl-prefixed name and removed afterwards.
+    source_spec = source / STAGED_SPEC_NAME
+    shutil.copyfile(DEVICE_SPEC, source_spec)
+    # Transformers 5.16.1's utils/ is a namespace package (no __init__.py). Some
+    # test files do sys.path.append(".") then import from utils, which fails when
+    # utils remains a namespace package. Convert it to a regular package.
+    utils_init = source / "utils" / "__init__.py"
+    utils_init_existed = utils_init.exists()
+    if not utils_init_existed:
+        utils_init.touch()
 
-    env = child_env(source, args.device, report, args.offline)
+    env = child_env(source, args.device, report, args.offline, workdir)
     command = pytest_command(
         target,
         args.marks,
@@ -519,6 +536,8 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             str(source / "pyproject.toml"),
             "--rootdir",
             str(source),
+            # pytest requires a module name here, not a path. ``workdir`` is on
+            # the child PYTHONPATH so the staged plugin resolves by name.
             "-p",
             "hf_report_plugin",
             *args.pytest_arg,
@@ -533,7 +552,11 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             capture_output=True,
             text=True,
             env=env,
-            cwd=str(workdir),
+            # Several 5.16.1 test modules do sys.path.append(".") and then import
+            # from the source tree's top-level ``utils`` package. Running anywhere
+            # else turns those modules into collection errors unrelated to the
+            # device under test.
+            cwd=str(source),
             timeout=args.timeout,
         )
         stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
@@ -546,6 +569,10 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors="replace")
         rc, timed_out = None, True
+    finally:
+        source_spec.unlink(missing_ok=True)
+        if not utils_init_existed:
+            utils_init.unlink(missing_ok=True)
 
     reduced = reduce_records(read_report(report))
     combined = "\n".join(

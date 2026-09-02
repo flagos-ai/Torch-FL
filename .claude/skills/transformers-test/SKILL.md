@@ -94,6 +94,22 @@ so a custom PrivateUse1 name is not accepted at that point. The spec's
 For built-in devices, `TRANSFORMERS_TEST_DEVICE` remains available as an
 alternative to a spec file.
 
+When using `tests/manual/transformers_hf_tests.py`, do **not** export
+`TRANSFORMERS_TEST_DEVICE_SPEC` yourself. The runner stages the repository spec
+into the child process and sets the value to an importable module name. This is
+important for Transformers 5.16.1: it first checks that the configured value is a
+file, then strips `.py` and imports the remaining string. A repository-relative
+path such as `tests/manual/hf_device_spec.py` therefore fails in that release
+when it is not staged next to the child working directory. For a direct pytest
+invocation, stage the spec into the Transformers source root, run pytest from
+that root, and set the environment variable to the staged filename.
+
+The torch_fl repository also has a top-level `tests/` package. The official
+runner removes the repository root from the child `PYTHONPATH` so imports such as
+`tests.models.bert...` resolve to the pinned Transformers source tree rather
+than torch_fl's own tests. If you invoke pytest manually, make the Transformers
+source root the first import location and do not leave the torch_fl repository
+root ahead of it.
 
 The spec module must define `DEVICE_NAME` plus the three backend hooks HF
 dispatches on; a missing hook raises at import unless HF has a default:
@@ -124,8 +140,24 @@ version declared by `src/transformers/__init__.py`, and runs only
 `tests/models/<module>/` for that architecture. Set `--source-dir` to use a
 prepared tree, or use `--offline` to require an existing versioned cache. A
 version-mismatched source tree produces failures that belong to HF, not to
-torch_fl. The runner injects `flagos` through
-`TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py`.
+torch_fl. The runner injects `flagos` by staging
+`tests/manual/hf_device_spec.py` for the child process and setting
+`TRANSFORMERS_TEST_DEVICE_SPEC` to the staged module name itself.
+
+Two properties of the pinned source tree decide where the child process may run.
+Some Transformers 5.16.1 test modules call `sys.path.append(".")` and then import
+from the repository's top-level `utils/` package, so the child's working
+directory must be the Transformers source root; running from a scratch directory
+turns those modules into collection errors that have nothing to do with the
+accelerator. The runner therefore stages the spec into that root and removes it
+again when the run finishes, instead of leaving the pinned tree modified.
+
+The runner also loads its own recording plugin as a module name (`-p
+hf_report_plugin`) from a staged directory that is on the child `PYTHONPATH`;
+pytest rejects a filesystem path here. That plugin appends one JSON record per
+test as the run progresses, which is what preserves the tests that completed
+before a crash. Do not repoint `HF_TEST_REPORT` or replace the plugin: without
+it, a crashing run reports no per-test evidence at all.
 
 Some official tests download tiny fixtures from the Hugging Face Hub. If
 `huggingface.co` is unreachable, do not classify the resulting retries or
@@ -262,6 +294,23 @@ Keep `NaN`/`Inf` separate from magnitude disagreement and rank it higher. A NaN
 is always a defect; a tolerance miss may be legitimate accumulation-order
 variance. Reporting both as one class hides the real bug.
 
+Detecting NaN in test output is not root-cause analysis. The test framework
+reports "mean relative difference: nan" when either the eager or optimized path
+produces NaN, but that text does not identify which path failed, where the NaN
+originated, or what tensor operation caused it. Before filing, isolate the exact
+operation (softmax denominator divide-by-zero, FP16 exp overflow, uninitialized
+buffer) and confirm via instrumentation or separate reproducer. A `PRECISION`
+finding without this isolation is incomplete.
+
+Similarly, a process crash (SIGSEGV, device-side assert, timeout) observed during
+a test sequence is **timing evidence**, not causality. The corrupting operation
+may have occurred in an earlier test, and the signal may arrive only when a later
+allocation or synchronization touches the damaged state. Before filing a `CRASH`
+issue, bisect the test list or add per-test instrumentation to confirm the
+trigger, and attempt to extract a native stack trace or core dump. A crash report
+that consists only of "subprocess returned -11 after running 99 tests" does not
+identify what to fix.
+
 ## Step 7 — deduplicate before filing anything
 
 The same root cause reappears across models and platforms. Filing per model and
@@ -301,12 +350,15 @@ def cause_fingerprint(failure_class, component, subject, mechanism):
 
 `subject` is `aten::<op>.<overload>` when an operator was named, otherwise the
 feature or module that failed (`sdpa`, `torch.compile`, `flash_attention_2`).
-`component` identifies the implementation responsible for the cause: for
-example `musa:SubTensorKernelMusa`, `ascend:generated-add`, or
-`shared:privateuse1-registration`. `mechanism` is the shortest verified statement
-that distinguishes the defect, preferably the vendor error's stable final line
-or a normalized assertion. Do not hash an entire traceback: call stacks change
-without changing the cause.
+`component` identifies the implementation responsible for the cause. Use stable
+symbols and template names, not generated file paths:
+- For handwritten kernels: function name (`musa:SubTensorKernelMusa`)
+- For generated implementations: template or category name (`ascend:generated-add`), not the generated output path
+- For shared registration or routing: (`shared:privateuse1-registration`)
+
+`mechanism` is the shortest verified statement that distinguishes the defect,
+preferably the vendor error's stable final line or a normalized assertion. Do not
+hash an entire traceback: call stacks change without changing the cause.
 
 This makes the value stable across models, tests, transformers releases, and
 chips that execute the same faulty implementation. It does **not** merge two
