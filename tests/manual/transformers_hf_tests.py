@@ -529,9 +529,7 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     (workdir / "src").symlink_to(source / "src", target_is_directory=True)
     env = child_env(source, args.device, report, args.offline)
     env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(workdir), env["PYTHONPATH"]]
-    )
+    env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
     command = pytest_command(
         target,
         args.marks,
