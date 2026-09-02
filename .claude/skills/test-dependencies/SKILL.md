@@ -97,6 +97,40 @@ python -m pip install --index-url https://pypi.org/simple <package>...
 Never copy proxy credentials into source files, logs committed to the
 repository, issue reports, or test evidence published outside the machine.
 
+### Recovering Hugging Face connectivity
+
+Official Transformers tests may download tiny fixtures from the Hugging Face
+Hub even when the synthetic probe is fully offline. If `huggingface.co` is not
+reachable, recover connectivity before classifying the test result:
+
+1. Check whether the required files are already cached. If they are, rerun with
+   `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` and do not treat cache misses as
+   backend failures.
+2. If a repository proxy is available, load it and retry the same command:
+
+   ```bash
+   source ../proxy.sh
+   python -c 'from huggingface_hub import hf_hub_download; print(hf_hub_download("hf-internal-testing/tiny-random-BertModel", "config.json"))'
+   ```
+
+3. If the origin remains unreachable, retry through the public Hub mirror:
+
+   ```bash
+   export HF_ENDPOINT=https://hf-mirror.com
+   python -c 'from huggingface_hub import hf_hub_download; print(hf_hub_download("hf-internal-testing/tiny-random-BertModel", "config.json"))'
+   ```
+
+Use the proxy first when it is configured, then `HF_ENDPOINT` as the fallback.
+Unset `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` for either online attempt.
+The endpoint variable is inherited by the official test subprocess. Record
+whether the run used the default endpoint, a proxy, or `https://hf-mirror.com`,
+but never record proxy URLs containing credentials.
+
+`HF_ENDPOINT` only changes Hugging Face Hub downloads. The official runner's
+version-matched Transformers source archive comes from GitHub; if that archive
+cannot be downloaded, use `--source-dir`, prepare the versioned cache on a
+machine with access, or rerun with `--offline` after the cache is complete.
+
 ## Step 4 — validate without changing the environment
 
 Run an import and device smoke check immediately after installation:

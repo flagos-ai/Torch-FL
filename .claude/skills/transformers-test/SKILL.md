@@ -127,6 +127,32 @@ version-mismatched source tree produces failures that belong to HF, not to
 torch_fl. The runner injects `flagos` through
 `TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py`.
 
+Some official tests download tiny fixtures from the Hugging Face Hub. If
+`huggingface.co` is unreachable, do not classify the resulting retries or
+network errors as backend failures. First check the local Hub cache and rerun
+with `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` when all fixtures are present.
+Otherwise load the configured proxy and retry the same command; if the origin
+still cannot be reached, use the Hub mirror:
+
+```bash
+source ../proxy.sh
+# Retry the official runner with HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE unset.
+TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py \
+python tests/manual/transformers_hf_tests.py --model <model> --out /tmp/<model>.json
+
+export HF_ENDPOINT=https://hf-mirror.com
+TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py \
+python tests/manual/transformers_hf_tests.py --model <model> --out /tmp/<model>-mirror.json
+```
+
+Use the proxy before `HF_ENDPOINT`; unset `HF_HUB_OFFLINE` and
+`TRANSFORMERS_OFFLINE` for online retries. `HF_ENDPOINT` is inherited by the
+runner's isolated pytest process and affects Hub fixture downloads only. It does
+not change the GitHub download used to populate the version-matched Transformers
+source cache. For that source archive, use `--source-dir`, prepare the cache on
+a machine with access, or use `--offline` once the cache is complete. Record the
+endpoint mode used by the run, without exposing proxy credentials.
+
 `--all` visits each test directory once, not each registry key: many keys share
 a directory (`blip_text_model` and `blip_vision_model` both map to
 `tests/models/blip`), and sweeping keys would count one defect three times. It
