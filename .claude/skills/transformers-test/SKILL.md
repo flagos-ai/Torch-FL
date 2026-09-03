@@ -1,26 +1,43 @@
 ---
 name: transformers-test
 description: >
-  Measure torch_fl transformers coverage on an accelerator one model at a time,
-  and turn each new failure into an operator, feature, precision, or crash
-  finding with a named root cause. Use this to survey a platform's HuggingFace
-  model support, to check a model after enabling operators, or to re-measure
-  after a transformers version change. Covers: per-model probing without real
-  weights, the HF custom-device injection contract, CPU same-dtype precision
-  baselines, aten attribution through TorchDispatchMode, root-cause fingerprint
-  dedup, and a baseline-first gate for explicitly authorized tracker writes.
-  Do not use this to infer model support from a routing table or from a passing
-  operator suite.
+  Fully automatic runner for HuggingFace official unit tests — both the
+  transformers suite (tests/models/<module>/) and the diffusers suite
+  (tests/pipelines/<name>/, tests/models/) — on the flagos accelerator.
+  Use this to measure a platform's HF model/pipeline support, to re-measure
+  after enabling operators, after a transformers/diffusers version change, or
+  to produce a three-route (vendor / boxing / flaggems) UT report. The skill
+  runs end to end without user interaction: pin the environment, inject the
+  flagos device, sweep every architecture or pipeline in an isolated
+  subprocess, classify each failure with a named root cause, deduplicate by
+  cause fingerprint, and write a report. The only steps that are NOT automatic
+  are GitHub writes (issues/PRs), which stay behind an explicit authorization
+  gate. Do not use this to infer support from a routing table or from a
+  passing operator suite.
 ---
 
-# transformers-test (torch_fl)
+# transformers-test (torch_fl) — automatic HF UT runner for transformers + diffusers
 
-## Scope and prerequisites
+## Scope
 
-This skill measures whether real transformers models run on the `flagos`
-device. It is a hardware measurement, not a routing audit: an operator that
-passes a standalone dispatch test can still fail inside a model through a shape,
-dtype, stride, or call-order the operator suite never produces.
+This skill measures whether real HuggingFace models and pipelines pass their
+**official unit tests** on the `flagos` device. It is a hardware measurement,
+not a routing audit: an operator that passes a standalone dispatch test can
+still fail inside a model through a shape, dtype, stride, or call-order the
+operator suite never produces.
+
+Two official suites are covered:
+
+| Suite | What runs | Test root |
+|---|---|---|
+| transformers | every test under one architecture directory | `<transformers-src>/tests/models/<module>/` |
+| diffusers | every test under one pipeline directory, plus `tests/models/` | `<diffusers-src>/tests/pipelines/<name>/`, `<diffusers-src>/tests/models/` |
+
+"Automatic" means: once invoked with a target (one model, one pipeline, or a
+full sweep), the skill carries the run from environment pinning through the
+final report with no intermediate questions. It never asks "should I run the
+next model". The single exception is any GitHub write, which remains gated by
+the authorization rules at the end of this document.
 
 Complete these first:
 
@@ -33,99 +50,158 @@ Complete these first:
   install `accelerate` before official tests that exercise a device context,
   `device_map`, `tp_plan`, or `torch.set_default_device`.
 
-The unit of work is **one architecture**. `transformers-test <model>` runs every
-official test under that architecture's `tests/models/<module>/` directory. Use
-`transformers-test --all` only when an explicit full sweep is wanted: it walks all
-architecture keys exposed by the pinned Transformers registry, one isolated
-process per architecture. This means model architecture tests, not every Hub
-checkpoint or weight variant.
+The unit of work is **one architecture** (transformers) or **one pipeline /
+model directory** (diffusers), each in its own subprocess. A full sweep walks
+every directory once; it does not enumerate Hub checkpoints or download real
+weights — HF's own tests use tiny random configs and dummy weights.
 
-## Step 1 — pin the environment and record it
+## Route matrix
 
-Two versions decide how a result must be read: the `transformers` version and
-the torch_fl commit. A failure carries no meaning without both.
+Every measurement runs on up to three routes. A bug's route pattern is its
+first attribution signal, so keep the routes comparable: same suite, same
+source tree, same pytest arguments.
 
-Default to the latest `transformers`. Pin an older line only to reproduce a
-known-good state or to check a regression:
+| Route | Interpreter | Device | Extra environment |
+|---|---|---|---|
+| vendor | system python3 + vendor torch | `cuda` | none (baseline) |
+| boxing | the torch_fl venv (e.g. `/opt/fl-envs/boxing/bin/python`) | `flagos` | device injection, Step 2 |
+| flaggems | boxing venv | `flagos` | `FLAGOS_USE_FLAGGEMS=1 TRITON_BACKENDS_IN_TREE=1` |
+
+For the flaggems route add pytest-xdist crash isolation so one worker fault
+cannot take down the whole run:
 
 ```bash
-python tests/manual/transformers_model_probe.py --model qwen3
-python tests/manual/transformers_model_probe.py --model qwen3 --transformers-version 4.50.2
+-n1 --dist load --max-worker-restart 8
 ```
 
-Install each requested `transformers` into its own cached virtual environment
-rather than the environment that holds torch_fl. `transformers` pulls its own
-torch constraint, and letting it resolve inside the torch_fl environment can
-replace the torch the extension was built against — which produces symbol
-errors or silent ABI corruption, not a coverage result.
+A failure on all three routes including vendor is an upstream (HF or vendor
+torch) issue, not a torch_fl defect. A failure only on flaggems points at the
+FlagGems kernel or its routing. A failure on boxing + flaggems but not vendor
+is the torch_fl integration layer.
 
-Record and keep with the run:
+## Step 1 — pin the environment and record it (automatic)
 
-```bash
-python - <<'PY'
+Before running anything, capture the versions that decide how a result must be
+read. A failure carries no meaning without them.
+
+```python
 import torch, transformers, torch_fl
 print("torch", torch.__version__)
 print("transformers", transformers.__version__)
 print("device_count", torch.flagos.device_count())
-PY
-
-git rev-parse --short HEAD
+try:
+    import diffusers; print("diffusers", diffusers.__version__)
+except ImportError:
+    pass
+try:
+    import flag_gems; print("flag_gems", flag_gems.__version__)
+except ImportError:
+    pass
 ```
-
-For a vendor box, also record the chip model, driver, SDK revision, and any
-required environment. A model probe that ran against the wrong runtime is an
-environment failure, not a coverage data point.
-
-## Step 2 — inject `flagos` as the HF test device
-
-`transformers` supports a third-party device through a device-spec module.
-The spec imports `torch_fl`, registers the PrivateUse1 name, and supplies the
-backend hooks that HuggingFace needs:
 
 ```bash
-export TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py
+git rev-parse --short HEAD   # torch_fl commit
 ```
 
-Do not set `TRANSFORMERS_TEST_DEVICE=flagos` for Transformers 5.16.1: that
-release validates the variable with `torch.device()` before importing the spec,
-so a custom PrivateUse1 name is not accepted at that point. The spec's
-`DEVICE_NAME` becomes the effective test device after it is loaded.
+Also record: chip model, driver, vendor SDK revision, the venv path, and the
+source-tree paths and versions for transformers and diffusers. Every table in
+the final report cites this block.
 
-For built-in devices, `TRANSFORMERS_TEST_DEVICE` remains available as an
-alternative to a spec file.
+Missing **test-only** Python dependencies (sentencepiece, protobuf, librosa,
+…) may be pip-installed into the test venv when they are leaf test
+dependencies. Never let a dependency resolver replace or upgrade `torch` —
+that silently changes the ABI the extension was built against and invalidates
+the run. Pin with `--no-deps` or an exact version when in doubt.
 
+## Step 2 — inject `flagos` as the HF test device (automatic)
 
-The spec module must define `DEVICE_NAME` plus the three backend hooks HF
-dispatches on; a missing hook raises at import unless HF has a default:
+Both libraries support a third-party device through a device-spec module, and
+both accept a plain device-name environment variable once `torch.device(
+"flagos")` constructs — which requires `torch_fl` to be imported **before** the
+library's testing utils validate the variable.
 
-```python
-DEVICE_NAME = "flagos"
-MANUAL_SEED_FN = torch.flagos.manual_seed
-EMPTY_CACHE_FN = torch.flagos.empty_cache
-DEVICE_COUNT_FN = torch.flagos.device_count
-```
+### transformers
+
+Two working mechanisms:
+
+1. **Device spec** (the upstream contract, used by
+   `tests/manual/transformers_hf_tests.py`):
+
+   ```bash
+   export TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py
+   ```
+
+   The spec imports `torch_fl`, sets `DEVICE_NAME = "flagos"`, and supplies
+   `MANUAL_SEED_FN` / `EMPTY_CACHE_FN` / `DEVICE_COUNT_FN`. Newer transformers
+   releases validate `TRANSFORMERS_TEST_DEVICE` with `torch.device()` before
+   importing the spec, so prefer the spec over the bare variable.
+
+2. **Bootstrap plugin + device variable** (used for direct pytest runs):
+
+   ```bash
+   PYTEST_PLUGINS=flagos_pytest_bootstrap TRANSFORMERS_TEST_DEVICE=flagos \
+     python /root/bench/run_hf_ut.py <pytest args>
+   ```
+
+   `flagos_pytest_bootstrap` is a site-packages plugin that just does
+   `import torch_fl`; `PYTEST_PLUGINS` loads it in every pytest process,
+   including xdist workers, so the device name exists before validation.
+   `run_hf_ut.py` is the equivalent for the main process: it imports
+   `torch_fl`, then calls `pytest.main`.
 
 Note the gating split this produces, and do not try to defeat it:
 `require_torch_accelerator` passes for `flagos` (non-CPU, non-None), while
 `require_torch_gpu` skips because it compares against `cuda` literally. Cases
 skipped by `require_torch_gpu` are CUDA-specific and are not coverage gaps.
 
-The `transformers` wheel ships no `tests/` directory. The synthetic probe
-(`tests/manual/transformers_model_probe.py`) does not need an HF source checkout.
-To run HuggingFace's own assertions, use the official runner:
+### diffusers
+
+diffusers reads `DIFFUSERS_TEST_DEVICE` and `DIFFUSERS_TEST_DEVICE_SPEC` in
+`diffusers/utils/testing_utils.py`. Two differences from transformers:
+
+- the spec is a **file path**, not a module name (diffusers strips the `.py`
+  and imports the remainder);
+- the hook table is larger: in addition to `MANUAL_SEED_FN`,
+  `EMPTY_CACHE_FN`, `DEVICE_COUNT_FN`, it merges `SUPPORTS_TRAINING`,
+  `RESET_PEAK_MEMORY_STATS_FN`, `RESET_MAX_MEMORY_ALLOCATED_FN`, and
+  `MAX_MEMORY_ALLOCATED_FN` when the spec defines them (each has a default, so
+  an omitted hook falls back instead of raising).
+
+```bash
+PYTHONPATH=/root/hf-diffusers/src \
+PYTEST_PLUGINS=flagos_pytest_bootstrap \
+DIFFUSERS_TEST_DEVICE=flagos HF_HUB_OFFLINE=1 \
+  python -m pytest tests/pipelines/audioldm2 -q
+```
+
+Run from the diffusers repository root so its `tests` package resolves.
+Import diffusers through `PYTHONPATH=<src>` rather than reinstalling: the test
+venv's transformers pins must stay exactly where the route matrix put them.
+
+If `DIFFUSERS_TEST_DEVICE` and the spec's `DEVICE_NAME` disagree, diffusers
+raises — set one or keep them equal.
+
+## Step 3 — run the suites, one directory per subprocess (automatic)
+
+### transformers
+
+Use the in-repo official runner; it resolves a version-matched source tree,
+injects the spec, isolates each architecture in a subprocess with a timeout,
+and writes incremental JSON:
 
 ```bash
 python tests/manual/transformers_hf_tests.py --model qwen3
+python tests/manual/transformers_hf_tests.py --model qwen3 --out /tmp/qwen3.json
 python tests/manual/transformers_hf_tests.py --all --out /tmp/transformers-all.json
+python tests/manual/transformers_hf_tests.py --list-models
 ```
 
-It obtains a cached source tree for the exact installed version, verifies the
-version declared by `src/transformers/__init__.py`, and runs only
-`tests/models/<module>/` for that architecture. Set `--source-dir` to use a
-prepared tree, or use `--offline` to require an existing versioned cache. A
-version-mismatched source tree produces failures that belong to HF, not to
-torch_fl. The runner injects `flagos` through
-`TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py`.
+`--all` visits each test **directory** once, not each registry key: many keys
+share a directory (`blip_text_model` and `blip_vision_model` both map to
+`tests/models/blip`), and sweeping keys would count one defect several times.
+The aggregate JSON is rewritten after every architecture, so an interrupted
+sweep resumes with its measurements intact, and `attempted` is reported apart
+from `completed` so a coverage rate never counts architectures that never ran.
 
 Some official tests download tiny fixtures from the Hugging Face Hub. If
 `huggingface.co` is unreachable, do not classify the resulting retries or
@@ -153,104 +229,113 @@ source cache. For that source archive, use `--source-dir`, prepare the cache on
 a machine with access, or use `--offline` once the cache is complete. Record the
 endpoint mode used by the run, without exposing proxy credentials.
 
-`--all` visits each test directory once, not each registry key: many keys share
-a directory (`blip_text_model` and `blip_vision_model` both map to
-`tests/models/blip`), and sweeping keys would count one defect three times. It
-rewrites the aggregate JSON after every architecture, so an interrupted sweep
-still holds its measurements, and it reports `attempted` apart from `completed`
-so a coverage rate never uses architectures that never ran as its denominator.
+For a targeted re-run of specific nodes (e.g. only `test_training`), run
+pytest directly through the bootstrap plugin as in Step 2, keeping the same
+source tree.
 
-The actual device contract used here is `TRANSFORMERS_TEST_DEVICE_SPEC` and
-the three hooks in the spec module. No third-party test switch or other
-pass-oriented environment override is added.
+### diffusers
 
-The official runner preserves per-test JSON evidence and never writes to
-GitHub. The skill may turn a verified finding into a tracker action only through
-the explicitly authorized workflow in Steps 7 and 8; normal architecture tests
-and `--all` sweeps remain report-only.
+There is no in-tree diffusers runner yet; drive pytest directly. Enumerate the
+work items as directories and run each in its own subprocess with a timeout:
 
-## Step 3 — probe one model in layers
-
-Build the model from its `CONFIG_MAPPING` entry reduced to tiny dimensions and
-randomly initialized. Real pretrained weights are not needed to find missing
-operators, and requiring them makes the survey depend on downloads and device
-memory.
-
-Resolve the architecture key through `model_type_to_module_name()`. Keys and
-module directories disagree for a substantial minority of architectures
-(`blip-2` → `blip_2`, `audio-spectrogram-transformer` →
-`audio_spectrogram_transformer`); comparing the raw key against directory names
-misreports those models as absent.
-
-Run the layers in order and stop the model at the first failing layer. A model
-whose `.to(device)` fails produces meaningless forward and backward results:
-
-| Layer | What runs | What a failure means |
-|---|---|---|
-| L0 | build tiny model, `.to("flagos")` | allocator, copy, or dtype transfer |
-| L1 | forward, compare to CPU same dtype | missing operator or precision |
-| L2 | backward plus one optimizer step | missing backward operator |
-| L3 | short `generate()` | KV-cache, sampling, or control flow |
-
-If the requested model does not exist in the pinned `transformers`, record
-`NOT_IN_VERSION`. That is neither a pass nor a failure, and counting it either
-way corrupts the platform's rate.
-
-## Step 4 — isolate every model in a subprocess
-
-Run each model in its own subprocess with a timeout, even in single-model mode.
-Accelerator faults are not contained: one illegal memory access poisons the
-device context, after which every later operation fails with the same symptom.
-This has been measured in this repository — a single fault turned roughly one
-real failure into roughly eighty collateral ones.
-
-Treat a poisoned run as one finding for the whole model, never as a list of
-per-layer failures:
-
-```text
-illegal memory access | device-side assert | unspecified launch failure
-misaligned address | vmfault | acceleratorerror
+```bash
+for d in /root/hf-diffusers/tests/pipelines/*/; do
+  name=$(basename "$d")
+  run_one "$name"   # the Step-2 command, target tests/pipelines/$name
+done
 ```
 
-Write results incrementally so an interrupted sweep resumes instead of
-restarting, and keep raw stdout/stderr per model for auditing.
+Cover `tests/models/` (unets, transformers, vae, …) the same way. Do not
+fabricate tests for a pipeline that has no upstream test directory — record it
+as having no official UT (upstream may have deprecated it).
 
-## Step 5 — classify the failure and name the root cause
+### Isolation rules (both suites)
 
-Every failure must land in exactly one class. The class selects the issue label
-and decides whether the finding is actionable:
+- One directory per subprocess, with a timeout, always. Accelerator faults are
+  not contained: one illegal memory access poisons the device context, after
+  which every later test in the same process fails with the same symptom.
+  This repository has measured a single fault turning one real failure into
+  roughly eighty collateral ones.
+- Treat a poisoned run as **one finding for the whole directory**, never as a
+  list of per-test failures:
+
+  ```text
+  illegal memory access | device-side assert | unspecified launch failure
+  misaligned address | vmfault | acceleratorerror
+  ```
+
+- Write results incrementally so an interrupted sweep resumes, and keep raw
+  stdout/stderr per directory for auditing.
+- If the requested model/pipeline does not exist in the pinned version, record
+  `NOT_IN_VERSION`. That is neither a pass nor a failure.
+
+## Step 4 — classify every result (automatic)
+
+Reduce raw pytest output to one status per test node, then one verdict per
+directory. A node reports up to three times (setup/call/teardown); the worst
+outcome wins, and a setup/teardown failure is an `ERROR`, not a `FAIL` — the
+test body never ran.
+
+| Status | Meaning |
+|---|---|
+| `PASS` / `FAIL` / `ERROR` | ran, and the assertion/harness outcome |
+| `XFAIL` / `XPASS` | expected-failure bookkeeping, never hides a FAIL |
+| `SKIP_CUDA_ONLY` | skip reason matches CUDA/ROCm/multi-GPU/flash-attn gating — not a coverage gap |
+| `SKIP_OTHER` | any other skip |
+| `ENVIRONMENT_ERROR` | `ModuleNotFoundError`, missing optional library — the assertion never ran |
+| `COLLECT_ERROR` | module failed at import/collection |
+| `NOT_IN_VERSION` / `NO_TESTS_RUN` / `TIMEOUT` / `CRASH` | run-level verdicts |
+
+Directory verdict precedence: `NOT_IN_VERSION` → `TIMEOUT` → `CRASH` →
+`COLLECT_ERROR` → `FAIL` → `ENVIRONMENT_ERROR`/`NO_TESTS_RUN` → `PASS`.
+
+`SKIP_CUDA_ONLY`, `ENVIRONMENT_ERROR`, `NOT_IN_VERSION`, and genuine upstream
+skips are excluded from both the failure count and the pass-rate denominator.
+Do not inflate a platform's rate by quietly keeping them in either.
+
+## Step 5 — classify the failure and name the root cause (automatic)
+
+Every `FAIL`/`ERROR` lands in exactly one cause class:
 
 | Class | Signal | Labels |
 |---|---|---|
 | `OP_UNSUPPORTED` | `NOT_SUPPORTED`, `backend not registered`, `could not run 'aten::…'` | `enhancement`, `ai-generated` |
-| `FEATURE_UNSUPPORTED` | non-operator runtime or feature gap | `enhancement`, `ai-generated` |
+| `FEATURE_UNSUPPORTED` | non-operator runtime or feature gap (device whitelist, test-harness device gate, missing spec hook) | `enhancement`, `ai-generated` |
 | `PRECISION` | ran, but disagrees with the CPU baseline | `bug`, `ai-generated` |
 | `CRASH` | segfault, poison, or timeout | `bug`, `ai-generated` |
 
-Use only labels that exist in this repository. As of this writing the tracker
-has `bug`, `enhancement`, `documentation`, `ai-generated`, `duplicate`,
-`P0`/`P1`/`P2`, and the triage set; there is no `operator` label, so an
-unsupported operator is filed as `enhancement` with `aten::<op>` in the title.
-Confirm the current set before filing rather than trusting this list:
+For `OP_UNSUPPORTED` and `PRECISION`, re-run the failing test under
+`TorchDispatchMode` and capture the aten calls, then name the specific
+operator in the finding. `tests/manual/op_called_summary.py` is the existing
+collection pattern. Without this attribution the report only says a test
+failed, which a maintainer cannot act on.
 
-```bash
-gh api repos/flagos-ai/Torch-FL/labels --paginate --jq '.[].name'
-```
+Before naming torch_fl as the cause, check the **vendor route**: if the vendor
+baseline fails the same node the same way, the cause is upstream (HF test
+code, HF modeling code, or vendor torch), and the finding is filed as
+upstream-attributed, not as a torch_fl defect. A transformers-suite example of
+this discipline: a whole `XLMRobertaForMultipleChoice` failure family traced
+to `add_pooling_layer=False` vs `outputs[1]` in upstream modeling code — it
+failed identically on CPU, vendor, boxing, and flaggems.
 
-For `OP_UNSUPPORTED` and `PRECISION`, re-run the failing layer under
-`TorchDispatchMode` and capture the aten calls, then put the specific operator
-in the finding. Without this attribution the report only says a model failed,
-which a maintainer cannot act on. `tests/manual/op_called_summary.py` is the
-existing pattern for this collection.
+diffusers-specific cause notes:
 
-## Step 6 — judge precision against CPU, same dtype
+- diffusers dummy-model tests build tiny random pipelines; a failure in
+  `setUp`/weight download is an environment issue, not a pipeline result.
+- Test-code device gates (`device_map` whitelists, hardcoded `cuda`, RNG
+  factory device validation) are `FEATURE_UNSUPPORTED` against the **test or
+  upstream library**, not model defects. Say so explicitly.
+- Pipeline deprecated upstream with no test directory: record as "no official
+  UT", never invent a test.
 
-The baseline is the same model, same seed, same dtype on CPU. A CUDA baseline is
-not usable here: most vendor boxes have no NVIDIA device, so it would make the
-survey unrunnable exactly where it is needed.
+## Step 6 — judge precision against CPU, same dtype (automatic)
 
-Validate the CPU side first. If CPU itself errors, the case is `UNTESTED` — not
-a device failure. Then compare with dtype-scaled tolerances:
+The baseline is the same model/pipeline, same seed, same dtype on CPU. A CUDA
+baseline is not usable: most vendor boxes have no NVIDIA device, and the whole
+point of the vendor route is a non-NVIDIA comparison.
+
+Validate the CPU side first. If CPU itself errors, the case is `UNTESTED` —
+not a device failure. Then compare with dtype-scaled tolerances:
 
 | dtype | rtol | atol |
 |---|---|---|
@@ -258,26 +343,33 @@ a device failure. Then compare with dtype-scaled tolerances:
 | float16 | 1e-3 | 1e-3 |
 | bfloat16 | 1.6e-2 | 1e-2 |
 
-Keep `NaN`/`Inf` separate from magnitude disagreement and rank it higher. A NaN
-is always a defect; a tolerance miss may be legitimate accumulation-order
+For diffusers pipelines compare the same output slices the upstream test
+compares (usually a small `[0, :4]`-style slice of the output tensor), not the
+full output.
+
+Keep `NaN`/`Inf` separate from magnitude disagreement and rank it higher. A
+NaN is always a defect; a tolerance miss may be legitimate accumulation-order
 variance. Reporting both as one class hides the real bug.
 
-## Step 7 — deduplicate before filing anything
+Watch for **harness tolerance fallbacks** before filing a precision finding:
+HF's per-device tolerance tables may lack a `flagos` entry and fall back to a
+stricter-than-fp16-ulp default, while `cuda` passes on its own entry. That is
+a test-side tolerance gap (`FEATURE_UNSUPPORTED` in the harness), not a kernel
+precision bug — verify against the vendor route and the actual max abs diff
+first.
 
-The same root cause reappears across models and platforms. Filing per model and
-per platform buries the signal under duplicates.
+## Step 7 — deduplicate before filing anything (automatic)
 
-Two different fingerprints are in play, and confusing them is the usual mistake:
+The same root cause reappears across models, pipelines, and platforms. Filing
+per occurrence buries the signal under duplicates.
 
-- the **occurrence fingerprint** that `tests/manual/transformers_hf_tests.py`
-  writes into each test record. It includes the model, the device, and the test
-  node ID, so it identifies one test result and is deliberately unsuitable for
-  dedup;
-- the **cause fingerprint** below, which drops model and node ID so that the same
-  defect reached from ten models collapses to one value.
+Two fingerprints are in play — do not confuse them:
 
-Compute the cause fingerprint from the finding you established in Step 6, not
-from raw pytest output:
+- the **occurrence fingerprint** that `transformers_hf_tests.py` writes into
+  each test record: it includes model, device, and node ID, so it identifies
+  one test result and is deliberately unsuitable for dedup;
+- the **cause fingerprint** below, which drops model and node ID so the same
+  defect reached from ten directories collapses to one value.
 
 ```python
 import hashlib, re
@@ -300,213 +392,138 @@ def cause_fingerprint(failure_class, component, subject, mechanism):
 ```
 
 `subject` is `aten::<op>.<overload>` when an operator was named, otherwise the
-feature or module that failed (`sdpa`, `torch.compile`, `flash_attention_2`).
-`component` identifies the implementation responsible for the cause: for
-example `musa:SubTensorKernelMusa`, `ascend:generated-add`, or
-`shared:privateuse1-registration`. `mechanism` is the shortest verified statement
-that distinguishes the defect, preferably the vendor error's stable final line
-or a normalized assertion. Do not hash an entire traceback: call stacks change
-without changing the cause.
+feature or module that failed (`sdpa`, `device_map`, `torch.compile`).
+`component` identifies the implementation responsible: `musa:SubTensorKernelMusa`,
+`ascend:generated-add`, `flaggems:cumsum`, `upstream:xlm-roberta-mc-head`, or
+`shared:privateuse1-registration`. `mechanism` is the shortest verified
+statement that distinguishes the defect — the vendor error's stable final line
+or a normalized assertion. Do not hash a traceback: call stacks change without
+changing the cause.
 
-This makes the value stable across models, tests, transformers releases, and
-chips that execute the same faulty implementation. It does **not** merge two
-vendor backends merely because they both report that an operator is unsupported;
-those are separate implementation gaps. Conversely, a defect in shared torch_fl
-code uses a `shared:*` component and therefore has one fingerprint across all
-affected platforms.
+Two vendor backends both reporting an operator unsupported are **separate**
+gaps (different components). A defect in shared torch_fl code uses a
+`shared:*` component and has one fingerprint across all affected platforms.
 
-Then, for each fingerprint, search before writing anything. Search issue bodies
-and comments directly rather than trusting only the search index, which can lag
-behind new writes by minutes:
+Then, for each fingerprint, search before writing anything — issue bodies and
+comments directly, since the search index lags writes:
 
 ```bash
 FP=cce6ae545772
-
 gh api repos/flagos-ai/Torch-FL/issues --paginate -X GET -f state=all \
   --jq ".[] | select(.pull_request | not) | select(.body // \"\" | contains(\"$FP\")) | \"issue #\(.number) \(.state) \(.title)\""
-
 gh api repos/flagos-ai/Torch-FL/issues/comments --paginate -X GET \
   --jq ".[] | select(.body // \"\" | contains(\"$FP\")) | \"comment \(.html_url)\""
 ```
 
-Also search by the attributed subject and component to catch issues created before
-this fingerprint convention. That semantic search is a fallback, not proof that
-two causes are equal; read every candidate before deciding:
+Also search by subject and component as a semantic fallback for pre-fingerprint
+issues, and read every candidate before deciding. Outcomes:
 
-```bash
-SUBJECT='aten::rsub.Scalar'
-gh api search/issues -X GET \
-  -f q="$SUBJECT repo:flagos-ai/Torch-FL is:issue" \
-  --jq '.items[] | "#\(.number) \(.state) \(.title)"'
-```
+- open issue match: duplicate; at most a new-evidence comment (gated below);
+- closed issue match: report the match and its closing disposition; do not
+  reopen without explicit authorization;
+- no match: eligible for a new issue under the gates below.
 
-- a match in an open issue: it is a duplicate, not a new issue; prepare a comment
-  carrying this platform's evidence and write it only if Step 8's authorization
-  gate covers comments;
-- a match in a closed issue: report the match and its closing disposition. Do not
-  reopen it or comment unless the user explicitly authorizes that specific
-  action; a maintainer may have closed it as intentional or unsupported;
-- no match: it is eligible for a new issue under Step 8.
-
-For dedup to work, every issue and every comment the skill writes must carry the
-value in exactly this form, on its own line:
+Every issue or comment the skill writes must carry the fingerprint on its own
+line:
 
 ```text
 Fingerprint: `cce6ae545772`
 ```
 
-State the chip and the model in the title, and the `transformers` version, so
-the title alone identifies the measurement:
+## Step 8 — write the report (automatic)
+
+The automatic run ends with a written report; it needs no authorization.
+
+Per suite, produce a per-directory table with one row per route:
 
 ```text
-[AI][MUSA MTT S5000] qwen3: aten::index_copy_ not supported (transformers 5.16.1)
-[AI][Ascend 910] gemma3: fp16 logits mismatch vs CPU, max abs diff 3.2e-2 (transformers 5.16.1)
+| directory | route | passed | failed | error | skip(cuda) | skip(other) | env | verdict |
 ```
 
-Before any tracker write, read `.github/AI_AGENT_GUIDE.md`,
-`.github/CLAUDE_CODE_GUIDE.md`, and
-`.github/ISSUE_TEMPLATE/ai_agent_issue.md`. Include a self-contained reproducer
-and the environment block, and write everything in English per `CLAUDE.md`.
+plus: the Step 1 environment block, the failure inventory grouped by cause
+fingerprint (class, subject, component, mechanism, affected directories,
+issue/PR number if one exists, **unfixed** marker otherwise), and the evidence
+file paths. Route-pattern attribution (Step 5) is stated per cause.
 
-## Step 8 — baseline first, then authorize each tracker action
+Report only what was actually measured. Skipped, timed-out, and
+absent-from-version directories are their own categories, never silent
+omissions, and a previous cohort's numbers are never carried forward as
+re-measured. Keep raw JSON and logs outside the repository; a sweep produces
+roughly a megabyte per directory and crashing runs leave vendor core dumps
+(`core_*.mudmp` on MUSA) in the working tree — move evidence out and delete
+dumps before any commit. All committed docs are in English per `CLAUDE.md`;
+Chinese working copies live at the repository root as `*_zh.md`, never under
+`docs/`.
 
-A first sweep on a new platform can produce hundreds of failures at once.
-Writing all of them to the tracker would hide the signal under a flood. Neither
-harness writes to GitHub or promotes a baseline; the agent performs the steps
-below deliberately from the report JSON.
+## Step 9 — tracker writes stay gated (the only non-automatic step)
 
-### Evidence gate
+Running suites, classifying, deduplicating, and writing the report are all
+automatic. Creating issues, commenting, reopening, and filing PRs are not.
+Each is a separate outward-facing action requiring an explicit user request in
+the current session, for the named finding only:
 
-All four conditions must hold before any tracker write is considered. If one
-fails, stop and report instead:
-
-1. **A pre-existing baseline exists for this chip.** Before the current run,
-   `docs/reference/hf-coverage.md` already contained a measurement for this chip
-   with an earlier run date and cause fingerprints. The first sweep is the
-   baseline: record it, perform no tracker writes, and say so. Recording the
-   current sweep immediately before filing does not turn it into an earlier
-   baseline.
-2. **The finding survived isolation.** It reproduces in its own process with a
-   passing CPU same-dtype baseline and, for a poisoned run, is confirmed as the
-   first fault rather than collateral damage.
-3. **A standalone reproducer runs.** Prefer fewer than 30 lines importing only
-   `torch` and `torch_fl`, with no `transformers` or pytest. If reduction is not
-   possible, explain why and retain the exact isolated single-test command.
-4. **The count is sane.** More than five apparently new causes from one sweep
-   triggers another classification and dedup pass; do not publish a batch whose
-   causes may have collapsed incorrectly.
-
-After that gate, compare the cause fingerprint with both the pre-existing
-baseline and the tracker:
-
-- present in the baseline: a known cause, never a new issue;
-- absent from the baseline but present in an open issue: a duplicate, optionally
-  eligible for a new-evidence comment;
-- absent from the baseline but present in a closed issue: report the issue and
-  its closing disposition; optionally eligible for a comment or reopen request;
-- absent from both: a regression or newly discovered cause eligible for a new
-  issue.
-
-### Authorization gate
-
-Every GitHub write is a separate outward-facing action. Perform only the action
-the user explicitly requests in the current session, and only for the named
-finding or issue:
-
-- "file/open/create an issue" authorizes creating the specified new issue; it
-  does not authorize commenting on or reopening an existing issue;
-- "comment on issue #N" authorizes one comment on that issue; it does not
-  authorize reopening it;
-- "reopen issue #N" authorizes changing that issue's state; add a comment only
-  if commenting was also requested;
-- "run the survey", "find problems", and "summarize" authorize no tracker
+- "file/open/create an issue" authorizes that one new issue — not comments,
+  not reopens;
+- "comment on issue #N" authorizes one comment on that issue;
+- "run the survey", "find problems", and "summarize" authorize **no** tracker
   writes, and authorization for one finding never extends to the rest.
 
-Read-only duplicate searches need no write authorization. If authorization is
-missing or ambiguous, prepare the issue body or comment without publishing it.
-Do not repeatedly ask for authorization during a survey; report the candidates
-at the end and let the user decide.
+Before any tracker write, all four evidence conditions must hold:
 
-### Creating a new issue
+1. **A pre-existing baseline exists for this chip** — an earlier dated
+   measurement with cause fingerprints to diff against. The first sweep on a
+   chip IS the baseline: record it, perform no tracker writes.
+2. **The finding survived isolation** — reproduces in its own process with a
+   passing CPU same-dtype baseline (and a vendor-route comparison done); for a
+   poisoned run, confirmed as the first fault, not collateral.
+3. **A standalone reproducer runs** — prefer under 30 lines importing only
+   `torch` and `torch_fl`; if reduction is impossible, explain why and keep
+   the exact isolated single-test command.
+4. **The count is sane** — more than five apparently new causes from one sweep
+   triggers another classification and dedup pass first.
 
-Write the body to a file — never pass a multi-line body as a shell argument,
-where a backtick or `$` in a traceback could be interpreted:
+When filing, follow `.github/AI_AGENT_GUIDE.md`,
+`.github/CLAUDE_CODE_GUIDE.md`, and `.github/ISSUE_TEMPLATE/ai_agent_issue.md`
+section by section; write the body to a file and use `gh issue create
+--body-file`; everything in English; include the fingerprint line, the
+verbatim error, the environment block, and a root cause that names
+`file:line`. Use only labels that exist:
 
 ```bash
-gh issue create \
-  --repo flagos-ai/Torch-FL \
-  --title "[AI][MUSA MTT S5000] bert: aten::rsub.Scalar illegal memory access (transformers 5.16.1)" \
-  --body-file /tmp/issue-cce6ae545772.md \
-  --label ai-generated --label bug
+gh api repos/flagos-ai/Torch-FL/labels --paginate --jq '.[].name'
 ```
 
-Map the finding onto `.github/ISSUE_TEMPLATE/ai_agent_issue.md` section by
-section. The template's rejection criteria decide whether the issue is useful;
-in particular:
+If authorization is missing or ambiguous, prepare the ready-to-file text and
+stop. Do not ask repeatedly during a sweep; report the candidates at the end.
 
-- **Root Cause Analysis** — the template forbids "unknown". Name the mechanism
-  and cite `file:line` of the code responsible, e.g. "`SubTensorKernelMusa`
-  moves only `other` to the device (`csrc/aten/backends/musa/generated/musa_kernels.cc:760`)
-  and allocates `out` from `self.options()` (line 764), so a CPU wrapped scalar
-  in the `self` slot reaches muDNN as a host pointer." If the mechanism is not
-  established, the finding is not ready to publish.
-- **Expected vs Actual** — include the verbatim error text and relevant
-  traceback, not a paraphrase.
-- **Environment** — include the pinned Step 1 block: chip, driver, vendor
-  library, Python, `torch`, `transformers`, and the torch_fl commit SHA.
-- **Proposed Solution and Verification Plan** — give a concrete implementation
-  direction and the unit, integration, and hardware regression checks needed.
+## Final checklist
 
-Add the fingerprint line from Step 7 and state the model and test node ID that
-led to the finding. Keep the raw JSON out of the issue; quote only the relevant
-evidence. Assign an issue owner only if the user names one or repository policy
-requires one; an issue assignee is not a PR reviewer.
+- transformers and diffusers versions, torch, flag_gems, torch_fl commit, and
+  chip/driver are recorded with every result;
+- routes are comparable: same source tree and pytest args per directory;
+- device injection used the correct contract per library (spec vs bootstrap +
+  device variable) and was never "fixed" by patching upstream tests;
+- one directory per subprocess, with timeout; poisoned runs are one finding
+  per directory;
+- CPU baselines validated before any device comparison; vendor route checked
+  before attributing a cause to torch_fl;
+- every `OP_UNSUPPORTED`/`PRECISION` finding names an operator or a
+  `file:line` mechanism;
+- `SKIP_CUDA_ONLY`, `ENVIRONMENT_ERROR`, and `NOT_IN_VERSION` are excluded
+  from failure counts and denominators;
+- every finding row carries its cause fingerprint, and fingerprints were
+  searched in issue bodies and comments before any filing decision;
+- no tracker write without both Step 9 gates and explicit per-action
+  authorization;
+- raw JSON, logs, and vendor core dumps are not in the commit;
+- committed docs are English; Chinese copies are `*_zh.md` at repo root;
+- `ruff check .` and `ruff format --check .` pass before any PR.
 
-Nothing here bypasses the report-only default. When in doubt, produce the
-ready-to-file text and wait.
-
-## Step 9 — record measured evidence
-
-Update `docs/reference/hf-coverage.md` with the chip, run date, `transformers`
-version, torch_fl commit, models attempted, and the per-class counts. Every
-finding gets a row carrying its Step 7 cause fingerprint, its class, its subject
-operator or feature, and its issue number if one was filed — that table is what
-the next run diffs against, so a finding recorded without its fingerprint cannot
-be deduplicated later.
-
-Keep the raw JSON, outside the repository. A sweep produces roughly a megabyte
-per model, and crashing runs leave vendor core dumps (`core_*.mudmp` on MUSA) in
-the working tree; move the JSON to an evidence directory and delete the dumps
-before committing.
-
-Report only the models actually attempted. If a model was skipped, timed out, or
-was absent from the pinned version, say so in its own category. Do not carry a
-previous cohort's numbers forward as though they were re-measured, and do not
-copy one chip's rate onto another.
-
-Before opening a PR:
-
-- the `transformers` version and torch_fl commit are recorded with every result;
-- CPU baselines were validated before any device comparison;
-- poisoned runs are one finding per model, not per layer;
-- every `OP_UNSUPPORTED` and `PRECISION` finding names an operator;
-- every finding row carries its cause fingerprint;
-- `NOT_IN_VERSION`, `UNTESTED`, and CUDA-only skips are excluded from failures;
-- fingerprints were searched in issue bodies and comments, with a semantic
-  fallback for pre-fingerprint issues;
-- duplicate issues were commented on or reopened only when that exact action was
-  separately authorized;
-- no tracker write occurred without both Step 8 gates passing, and the first
-  sweep on a chip performed no tracker writes;
-- raw JSON and vendor core dumps are not in the commit;
-- unavailable hardware is marked **not revalidated**;
-- `ruff check .` and `ruff format --check .` pass.
-
-Coverage may be claimed only for the models measured on that chip. A passing
-operator suite, a populated routing table, and another platform's rate are all
-not evidence.
+Coverage may be claimed only for the directories actually measured on that
+chip. A passing operator suite, a populated routing table, and another
+platform's rate are all not evidence.
 
 ## Related
 
 [[runtime-bringup]] · [[native-op-backend]] · [[cuda-compat-vendor]] ·
-[[flaggems-integration]] · [[pre-pr-checks]]
+[[test-dependencies]] · [[flaggems-integration]] · [[pre-pr-checks]]
