@@ -11,27 +11,70 @@ description: >
 
 ## Quick Start
 
-Choose your mode based on task and model capability:
+### Skill Invocation
 
-### Mode 1: Automated End-to-End (Recommended)
+When user invokes the skill with parameters:
 
-**For strong models (Opus, Sonnet)**:
-```bash
-bash scripts/transformers_auto_sweep.sh <model> <device> <chip>
+```
+/transformers-test --model bert
+/transformers-test --model qwen3 --chip MUSA
+/transformers-test --batch --chip GCU
 ```
 
-**For weak models (Qwen-27B, smaller models)**:
-```bash
-python scripts/safe_transformers_wrapper.py test <model> <chip>
+**Parse these parameters**:
+- `--model <name>`: Model to test (required unless --batch)
+- `--chip <name>`: Chip name for issues (default: GCU)
+- `--device <name>`: Device for torch (default: gcu)
+- `--batch`: Run batch mode (bert + qwen3)
+- `--safe`: Force safe mode for weak models
+- `--manual`: Run manual mode (don't file issues automatically)
+
+**Default behavior** (no --safe, no --manual):
+- **Strong models (Opus)**: Run automated pipeline
+- **Weak models (Qwen-27B, Sonnet)**: Automatically use safe mode
+
+### Execution Logic
+
+```python
+# Pseudo-code for the skill
+
+if args.batch:
+    if is_weak_model or args.safe:
+        command = f"python scripts/safe_transformers_wrapper.py batch {chip} --device {device}"
+    else:
+        command = f"bash scripts/transformers_batch_sweep.sh {device} {chip}"
+else:
+    if is_weak_model or args.safe:
+        command = f"python scripts/safe_transformers_wrapper.py test {model} {chip} --device {device}"
+    else:
+        command = f"bash scripts/transformers_auto_sweep.sh {model} {device} {chip}"
+
+# Execute command
+run(command)
 ```
 
-**What it does**: Run tests → triage → verify → deduplicate → file issues (fully automatic)
+### Examples
+
+**User**: `/transformers-test --model bert`
+- **Strong model**: `bash scripts/transformers_auto_sweep.sh bert gcu GCU`
+- **Weak model**: `python scripts/safe_transformers_wrapper.py test bert GCU`
+
+**User**: `/transformers-test --model qwen3 --chip MUSA --device musa`
+- **Strong model**: `bash scripts/transformers_auto_sweep.sh qwen3 musa MUSA`
+- **Weak model**: `python scripts/safe_transformers_wrapper.py test qwen3 MUSA --device musa`
+
+**User**: `/transformers-test --batch`
+- **Strong model**: `bash scripts/transformers_batch_sweep.sh gcu GCU`
+- **Weak model**: `python scripts/safe_transformers_wrapper.py batch GCU`
+
+**User**: `/transformers-test --model bert --safe`
+- **Any model**: `python scripts/safe_transformers_wrapper.py test bert GCU` (force safe mode)
+
+### What It Does
+
+Run tests → triage → verify → deduplicate → file issues (fully automatic)
 
 **Time**: 15-90 minutes depending on model
-
-### Mode 2: Manual Investigation (Advanced)
-
-Follow the detailed steps below for full control over each stage.
 
 ---
 
@@ -91,13 +134,80 @@ Tests now support **resilient mode** for unstable platforms (crash recovery):
 
 ## Safety Mode for Weak Models (NEW)
 
-If using weak models (Qwen-27B, Sonnet 5, etc.), use the **safe wrapper** to prevent common mistakes:
+**Weak models** (Qwen-27B, Sonnet 5, smaller models) often have poor instruction following:
+- Installing packages when they shouldn't
+- Editing source files incorrectly
+- Running wrong commands
+- Not following PR templates
+
+**Solution**: When you detect you are a weak model, OR when `--safe` flag is passed, use the safe wrapper.
 
 **Safe wrapper**: `scripts/safe_transformers_wrapper.py`
 
 **What it prevents**:
 - ❌ Installing packages (`pip install`)
 - ❌ Editing source files
+- ❌ Modifying environment variables
+- ❌ Running dangerous commands
+- ✅ Only allows validated, pre-approved operations
+
+**How to detect you are a weak model**:
+- Your model name contains "qwen", "sonnet", or other non-Opus identifiers
+- You've been instructed to use safe mode
+- User passed `--safe` flag
+
+**When in safe mode**:
+```bash
+# Instead of:
+bash scripts/transformers_auto_sweep.sh bert gcu GCU
+
+# Use:
+python scripts/safe_transformers_wrapper.py test bert GCU
+```
+
+The safe wrapper validates all parameters and prevents mistakes.
+
+---
+
+## Parameter Reference
+
+### Skill Arguments
+
+When invoked as `/transformers-test [args]`, parse these flags:
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--model` | string | required* | Model name (bert, qwen3, etc.) |
+| `--chip` | string | GCU | Chip name for issue titles |
+| `--device` | string | gcu | Device name for torch |
+| `--batch` | boolean | false | Run batch mode (bert+qwen3) |
+| `--safe` | boolean | auto** | Force safe mode for weak models |
+| `--manual` | boolean | false | Manual mode (no auto issue filing) |
+
+*Required unless `--batch` is specified
+**Auto-detected based on model capability
+
+### Command Mapping
+
+Based on parsed arguments, construct the appropriate command:
+
+```
+if --batch:
+    if weak_model or --safe:
+        python scripts/safe_transformers_wrapper.py batch {chip} --device {device}
+    else:
+        bash scripts/transformers_batch_sweep.sh {device} {chip}
+
+elif --model:
+    if weak_model or --safe:
+        python scripts/safe_transformers_wrapper.py test {model} {chip} --device {device}
+    else:
+        bash scripts/transformers_auto_sweep.sh {model} {device} {chip}
+```
+
+---
+
+## Scope and prerequisites
 - ❌ Modifying environment variables
 - ❌ Running dangerous commands
 - ✅ Only allows validated, pre-approved operations
