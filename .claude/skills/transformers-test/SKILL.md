@@ -1,19 +1,129 @@
 ---
 name: transformers-test
 description: >
-  Measure torch_fl transformers coverage on an accelerator one model at a time,
-  and turn each new failure into an operator, feature, precision, or crash
-  finding with a named root cause. Use this to survey a platform's HuggingFace
-  model support, to check a model after enabling operators, or to re-measure
-  after a transformers version change. Covers: per-model probing without real
-  weights, the HF custom-device injection contract, CPU same-dtype precision
-  baselines, aten attribution through TorchDispatchMode, root-cause fingerprint
-  dedup, and a baseline-aware gate for explicitly authorized tracker writes.
-  Do not use this to infer model support from a routing table or from a passing
-  operator suite.
+  Run HuggingFace transformers tests on custom chips with automatic triage,
+  verification, deduplication, and GitHub issue filing. Supports resilient mode
+  (crash recovery), manual/automatic pipelines, and weak model safety mode.
+  Use for coverage measurement, automated issue filing, or manual investigation.
 ---
 
 # transformers-test (torch_fl)
+
+## Quick Start
+
+Choose your mode based on task and model capability:
+
+### Mode 1: Automated End-to-End (Recommended)
+
+**For strong models (Opus, Sonnet)**:
+```bash
+bash scripts/transformers_auto_sweep.sh <model> <device> <chip>
+```
+
+**For weak models (Qwen-27B, smaller models)**:
+```bash
+python scripts/safe_transformers_wrapper.py test <model> <chip>
+```
+
+**What it does**: Run tests → triage → verify → deduplicate → file issues (fully automatic)
+
+**Time**: 15-90 minutes depending on model
+
+### Mode 2: Manual Investigation (Advanced)
+
+Follow the detailed steps below for full control over each stage.
+
+---
+
+## Usage Modes Overview
+
+| Mode | Command | Use Case | Model Capability |
+|------|---------|----------|------------------|
+| **Automated** | `transformers_auto_sweep.sh` | End-to-end automation | Strong models (Opus) |
+| **Safe** | `safe_transformers_wrapper.py` | Protected automation | Weak models (Qwen-27B) |
+| **Batch** | `transformers_batch_sweep.sh` | Test multiple models | Any |
+| **Manual** | Step-by-step commands | Investigation, control | Strong models |
+| **Triage-only** | Start from Step 2 | Already have test results | Any |
+
+### Quick Command Reference
+
+```bash
+# Single model (automated)
+bash scripts/transformers_auto_sweep.sh bert gcu GCU
+
+# Single model (safe for weak models)
+python scripts/safe_transformers_wrapper.py test bert GCU
+
+# Batch (bert + qwen3)
+bash scripts/transformers_batch_sweep.sh gcu GCU
+python scripts/safe_transformers_wrapper.py batch GCU  # weak model version
+
+# List available models
+python scripts/safe_transformers_wrapper.py list-models
+python tests/manual/transformers_hf_tests.py --list-models
+
+# Manual mode - see detailed steps below
+```
+
+## Resilient Testing Mode (NEW)
+
+Tests now support **resilient mode** for unstable platforms (crash recovery):
+
+- **Batch execution**: Tests run in batches (default: 20 tests/batch)
+- **Crash isolation**: One batch crash doesn't affect others
+- **Auto-recovery**: Device reset attempted after crash
+- **Incremental output**: Results saved as tests complete
+- **Independent timeout**: Each batch has its own timeout (default: 15 min)
+
+**Why?** New chips (like Enflame GCU S60) often have crashes/hangs. Resilient mode ensures you get partial results and can still file issues for completed tests.
+
+**Parameters**:
+```bash
+--resilient                  # Enable resilient mode
+--batch-size 20              # Tests per batch (10-50)
+--batch-timeout 900          # Timeout per batch in seconds
+```
+
+**Adjust for your environment**:
+- Frequent crashes: `--batch-size 10`
+- Stable: `--batch-size 50`
+- Large models: `--batch-timeout 1800`
+
+## Safety Mode for Weak Models (NEW)
+
+If using weak models (Qwen-27B, Sonnet 5, etc.), use the **safe wrapper** to prevent common mistakes:
+
+**Safe wrapper**: `scripts/safe_transformers_wrapper.py`
+
+**What it prevents**:
+- ❌ Installing packages (`pip install`)
+- ❌ Editing source files
+- ❌ Modifying environment variables
+- ❌ Running dangerous commands
+- ✅ Only allows validated, pre-approved operations
+
+**Parameters validated**:
+- Model name (against allowlist)
+- Chip name (against allowlist)
+- Device name (against allowlist)
+
+**Usage for weak models**:
+```bash
+# Extract parameters from user request
+# Then call:
+python scripts/safe_transformers_wrapper.py test <model> <chip>
+```
+
+**DO NOT** (for weak models):
+1. Modify the command or add extra parameters
+2. Run pip install or other setup commands
+3. Edit Python files
+4. Change environment variables
+5. Try to "fix" issues by modifying code
+
+**Just**: Extract parameters → Call wrapper → Report result
+
+---
 
 ## Scope and prerequisites
 
