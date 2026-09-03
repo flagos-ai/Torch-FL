@@ -71,6 +71,76 @@ inline void SyncCurrentStreamBeforeBlockingCopy() {
 #endif
 }
 
+// The maca CUDA copy kernel (reached via DeviceBoxingGuard + at::native::copy_)
+// has no UInt16/UInt32/UInt64 case in its dtype dispatch, so any dtype *cast*
+// to or from those types raises `"copy_" not implemented for 'UInt32'`. The
+// host copy kernel supports the full set, so route those casts through a CPU
+// round-trip instead. Same-dtype copies are unaffected: they take the direct
+// memcpy path and never reach a dtype dispatch.
+bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
+  if (src == dst) {
+    return false;
+  }
+  const auto is_unsigned = [](c10::ScalarType t) {
+    return t == c10::kUInt16 || t == c10::kUInt32 || t == c10::kUInt64;
+  };
+  return is_unsigned(src) || is_unsigned(dst);
+}
+
+// Copy `src` (a flagos device tensor) into `dst` (a flagos device tensor),
+// casting dtype and honoring both tensors' strides, via a host round-trip.
+// This is the fallback for dtype casts the native CUDA copy kernel cannot do
+// (see cast_needs_cpu_roundtrip). The blocking Memcpys drain the current stream
+// first so a kernel result produced on a side stream is visible.
+void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
+  at::Tensor src_contig = src.is_contiguous()
+      ? src
+      : at::native::flagos::contiguous(src, c10::MemoryFormat::Contiguous);
+  size_t nbytes = src_contig.numel() * src_contig.element_size();
+  at::Tensor cpu_src =
+      at::empty(src_contig.sizes(), src_contig.options().device(at::kCPU));
+  SyncCurrentStreamBeforeBlockingCopy();
+  if (nbytes > 0) {
+    Memcpy(
+        cpu_src.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+  }
+
+  // Map dst's whole storage (not just its view) into CPU byte memory so a
+  // strided in-place copy preserves the parts of the storage dst's view does
+  // not cover. The CPU copy then writes only dst's logical elements.
+  size_t dst_storage_nbytes = dst.storage().nbytes();
+  at::Tensor cpu_dst_storage = at::empty(
+      {static_cast<int64_t>(dst_storage_nbytes)},
+      dst.options().device(at::kCPU).dtype(at::kByte));
+  int64_t dst_storage_offset_bytes =
+      dst.storage_offset() * static_cast<int64_t>(dst.element_size());
+  char* dst_storage_base =
+      static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
+  if (dst_storage_nbytes > 0) {
+    Memcpy(
+        cpu_dst_storage.data_ptr(),
+        dst_storage_base,
+        dst_storage_nbytes,
+        MemcpyDeviceToHost);
+  }
+
+  at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
+  cpu_dst.set_(
+      cpu_dst_storage.storage(),
+      dst.storage_offset(),
+      dst.sizes(),
+      dst.strides());
+  at::native::copy_(cpu_dst, cpu_src, false);
+
+  if (dst_storage_nbytes > 0) {
+    Memcpy(
+        dst_storage_base,
+        cpu_dst_storage.data_ptr(),
+        dst_storage_nbytes,
+        MemcpyHostToDevice);
+  }
+}
+
 } // namespace
 
 ADD_IMPL_TO_DISPATCHER(
@@ -145,9 +215,15 @@ at::Tensor _copy_from(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
-      // strided copy kernel (handles strides, dtype casts on-device).
-      DeviceBoxingGuard guard(self, dst);
-      at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
+      // strided copy kernel (handles strides, dtype casts on-device). The
+      // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
+      // take the host round-trip instead.
+      if (cast_needs_cpu_roundtrip(self.scalar_type(), dst.scalar_type())) {
+        strided_copy_cast_via_cpu(self, dst);
+      } else {
+        DeviceBoxingGuard guard(self, dst);
+        at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
+      }
 #else
       // Ascend: copy on-device via aclnnInplaceCopy, which honors both src and
       // dst strides/offset and casts dtype. Avoids the CPU round-trip below.
@@ -448,11 +524,25 @@ at::Tensor _to_copy(
       }
 #else
       // CUDA platform: use DeviceBoxingGuard + CUDA TensorIterator copy kernel
-      // for dtype cast on-device, avoiding costly CPU round-trip.
-      result = at::empty(self_contig.sizes(), self_contig.options()
-          .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
-      DeviceBoxingGuard guard(self_contig, result);
-      at::native::copy_(result, self_contig, false);
+      // for dtype cast on-device, avoiding costly CPU round-trip. The native
+      // copy kernel has no UInt16/UInt32/UInt64 case, so those casts take the
+      // host round-trip instead.
+      if (cast_needs_cpu_roundtrip(self_contig.scalar_type(), dtype)) {
+        result = at::empty(
+            self_contig.sizes(),
+            self_contig.options()
+                .dtype(dtype)
+                .device(c10::Device(c10::kPrivateUse1, device_index)));
+        strided_copy_cast_via_cpu(self_contig, result);
+      } else {
+        result = at::empty(
+            self_contig.sizes(),
+            self_contig.options()
+                .dtype(dtype)
+                .device(c10::Device(c10::kPrivateUse1, device_index)));
+        DeviceBoxingGuard guard(self_contig, result);
+        at::native::copy_(result, self_contig, false);
+      }
 #endif
     } else {
       result = at::empty(
