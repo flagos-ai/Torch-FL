@@ -176,8 +176,20 @@ class Recorder:
 
 
 def pytest_configure(config):
+    import torch_fl  # noqa: F401 - register the custom device before collection
+
     path = os.environ["HF_TEST_REPORT"]
     config.pluginmanager.register(Recorder(path), "torch_fl_hf_recorder")
+
+
+def pytest_collection_modifyitems(config, items):
+    import pytest
+
+    if os.environ.get("HF_TEST_SKIP_FLEX_ATTENTION") == "1":
+        skip = pytest.mark.skip(reason="flex attention requires a CUDA Triton backend")
+        for item in items:
+            if "flex_attention" in item.nodeid:
+                item.add_marker(skip)
 """
 
 
@@ -376,6 +388,9 @@ def read_report(path: Path) -> list[dict]:
 
 def environment(device: str) -> dict:
     """Collect the versions a result cannot be interpreted without."""
+    # The device spec imports torch_fl after torch. Disable unrelated torch
+    # backend entry points first so a broken optional plugin cannot abort startup.
+    os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
     import torch
     import transformers
 
@@ -443,6 +458,7 @@ def test_dir(source: Path, model: str) -> Path:
 def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     # Custom PrivateUse1 names are registered by the spec. Transformers validates
     # TRANSFORMERS_TEST_DEVICE before importing that spec, so setting it to
     # ``flagos`` would fail at torch.device() validation.
@@ -459,7 +475,9 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     ]
     # HF's ``tests`` package must be importable by name: its model tests use
     # relative imports such as ``from ...causal_lm_tester import ...``.
-    env["PYTHONPATH"] = os.pathsep.join([str(source), *path_entries])
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(source), str(source / "utils"), *path_entries]
+    )
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
@@ -487,8 +505,295 @@ def pytest_command(
     return command
 
 
+def collect_all_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
+    """Collect all test nodeids without running them."""
+    target = test_dir(source, model)
+    if not target.is_dir():
+        return {"tests": [], "collected": 0, "error": "target not found"}
+
+    workdir = Path(tempfile.mkdtemp(prefix=f"hf-collect-{model.replace('/', '_')}-"))
+    try:
+        (workdir / "hf_report_plugin.py").write_text(PLUGIN)
+        shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
+        (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+        (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+
+        env = child_env(source, args.device, workdir / "dummy.jsonl", args.offline)
+        env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
+
+        command = pytest_command(
+            target,
+            args.marks,
+            [
+                "-c",
+                str(source / "pyproject.toml"),
+                "--rootdir",
+                str(source),
+                "--collect-only",
+                "-q",
+            ],
+            collect_only=True,
+        )
+
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(workdir),
+            timeout=120,
+        )
+
+        # Parse pytest --collect-only output
+        test_nodeids = []
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if "::" in line and not line.startswith("="):
+                # Clean up pytest's output format
+                nodeid = line.split()[0] if " " in line else line
+                if nodeid and nodeid.endswith("py"):
+                    continue  # Skip file-level entries
+                test_nodeids.append(nodeid)
+
+        return {"tests": test_nodeids, "collected": len(test_nodeids)}
+
+    except Exception as e:
+        return {"tests": [], "collected": 0, "error": str(e)}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_test_batch(
+    model: str,
+    source: Path,
+    batch_nodeids: list[str],
+    args: argparse.Namespace,
+    batch_timeout: int,
+) -> dict:
+    """Run a batch of specific tests."""
+    target = test_dir(source, model)
+    workdir = Path(tempfile.mkdtemp(prefix=f"hf-batch-{model.replace('/', '_')}-"))
+
+    try:
+        report = workdir / "report.jsonl"
+        report.touch()
+        (workdir / "hf_report_plugin.py").write_text(PLUGIN)
+        shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
+        (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+        (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+
+        env = child_env(source, args.device, report, args.offline)
+        env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
+
+        # Build command with specific test nodeids
+        command = pytest_command(
+            target,
+            args.marks,
+            [
+                "-c",
+                str(source / "pyproject.toml"),
+                "--rootdir",
+                str(source),
+                "-p",
+                "hf_report_plugin",
+                *args.pytest_arg,
+            ]
+            + batch_nodeids,  # Add nodeids to select specific tests
+            collect_only=False,
+        )
+
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(workdir),
+            timeout=batch_timeout,
+        )
+
+        reduced = reduce_records(read_report(report))
+        crashed = pytest_process_crashed(proc.returncode)
+
+        return {
+            "tests": reduced["tests"],
+            "collect_errors": reduced["collect_errors"],
+            "collected": reduced["collected"],
+            "crashed": crashed,
+            "returncode": proc.returncode,
+            "stdout_tail": proc.stdout.strip()[-2000:] or None,
+            "stderr_tail": proc.stderr.strip()[-2000:] or None,
+        }
+
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+
+        # Try to read whatever got written before timeout
+        reduced = reduce_records(read_report(report))
+
+        return {
+            "tests": reduced["tests"],
+            "collect_errors": reduced["collect_errors"],
+            "collected": reduced["collected"],
+            "crashed": True,
+            "timed_out": True,
+            "returncode": None,
+            "stdout_tail": stdout.strip()[-2000:] or None,
+            "stderr_tail": stderr.strip()[-2000:] or None,
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def reset_device_context(device: str):
+    """Attempt to reset device state after a crash."""
+    try:
+        import torch
+
+        if device == "flagos":
+            torch.flagos.empty_cache()
+            torch.flagos.synchronize()
+    except Exception:
+        pass  # Best effort, ignore failures
+
+
+def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> dict:
+    """Resilient mode: run tests in batches, continue on crash."""
+    target = test_dir(source, model)
+    if not target.is_dir():
+        return {
+            "run": {"status": "NOT_IN_VERSION", "target": str(target)},
+            "tests": [],
+            "collect_errors": [],
+            "summary": {},
+        }
+
+    print(f"[Resilient mode] Collecting tests for {model}...")
+    collected = collect_all_tests(model, source, args)
+
+    if collected["collected"] == 0:
+        return {
+            "run": {
+                "status": "NO_TESTS_COLLECTED",
+                "error": collected.get("error"),
+            },
+            "tests": [],
+            "collect_errors": [],
+            "summary": {},
+        }
+
+    all_test_nodeids = collected["tests"]
+    print(f"[Resilient mode] Collected {len(all_test_nodeids)} tests")
+
+    batch_size = args.batch_size
+    batch_timeout = args.batch_timeout
+    all_tests = []
+    all_collect_errors = []
+    crashed_batches = []
+    total_batches = (len(all_test_nodeids) + batch_size - 1) // batch_size
+
+    started = time.time()
+
+    for batch_idx, start in enumerate(range(0, len(all_test_nodeids), batch_size)):
+        batch = all_test_nodeids[start : start + batch_size]
+        batch_name = f"{batch_idx + 1}/{total_batches}"
+
+        print(f"[Batch {batch_name}] Running {len(batch)} tests...")
+
+        try:
+            batch_result = run_test_batch(model, source, batch, args, batch_timeout)
+
+            if batch_result.get("crashed") or batch_result.get("timed_out"):
+                print(
+                    f"[Batch {batch_name}] ✗ CRASHED (rc={batch_result.get('returncode')})"
+                )
+                crashed_batches.append(
+                    {
+                        "batch_idx": batch_idx,
+                        "test_count": len(batch),
+                        "first_nodeid": batch[0] if batch else None,
+                        "crashed": batch_result.get("crashed", False),
+                        "timed_out": batch_result.get("timed_out", False),
+                    }
+                )
+
+                # Mark tests in crashed batch
+                for nodeid in batch:
+                    all_tests.append(
+                        {
+                            "nodeid": nodeid,
+                            "status": "BATCH_CRASHED",
+                            "detail": f"Batch {batch_name} crashed or timed out",
+                        }
+                    )
+
+                # Try to reset device
+                reset_device_context(args.device)
+
+            else:
+                print(f"[Batch {batch_name}] ✓ {len(batch_result['tests'])} results")
+                all_tests.extend(batch_result["tests"])
+                all_collect_errors.extend(batch_result["collect_errors"])
+
+        except Exception as e:
+            print(f"[Batch {batch_name}] ✗ Exception: {e}")
+            crashed_batches.append(
+                {
+                    "batch_idx": batch_idx,
+                    "test_count": len(batch),
+                    "first_nodeid": batch[0] if batch else None,
+                    "exception": str(e),
+                }
+            )
+
+            for nodeid in batch:
+                all_tests.append(
+                    {
+                        "nodeid": nodeid,
+                        "status": "BATCH_CRASHED",
+                        "detail": f"Batch {batch_name} exception: {e}",
+                    }
+                )
+
+            reset_device_context(args.device)
+
+    duration = round(time.time() - started, 1)
+
+    # Detect poison in all test details
+    combined = "\n".join(item.get("detail") or "" for item in all_tests)
+    poisoned = bool(POISON_RE.search(combined))
+
+    result = {
+        "run": {
+            "status": "COMPLETED_RESILIENT",
+            "target": str(target),
+            "duration_s": duration,
+            "collected": len(all_test_nodeids),
+            "crashed_batches": crashed_batches,
+            "total_batches": total_batches,
+            "context_poison": poisoned,
+            "batch_size": batch_size,
+            "batch_timeout": batch_timeout,
+        },
+        "tests": all_tests,
+        "collect_errors": all_collect_errors,
+    }
+
+    result["summary"] = summarize_statuses(all_tests, all_collect_errors)
+    return result
+
+
 def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     """Run one architecture's official tests in an isolated subprocess."""
+    # Check if resilient mode is enabled
+    if args.resilient:
+        return run_tests_resilient(model, source, args)
+
     target = test_dir(source, model)
     if not target.is_dir():
         return {
@@ -507,8 +812,11 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     report.touch()
     (workdir / "hf_report_plugin.py").write_text(PLUGIN)
     shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
-
+    (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+    (workdir / "src").symlink_to(source / "src", target_is_directory=True)
     env = child_env(source, args.device, report, args.offline)
+    env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
     command = pytest_command(
         target,
         args.marks,
@@ -785,6 +1093,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--collect-only", action="store_true")
     parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument(
+        "--resilient",
+        action="store_true",
+        help="resilient mode: run tests in batches, continue on crash",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=20,
+        help="tests per batch in resilient mode (default: 20)",
+    )
+    parser.add_argument(
+        "--batch-timeout",
+        type=int,
+        default=900,
+        help="timeout per batch in seconds (default: 900 = 15 minutes)",
+    )
     parser.add_argument("--out", type=Path, help="write the JSON result here")
     parser.add_argument(
         "--pytest-arg",
