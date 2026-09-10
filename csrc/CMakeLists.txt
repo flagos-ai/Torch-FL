@@ -151,6 +151,16 @@ if(NOT MUSA_KERNEL)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/musa/.*")
 endif()
 
+# The DCU SDK-native operators are always a SEPARATE artifact
+# (libdcu_aten_ops.so), never part of libtorch_fl.so -- that separation is the
+# whole point: the plugin links the official core plus the DTK SDK and must not
+# inherit libtorch_fl.so's link line. The recursive glob above would otherwise
+# pull these sources in on every platform, so filter them unconditionally. The
+# plugin target is defined further down, guarded by ACCELERATOR=dcu.
+# dcu_sdk_registration.cc (the core-side bridge) deliberately lives outside this
+# directory, in csrc/aten/, so it stays in libtorch_fl.so.
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/dcu_sdk/.*")
+
 if(ACCELERATOR STREQUAL "metax")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*\\.cu$")
@@ -296,6 +306,13 @@ endif()
 # /opt/dtk/roctracer/include, and the library is at /opt/dtk/lib/libroctracer64.so.
 # Unlike CUPTI's version-sensitivity, ROCtracer 4.1 is stable across DTK releases.
 if(ACCELERATOR STREQUAL "dcu")
+  # In SDK-only mode, exclude CUDA boxing kernels that would pull in DTK's
+  # libtorch_hip.so as a hard dependency. The official CPU wheel has no CUDA
+  # runtime, and the SDK plugin (libdcu_aten_ops.so) implements the GEMM
+  # cohort independently without requiring libtorch_hip.
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
+
   find_path(ROCTRACER_INCLUDE_DIR
     NAMES roctracer.h
     PATHS
@@ -533,6 +550,171 @@ install(TARGETS ${LIBRARY_NAME}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+# DCU SDK-native operator plugin. Keep this target independent from the main
+# torch_fl library: it is loaded only when FLAGOS_DCU_SDK_OPS=1 and must not
+# acquire torch_fl's CUDA boxing/device-library dependencies transitively.
+if(ACCELERATOR STREQUAL "dcu")
+  option(FLAGOS_DCU_SDK_OPS_BUILD
+      "Build the DTK SDK-native DCU operator plugin" ON)
+  if(FLAGOS_DCU_SDK_OPS_BUILD)
+    set(_dcu_sdk_root "${FLAGOS_DCU_SDK_ROOT}")
+    if(NOT _dcu_sdk_root)
+      set(_dcu_sdk_root "$ENV{FLAGOS_DCU_SDK_ROOT}")
+    endif()
+    if(NOT _dcu_sdk_root)
+      set(_dcu_sdk_root "${DTK_ROOT}")
+    endif()
+    if(NOT _dcu_sdk_root)
+      set(_dcu_sdk_root "$ENV{DTK_ROOT}")
+    endif()
+    if(NOT _dcu_sdk_root)
+      set(_dcu_sdk_root "$ENV{ROCM_PATH}")
+    endif()
+    if(NOT _dcu_sdk_root)
+      set(_dcu_sdk_root "/opt/dtk")
+    endif()
+
+    find_path(DCU_SDK_ROCBLAS_INCLUDE_DIR
+        NAMES rocblas/rocblas.h
+        PATHS "${_dcu_sdk_root}/include"
+        NO_DEFAULT_PATH)
+    find_library(DCU_SDK_ROCBLAS_LIBRARY
+        NAMES rocblas
+        PATHS "${_dcu_sdk_root}/lib" "${_dcu_sdk_root}/lib64"
+        NO_DEFAULT_PATH)
+    find_path(DCU_SDK_HIP_INCLUDE_DIR
+        NAMES hip/hip_runtime_api.h
+        PATHS "${_dcu_sdk_root}/include"
+        NO_DEFAULT_PATH)
+    if(NOT DCU_SDK_ROCBLAS_INCLUDE_DIR OR
+       NOT DCU_SDK_ROCBLAS_LIBRARY OR NOT DCU_SDK_HIP_INCLUDE_DIR)
+      message(FATAL_ERROR
+          "FLAGOS_DCU_SDK_OPS_BUILD=ON requires DTK rocBLAS and HIP headers. "
+          "Searched ${_dcu_sdk_root}/include and ${_dcu_sdk_root}/lib; set "
+          "FLAGOS_DCU_SDK_ROOT, DTK_ROOT, or ROCM_PATH to a valid SDK.")
+    endif()
+
+    # Device code is compiled with DTK's hipcc rather than CMake's CUDA language.
+    # This keeps the main project g++-only while still allowing the independent
+    # plugin to carry HIP kernels. The object contains no ATen code.
+    set(_dcu_hipcc "${_dcu_sdk_root}/bin/hipcc")
+    if(NOT EXISTS "${_dcu_hipcc}")
+      set(_dcu_hipcc "${_dcu_sdk_root}/hip/bin/hipcc")
+    endif()
+    if(NOT EXISTS "${_dcu_hipcc}")
+      message(FATAL_ERROR
+          "DCU SDK-native plugin requires hipcc under ${_dcu_sdk_root}/bin or "
+          "${_dcu_sdk_root}/hip/bin")
+    endif()
+    set(_dcu_hip_arch "gfx936")
+    if(DEFINED FLAGOS_DCU_GPU_ARCH AND NOT FLAGOS_DCU_GPU_ARCH STREQUAL "")
+      set(_dcu_hip_arch "${FLAGOS_DCU_GPU_ARCH}")
+    elseif(DEFINED ENV{FLAGOS_DCU_GPU_ARCH} AND NOT "$ENV{FLAGOS_DCU_GPU_ARCH}" STREQUAL "")
+      set(_dcu_hip_arch "$ENV{FLAGOS_DCU_GPU_ARCH}")
+    endif()
+    set(_dcu_hip_obj "${CMAKE_CURRENT_BINARY_DIR}/dcu_sdk/dtk_elementwise.hip.o")
+    add_custom_command(
+        OUTPUT "${_dcu_hip_obj}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/dcu_sdk"
+        COMMAND "${_dcu_hipcc}" -std=c++17 --offload-arch=${_dcu_hip_arch}
+            -fPIC -O3 -I${CMAKE_SOURCE_DIR}/csrc
+            -I${CMAKE_SOURCE_DIR}/csrc/include
+            -I${CMAKE_SOURCE_DIR}
+            -I${PYTORCH_INSTALL_DIR}/include
+            -I${PYTORCH_INSTALL_DIR}/include/torch/csrc/api/include
+            -I${DCU_SDK_HIP_INCLUDE_DIR}
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/dtk_elementwise.hip"
+            -o "${_dcu_hip_obj}"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/dtk_elementwise.hip"
+            "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/dtk_launch.h"
+        COMMENT "DTK hipcc: dtk_elementwise.hip (${_dcu_hip_arch})"
+        VERBATIM)
+
+    add_library(libdcu_aten_ops SHARED
+        "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/dcu_sdk_plugin.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/generated/dtk_kernels.cc"
+        "${_dcu_hip_obj}")
+    set_target_properties(libdcu_aten_ops PROPERTIES
+        OUTPUT_NAME dcu_aten_ops
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden)
+    target_compile_definitions(libdcu_aten_ops PRIVATE
+        __HIP_PLATFORM_AMD__=1
+        C10_CUDA_NO_CMAKE_CONFIGURE_FILE=1)
+    target_include_directories(libdcu_aten_ops PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
+        ${DCU_SDK_ROCBLAS_INCLUDE_DIR}
+        ${DCU_SDK_HIP_INCLUDE_DIR})
+    # Link only the exact official core interfaces needed for at::Tensor and
+    # c10's ABI. Do NOT use ${TORCH_LIBRARIES}: TorchConfig.cmake defines that
+    # umbrella list with the libtorch.so target, which is explicitly forbidden
+    # in SDK-only mode.
+    # Keep rocBLAS in DT_NEEDED even when all currently generated host wrappers
+    # are elementwise: the plugin's SDK binding is an intentional contract, and
+    # later category templates (GEMM/MIOpen/etc.) must not silently turn the ELF
+    # audit into a false negative because the linker dropped an unused library.
+    target_link_libraries(libdcu_aten_ops PRIVATE
+        torch_cpu c10 flagos)
+    target_link_options(libdcu_aten_ops PRIVATE
+        -Wl,--no-as-needed ${DCU_SDK_ROCBLAS_LIBRARY} -Wl,--as-needed)
+    # `${DCU_SDK_ROCBLAS_LIBRARY}` is deliberately passed as a link option above
+    # rather than through target_link_libraries: CMake's transitive dependency
+    # machinery places all libraries after its own --as-needed boundary, which
+    # drops rocBLAS when the current generated cohort is header-only on the host.
+    target_link_directories(libdcu_aten_ops PRIVATE
+        "${_dcu_sdk_root}/lib" "${_dcu_sdk_root}/lib64"
+        "${_dcu_sdk_root}/hip/lib")
+    flagos_set_portable_rpath(libdcu_aten_ops
+        EXTRA_DIRS "${_dcu_sdk_root}/lib" "${_dcu_sdk_root}/lib64"
+                   "${_dcu_sdk_root}/hip/lib" "${_dcu_sdk_root}/cuda/cuda-12/lib64")
+    install(TARGETS libdcu_aten_ops
+        LIBRARY DESTINATION lib_dcu)
+    set(_dcu_sdk_kernel_header
+        "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/generated/dtk_kernels_decl.h")
+    set(_dcu_sdk_manifest_template
+        "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/generated/dcu_sdk_manifest.json")
+    if(EXISTS "${_dcu_sdk_manifest_template}")
+      install(FILES "${_dcu_sdk_manifest_template}" DESTINATION lib_dcu)
+    endif()
+    # The manifest states the currently generated plugin rows. Route-level
+    # coverage metadata is emitted separately by codegen_dtk.py; this fallback
+    # keeps source builds usable until that generated manifest is installed.
+    set(_dcu_sdk_manifest "${CMAKE_CURRENT_BINARY_DIR}/dcu_sdk_manifest.json")
+    set(_dcu_sdk_manifest_source
+        "${CMAKE_SOURCE_DIR}/torch_fl/configs/dcu_sdk_manifest.json")
+    if(EXISTS "${_dcu_sdk_manifest_source}")
+      configure_file("${_dcu_sdk_manifest_source}" "${_dcu_sdk_manifest}" COPYONLY)
+    else()
+      message(FATAL_ERROR
+          "DCU SDK-native manifest is missing: ${_dcu_sdk_manifest_source}. "
+          "Run scripts/codegen_dtk.py --emit all before configuring.")
+    endif()
+    install(FILES "${_dcu_sdk_manifest}" DESTINATION lib_dcu)
+    message(STATUS "DCU SDK-native plugin manifest: ${_dcu_sdk_manifest}")
+
+    # The generated HIP object and host kernel table are the plugin's complete
+    # source boundary. Keep a dependency on the declaration header so changing
+    # the generated row set rebuilds the plugin even when the CMake source glob
+    # itself is unchanged.
+    set_property(TARGET libdcu_aten_ops APPEND PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/dcu_sdk/generated/dtk_kernels_decl.h")
+    add_dependencies(libdcu_aten_ops ${LIBRARY_NAME})
+
+    # CMake's post-build checker runs before installation and therefore catches a
+    # forbidden DT_NEEDED edge at the point it is introduced.
+    add_custom_command(TARGET libdcu_aten_ops POST_BUILD
+        COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/scripts/check_dcu_sdk_abi.py"
+            "$<TARGET_FILE:libdcu_aten_ops>"
+        COMMENT "Checking DCU SDK plugin dependencies")
+    message(STATUS "DCU SDK-native route manifest: ${_dcu_sdk_manifest_source}")
+  endif()
+endif()
+
+
 
 if(ACCELERATOR STREQUAL "gcu" OR ACCELERATOR STREQUAL "musa"
    OR ACCELERATOR STREQUAL "bpu" OR ACCELERATOR STREQUAL "ascend")

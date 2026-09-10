@@ -243,6 +243,13 @@ else
   fi
 
   KEEP_NAMES+=("${DEVICE_SO[@]}")
+  # The SDK-native plugin is built into lib_dcu by CMake and is independent of
+  # DTK's device-side libtorch. Keep it when refreshing the decoupled bundle;
+  # otherwise this script's stale-file cleanup silently removes the artifact
+  # that FLAGOS_DCU_SDK_OPS=1 is supposed to load.
+  if [ -f "${LIB_DCU}/libdcu_aten_ops.so" ]; then
+    KEEP_NAMES+=("libdcu_aten_ops.so")
+  fi
   prune_unwanted
   bundle_copy_so "${SRC}" "${LIB_DCU}" "${BUNDLE_RPATH}" 1 "${DEVICE_SO[@]}"
   echo "Resolving hashed deps from ${TORCH_LIBS}"

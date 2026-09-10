@@ -302,10 +302,30 @@ def setup_dcu_runtime():
     """Make DTK's kernels available in this process, before ``import torch``.
 
     Dispatches on ``FLAGOS_DCU_VENDOR_CORE``: decoupled preload by default,
-    legacy relink when the env var is set.
+    legacy relink when the env var is set. SDK-native mode deliberately skips
+    the DTK torch-device preload when SDK-only operation was requested; the
+    plugin is loaded later, after ``torch_fl._C`` has installed the core-side
+    registration bridge.
+
+    ``FLAGOS_DCU_SDK_ONLY=1`` and ``FLAGOS_DCU_VENDOR_CORE=1`` are mutually
+    exclusive and rejected together rather than silently ordered: the first says
+    "map no part of DTK's torch", the second replaces the whole core with it. A
+    precedence rule either way would leave the user with a process that quietly
+    contradicts one of the two switches they set.
     """
+    from torch_fl.accelerator.dcu._dcu_sdk_ops import sdk_only
+
+    if sdk_only() and vendor_core_mode():
+        raise RuntimeError(
+            "FLAGOS_DCU_SDK_ONLY=1 and FLAGOS_DCU_VENDOR_CORE=1 are mutually "
+            "exclusive: SDK-only mode runs the DTK SDK on the official PyTorch "
+            "core and maps no vendor torch, while vendor-core mode replaces that "
+            "core with DTK's fork. Unset one of them."
+        )
     if vendor_core_mode():
         return ensure_dcu_libtorch_links()
+    if sdk_only():
+        return False
     return preload_dcu_device_libs()
 
 

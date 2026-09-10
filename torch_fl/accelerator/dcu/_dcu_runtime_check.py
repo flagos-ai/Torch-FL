@@ -29,6 +29,11 @@ wrong-looking numerical result or a bare undefined-symbol abort:
    'aten::mm' with arguments from the 'CUDA' backend".
 
 Both raise; a partially wired process is not worth continuing with.
+
+SDK-only mode (``FLAGOS_DCU_SDK_ONLY=1``) loads no DTK libtorch at all, so
+neither check applies -- they would fail on exactly the property that mode
+establishes.  ``validate_sdk_only_runtime()`` is its equivalent: the SDK plugin
+registered its kernels, and no vendor torch is mapped.
 """
 
 import os
@@ -108,3 +113,32 @@ def validate_decoupled_runtime(bundle_dir):
     check_cuda_dispatch(
         lambda op: torch._C._dispatch_has_kernel_for_dispatch_key(op, "CUDA")
     )
+
+
+def validate_sdk_only_runtime():
+    """The SDK-only counterpart: the plugin registered, and no vendor torch.
+
+    Both checks above are about DTK's ``libtorch_hip.so`` binding correctly to the
+    official core, which SDK-only mode deliberately never loads -- running them
+    there would fail on the very property the mode exists to establish. What is
+    load-bearing instead is that the SDK plugin's kernels really are in the
+    dispatcher (an empty ``Backend::kDcuSdk`` slot means every routed GEMM raises)
+    and that no vendor torch crept into the process.
+
+    Version alignment needs no separate check here: the plugin manifest's
+    ``torch_base`` is compared against the active torch during
+    ``load_and_register()``, before any kernel pointer is installed.
+    """
+    from torch_fl.accelerator.dcu._dcu_sdk_ops import (
+        assert_sdk_only_process,
+        kernels_registered,
+    )
+
+    if not kernels_registered():
+        raise RuntimeError(
+            "DCU SDK-only mode is active but libdcu_aten_ops.so registered no "
+            "kernels, so the SDK-native routes have nothing behind them. This "
+            "means load_and_register() did not run -- import torch_fl before "
+            "torch in a fresh process."
+        )
+    assert_sdk_only_process()

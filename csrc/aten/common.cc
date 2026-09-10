@@ -151,6 +151,8 @@ void ParseConfigInto(const std::string& path,
       table[op] = Backend::kFlagOsPython;
     } else if (val == "tileops") {
       table[op] = Backend::kTileOps;
+    } else if (val == "dcu_sdk") {
+      table[op] = Backend::kDcuSdk;
     } else {
       fprintf(stderr, "[flagos] unknown backend '%s' for op '%s', using flagos\n", val.c_str(), op.c_str());
       table[op] = Backend::kFlagOs;
@@ -206,6 +208,9 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
     } else if (v == "tileops") {
       table[op] = Backend::kTileOps;
       fprintf(stderr, "[flagos] env override: %s -> tileops\n", op.c_str());
+    } else if (v == "dcu_sdk") {
+      table[op] = Backend::kDcuSdk;
+      fprintf(stderr, "[flagos] env override: %s -> dcu_sdk\n", op.c_str());
     }
   }
 
@@ -223,6 +228,56 @@ Backend GetBackendForOp(const std::string& op_name) {
   const auto& table = BackendTable();
   auto it = table.find(op_name);
   return it != table.end() ? it->second : Backend::kFlagOs;
+}
+
+const char* BackendName(Backend backend) {
+  switch (backend) {
+    case Backend::kCuda:         return "cuda";
+    // "flagos"/"flagos_python", not the "flaggems" aliases the conf parser also
+    // accepts: the dispatch log's spelling is asserted by
+    // tests/integration/ops/test_*_dispatch.py.
+    case Backend::kFlagOs:       return "flagos";
+    case Backend::kFlagOsPython: return "flagos_python";
+    case Backend::kAscend:       return "ascend";
+    case Backend::kMusa:         return "musa";
+    case Backend::kMetax:        return "metax";
+    case Backend::kTsingMicro:   return "tsingmicro";
+    case Backend::kGcu:          return "gcu";
+    case Backend::kTileOps:      return "tileops";
+    case Backend::kDcuSdk:       return "dcu_sdk";
+    case Backend::kUncached:     return "uncached";
+  }
+  return "unknown";
+}
+
+void ReportMissingKernel(const std::string& op_name, Backend backend) {
+  // kDcuSdk is the one backend whose kernels arrive at *runtime*, from a plugin
+  // outside this library, so an empty slot here has causes (and fixes) that no
+  // build-time-registered backend shares. Naming them is the difference between
+  // an actionable message and a dead end -- particularly in SDK-only mode, where
+  // the inherited `cuda` routes have no libtorch_hip behind them either, and the
+  // honest answer is "this op is not covered", not a silent CPU result.
+  if (backend == Backend::kDcuSdk) {
+    TORCH_CHECK(
+        false,
+        op_name,
+        ": routed to the DCU SDK-native backend (dcu_sdk), but no kernel is "
+        "registered for it. Either libdcu_aten_ops.so was never loaded -- it is "
+        "loaded at `import torch_fl` only when FLAGOS_DCU_SDK_OPS=1, and the "
+        "loader raises on its own if the library or dcu_sdk_manifest.json is "
+        "missing -- or this op is outside the generated SDK category set. "
+        "In SDK-only mode this is an explicit unsupported-operation error, not "
+        "a CPU fallback. Unset FLAGOS_DCU_SDK_OPS and FLAGOS_DCU_SDK_ONLY to "
+        "use the legacy DTK libtorch_hip compatibility route, or install a "
+        "plugin whose manifest covers this operator.");
+  }
+  TORCH_CHECK(
+      false,
+      op_name,
+      ": no kernel registered for backend '",
+      BackendName(backend),
+      "'. This build does not contain that backend's kernels; check the routing "
+      "config (FLAGOS_BACKEND_CONFIG) and the FLAGOS_OP_* overrides.");
 }
 
 } // namespace at::native::flagos

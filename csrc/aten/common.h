@@ -30,14 +30,34 @@ enum class Backend {
   kTsingMicro,
   kGcu,
   kTileOps,
+  // Hygon DCU operators implemented directly against the DTK SDK (rocBLAS &c)
+  // by libdcu_aten_ops.so, which torch_fl loads at import when
+  // FLAGOS_DCU_SDK_OPS=1. Unlike kCuda -- which on DCU boxes PrivateUse1 to the
+  // CUDA key and lands in DTK's forked libtorch_hip.so -- this slot needs no
+  // vendor torch build at all: the plugin links only the official libc10 /
+  // libtorch_cpu plus the SDK. Its kernels are installed at runtime through the
+  // registration ABI in backends/dcu_sdk/dcu_sdk_abi.h, so the slot is empty
+  // until that plugin is loaded (see GetFn()'s kDcuSdk diagnostics).
+  kDcuSdk,
   kUncached
 };
 
 // Returns the backend for a given op name, loaded once from config file at startup.
 // Config file path: $FLAGOS_BACKEND_CONFIG or torch_fl/configs/backends.conf
-// Format: "op_name = backend"  (backend: "flagos" | "flaggems" | "cuda" | "metax" | "tileops")
+// Format: "op_name = backend"  (backend: "flagos" | "flaggems" | "cuda" |
+// "metax" | "tileops" | "dcu_sdk")
 // Default when op is not listed: FlagOS.
 Backend GetBackendForOp(const std::string& op_name);
+
+// The config/logging spelling of a backend, e.g. Backend::kDcuSdk -> "dcu_sdk".
+const char* BackendName(Backend backend);
+
+// Raises when the routing config selects a backend whose kernel slot is empty.
+// Out-of-line on purpose: this is the cold path of every Dispatcher<> template
+// instantiation, and the message text should exist once rather than per op.
+[[noreturn]] void ReportMissingKernel(
+    const std::string& op_name,
+    Backend backend);
 
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
