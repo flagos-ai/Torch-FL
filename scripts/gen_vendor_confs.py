@@ -181,6 +181,13 @@ CSRC_DIR = REPO_ROOT / "csrc/aten"
 # and not written here.)
 FLAGGEMS_CPP_PLATFORMS = {"metax"}
 
+# Native Ascend wheels deliberately disable FLAGGEMS_PYTHON: the CI image does
+# not ship Triton/FlagGems, and set_env_ascend.sh sets FLAGGEMS_PYTHON=0. Keep
+# the generated conf honest by not routing Ascend through a dispatcher slot that
+# is absent from the wheel. Boxing platforms compile the Python caller and may
+# use the measured FlagGems coverage.
+FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
+
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
 # setup.py force-sets TILEOPS_KERNEL=OFF for every ACCELERATOR != "cuda" -- so on
@@ -535,13 +542,14 @@ def build_all(conf_dir: Path) -> dict:
         # A vendor build is FLAGGEMS_KERNEL=OFF, so the flaggems_cpp slot has no
         # kernel -- withhold the key and let those ops take the Python path.
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
+        py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(
                 op,
                 vendor,
                 cpp_here,
-                fg_py,
+                py_here,
                 natives[vendor],
                 registered[vendor],
                 tileops_here,

@@ -371,6 +371,20 @@ def build_deps():
         # pass-through below emits a later -D that overrides the OFF above). The
         # C++ kernels reach the device via the same DeviceBoxingGuard as the
         # boxing path, so they need boxing mode.
+    elif ACCELERATOR == "ascend":
+        # Ascend uses ACLNN as the native fallback, with the patched FlagGems /
+        # triton-ascend Python path enabled by default. The generated Ascend
+        # conf is FlagGems-first for measured routes, while unsupported or
+        # unregistered operators remain on ACLNN/CPU fallback.
+        cmake_args.extend(
+            [
+                "-DCUDA_KERNEL=OFF",
+                "-DFLAGGEMS_KERNEL=OFF",
+                "-DFLAGGEMS_PYTHON=ON",
+                "-DMETAX_KERNEL=OFF",
+                "-DASCEND_KERNEL=ON",
+            ]
+        )
     elif ACCELERATOR == "tsingmicro":
         cmake_args.extend(
             [

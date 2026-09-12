@@ -33,7 +33,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
 # CPU torch is installed from CPU_TORCH_INDEX_URL, not this generic PyPI mirror.
-export PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+export PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://repo.huaweicloud.com/repository/pypi/simple}"
 export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-120}"
 export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-10}"
 
@@ -85,14 +85,13 @@ fi
 # --- Environment -------------------------------------------------------------
 export ACCELERATOR=ascend
 export ASCEND_HOME
-# Ascend has no CUDA assets, no CUDA runtime, and (in the first-version wheel)
-# no FlagGems C++/Python path. Disable all of them explicitly so dispatch
-# resolves every op to the ascend ACLNN backend.
+# Ascend has no CUDA assets or CUDA runtime. Keep the ACLNN backend as the
+# native fallback and enable the patched FlagGems Python path by default.
 export FLAGOS_DISABLE_CUDA_ASSETS=1
-export FLAGOS_USE_FLAGGEMS=0
+export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON=0
+export FLAGGEMS_PYTHON=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
@@ -201,10 +200,6 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   "$VENV_PYTHON" -m pip install --index-url "$CPU_TORCH_INDEX_URL" \
     "torch==${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
   if [[ "$CI_STAGE" == "integration" ]]; then
-    # pytest is also installed by the common workflow; mirrored here so the
-    # venv is self-contained for local runs. transformers is NOT installed:
-    # the first-version ascend acceptance has no model-mounted test (Qwen3 is
-    # deferred), so pulling it would only widen the CI failure surface.
     "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
   fi
 fi
@@ -213,6 +208,62 @@ export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
+
+# Both the build and integration jobs execute this setup script in the same
+# combined platform job. Install FlagGems before either stage builds or tests
+# the wheel; restricting this block to CI_STAGE=integration leaves the build
+# job's prebuilt venv without flag_gems, and the resulting wheel fails as soon
+# as the FlagGems-first Ascend conf dispatches an operator.
+#
+# Use --no-deps for the source packages so pip cannot replace the pinned CPU
+# torch. Triton-Ascend is supplied by its vendor index and also installs
+# without dependency resolution; the venv already contains the compatible
+# Python/Torch base. Individual retries are intentional: the shared mirror can
+# close a large-wheel response early, producing IncompleteRead even though the
+# package is available. Retrying the failed package avoids restarting all setup.
+pip_retry() {
+  local attempt=1
+  while true; do
+    # Increase pip's own retry limit and timeout for large wheels on unstable networks.
+    # triton-ascend 3.2.2 is 270 MB; the default timeout (15s) and retries (5) are
+    # insufficient when the mirror link drops mid-download.
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
+# FlagGems commit 8e1fce4 adds triton.knobs, and 4ff8a0f adds tl.map_elementwise,
+# both unavailable in triton-ascend 3.2.x. Pin to 82b4b0c, the last commit before
+# those Triton APIs were used.
+FLAGGEMS_REVISION="82b4b0c10e6bb628ba9d0d4054913f3bdb6f87a2"
+pip_retry --no-deps "git+https://github.com/flagos-ai/FlagGems.git@${FLAGGEMS_REVISION}"
+pip_retry --index-url "$PIP_INDEX_URL" pybind11 packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
+# Install the latest published triton-ascend wheel (3.2.2). Source builds from
+# the 3.5 branch require unreliable gitcode.com submodules and exceed the CI
+# timeout; the 3.2.x wheel is stable and fast.
+pip_retry --no-deps --extra-index-url 'https://triton-ascend.osinfra.cn/pypi/simple' 'triton-ascend==3.2.2'
+"$VENV_PYTHON" "$REPO_ROOT/scripts/patch_triton_ascend.py"
+
+# Fail early in the wheel-only stage if the pinned FlagGems/Triton pair
+# can be imported together. The build stage cannot run this check because
+# torch_fl._C does not exist until the wheel has been built and installed.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  # torch_fl must be imported first so its PrivateUse1 shim owns the device key.
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl
+import flag_gems
+
+print(f"FlagGems import: {flag_gems.__file__}")
+PY
+fi
 
 # Sanity: the isolated torch must be the CPU wheel, not a CUDA vendor build.
 "$VENV_PYTHON" - <<'PY'

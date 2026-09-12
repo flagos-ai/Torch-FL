@@ -33,14 +33,22 @@ import sys
 
 
 def find_triton_path():
-    """Auto-detect triton installation path."""
+    """Auto-detect triton installation path without importing its backend."""
     try:
         import triton
 
         return os.path.dirname(triton.__file__)
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
+        # Importing triton-ascend can fail before this patch is applied because
+        # its Ascend backend imports torch_npu. Locate the package on disk so
+        # the patch can remove that dependency before triton is imported again.
+        for site_packages in sys.path:
+            candidate = os.path.join(site_packages, "triton")
+            if os.path.isdir(os.path.join(candidate, "backends", "ascend")):
+                return candidate
+
         print(
-            "ERROR: triton not found. Specify --triton-path explicitly.",
+            "ERROR: triton-ascend package not found. Specify --triton-path explicitly.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -289,6 +297,31 @@ def patch_utils(triton_path):
     return patch_file(fp, replacements)
 
 
+def patch_backend_register(triton_path):
+    """Patch compiler flags that otherwise require libtorch_npu."""
+    fp = os.path.join(triton_path, "backends", "ascend", "backend_register.py")
+    replacements = [
+        (
+            "    import torch_npu\n"
+            "    torch_path = os.path.dirname(os.path.realpath(torch.__file__))\n"
+            "    torch_npu_path = os.path.dirname(os.path.realpath(torch_npu.__file__))",
+            "    # torch_npu is a compatibility shim supplied by torch_fl.\n"
+            "    torch_path = os.path.dirname(os.path.realpath(torch.__file__))\n"
+            "    torch_npu_path = torch_path",
+        ),
+        (
+            "        f\"-I{os.path.join(torch_npu_path, 'include')}\",",
+            "        # torch_npu headers are not needed by the FLAGOS backend,",
+        ),
+        (
+            "            f\"-L{os.path.join(torch_npu_path, 'lib')}\",\n"
+            '            f"-ltorch_npu",',
+            "            # The FLAGOS backend links against torch_fl/ATen, not torch_npu.",
+        ),
+    ]
+    return patch_file(fp, replacements)
+
+
 def patch_npu_utils(triton_path):
     """Patch backends/ascend/npu_utils.cpp for CANN 9.0.0 enum names.
 
@@ -333,13 +366,16 @@ def main():
         )
         sys.exit(1)
 
-    print("\n[1/3] Patching backends/ascend/driver.py ...")
+    print("\n[1/4] Patching backends/ascend/driver.py ...")
     patch_driver(triton_path)
 
-    print("\n[2/3] Patching backends/ascend/utils.py ...")
+    print("\n[2/4] Patching backends/ascend/utils.py ...")
     patch_utils(triton_path)
 
-    print("\n[3/3] Patching backends/ascend/npu_utils.cpp (CANN 9.0.0 enum) ...")
+    print("\n[3/4] Patching backends/ascend/backend_register.py ...")
+    patch_backend_register(triton_path)
+
+    print("\n[4/4] Patching backends/ascend/npu_utils.cpp (CANN 9.0.0 enum) ...")
     patch_npu_utils(triton_path)
 
     print("\nDone. triton-ascend is now compatible with torch_fl.")
