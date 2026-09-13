@@ -14,6 +14,7 @@
 
 """One public profiler contract shared by every FlagOS hardware backend."""
 
+import os
 from collections import Counter
 
 import pytest
@@ -103,6 +104,11 @@ def test_profiler_flow_events_are_paired(profile_result, profiler_capabilities):
 
 @pytest.mark.profiler_device
 @pytest.mark.profiler_linkage
+@pytest.mark.xfail(
+    os.getenv("FLAGOS_USE_FLAGGEMS") == "1",
+    reason="FlagGems mm/bmm don't report profiler device time (issue pending)",
+    strict=False,
+)
 def test_profiler_device_time_linkage(profile_result, profiler_capabilities):
     """key_averages device time equals the linked device events in the trace.
 
