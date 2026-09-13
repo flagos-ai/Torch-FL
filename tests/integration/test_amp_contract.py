@@ -20,6 +20,8 @@ hardware. Only genuine route differences select or skip individual cases,
 through the capabilities in `amp_support`.
 """
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -133,8 +135,14 @@ def test_autocast_fp32_policy(dtype, amp_capabilities, amp_device):
     """Numerically sensitive ops are promoted to float32."""
     require(amp_capabilities, "device")
 
-    if detect_platform() == "dcu" and dtype == torch.bfloat16 and os.getenv("FLAGOS_USE_FLAGGEMS") == "1":
-        pytest.xfail("FlagGems/Triton-DCU: bf16+f64 scalar add triggers compiler crash (PassManager::run failed)")
+    if (
+        detect_platform() == "dcu"
+        and dtype == torch.bfloat16
+        and os.getenv("FLAGOS_USE_FLAGGEMS") == "1"
+    ):
+        pytest.xfail(
+            "FlagGems/Triton-DCU: bf16+f64 scalar add triggers compiler crash (PassManager::run failed)"
+        )
 
     x = torch.rand(64, device=amp_device, dtype=dtype) + 0.5
     normalized = torch.randn(4, 16, device=amp_device, dtype=dtype)
