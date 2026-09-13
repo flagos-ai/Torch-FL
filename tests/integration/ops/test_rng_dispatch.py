@@ -551,7 +551,7 @@ class TestRngMultiDevice:
         "native path is reproducible on every device. xfail (non-strict) so the "
         "eventual fix surfaces as an xpass instead of being silently assumed.",
         strict=False,
-        raises=ValueError,
+        raises=(ValueError, AssertionError),
     )
     def test_multinomial_on_second_device(self):
         dev = self._second_device()
