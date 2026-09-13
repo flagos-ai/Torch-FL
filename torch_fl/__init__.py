@@ -912,8 +912,14 @@ def _patch_flaggems_codegen_config():
             origin="torch_fl_shim",
         )
         # triton-ascend checks hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait")
-        # Provide a minimal _C shim to satisfy that check
+        # Provide a minimal _C shim with mock stream functions
         _npu_c_shim = types.ModuleType("torch_npu._C")
+
+        # Mock stream API - return flagos stream handle
+        def _mock_get_current_stream(device_index=0):
+            return flagos.current_stream(device_index).cuda_stream
+
+        _npu_c_shim._npu_getCurrentRawStreamNoWait = _mock_get_current_stream
         _npu_shim._C = _npu_c_shim
         sys.modules["torch_npu"] = _npu_shim
 
