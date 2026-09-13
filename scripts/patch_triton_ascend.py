@@ -318,6 +318,22 @@ def patch_backend_register(triton_path):
             '            f"-ltorch_npu",',
             "            # The FLAGOS backend links against torch_fl/ATen, not torch_npu.",
         ),
+        # The torch_npu "header_file" strategy emits two torch_npu includes into
+        # the generated launcher. Neither is reachable for torch_fl: the
+        # workspace allocator is replaced by at::empty()/rtMalloc, and the
+        # OpCommand path is taskqueue-only (disabled above). Note upstream
+        # guards the second include with `if {enable_taskqueue}` inside an
+        # f-string, which evaluates the truthy set literal `{False}`, so it is
+        # emitted regardless of the flag. Drop both and keep only ATen.
+        (
+            "    return f'''#include <ATen/ATen.h>\n"
+            "#include <torch_npu/csrc/core/npu/NPUWorkspaceAllocator.h>\n"
+            "{'#include <torch_npu/csrc/framework/OpCommand.h>'"
+            " if {enable_taskqueue} else ''}'''",
+            "    # torch_npu includes removed: torch_fl allocates workspace via\n"
+            "    # at::empty()/rtMalloc and never takes the taskqueue path.\n"
+            "    return '''#include <ATen/ATen.h>'''",
+        ),
     ]
     return patch_file(fp, replacements)
 
