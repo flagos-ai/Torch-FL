@@ -66,6 +66,21 @@ def test_accelerator_env_wins_outright():
     assert platform_support.detect_platform() == "ascend"
 
 
+def test_dcu_accelerator_is_recognized():
+    """ACCELERATOR=dcu must resolve to "dcu", not fall through to "cuda".
+
+    DCU is a boxing build, so every other signal detect_platform() consults
+    reports CUDA: the marker records the accelerator name, but a DCU wheel
+    installs its assets under lib_dcu/ rather than lib/, so the marker read
+    misses and the final fallback returns "cuda". That silent fall-through
+    made platform-specific guards written as `detect_platform() == "dcu"`
+    dead code -- tests/integration/test_amp_contract.py had two such guards
+    that never once evaluated true in CI.
+    """
+    os.environ["ACCELERATOR"] = "dcu"
+    assert platform_support.detect_platform() == "dcu"
+
+
 @pytest.fixture
 def isolated_torch_fl_import(monkeypatch):
     """Temporarily hide the real torch_fl module so detect_platform()'s
