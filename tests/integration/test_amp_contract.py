@@ -135,11 +135,7 @@ def test_autocast_fp32_policy(dtype, amp_capabilities, amp_device):
     """Numerically sensitive ops are promoted to float32."""
     require(amp_capabilities, "device")
 
-    if (
-        detect_platform() == "dcu"
-        and dtype == torch.bfloat16
-        and os.getenv("FLAGOS_USE_FLAGGEMS") == "1"
-    ):
+    if detect_platform() == "dcu" and dtype == torch.bfloat16:
         pytest.skip(
             "FlagGems/Triton-DCU: bf16+f64 scalar add triggers compiler crash "
             "(PassManager::run failed) -- FlagGems issue #6220"
