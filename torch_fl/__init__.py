@@ -35,6 +35,25 @@ def _build_accelerator() -> str:
     return str(built).strip().lower()
 
 
+def _is_ppu_build() -> bool:
+    """True for a PPU wheel, which needs backends_ppu.conf rather than CUDA's.
+
+    PPU cannot be told apart by _build_accelerator() the way DCU can: it is a
+    CUDA-ABI boxing backend whose CI deliberately reports ACCELERATOR=cuda, and
+    torch.version.hip is unreadable here anyway (this runs before `import
+    torch`). Use the same signal setup.py bundles the wheel on -- PPU_SDK /
+    PPU_HOME, else the lib_ppu/ bundle directory the wheel ships.
+
+    Without this, PPU read backends_cuda.conf and inherited its FlagGems routes.
+    That is what sent mm/bmm through the _hygon kernel PPU's triton cannot
+    compile: 28 minutes inside a single test_mm and a SIGSEGV at interpreter
+    exit, on a runner where every assertion still passed.
+    """
+    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
+        return True
+    return os.path.isdir(os.path.join(os.path.dirname(__file__), "lib_ppu"))
+
+
 def _select_backend_config() -> None:
     """Pick the op-routing config file for this build.
 
@@ -150,6 +169,8 @@ def _select_backend_config() -> None:
         conf_name = "backends_metax.conf"
     elif _build_accelerator() == "dcu":
         conf_name = "backends_dcu.conf"
+    elif _is_ppu_build():
+        conf_name = "backends_ppu.conf"
     else:
         conf_name = "backends_cuda.conf"
     conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)

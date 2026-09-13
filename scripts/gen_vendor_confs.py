@@ -149,6 +149,16 @@ EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}}
 BOXING_PLATFORMS = {
     "metax": "backends_metax.conf",
     "dcu": "backends_dcu.conf",
+    # PPU's gap set is mm/bmm. Its triton build rejects the `num_ldmatrixes`
+    # kwarg that FlagGems' _hygon mm/bmm kernel passes to triton's mm_kernel:
+    # mm raises KeyError at triton/runtime/jit.py:_pack_args, and bmm reaches
+    # the same kernel and stalls inside triton compilation. Measured on the PPU
+    # runner, routing mm to flaggems turned a 2.87s test_factory_ops.py into
+    # 1801s (28 minutes inside test_mm alone) and left the process exiting on
+    # SIGSEGV. PPU previously had no conf of its own and read
+    # backends_cuda.conf, so it silently inherited every CUDA FlagGems route;
+    # a separate conf is what lets the two platforms disagree about mm/bmm.
+    "ppu": "backends_ppu.conf",
 }
 BOXING_FALLBACK = "cuda"
 
