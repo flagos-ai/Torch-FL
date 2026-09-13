@@ -684,7 +684,6 @@ class TestRngDropout:
         )
 
     @pytest.mark.flaggems
-    @pytest.mark.main_ops
     def test_dropout_reproducible_on_flaggems_path(self):
         assert torch.equal(_draw(self._dropout, SEED), _draw(self._dropout, SEED))
         assert not torch.equal(
