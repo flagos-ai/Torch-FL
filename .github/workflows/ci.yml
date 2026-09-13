@@ -116,6 +116,8 @@ jobs:
     needs: discover-platforms
     if: needs.discover-platforms.outputs.has_ascend == 'true'
     uses: ./.github/workflows/integration-test-ascend.yml
+    with:
+      timeout-minutes: 120
 
   cuda-pipeline:
     name: Platform pipeline (cuda)
