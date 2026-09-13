@@ -899,6 +899,7 @@ def _patch_flaggems_codegen_config():
     # Provide a minimal shim module so the import doesn't fail.
     # Also set __spec__ to satisfy importlib.util.find_spec() checks (used by
     # accelerate.utils.imports.is_npu_available).
+    # triton-ascend backend_register.py also checks torch_npu._C for stream APIs.
     if "torch_npu" not in sys.modules:
         import types
         import importlib.machinery
@@ -910,6 +911,10 @@ def _patch_flaggems_codegen_config():
             loader=None,
             origin="torch_fl_shim",
         )
+        # triton-ascend checks hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait")
+        # Provide a minimal _C shim to satisfy that check
+        _npu_c_shim = types.ModuleType("torch_npu._C")
+        _npu_shim._C = _npu_c_shim
         sys.modules["torch_npu"] = _npu_shim
 
 
