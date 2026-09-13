@@ -245,7 +245,12 @@ pip_retry() {
 # those Triton APIs were used.
 FLAGGEMS_REVISION="82b4b0c10e6bb628ba9d0d4054913f3bdb6f87a2"
 pip_retry --no-deps "git+https://github.com/flagos-ai/FlagGems.git@${FLAGGEMS_REVISION}"
-pip_retry --index-url "$PIP_INDEX_URL" pybind11 packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
+# Install dependencies one by one to avoid IncompleteRead causing full batch retry
+pip_retry --index-url "$PIP_INDEX_URL" pybind11
+pip_retry --index-url "$PIP_INDEX_URL" packaging
+pip_retry --index-url "$PIP_INDEX_URL" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL" 'sqlalchemy==2.0.48'
+pip_retry --index-url "$PIP_INDEX_URL" 'numpy>=1.20,<2.0'
 # Install the latest published triton-ascend wheel (3.2.2). Source builds from
 # the 3.5 branch require unreliable gitcode.com submodules and exceed the CI
 # timeout; the 3.2.x wheel is stable and fast.
