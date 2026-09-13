@@ -141,7 +141,7 @@ def test_autocast_fp32_policy(dtype, amp_capabilities, amp_device):
         and os.getenv("FLAGOS_USE_FLAGGEMS") == "1"
     ):
         pytest.xfail(
-            "FlagGems/Triton-DCU: bf16+f64 scalar add triggers compiler crash (PassManager::run failed)"
+            "FlagGems/Triton-DCU: bf16+f64 scalar add triggers compiler crash (issue #349)"
         )
 
     x = torch.rand(64, device=amp_device, dtype=dtype) + 0.5
