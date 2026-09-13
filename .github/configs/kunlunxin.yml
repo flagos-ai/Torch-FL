@@ -1,0 +1,118 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Kunlunxin
+
+# Platform-specific preparation is implemented outside the common workflows.
+setup_script: .github/scripts/set_env_kunlun.sh
+
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-kunlunxin-xre5.37.1:2.1.2
+
+runner_labels:
+  - p800-8g-cicd-pytorch
+
+container_volumes: []
+
+# P800 devices are exposed through /dev/xpuN character nodes plus the
+# /dev/xpuctrl control node, not through the NVIDIA --gpus interface.
+# --privileged + seccomp=unconfined match the measured image's requirements.
+container_options: >-
+  --device /dev/xpu0
+  --device /dev/xpu1
+  --device /dev/xpu2
+  --device /dev/xpu3
+  --device /dev/xpu4
+  --device /dev/xpu5
+  --device /dev/xpu6
+  --device /dev/xpu7
+  --device /dev/xpuctrl
+  --shm-size=64g
+  --privileged
+  --security-opt seccomp=unconfined
+
+integration_environment: {}
+
+timeout_minutes: 60
+wheel_artifact_name: wheel-kunlunxin
+# Keep Kunlunxin integration self-contained; the wheel is built and installed
+# in the same job instead of being transferred through the artifact service.
+integration_wheel_source: local-build
+
+# The common workflow only executes this platform-provided test manifest.
+# Scope mirrors the cuda/dcu six-part pattern (device + basic ops + general
+# factory + AMP + runtime smoke + vendor main_ops), skipping FlagGems main_ops
+# (4 broken routes), profiler parity (CUPTI vendor defect), and
+# inference/training (Qwen3 mount). The runtime smoke harness (flagos:1) is
+# enabled via XPU_CUPTI_ENABLE_DEVICE=0..7 set by set_env_kunlun.sh, which
+# prevents the vendor XDNN fp64 min probe from aborting the process.
+integration_tests:
+  - name: Check device availability
+    command: |
+      python - <<'PY'
+      import torch
+      import torch_fl
+
+      torch_path = torch.__file__
+      package_lib = torch_fl.__file__.rsplit("/", 1)[0] + "/lib"
+
+      assert torch.__version__ == "2.9.0+cu129", torch.__version__
+      assert torch.version.cuda == "12.9", torch.version.cuda
+      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
+      print(f"Vendor PyTorch: {torch.__version__}")
+      print(f"torch path: {torch_path}")
+      print(f"torch_fl lib: {package_lib}")
+      print(f"flagos devices: {torch_fl.flagos.device_count()}")
+      PY
+  - name: Run basic operator suite
+    # 57 basic-op tests on flagos:0 (creation, arithmetic, matmul, reduction,
+    # indexing, activations, grad, sync). flagos:0 is the validated path -- the
+    # smoke harness abort was on flagos:1's first context init, not on tensor
+    # allocation in general.
+    command: python -m pytest tests/integration/test_ops.py -v --tb=short
+  - name: Run general factory tests
+    # Factory/tensor tests (46), the "general tests" item every other line runs.
+    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+  - name: Run AMP suite
+    command: python -m pytest tests/integration/test_amp.py -v -s --tb=short
+  - name: Run runtime smoke
+    # The standalone smoke script's torch.empty hits the vendor XDNN fp64 min
+    # probe (min.cpp:41, exit(1)). CI isolated three requirements via controlled
+    # runs: env alone aborts, init alone aborts, env+init together pass. randn
+    # does NOT trigger the probe (only empty does), so the dispatch subprocesses
+    # (first op randn) do not need env. env is therefore exported LOCALLY here
+    # only -- it must NOT be global, because the same env on 8 devices makes
+    # cuptiActivityEnable fail with error 17 in every dispatch subprocess. This
+    # command: local export env + in-process is_available/init/randn warm-up
+    # (device 0 and 1) + runpy to run the smoke source unmodified.
+    command: |
+      export XPU_CUPTI_ENABLE_DEVICE=0,1,2,3,4,5,6,7
+      python - <<'PY'
+      import torch, torch_fl
+      assert torch_fl.flagos.is_available(), "flagos device unavailable"
+      torch_fl.flagos.init()
+      print("init done", flush=True)
+      torch.randn(1024, 1024, device="flagos:0")
+      print("device0 randn done", flush=True)
+      torch.randn(1024, 1024, device="flagos:1")
+      print("device1 randn done", flush=True)
+      import runpy
+      runpy.run_path("tests/manual/kunlun_runtime_smoke.py", run_name="__main__")
+      PY
+  - name: Run operator tests (vendor backend, main ops)
+    # main_ops dispatch tests on flagos:0, vendor (cuda boxing) backend. RNG
+    # dispatch is ignored -- pre-existing Kunlun RNG gap poisons the device
+    # context (see ci-vendor-kernel-poisons-device-context). Ordered last so a
+    # red op does not block the validated suites above; if mm/pow red or poison,
+    # the CI log pinpoints them for per-op deselect.
+    command: python -m pytest tests/integration/ops/ -m "main_ops and not flaggems_python and not flaggems_cpp" --ignore=tests/integration/ops/test_rng_dispatch.py -v -s --tb=short
