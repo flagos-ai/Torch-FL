@@ -34,8 +34,8 @@ CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.or
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
 # CPU torch is installed from CPU_TORCH_INDEX_URL, not this generic PyPI mirror.
 export PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://repo.huaweicloud.com/repository/pypi/simple}"
-export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-120}"
-export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-10}"
+export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-300}"
+export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-20}"
 
 # --- CANN toolkit root -------------------------------------------------------
 # CANN images ship several layouts; pick the first candidate that actually has
