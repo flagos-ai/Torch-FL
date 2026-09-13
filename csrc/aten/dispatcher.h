@@ -223,7 +223,7 @@ class Dispatcher {
     switch (backend) {
       case Backend::kCuda:          name = "cuda"; break;
       case Backend::kFlagGemsCpp:   name = "flagos"; break;  // keep old name for test compat
-      case Backend::kFlagGems:      name = "flaggems"; break;
+      case Backend::kFlagGems:      name = "flagos_python"; break;  // keep old name for test compat
       case Backend::kAscend:        name = "ascend"; break;
       case Backend::kMusa:          name = "musa"; break;
       case Backend::kMetax:         name = "metax"; break;
