@@ -922,6 +922,7 @@ def _patch_flaggems_codegen_config():
         _npu_c_shim._npu_getCurrentRawStreamNoWait = _mock_get_current_stream
         _npu_shim._C = _npu_c_shim
         sys.modules["torch_npu"] = _npu_shim
+        sys.modules["torch_npu._C"] = _npu_c_shim
 
 
 # Patch FlagGems codegen config before any FlagGems code is imported
