@@ -323,7 +323,7 @@ def patch_backend_register(triton_path):
 
 
 def patch_npu_utils(triton_path):
-    """Patch backends/ascend/npu_utils.cpp for CANN 9.0.0 enum names.
+    """Patch backends/ascend/npu_utils.cpp for CANN 9.0.0 enum names and remove torch_npu dependency.
 
     triton-ascend 3.2.0's npu_utils.cpp references rtLimitType_t enumerators
     from a newer CANN release. CANN 9.0.0 (rt_external_base.h) names the SIMT
@@ -332,10 +332,19 @@ def patch_npu_utils(triton_path):
     fails with "could not convert brace-enclosed initializer list". Map the
     "WARP_STACK_SIZE" key onto the enumerator that CANN 9.0.0 actually
     provides. Idempotent: the newer name only ever appears here.
+
+    Also remove the torch_npu header include which is not needed and causes
+    compilation failures when torch_npu is not installed.
     """
     fp = os.path.join(triton_path, "backends", "ascend", "npu_utils.cpp")
 
     replacements = [
+        # Remove torch_npu header include
+        (
+            "#include <torch_npu/csrc/core/npu/NPUWorkspaceAllocator.h>",
+            "// torch_npu removed: not needed for torch_fl",
+        ),
+        # Fix CANN 9.0.0 enum name
         (
             "rtLimitType_t::RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE",
             "rtLimitType_t::RT_LIMIT_TYPE_SIMT_STACK_SIZE",
