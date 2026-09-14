@@ -199,6 +199,29 @@ FLAGGEMS_CPP_PLATFORMS = {"metax"}
 # use the measured FlagGems coverage.
 FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 
+# Ops a native-kernel vendor must keep on its own kernel because that platform's
+# triton backend cannot compile the FlagGems kernel. The boxing platforms express
+# this by pinning the op to `cuda` and recovering it with boxing_triton_gaps();
+# a native vendor's conf spells the fallback as the vendor name, which is also
+# what an op with no FlagGems coverage looks like, so the two cases cannot be
+# told apart by reading the file back. Stated here instead.
+#
+# ascend: pow/rsqrt crash bishengir-compile with "LLVM ERROR: unsupported
+# datatype for arith::ExtFOp to hfusion" (triton-ascend 3.2.2, CANN 9.0.0,
+# Ascend910_9382). Measured in CI run 34792677968: these were the only 2
+# failures left of 38 tests once the torch_npu build flags were stripped, and
+# both have native aclnn kernels, so the vendor route is a real fallback rather
+# than a loss of coverage. Filed upstream as FlagGems issue #6226.
+NATIVE_TRITON_GAPS = {
+    "ascend": {
+        "pow.Scalar",
+        "pow.Tensor_Scalar",
+        "pow.Tensor_Tensor",
+        "rsqrt",
+        "rsqrt_",
+    },
+}
+
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
 # setup.py force-sets TILEOPS_KERNEL=OFF for every ACCELERATOR != "cuda" -- so on
@@ -554,6 +577,7 @@ def build_all(conf_dir: Path) -> dict:
         # kernel -- withhold the key and let those ops take the Python path.
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
         py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()
+        py_here = py_here - NATIVE_TRITON_GAPS.get(vendor, set())
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(
