@@ -73,7 +73,7 @@ PROFILES = (
     },
 )
 
-HARNESS_VERSION = 5
+HARNESS_VERSION = 6
 
 # Backend::kFlagGems under every spelling ParseBackendName accepts. The current
 # configurations spell it "flaggems"; the two legacy names stay in the set
@@ -112,8 +112,16 @@ import re
 import sys
 import traceback
 
-import torch
 import torch_fl  # noqa: F401
+import torch
+
+# torch_fl first, on purpose. On the external-libtorch CUDA build the accelerator
+# .so is dlopened by torch_fl's import-time preload, and PyTorch caches its CUDA
+# hooks on the first `import torch`. With the order reversed every device op
+# raises "Cannot initialize CUDA without ATen_cuda library" while the routes
+# themselves are fine, which is exactly the failure the survey must not record
+# as a FlagGems defect. pytest achieves the same ordering through
+# tests/integration/conftest.py::pytest_configure.
 
 op_name = sys.argv[1]
 profiles = json.loads(sys.argv[2])
