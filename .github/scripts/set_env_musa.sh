@@ -240,6 +240,10 @@ FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a3+mthreads3.6}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
 pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
+# flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
+# again to ensure isolation.
+"$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
+
 # Pinned rather than tracking master: FlagGems moves faster than the vendor
 # Triton it needs, and an unpinned install is one upstream commit away from
 # requiring a Triton the flagtree pin above does not provide. e7b4a865f is the
