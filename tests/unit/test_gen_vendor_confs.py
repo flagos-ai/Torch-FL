@@ -181,6 +181,62 @@ def test_vendor_registered_ops_includes_the_flaggems_inc():
     assert native < registered
 
 
+def test_musa_registers_all_flaggems_ops_except_known_failures():
+    """MUSA registers all 482 FlagGems Python ops, then routes them to flaggems
+    except for ops in NATIVE_TRITON_GAPS['musa'] which have known correctness bugs.
+
+    Strategy: register everything → run CI → move failures to NATIVE_TRITON_GAPS.
+    This maximizes coverage (478 FlagGems + 38 mudnn-only = 516 accelerated, vs 158
+    before) while maintaining correctness via the fallback list.
+
+    Known failures (as of 2026-09-14 on MTT S5000, FlagGems e7b4a865):
+      - index_add/index_add_: return all zeros instead of accumulating (no mudnn fallback)
+      - randn/randn_like: crash unpacking generator state (fallback to mudnn)
+
+    Ops in NATIVE_TRITON_GAPS are NOT registered (to avoid "backend not registered"
+    errors when they route to none/musa).
+    """
+    routes = g.build_all(CONF_DIR)["musa"][1]
+    native = g.vendor_native_ops("musa")
+    flaggems_py = g.flaggems_python_ops()
+    registered = g.vendor_registered_ops("musa")
+    gaps = g.NATIVE_TRITON_GAPS.get("musa", set())
+
+    # All FlagGems ops except those in gaps should be registered
+    expected_registered_from_flaggems = flaggems_py - gaps
+    assert expected_registered_from_flaggems <= registered, (
+        "Some FlagGems ops not registered"
+    )
+
+    # Count flaggems routes
+    flaggems_routes = {
+        op for op, key in routes.items() if key.split("#")[0].strip() == "flaggems"
+    }
+
+    # 482 FlagGems ops - 4 known failures = 478 registered and routed to flaggems
+    assert len(flaggems_routes) == len(expected_registered_from_flaggems)
+    assert len(gaps) == 4, f"Expected 4 gaps, got {len(gaps)}"
+    assert gaps == {"index_add", "index_add_", "randn", "randn_like"}
+
+    # Known failures should NOT be routed to flaggems or be registered
+    for op in gaps:
+        assert op not in flaggems_routes, (
+            f"{op} in NATIVE_TRITON_GAPS but routed to flaggems"
+        )
+        # Ops in gaps that mudnn doesn't have will be unregistered
+        if op not in native:
+            assert op not in registered, (
+                f"{op} in gaps without native impl should be unregistered"
+            )
+
+    # Coverage check: 478 FlagGems + mudnn-only ops
+    mudnn_only = native - flaggems_py
+    total_accelerated = len(flaggems_routes) + len(mudnn_only)
+    assert total_accelerated >= 514, (
+        f"Expected ≥514 accelerated ops, got {total_accelerated}"
+    )
+
+
 def test_ascend_matmul_is_native_though_absent_from_its_inc():
     """matmul is claimed straight from register.cc under `#if defined(USE_ASCEND)`
     so the call hits fused aclnnMatmul instead of decomposing. WrapperMatmul

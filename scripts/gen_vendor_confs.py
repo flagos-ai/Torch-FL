@@ -230,6 +230,10 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # failures left of 38 tests once the torch_npu build flags were stripped, and
 # both have native aclnn kernels, so the vendor route is a real fallback rather
 # than a loss of coverage. Filed upstream as FlagGems issue #6226.
+#
+# musa: index_add returns all zeros instead of accumulating (correctness bug);
+# randn crashes unpacking generator state (expects 2 int64, gets more). Both
+# measured on MTT S5000 with FlagGems e7b4a865 + flagtree 0.6.2a3+mthreads3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
         "pow.Scalar",
@@ -238,7 +242,23 @@ NATIVE_TRITON_GAPS = {
         "rsqrt",
         "rsqrt_",
     },
+    "musa": {
+        "index_add",
+        "index_add_",
+        "randn",
+        "randn_like",
+    },
 }
+
+# Vendors whose native kernel outranks FlagGems for any op that has both, until a
+# per-op hardware sweep says otherwise. This inverts the usual priority, so it is
+# deliberately narrow.
+#
+# Empty for now: all vendors use FlagGems-first routing where both backends exist.
+# Move a vendor here if its Triton stack is immature and unverified routes cause
+# regressions. Failures for specific ops go in NATIVE_TRITON_GAPS above with their
+# diagnosis; this set is for blanket "prefer native until measured" policies.
+NATIVE_KERNEL_PREFERRED = set()
 
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
@@ -598,6 +618,10 @@ def build_all(conf_dir: Path) -> dict:
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
         py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()
         py_here = py_here - NATIVE_TRITON_GAPS.get(vendor, set())
+        # Native kernel wins wherever both exist; FlagGems keeps the ops the
+        # vendor has no kernel for. See NATIVE_KERNEL_PREFERRED.
+        if vendor in NATIVE_KERNEL_PREFERRED:
+            py_here = py_here - natives[vendor]
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(
