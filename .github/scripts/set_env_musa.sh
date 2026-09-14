@@ -198,6 +198,15 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 
+# Ensure torch_musa from the base image is not importable in the venv.
+# The venv should be isolated by default, but explicitly uninstall if present.
+if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec('torch_musa') is None else 1)" 2>/dev/null; then
+  : # torch_musa is not visible, isolation is working
+else
+  echo "::warning::torch_musa is visible in the venv; attempting to uninstall"
+  "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
+fi
+
 # --- Verify the isolation held ----------------------------------------------
 CI_STAGE="$CI_STAGE" CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import importlib.util
