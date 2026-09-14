@@ -281,7 +281,9 @@ PY
 
 # --- Verify the FlagGems stack imports --------------------------------------
 # Integration only: torch_fl._C does not exist until the wheel is built, and the
-# import order below needs it.
+# import order below needs it. Check for the extension module before attempting
+# import -- CI calls set_env_musa.sh before building the wheel, so torch_fl is
+# not yet importable at that stage.
 #
 # torch_fl must be imported before flag_gems. FlagGems 5.x selects its MThreads
 # backend by reading torch.musa, which stock PyTorch does not have -- torch_fl
@@ -291,7 +293,7 @@ PY
 # That shim is itself conditional on the active conf routing at least one op to
 # FlagGems, so this check also fails if backends_musa.conf has no flaggems route
 # -- which is exactly the state this environment is being provisioned to leave.
-if [[ "$CI_STAGE" == "integration" ]]; then
+if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
   "$VENV_PYTHON" - <<'PY'
 import torch_fl  # noqa: F401  -- must precede flag_gems; installs the torch.musa shim
 
