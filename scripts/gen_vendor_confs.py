@@ -158,6 +158,7 @@ BOXING_PLATFORMS = {
     # SIGSEGV. PPU previously had no conf of its own and read
     # backends_cuda.conf, so it silently inherited every CUDA FlagGems route;
     # a separate conf is what lets the two platforms disagree about mm/bmm.
+    # Filed upstream as FlagGems issue #6225.
     "ppu": "backends_ppu.conf",
 }
 BOXING_FALLBACK = "cuda"

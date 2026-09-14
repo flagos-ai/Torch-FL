@@ -126,8 +126,10 @@ integration_tests:
   # `num_ldmatrixes` keyword that FlagGems' _hygon mm/bmm kernel passes to
   # triton's mm_kernel -- KeyError at triton/runtime/jit.py:_pack_args (mm),
   # and bmm hits the same kernel and times out at 60s inside triton
-  # compilation. The remaining 13 flaggems main_ops pass. Follow-up: track PPU
-  # triton alignment with upstream FlagGems _hygon mm op. No CPU fallback.
+  # compilation. The remaining 13 flaggems main_ops pass. No CPU fallback.
+  # Filed upstream as FlagGems issue #6225. backends_ppu.conf pins mm/bmm to
+  # the vendor kernel, so these deselects now only cover the two dispatch-log
+  # tests that assert the FlagGems route itself.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
       if [[ -z "${FLAGGEMS_SOURCE:-}" ]]; then
