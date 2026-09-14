@@ -339,6 +339,5 @@ class TestNewOpDispatchRouting:
             f"expected {op} -> {logged_backend}, got:\n{result.stderr}"
         )
         assert f"[flagos cpu_fallback] aten::{op}" not in result.stderr, (
-            f"{op} fell back to CPU instead of its configured backend:\n"
-            f"{result.stderr}"
+            f"{op} fell back to CPU instead of its configured backend:\n{result.stderr}"
         )
