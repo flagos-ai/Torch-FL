@@ -273,6 +273,37 @@ pip_retry() {
     sleep 10
   done
 }
+# The source-free NVIDIA FlagTree wheel links its bundled libtriton.so against
+# the glibc symbol versions of the distribution it was built on, and the current
+# wheels require GLIBC_2.38. A runner image older than that (the Ubuntu 22.04
+# images ship glibc 2.35) installs the wheel successfully and then fails while
+# importing triton, reporting the missing symbol from a C extension instead of
+# the actual image requirement. Check the image up front so the failure names
+# the requirement and its fix.
+FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-2.38}"
+
+detect_glibc_version() {
+  local version=""
+  if command -v getconf >/dev/null 2>&1; then
+    version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $NF}')"
+  fi
+  if [[ -z "$version" ]] && command -v ldd >/dev/null 2>&1; then
+    version="$(ldd --version 2>/dev/null | head -n 1 | awk '{print $NF}')"
+  fi
+  printf '%s' "${version%%[^0-9.]*}"
+}
+
+IMAGE_GLIBC="$(detect_glibc_version)"
+if [[ -z "$IMAGE_GLIBC" ]]; then
+  echo "::error::Unable to determine the glibc version of this image"
+  exit 1
+fi
+if [[ "$(printf '%s\n%s\n' "$FLAGTREE_MIN_GLIBC" "$IMAGE_GLIBC" | sort -V | head -n 1)" != "$FLAGTREE_MIN_GLIBC" ]]; then
+  echo "::error::FlagTree $FLAGTREE_VERSION requires glibc >= $FLAGTREE_MIN_GLIBC; this image provides $IMAGE_GLIBC"
+  exit 1
+fi
+echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
+
 pip_retry "$VENV_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
   "flagtree===${FLAGTREE_VERSION}"
 
