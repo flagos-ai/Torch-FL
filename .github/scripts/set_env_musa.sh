@@ -132,7 +132,10 @@ else
   "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT" || true
   # Ensure system site-packages are not inherited (torch_musa from base image)
   if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
-    sed -i 's/^include-system-site-packages = true/include-system-site-packages = false/' "$VENV_ROOT/pyvenv.cfg"
+    # Remove any existing include-system-site-packages line and add our own
+    grep -v '^include-system-site-packages' "$VENV_ROOT/pyvenv.cfg" > "$VENV_ROOT/pyvenv.cfg.tmp"
+    echo "include-system-site-packages = false" >> "$VENV_ROOT/pyvenv.cfg.tmp"
+    mv "$VENV_ROOT/pyvenv.cfg.tmp" "$VENV_ROOT/pyvenv.cfg"
   fi
 fi
 
@@ -156,7 +159,10 @@ if ! venv_is_usable; then
     if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
       echo "::debug::pyvenv.cfg before modification:"
       cat "$VENV_ROOT/pyvenv.cfg"
-      sed -i 's/^include-system-site-packages = true/include-system-site-packages = false/' "$VENV_ROOT/pyvenv.cfg"
+      # Remove any existing include-system-site-packages line and add our own
+      grep -v '^include-system-site-packages' "$VENV_ROOT/pyvenv.cfg" > "$VENV_ROOT/pyvenv.cfg.tmp"
+      echo "include-system-site-packages = false" >> "$VENV_ROOT/pyvenv.cfg.tmp"
+      mv "$VENV_ROOT/pyvenv.cfg.tmp" "$VENV_ROOT/pyvenv.cfg"
       echo "::debug::pyvenv.cfg after modification:"
       cat "$VENV_ROOT/pyvenv.cfg"
     else
