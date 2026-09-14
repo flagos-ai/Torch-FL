@@ -26,6 +26,14 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+# The NVIDIA FlagTree 3.6 wheel is the source-free artifact documented by
+# FlagTree's User-Manual. It replaces the stock Triton module in the venv.
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2}"
+# FlagGems currently uses master as its default branch; the repository has no
+# main branch. Keep this overrideable so a tested revision can be pinned by CI.
+FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-https://github.com/flagos-ai/FlagGems.git}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
 
 select_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -174,19 +182,45 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
   exit 1
 fi
 
-"$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build
+"$VENV_PYTHON" -m pip install --upgrade pip "setuptools>=64,<77" "setuptools-scm>=8,<10" "wheel==0.46.2" cmake build
 "$VENV_PYTHON" -m pip install \
   --index-url "$CPU_TORCH_INDEX_URL" \
   "torch==$CPU_TORCH_VERSION"
-if [[ "$CI_STAGE" == "integration" ]]; then
-  "$VENV_PYTHON" -m pip install pytest transformers
-fi
 
-# Keep the vendor FlagGems/FlagCX Python packages available without copying the
-# vendor torch package. They are pure-Python/extension packages used by the
-# CUDA runtime path; the active torch package remains the CPU wheel below.
+# FlagTree's NVIDIA 3.6 source-free wheel provides the `triton` Python module.
+# Install it after the CPU torch wheel and never let pip resolve dependencies:
+# the latter would be allowed to replace the validated CPU torch ABI. The wheel
+# itself has no mandatory runtime dependencies on Python 3.12.
+if [[ "$VENDOR_PYTHON_VERSION" != 3.12.* ]]; then
+  echo "::error::FlagTree 3.6 NVIDIA wheel requires Python 3.12; vendor Python is $VENDOR_PYTHON_VERSION"
+  exit 1
+fi
+while "$VENV_PYTHON" -m pip show triton >/dev/null 2>&1; do
+  "$VENV_PYTHON" -m pip uninstall -y triton
+done
+pip_retry() {
+  local attempt=1
+  while true; do
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 600 "$@"; then
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+  "flagtree===${FLAGTREE_VERSION}"
+
+# Keep only vendor packages that are not provided by FlagTree. In particular,
+# do not copy vendor `triton` or `triton_kernels`: either would contaminate the
+# source-free FlagTree installation with a potentially incompatible Triton.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
+for package in flagcx; do
   if [[ -d "$VENDOR_SITE/$package" ]]; then
     cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
   fi
@@ -195,6 +229,22 @@ for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
     cp -a "$metadata" "$VENV_SITE/"
   done
 done
+
+# Install the current FlagGems source after FlagTree. FlagGems has no `main`
+# branch at present; `master` is its default branch and can be overridden with
+# TORCH_FL_FLAGGEMS_REVISION for reproducible CI experiments. --no-deps keeps
+# the CPU-only torch ABI intact; install its non-torch dependencies explicitly.
+pip_retry packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+FLAGGEMS_SOURCE_ROOT="${RUNNER_TEMP:-/tmp}/flag-gems-${CI_STAGE}"
+rm -rf "$FLAGGEMS_SOURCE_ROOT"
+git clone --depth 1 --branch "$FLAGGEMS_REVISION" \
+  "$FLAGGEMS_REPOSITORY" "$FLAGGEMS_SOURCE_ROOT"
+FLAGGEMS_COMMIT="$(git -C "$FLAGGEMS_SOURCE_ROOT" rev-parse HEAD)"
+echo "FlagGems source: ${FLAGGEMS_REPOSITORY}@${FLAGGEMS_REVISION} (${FLAGGEMS_COMMIT})"
+pip_retry --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
+if [[ "$CI_STAGE" == "integration" ]]; then
+  pip_retry pytest transformers
+fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -236,6 +286,8 @@ export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
 export FLAGOS_CUDA_ASSETS_DIR="$CUDA_ASSETS_DIR"
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
+export FLAGTREE_VERSION
+export GEMS_VENDOR="${GEMS_VENDOR:-nvidia}"
 
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
 CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
@@ -246,6 +298,23 @@ export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64:
 export LD_LIBRARY_PATH="$CUDA_ASSETS_DIR${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib:$VENDOR_FLAGGEMS_LIB:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"
+# Verify that the source-free wheel installed the expected Triton provider,
+# rather than silently falling back to stock Triton.
+python - <<'PY'
+import importlib.metadata
+import importlib.util
+import os
+
+import triton
+
+flagtree_version = importlib.metadata.version("flagtree")
+assert flagtree_version == os.environ["FLAGTREE_VERSION"], flagtree_version
+assert importlib.util.find_spec("triton.flagtree_spec") is not None
+print(f"FlagTree: {flagtree_version}")
+print(f"Triton module: {triton.__file__}")
+print(f"Triton version: {getattr(triton, '__version__', 'unknown')}")
+PY
+
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   # Prebuild so package_data sees libtorch_fl.so and the bundled CUDA assets
   # before the common workflow invokes python -m build.
@@ -281,7 +350,7 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
-    FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH \
+    FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGTREE_VERSION GEMS_VENDOR \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

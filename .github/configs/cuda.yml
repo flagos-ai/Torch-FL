@@ -66,6 +66,23 @@ integration_tests:
       print(f"CUDA assets: {package_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
+  - name: Check FlagTree and FlagGems
+    command: |
+      python - <<'PY'
+      import importlib.metadata
+      import importlib.util
+
+      import torch_fl
+      import flag_gems
+      import triton
+
+      assert importlib.metadata.version("flagtree") == "0.6.2a2"
+      assert importlib.util.find_spec("triton.flagtree_spec") is not None
+      print(f"FlagTree: {importlib.metadata.version('flagtree')}")
+      print(f"Triton: {triton.__version__} ({triton.__file__})")
+      print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
+      print(f"torch_fl: {torch_fl.__file__}")
+      PY
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
@@ -108,8 +125,9 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py
       --model "$MODEL_PATH" -v -s --tb=short
-  - name: Run torch.compile tests
+  - name: Run torch.compile tests with FlagTree
     command: >-
+      FLAGOS_USE_FLAGTREE=1
       python -m pytest tests/integration/test_compile.py
       -v -s --tb=short
   - name: Run training tests
