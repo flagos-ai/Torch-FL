@@ -154,7 +154,13 @@ if ! venv_is_usable; then
     "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT"
     # Ensure system site-packages are not inherited (torch_musa from base image)
     if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
+      echo "::debug::pyvenv.cfg before modification:"
+      cat "$VENV_ROOT/pyvenv.cfg"
       sed -i 's/^include-system-site-packages = true/include-system-site-packages = false/' "$VENV_ROOT/pyvenv.cfg"
+      echo "::debug::pyvenv.cfg after modification:"
+      cat "$VENV_ROOT/pyvenv.cfg"
+    else
+      echo "::warning::pyvenv.cfg not found at $VENV_ROOT/pyvenv.cfg after venv creation"
     fi
   fi
 fi
@@ -209,7 +215,18 @@ if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec(
   : # torch_musa is not visible, isolation is working
 else
   echo "::warning::torch_musa is visible in the venv; attempting to uninstall"
+  echo "::debug::sys.path from venv:"
+  "$VENV_PYTHON" -c "import sys; print('\n'.join(sys.path))"
+  echo "::debug::pyvenv.cfg content:"
+  cat "$VENV_ROOT/pyvenv.cfg" || echo "pyvenv.cfg not found"
   "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
+  # Verify torch_musa is now gone
+  if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec('torch_musa') is None else 1)" 2>/dev/null; then
+    echo "::notice::torch_musa successfully removed from venv"
+  else
+    echo "::error::torch_musa still visible after uninstall attempt"
+    exit 1
+  fi
 fi
 
 # --- MThreads Triton (flagtree) + FlagGems -----------------------------------
