@@ -270,8 +270,17 @@ them:
 | 4 | `test_amp_contract.py -m amp` | **27 passed** |
 | 5 | `test_math_bits_contract.py -m math_bits` | **12 passed** |
 | 6 | `test_profiler_contract.py -m profiler` | **10 passed, 1 skipped, 1 xpassed** |
-| 7 | `tests/integration/ops/` in a wheel-only workspace | **477 passed, 15 skipped, 512 deselected, 2 xfailed, 1 xpassed** (23.41s) |
+| 7 | `tests/integration/ops/` in a wheel-only workspace | **490 passed, 2 skipped, 512 deselected, 2 xfailed, 1 xpassed** (126.75s) |
 | 8 | `test_rng_dispatch.py -m main_ops` | **80 passed, 37 deselected** |
+
+Group 7 is run with `FLAGOS_USE_FLAGGEMS=1`, matching
+`.github/scripts/set_env_musa.sh`: the group's marker expression does not
+exclude the `flaggems` marker, and `tests/integration/ops/conftest.py` gates
+`flaggems`-marked tests on that variable, so a run without it skips them
+instead of exercising them. `PYTHONPATH` must point at this working tree —
+the conda environment also carries a non-editable wheel install of `torch_fl`
+from an earlier tree, and without the override `import torch_fl` resolves to
+that install and reads its stale `backends_musa.conf`.
 
 Unit tests: `tests/unit/test_gen_vendor_confs.py` — **34 passed, 1 failed**. The
 one failure is `test_shipped_confs_are_up_to_date`, which reports
