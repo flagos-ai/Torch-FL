@@ -5,12 +5,14 @@
 This is a manual hardware survey, not a pytest test. CI does not invoke files in
 ``tests/manual``.
 
-The unit of measurement is an active, unique ``flagos_python`` overload from the
+The unit of measurement is an active, unique FlagGems Python overload from the
 platform conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has
-its own ``backends_<platform>.conf``). Each overload runs in a fresh child process
-through ``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real
-ATen schema and are first validated on CPU; device results are then compared with
-the same overload on CPU.
+its own ``backends_<platform>.conf``). It is spelled ``flaggems`` in the current
+configurations and ``flagos_python`` in the historical ones; both name
+``Backend::kFlagGems``. Each overload runs in a fresh child process through
+``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real ATen
+schema and are first validated on CPU; device results are then compared with the
+same overload on CPU.
 
 Two support levels are reported:
 
@@ -71,7 +73,13 @@ PROFILES = (
     },
 )
 
-HARNESS_VERSION = 4
+HARNESS_VERSION = 5
+
+# Backend::kFlagGems under every spelling ParseBackendName accepts. The current
+# configurations spell it "flaggems"; the two legacy names stay in the set
+# because the baseline cohort was measured under them, and a conf that uses
+# either would otherwise be surveyed as if it routed nothing to FlagGems.
+_FLAGGEMS_PYTHON_BACKENDS = frozenset({"flaggems", "flaggems_python", "flagos_python"})
 
 
 def active_routes(path: Path) -> list[str]:
@@ -81,7 +89,7 @@ def active_routes(path: Path) -> list[str]:
         if not line or "=" not in line:
             continue
         op, backend = (part.strip() for part in line.split("=", 1))
-        if backend == "flagos_python":
+        if backend in _FLAGGEMS_PYTHON_BACKENDS:
             routes.add(op)
     return sorted(routes)
 
