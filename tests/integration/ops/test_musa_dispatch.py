@@ -17,11 +17,13 @@
 The per-op files in this directory assert a ``-> cuda`` routing that MUSA builds
 cannot produce: no CUDA boxing kernels are compiled in (the platform ships no
 cudart), so those tests are skipped by conftest's platform gate. This file is the
-MUSA equivalent -- it checks that ops land on the ``musa`` backend, that the
-per-op env override works, and that the results match a CPU reference.
+MUSA equivalent -- it checks that ops land on accelerated backends (FlagGems or
+mudnn native), that the per-op env override works, and that the results match a
+CPU reference.
 
-The kernels here call mudnn (the vendor kernel library) directly, so "routes to
-musa" and "runs the vendor kernel" are the same statement.
+Current MUSA strategy prioritizes FlagGems (Triton) implementations where available,
+falling back to mudnn native kernels. Ops covered by FlagGems route to
+``flagos_python``; ops with only mudnn implementations route to ``musa``.
 
 Usage:
     pytest tests/integration/ops/test_musa_dispatch.py -v
@@ -38,13 +40,14 @@ import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
-# op name as it appears in the dispatch log -> snippet exercising it
+# op name as it appears in the dispatch log -> (snippet, expected backend)
+# Expected backend can be "musa" (mudnn native) or "flagos_python" (FlagGems)
 _OPS = {
-    "mm": "a @ b",
-    "add.Tensor": "a + b",
-    "mul.Tensor": "a * b",
-    "_softmax": "torch.softmax(a, -1)",
-    "relu": "torch.relu(a)",
+    "mm": ("a @ b", "flagos_python"),  # FlagGems coverage
+    "add.Tensor": ("a + b", "flagos_python"),  # FlagGems coverage
+    "mul.Tensor": ("a * b", "musa"),  # mudnn native only
+    "_softmax": ("torch.softmax(a, -1)", "flagos_python"),  # FlagGems coverage
+    "relu": ("torch.relu(a)", "flagos_python"),  # FlagGems coverage
 }
 
 # Ops in the coverage set that mudnn has no mode for. They are deliberately left
@@ -78,15 +81,16 @@ def _run_dispatch_subprocess(expr: str, extra_env: dict) -> subprocess.Completed
 
 
 class TestMusaDispatch:
-    """Ops route to the musa backend and produce correct results."""
+    """Ops route to accelerated backends (FlagGems or mudnn) and produce correct results."""
 
     @pytest.mark.musa
-    @pytest.mark.parametrize("op,expr", sorted(_OPS.items()))
-    def test_dispatch_log_musa(self, op, expr):
-        """Every covered op reports `-> musa` in the dispatch log by default."""
+    @pytest.mark.parametrize("op,expr_backend", sorted(_OPS.items()))
+    def test_dispatch_log_musa(self, op, expr_backend):
+        """Every covered op routes to its configured backend (FlagGems or mudnn)."""
+        expr, expected_backend = expr_backend
         result = _run_dispatch_subprocess(expr, {"FLAGOS_LOG_DISPATCH": "1"})
-        assert f"[flagos dispatch] {op} -> musa" in result.stderr, (
-            f"Expected musa dispatch log for {op}, got:\n{result.stderr}"
+        assert f"[flagos dispatch] {op} -> {expected_backend}" in result.stderr, (
+            f"Expected {expected_backend} dispatch for {op}, got:\n{result.stderr}"
         )
 
     @pytest.mark.musa
@@ -101,7 +105,7 @@ class TestMusaDispatch:
 
     @pytest.mark.musa
     def test_dispatch_log_mm_out_musa(self):
-        """mm.out routes to musa too (mudnn MatMul into a caller-provided out)."""
+        """mm.out routes to FlagGems (mudnn MatMul fallback available but FlagGems preferred)."""
         env = os.environ.copy()
         env["FLAGOS_LOG_DISPATCH"] = "1"
         code = (
@@ -119,8 +123,8 @@ class TestMusaDispatch:
             env=env,
             check=True,
         )
-        assert "[flagos dispatch] mm.out -> musa" in result.stderr, (
-            f"Expected musa dispatch log, got:\n{result.stderr}"
+        assert "[flagos dispatch] mm.out -> flagos_python" in result.stderr, (
+            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
         )
 
 
