@@ -85,15 +85,12 @@ export CUDA_KERNEL=0
 export METAX_KERNEL=0
 export ASCEND_KERNEL=0
 export GCU_KERNEL=0
-# This image ships no MThreads Triton/FlagGems stack (the vendor
-# flagtree-0.5.0+mthreads3.1 wheel is absent). Keep the native mudnn path
-# deterministic; the hybrid routing documented in
-# docs/vendors/musa/installation.md can be enabled once that backend is
-# provisioned and validated. A generic PyPI triton is not a substitute for the
-# MThreads build and is never installed in its place.
+# FlagGems Python ops are provisioned and validated on MUSA via the MThreads
+# Triton build (flagtree). The C++ kernels (FLAGGEMS_KERNEL=1) require
+# FLAGGEMS_KERNEL=ON at build time and are not yet available.
 export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON=0
-export FLAGOS_USE_FLAGGEMS=0
+export FLAGGEMS_PYTHON=1
+export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 # MUSA bundles no libtorch_cuda.so and the toolkit exports no cuda symbols, so
 # the CUDA asset preload has nothing to open.
@@ -207,6 +204,58 @@ else
   "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
 fi
 
+# --- MThreads Triton (flagtree) + FlagGems -----------------------------------
+# Installed for both stages, not just integration: build and integration share
+# one platform job, and restricting this to CI_STAGE=integration would leave the
+# build job's venv without flag_gems -- the wheel then fails as soon as a
+# FlagGems route dispatches. Same reasoning as set_env_ascend.sh.
+#
+# --no-deps on both source packages so pip cannot replace the pinned CPU torch
+# 2.10 with something a transitive requirement prefers.
+#
+# Retries are deliberate: the flagtree wheel is 180 MB and the shared mirror can
+# close a large-wheel response early (IncompleteRead) even though the package is
+# there. Retrying just the failed package beats restarting all of setup.
+pip_retry() {
+  local attempt=1
+  while true; do
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
+# flagtree is the Triton build carrying the "mthreads" backend. 3.6 is not a
+# preference but a requirement: current FlagGems uses tl.map_elementwise and
+# triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
+# fails at import, so the two pins move together.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a3+mthreads3.6}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+
+# Pinned rather than tracking master: FlagGems moves faster than the vendor
+# Triton it needs, and an unpinned install is one upstream commit away from
+# requiring a Triton the flagtree pin above does not provide. e7b4a865f is the
+# revision validated against flagtree 0.6.2a3+mthreads3.6 on the MTT S5000.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-e7b4a865fce6d85861ee91a6aca56564ef9acf7d}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
+
+# FlagGems' own runtime deps, installed one at a time for the IncompleteRead
+# reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
+# the stock +cpu torch C extensions at import.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+
 # --- Verify the isolation held ----------------------------------------------
 CI_STAGE="$CI_STAGE" CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import importlib.util
@@ -229,6 +278,31 @@ print(f"CPU torch path: {torch_path}")
 print(f"MUSA_HOME: {os.environ['MUSA_HOME']}")
 print(f"MUSA_KERNEL: {os.environ['MUSA_KERNEL']}")
 PY
+
+# --- Verify the FlagGems stack imports --------------------------------------
+# Integration only: torch_fl._C does not exist until the wheel is built, and the
+# import order below needs it.
+#
+# torch_fl must be imported before flag_gems. FlagGems 5.x selects its MThreads
+# backend by reading torch.musa, which stock PyTorch does not have -- torch_fl
+# installs that surface as a shim (_install_musa_flaggems_compat). Importing
+# flag_gems first raises AttributeError: module 'torch' has no attribute 'musa'.
+#
+# That shim is itself conditional on the active conf routing at least one op to
+# FlagGems, so this check also fails if backends_musa.conf has no flaggems route
+# -- which is exactly the state this environment is being provisioned to leave.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl  # noqa: F401  -- must precede flag_gems; installs the torch.musa shim
+
+import triton
+import flag_gems
+
+assert "mthreads" in triton.backends.backends, sorted(triton.backends.backends)
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+PY
+fi
 
 if command -v mthreads-gmi >/dev/null 2>&1; then
   mthreads-gmi
