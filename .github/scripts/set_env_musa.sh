@@ -209,6 +209,16 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 
+# Persist venv activation to subsequent workflow steps via GITHUB_ENV
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  {
+    echo "VIRTUAL_ENV=$VENV_ROOT"
+    echo "PATH=$VENV_ROOT/bin:$PATH"
+    echo "PYTHONNOUSERSITE=1"
+    echo "PYTHONPATH="
+  } >> "$GITHUB_ENV"
+fi
+
 # Ensure torch_musa from the base image is not importable in the venv.
 # The venv should be isolated by default, but explicitly uninstall if present.
 if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec('torch_musa') is None else 1)" 2>/dev/null; then
