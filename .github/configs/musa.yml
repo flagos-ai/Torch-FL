@@ -74,12 +74,17 @@ integration_tests:
           print(f"\n=== torch_musa found ===")
           print(f"  Location: {torch_musa_spec.origin}")
           print(f"  Submodule search locations: {torch_musa_spec.submodule_search_locations}")
+          # torch_fl creates a shim with origin="torch_fl_shim" - that's expected.
+          # Only fail if torch_musa comes from the real vendor package.
+          if torch_musa_spec.origin != "torch_fl_shim":
+              raise AssertionError(
+                  f"vendor torch_musa leaked into the isolated venv (ABI mismatch): {torch_musa_spec.origin}"
+              )
+          print("  OK: This is torch_fl's shim, not the vendor package")
 
       assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
       assert torch.version.cuda is None, torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
-      assert torch_musa_spec is None, \
-          "vendor torch_musa leaked into the isolated venv (ABI mismatch)"
       assert not (package_lib / "libtorch_cuda.so").is_file(), package_lib
       assert torch_fl.flagos.is_available(), "flagos device is unavailable"
       assert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()
