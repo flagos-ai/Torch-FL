@@ -17,7 +17,8 @@ cat dispatch tests
 
 Verifies that torch.cat:
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems (default) or cuda (via env override)
+  - C++ wrapper routes to the backend the platform conf lists for cat (the
+    vendor kernel, since FlagGems has no cat kernel) or cuda via env override
   - dispatch log confirms the actual backend used
   - KV cache / normal inference common patterns (append, mask extension, non-contiguous input, etc.)
 
@@ -32,6 +33,8 @@ import sys
 import pytest
 import torch
 import torch_fl  # noqa: F401
+
+from backend_conf import routed_backend
 
 
 DEVICE = "flagos:0"
@@ -479,17 +482,19 @@ class TestCatDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, cat falls back to the vendor kernel.
+        """cat dispatches to whatever backend this platform's conf lists.
 
-        FlagGems has no Triton kernel for cat, so backends_flaggems.conf keeps it
-        on cuda: this verifies the runtime switch degrades gracefully per-op
-        rather than forcing an unavailable backend.
+        FlagGems has no Triton kernel for cat, so every generated conf keeps it
+        on that platform's vendor kernel -- ``cuda`` on CUDA/DCU/PPU, ``musa`` on
+        MUSA. Reading the conf keeps the assertion true on all of them and still
+        checks the real property: the runtime honours the table it was given.
         """
         result = _run_cat_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] cat -> cuda" in result.stderr, (
-            f"Expected cuda fallback dispatch log, got:\n{result.stderr}"
+        expected = routed_backend("cat")
+        assert f"[flagos dispatch] cat -> {expected}" in result.stderr, (
+            f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

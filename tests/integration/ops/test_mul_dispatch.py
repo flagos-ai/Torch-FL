@@ -17,7 +17,8 @@ mul.Tensor dispatch tests
 
 Verifies that torch.mul (Tensor variant):
   - produces correct results on flagos device
-  - FlagGems runtime mode falls back to the CUDA backend by default
+  - C++ wrapper routes to the backend the platform conf lists for the .Tensor
+    overload (the vendor kernel on every current platform)
   - explicit overrides can still route to flaggems_python
   - dispatch log confirms the actual backend used
 
@@ -32,6 +33,8 @@ import sys
 import pytest
 import torch
 import torch_fl  # noqa: F401
+
+from backend_conf import routed_backend
 
 
 DEVICE = "flagos:0"
@@ -109,12 +112,19 @@ class TestMulTensorDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """FlagGems runtime mode keeps recursive mul.Tensor on CUDA."""
+        """mul.Tensor dispatches to whatever backend this platform's conf lists.
+
+        ``flagos_python`` on CUDA/DCU/PPU and ``musa`` on MUSA: FlagGems has no
+        Triton kernel for the .Tensor overload, so each platform's generated conf
+        keeps it on its own vendor kernel. Reading the conf keeps the assertion
+        true on all of them.
+        """
         result = _run_mul_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] mul.Tensor -> cuda" in result.stderr
+        expected = routed_backend("mul.Tensor")
+        assert f"[flagos dispatch] mul.Tensor -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops
