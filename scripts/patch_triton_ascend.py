@@ -29,6 +29,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 
 
@@ -370,6 +371,77 @@ def patch_npu_utils(triton_path):
     return patch_file(fp, replacements)
 
 
+def strip_torch_npu_build_flags(triton_path):
+    """Drop -ltorch_npu / -DUSE_TORCH_NPU from every backend flag list, by regex.
+
+    This is the load-bearing patch, and it is deliberately not an exact-string
+    replacement. USE_TORCH_NPU is what compiles the at_npu::native::OpCommand
+    body in npu_utils.cpp; with it defined and torch_npu absent, the JIT compile
+    dies with "'at_npu' has not been declared" no matter what the headers look
+    like. The empty stub headers from setup_torch_npu_stubs.sh satisfy the
+    #include and nothing more.
+
+    Every flag-list entry in this file is a short literal on its own line, so
+    matching the flag itself -- with or without an f-prefix, either quote style,
+    optional trailing comma -- survives the reformatting between releases that
+    broke the surrounding-context patterns. Idempotent: once removed there is
+    nothing left to match.
+    """
+    changed = []
+    for name in ("utils.py", "backend_register.py", "driver.py"):
+        fp = os.path.join(triton_path, "backends", "ascend", name)
+        if not os.path.exists(fp):
+            continue
+        with open(fp) as f:
+            content = f.read()
+        patched = re.sub(
+            r"^[ \t]*f?['\"]-(?:ltorch_npu|DUSE_TORCH_NPU)['\"],?[ \t]*\r?\n",
+            "",
+            content,
+            flags=re.MULTILINE,
+        )
+        if patched != content:
+            with open(fp, "w") as f:
+                f.write(patched)
+            changed.append(name)
+    if changed:
+        print(f"  PATCHED (torch_npu build flags stripped): {', '.join(changed)}")
+    else:
+        print("  OK (no torch_npu build flags present)")
+    return bool(changed)
+
+
+def verify_no_torch_npu_build_flags(triton_path):
+    """Fail the patch run if any torch_npu build flag survived.
+
+    patch_file() only warns on a missed pattern and main() ignored every return
+    value, so the script exited 0 after patching almost nothing when CI moved
+    from triton-ascend 3.2.0 to 3.2.2. The setup step read green and the rot
+    only surfaced 20 minutes later as 11 failing operator tests. Verify the one
+    postcondition that actually decides whether kernels can compile.
+    """
+    offenders = []
+    for name in ("utils.py", "backend_register.py", "driver.py"):
+        fp = os.path.join(triton_path, "backends", "ascend", name)
+        if not os.path.exists(fp):
+            continue
+        with open(fp) as f:
+            for lineno, line in enumerate(f, 1):
+                if "-ltorch_npu" in line or "-DUSE_TORCH_NPU" in line:
+                    if line.lstrip().startswith("#"):
+                        continue
+                    offenders.append(f"{name}:{lineno}: {line.strip()}")
+    if offenders:
+        print(
+            "ERROR: torch_npu build flags still present after patching:",
+            file=sys.stderr,
+        )
+        for entry in offenders:
+            print(f"  {entry}", file=sys.stderr)
+        sys.exit(1)
+    print("  VERIFIED: no torch_npu build flags remain")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Patch triton-ascend for torch_fl compatibility"
@@ -391,17 +463,21 @@ def main():
         )
         sys.exit(1)
 
-    print("\n[1/4] Patching backends/ascend/driver.py ...")
+    print("\n[1/5] Patching backends/ascend/driver.py ...")
     patch_driver(triton_path)
 
-    print("\n[2/4] Patching backends/ascend/utils.py ...")
+    print("\n[2/5] Patching backends/ascend/utils.py ...")
     patch_utils(triton_path)
 
-    print("\n[3/4] Patching backends/ascend/backend_register.py ...")
+    print("\n[3/5] Patching backends/ascend/backend_register.py ...")
     patch_backend_register(triton_path)
 
-    print("\n[4/4] Patching backends/ascend/npu_utils.cpp (CANN 9.0.0 enum) ...")
+    print("\n[4/5] Patching backends/ascend/npu_utils.cpp (CANN 9.0.0 enum) ...")
     patch_npu_utils(triton_path)
+
+    print("\n[5/5] Stripping torch_npu build flags ...")
+    strip_torch_npu_build_flags(triton_path)
+    verify_no_torch_npu_build_flags(triton_path)
 
     print("\nDone. triton-ascend is now compatible with torch_fl.")
     print("NOTE: Clear triton kernel cache if you had previously compiled kernels:")

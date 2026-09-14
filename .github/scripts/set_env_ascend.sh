@@ -92,6 +92,17 @@ export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGGEMS_KERNEL=0
 export FLAGGEMS_PYTHON=1
+# triton-ascend's taskqueue launch path calls at_npu::native::OpCommand, a
+# torch_npu symbol torch_fl does not provide. Turn it off through the env var
+# triton-ascend already reads rather than relying on patch_triton_ascend.py to
+# rewrite the default: that rewrite is an exact-string replace written against
+# triton-ascend 3.2.0 and silently stopped matching on the 3.2.2 wheel pinned
+# below, which left taskqueue on. The empty OpCommand.h stub written by
+# scripts/setup_torch_npu_stubs.sh is only sufficient while taskqueue is off --
+# with it on, the generated launcher references the symbol and the JIT compile
+# fails with "'at_npu' has not been declared", which is what broke 11 Ascend
+# operator tests in run 34786387238. An env var cannot version-rot.
+export TRITON_ENABLE_TASKQUEUE=false
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
