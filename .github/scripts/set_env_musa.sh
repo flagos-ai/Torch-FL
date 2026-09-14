@@ -130,6 +130,10 @@ if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
 else
   VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-musa-${CI_STAGE}}"
   "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT" || true
+  # Ensure system site-packages are not inherited (torch_musa from base image)
+  if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
+    sed -i 's/^include-system-site-packages = true/include-system-site-packages = false/' "$VENV_ROOT/pyvenv.cfg"
+  fi
 fi
 
 VENV_PYTHON="$VENV_ROOT/bin/python"
@@ -148,6 +152,10 @@ if ! venv_is_usable; then
     apt-get update
     apt-get install -y --no-install-recommends "python${python_mm}-venv"
     "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT"
+    # Ensure system site-packages are not inherited (torch_musa from base image)
+    if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
+      sed -i 's/^include-system-site-packages = true/include-system-site-packages = false/' "$VENV_ROOT/pyvenv.cfg"
+    fi
   fi
 fi
 
