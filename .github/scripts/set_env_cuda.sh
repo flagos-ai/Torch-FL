@@ -26,10 +26,13 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-# The NVIDIA FlagTree 3.6 wheel is the source-free artifact documented by
-# FlagTree's User-Manual. It replaces the stock Triton module in the venv.
+# FlagTree provides Triton support. The source-free 0.6.2a2 wheel pairs with
+# Triton 3.6 and is published as cp312 only, so the isolated test environment
+# below has to run on Python 3.12; the vendor Python stays at 3.10 and is used
+# solely to inspect the vendor image.
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2}"
+FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-3.12}"
 # FlagGems currently uses master as its default branch; the repository has no
 # main branch. Keep this overrideable so a tested revision can be pinned by CI.
 FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-https://github.com/flagos-ai/FlagGems.git}"
@@ -168,13 +171,77 @@ if [[ ! -e "$CUDA_ASSETS_DIR/libc10_cuda.so" ]]; then
 fi
 echo "CUDA assets staged: $(find "$CUDA_ASSETS_DIR" -maxdepth 1 -type f -name '*.so*' | wc -l)"
 
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
-if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-  echo "::warning::Vendor Python cannot create a venv; trying uv"
-  if ! command -v uv >/dev/null 2>&1; then
-    "$VENDOR_PYTHON" -m pip install --upgrade uv
+# The isolated environment runs on the Python version FlagTree is built for, so
+# `python` inside it is the same interpreter that owns the Triton provider. The
+# vendor Python (3.10 on current images) is only used to inspect the vendor
+# image above; nothing below runs under it.
+python_matches_version() {
+  "$1" - "$FLAGTREE_PYTHON_VERSION" <<'PY'
+import sys
+
+expected = tuple(int(part) for part in sys.argv[1].split("."))
+raise SystemExit(0 if sys.version_info[:2] == expected else 1)
+PY
+}
+
+select_test_python() {
+  local candidate
+  for candidate in \
+    "${TORCH_FL_TEST_PYTHON:-}" \
+    "python$FLAGTREE_PYTHON_VERSION" \
+    "/usr/bin/python$FLAGTREE_PYTHON_VERSION"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ "$candidate" != */* ]]; then
+      candidate="$(command -v "$candidate" 2>/dev/null || true)"
+      [[ -n "$candidate" ]] || continue
+    fi
+    if [[ -x "$candidate" ]] && python_matches_version "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_test_python() {
+  if command -v uv >/dev/null 2>&1; then
+    echo "Installing Python $FLAGTREE_PYTHON_VERSION with uv..."
+    if uv python install "$FLAGTREE_PYTHON_VERSION"; then
+      local installed
+      installed="$(uv python find "$FLAGTREE_PYTHON_VERSION" 2>/dev/null || true)"
+      if [[ -n "$installed" && -x "$installed" ]] && python_matches_version "$installed"; then
+        printf '%s' "$installed"
+        return 0
+      fi
+    fi
   fi
-  uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
+  echo "Installing Python $FLAGTREE_PYTHON_VERSION from the deadsnakes PPA..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq software-properties-common
+  add-apt-repository -y ppa:deadsnakes/ppa
+  apt-get update -qq
+  apt-get install -y -qq "python$FLAGTREE_PYTHON_VERSION" \
+    "python$FLAGTREE_PYTHON_VERSION-venv" "python$FLAGTREE_PYTHON_VERSION-dev"
+  command -v "python$FLAGTREE_PYTHON_VERSION"
+}
+
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
+TEST_PYTHON="$(select_test_python || true)"
+if [[ -z "$TEST_PYTHON" ]]; then
+  if ! TEST_PYTHON="$(install_test_python)"; then
+    echo "::error::Python $FLAGTREE_PYTHON_VERSION is required by FlagTree $FLAGTREE_VERSION"
+    exit 1
+  fi
+fi
+echo "Test Python: $TEST_PYTHON ($("$TEST_PYTHON" -c 'import sys; print(sys.version.split()[0])'))"
+
+if ! "$TEST_PYTHON" -m venv --clear "$VENV_ROOT"; then
+  echo "::warning::$TEST_PYTHON cannot create a venv; trying uv"
+  if ! command -v uv >/dev/null 2>&1; then
+    "$TEST_PYTHON" -m pip install --upgrade uv
+  fi
+  uv venv --clear --seed --python "$TEST_PYTHON" "$VENV_ROOT"
 fi
 VENV_PYTHON="$VENV_ROOT/bin/python"
 if [[ ! -x "$VENV_PYTHON" ]]; then
@@ -187,37 +254,8 @@ fi
   --index-url "$CPU_TORCH_INDEX_URL" \
   "torch==$CPU_TORCH_VERSION"
 
-# FlagTree 3.6 requires Python 3.12. If vendor Python is older, install python3.12
-# from deadsnakes PPA and create a separate venv for FlagTree, then symlink packages.
-FLAGTREE_PYTHON="$VENV_PYTHON"
-if [[ "$VENDOR_PYTHON_VERSION" != 3.12.* ]]; then
-  echo "::warning::Vendor Python is $VENDOR_PYTHON_VERSION; FlagTree 3.6 requires Python 3.12"
-  if ! command -v python3.12 >/dev/null 2>&1; then
-    echo "Installing Python 3.12 from deadsnakes PPA..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq software-properties-common
-    add-apt-repository -y ppa:deadsnakes/ppa
-    apt-get update -qq
-    apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
-  fi
-  FLAGTREE_VENV="$VENV_ROOT-py312"
-  rm -rf "$FLAGTREE_VENV"
-  python3.12 -m venv "$FLAGTREE_VENV"
-  FLAGTREE_PYTHON="$FLAGTREE_VENV/bin/python"
-  echo "Created Python 3.12 venv for FlagTree: $FLAGTREE_VENV"
-
-  # Install basic dependencies in Python 3.12 venv
-  "$FLAGTREE_PYTHON" -m pip install --upgrade pip "setuptools>=64,<77" "setuptools-scm>=8,<10" "wheel==0.46.2"
-  "$FLAGTREE_PYTHON" -m pip install \
-    --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
-fi
-
-# Install FlagTree with the appropriate Python version
-while "$FLAGTREE_PYTHON" -m pip show triton >/dev/null 2>&1; do
-  "$FLAGTREE_PYTHON" -m pip uninstall -y triton
-done
+# FlagTree ships its own Triton provider; nothing else in the environment may
+# shadow it, so it is installed last with --no-deps.
 pip_retry() {
   local python_exe="$1"
   shift
@@ -235,24 +273,8 @@ pip_retry() {
     sleep 10
   done
 }
-pip_retry "$FLAGTREE_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+pip_retry "$VENV_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
   "flagtree===${FLAGTREE_VERSION}"
-
-# If using separate Python 3.12 venv, symlink FlagTree packages to main venv
-if [[ "$FLAGTREE_PYTHON" != "$VENV_PYTHON" ]]; then
-  FLAGTREE_SITE="$("$FLAGTREE_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-  VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-  echo "Symlinking FlagTree packages from $FLAGTREE_SITE to $VENV_SITE"
-  for pkg in flagtree triton; do
-    if [[ -d "$FLAGTREE_SITE/$pkg" ]]; then
-      ln -sf "$FLAGTREE_SITE/$pkg" "$VENV_SITE/"
-    fi
-    for metadata in "$FLAGTREE_SITE"/"$pkg"-*.dist-info; do
-      [[ -e "$metadata" ]] || continue
-      ln -sf "$metadata" "$VENV_SITE/"
-    done
-  done
-fi
 
 # Keep only vendor packages that are not provided by FlagTree. In particular,
 # do not copy vendor `triton` or `triton_kernels`: either would contaminate the
@@ -336,21 +358,28 @@ export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64:
 export LD_LIBRARY_PATH="$CUDA_ASSETS_DIR${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib:$VENDOR_FLAGGEMS_LIB:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"
-# Verify that the source-free wheel installed the expected Triton provider,
-# rather than silently falling back to stock Triton.
+# Verify that the source-free wheel installed the Triton provider it ships,
+# rather than a stock Triton left over in the environment.
 python - <<'PY'
 import importlib.metadata
-import importlib.util
 import os
+from pathlib import Path
 
 import triton
 
+expected = os.environ["FLAGTREE_VERSION"]
 flagtree_version = importlib.metadata.version("flagtree")
-assert flagtree_version == os.environ["FLAGTREE_VERSION"], flagtree_version
-assert importlib.util.find_spec("triton.flagtree_spec") is not None
+assert flagtree_version == expected, (flagtree_version, expected)
+
+distribution = importlib.metadata.distribution("flagtree")
+provided = {str(entry).split("/", 1)[0] for entry in distribution.files or ()}
+assert "triton" in provided, sorted(provided)
+
+triton_root = Path(triton.__file__).resolve().parent
+assert triton_root == Path(distribution.locate_file("triton")).resolve(), triton_root
 print(f"FlagTree: {flagtree_version}")
-print(f"Triton module: {triton.__file__}")
-print(f"Triton version: {getattr(triton, '__version__', 'unknown')}")
+print(f"Triton module: {triton_root}")
+print(f"Triton version: {triton.__version__}")
 PY
 
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then

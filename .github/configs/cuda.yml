@@ -70,16 +70,26 @@ integration_tests:
     command: |
       python - <<'PY'
       import importlib.metadata
-      import importlib.util
+      import os
+      from pathlib import Path
 
       import torch_fl
       import flag_gems
       import triton
+      from torch_fl.compile.flagtree_shim import is_flagtree_active
 
-      assert importlib.metadata.version("flagtree") == "0.6.2a2"
-      assert importlib.util.find_spec("triton.flagtree_spec") is not None
-      print(f"FlagTree: {importlib.metadata.version('flagtree')}")
-      print(f"Triton: {triton.__version__} ({triton.__file__})")
+      # The FlagTree wheel is source-free: it ships its own Triton, and the
+      # expected version comes from the setup script so the two stay in step.
+      expected = os.environ.get("FLAGTREE_VERSION", "0.6.2a2")
+      distribution = importlib.metadata.distribution("flagtree")
+      assert distribution.version == expected, distribution.version
+      assert is_flagtree_active(), triton.__file__
+
+      triton_root = Path(triton.__file__).resolve().parent
+      assert Path(distribution.locate_file("triton")).resolve() == triton_root, triton_root
+      assert triton.__version__.startswith("3.6."), triton.__version__
+      print(f"FlagTree: {expected}")
+      print(f"Triton: {triton.__version__} ({triton_root})")
       print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
       print(f"torch_fl: {torch_fl.__file__}")
       PY
