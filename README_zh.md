@@ -97,7 +97,7 @@ torch-fl 在项目层面提供以下能力：
 | PPU | 针对 PPU CUDA 13 兼容 SDK 的 CUDA boxing | Eager、autograd | **实验性** | [PPU](docs/vendors/ppu/installation.md) |
 | 海光 DCU | 基于 hipify DTK torch 的 CUDA boxing | Eager、autograd、profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | 燧原 GCU | 原生 topsaten 后端，未路由及 int64 算子使用 CPU 回退 | Eager | **实验性** | [GCU](docs/vendors/gcu/installation.md) |
-| 摩尔线程 MUSA | 原生 mudnn 后端，未路由算子使用 CPU 回退 | Eager | **实验性** | [MUSA](docs/vendors/musa/installation.md) |
+| 摩尔线程 MUSA | FlagGems 优先的 Triton 内核，原生 mudnn 回退，未路由算子使用 CPU 回退 | Eager、FP16/BF16 AMP | **实验性** | [MUSA](docs/vendors/musa/installation.md) |
 | 地平线 BPU | 无 eager 内核；通过 hbdk4 使用 `torch.compile` 图执行路径 | 仅图编译 | **仅运行时** | [BPU](docs/vendors/bpu/installation.md) |
 | 清微智能 | 已提供运行时构建选择器 | 尚无安装文档 | **仅运行时** | — |
 

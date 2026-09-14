@@ -21,6 +21,7 @@
   m.impl("acos", WrapperAcos);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add_.Tensor", WrapperAddInplaceTensor);
   m.impl("addcdiv", WrapperAddcdiv);
   m.impl("addcmul", WrapperAddcmul);
   m.impl("addmm", WrapperAddmm);
@@ -46,6 +47,7 @@
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("div_.Tensor", WrapperDivInplaceTensor);
   m.impl("elu", WrapperElu);
   m.impl("embedding", WrapperEmbedding);
   m.impl("eq.Scalar", WrapperEqScalar);
@@ -96,6 +98,7 @@
   m.impl("mm.out", WrapperMmOut);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul_.Tensor", WrapperMulInplaceTensor);
   m.impl("native_dropout", WrapperNativeDropout);
   m.impl("native_dropout_backward", WrapperNativeDropoutBackward);
   m.impl("native_layer_norm", WrapperNativeLayerNorm);
@@ -152,6 +155,7 @@
   m.impl("std.correction", WrapperStdCorrection);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);
+  m.impl("sub_.Tensor", WrapperSubInplaceTensor);
   m.impl("sum", WrapperSum);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
   m.impl("tan", WrapperTan);

@@ -679,15 +679,46 @@ def _aicore_count(_cache=[]):
     return _cache[0]
 
 
+def _device_index(device):
+    """Resolve a device spec to an index, accepting what `torch.cuda` accepts.
+
+    `get_device_properties` is published as `torch.cuda.get_device_properties`
+    (and as `torch.musa`/`torch.npu`), so callers pass every form the CUDA
+    function documents: an index, a `torch.device`, a `"cuda:1"`/`"musa"` style
+    string, or nothing at all for the current device. FlagGems adds a fifth, its
+    own duck-typed device descriptor, and reaches the string form through
+    `flag_gems.ops.cumsum`'s module-level `device = device.name`.
+
+    Only the index matters here: the flagos backend has a single device type, so
+    the type portion of the spec carries no information beyond "not the CPU".
+    """
+    if device is None:
+        return current_device()
+    if isinstance(device, torch.device):
+        return current_device() if device.index is None else device.index
+    if isinstance(device, str):
+        # "flagos", "musa", "cuda", "flagos:1" -- only the suffix is meaningful.
+        return int(device.rpartition(":")[2]) if ":" in device else current_device()
+    if isinstance(device, int):
+        return device
+    # FlagGems' DeviceDetector and similar duck-typed specs.
+    index = getattr(device, "index", None)
+    if index is not None:
+        return int(index)
+    raise TypeError(
+        f"get_device_properties expects an int, str, torch.device or None, "
+        f"but got {type(device).__name__}"
+    )
+
+
 def get_device_properties(device=None):
     """Return device properties for the given device.
 
     Args:
-        device (int or None): device index, or None for current device.
+        device: device index, `torch.device`, `"<type>[:<index>]"` string, or
+            None for the current device. Matches `torch.cuda.get_device_properties`.
     """
-    if device is None:
-        device = current_device()
-    return _DeviceProperties(device)
+    return _DeviceProperties(_device_index(device))
 
 
 __all__ = [

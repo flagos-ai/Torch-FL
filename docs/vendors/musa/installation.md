@@ -82,19 +82,26 @@ print(f"abs matches CPU: {torch.allclose(y.cpu(), x.cpu().abs())}")
 `torch_fl` installs a `lib/flagos_platform` marker so the runtime picks `backends_musa.conf` automatically. This native-only mode requires no environment variable override.
 
 There is no `FLAGOS_USE_FLAGGEMS` opt-in and no separate `*_flagos_py.conf`
-narrow hybrid set. `backends_musa.conf` is generated FlagGems-first: of the 158
-ops MUSA registers on PrivateUse1, 122 resolve to `flaggems` and 36 to `musa`,
+narrow hybrid set. `backends_musa.conf` is generated FlagGems-first: of the 515
+ops MUSA registers on PrivateUse1, 468 resolve to `flaggems` and 47 to `musa`,
 and the remaining ops are written `none` because MUSA does not register them, so
 they reach `cpu_fallback`. Where a mudnn kernel exists behind an op FlagGems
 wins, the entry carries a `# musa` annotation. Reading the file tells you the
 whole routing.
 
+The 47 native routes are the ops FlagGems does not cover at all plus the ops
+listed in `NATIVE_TRITON_GAPS["musa"]`, which FlagGems cannot execute correctly
+on this stack: the bf16 wrapped-number lowering failure in the pointwise
+arithmetic family (including its in-place `.Tensor` forms, which is where ATen's
+wrapped-number boxing sends `add_.Scalar`, `_foreach_add_` and AdamW's foreach
+step), the RNG bridge, and `sort`. Three of those gap ops have no mudnn kernel
+either and stay `none`. FlagGems is not patched for MUSA.
+
 The FlagGems routes require FlagGems and the MThreads FlagTree compiler/runtime.
-On the measured host, FlagGems 5.0.2 executed with the vendor
-`flagtree-0.5.0+mthreads3.1` wheel (Triton 3.1.0, backend `mthreads`). The
-generic installed Triton 3.7.1 is not sufficient and must not be used for this
-path. The vendor wheel SHA-256 was
-`197b0c6954ad8b3edef51138311a8c4f3aea75b90ba0f69d3c2fda95a76b6b1b`.
+On the measured host, FlagGems `5.4.0rc2.post1` (master, installed from source)
+executed with `flagtree 0.6.2a3+mthreads3.6` (Triton 3.6.0, backend `mthreads`).
+A generic PyPI Triton wheel is not sufficient -- it ships no `mthreads` backend
+-- and must not be used for this path.
 
 To pin the table to one backend for A/B measurement, set `ALL_USE_FLAGGEMS=1` or
 `ALL_USE_VENDOR=1` (mutually exclusive). Ops the target does not implement are
@@ -342,16 +349,26 @@ SDK, PyTorch, or FlagTree combinations.
 
 ### FlagGems runtime prerequisite
 
-The wheel compiles the narrow FlagGems Python dispatcher set, but a generic Triton wheel does not imply MUSA kernel support. Use the vendor `flagtree-0.5.0+mthreads3.1` wheel compatible with FlagGems 5.0.2 and expose its `triton` package and `triton/_C` directory to the process. The measured setup used:
+A generic Triton wheel does not imply MUSA kernel support. Use a FlagTree wheel
+that ships the `mthreads` backend and a FlagGems revision that matches it; the
+measured combination for the routing above is `flagtree 0.6.2a3+mthreads3.6`
+(Triton 3.6.0) with FlagGems `5.4.0rc2.post1` installed from source. Install
+FlagGems with `--no-deps` so its `triton` dependency does not replace FlagTree's
+wheel:
 
 ```bash
-PYTHONPATH=/path/to/flagtree-runtime:$PWD \
-LD_LIBRARY_PATH=/path/to/flagtree-runtime/triton/_C:/path/to/flagtree-runtime/triton:$CONDA_PREFIX/lib:/usr/local/musa/lib \
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_USE_FLAGGEMS=1 ACCELERATOR=musa \
-pytest tests/integration/ops/test_musa_flaggems.py -q
+python3 -m pip install "flagtree===0.6.2a3+mthreads3.6" \
+    --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+pip install --no-deps -e /path/to/FlagGems
 ```
 
-If that vendor compiler/runtime is unavailable, keep `FLAGOS_USE_FLAGGEMS` unset and use `backends_musa.conf`; native mudnn/muRAND and CPU fallback remain usable.
+The full procedure, including the environment variables the MUSA CI job sets, is
+in [flaggems-setup.md](flaggems-setup.md). Because the MUSA wheel registers the
+whole FlagGems Python operator set on PrivateUse1, no dispatcher subset has to be
+selected at build time and there is no `FLAGOS_USE_FLAGGEMS` opt-in to set: the
+generated `backends_musa.conf` already decides the routing, and native
+mudnn/muRAND plus CPU fallback remain usable for the ops it sends to `musa` or
+`none`.
 
 ## Build without native kernels
 

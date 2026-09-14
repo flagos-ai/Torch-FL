@@ -15,20 +15,26 @@
 """
 FlagGems routing consistency (full coverage)
 
-Every op that ``backends_flaggems.conf`` routes to ``flagos_python`` must have a
-real ``Backend::kFlagGems`` kernel generated in the C++ layer. Generated
-kernels intentionally retained for explicit per-op overrides are also allowed
-when the code generator lists them in ``flaggems_recursive_fallback``. This
-guards the whole FlagGems Python surface against drift between the runtime
-config and the codegen output.
+Every op in ``FLAGGEMS_PYTHON_OPS`` -- the FlagGems Python coverage ceiling the
+generator intersects each platform conf with -- must have a real
+``Backend::kFlagGems`` kernel generated in the C++ layer. Generated kernels
+intentionally retained for explicit per-op overrides are also allowed when the
+code generator lists them in ``flaggems_recursive_fallback``. This guards the
+whole FlagGems Python surface against drift between the coverage data and the
+codegen output.
 
-This is a pure text/parse check: it reads the shipped config and generated
+The coverage set lives in ``scripts/backend_coverage.py`` rather than in a
+``backends_flaggems.conf``: the confs were unified on one full-coverage table
+per platform, so the shared file only ever read by the generator became a data
+module. This check reads the same module the generator does.
+
+This is a pure text/parse check: it reads the coverage data and generated
 sources, so it needs no GPU, no ``flag_gems`` install, and runs in
 milliseconds on any platform.
 
 The op-name -> kernel bridge is:
 
-    conf ``op = flagos_python``
+    coverage ``"op" in FLAGGEMS_PYTHON_OPS``
       -> register.inc  ``m.impl("op", WrapperFoo);``
       -> WrapperFoo body ``... foo_dispatcher(...)``
       -> flaggems_python_kernels.cc
@@ -56,7 +62,7 @@ _SKIP_ROUTE_SET = {"special_i1_out_dispatcher"}
 
 # tests/integration/ops/<this file> -> repo root is three levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_CONF = _REPO_ROOT / "torch_fl" / "configs" / "backends_flaggems.conf"
+_COVERAGE = _REPO_ROOT / "scripts" / "backend_coverage.py"
 _REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
 _KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
 _CODEGEN = _REPO_ROOT / "scripts" / "codegen_ops.py"
@@ -80,22 +86,13 @@ def _read(path: Path) -> str:
     return path.read_text()
 
 
-def _conf_flagos_python_ops() -> set[str]:
-    """Op names that backends_flaggems.conf routes to the flagos_python slot."""
-    ops: set[str] = set()
-    for raw in _read(_CONF).splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        op, backend = (part.strip() for part in line.split("=", 1))
-        if backend == "flagos_python":
-            ops.add(op)
-    return ops
+def _module_op_set(module_path: Path, name: str) -> set[str]:
+    """Read a ``name = {...}`` / ``name = frozenset({...})`` literal out of a script.
 
-
-def _codegen_op_set(name: str) -> set[str]:
-    """Read a ``name = {"op", ...}`` set literal out of the codegen source."""
-    module = ast.parse(_read(_CODEGEN))
+    Accepts the frozen form because ``backend_coverage.py`` publishes its sets as
+    ``frozenset`` so that no caller can mutate the coverage ceiling in place.
+    """
+    module = ast.parse(_read(module_path))
     for node in ast.walk(module):
         if not isinstance(node, ast.Assign):
             continue
@@ -104,10 +101,24 @@ def _codegen_op_set(name: str) -> set[str]:
             for target in node.targets
         ):
             continue
-        value = ast.literal_eval(node.value)
-        assert isinstance(value, set) and all(isinstance(op, str) for op in value)
-        return value
-    raise AssertionError(f"{name} is missing from codegen_ops.py")
+        value = node.value
+        if isinstance(value, ast.Call):  # frozenset({...}) / set([...])
+            assert value.args, f"{name} is a bare call, not a set literal"
+            value = value.args[0]
+        ops = set(ast.literal_eval(value))
+        assert all(isinstance(op, str) for op in ops)
+        return ops
+    raise AssertionError(f"{name} is missing from {module_path.name}")
+
+
+def _conf_flagos_python_ops() -> set[str]:
+    """Op names the generator treats as FlagGems-Python coverage."""
+    return _module_op_set(_COVERAGE, "FLAGGEMS_PYTHON_OPS")
+
+
+def _codegen_op_set(name: str) -> set[str]:
+    """Read a ``name = {"op", ...}`` set literal out of the codegen source."""
+    return _module_op_set(_CODEGEN, name)
 
 
 def _override_only_ops() -> set[str]:
@@ -201,7 +212,7 @@ class TestFlagGemsConfConsistency:
         """Sanity: the conf actually routes a meaningful number of ops here."""
         ops = _conf_flagos_python_ops()
         assert len(ops) > 100, (
-            f"expected many flagos_python ops in {_CONF.name}, got {len(ops)}"
+            f"expected many flagos_python ops in {_COVERAGE.name}, got {len(ops)}"
         )
 
     @pytest.mark.anyplatform
@@ -221,7 +232,7 @@ class TestFlagGemsConfConsistency:
         missing = sorted(conf_disp - cc_disp)
         assert not missing, (
             "these ops are routed to flagos_python in "
-            f"{_CONF.name} but have NO kFlagGems kernel in "
+            f"{_COVERAGE.name} but have NO kFlagGems kernel in "
             f"{_KERNELS_CC.name} (conf/codegen drift): {missing}"
         )
 
@@ -245,7 +256,7 @@ class TestFlagGemsConfConsistency:
         orphans = sorted(cc_disp - conf_disp - override_disp)
         assert not orphans, (
             f"these kFlagGems kernels in {_KERNELS_CC.name} are not routed "
-            f"by {_CONF.name} and are not listed as override-only kernels: {orphans}"
+            f"by {_COVERAGE.name} and are not listed as override-only kernels: {orphans}"
         )
 
     @pytest.mark.anyplatform

@@ -10,7 +10,7 @@
 | PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | [PPU Installation](../vendors/ppu/installation.md) |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | [DCU Installation](../vendors/dcu/installation.md) |
 | Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64 ops | [GCU Installation](../vendors/gcu/installation.md) |
-| Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |
+| Moore Threads MUSA | `ACCELERATOR=musa` | FlagGems-first Triton kernels, native `mudnn` backend as fallback, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |
 | D-Robotics BPU | `ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | [BPU Installation](../vendors/bpu/installation.md) |
 | TsingMicro | `ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | The runtime build branch exists, but a current end-to-end installation and validation procedure is not documented. |
 

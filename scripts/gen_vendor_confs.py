@@ -234,6 +234,53 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # musa: index_add returns all zeros instead of accumulating (correctness bug);
 # randn crashes unpacking generator state (expects 2 int64, gets more). Both
 # measured on MTT S5000 with FlagGems e7b4a865 + flagtree 0.6.2a3+mthreads3.6.
+#
+# musa: add/sub/div.Tensor hit a bf16 promotion mismatch that only the .Tensor
+# overloads reach. A Python-float operand arrives as a float64 0-dim tensor --
+# ATen's wrapped-number boxing, which is how `bf16_tensor + 0.5` still yields
+# bf16 out of core TensorIterator. FlagGems' pointwise promotion does not honour
+# is_wrapped_number, so it promotes the sum to fp64 and the store then casts
+# double -> bfloat16. mthreads' LLVM lowering declares
+# `llvm.musa.float2bfloat16(float)` with no double overload, so triton dies with
+# "intrinsic call operand #0 has type double but ... expects float" and the op
+# never runs. bf16 is the only dtype affected (fp16/fp32 have a double down-cast)
+# and .Tensor the only overload (the .Scalar forms pass the number as a scalar
+# argument and are unaffected), which is why mul.Tensor -- already native -- and
+# add/sub/div.Scalar keep working. Re-measured on MTT S5000 with FlagGems
+# 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
+#
+# musa: the four in-place arithmetic ops, same bf16 wrapped-number mismatch as
+# their .Tensor counterparts above, reached through a different entry point.
+# ATen boxes `add_.Scalar` (and `_foreach_add_`, and so AdamW's foreach path)
+# onto `add_.Tensor`, so routing only the out-of-place op leaves every in-place
+# caller on the failing FlagGems kernel -- measured: `torch._foreach_add_(x, 1.0)`
+# on bf16 logs `[flagos dispatch] add_.Tensor -> flagos_python` and then dies in
+# triton with "intrinsic call operand #0 has type double but
+# llvm.musa.float2bfloat16 expects float". mudnn has real in-place Binary
+# kernels, so the route back is free. `mul_.Tensor` is here for the same reason
+# even though its out-of-place form is already native.
+#
+# musa: _conj is here for a contract reason, not a compile one. `conj` in ATen is
+# a lazy view -- it sets the Conjugate bit and leaves the storage alone, which
+# tests/integration/test_math_bits_contract.py pins. flag_gems' `_conj` is a real
+# kernel that materializes the conjugated values, so registering it on
+# PrivateUse1 replaces the lazy view with an eager copy and `is_conj()` comes
+# back False. mudnn has no Conjugate-bit path either, so the correct route is
+# `none`: leave the op unregistered and let ATen's composite implement it. Being
+# in this set does both -- it is dropped from the FlagGems registration list and,
+# having no native kernel, route() falls through to `none`.
+#
+# musa: sort is here for what flag_gems' kernel does *inside* itself, not for what
+# it computes. Its radix path casts the cumulative histogram to uint32
+# (flag_gems/ops/sort.py, `ex_cumsum_bins.to(torch.uint32)`), and mudnn's
+# Unary::CAST has no UInt16/32/64 case -- MudnnSupportsDtype stops at kBool -- so
+# the cast raises "MudnnCopy: unsupported dtype Long -> UInt32" before the sort
+# runs at all. mudnn's own sort is a real kernel, measured here to return the
+# right values *and* indices for the shape the profiler contract uses
+# (torch.randn(16)), so routing the op back loses no coverage. sort.stable is the
+# same kernel through the stable entry point, and argsort/msort are composites
+# over sort, so this one entry fixes all four. Measured on MTT S5000 with FlagGems
+# 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
         "pow.Scalar",
@@ -243,10 +290,20 @@ NATIVE_TRITON_GAPS = {
         "rsqrt_",
     },
     "musa": {
+        "_conj",
+        "add.Tensor",
+        "add_.Tensor",
+        "div.Tensor",
+        "div_.Tensor",
         "index_add",
         "index_add_",
+        "mul_.Tensor",
         "randn",
         "randn_like",
+        "sort",
+        "sort.stable",
+        "sub.Tensor",
+        "sub_.Tensor",
     },
 }
 

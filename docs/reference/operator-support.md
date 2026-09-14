@@ -345,6 +345,79 @@ This is targeted dtype evidence for CANN 9.0, not a claim that every ACLNN
 operator accepts every ACL dtype. Complex and quantized dtypes remain outside
 this cohort.
 
+### MUSA FlagGems routing restored, in-place arithmetic routed back to mudnn (2026-09-14)
+
+The MUSA FlagGems registration generator was restored
+(`scripts/codegen_musa_flaggems.py` -> `csrc/aten/backends/musa/generated/musa_flaggems_register.inc`,
+included from `csrc/aten/register.cc`), so all 482 FlagGems Python ops are again
+registered on MUSA's PrivateUse1 device and the wrappers route through the
+FlagGems Python dispatcher slot. MUSA moves from 158 to **515 registered ops**
+and from 122 to **468 `flaggems` routes**; `musa` route count goes 36 -> 47 and
+`none` 1878 -> 1521. The restored path is the same one the `d0e2d1a` full-coverage
+unification assumed: without it, `FLAGGEMS_PYTHON_OPS` was a coverage ceiling
+MUSA could not reach.
+
+**Ops that do not stay on FlagGems.** FlagGems is not patched anywhere. Fourteen
+ops are listed in `NATIVE_TRITON_GAPS["musa"]` and route back to the mudnn native
+kernel, with three distinct root causes:
+
+- **bf16 wrapped-number promotion (11 ops).** `add.Tensor`, `sub.Tensor`,
+  `div.Tensor`, and their in-place forms, plus `mul_.Tensor`. ATen boxes a
+  Python-float operand into a float64 0-dim tensor (`is_wrapped_number`);
+  FlagGems' pointwise promotion does not honour that flag, promotes the result to
+  fp64, and mthreads' LLVM lowering declares `llvm.musa.float2bfloat16(float)`
+  with no double overload. The four in-place entries are the ones that matter at
+  runtime: ATen boxes `add_.Scalar` — and `_foreach_add_`, and therefore AdamW's
+  foreach step — onto `add_.Tensor`, so routing only the out-of-place op leaves
+  every in-place caller on the failing kernel.
+- **`randn`, `randn_like`.** FlagGems crashes unpacking generator state. The
+  native muRAND routes already exist and were measured on 2026-08-17.
+- **`sort`, `sort.stable`.** FlagGems' radix sort casts its histogram to uint32
+  internally, and mudnn's `Unary::CAST` has no UInt16/32/64 case, so the cast
+  raises before the sort runs. mudnn's own sort is a real kernel; argsort and
+  msort decompose onto sort, so one entry covers all four.
+
+`_conj`, `index_add`, and `index_add_` are in the same gap set but route to
+`none`: mudnn has no kernel for them either, so the call reaches ATen's CPU
+fallback rather than a registered-but-incorrect dispatcher slot. `_conj` is a
+contract case, not a compile one — ATen's `conj` is a lazy view that sets the
+Conjugate bit, and FlagGems materializes it, which breaks
+`tests/integration/test_math_bits_contract.py`'s `is_conj()` assertion.
+
+**Measured on the eight-device MTT S5000 host** with CPU PyTorch 2.10.0, mudnn
+v3300, FlagGems `4d9c34775` (5.4.0rc2.post1+g4d9c34775) and flagtree
+`0.6.2a3+mthreads3.6` (Triton 3.6, backend `mthreads`), running every group of
+`.github/configs/musa.yml` locally:
+
+- `tests/integration/ops/test_musa_dispatch.py -m musa`: **104 passed, 1 skipped**.
+- `tests/integration/test_factory_ops.py`: **46 passed**; `test_amp_contract.py -m amp`:
+  **27 passed**; `test_math_bits_contract.py -m math_bits`: **12 passed**;
+  `test_profiler_contract.py -m profiler`: **10 passed, 1 skipped, 1 xpassed**.
+- The operator cohort in a wheel-only workspace: **477 passed, 15 skipped, 512 deselected,
+  2 xfailed, 1 xpassed**; `test_rng_dispatch.py -m main_ops`: **80 passed, 37 deselected**.
+- Routing was confirmed at runtime with `FLAGOS_LOG_DISPATCH=1`: `add_.Scalar`,
+  `_foreach_add_.Scalar`, `sub_.Scalar`, `mul_.Scalar`, and `div_.Scalar` all
+  resolve to `[flagos dispatch] <op>.Tensor -> musa`, and the numeric results match
+  the CPU reference.
+
+**Root-cause evidence for the routes.** The bf16 failure was reproduced locally
+by forcing the route back with `FLAGOS_OP_add__Tensor=flaggems`:
+`test_autocast_fp32_policy[dtype1]` then fails with
+`RuntimeError: failed to translate module to LLVM IR ... intrinsic call operand #0
+has type double but "llvm.musa.float2bfloat16" expects float`, and passes with the
+shipped `add.Tensor = musa` route. That is the same failure the remote MUSA CI
+reported on the pre-fix revision of this branch.
+
+`tests/integration/ops/test_flaggems_conf_consistency.py` was repointed from the
+deleted `torch_fl/configs/backends_flaggems.conf` to `scripts/backend_coverage.py`,
+which is where `d0e2d1a` moved `FLAGGEMS_PYTHON_OPS`. Three of its assertions
+(`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
+`test_counts_match`) still fail on a pre-existing drift: `addmm` and `bmm` are
+listed in `FLAGGEMS_CPP_OPS` while their dispatchers are registered with
+`Backend::kFlagGems`. The same three fail at `400cf865`, before `d0e2d1a`, so the
+drift is not introduced here. It is invisible to CI because the wheel-only
+workspace has no `scripts/` or `csrc/` and the module skips.
+
 ### MUSA native empty-tensor handling (2026-08-30)
 
 The native mudnn kernels now handle zero-element tensors without a CPU fallback. mudnn v3300 rejects zero-element operands for its Unary, Binary, and Reduce modes, returning `NOT_SUPPORTED`; the generated kernels therefore return an already device-allocated empty output without launching. Whole-tensor `sum`, `mean`, and `prod` additionally fill their CPU-defined identities (`0`, `nan`, and `1`) on the device when the input is empty. This covers the zero-length `narrow` autograd path from issue #214, where `square().sum()` previously failed in the pow kernel and then in the reduction.
@@ -395,6 +468,14 @@ compiler sees — and every accelerated route is required to be in it.
 | Ascend 910 | 248 | 126 | 1662 | 374 / 2036 (18%) |
 | Enflame GCU S60 | 88 | 64 | 1884 | 152 / 2036 (7%) |
 | MTT S5000 (MUSA) | 122 | 36 | 1878 | 158 / 2036 (7%) |
+
+**The MUSA row was superseded on 2026-09-14** — the MUSA FlagGems registration
+generator was restored, taking MUSA to 468 `flaggems` / 47 `musa` / 1521 `none`
+and 515 registered ops. See "MUSA FlagGems routing restored, in-place arithmetic
+routed back to mudnn (2026-09-14)" below. The Ascend and GCU numbers are the ones
+committed in their shipped configurations; re-running `gen_vendor_confs.py`
+today would move Ascend to 243 `flaggems` / 131 `ascend`, a pre-existing drift
+that predates this work and is out of scope here.
 
 The FlagGems count differs per platform because it is now the intersection of the
 shared coverage set with that platform's registrations, not the shared set
@@ -532,6 +613,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-14 | MTT S5000 (8 devices) | MUSA FlagGems routing and in-place arithmetic fallback | Restored the MUSA FlagGems registration generator, taking MUSA from 158 to 515 registered ops and from 122 to 468 `flaggems` routes (`musa` 36 -> 47, `none` 1878 -> 1521). Moved 14 ops into `NATIVE_TRITON_GAPS["musa"]` so they fall back to mudnn instead: `add/sub/div.Tensor` and their in-place forms plus `mul_.Tensor` (bf16 wrapped-number promotion reaches `llvm.musa.float2bfloat16` with a double operand), `randn`/`randn_like`, `sort`/`sort.stable`, and `_conj`/`index_add`/`index_add_`, which route to `none` because mudnn has no kernel for them. FlagGems is not patched. Ascend, GCU, DCU, MetaX and PPU rows are **not revalidated** by this change and no FlagGems route was altered for them. | Every group of `.github/configs/musa.yml` run locally on hardware: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 477 passed/15 skipped/512 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. The bf16 gap was reproduced causally with `FLAGOS_OP_add__Tensor=flaggems`, which reproduces the remote CI's `failed to translate module to LLVM IR` on `test_autocast_fp32_policy[dtype1]` and passes on the shipped route. Generator idempotent (`codegen_mudnn.py` twice, byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing failure (ascend/gcu conf staleness, unrelated). Three pre-existing `test_flaggems_conf_consistency.py` failures also present at `400cf865`. |
 | 2026-09-11 | None (CPU-only host) | Unified MetaX confs (refactor/unified-vendor-confs) | Collapsed `backends_metax_flaggems.conf` and `backends_metax_flaggems_cpp.conf` into a single `backends_metax.conf`. The 17 on-device-verified C++ routes are now in the file unconditionally; a build without `FLAGGEMS_KERNEL=ON` degrades them to the boxing kernel via `Dispatcher::GetFn` instead of raising. `METAX_CPP_MEASURED` in `gen_vendor_confs.py` records the measured set explicitly since the file it was formerly recovered from no longer exists. `mm` remains on the boxing kernel (MetaX C550 shared-memory limit). `_select_backend_config()` now routes both `FLAGOS_USE_FLAGGEMS` and `FLAGOS_USE_FLAGGEMS_CPP` to the same `backends_metax.conf` under `FLAGOS_METAX_BOXING=1`. **All hardware rows not revalidated.** | Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), `tests/unit/test_gen_vendor_confs.py` passes with updated test names. |
 | 2026-09-10 | None (CPU-only host) | Full-coverage MUSA/GCU/Ascend and boxing configurations | Converted the MUSA, GCU, Ascend and boxing configurations to full coverage: all 2036 routable ops listed exactly once under `flaggems_cpp` / `flaggems` / `<vendor>` / `none`, priority in that order, generated by `scripts/gen_vendor_confs.py`. Every accelerated route is now gated on the platform's real PrivateUse1 registration set, read from the generated `*_register.inc` files, because CUDA-measured FlagGems coverage is a ceiling and not a per-platform routing set (Ascend 374, GCU 152, MUSA 158 registered of 2036). MetaX and Tsingmicro register the full generated list, so `none` would raise there instead of boxing to `cpu_fallback`; Tsingmicro's configuration stays hand-written. **All hardware rows not revalidated.** | No route measured. `flaggems_overload_survey.py` cannot run on this host: Triton 3.7.1 exposes only `amd`/`nvidia` backends and `import flag_gems` fails. Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), routing equals registration exactly on all three vendors, `tests/unit/test_gen_vendor_confs.py`: 27 passed, `tests/unit/`: 303 passed, 96 skipped, 2 pre-existing profiler failures (`CXXABI_1.3.15` libstdc++ skew) unrelated to routing. |
 | 2026-08-31 | MetaX C550 (8 devices) | FlagGems qualname/cohort skew | Rerouted 10 FlagGems entries whose generated Python qualnames are absent from the current FlagGems tree to the CUDA boxing path in the generic, DCU, and MetaX FlagGems configurations. The generic FlagGems cohort was not revalidated on the other platforms. | On MetaX, `x[None]`, `binary_cross_entropy_with_logits`, and the affected dispatch paths now resolve through CUDA boxing; the issue #218 `mul_` reproducer still passes. `special_bessel_j1` retains a pre-existing MACA boxing failure unrelated to FlagGems. The 10 routes were not measured by the standard overload survey. |

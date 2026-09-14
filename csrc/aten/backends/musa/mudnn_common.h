@@ -296,6 +296,13 @@ void MudnnCopy(const at::Tensor& src, at::Tensor& dst);
 // Issues a mudnn op on the shared stream of `guard_tensor`'s device and waits
 // for it, mirroring EXEC_TOPSATEN_CMD's synchronous contract.
 //
+// Ordering against the other producers on that stream comes from the stream
+// itself, not from this macro: Triton kernels launched through
+// flagtree_shim.get_musa_current_raw_stream land on the same
+// GetDefaultMusaStream() queue, so the trailing synchronize waits for their
+// writes as well as for this op's. That only holds while the stream really is a
+// single process-wide value -- see musa_stream.h.
+//
 // `op_expr` is the full call, e.g. `op.Run(_mudnn_h, t_out.get(), t_in.get())`,
 // with `_mudnn_h` naming the cached handle. Spelling it out (rather than taking
 // the op and args separately like EXEC_TOPSATEN_CMD) keeps the macro usable for

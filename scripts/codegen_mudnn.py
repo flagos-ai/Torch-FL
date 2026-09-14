@@ -127,6 +127,20 @@ OPS = {
     # ---- binary_alpha: ADD_ALPHA/SUB_ALPHA carry aten's `alpha` ----
     "add.Tensor": ("binary_alpha", "ADD_ALPHA"),
     "sub.Tensor": ("binary_alpha", "SUB_ALPHA"),
+    # ---- binary_inplace / binary_alpha_inplace: write back into self ----
+    # These exist as the fallback for the four in-place arithmetic ops, whose
+    # FlagGems pointwise kernel cannot compile on mthreads: FlagGems promotes a
+    # bf16 operand against a Python-number operand to fp64, and mthreads' LLVM
+    # lowering only declares `float2bfloat16(float)`. Routed to `musa` in
+    # NATIVE_TRITON_GAPS' spirit rather than patching FlagGems.
+    #
+    # `mul_.Scalar` and `div_.Scalar` need no entry: ATen boxes the Scalar
+    # overloads into these Tensor ones, so a single kernel per op covers both
+    # forms -- measured, `a.mul_(2.0)` dispatches as `mul_.Tensor`.
+    "add_.Tensor": ("binary_alpha_inplace", "ADD_ALPHA"),
+    "sub_.Tensor": ("binary_alpha_inplace", "SUB_ALPHA"),
+    "mul_.Tensor": ("binary_inplace", "MUL"),
+    "div_.Tensor": ("binary_inplace", "TRUEDIV"),
     # ---- binary_cmp: bool out ----
     "eq.Tensor": ("binary_cmp", "EQ"),
     "ne.Tensor": ("binary_cmp", "NE"),
@@ -520,6 +534,131 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 """
+)
+
+# In-place binary. Three of the out-of-place prologue's rules change once the
+# output is `self` itself, and each one is a measured difference from
+# `_BINARY_PROLOGUE` rather than a stylistic choice:
+#
+#   - The result shape is self's shape, never the broadcast shape. `self` is
+#     not expanded and does not need to be: aten requires self's shape to be
+#     the broadcast one, and expanding `other` up to it is what validates that.
+#   - A Python number operand arrives as a 0-dim *wrapped* tensor, and
+#     TensorIterator ignores a wrapped number's dtype for promotion unless the
+#     other operand is integral -- then it falls back to the default dtype.
+#     That is why `bf16.add_(1.0)` stays bf16 while `int64.add_(1.0)` computes
+#     in float32. `at::result_type` carries no wrapped-number rule, so using it
+#     alone is exactly the defect these kernels replace: FlagGems promoted the
+#     bf16 operand to fp64 and mthreads' LLVM lowering has no
+#     `float2bfloat16(double)`, so the whole module failed to translate.
+#   - When the compute dtype still differs from self's (a float64 operand
+#     against a float32 self) the result is narrowed on the way back, which is
+#     what aten does too. `c10::canCast` rejects the pairings aten rejects --
+#     float -> integral, complex -> real, non-bool -> bool -- so
+#     `int64.add_(1.0)` raises here with aten's message instead of silently
+#     truncating into self.
+_BINARY_INPLACE_PROLOGUE = """\
+  // Before anything touches `other`: mudnn rejects zero-element operands
+  // (NOT_SUPPORTED), and in-place arithmetic on an empty self is a no-op, so
+  // neither the conversion nor the run should happen.
+  if (self.numel() == 0) return self;
+  // The dtype rule aten's TensorIterator applies to a wrapped-number operand,
+  // reproduced here rather than delegated to at::result_type: the operand
+  // contributes its own scalar type, except that a floating one contributes the
+  // *default* dtype instead of double. Measured on CPU, this is what makes
+  // `bf16.add_(1.0)` compute in float32 and narrow back to bfloat16 (rather
+  // than raising), `int64.add_(1)` stay int64, and `int64.add_(1.0)` promote to
+  // float32 and then fail the cast check below -- aten's own error for it.
+  auto other_dtype = other.scalar_type();
+  if (other.unsafeGetTensorImpl()->is_wrapped_number() &&
+      at::isFloatingType(other_dtype)) {{
+    other_dtype = c10::get_default_dtype_as_scalartype();
+  }}
+  auto result_dtype = c10::promoteTypes(self.scalar_type(), other_dtype);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, self.scalar_type()),
+      "result type ", result_dtype,
+      " can't be cast to the desired output type ", self.scalar_type());
+  // A non-device operand (the wrapped number, a CPU tensor) has to be moved
+  // before mudnn can read it; expand() to self's shape stays a view, and mudnn
+  // reads 0-strides correctly, so broadcasting costs no allocation.
+  auto other_c = other.to(self.device(), result_dtype).expand(self.sizes());
+  musa_ops::mudnn::Binary op;
+  op.SetMode(musa_ops::mudnn::Binary::Mode::{mode});
+"""
+
+# The two dispatch arms, which both end in `return self;`. Split out of the
+# prologue so the alpha variant can set alpha between them: the alpha has to be
+# configured on `op` before either arm runs it, and putting the SetAlpha block
+# after the arms would leave it unreachable.
+_BINARY_INPLACE_BODY = """\
+  if (self.scalar_type() == result_dtype) {{
+    // The common case: compute straight into self's storage. mudnn's Binary is
+    // elementwise, so out aliasing in1 is safe -- every element is read before
+    // the same element is written, including under a broadcast.
+    musa_ops::MudnnTensorWrapper t_self(self);
+    musa_ops::MudnnTensorWrapper t_other(other_c);
+    EXEC_MUDNN_CMD(
+        "{at_op}", self,
+        op.Run(_mudnn_h, t_self.get(), t_self.get(), t_other.get()));
+    return self;
+  }}
+  // The computation widens; run into a temp of the compute dtype and narrow on
+  // the way back.
+  auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  auto self_wide = self.to(result_dtype);
+  musa_ops::MudnnTensorWrapper t_self(self_wide);
+  musa_ops::MudnnTensorWrapper t_other(other_c);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  EXEC_MUDNN_CMD(
+      "{at_op}", self,
+      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
+  self.copy_(out);
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+"""
+
+T_BINARY_INPLACE = (
+    """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other) {{
+  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+      !musa_ops::{dtype_pred}(other.scalar_type())) {{
+    auto cpu = self.cpu();
+    cpu.{at_op}(other.cpu());
+    self.copy_(cpu);
+    return self;
+  }}
+"""
+    + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_BODY
+)
+
+T_BINARY_ALPHA_INPLACE = (
+    """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other,
+                    const at::Scalar& alpha) {{
+  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+      !musa_ops::{dtype_pred}(other.scalar_type())) {{
+    auto cpu = self.cpu();
+    cpu.{at_op}(other.cpu(), alpha);
+    self.copy_(cpu);
+    return self;
+  }}
+"""
+    + _BINARY_INPLACE_PROLOGUE
+    + """\
+  // Before either arm runs `op`. mudnn's Binary carries the alpha as an untyped
+  // Scalar, so it is narrowed here to the compute dtype's C type; leaving it
+  // unset would silently compute with mudnn's default of 1.
+  if (at::isIntegralType(result_dtype, /*includeBool=*/true)) {{
+    op.SetAlpha(alpha.to<int64_t>());
+  }} else {{
+    op.SetAlpha(alpha.to<double>());
+  }}
+"""
+    + _BINARY_INPLACE_BODY
 )
 
 T_BINARY_CMP = (
@@ -2376,6 +2515,8 @@ CATEGORIES = {
     "unary_two_pass": T_UNARY_TWO_PASS,
     "binary": T_BINARY,
     "binary_alpha": T_BINARY_ALPHA,
+    "binary_inplace": T_BINARY_INPLACE,
+    "binary_alpha_inplace": T_BINARY_ALPHA_INPLACE,
     "binary_cmp": T_BINARY_CMP,
     "unary_scalar": T_UNARY_SCALAR,
     "unary_scalar_alpha": T_UNARY_SCALAR_ALPHA,
@@ -2435,6 +2576,8 @@ ARITHMETIC_CATEGORIES = {
     "unary_two_pass",
     "binary",
     "binary_alpha",
+    "binary_inplace",
+    "binary_alpha_inplace",
     "unary_scalar",
     "unary_scalar_alpha",
     "matmul",
@@ -2479,6 +2622,8 @@ CATEGORY_CLASS = {
     "unary_two_pass": "Unary",
     "binary": "Binary",
     "binary_alpha": "Binary",
+    "binary_inplace": "Binary",
+    "binary_alpha_inplace": "Binary",
     "binary_cmp": "Binary",
     "unary_scalar": "Unary",
     "unary_scalar_alpha": "Unary",
@@ -2548,7 +2693,9 @@ FILE_HEADER = """\
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/result_type.h>
+#include <c10/core/DefaultDtype.h>
 #include <c10/core/Scalar.h>
+#include <c10/core/ScalarType.h>
 #include <algorithm>
 #include <limits>
 #include <string>
