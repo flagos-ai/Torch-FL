@@ -162,6 +162,12 @@ ensure_system_prerequisites() {
   exit 1
 }
 
+# Sets VENDOR_PYTHON. The interpreter is returned through that global rather than
+# on stdout: everything this function runs — the venv bootstrap, pip, the CUDA
+# wheel download — writes to stdout, and a command substitution would fold all of
+# it into the interpreter path (which fails as `File name too long` on the first
+# exec). Progress therefore stays visible in the job log and cannot reach the
+# variable.
 bootstrap_vendor_python() {
   # The FlagGems C++ operators are compiled by this interpreter and imported by
   # the test environment, so both have to run the same Python minor version or
@@ -192,7 +198,7 @@ bootstrap_vendor_python() {
   "$vendor_python" -m pip install --upgrade pip
   pip_retry "$vendor_python" --index-url "$VENDOR_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
-  printf '%s' "$vendor_python"
+  VENDOR_PYTHON="$vendor_python"
 }
 
 VENDOR_PYTHON="$(find_image_vendor_python)"
@@ -217,9 +223,13 @@ if [[ -n "$VENDOR_PYTHON" ]]; then
 else
   VENDOR_SOURCE="bootstrap"
   ensure_system_prerequisites
-  VENDOR_PYTHON="$(bootstrap_vendor_python)"
+  bootstrap_vendor_python
 fi
 echo "Accelerator PyTorch source: $VENDOR_SOURCE ($VENDOR_PYTHON)"
+if [[ ! -x "$VENDOR_PYTHON" ]]; then
+  echo "::error::The accelerator interpreter resolved to '$VENDOR_PYTHON', which is not an executable file"
+  exit 1
+fi
 VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
 import json
 from pathlib import Path
@@ -347,6 +357,9 @@ echo "CUDA assets staged: $(find "$CUDA_ASSETS_DIR" -maxdepth 1 -type f -name '*
 # is required to), so both can compile and import the same extension modules.
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
 
+# Sets TEST_PYTHON, for the same reason bootstrap_vendor_python sets
+# VENDOR_PYTHON: the uv and apt-get branches below both write to stdout, and
+# capturing them would return a transcript instead of an interpreter path.
 install_test_python() {
   if command -v uv >/dev/null 2>&1; then
     echo "Installing Python $FLAGTREE_PYTHON_VERSION with uv..."
@@ -354,7 +367,7 @@ install_test_python() {
       local installed
       installed="$(uv python find "$FLAGTREE_PYTHON_VERSION" 2>/dev/null || true)"
       if [[ -n "$installed" && -x "$installed" ]] && python_matches_version "$installed"; then
-        printf '%s' "$installed"
+        TEST_PYTHON="$installed"
         return 0
       fi
     fi
@@ -367,13 +380,13 @@ install_test_python() {
   apt-get update -qq
   apt-get install -y -qq "python$FLAGTREE_PYTHON_VERSION" \
     "python$FLAGTREE_PYTHON_VERSION-venv" "python$FLAGTREE_PYTHON_VERSION-dev"
-  command -v "python$FLAGTREE_PYTHON_VERSION"
+  TEST_PYTHON="$(command -v "python$FLAGTREE_PYTHON_VERSION")"
 }
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
 TEST_PYTHON="$(select_test_python || true)"
 if [[ -z "$TEST_PYTHON" ]]; then
-  if ! TEST_PYTHON="$(install_test_python)"; then
+  if ! install_test_python; then
     echo "::error::Python $FLAGTREE_PYTHON_VERSION is required by FlagTree $FLAGTREE_VERSION"
     exit 1
   fi
