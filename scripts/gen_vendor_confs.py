@@ -163,6 +163,24 @@ BOXING_PLATFORMS = {
 }
 BOXING_FALLBACK = "cuda"
 
+# Generated conf notes for platform-specific FlagGems fallbacks. Keep these in
+# the generator so regeneration preserves the measured diagnosis and upstream
+# issue reference instead of erasing a hand-edited comment.
+BOXING_GAP_NOTES = {
+    "dcu": (
+        "mm/bmm are pinned to cuda: FlagGems issue #6227 (first profiled",
+        "mm hangs until the 50-minute CI timeout on the DCU HCU backend).",
+        "mse_loss is pinned to cuda: FlagGems issue #6221 (mse_loss_backward",
+        "is not implemented on DCU).",
+        "transpose.int is pinned to cuda: FlagGems issue #6219 (transpose is",
+        "not implemented in the FlagGems module on DCU).",
+    ),
+    "ppu": (
+        "mm/bmm are pinned to cuda: FlagGems issue #6225 (PPU triton",
+        "rejects the _hygon kernel's num_ldmatrixes kwarg).",
+    ),
+}
+
 # Where the registration .inc files live, relative to the repo root.
 CSRC_DIR = REPO_ROOT / "csrc/aten"
 
@@ -516,6 +534,8 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
         f"# Coverage: {covered}/{total} ops accelerated "
         f"({100.0 * covered / total:.1f}%)",
     ]
+    if platform in BOXING_GAP_NOTES:
+        lines += ["#"] + [f"# Note: {line}" for line in BOXING_GAP_NOTES[platform]]
     for backend in ("flaggems_cpp", "flaggems", "tileops", vendor, "none"):
         if backend in counts:
             lines.append(f"#   {backend:<13} {counts[backend]:>5}")
