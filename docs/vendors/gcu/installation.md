@@ -34,10 +34,10 @@ Build flags:
 - `ACCELERATOR=gcu`: selects the GCU build path and enables `GCU_KERNEL=ON`
 - `GCU_KERNEL=ON`: compiles generated `topsaten` operator kernels (automatic when `ACCELERATOR=gcu`)
 - `CUDA_KERNEL=OFF`: automatically disabled (no CUDA runtime exists on GCU)
-- `FLAGGEMS_PYTHON=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration
+- `FLAGGEMS_PYTHON=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration. It is on by default under `ACCELERATOR=gcu`, but the environment variable is applied afterwards, so export `FLAGGEMS_PYTHON=1` explicitly if you also set the other `*_KERNEL` flags in the same shell
 - `--no-build-isolation`: ensures the build uses your installed CPU torch
 
-The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning.
+The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning. `scripts/codegen/codegen_gcu_flaggems.py` separately writes the FlagGems wrapper registrations into `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`; both generators must be re-run when the routing sets change.
 
 ### Codegen validation
 
@@ -113,19 +113,33 @@ GCU device pointers are device-scoped (no unified addressing): a pointer only re
 
 Unlike `mudnn` (MUSA), `topsaten` does not honor strides on non-contiguous inputs. Generated kernels call `.contiguous()` where necessary to materialize a contiguous copy before passing to `topsaten`.
 
-## Optional: FlagGems via Triton-GCU
+## FlagGems via the enflame Triton backend
 
-FlagGems can provide Triton-compiled kernels when the Enflame `triton_gcu` plugin and `/opt/triton_gcu` toolchain are installed. GCU builds compile the FlagGems Python caller alongside native topsaten wrappers, while the backend configuration selects which implementation runs for each exact ATen overload.
+FlagGems provides Triton-compiled kernels for the operators `topsaten` does not
+cover, and the generated `backends_gcu.conf` routes to them by default wherever
+FlagGems can execute the operator correctly on GCU. GCU builds compile the
+FlagGems Python caller alongside the native `topsaten` wrappers, and the backend
+configuration selects which implementation runs for each exact ATen overload.
 
-The GCU compatibility layer prepares the Triton-GCU runtime but does not call `flag_gems.enable()` to register a competing PrivateUse1 implementation. This keeps one wrapper per overload and allows native and FlagGems RNG paths to share the same per-device seed/offset stream.
+The FlagGems path needs a vendor Triton backend that carries the `enflame`
+backend — `flagtree==0.6.1+enflame3.6` in CI, Enflame's older `triton_gcu`
+plugin elsewhere — plus FlagGems itself. Without one, no `flaggems` route can
+execute.
 
-The FlagGems path remains experimental and requires validation on the target S60 software stack.
+The GCU compatibility layer prepares the vendor Triton runtime but does not call
+`flag_gems.enable()` to register a competing PrivateUse1 implementation. This
+keeps one wrapper per overload and allows native and FlagGems RNG paths to share
+the same per-device seed/offset stream.
+
+Installation, routing, and operator-specific failure modes are documented in
+[flaggems-setup.md](flaggems-setup.md); the measured per-operator results are in
+[flaggems-test-results.md](flaggems-test-results.md).
 
 ## Limitations
 
 ### CI scope
 
-[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite, the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, and the shared `tests/integration/test_amp_contract.py`. FlagGems markers are excluded because the CI image does not install the vendor Triton stack. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
+[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite twice — once on the `anyplatform`/`main_ops` cohort with the FlagGems markers excluded, once on the `flaggems and main_ops` cohort — plus the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, the shared `tests/integration/test_amp_contract.py`, the shared `tests/integration/test_math_bits_contract.py`, and `tests/integration/test_compile.py`. `.github/scripts/set_env_gcu.sh` provisions FlagTree and FlagGems into the isolated venv for both the build and integration stages, so the FlagGems cohort runs against the real Triton stack rather than being excluded. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
 
 ### Distributed support not validated
 

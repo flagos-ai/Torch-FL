@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -124,12 +126,21 @@ class TestNegDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, neg routes to flagos_python."""
+        """neg dispatches to whatever backend this platform's conf lists.
+
+        FlagGems-first is the generated default, but it is not unconditional:
+        GCU routes neg to its native ``gcu`` kernel because the FlagGems kernel
+        carries a 64-bit type the GCU300 front end rejects for an int64 operand
+        (see NATIVE_TRITON_GAPS["gcu"]). Asserting the conf's own value keeps
+        this test meaningful on every platform rather than pinning it to the one
+        it was written on.
+        """
         result = _run_neg_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] neg -> flagos_python" in result.stderr
+        expected = routed_backend("neg")
+        assert f"[flagos dispatch] neg -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops

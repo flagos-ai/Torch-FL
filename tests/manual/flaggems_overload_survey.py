@@ -5,12 +5,14 @@
 This is a manual hardware survey, not a pytest test. CI does not invoke files in
 ``tests/manual``.
 
-The unit of measurement is an active, unique ``flagos_python`` overload from the
-platform conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has
-its own ``backends_<platform>.conf``). Each overload runs in a fresh child process
-through ``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real
-ATen schema and are first validated on CPU; device results are then compared with
-the same overload on CPU.
+The unit of measurement is an active, unique FlagGems overload in the platform
+conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has its own
+``backends_<platform>.conf``) -- a `flaggems` route, or the legacy
+`flagos_python` spelling the retired ``backends_flaggems.conf`` used. Each
+overload runs in a fresh child process through
+``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real ATen
+schema and are first validated on CPU; device results are then compared with the
+same overload on CPU.
 
 Two support levels are reported:
 
@@ -73,6 +75,13 @@ PROFILES = (
 
 HARNESS_VERSION = 4
 
+# Route spellings that mean "the FlagGems Python/Triton path". `flagos_python`
+# is the name the retired backends_flaggems.conf used; the per-platform confs
+# generated from backend_coverage.py spell it `flaggems`. Accepting both is what
+# lets this survey measure a platform's real routes -- with only the legacy
+# spelling it reported every platform conf as having nothing to test.
+FLAGGEMS_ROUTES = frozenset({"flagos_python", "flaggems"})
+
 
 def active_routes(path: Path) -> list[str]:
     routes = set()
@@ -81,7 +90,7 @@ def active_routes(path: Path) -> list[str]:
         if not line or "=" not in line:
             continue
         op, backend = (part.strip() for part in line.split("=", 1))
-        if backend == "flagos_python":
+        if backend in FLAGGEMS_ROUTES:
             routes.add(op)
     return sorted(routes)
 

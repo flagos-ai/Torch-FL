@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -137,12 +139,21 @@ class TestSumDimDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, sum.dim_IntList routes to flagos_python."""
+        """sum.dim_IntList dispatches to whatever backend this platform's conf lists.
+
+        FlagGems-first is the generated default, but it is not unconditional:
+        GCU routes sum.dim_IntList to its native ``gcu`` kernel because the
+        FlagGems kernel carries a 64-bit type the GCU300 front end rejects for
+        an int64 operand (see NATIVE_TRITON_GAPS["gcu"]). Asserting the conf's
+        own value keeps this test meaningful on every platform rather than
+        pinning it to the one it was written on.
+        """
         result = _run_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] sum.dim_IntList -> flagos_python" in result.stderr
+        expected = routed_backend("sum.dim_IntList")
+        assert f"[flagos dispatch] sum.dim_IntList -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops

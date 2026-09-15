@@ -456,6 +456,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_GCU_KERNEL)
     #include "backends/gcu/generated/gcu_register.inc"
     #endif
+    // Registered whenever the FlagGems Python path is compiled in, not only
+    // under FLAGOS_GCU_KERNEL: backends_gcu.conf routes ops to FlagGems by
+    // default, so these kFlagGems dispatcher slots must exist or those routes
+    // raise "backend not registered". Same contract as the MUSA include below.
+    #if defined(FLAGOS_FLAGGEMS_PYTHON)
+    #include "backends/gcu/generated/gcu_flaggems_register.inc"
+    #endif
   #elif defined(USE_ASCEND)
     #include "backends/ascend/generated/ascend_register.inc"
   #elif defined(USE_MUSA)

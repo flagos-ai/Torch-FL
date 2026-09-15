@@ -27,6 +27,7 @@ Run every script from the repository root; the examples below assume that.
 | `codegen_gcu.py` | Enflame GCU (topsaten) backend sources, and the matching conf append. | `python scripts/codegen/codegen_gcu.py [--category NAME] [--no-conf]` |
 | `codegen_mudnn.py` | Moore Threads MUSA (mudnn) backend sources, and the matching conf append. | `python scripts/codegen/codegen_mudnn.py [--category NAME] [--no-conf]` |
 | `codegen_musa_flaggems.py` | The MUSA FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_musa_flaggems.py [--check]` |
+| `codegen_gcu_flaggems.py` | The GCU FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_gcu_flaggems.py [--check]` |
 | `codegen_autograd.py` | `csrc/aten/generated/variable_type.cc` — the `AutogradPrivateUse1` layer for ops a backend re-owns with a fused kernel. | `python scripts/codegen/codegen_autograd.py` |
 | `codegen_tileops.py` | `csrc/aten/generated/tileops_python_kernels.cc`, `torch_fl/tileops/generated/` (routes, shims), `tests/integration/ops/test_tileops_generated.py`, and the `TILEOPS_OPS` block in `backend_coverage.py`. | `python scripts/codegen/codegen_tileops.py [--check]` |
 | `gen_vendor_confs.py` | `torch_fl/configs/backends_<vendor>.conf`, one full-coverage conf per platform. | `python scripts/codegen/gen_vendor_confs.py [--check\|--stats]` |
@@ -92,7 +93,8 @@ before opening a PR that touches a generator.
 | `csrc/aten/generated/tileops_python_kernels.cc` | `codegen_tileops.py` | `codegen_tileops.py --check` |
 | `csrc/aten/generated/name_map.json` | `extract_name_map.py` | none |
 | `csrc/aten/backends/ascend/generated/*` | `codegen_ascend.py` | none — regenerate and require an empty diff |
-| `csrc/aten/backends/gcu/generated/*` | `codegen_gcu.py` | none — regenerate and require an empty diff |
+| `csrc/aten/backends/gcu/generated/{gcu_kernels.cc,gcu_register.inc}` | `codegen_gcu.py` | none — regenerate and require an empty diff |
+| `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc` | `codegen_gcu_flaggems.py` | `codegen_gcu_flaggems.py --check` |
 | `csrc/aten/backends/musa/generated/{musa_kernels.cc,musa_register.inc}` | `codegen_mudnn.py` | none — regenerate and require an empty diff |
 | `csrc/aten/backends/musa/generated/musa_flaggems_register.inc` | `codegen_musa_flaggems.py` | `codegen_musa_flaggems.py --check` |
 | `torch_fl/configs/backends_*.conf` | `gen_vendor_confs.py` | `gen_vendor_confs.py --check`, and `tests/unit/test_gen_vendor_confs.py` enforces the same contract |

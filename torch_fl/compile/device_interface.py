@@ -60,8 +60,9 @@ DEVICE_TYPE = "flagos"
 # torch.flagos and the vendor Triton driver instead of proxying to CUDA.
 #
 # MUSA reaches Triton through MThreads FlagTree; GCU reaches it through
-# Enflame's triton_gcu plugin, already redirected onto flagos by
-# torch_fl.accelerator.gcu._gcu_compat.patch_triton_gcu_for_flagos(). The
+# FlagTree's enflame backend (or Enflame's older triton_gcu plugin), already
+# redirected onto flagos by
+# torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). The
 # distinction that matters to this module is the same for both, so keep the
 # checks keyed on this set rather than on a vendor name.
 _NATIVE_ACCELERATORS = frozenset({"musa", "gcu"})

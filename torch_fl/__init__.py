@@ -968,18 +968,20 @@ def _patch_flaggems_codegen_config():
     # Keyed on the build accelerator for the same reason as DCU: no runtime probe
     # distinguishes GCU here, and the tops stack has no libcuda.so, so without
     # this branch GCU would reach the ascend fallback and get GEMS_VENDOR=ascend
-    # (which also picks the wrong comm profile). FlagGems' Triton kernels need
-    # Enflame's triton_gcu plugin plus its /opt/triton_gcu compiler toolchain; if
-    # either is missing, patch_triton_gcu_for_flagos() returns False and we leave
-    # GEMS_VENDOR unset so the topsaten kernels and cpu_fallback stay in charge.
+    # (which also picks the wrong comm profile). FlagGems' Triton kernels need a
+    # vendor Triton backend for the GCU -- FlagTree's enflame backend, or
+    # Enflame's older triton_gcu plugin with its /opt/triton_gcu toolchain. If
+    # neither is installed, patch_gcu_triton_for_flagos() returns False and we
+    # leave GEMS_VENDOR unset so the topsaten kernels and cpu_fallback stay in
+    # charge.
     if _build_accelerator() == "gcu" and os.environ.get("GEMS_VENDOR") != "ascend":
         from torch_fl.accelerator.gcu._gcu_compat import (
             install_gcu_rng_generators,
-            patch_triton_gcu_for_flagos,
+            patch_gcu_triton_for_flagos,
         )
 
         install_gcu_rng_generators()
-        if patch_triton_gcu_for_flagos():
+        if patch_gcu_triton_for_flagos():
             os.environ.setdefault("GEMS_VENDOR", "enflame")
         return
 
@@ -1595,9 +1597,9 @@ def _register_flaggems_operators():
     # FLAGOS_BACKEND_CONFIG. Calling flag_gems.enable() here would register a
     # competing PrivateUse1 implementation and bypass the shared dispatcher.
     if _build_accelerator() == "gcu":
-        from torch_fl.accelerator.gcu._gcu_compat import is_triton_gcu_available
+        from torch_fl.accelerator.gcu._gcu_compat import is_gcu_triton_available
 
-        if not is_triton_gcu_available():
+        if not is_gcu_triton_available():
             _registered_ops = []
             return 0
         try:

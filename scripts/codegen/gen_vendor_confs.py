@@ -102,7 +102,7 @@ from backend_coverage import (  # noqa: E402
 #
 #   platform  registration branch in csrc/aten/register.cc   m.impl count
 #   musa      musa_register.inc + musa_flaggems_register.inc  158
-#   gcu       gcu_register.inc                                 152
+#   gcu       gcu_register.inc + gcu_flaggems_register.inc     546
 #   ascend    ascend_register.inc                              372
 #
 # metax, tsingmicro and dcu fall through to the `#else` branch and register the
@@ -121,7 +121,10 @@ VENDORS = {
         "backends/musa/generated/musa_register.inc",
         ("backends/musa/generated/musa_flaggems_register.inc",),
     ),
-    "gcu": ("backends/gcu/generated/gcu_register.inc", ()),
+    "gcu": (
+        "backends/gcu/generated/gcu_register.inc",
+        ("backends/gcu/generated/gcu_flaggems_register.inc",),
+    ),
     "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
 }
 
@@ -349,6 +352,86 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # masked_scatter_backward removal and the mthreads linear, none of which is in
 # this set), so every entry here also holds for the pinned revision. The two
 # promotions described above were re-checked on the pin itself as well.
+#
+# gcu: the four matmul overloads. FlagGems' matmul kernels are autotuned with
+# extra Triton compile options that the enflame backend of flagtree 0.6.1 does
+# not accept -- the launch dies before any GCU code runs, on a keyword the
+# compiler refuses:
+#
+#   mm / mm.out      KeyError: 'Keyword argument SPLIT_K was specified but
+#                    unrecognised'  (flag_gems/ops/mm.py passes SPLIT_K to
+#                    triton.autotune's config list)
+#   bmm / bmm.out    TypeError: dynamic_func() missing 7 required positional
+#                    arguments: TILE_M, TILE_N, TILE_K, GROUP_M, DIVISIBLE_M,
+#                    DIVISIBLE_N, DIVISIBLE_K  (flag_gems/ops/bmm.py builds its
+#                    configs as primal heuristics, which flagtree's
+#                    triton.autotune does not unpack at all)
+#
+# These are host-side argument errors, not miscomputes: nothing is launched, so
+# the failure is loud rather than silent. topsaten has real GEMM kernels for all
+# four overloads (gcu_register.inc claims them), so the route back is free --
+# and `addmm`/`addmm.out`, which use a third kernel in the same FlagGems module,
+# were measured correct and stay on FlagGems.
+#
+# gcu: everything else below, measured on the S60. GCU300 rejects every 64-bit
+# data type in the kernel IR -- `error: 64-bit data type not supported on
+# GCU300!`, surfaced to Python as `RuntimeError: Pipeline run failed: PassManager
+# execution failed` -- so any FlagGems kernel that widens an operand to i64/f64
+# fails to compile. That single compiler limit accounts for most of this set, but
+# not all of it: the RNG entries also miscompute silently.
+#
+# The pointwise overloads (add/sub/div/mul/rsqrt/clamp.Tensor) hit it through
+# ATen's wrapped-number boxing, the same defect MUSA records for bf16: a Python
+# scalar arrives as a float64 0-dim tensor, and pointwise_dynamic promotes with
+# torch._prims_common.elementwise_dtypes, which does not honour
+# is_wrapped_number. Measured: `f32 + 0.5`, `f32 + 1`, `i32 + 1`, `f32 - 1` and
+# `f32 / 2` all raise, while `f32 + f32` and every tensor-tensor form compute
+# correctly. It is the overload that is broken, but routing is per op, so the
+# whole entry moves. The scalar forms that are already native -- add.Scalar,
+# sub.Scalar, mul.Scalar -- are unaffected and stay on FlagGems, as do `clamp`
+# with Python bounds, `pow.*`, `mul.Tensor` and every comparison. `mul_.Tensor`
+# is the one non-64-bit entry here: it raises `NotImplementedError: There were no
+# tensor arguments to this function`, the same recursive re-entry codegen_ops.py
+# records for `mul.Tensor`.
+#
+# The factory entries widen a little differently. `arange` (all three overloads,
+# float and int alike), `linspace`, `full`/`full_like` with an integer fill,
+# `sum` on an integer operand and every integer-dtype `zeros`/`zeros_like`/
+# `ones`/`ones_like`/`zero_` fail to compile; `scalar_tensor` compiles but returns
+# float32 for an integer argument. `zeros` is also unreliable at float32: on a
+# first-touch 262144-element allocation it left 21207 (shape (64,64,64)) and
+# 22536 (shape (32,32,256)) elements unwritten, and was clean on every repeat.
+# The float32 `ones` path measured clean in isolation but the suite still reports
+# a partially written (64,64,64) result, so the family moves back together
+# rather than per-dtype.
+#
+# The gather/loss/sort entries -- `embedding`, `floor_divide`, `index_add`,
+# `nll_loss_forward`, `nll_loss_backward`, `sort`, `sort.stable` -- all fail on
+# index/offset arithmetic that legalizes to a 64-bit extension (`arith.extsi` /
+# `arith.extui` marked illegal); `sort` additionally segfaults the process
+# outright.
+#
+# The RNG family is the one group that is wrong rather than merely unbuildable,
+# which is why all of it moves back to the vendor's handwritten kernels
+# (codegen_gcu.py HANDWRITTEN_OPS) -- `rand`, `randn`, `randperm`, `multinomial`,
+# `uniform_`, `exponential_`, `native_dropout`, `binomial`, `_standard_gamma`
+# and `_sample_dirichlet` raise the 64-bit error, and the rest return the wrong
+# distribution: test_rng_dispatch.py measures `torch.rand(2000)` with mean 0.143
+# against a 0.5 contract, `randn` with mean 0.378, `exponential_(1.0)` with mean
+# 0.501, `uniform_(-1, 1)` with mean 2.497, a dropout keep-rate off by 5x, and
+# `bernoulli` returning values outside {0, 1}.
+#
+# Several entries have no topsaten kernel claimed by codegen_gcu.py (`arange`,
+# `linspace`, `full`, `full_like`, `scalar_tensor`, `zero_`, `constant_pad_nd`,
+# `embedding`, `nll_loss_*`, `floor_divide*`, `index_add*`, `sort*`). There the
+# gap drops them from both the conf's FlagGems route and the generated
+# registration, so route() falls through to `none` and the call reaches ATen's
+# cpu_fallback. That is the route these ops already took before GCU had a
+# FlagGems path, so nothing regresses; it is not a vendor kernel because no
+# vendor kernel is claimed for them yet.
+#
+# Measured on S60 with FlagGems master 3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85
+# (5.4.0.dev0) + flagtree 0.6.1+enflame3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
         "pow.Scalar",
@@ -356,6 +439,319 @@ NATIVE_TRITON_GAPS = {
         "pow.Tensor_Tensor",
         "rsqrt",
         "rsqrt_",
+    },
+    "gcu": {
+        # Pointwise overloads broken by ATen's float64 wrapped-number boxing.
+        "add.Tensor",
+        "add_.Tensor",
+        "clamp.Tensor",
+        "div.Scalar",
+        "div.Scalar_mode",
+        "div.Tensor",
+        "div.Tensor_mode",
+        "div_.Scalar",
+        "div_.Scalar_mode",
+        "div_.Tensor",
+        "div_.Tensor_mode",
+        "mul_.Tensor",
+        "rsqrt",
+        "rsqrt_",
+        "sub.Tensor",
+        "sub_.Tensor",
+        # Factory / creation ops that widen to a 64-bit element type.
+        "arange",
+        "arange.start",
+        "arange.start_step",
+        "constant_pad_nd",
+        "full",
+        "full_like",
+        "linspace",
+        "ones",
+        "ones_like",
+        "scalar_tensor",
+        "sum",
+        "zero_",
+        "zeros",
+        "zeros_like",
+        # Index/offset arithmetic that legalizes to a 64-bit extension.
+        "embedding",
+        "floor_divide",
+        "floor_divide_.Tensor",
+        "index_add",
+        "index_add_",
+        "nll_loss_backward",
+        "nll_loss_forward",
+        "sort",
+        "sort.stable",
+        # Matmul: flagtree refuses the autotune kwargs before any GCU code runs.
+        "bmm",
+        "bmm.out",
+        "mm",
+        "mm.out",
+        # RNG: the vendor's handwritten kernels, for the wrong distributions.
+        "bernoulli_.float",
+        "exponential_",
+        "multinomial",
+        "native_dropout",
+        "native_dropout_backward",
+        "rand",
+        "rand_like",
+        "randint",
+        "randint_like",
+        "randn",
+        "randn_like",
+        "randperm",
+        "uniform_",
+        # The int64 element-type family. These kernels are correct for f32/i32/bool
+        # and fail only for an integral operand, because GCU300 cannot represent
+        # any 64-bit type in the kernel IR at all -- the pointer parameter is the
+        # rejected type, so it is the *operand* that has to be avoided, not the
+        # op. Routing is per op, so an op that any real caller hands an int64
+        # tensor has to move as a whole. Measured on the S60 (see the note below
+        # the set): every entry below computes correctly on i32/f32/bool and
+        # raises `Pipeline run failed` on i64.
+        #
+        # Comparisons have topsaten kernels for every dtype, so gapping them
+        # routes back to `gcu` with its TopsatenSupportsDtype CPU round-trip for
+        # the int64 case; the bitwise/fill/mask group has no topsaten kernel, so
+        # it lands on `none` and the call reaches cpu_fallback -- the same route
+        # these ops already took before GCU had a FlagGems path.
+        "eq.Scalar",
+        "eq.Tensor",
+        "ne.Scalar",
+        "ne.Tensor",
+        "lt.Scalar",
+        "lt.Tensor",
+        "le.Scalar",
+        "le.Tensor",
+        "gt.Scalar",
+        "gt.Tensor",
+        "ge.Scalar",
+        "ge.Tensor",
+        "bitwise_and.Scalar",
+        "bitwise_and.Scalar_Tensor",
+        "bitwise_and.Tensor",
+        "bitwise_and_.Scalar",
+        "bitwise_and_.Tensor",
+        "bitwise_not",
+        "bitwise_not_",
+        "bitwise_or.Scalar",
+        "bitwise_or.Scalar_Tensor",
+        "bitwise_or.Tensor",
+        "bitwise_or_.Scalar",
+        "bitwise_or_.Tensor",
+        "bitwise_xor.Scalar",
+        "bitwise_xor.Scalar_Tensor",
+        "bitwise_xor.Tensor",
+        "bitwise_xor_.Scalar",
+        "bitwise_xor_.Tensor",
+        "fill.Scalar",
+        "fill.Scalar_out",
+        "fill.Tensor",
+        "fill.Tensor_out",
+        "fill_.Scalar",
+        "fill_.Tensor",
+        "masked_fill.Scalar",
+        "masked_fill.Tensor",
+        "masked_fill_.Scalar",
+        "masked_fill_.Tensor",
+        "masked_select",
+        "where.self",
+        "all",
+        "any",
+        # _conj is here for the same contract reason as musa's entry: flag_gems'
+        # `_conj` is a real kernel that materializes the conjugation, where ATen
+        # keeps it as a lazy view. GCU cannot materialize a Conjugate bit at all
+        # (`view_as_real` has no PrivateUse1 kernel, so the FlagGems kernel warns
+        # and aborts on a complex operand), so the op is unregistered and ATen's
+        # composite runs instead -- which is what test_math_bits_contract.py
+        # probes for before deciding whether its contract applies.
+        "_conj",
+        # The scan family. flag_gems lowers every one of these to a Triton kernel
+        # whose accumulator is a 64-bit type, so the GCU300 front end rejects the
+        # whole family. Measured on the S60 with 4-element operands:
+        #
+        #   cumsum      i64 FAIL  f32 PASS      cumsum.out      i64 FAIL  f32 PASS
+        #   cumprod     i64 FAIL  f32 PASS      cumprod_        i64 FAIL  f32 PASS
+        #   logcumsumexp i64 FAIL f32 PASS      logcumsumexp.out i64 FAIL f32 PASS
+        #   cummax      i64 FAIL  f32 FAIL      cummin          i64 FAIL  f32 FAIL
+        #
+        # cummax/cummin fail for float32 as well -- their kernel carries the index
+        # tensor as int64 unconditionally, so they are unusable on GCU at any
+        # dtype. That is what test_diff_then_cumsum hits: `diff(...).cumsum(-1)` on
+        # an int64 index tensor raises `flag_gems/ops/cumsum.py:343: 64-bit data
+        # type not supported on GCU300!`.
+        #
+        # No topsaten kernel exists for any of these, so gapping lands on `none`
+        # and cpu_fallback -- the route they took before GCU had a FlagGems path.
+        # The .out forms of cummax/cummin/cumprod and cumsum_ route to `none`
+        # already and need no entry.
+        "cumsum",
+        "cumsum.out",
+        "cumprod",
+        "cumprod_",
+        "cummax",
+        "cummin",
+        "logcumsumexp",
+        "logcumsumexp.out",
+        # Everything below comes from the full sweep rather than from targeted
+        # probes: tests/manual/flaggems_overload_survey.py --conf
+        # torch_fl/configs/backends_gcu.conf run on the S60 at FlagGems master
+        # 3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85 (5.4.0.dev0) + flagtree
+        # 0.6.1+enflame3.6, seven profiles per overload (2d/4d/1d float32, 2d
+        # float16, 2d int64, 2d bool, 2d strided), all 374 FlagGems routes
+        # measured. Per-op evidence, repro and the unchanged remainder are in
+        # docs/vendors/gcu/flaggems-test-results.md.
+        #
+        # Group A -- FlagGems is wrong at float16/float32, the dtypes every GCU
+        # caller uses, so the route is unusable and the op goes back to topsaten
+        # (or to `none` and cpu_fallback where topsaten has no kernel either).
+        # Three signatures account for most of it: `Pipeline run failed:
+        # PassManager execution failed`, the GCU300 front end rejecting the
+        # 64-bit type the kernel carries internally (reductions, scans, index
+        # ops); `UNREACHABLE executed at
+        # .../flagtree-enflame3.6-gcu400/...` after `unsupported extern
+        # elementwise: __nv_asinf`, a hard compiler abort on the libm externs
+        # flag_gems emits for the inverse-trig and special-function families;
+        # and `PROCESS-DEATH` for the four ops whose launch kills the driver
+        # thread outright. The rest are measured wrong answers (`elu` off by
+        # 0.89, `_softmax_backward_data` returning int8, `histc`, `kthvalue`,
+        # `sum.out` losing its dims) or a flag_gems wrapper that refuses an
+        # input ATen accepts.
+        "_adaptive_avg_pool2d",
+        "_batch_norm_no_update",
+        "_euclidean_dist",
+        "_linalg_eigvals",
+        "_log_softmax_backward_data",
+        "_pdist_backward",
+        "_softmax_backward_data",
+        "_unique2",
+        "_weight_norm_interface",
+        "_weight_norm_interface_backward",
+        "addmm.out",
+        "addmm_",
+        "addr",
+        "aminmax",
+        "any.dims",
+        "argmax",
+        "argmin",
+        "asin",
+        "asin_",
+        "bucketize.Tensor",
+        "cosh.out",
+        "count_nonzero",
+        "dequantize.self",
+        "elu",
+        "elu_",
+        "elu_backward",
+        "erfinv",
+        "erfinv_",
+        "histc",
+        "index_copy",
+        "index_copy_",
+        "isin.Tensor_Scalar",
+        "isin.Tensor_Tensor",
+        "kthvalue",
+        "lgamma",
+        "lgamma_",
+        "max.dim",
+        "median",
+        "median.dim",
+        "min.dim",
+        "mode",
+        "mse_loss",
+        "nanmedian",
+        "nanmedian.dim",
+        "native_batch_norm",
+        "native_layer_norm",
+        "nextafter",
+        "nextafter_",
+        "nonzero",
+        "norm.Scalar",
+        "norm.ScalarOpt_dim",
+        "range",
+        "renorm",
+        "repeat_interleave.Tensor",
+        "scatter.src",
+        "scatter_.src",
+        "scatter_add_",
+        "silu_backward",
+        "soft_margin_loss",
+        "soft_margin_loss_backward",
+        "special_chebyshev_polynomial_u",
+        "special_chebyshev_polynomial_v",
+        "special_chebyshev_polynomial_w",
+        "special_hermite_polynomial_h",
+        "special_modified_bessel_k0",
+        "special_modified_bessel_k0.out",
+        "special_shifted_chebyshev_polynomial_u",
+        "special_shifted_chebyshev_polynomial_w",
+        "sum.out",
+        "topk",
+        "tril.out",
+        "tril_",
+        "triu",
+        "triu_",
+        "unfold_backward",
+        "unique_consecutive",
+        "unique_dim",
+        "upsample_bicubic2d",
+        "var.correction",
+        "var_mean.correction",
+        "vdot",
+        # Group B -- correct at float16/float32 and at bool, and broken only for
+        # an int64 operand (the 64-bit kernel-type rejection again; a few also
+        # return the input dtype where ATen promotes, which only an integral or
+        # bool operand reaches). These are gapped because topsaten has a kernel
+        # for every one of them: gapping restores the vendor kernel's
+        # TopsatenSupportsDtype CPU round-trip for int64 and costs nothing at
+        # float16/float32, which is a strictly better outcome than a route that
+        # raises `Pipeline run failed` for an operand type it accepts.
+        #
+        # The rest of the group -- 76 overloads that are equally broken for
+        # int64 and have no topsaten kernel to fall back to -- deliberately stay
+        # on FlagGems and are listed in docs/vendors/gcu/flaggems-test-results.md
+        # instead. Gapping those would demote their float16/float32 path to
+        # cpu_fallback, which is a far larger regression than the int64 raise it
+        # would avoid: `threshold_backward`, `relu_`, `clamp_min`, `clamp_max`,
+        # `max`, `min`, `nan_to_num` and `masked_scatter` are all in that set,
+        # and none of them is handed an int64 tensor by a float model.
+        "abs",
+        "acos",
+        "addmm",
+        "amax",
+        "amin",
+        "atan",
+        "ceil",
+        "cos",
+        "cosh",
+        "erf",
+        "exp",
+        "expm1",
+        "flip",
+        "floor",
+        "fmod.Scalar",
+        "log",
+        "log10",
+        "log1p",
+        "log2",
+        "logical_and",
+        "logical_or",
+        "mse_loss_backward",
+        "neg",
+        "pow.Tensor_Scalar",
+        "pow.Tensor_Tensor",
+        "reciprocal",
+        "relu",
+        "remainder.Scalar",
+        "sigmoid",
+        "sin",
+        "sinh",
+        "sqrt",
+        "sum.dim_IntList",
+        "tanh",
+        "tril",
+        "trunc",
     },
     "musa": {
         "_conj",

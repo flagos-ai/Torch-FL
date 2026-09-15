@@ -33,6 +33,8 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -158,6 +160,14 @@ class TestEmbeddingDispatchLog:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for embedding.
+
+        Skipped where the conf routes embedding to ``none``: the op is then not
+        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
+        the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("embedding") is None:
+            pytest.skip("embedding is routed to 'none' on this platform")
         result = _run_embedding_subprocess(
             {
                 "FLAGOS_LOG_DISPATCH": "1",
@@ -170,12 +180,17 @@ class TestEmbeddingDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, embedding routes to flagos_python.
+        """With the FlagGems runtime path available, embedding keeps its conf route.
 
-        FlagGems and the vendor kernels are both compiled in; FLAGOS_USE_FLAGGEMS=1
-        selects backends_flaggems.conf at import, where embedding has a FlagGems
-        Triton kernel and thus routes to flagos_python.
+        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so this is a check
+        that the FlagGems runtime path is compiled in and routing still agrees
+        with the conf rather than a switch that turns FlagGems on. Skipped where
+        the conf routes embedding away from FlagGems: GCU leaves it to
+        cpu_fallback because the FlagGems embedding kernel cannot compile the
+        int64 index operand that GCU300 rejects.
         """
+        if routed_backend_or_none("embedding") != "flagos_python":
+            pytest.skip("embedding does not route through FlagGems on this platform")
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
