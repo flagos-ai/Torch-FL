@@ -27,17 +27,13 @@
 //   - div_.Tensor_mode
 //   - floor_divide
 //   - floor_divide_.Tensor
-//   - index_add
-//   - index_add_
 //   - mul_.Tensor
-//   - randn
-//   - randn_like
 //   - sort
 //   - sort.stable
 //   - sub.Tensor
 //   - sub_.Tensor
 //
-// Total: 357 ops registered here, 122 further FlagGems ops already claimed by musa_register.inc.
+// Total: 359 ops registered here, 122 further FlagGems ops already claimed by musa_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_batch_norm_no_update", WrapperPrivBatchNormNoUpdate);
@@ -201,6 +197,8 @@
   m.impl("hypot", WrapperHypot);
   m.impl("i0", WrapperI0);
   m.impl("i0.out", WrapperI0Out);
+  m.impl("index_add", WrapperIndexAdd);
+  m.impl("index_add_", WrapperIndexAddInplace);
   m.impl("index_copy", WrapperIndexCopy);
   m.impl("index_copy_", WrapperIndexCopyInplace);
   m.impl("index_reduce_", WrapperIndexReduceInplace);

@@ -231,9 +231,31 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # both have native aclnn kernels, so the vendor route is a real fallback rather
 # than a loss of coverage. Filed upstream as FlagGems issue #6226.
 #
-# musa: index_add returns all zeros instead of accumulating (correctness bug);
-# randn crashes unpacking generator state (expects 2 int64, gets more). Both
-# measured on MTT S5000 with FlagGems e7b4a865 + flagtree 0.6.2a3+mthreads3.6.
+# musa: index_add and randn_like/randn were the first entries in this set (#275,
+# 2026-09-15), recorded as "index_add returns all zeros instead of accumulating"
+# and "randn crashes unpacking generator state". Neither signature reproduces.
+# Re-measured on MTT S5000 with FlagGems 4d9c34775 + flagtree 0.6.2a3+mthreads3.6,
+# and re-checked on the CI pin e7b4a865f (an ancestor of it, see below):
+#
+#   - index_add / index_add_: bit-exact against the CPU for duplicate indices,
+#     dim 0 and dim 1, float64, and alpha != 1, in both the in-place and
+#     out-of-place spellings. A new flag_gems code-cache entry appears per run, so
+#     the mthreads kernel compiles and runs on device rather than the op passing
+#     on the CPU. Neither op has a mudnn kernel, so before this they could not be
+#     registered at all -- they routed to `none`, and the `FLAGOS_OP_*` override
+#     could not reach them either, which is why the old "returns all zeros"
+#     signature was measured by hand. It has the shape of a cross-stream read: the
+#     in-place wrapper is a FlagGems kernel writing a clone followed by a copy
+#     into `self`, and #275 fixed a split default stream in the same change, so
+#     the copy could read the clone before the kernel filling it had retired.
+#
+#   - randn / randn_like: finite, seed-reproducible, and seed-sensitive over 65536
+#     samples, in float32/float16/bfloat16, and randn_like inherits shape and dtype
+#     from its input. FlagGems runs off the Philox bridge that torch_fl installs
+#     for MUSA, which is exactly the generator state the old crash was about.
+#
+# Both now route to FlagGems; the promotion is recorded in
+# docs/reference/operator-support.md.
 #
 # musa: add/sub/div.Tensor hit a bf16 promotion mismatch that only the .Tensor
 # overloads reach. A Python-float operand arrives as a float64 0-dim tensor --
@@ -249,16 +271,29 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # add/sub/div.Scalar keep working. Re-measured on MTT S5000 with FlagGems
 # 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
 #
-# musa: the four in-place arithmetic ops, same bf16 wrapped-number mismatch as
-# their .Tensor counterparts above, reached through a different entry point.
-# ATen boxes `add_.Scalar` (and `_foreach_add_`, and so AdamW's foreach path)
-# onto `add_.Tensor`, so routing only the out-of-place op leaves every in-place
-# caller on the failing FlagGems kernel -- measured: `torch._foreach_add_(x, 1.0)`
-# on bf16 logs `[flagos dispatch] add_.Tensor -> flagos_python` and then dies in
-# triton with "intrinsic call operand #0 has type double but
-# llvm.musa.float2bfloat16 expects float". mudnn has real in-place Binary
-# kernels, so the route back is free. `mul_.Tensor` is here for the same reason
-# even though its out-of-place form is already native.
+# musa: the four in-place arithmetic ops. add_/sub_/div_ are the same bf16
+# wrapped-number mismatch as their .Tensor counterparts above, reached through a
+# different entry point. ATen boxes `add_.Scalar` (and `_foreach_add_`, and so
+# AdamW's foreach path) onto `add_.Tensor`, so routing only the out-of-place op
+# leaves every in-place caller on the failing FlagGems kernel -- measured:
+# `torch._foreach_add_(x, 1.0)` on bf16 logs `[flagos dispatch] add_.Tensor ->
+# flagos_python` and then dies in triton with "intrinsic call operand #0 has type
+# double but llvm.musa.float2bfloat16 expects float". mudnn has real in-place
+# Binary kernels, so the route back is free.
+#
+# `mul_.Tensor` is in the same group but for a different, and larger, defect:
+# flag_gems' generic `mul` is written for its own device name, so
+# `mul_broadcast_func` (flag_gems/ops/mul.py, the `device.type != _DEVICE_NAME`
+# guard at line 587) takes that branch for every FlagGems tensor on this backend
+# (`'flagos' != 'musa'`) and delegates -- to `aten.mul.out.redispatch` when it was
+# given an out=, which has no kernel at that dispatch key, so the op dies with
+# "no fallback function is registered for schema aten::mul.out" for *every* dtype
+# and both operand shapes. Unlike the wrapped-number case this is not bf16-only:
+# measured failing for f32 tensor-tensor as well, while `torch._foreach_mul_(x,
+# 1.0)` on bf16 passes because it never reaches this function. `aten.mul.out`
+# itself is usable on MUSA when called directly, so the missing piece is only the
+# redispatch target. Re-measured on MTT S5000 with FlagGems 4d9c34775 + flagtree
+# 0.6.2a3+mthreads3.6.
 #
 # musa: _conj is here for a contract reason, not a compile one. `conj` in ATen is
 # a lazy view -- it sets the Conjugate bit and leaves the storage alone, which
@@ -282,6 +317,13 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # over sort, so this one entry fixes all four. Measured on MTT S5000 with FlagGems
 # 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
 #
+# Re-confirmed on 2026-09-15: the failure is unchanged and still names the cast,
+# not the sort -- `RuntimeError: MudnnCopy: unsupported dtype Long -> UInt32`,
+# raised both from `torch.sort` when the spellings it dispatches to are routed to
+# FlagGems and from `flag_gems.ops.sort_stable` called directly, in every dtype
+# probed (f32, int64). The mudnn route answers correctly for all of them, which is
+# why both `sort` and `sort.stable` stay in this set.
+#
 # musa: integer division. Two separate defects, both in the *integral* path and
 # both silent -- the kernel returns a plausible answer with the wrong dtype or
 # one stale element, so nothing upstream can be blamed for it (issue #266).
@@ -302,6 +344,11 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # composites over the Tensor entries above, so they follow those routes.
 #
 # Measured on MTT S5000 with FlagGems 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
+# 4d9c34775 is a strict superset of the CI pin e7b4a865f (it is a descendant, and
+# the diff between them touches only flash_attention_backward, the ascend
+# masked_scatter_backward removal and the mthreads linear, none of which is in
+# this set), so every entry here also holds for the pinned revision. The two
+# promotions described above were re-checked on the pin itself as well.
 NATIVE_TRITON_GAPS = {
     "ascend": {
         "pow.Scalar",
@@ -320,11 +367,7 @@ NATIVE_TRITON_GAPS = {
         "div_.Tensor_mode",
         "floor_divide",
         "floor_divide_.Tensor",
-        "index_add",
-        "index_add_",
         "mul_.Tensor",
-        "randn",
-        "randn_like",
         "sort",
         "sort.stable",
         "sub.Tensor",

@@ -83,6 +83,12 @@ decimal place.
 For every row, `STRICT + BASIC_ONLY + FAILED + UNTESTED = Total`, and
 `Basic executable = STRICT + BASIC_ONLY`.
 
+These four rows are the FlagGems overload-survey cohort, which does not include
+MUSA. The MUSA routing changes recorded under **Native Backend Route Changes** are
+**not revalidated** against them: no route in this cohort was altered for A100,
+mc550, 810e or bw1000 by that work, and no MUSA row exists here to update. The
+same caveat applies to the raw case counts below.
+
 ## Raw Case Evidence
 
 These counts cover seven synthesized profiles per overload. They are case-level
@@ -344,6 +350,158 @@ Measured on Ascend 910 with CANN 9.0 and `ASCEND_RT_VISIBLE_DEVICES=2`:
 This is targeted dtype evidence for CANN 9.0, not a claim that every ACLNN
 operator accepts every ACL dtype. Complex and quantized dtypes remain outside
 this cohort.
+
+### MUSA FlagGems gap re-measurement: four ops promoted back to FlagGems (2026-09-15)
+
+`NATIVE_TRITON_GAPS["musa"]` was introduced on 2026-09-14 with 18 entries, each
+carrying a failure signature recorded at the time ("`index_add` returns all zeros
+instead of accumulating", "`randn` crashes unpacking generator state", ...). Every
+entry was re-probed against the FlagGems revision the MUSA CI job actually
+installs, on the documented signature rather than on "some shape now works", so a
+pass verdict means the specific defect is gone. Four entries no longer reproduce
+and are promoted out of the set; the remaining fourteen keep their routes and have
+their provenance updated to the current revision.
+
+**Promoted out (4).**
+
+| Op | Route before | Route now | Measured |
+|---|---|---|---|
+| `index_add` | `none` | `flaggems` | bit-exact vs CPU for duplicate indices, `dim` 0 and 1, float64, and `alpha = 2.5`; 7/7 probe cases pass |
+| `index_add_` | `none` | `flaggems` | same 7/7, both spellings, in-place alias preserved |
+| `randn` | `musa` | `flaggems  # musa` | finite, seed-reproducible and seed-sensitive over 65536 samples; f32/f16/bf16 all `std ≈ 0.97`; 4/4 pass |
+| `randn_like` | `musa` | `flaggems  # musa` | inherits shape and dtype; 4/4 pass |
+
+Neither `index_add` nor `index_add_` has a mudnn kernel, so before this change they
+could not be registered at all: they routed to `none`, and the `FLAGOS_OP_*`
+override could not reach them either, which is why the old "returns all zeros"
+signature had to be measured by hand. The recorded signature has the shape of a
+cross-stream read — the in-place wrapper is a FlagGems kernel writing a clone
+followed by a copy into `self`, and the split default stream was fixed in the same
+change that added the entry — so the promotion is a fix that landed upstream of
+this repository, not a re-routing decision.
+
+**Kept (14).** All of these reproduce their recorded signature exactly, in process,
+with `FLAGOS_OP_*` pinning the op back onto FlagGems:
+
+| Op | Reproduced failure | Root cause |
+|---|---|---|
+| `add.Tensor`, `add_.Tensor`, `sub.Tensor`, `sub_.Tensor`, `div.Tensor`, `div_.Tensor` | `failed to translate module to LLVM IR` (bf16 wrapped-number operand only) | FlagGems pointwise promotion ignores `is_wrapped_number`, promotes to fp64; mthreads' LLVM lowering has no double `float2bfloat16` |
+| `mul_.Tensor` | `no fallback function is registered for schema aten::mul.out` (f32 and bf16, every shape) | `flag_gems/ops/mul.py:587` gates on its own device name (`'flagos' != 'musa'`) and redispatches to `aten.mul.out`, which has no kernel at that dispatch key |
+| `div.Tensor_mode`, `div_.Tensor_mode` | wrong trailing element at `n = 3, 5, 6, 7, 9, 15, 17, 31, 33, 100` in int64 `floor`/`trunc` and int32 `floor` | FlagGems computes the integer rounding-mode forms on the same kernel that loses its final store |
+| `floor_divide`, `floor_divide_.Tensor` | wrong trailing element at the same `n`, int64 and int32 | same trailing-store loss |
+| `sort`, `sort.stable` | `RuntimeError: MudnnCopy: unsupported dtype Long -> UInt32` | FlagGems' radix sort casts its histogram to uint32 internally; mudnn `Unary::CAST` stops at `kBool` |
+| `_conj` | probe *passes*, and that is the point | `ATen` `conj` is a lazy view that sets the Conjugate bit (`is_conj() == True`); `flag_gems.ops._conj` materializes (`is_conj() == False`), so registering it breaks `test_math_bits_contract.py`. mudnn has no Conjugate-bit path either, so `none` — unregistered, ATen's composite — is the correct route |
+
+Two probes establish the `mul_.Tensor` reason directly rather than by inference:
+`aten.mul.out` called on MUSA at the top level *works* (so the kernel exists and
+the only missing piece is the redispatch target), and the guard is confirmed live —
+`flag_gems.ops.mul._DEVICE_NAME == 'musa'`, the FlagGems runtime device name is
+`'musa'`, and the tensor's `device.type` is `'flagos'`.
+
+**Route delta.** MUSA `flaggems` 464 -> **468**, `musa` 51 -> **49**, `none` 1521 ->
+**1519** (2036 routable ops). Two of the four were previously on the vendor route
+(`randn`, `randn_like`, which keep a native kernel and so are annotated
+`flaggems  # musa`); the `index_add` pair was on `none`. The registered-op set is
+unchanged at 518: `index_add` and `index_add_` are added to
+`musa_flaggems_register.inc` (357 -> **359** `m.impl` lines) at the same time as the
+four entries leave the gap set, which is what `codegen_musa_flaggems.py` keys on.
+
+**Measured on the eight-device MTT S5000 host** with CPU PyTorch 2.10.0, mudnn
+v3300, FlagGems `4d9c34775` (5.4.0rc2.post1+g4d9c34775) and flagtree
+`0.6.2a3+mthreads3.6` (Triton 3.6, backend `mthreads`):
+
+- Per-op probe, one fresh process per op (`FLAGOS_LOG_DISPATCH=1`,
+  `FLAGOS_LOG_FALLBACK=1`, `PYTHONUNBUFFERED=1` so the `--- CASE` markers and the
+  dispatcher's own stderr lines interleave). Verdicts for all 18 entries:
+
+  | Op | Verdict | Cases | Dispatch / fallback lines |
+  |---|---|---|---|
+  | `index_add` | PASS | 0/7 failed | 28 / 7 |
+  | `index_add_` | PASS | 0/7 failed | 28 / 7 |
+  | `randn` | PASS | 0/4 failed | 15 / 0 |
+  | `randn_like` | PASS | 0/4 failed | 15 / 0 |
+  | `_conj` | PASS (contract entry) | 0/1 failed | 0 / 2 |
+  | `add.Tensor` | FAIL (expected) | 1/5 failed | 5 / 0 |
+  | `add_.Tensor` | FAIL (expected) | 2/6 failed | 6 / 0 |
+  | `sub.Tensor` | FAIL (expected) | 1/5 failed | 5 / 0 |
+  | `sub_.Tensor` | FAIL (expected) | 2/6 failed | 6 / 0 |
+  | `mul_.Tensor` | FAIL (expected) | 3/6 failed | 5 / 3 |
+  | `div.Tensor` | FAIL (expected) | 1/5 failed | 5 / 0 |
+  | `div_.Tensor` | FAIL (expected) | 1/6 failed | 7 / 0 |
+  | `div.Tensor_mode` | FAIL (expected) | 3/3 failed | 54 / 0 |
+  | `div_.Tensor_mode` | FAIL (expected) | 3/3 failed | 54 / 0 |
+  | `floor_divide` | FAIL (expected) | 2/3 failed | 37 / 0 |
+  | `floor_divide_.Tensor` | FAIL (expected) | 2/3 failed | 37 / 0 |
+  | `sort` | FAIL (expected) | 6/7 failed | 24 / 0 |
+  | `sort.stable` | FAIL (expected) | 2/7 failed | 12 / 0 |
+
+  The comparison control matters as much as the verdicts do: a deliberately
+  perturbed reference is rejected by the same comparator (`perturbed reference
+  rejected=True`, `1/24` element outside tolerance), so a green table is not a
+  comparator that cannot fail. The `_conj` row's two fallback lines are
+  `aten::view_as_real` — no slot is claimed for the op, which is the intended
+  state.
+- Provenance, not just verdicts: the flag_gems code cache was snapshotted before
+  and after each op. Both `index_add` and `index_add_` add a new entry
+  (`index_add_rank_2_pid_*.py`), so the mthreads kernel compiled and ran on device;
+  `sort`/`sort.stable` add six and two triton cache directories, i.e. the failing
+  kernels really are being built and then rejected by the cast. All 7 fallback
+  lines in the `index_add` rows are the probe's own CPU comparison.
+- End-to-end on the rebuilt library, driving the public API with no `FLAGOS_OP_*`
+  override so the op reaches whatever the shipped conf routes it to: **14/14 cases
+  pass**. The dispatch log shows `index_add -> flagos_python` (22),
+  `index_add_ -> flagos_python` (5), `randn -> flagos_python` (10),
+  `randn_like -> flagos_python` (1), against the regression controls
+  `sort -> musa` and `add.Tensor -> musa`; the 27 `cpu_fallback` lines are all
+  `aten::equal`, the harness's own host comparison. Coverage includes duplicate
+  indices, `dim=1`, float64, a non-zero base (returns `sum 60.0`, so a kernel
+  returning the input unchanged cannot pass), `torch.manual_seed` reproducibility,
+  a 200k-sample statistics check against the CPU draw, and sort/index bit-exactness.
+- `index_add` with duplicate indices and `alpha != 1` is *not* bit-exact and the
+  bound was measured rather than assumed: over 20 seeds, `alpha = 2.5` differs from
+  the CPU reference in 11/20 trials with a worst absolute error of `4.768e-07` —
+  one float32 ULP at `|x| < 4` — and only on the duplicated rows. `alpha == 1` is a
+  plain add and is bit-exact in every trial. ATen documents duplicate-index
+  `index_add` as order-free (it is on the CUDA non-determinism list), so this is
+  reassociation of the fused multiply, not an accumulation defect; the probe
+  carries both a 1-ULP budgeted comparator and a dedicated case that fails if the
+  error ever leaves that bound.
+- The four MUSA CI groups that exercise these routes were re-run locally: dispatch
+  **113 passed**; factory **46 passed**; operator cohort **493 passed, 1 skipped,
+  521 deselected, 2 xfailed, 1 xpassed, 3 failed**; RNG with the manifest's own
+  `-k` filter **80 passed, 37 deselected**. The cohort's three failures are the
+  pre-existing `test_flaggems_conf_consistency.py` assertions described below and
+  are the same three that fail on the pristine conf.
+- Generator ordering, which is load-bearing here: `gen_vendor_confs.py` reads the
+  on-disk `musa_flaggems_register.inc` to decide which ops the platform registers,
+  so `codegen_musa_flaggems.py` must run **before** it. Running them the other way
+  round leaves `index_add` at `none`. Idempotency: both generators re-run to
+  byte-identical output, `codegen_musa_flaggems.py --check` reports "is up to
+  date", and `gen_vendor_confs.py --check` is clean for MUSA.
+- `tests/unit/test_gen_vendor_confs.py`: **34 passed, 1 failed**. The failure is
+  `test_shipped_confs_are_up_to_date` reporting `stale: ['backends_gcu.conf',
+  'backends_ascend.conf']`, which also fails on a stashed pristine tree.
+
+**Evidence gap.** `tests/manual/flaggems_overload_survey.py` cannot measure this
+change, for the reason recorded in the section below: it selects overloads whose
+conf value is `flagos_python`, the unified per-platform confs spell the FlagGems
+route `flaggems`, and the `backends_flaggems.conf` it was written against was
+removed by `d0e2d1a`. The evidence here is targeted per-op probing plus the
+end-to-end route check plus the CI groups, not a synthesized overload survey. The
+generic FlagGems baseline rows (A100, mc550, PPU, DCU, 546-route cohort) are
+unchanged by this work and are **not revalidated**; no FlagGems route was altered
+for any other platform, and `NATIVE_TRITON_GAPS` has no non-MUSA entry beyond the
+pre-existing Ascend `pow`/`rsqrt` set.
+
+**Two pre-existing conditions, unchanged by this work.** Three assertions in
+`tests/integration/ops/test_flaggems_conf_consistency.py`
+(`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
+`test_counts_match`) fail against the pristine conf as well — re-measured here with
+`backends_musa.conf` stashed, same three tests, byte-identical text — on
+`mm`/`bmm`/`addmm` dispatcher drift in `csrc/aten/generated/` that this change does
+not touch. Separately, the stale `backends_gcu.conf` / `backends_ascend.conf`
+reported by `test_shipped_confs_are_up_to_date` are pre-existing generator drift on
+two out-of-scope platforms. Neither is in scope here.
 
 ### MUSA integer division: mudnn `TRUEDIV` promotion and FlagGems floor-divide tail store (2026-09-15)
 
@@ -739,6 +897,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-15 | MTT S5000 (8 devices) | MUSA FlagGems gap re-measurement | Re-probed all 18 `NATIVE_TRITON_GAPS["musa"]` entries against the FlagGems revision the MUSA CI job installs, on each entry's recorded failure signature. Four no longer reproduce and are promoted out of the set: `index_add` and `index_add_` (recorded as "returns all zeros") now route to `flaggems` from `none`, and `randn`/`randn_like` (recorded as "crashes unpacking generator state") route to `flaggems` with the mudnn kernel retained as `flaggems  # musa`. The other fourteen keep their routes with provenance updated to `4d9c34775`; `_conj` stays because its probe *passes* (flag_gems materializes the conjugate where ATen's lazy view must set the Conjugate bit). MUSA `flaggems` 464 -> 468, `musa` 51 -> 49, `none` 1521 -> 1519; registered-op set unchanged at 518, `musa_flaggems_register.inc` 357 -> 359 `m.impl` lines. FlagGems is not patched. A100/mc550/PPU/DCU rows and every non-MUSA platform are **not revalidated**. | Per-op probe, one fresh process each, `FLAGOS_OP_*` pinning the op back to FlagGems, `FLAGOS_LOG_DISPATCH=1`/`FLAGOS_LOG_FALLBACK=1`: `index_add`, `index_add_`, `randn`, `randn_like` PASS (0/7, 0/7, 0/4, 0/4) and the 13 entries kept in the set reproduce their recorded signature exactly (bf16 `failed to translate module to LLVM IR`; `no fallback function is registered for schema aten::mul.out` for f32 and bf16, with `aten.mul.out` itself verified usable on MUSA and the `flag_gems/ops/mul.py:587` device-name guard confirmed live; the trailing-store loss at `n = 3,5,6,7,9,15,17,31,33,100`; `RuntimeError: MudnnCopy: unsupported dtype Long -> UInt32`). Comparator control rejects a perturbed reference. Provenance beyond verdicts: `index_add`/`index_add_` each add a new flag_gems code-cache entry, so the mthreads kernel compiled and ran on device, and every fallback line in those rows is the probe's own CPU comparison. End-to-end on the rebuilt library with the shipped conf: 14/14 cases pass, dispatch log showing `index_add`/`index_add_`/`randn`/`randn_like -> flagos_python` against `sort`/`add.Tensor -> musa` regression controls. `index_add` with duplicate indices and `alpha = 2.5` is bounded, not assumed: 11/20 seeds differ from CPU by at most `4.768e-07` (one float32 ULP) on the duplicated rows only, `alpha == 1` bit-exact, matching ATen's documented order-freedom for duplicate indices. CI groups re-run: dispatch 113 passed; factory 46 passed; operator cohort 493 passed/1 skipped/521 deselected/2 xfailed/1 xpassed plus the 3 pre-existing consistency failures; RNG 80 passed/37 deselected with the manifest's `-k` filter. Generators idempotent (`codegen_musa_flaggems.py --check` "is up to date", `gen_vendor_confs.py --check` clean for MUSA); `codegen_musa_flaggems.py` must run before `gen_vendor_confs.py`. `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing ascend/gcu drift failure. `flaggems_overload_survey.py` cannot measure these routes — evidence gap recorded in the section above. |
 | 2026-09-15 | MTT S5000 (8 devices) | MUSA integer division (issue #266) | Fixed two integer-division defects in the generator, not with handwritten kernels. `int64 / int64` raised `Unsupported binary mode: TRUEDIV, with left data type: INT64` because the generated kernels took `result_dtype` from `at::result_type` (int64) while ATen promotes integer true division to float32; `_TRUEDIV_INT_TO_FLOAT` now widens integral results, guarded on `!rounding_mode.has_value()` so `'floor'`/`'trunc'` keep int64. Integer `//`, `floor_divide`, and `floor_divide_` silently lost the trailing element on non-power-of-two `numel` in FlagGems; new `binary_mode` / `binary_inplace_mode` categories plus the `floor_divide_.Tensor` native entry route `div.Tensor_mode`, `div_.Tensor_mode`, `floor_divide` and `floor_divide_.Tensor` through mudnn `FLOORDIV`/`TRUNCATEDIV`/`TRUEDIV` via `SetMudnnDivMode`. MUSA `flaggems` 468 -> 464, `musa` 47 -> 51, `none` 1521; registered-op set unchanged at 518 (three overloads moved from the FlagGems registration to the native one). FlagGems is not patched. Other platforms are **not revalidated** and no FlagGems route changed for them. | 59-case CPU-parity probe on `flagos:0` run against both this tree and a base-commit worktree (out-of-place, in-place, scalar and tensor operands, both rounding modes, negatives, `out=`, broadcasting, and `floor_divide` at `n = 2,3,4,5,7,8,15,17,33,100`): 39 exact / 7 float-approximate / 13 mismatches before, 43 exact / 14 float-approximate / 1 error-text match / 1 probe-harness mismatch after. Integer floor division and every `rounding_mode` case exact; the float-approximate cases are true division one float32 ULP from CPU and reproduce identically on pure-float inputs on the base tree (pre-existing mudnn `TRUEDIV` arithmetic, not this change). `FLAGOS_LOG_DISPATCH=1` shows all five overloads on `-> musa`; pinning the four rerouted overloads back onto FlagGems via `FLAGOS_OP_*` reproduces the tail loss (`[5, 5, 0]` for `[5, 5, 6]` at n=3) and leaves true division correct, isolating the routing fix causally. Full `.github/configs/musa.yml` run locally: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 493 passed/1 skipped/513 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. Generator idempotent (two runs byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `flaggems_overload_survey.py` cannot measure these routes: it selects `flagos_python` entries, and the rerouted overloads are exactly the ones that left that route — evidence gap recorded in the section above. Three pre-existing `test_flaggems_conf_consistency.py` failures (`mm`/`bmm`/`addmm` dispatcher drift) reproduce byte-identically against the pristine conf. |
 | 2026-09-14 | MTT S5000 (8 devices) | MUSA FlagGems routing and in-place arithmetic fallback | Restored the MUSA FlagGems registration generator, taking MUSA from 158 to 515 registered ops and from 122 to 468 `flaggems` routes (`musa` 36 -> 47, `none` 1878 -> 1521). Moved 14 ops into `NATIVE_TRITON_GAPS["musa"]` so they fall back to mudnn instead: `add/sub/div.Tensor` and their in-place forms plus `mul_.Tensor` (bf16 wrapped-number promotion reaches `llvm.musa.float2bfloat16` with a double operand), `randn`/`randn_like`, `sort`/`sort.stable`, and `_conj`/`index_add`/`index_add_`, which route to `none` because mudnn has no kernel for them. FlagGems is not patched. Ascend, GCU, DCU, MetaX and PPU rows are **not revalidated** by this change and no FlagGems route was altered for them. | Every group of `.github/configs/musa.yml` run locally on hardware: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 490 passed/2 skipped/512 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. The bf16 gap was reproduced causally with `FLAGOS_OP_add__Tensor=flaggems`, which reproduces the remote CI's `failed to translate module to LLVM IR` on `test_autocast_fp32_policy[dtype1]` and passes on the shipped route. Three `flaggems`-marked dispatch-log tests that hard-coded `flagos_python`/`cuda` were rewritten to read the route from the platform conf (`tests/integration/ops/backend_conf.py`); they were the only failures in CI group 7 on `6f8128e` and pass on every platform's conf afterwards. Generator idempotent (`codegen_mudnn.py` twice, byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing failure (ascend/gcu conf staleness, unrelated). Three pre-existing `test_flaggems_conf_consistency.py` failures reproduce byte-identically against `d0e2d1a`'s data files, so they are not introduced by this change. |
 | 2026-09-11 | None (CPU-only host) | Unified MetaX confs (refactor/unified-vendor-confs) | Collapsed `backends_metax_flaggems.conf` and `backends_metax_flaggems_cpp.conf` into a single `backends_metax.conf`. The 17 on-device-verified C++ routes are now in the file unconditionally; a build without `FLAGGEMS_KERNEL=ON` degrades them to the boxing kernel via `Dispatcher::GetFn` instead of raising. `METAX_CPP_MEASURED` in `gen_vendor_confs.py` records the measured set explicitly since the file it was formerly recovered from no longer exists. `mm` remains on the boxing kernel (MetaX C550 shared-memory limit). `_select_backend_config()` now routes both `FLAGOS_USE_FLAGGEMS` and `FLAGOS_USE_FLAGGEMS_CPP` to the same `backends_metax.conf` under `FLAGOS_METAX_BOXING=1`. **All hardware rows not revalidated.** | Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), `tests/unit/test_gen_vendor_confs.py` passes with updated test names. |

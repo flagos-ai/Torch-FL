@@ -4,7 +4,7 @@ Track and manage MUSA FlagGems ops that fail CI tests and need fallback to mudnn
 
 Usage:
   # After CI run, record failing ops
-  python3 scripts/tools/record_musa_flaggems_failures.py add index_add randn embedding
+  python3 scripts/tools/record_musa_flaggems_failures.py add add.Tensor floor_divide embedding
 
   # Regenerate configs with failures moved to NATIVE_TRITON_GAPS
   python3 scripts/codegen/gen_vendor_confs.py
