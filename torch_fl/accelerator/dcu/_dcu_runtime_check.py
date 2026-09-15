@@ -51,7 +51,7 @@ def bundled_vendor_version(bundle_dir):
     """The torch version the bundled DTK libtorch was built from, or None.
 
     Reads ``vendor_version.py``, a verbatim copy of the DTK wheel's own
-    ``torch/version.py`` placed there by ``scripts/bundle_dcu_libtorch.sh``.
+    ``torch/version.py`` placed there by ``scripts/vendor/bundle_dcu_libtorch.sh``.
     None means a source checkout with no bundle, where the preload was a no-op
     too, so there is nothing to reconcile.
     """
@@ -96,7 +96,7 @@ def check_cuda_dispatch(has_kernel):
         f"{', '.join(missing)}, so PrivateUse1 -> CUDA boxing cannot work. The "
         "device libraries were not loaded before `import torch` (import torch_fl "
         "first, never torch_fl after torch in a fresh process), or the bundle is "
-        "incomplete -- rerun scripts/bundle_dcu_libtorch.sh."
+        "incomplete -- rerun scripts/vendor/bundle_dcu_libtorch.sh."
     )
 
 

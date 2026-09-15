@@ -275,7 +275,7 @@ test: update MUSA dispatch tests to accept FlagGems routing
 ```
 
 **Changes**:
-- Restored the MUSA `musa_flaggems_register.inc` generation (`scripts/codegen_musa_flaggems.py`),
+- Restored the MUSA `musa_flaggems_register.inc` generation (`scripts/codegen/codegen_musa_flaggems.py`),
   registering all 482 FlagGems Python ops on PrivateUse1 for MUSA
 - Updated test expectations to match FlagGems-first routing: 468 ops route to
   `flaggems`, 47 to `musa`, 1521 to `none`
@@ -379,11 +379,11 @@ checks is byte-identical to a fresh generation.
 
 ### Generator idempotency
 
-- `scripts/codegen_mudnn.py` re-run produces byte-identical artifacts
+- `scripts/codegen/codegen_mudnn.py` re-run produces byte-identical artifacts
   (`musa_flaggems_register.inc`, `musa_register.inc`, `musa_kernels.cc` all match
   on the second run).
-- `scripts/codegen_musa_flaggems.py --check` reports "is up to date".
-- `scripts/gen_vendor_confs.py --check` is clean for MUSA. It is stale for
+- `scripts/codegen/codegen_musa_flaggems.py --check` reports "is up to date".
+- `scripts/codegen/gen_vendor_confs.py --check` is clean for MUSA. It is stale for
   `backends_ascend.conf` and `backends_gcu.conf`; that drift predates this work
   and those platforms are out of scope here.
 

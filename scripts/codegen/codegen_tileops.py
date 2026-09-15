@@ -1,0 +1,1085 @@
+#!/usr/bin/env python3
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Generate TileOPs -> aten routing tables from the TileOPs manifest.
+
+Reads ``tileops/manifest/*.yaml`` plus the hand-maintained tables in
+``torch_fl/tileops/spec.py`` and writes:
+
+  - ``torch_fl/tileops/generated/routes.py``       routing table
+  - ``torch_fl/tileops/generated/shims.py``        module-level callables for C++
+  - ``csrc/aten/generated/tileops_python_kernels.cc``  C++ stubs + registrations
+  - ``scripts/codegen/backend_coverage.py``               the op set (TILEOPS_OPS block)
+  - ``tests/integration/ops/test_tileops_generated.py``  numeric + dispatch tests
+
+Routes reach aten through the C++ dispatcher on ``Backend::kTileOps``, the same
+way FlagGems' Python ops reach it on ``kFlagGems`` (see
+``csrc/aten/generated/flaggems_python_kernels.cc``). The kernels themselves stay
+in Python -- TileOPs ships no C++ API -- so each generated stub calls back into
+``torch_fl.tileops.generated.shims`` via ``CallPythonOp_Generic``.
+
+Going through the dispatcher rather than binding on PrivateUse1 directly is what
+makes ``FLAGOS_OP_<op>=<backend>``, ``FLAGOS_LOG_DISPATCH=1`` and
+``FLAGOS_USE_TILEOPS=1`` work without reimplementing any of them in Python: a
+torch.library PrivateUse1 binding intercepts *before* the dispatcher, so an op
+bound there never sees its own routing config.
+
+C++ signatures are read back from the committed ``csrc/aten/generated/ops.h``
+(types) and ``register.inc`` (parameter names) rather than re-derived from
+torchgen. The generated stub is assigned to a dispatcher function pointer, so
+matching that header exactly is the requirement; reading it directly makes a
+mismatch impossible rather than merely unlikely.
+
+Products are committed, matching how ``csrc/aten/generated/`` is handled: routing
+changes show up in review and the build never needs TileOPs installed.
+
+Usage (needs tileops importable, e.g. PYTHONPATH=/path/to/tilelang-env):
+
+    python scripts/codegen/codegen_tileops.py [--check]
+
+``--check`` regenerates into memory and fails if the committed files differ,
+which is what CI should run.
+
+Output is piped through ``ruff format`` so the products satisfy the repo lint
+job. Without that, ``ruff format .`` rewrites them and ``--check`` immediately
+reports them stale -- the two gates would contradict each other.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import importlib
+import inspect
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+from typing import Dict, List, Optional, Tuple
+
+REPO = pathlib.Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO))
+
+from torch_fl.tileops.spec import (  # noqa: E402
+    ATEN_ALIAS,
+    ATEN_OVERLOAD,
+    BINARY,
+    DEFAULT_OFF,
+    EXCLUDE,
+    RECIPES,
+    REDUCE,
+    SOFTMAX,
+    UNARY,
+)
+
+CONF_CUDA = REPO / "torch_fl" / "configs" / "backends_cuda.conf"
+OUT_ROUTES = REPO / "torch_fl" / "tileops" / "generated" / "routes.py"
+OUT_SHIMS = REPO / "torch_fl" / "tileops" / "generated" / "shims.py"
+OUT_KERNELS = REPO / "csrc" / "aten" / "generated" / "tileops_python_kernels.cc"
+# Formerly torch_fl/configs/backends_tileops.conf. The routing decision now
+# lives as a `# tileops` annotation in backends_cuda.conf, so what this script
+# owns is the op *set*, patched into the shared coverage module the conf
+# generators read (only the TILEOPS_OPS block is rewritten).
+OUT_COVERAGE = REPO / "scripts" / "codegen" / "backend_coverage.py"
+OUT_TEST = REPO / "tests" / "integration" / "ops" / "test_tileops_generated.py"
+
+#: Committed csrc products read back for C++ signatures. ops.h carries the
+#: dispatcher typedefs (types); register.inc carries the wrapper functions
+#: (parameter names, and the m.impl mapping from overload to wrapper).
+SRC_OPS_H = REPO / "csrc" / "aten" / "generated" / "ops.h"
+SRC_REGISTER_INC = REPO / "csrc" / "aten" / "generated" / "register.inc"
+
+LICENSE = """# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+
+BANNER = "# AUTO-GENERATED by scripts/codegen/codegen_tileops.py -- DO NOT EDIT."
+
+CPP_LICENSE = """// Copyright 2026 FlagOS Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License."""
+
+CPP_BANNER = "// AUTO-GENERATED by scripts/codegen/codegen_tileops.py -- DO NOT EDIT."
+
+#: Python module the generated C++ stubs resolve their callables from.
+SHIM_MODULE = "torch_fl.tileops.generated.shims"
+
+#: Dispatcher names that do not follow the mechanical overload -> snake_case rule.
+#: codegen_ops.py lowercases the whole overload suffix ("dim_IntList" ->
+#: "dim_intlist"), so a generic word-splitting conversion produces
+#: "dim_int_list" and misses. Spelled out rather than special-cased in the
+#: converter, since the set is small and closed.
+DISPATCHER_NAME_OVERRIDE = {
+    "count_nonzero.dim_IntList": "count_nonzero_dim_intlist_dispatcher",
+    "sum.dim_IntList": "sum_dim_intlist_dispatcher",
+}
+
+# ctor params that are plumbing rather than op semantics
+CTOR_IGNORE = {"self", "kernel_map", "tune"}
+
+# dtype token (manifest spelling) -> torch dtype attribute name
+DTYPE_TOKENS = {
+    "float16": "float16",
+    "bfloat16": "bfloat16",
+    "float32": "float32",
+    "float64": "float64",
+    "int8": "int8",
+    "int16": "int16",
+    "int32": "int32",
+    "int64": "int64",
+    "uint8": "uint8",
+    "bool": "bool",
+}
+
+
+# --------------------------------------------------------------------------- #
+# manifest / class discovery
+# --------------------------------------------------------------------------- #
+def load_manifest() -> Dict[str, dict]:
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("codegen_tileops: PyYAML required")
+    try:
+        import tileops.manifest as man_pkg
+    except ImportError as exc:
+        sys.exit(f"codegen_tileops: cannot import tileops ({exc}); set PYTHONPATH")
+
+    man_dir = pathlib.Path(man_pkg.__file__).parent
+    entries: Dict[str, dict] = {}
+    for path in sorted(man_dir.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text()) or {}
+        for name, spec in data.items():
+            if isinstance(spec, dict) and "ref_api" in spec:
+                spec = dict(spec)
+                spec["_family"] = path.stem
+                entries[name] = spec
+    return entries
+
+
+def load_op_classes() -> Dict[str, type]:
+    """Map Op class name -> class, walking every module under tileops.ops."""
+    import tileops.ops as ops_pkg
+
+    ops_dir = pathlib.Path(ops_pkg.__file__).parent
+    root = ops_dir.parent.parent
+    classes: Dict[str, type] = {}
+    for path in sorted(ops_dir.rglob("*.py")):
+        mod = str(path.relative_to(root).with_suffix("")).replace("/", ".")
+        try:
+            module = importlib.import_module(mod)
+        except Exception:
+            continue
+        for name, obj in vars(module).items():
+            if inspect.isclass(obj) and name not in classes:
+                classes[name] = obj
+    return classes
+
+
+def routed_aten_names() -> set:
+    """Base aten names torch_fl already routes, taken from the CUDA conf."""
+    names = set()
+    for line in CONF_CUDA.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        names.add(line.split("=")[0].strip().split(".")[0])
+    return names
+
+
+# --------------------------------------------------------------------------- #
+# classification
+# --------------------------------------------------------------------------- #
+def aten_base(ref_api: str) -> Optional[str]:
+    if not ref_api:
+        return None
+    if ref_api in ATEN_ALIAS:
+        return ATEN_ALIAS[ref_api]
+    return ref_api.split("(")[0].strip().split(".")[-1]
+
+
+def ctor_params(cls: type) -> Optional[Tuple[str, ...]]:
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        return None
+    return tuple(p for p in sig.parameters if p not in CTOR_IGNORE)
+
+
+def forward_params(cls: type) -> Optional[Tuple[str, ...]]:
+    try:
+        sig = inspect.signature(cls.forward)
+    except (TypeError, ValueError):
+        return None
+    return tuple(p for p in sig.parameters if p != "self")
+
+
+def dtypes_for(op_name: str, cls: type, spec: dict) -> Tuple[str, ...]:
+    """Supported dtypes as torch attribute names.
+
+    Prefers ``cls.kernel_cls.SUPPORTED_DTYPES`` (readable without instantiating,
+    covers ~half the ops) and falls back to the manifest dtype strings, which
+    cover all of them.
+    """
+    kernel_cls = getattr(cls, "kernel_cls", None)
+    supported = getattr(kernel_cls, "SUPPORTED_DTYPES", None) if kernel_cls else None
+    if supported:
+        out = []
+        for dt in supported:
+            name = str(dt).replace("torch.", "")
+            if name in DTYPE_TOKENS:
+                out.append(name)
+        if out:
+            return tuple(out)
+
+    tokens: List[str] = []
+    for field in (spec.get("signature", {}).get("inputs", {}) or {}).values():
+        if not isinstance(field, dict):
+            continue
+        raw = field.get("dtype")
+        if not raw or "same_as" in str(raw):
+            continue
+        for tok in re.split(r"[|,]", str(raw)):
+            tok = tok.strip()
+            if tok in DTYPE_TOKENS and tok not in tokens:
+                tokens.append(tok)
+        if tokens:
+            break
+    return tuple(tokens)
+
+
+Route = collections.namedtuple(
+    "Route", "aten overload recipe module cls_name op_name dtypes extra workload family"
+)
+
+
+def first_workload(spec: dict) -> Optional[list]:
+    for wl in spec.get("workloads") or []:
+        for key, val in wl.items():
+            if key.endswith("_shape") and isinstance(val, list):
+                return val
+    return None
+
+
+def classify(entries: Dict[str, dict], classes: Dict[str, type]):
+    routed = routed_aten_names()
+    routes: List[Route] = []
+    manual: Dict[Tuple[str, ...], List[str]] = collections.defaultdict(list)
+    skipped: Dict[str, str] = {}
+
+    for op_name, spec in sorted(entries.items()):
+        if spec.get("status") != "implemented":
+            continue
+        base = aten_base(spec.get("ref_api"))
+        if not base or base not in routed:
+            continue
+        if op_name in EXCLUDE:
+            skipped[op_name] = EXCLUDE[op_name]
+            continue
+
+        cls = classes.get(op_name)
+        if cls is None:
+            skipped[op_name] = "Op class not importable"
+            continue
+
+        ctor = ctor_params(cls)
+        recipe = RECIPES.get(ctor)
+        if recipe is None:
+            manual[ctor or ()].append(op_name)
+            continue
+
+        dtypes = dtypes_for(op_name, cls, spec)
+        if not dtypes:
+            skipped[op_name] = "no dtype set from kernel_cls or manifest"
+            continue
+
+        extra = {}
+        if "inplace" in (ctor or ()):
+            extra["inplace"] = False
+        if "keepdim" in (ctor or ()):
+            extra["keepdim"] = True
+        if "alpha" in (ctor or ()):
+            extra["alpha"] = True
+        if "correction" in (ctor or ()):
+            extra["correction"] = True
+        if "ord" in (ctor or ()):
+            extra["ord"] = True
+
+        routes.append(
+            Route(
+                aten=base,
+                overload=ATEN_OVERLOAD.get(base, base),
+                recipe=recipe,
+                module=cls.__module__,
+                cls_name=op_name,
+                op_name=op_name,
+                dtypes=dtypes,
+                extra=extra,
+                workload=first_workload(spec),
+                family=spec.get("_family", "?"),
+            )
+        )
+
+    validate(routes, classes)
+    return routes, manual, skipped
+
+
+def validate(routes: List[Route], classes: Dict[str, type]) -> None:
+    """Fail loudly rather than emit code that cannot work.
+
+    Each recipe implies an arity on ``forward``; if TileOPs changes a signature we
+    want a codegen failure, not a runtime one.
+    """
+    expected = {UNARY: 1, BINARY: 2, REDUCE: 1, SOFTMAX: 1}
+    problems = []
+    seen = {}
+    for r in routes:
+        fwd = forward_params(classes[r.cls_name]) or ()
+        want = expected[r.recipe]
+        if len(fwd) != want:
+            problems.append(
+                f"{r.cls_name}: recipe {r.recipe} expects {want} forward arg(s), got {list(fwd)}"
+            )
+        if r.overload in seen:
+            problems.append(
+                f"aten overload '{r.overload}' claimed by both {seen[r.overload]} and {r.cls_name}"
+            )
+        else:
+            seen[r.overload] = r.cls_name
+    if problems:
+        sys.exit("codegen_tileops: validation failed\n  " + "\n  ".join(problems))
+
+
+# --------------------------------------------------------------------------- #
+# C++ signature discovery
+# --------------------------------------------------------------------------- #
+CppSig = collections.namedtuple("CppSig", "ret params fn_typedef dispatcher")
+
+
+def _split_top_level(text: str) -> List[str]:
+    """Split a C++ parameter list on commas outside <> and ()."""
+    out, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "<(":
+            depth += 1
+        elif ch in ">)":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def cpp_signatures() -> Dict[str, CppSig]:
+    """aten overload -> C++ return type, (type, name) params, typedef, dispatcher.
+
+    Read from the committed csrc products rather than re-derived from torchgen.
+    The generated stub is assigned to a dispatcher function pointer declared in
+    ``ops.h``, so it must match that declaration exactly -- reading it back makes
+    a mismatch impossible instead of merely unlikely, and keeps this generator
+    from having to reimplement torchgen's faithful-signature rules.
+    """
+    header = SRC_OPS_H.read_text()
+    typedefs = {
+        disp: (fn, sig)
+        for fn, sig, disp in re.findall(
+            r"using (\w+Fn) = (.+?);\nDECLARE_DISPATCHER\(\1, (\w+)\)", header
+        )
+    }
+
+    inc = SRC_REGISTER_INC.read_text()
+    wrappers = {
+        name: params
+        for _ret, name, params in re.findall(
+            r"^([\w:<>,& ]+?) (Wrapper\w+)\((.*?)\) \{", inc, re.M
+        )
+    }
+    impls = dict(re.findall(r'm\.impl\("([^"]+)",\s*(\w+)\)', inc))
+
+    out: Dict[str, CppSig] = {}
+    for overload, wrapper in impls.items():
+        disp = dispatcher_name(overload)
+        entry = typedefs.get(disp) or typedefs.get("priv_" + disp)
+        if entry is None or wrapper not in wrappers:
+            continue
+        fn_typedef, sig = entry
+        ret = sig.split("(*)")[0].strip()
+        types = _split_top_level(sig.split("(*)", 1)[1].strip()[1:-1])
+        names = [
+            re.match(r"^.*?(\w+)$", p).group(1)
+            for p in _split_top_level(wrappers[wrapper])
+        ]
+        if len(types) != len(names):
+            continue
+        out[overload] = CppSig(
+            ret=ret,
+            params=list(zip(types, names)),
+            fn_typedef=fn_typedef,
+            dispatcher=disp if disp in typedefs else "priv_" + disp,
+        )
+    return out
+
+
+def dispatcher_name(overload: str) -> str:
+    """aten overload -> dispatcher symbol, mirroring codegen_ops.py."""
+    if overload in DISPATCHER_NAME_OVERRIDE:
+        return DISPATCHER_NAME_OVERRIDE[overload]
+    base, _, sub = overload.partition(".")
+    inplace = base.endswith("_") and not base.endswith("__")
+    if inplace:
+        base = base[:-1]
+    parts = [base.lstrip("_")]
+    if inplace:
+        parts.append("inplace")
+    if sub:
+        parts.append(sub)
+    name = "_".join(parts)
+    name = re.sub(r"(?<!^)(?<![_A-Z])([A-Z])", r"_\1", name).lower()
+    return name + "_dispatcher"
+
+
+def cpp_kernel_name(overload: str) -> str:
+    """aten overload -> generated C++ function name (AddTensorKernelTileOps)."""
+    base, _, sub = overload.partition(".")
+    inplace = base.endswith("_") and not base.endswith("__")
+    if inplace:
+        base = base[:-1]
+    camel = "".join(w.capitalize() for w in base.lstrip("_").split("_"))
+    if inplace:
+        camel += "Inplace"
+    if sub:
+        camel += "".join(w.capitalize() for w in sub.split("_"))
+    return camel + "KernelTileOps"
+
+
+def shim_name(overload: str) -> str:
+    """aten overload -> Python shim function name (_shim_add_tensor)."""
+    return "_shim_" + dispatcher_name(overload)[: -len("_dispatcher")]
+
+
+# --------------------------------------------------------------------------- #
+# emission
+# --------------------------------------------------------------------------- #
+def render_routes(routes: List[Route], skipped: Dict[str, str]) -> str:
+    lines = [
+        LICENSE,
+        "",
+        BANNER,
+        '"""TileOPs -> aten routing table generated from the TileOPs manifest.',
+        "",
+    ]
+    lines += [
+        "Modules are named as strings so importing this file never pulls in TileOPs;",
+        "torch_fl.tileops.runtime imports them lazily once the SM90/dependency gate",
+        "passes.",
+        '"""',
+        "",
+        "from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY",
+        "",
+    ]
+
+    dtype_sets = collections.Counter(r.dtypes for r in routes)
+    aliases = {}
+    for i, (dts, _) in enumerate(dtype_sets.most_common()):
+        aliases[dts] = f"_DT{i}"
+        lines.append(f"{aliases[dts]} = {tuple(dts)!r}")
+    lines.append("")
+    lines.append("#: (aten_overload, recipe, module, op_class, dtype_names, extra)")
+    lines.append("ROUTES = [")
+    for r in sorted(routes, key=lambda x: (x.recipe, x.overload)):
+        lines.append(
+            f"    ({r.overload!r}, {r.recipe}, {r.module!r}, {r.cls_name!r}, "
+            f"{aliases[r.dtypes]}, {r.extra!r}),"
+        )
+    lines.append("]")
+    lines.append("")
+    lines.append(
+        "#: aten overload -> a manifest workload shape, for warmup and benchmarks."
+    )
+    lines.append("WORKLOADS = {")
+    for r in sorted(routes, key=lambda x: x.overload):
+        if r.workload:
+            lines.append(f"    {r.overload!r}: {tuple(r.workload)!r},")
+    lines.append("}")
+    lines.append("")
+    lines.append(
+        "#: ops deliberately not routed, with the reason (see tileops.spec.EXCLUDE)."
+    )
+    lines.append("NOT_ROUTED = {")
+    for name, why in sorted(skipped.items()):
+        lines.append(f"    {name!r}: {why!r},")
+    lines.append("}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+#: aten params the recipe builders in torch_fl/tileops/runtime.py read from
+#: **kwargs rather than positionally. Forwarding these by position would be
+#: silently wrong in two different ways: `alpha` would land in the builders'
+#: `*rest` (which forces the aten fallback on every call), and `correction`
+#: would land in the `keepdim` slot, since aten orders var/std as
+#: (self, dim, correction, keepdim) while the builders take (x, dim, keepdim).
+KEYWORD_PARAMS = frozenset({"alpha", "correction", "dtype"})
+
+
+def split_params(sig: "CppSig") -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """Split a signature into (positional, keyword) params for the shim call."""
+    positional = [(t, n) for t, n in sig.params if n not in KEYWORD_PARAMS]
+    keyword = [(t, n) for t, n in sig.params if n in KEYWORD_PARAMS]
+    return positional, keyword
+
+
+def render_cpp_kernels(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
+    """Emit csrc/aten/generated/tileops_python_kernels.cc.
+
+    One stub per route, following the FlagGems Python-path template in
+    ``flaggems_python_kernels.cc``: forward the aten args to a Python callable
+    through ``CallPythonOp_Generic`` and register the result on the dispatcher.
+
+    ``alpha``/``correction``/``dtype`` are forwarded by name rather than by
+    position, because the recipe builders read them from ``**kwargs`` and aten
+    does not order them the way those builders take their positionals. ``dtype``
+    additionally needs ``is_dtype``: an IValue stores a ScalarType as a plain
+    int, so without the flag the shim would receive an int where a torch.dtype
+    is meant (see PyKwarg in python_op_caller.h).
+
+    Unlike the FlagGems stubs, the result is not passed through
+    ``UnboxToFlagos``. Those call functions that return a tensor still carrying
+    CUDA device metadata, so C++ rewrites it in place. The TileOPs shims return
+    through ``_C._cuda_to_flagos_view``, which builds a *new* flagos tensor over
+    the same storage -- it is already on the right device, and re-boxing in
+    place would corrupt a tensor the caller may still hold.
+    """
+    lines = [
+        CPP_LICENSE,
+        "",
+        CPP_BANNER,
+        "//",
+        "// TileOPs kernels registered on Backend::kTileOps.",
+        "//",
+        "// TileOPs ships no C++ API -- the kernels are TileLang-generated Python --",
+        "// so these stubs bridge back into the interpreter through the same",
+        "// CallPythonOp_Generic path FlagGems' Python ops use. Routing them through",
+        "// the dispatcher rather than binding them on PrivateUse1 in Python is what",
+        "// makes FLAGOS_OP_<op>, FLAGOS_LOG_DISPATCH and the conf files apply: a",
+        "// torch.library PrivateUse1 binding intercepts before the dispatcher runs,",
+        "// so an op bound there never reaches its own routing config.",
+        "//",
+        "// The shims resolve lazily and fall back to aten when TileOPs cannot serve a",
+        "// call (wrong dtype, unsupported arg shape, or TileOPs absent), so these",
+        "// stubs need no availability guard of their own.",
+        "",
+        "#ifdef FLAGOS_TILEOPS",
+        "",
+        '#include "ops.h"',
+        '#include "../backends/flagos/python_op_caller.h"',
+        "",
+        "namespace at::native::flagos {",
+        "namespace {",
+        "",
+    ]
+
+    registrations = []
+    for route in sorted(routes, key=lambda r: r.overload):
+        sig = sigs[route.overload]
+        positional, keyword = split_params(sig)
+        params = ", ".join(f"{typ} {name}" for typ, name in sig.params)
+        target = f"{SHIM_MODULE}.{shim_name(route.overload)}"
+        kernel = cpp_kernel_name(route.overload)
+        pos_args = ", ".join(n for _t, n in positional)
+
+        kwargs = []
+        for typ, name in keyword:
+            if "ScalarType" in typ:
+                kwargs.append(
+                    f'PyKwarg{{"{name}", {name}.has_value() ? '
+                    f"c10::IValue(static_cast<int64_t>(*{name})) : c10::IValue(), "
+                    f"/*is_dtype=*/true, /*is_none=*/!{name}.has_value()}}"
+                )
+            else:
+                kwargs.append(f'PyKwarg{{"{name}", {name}}}')
+        kw_args = ", ".join(kwargs)
+
+        n_out = sig.ret.count("at::Tensor") if sig.ret.startswith("::std::tuple") else 0
+
+        lines.append(f"// ---- {route.overload} ({route.recipe}, {route.cls_name})")
+        lines.append(f"{sig.ret} {kernel}({params}) {{")
+        if n_out:
+            call = (
+                "CallPythonOp_GenericKwTuple" if kwargs else "CallPythonOp_GenericTuple"
+            )
+            tail = f", {{{kw_args}}}, {n_out}" if kwargs else f", {n_out}"
+            lines.append(f'  auto result = {call}("{target}", {{{pos_args}}}{tail});')
+            lines.append(
+                "  return {" + ", ".join(f"result[{i}]" for i in range(n_out)) + "};"
+            )
+        elif kwargs:
+            lines.append(
+                f'  return CallPythonOp_GenericKw("{target}", '
+                f"{{{pos_args}}}, {{{kw_args}}});"
+            )
+        else:
+            lines.append(f'  return CallPythonOp_Generic("{target}", {{{pos_args}}});')
+        lines.append("}")
+        lines.append("")
+
+        registrations.append(
+            f"REGISTER_IMPL_TO_DISPATCHER({sig.fn_typedef}, {sig.dispatcher}, "
+            f"Backend::kTileOps, {kernel})"
+        )
+
+    lines.append("}  // namespace")
+    lines.append("")
+    lines.extend(registrations)
+    lines.append("")
+    lines.append("}  // namespace at::native::flagos")
+    lines.append("")
+    lines.append("#endif  // FLAGOS_TILEOPS")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_shims(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
+    """Emit torch_fl/tileops/generated/shims.py.
+
+    ``CallPythonOp_Generic`` resolves a dotted qualname with ``import module`` +
+    ``getattr``, so every route needs a module-level callable. TileOPs ops are
+    stateful objects whose constructors commit shape and dtype, which is why the
+    instance cache and the per-recipe argument derivation stay in
+    ``torch_fl.tileops.runtime`` -- these shims are just the named entry points.
+
+    Optional keyword args are dropped when None rather than forwarded. The
+    recipe builders treat the mere presence of ``dtype`` as "TileOPs cannot
+    serve this", so passing ``dtype=None`` on every call would divert every
+    reduction to aten and the routes would never run.
+    """
+    lines = [
+        LICENSE,
+        "",
+        BANNER,
+        '"""Module-level entry points for the generated TileOPs C++ stubs.',
+        "",
+        "Each function here is named by a CallPythonOp_Generic call in",
+        "csrc/aten/generated/tileops_python_kernels.cc. Keep the names in sync:",
+        "the C++ side resolves them by string at first call.",
+        '"""',
+        "",
+        "from torch_fl.tileops.generated.routes import ROUTES",
+        "from torch_fl.tileops.runtime import resolve_impl",
+        "",
+        "_ROUTES = {r[0]: r for r in ROUTES}",
+        "_CACHE = {}",
+        "",
+        "",
+        "def _impl(overload):",
+        '    """Resolve and cache the callable for one overload."""',
+        "    fn = _CACHE.get(overload)",
+        "    if fn is None:",
+        "        fn = _CACHE[overload] = resolve_impl(*_ROUTES[overload])",
+        "    return fn",
+        "",
+    ]
+
+    shim_names = []
+    for route in sorted(routes, key=lambda r: r.overload):
+        sig = sigs[route.overload]
+        positional, keyword = split_params(sig)
+        pos = [n for _t, n in positional]
+        kws = [n for _t, n in keyword]
+        name = shim_name(route.overload)
+        shim_names.append((route.overload, name))
+
+        params = pos + [f"{n}=None" for n in kws]
+        lines.append("")
+        lines.append(f"def {name}({', '.join(params)}):")
+        lines.append(f'    """{route.overload} -> {route.cls_name}."""')
+        if kws:
+            lines.append("    kwargs = {}")
+            for n in kws:
+                lines.append(f"    if {n} is not None:")
+                lines.append(f"        kwargs[{n!r}] = {n}")
+            lines.append(
+                f"    return _impl({route.overload!r})({', '.join(pos)}, **kwargs)"
+            )
+        else:
+            lines.append(f"    return _impl({route.overload!r})({', '.join(pos)})")
+        lines.append("")
+
+    lines.append("")
+    lines.append(
+        "#: aten overload -> the shim name the C++ stub resolves. Kept next to"
+    )
+    lines.append("#: the definitions so tests can check both sides agree.")
+    lines.append("SHIM_NAMES = {")
+    for overload, name in shim_names:
+        lines.append(f"    {overload!r}: {name!r},")
+    lines.append("}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def tileops_capable_ops(routes: List[Route]) -> set:
+    """Overloads that should carry the `# tileops` annotation in a conf.
+
+    DEFAULT_OFF routes are excluded: they generate a shim and a kernel stub, but
+    are known-worse or unverified, so nothing should repin them.
+    """
+    return {r.overload for r in routes if r.cls_name not in DEFAULT_OFF}
+
+
+def render_coverage(routes: List[Route], current: str) -> str:
+    """Rewrite TILEOPS_OPS inside scripts/codegen/backend_coverage.py.
+
+    This used to be render_conf(), writing torch_fl/configs/backends_tileops.conf
+    -- a full copy of backends_cuda.conf with these overloads flipped to
+    `tileops`. That file was a per-*mode* conf rather than a per-platform one, so
+    torch_fl/configs/ held two files describing one platform and
+    FLAGOS_USE_TILEOPS=1 had to swap between them.
+
+    `tileops` is now a routing key like any other, carried as a `# tileops`
+    annotation in backends_cuda.conf, and FLAGOS_USE_TILEOPS=1 repins the
+    annotated ops in the loaded table (ApplyTileOpsOptIn in csrc/aten/common.cc).
+    Default routing is untouched, which is what the annotation buys: TileOPs is
+    SM90-only and an optional dependency, so it must stay opt-in rather than
+    becoming the default for every CUDA build.
+
+    The set is patched into the shared coverage module instead of a private one
+    so all three measured ceilings (FlagGems Python, FlagGems C++, TileOPs) stay
+    in one file for gen_vendor_confs.py to read.
+    """
+    ops = sorted(tileops_capable_ops(routes))
+    body = "\n".join(_wrap_ops(ops, indent="    "))
+    new = f"TILEOPS_OPS = frozenset({{\n{body}\n}})  # fmt: skip"
+    patched, n = re.subn(
+        r"TILEOPS_OPS = frozenset\(\{.*?\}\)  # fmt: skip",
+        lambda _: new,
+        current,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if n != 1:
+        raise SystemExit(
+            f"{OUT_COVERAGE.name}: could not find the TILEOPS_OPS block to rewrite"
+        )
+    return patched
+
+
+def _wrap_ops(ops: List[str], indent: str) -> List[str]:
+    """Pack quoted op names into <=79-column lines, matching ruff's output."""
+    lines: List[str] = []
+    cur = indent
+    for op in ops:
+        item = f'"{op}",'
+        if cur != indent and len(cur) + 1 + len(item) > 79:
+            lines.append(cur)
+            cur = indent
+        cur = item if cur == indent else f"{cur} {item}"
+        if cur == item:
+            cur = indent + item
+    if cur.strip():
+        lines.append(cur)
+    return lines
+
+
+def render_test(routes: List[Route]) -> str:
+    lines = [
+        LICENSE,
+        "",
+        BANNER,
+        '"""Numeric and dispatch coverage for generated TileOPs routes."""',
+        "",
+        "import os",
+        "import subprocess",
+        "import sys",
+        "",
+        "import pytest",
+        "import torch",
+        "",
+        "import torch_fl  # noqa: F401",
+        "from torch_fl.tileops import runtime as tileops_runtime",
+        "from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS",
+        "from torch_fl.tileops.generated.shims import SHIM_NAMES",
+        "",
+        "pytestmark = pytest.mark.skipif(",
+        "    not tileops_runtime.is_tileops_available(),",
+        '    reason="TileOPs unavailable or host is not SM90",',
+        ")",
+        "",
+        "",
+        "def _ref(overload):",
+        '    """Resolve an aten overload to a callable.',
+        "",
+        "    Called with CPU tensors on purpose: the flagos key is where the TileOPs",
+        "    impl is bound, so a reference computed there would just re-enter the",
+        "    implementation under test.",
+        '    """',
+        '    base, _, ov = overload.partition(".")',
+        "    packet = getattr(torch.ops.aten, base)",
+        "    return getattr(packet, ov) if ov else packet",
+        "",
+        "",
+        "TOL = {",
+        "    torch.float16: (1e-2, 1e-2),",
+        "    torch.bfloat16: (5e-2, 5e-2),",
+        "    torch.float32: (1e-4, 1e-5),",
+        "}",
+        "",
+        "",
+        "@pytest.mark.parametrize(",
+        '    "overload,recipe,module,cls_name,dtypes,extra",',
+        "    ROUTES,",
+        "    ids=[r[0] for r in ROUTES],",
+        ")",
+        "def test_matches_aten(overload, recipe, module, cls_name, dtypes, extra):",
+        '    """Generated route agrees with the aten reference.',
+        "",
+        "    Runs on a small shape by default. Every distinct shape costs a full",
+        "    TileLang compile (~4 s on a cold shape; the availability gate disables only",
+        "    the buggy frontend cache layer while preserving the kernel cache), so the",
+        "    larger manifest workload shape is opt-in via FLAGOS_TILEOPS_FULL=1.",
+        '    """',
+        "    shape = (64, 32)",
+        "    if os.environ.get('FLAGOS_TILEOPS_FULL') == '1':",
+        "        shape = WORKLOADS.get(overload, shape)",
+        "    dtype = getattr(torch, dtypes[0])",
+        "",
+        "    fn = tileops_runtime.build_impl(recipe, module, cls_name, dtypes, extra, overload)",
+        "    if fn is None:",
+        '        pytest.skip("route not constructible on this host")',
+        "",
+        "    cpu_args = tileops_runtime.sample_inputs(",
+        "        recipe, shape, dtype, device='cpu', overload=overload",
+        "    )",
+        "    dev_args = tuple(",
+        "        a.to('flagos') if isinstance(a, torch.Tensor) else a for a in cpu_args",
+        "    )",
+        "",
+        "    got = fn(*dev_args)",
+        "    want = _ref(overload)(*cpu_args)",
+        "    if isinstance(got, (tuple, list)):",
+        "        got = got[0]",
+        "    if isinstance(want, (tuple, list)):",
+        "        want = want[0]",
+        "    if dtype in TOL:",
+        "        rtol, atol = TOL[dtype]",
+        "        torch.testing.assert_close(",
+        "            got.cpu().float(), want.float(), rtol=rtol, atol=atol",
+        "        )",
+        "    else:",
+        "        # Integer and bool results must be bit-exact.",
+        "        assert torch.equal(got.cpu(), want)",
+        "",
+        "",
+        "def test_dtype_guard_falls_back():",
+        '    """An unsupported dtype must fall back to aten, not raise."""',
+        "    x = torch.ones(64, device='flagos', dtype=torch.int32)",
+        "    assert torch.equal(torch.relu(x), x)",
+        "",
+        "",
+        "@pytest.mark.parametrize('overload', [r[0] for r in ROUTES])",
+        "def test_route_is_registered(overload):",
+        '    """Every generated route is known to the runtime."""',
+        "    assert overload in tileops_runtime.registered_ops()",
+        "",
+        "",
+        "@pytest.mark.parametrize('overload,shim', sorted(SHIM_NAMES.items()))",
+        "def test_shim_exists_and_is_callable(overload, shim):",
+        '    """Each route has the callable its C++ stub resolves by name.',
+        "",
+        "    CallPythonOp_Generic looks the function up by string on first call, so a",
+        "    rename that misses one side fails at runtime, on that one op, only once",
+        "    it is exercised. Checking the whole table here surfaces it immediately.",
+        '    """',
+        "    from torch_fl.tileops.generated import shims as tileops_shims",
+        "",
+        "    assert callable(getattr(tileops_shims, shim)), f'{overload} -> {shim}'",
+        "",
+        "",
+        "def test_dispatches_through_cpp():",
+        '    """The route is reached via the C++ dispatcher, not just callable.',
+        "",
+        "    Every other test here calls build_impl or the shim directly, which",
+        "    would keep passing if the generated .cc stubs were never compiled in",
+        "    or the conf never routed to them. This one runs a subprocess with",
+        "    FLAGOS_USE_TILEOPS=1 and reads the dispatcher's own log line, so it",
+        "    fails if the C++ registration is missing. The FLAGOS_OP_ half proves",
+        "    the per-op override reaches TileOPs routes -- the feature that had to",
+        "    be reimplemented in Python back when registration lived there.",
+        '    """',
+        "    prog = (",
+        "        'import torch, torch_fl; '",
+        "        \"torch.relu(torch.randn(64, 32, device='flagos', dtype=torch.float16))\"",
+        "    )",
+        "    # Propagate this interpreter's import path: torch_fl and tileops are",
+        "    # commonly run from a source checkout / PYTHONPATH rather than being",
+        "    # installed, and a bare subprocess would just fail to import them --",
+        "    # which would read as a dispatch failure.",
+        "    base = dict(",
+        "        os.environ,",
+        "        FLAGOS_USE_TILEOPS='1',",
+        "        FLAGOS_LOG_DISPATCH='1',",
+        "        PYTHONPATH=os.pathsep.join(p for p in sys.path if p),",
+        "    )",
+        "    # importing torch_fl (which this module does at collection time) writes",
+        "    # the resolved conf path back into os.environ. Inherited by the child it",
+        "    # outranks FLAGOS_USE_TILEOPS, pinning it to whichever conf the *parent*",
+        "    # happened to select.",
+        "    base.pop('FLAGOS_BACKEND_CONFIG', None)",
+        "",
+        "    out = subprocess.run(",
+        "        [sys.executable, '-c', prog], env=base, capture_output=True, text=True",
+        "    )",
+        "    assert '[flagos dispatch] relu -> tileops' in out.stdout + out.stderr, (",
+        "        f'stdout={out.stdout}\\nstderr={out.stderr}'",
+        "    )",
+        "",
+        "    out = subprocess.run(",
+        "        [sys.executable, '-c', prog],",
+        "        env=dict(base, FLAGOS_OP_relu='cuda'),",
+        "        capture_output=True,",
+        "        text=True,",
+        "    )",
+        "    assert '[flagos dispatch] relu -> cuda' in out.stdout + out.stderr, (",
+        "        f'stdout={out.stdout}\\nstderr={out.stderr}'",
+        "    )",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+def ruff_format(text: str, filename: str) -> str:
+    """Run ``ruff format`` over generated source, matching the lint job.
+
+    Returns the input unchanged when ruff is absent, so codegen still works on a
+    box without it -- but ``--check`` then compares against unformatted text and
+    can disagree with CI, hence the warning.
+    """
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        print(
+            f"codegen_tileops: ruff not found, {filename} left unformatted "
+            "(install ruff to match the lint job)",
+            file=sys.stderr,
+        )
+        return text
+    done = subprocess.run(
+        [ruff, "format", "--stdin-filename", filename, "-"],
+        input=text,
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        raise RuntimeError(f"ruff format failed on {filename}: {done.stderr.strip()}")
+    return done.stdout
+
+
+# --------------------------------------------------------------------------- #
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--check", action="store_true", help="fail if committed output is stale"
+    )
+    args = ap.parse_args()
+
+    entries = load_manifest()
+    classes = load_op_classes()
+    routes, manual, skipped = classify(entries, classes)
+
+    sigs = cpp_signatures()
+    unknown = [r.overload for r in routes if r.overload not in sigs]
+    if unknown:
+        # No dispatcher declaration means codegen_ops.py does not cover the op,
+        # so there is nothing to register the kernel against. Emitting a stub
+        # anyway would fail to compile.
+        sys.exit(
+            "codegen_tileops: no C++ dispatcher for: "
+            + ", ".join(sorted(unknown))
+            + "\nre-run scripts/codegen/codegen_ops.py, or exclude these in tileops.spec.EXCLUDE"
+        )
+
+    products = {
+        OUT_ROUTES: ruff_format(render_routes(routes, skipped), OUT_ROUTES.name),
+        OUT_SHIMS: ruff_format(render_shims(routes, sigs), OUT_SHIMS.name),
+        OUT_KERNELS: render_cpp_kernels(routes, sigs),  # C++, ruff would reject it
+        # Patched in place, not rendered: the file also carries the FlagGems
+        # sets. Already ruff-clean (the op blocks are `# fmt: skip`), so
+        # re-formatting here would only risk reflowing them.
+        OUT_COVERAGE: render_coverage(routes, OUT_COVERAGE.read_text()),
+        OUT_TEST: ruff_format(render_test(routes), OUT_TEST.name),
+    }
+
+    if args.check:
+        stale = [
+            p.name
+            for p, text in products.items()
+            if not p.exists() or p.read_text() != text
+        ]
+        if stale:
+            print(
+                "codegen_tileops: stale products: " + ", ".join(stale), file=sys.stderr
+            )
+            print("re-run: python scripts/codegen/codegen_tileops.py", file=sys.stderr)
+            return 1
+        print("codegen_tileops: products up to date")
+        return 0
+
+    for path, text in products.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        print(f"wrote {path.relative_to(REPO)}")
+
+    by_recipe = collections.Counter(r.recipe for r in routes)
+    print(f"\nrouted {len(routes)} ops: {dict(by_recipe)}")
+    print(f"default-off (conf says cuda): {sorted(DEFAULT_OFF)}")
+    print(f"excluded {len(skipped)}: {sorted(skipped)}")
+    n_manual = sum(len(v) for v in manual.values())
+    print(
+        f"\nmanual recipes still needed: {n_manual} ops across {len(manual)} ctor shapes"
+    )
+    for ctor, ops in sorted(manual.items(), key=lambda kv: -len(kv[1])):
+        print(f"  {list(ctor)} -> {sorted(ops)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

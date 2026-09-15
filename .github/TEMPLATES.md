@@ -29,7 +29,7 @@ Before creating any PR:
 cat .github/AI_AGENT_GUIDE.md
 
 # 2. Validate your changes
-python scripts/validate_ai_pr.py --pr-body pr_description.md
+python scripts/tools/validate_ai_pr.py --pr-body pr_description.md
 
 # 3. Run tests and save output
 pytest tests/unit/ -v > test_output.txt 2>&1
@@ -64,17 +64,17 @@ gh pr create \
 
 ### Validation Script
 
-Use `scripts/validate_ai_pr.py` to check your PR before submission:
+Use `scripts/tools/validate_ai_pr.py` to check your PR before submission:
 
 ```bash
 # Basic validation
-python scripts/validate_ai_pr.py
+python scripts/tools/validate_ai_pr.py
 
 # With PR body file
-python scripts/validate_ai_pr.py --pr-body my_pr.md
+python scripts/tools/validate_ai_pr.py --pr-body my_pr.md
 
 # Skip linting (if you've already confirmed it passes)
-python scripts/validate_ai_pr.py --skip-lint
+python scripts/tools/validate_ai_pr.py --skip-lint
 ```
 
 The script checks:

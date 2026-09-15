@@ -2,7 +2,7 @@
 //
 // Fused RMSNorm forward for the Ascend backend via aclnnRmsNorm. Intercepts
 // aten::_fused_rms_norm (a CompositeImplicitAutograd op force-included by
-// scripts/codegen_ops.py FORCE_INCLUDE_OPS) so HF's Qwen3RMSNorm — which
+// scripts/codegen/codegen_ops.py FORCE_INCLUDE_OPS) so HF's Qwen3RMSNorm — which
 // decomposes into ~6 elementwise ops + 2 dtype casts per layer — collapses to a
 // single device kernel. The HF module must call F.rms_norm to route here (a
 // small monkey-patch in the inference script); F.rms_norm -> aten::rms_norm ->

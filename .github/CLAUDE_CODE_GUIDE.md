@@ -19,7 +19,7 @@ This document provides specific instructions for using Claude Code (CLI, desktop
 # (Claude will read code, understand patterns, make changes)
 
 # 2. Before submitting, run validation
-python scripts/validate_ai_pr.py --pr-body pr.md
+python scripts/tools/validate_ai_pr.py --pr-body pr.md
 
 # 3. Create PR using AI template
 gh pr create \
@@ -205,7 +205,7 @@ If using Claude Code IDE extension:
 // .vscode/settings.json or similar
 {
   "claude.prePrompt": "Remember: all GitHub text must be English per CLAUDE.md",
-  "claude.postCodeReview": "Run: python scripts/validate_ai_pr.py"
+  "claude.postCodeReview": "Run: python scripts/tools/validate_ai_pr.py"
 }
 ```
 
@@ -214,11 +214,11 @@ If using Claude Code CLI:
 
 ```bash
 # Add to your shell rc file
-alias claude-pr='python scripts/validate_ai_pr.py && gh pr create'
+alias claude-pr='python scripts/tools/validate_ai_pr.py && gh pr create'
 
 # Use the validation script before every PR
 claude code "fix the bug in file.cc"
-python scripts/validate_ai_pr.py --pr-body pr.md
+python scripts/tools/validate_ai_pr.py --pr-body pr.md
 ```
 
 ## Common Pitfalls
@@ -359,7 +359,7 @@ If you're unsure whether Claude is doing things correctly:
 1. Check `.github/AI_AGENT_GUIDE.md` for the official guidelines
 2. Look at merged PRs for examples
 3. Ask Claude to show its reasoning before making changes
-4. Use `python scripts/validate_ai_pr.py` to catch issues early
+4. Use `python scripts/tools/validate_ai_pr.py` to catch issues early
 
 ## Related Documentation
 

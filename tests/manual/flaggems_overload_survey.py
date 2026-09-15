@@ -5,11 +5,12 @@
 This is a manual hardware survey, not a pytest test. CI does not invoke files in
 ``tests/manual``.
 
-The unit of measurement is an active, unique ``flagos_python`` overload from
-``backends_flaggems.conf``. Each overload runs in a fresh child process through
-``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real ATen
-schema and are first validated on CPU; device results are then compared with the
-same overload on CPU.
+The unit of measurement is an active, unique ``flagos_python`` overload from the
+platform conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has
+its own ``backends_<platform>.conf``). Each overload runs in a fresh child process
+through ``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real
+ATen schema and are first validated on CPU; device results are then compared with
+the same overload on CPU.
 
 Two support levels are reported:
 
@@ -21,7 +22,7 @@ pass. Raw per-case evidence is retained in JSON for later auditing.
 
 Usage:
   python tests/manual/flaggems_overload_survey.py \
-      --conf torch_fl/configs/backends_flaggems.conf \
+      --conf torch_fl/configs/backends_cuda.conf \
       --out /tmp/flaggems-overloads.json
 
 Resume after interruption by running the same command again. Use ``--rerun`` to

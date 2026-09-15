@@ -76,7 +76,7 @@ It builds as `libflagos_dtk_core_compat.so` (~16 KB) and installs into
 
 ### 2. A build-time ABI guard
 
-`scripts/check_dcu_core_abi.py` recomputes the gap from the binaries rather than
+`scripts/vendor/check_dcu_core_abi.py` recomputes the gap from the binaries rather than
 trusting the checked-in list. It reports
 
 ```text
@@ -90,7 +90,7 @@ by the shim. The manifest is deliberately a compatibility superset: its 16
 its 16 `fuse_*` symbols are imported by `libtorch_fl.so` only when the plugin was
 compiled against DTK's patched headers. CI compiles the plugin against official
 headers, so that valid build has a 16-symbol gap rather than 32.
-`scripts/bundle_dcu_libtorch.sh` runs the guard on every decoupled bundle, so a DTK
+`scripts/vendor/bundle_dcu_libtorch.sh` runs the guard on every decoupled bundle, so a DTK
 release that adds a fused op fails the build with the new symbol
 named, instead of failing at `import torch_fl` with a mangled undefined symbol.
 The guard needs the vendor core's *exports*, so it is pointed at DTK's own
@@ -276,10 +276,10 @@ vendor_core_mode True   add err 0.0   mm err 2.86e-06
 
 ```bash
 # Default: device libs only, on the official torch wheel.
-bash scripts/bundle_dcu_libtorch.sh
+bash scripts/vendor/bundle_dcu_libtorch.sh
 
 # Rollback: DTK's full core set, relinked into the torch install.
-FLAGOS_DCU_VENDOR_CORE=1 bash scripts/bundle_dcu_libtorch.sh
+FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh
 ```
 
 The env var must match at build time and at import time; a mismatch is rejected

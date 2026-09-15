@@ -273,7 +273,7 @@ torch_fl uses code generation to create operator bindings and backend-specific k
 When PyTorch's operator schema changes or new operators are added, regenerate the CUDA boxing kernels:
 
 ```bash
-python scripts/codegen_ops.py
+python scripts/codegen/codegen_ops.py
 ```
 
 This reads `torch._C._dispatch_tls_local_include()` and `native_functions.yaml` to generate `csrc/aten/generated/RegisterFlagOS.cpp` and related files.
@@ -282,11 +282,11 @@ This reads `torch._C._dispatch_tls_local_include()` and `native_functions.yaml` 
 
 | Script | Purpose | When to Run |
 |--------|---------|-------------|
-| `scripts/codegen_ops.py` | CUDA boxing kernels (kCUDA dispatch) | After PyTorch version bump or schema changes |
-| `scripts/codegen_autograd.py` | Autograd backward operator wrappers | After adding autograd support for new operators |
-| `scripts/codegen_ascend.py` | Ascend ACL kernel wrappers | After updating CANN version or adding Ascend ops |
-| `scripts/codegen_gcu.py` | GCU topsaten kernel wrappers | After updating TopsRider SDK or adding GCU ops |
-| `scripts/codegen_mudnn.py` | MUSA mudnn kernel wrappers | After updating MUSA toolkit or adding MUSA ops |
+| `scripts/codegen/codegen_ops.py` | CUDA boxing kernels (kCUDA dispatch) | After PyTorch version bump or schema changes |
+| `scripts/codegen/codegen_autograd.py` | Autograd backward operator wrappers | After adding autograd support for new operators |
+| `scripts/codegen/codegen_ascend.py` | Ascend ACL kernel wrappers | After updating CANN version or adding Ascend ops |
+| `scripts/codegen/codegen_gcu.py` | GCU topsaten kernel wrappers | After updating TopsRider SDK or adding GCU ops |
+| `scripts/codegen/codegen_mudnn.py` | MUSA mudnn kernel wrappers | After updating MUSA toolkit or adding MUSA ops |
 
 **Environment variables for codegen**:
 

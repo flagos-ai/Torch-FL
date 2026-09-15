@@ -51,7 +51,7 @@ Keep commits focused. A single PR should address one feature, bug, or documentat
 If you modify operator schemas, add new operators, or change backend registration:
 
 ```bash
-python scripts/codegen_ops.py
+python scripts/codegen/codegen_ops.py
 ```
 
 For platform-specific kernels, run the appropriate codegen script (see [Testing Guide](docs/development/testing.md#code-generation)).

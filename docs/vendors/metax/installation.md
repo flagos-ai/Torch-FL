@@ -59,7 +59,7 @@ ACCELERATOR=metax \
 ```bash
 FLAGOS_MACA_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   MACA_PATH=/opt/maca \
-  bash scripts/bundle_maca_libtorch.sh
+  bash scripts/vendor/bundle_maca_libtorch.sh
 ```
 
 This script:

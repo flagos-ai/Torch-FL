@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def load(name):
-    path = REPO_ROOT / "scripts" / f"{name}.py"
+    path = REPO_ROOT / "scripts" / "transformers" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

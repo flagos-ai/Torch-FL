@@ -68,7 +68,7 @@ Important properties are:
 
 ### Triage
 
-`scripts/transformers_triage.py` converts runner output into cause-oriented
+`scripts/transformers/transformers_triage.py` converts runner output into cause-oriented
 findings. It supports:
 
 - `OP_UNSUPPORTED`;
@@ -87,7 +87,7 @@ normalized mechanism. Model names and nodeids are aggregated occurrences.
 
 ### Verification
 
-`scripts/transformers_verify.py` reruns one representative nodeid per finding in
+`scripts/transformers/transformers_verify.py` reruns one representative nodeid per finding in
 a fresh pytest subprocess. It reconstructs the official environment with:
 
 - the exact Transformers source tree;
@@ -108,7 +108,7 @@ Verdicts are:
 
 ### Deduplication
 
-`scripts/transformers_deduplicate.py` checks exact fingerprints in the coverage
+`scripts/transformers/transformers_deduplicate.py` checks exact fingerprints in the coverage
 record, issue bodies, and issue comments. It then searches by subject for older
 issues that predate fingerprints.
 
@@ -118,7 +118,7 @@ findings are also blocked.
 
 ### Preview generation
 
-`scripts/transformers_preview_issues.py` writes one Markdown draft per new
+`scripts/transformers/transformers_preview_issues.py` writes one Markdown draft per new
 finding and a consolidated preview. Drafts follow the repository AI issue
 template structure and include the captured evidence, fingerprint, isolated
 command, proposed verification, and suggested labels.
@@ -137,7 +137,7 @@ the platform code generator rather than handwritten per-operator kernels.
 
 ### Filing
 
-`scripts/transformers_file_issues.py` is a separate optional tool. It requires an
+`scripts/transformers/transformers_file_issues.py` is a separate optional tool. It requires an
 explicit list of fingerprints, rejects non-confirmed findings, and rejects
 incomplete drafts. There is no bulk approval option.
 
@@ -146,32 +146,32 @@ retains compatibility with legacy drafts that used `Chip`.
 
 ### Safe and automatic wrappers
 
-`scripts/transformers_auto_sweep.sh` executes the full measurement and preview
+`scripts/transformers/transformers_auto_sweep.sh` executes the full measurement and preview
 pipeline, then prints the command shape for a later explicitly authorized filing
 action. It does not invoke the filer.
 
-`scripts/safe_transformers_wrapper.py` validates parameters before invoking that
+`scripts/transformers/safe_transformers_wrapper.py` validates parameters before invoking that
 same report-only path. Safe mode cannot publish issues automatically.
 
 ## Files
 
 ### Core tooling
 
-- `scripts/transformers_triage.py`
-- `scripts/transformers_verify.py`
-- `scripts/transformers_deduplicate.py`
-- `scripts/transformers_preview_issues.py`
-- `scripts/transformers_file_issues.py`
-- `scripts/transformers_auto_sweep.sh`
-- `scripts/transformers_batch_sweep.sh`
-- `scripts/safe_transformers_wrapper.py`
+- `scripts/transformers/transformers_triage.py`
+- `scripts/transformers/transformers_verify.py`
+- `scripts/transformers/transformers_deduplicate.py`
+- `scripts/transformers/transformers_preview_issues.py`
+- `scripts/transformers/transformers_file_issues.py`
+- `scripts/transformers/transformers_auto_sweep.sh`
+- `scripts/transformers/transformers_batch_sweep.sh`
+- `scripts/transformers/safe_transformers_wrapper.py`
 
 ### Runner and tests
 
 - `tests/manual/transformers_hf_tests.py`
 - `tests/unit/test_transformers_hf_tests.py`
 - `tests/unit/test_transformers_automation.py`
-- `scripts/test_transformers_automation.py`
+- `scripts/transformers/test_transformers_automation.py`
 
 ### Documentation
 
@@ -200,28 +200,28 @@ same report-only path. Safe mode cannot publish issues automatically.
 Run one architecture through the report-only path:
 
 ```bash
-bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
+bash scripts/transformers/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
 Or run the stages individually:
 
 ```bash
-python scripts/transformers_triage.py results.json --out classified.json
+python scripts/transformers/transformers_triage.py results.json --out classified.json
 
-python scripts/transformers_verify.py \
+python scripts/transformers/transformers_verify.py \
     classified.json \
     --out verified.json \
     --test-source-dir /root/.cache/torch_fl/hf-tests \
     --transformers-version 5.16.1 \
     --workers 1
 
-python scripts/transformers_deduplicate.py \
+python scripts/transformers/transformers_deduplicate.py \
     verified.json \
     --out new.json \
     --coverage-file docs/reference/hf-coverage.md \
     --repo flagos-ai/Torch-FL
 
-python scripts/transformers_preview_issues.py \
+python scripts/transformers/transformers_preview_issues.py \
     new.json \
     --chip "MUSA MTT S5000" \
     --transformers-version 5.16.1 \
@@ -234,7 +234,7 @@ After reviewing and completing specific drafts, an explicitly authorized set can
 be filed with:
 
 ```bash
-python scripts/transformers_file_issues.py \
+python scripts/transformers/transformers_file_issues.py \
     new.json \
     --issue-bodies-dir /tmp/qwen3-issues \
     --approve <fingerprint> [<fingerprint> ...] \
@@ -250,9 +250,9 @@ ruff check
 ruff format --check
 pytest tests/unit/test_transformers_hf_tests.py \
        tests/unit/test_transformers_automation.py -q
-python scripts/test_transformers_automation.py
-bash -n scripts/transformers_auto_sweep.sh \
-        scripts/transformers_batch_sweep.sh
+python scripts/transformers/test_transformers_automation.py
+bash -n scripts/transformers/transformers_auto_sweep.sh \
+        scripts/transformers/transformers_batch_sweep.sh
 ```
 
 The smoke test covers triage, deduplication, and preview generation. Filing is

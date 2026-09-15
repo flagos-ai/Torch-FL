@@ -23,21 +23,21 @@
 - [x] `.github/IMPLEMENTATION_SUMMARY.md` (this summary)
 
 ### Automation
-- [x] `scripts/validate_ai_pr.py` (validation script)
+- [x] `scripts/tools/validate_ai_pr.py` (validation script)
 
 ## 🧪 Testing Checklist
 
 ### Validation Script
 ```bash
 # Test help
-python scripts/validate_ai_pr.py --help
+python scripts/tools/validate_ai_pr.py --help
 
 # Test basic run
-python scripts/validate_ai_pr.py
+python scripts/tools/validate_ai_pr.py
 
 # Test with sample PR body
 echo "# Test PR" > /tmp/test_pr.md
-python scripts/validate_ai_pr.py --pr-body /tmp/test_pr.md
+python scripts/tools/validate_ai_pr.py --pr-body /tmp/test_pr.md
 ```
 
 ### Template Rendering
@@ -107,7 +107,7 @@ python scripts/validate_ai_pr.py --pr-body /tmp/test_pr.md
 ### Recommended Approach
 ```bash
 # Single commit for the complete template system
-git add .github/ CLAUDE.md CONTRIBUTING.md scripts/validate_ai_pr.py
+git add .github/ CLAUDE.md CONTRIBUTING.md scripts/tools/validate_ai_pr.py
 git commit -m "docs: add comprehensive issue/PR templates and AI agent guidelines
 
 Introduces a complete template system for managing contributions with
@@ -126,7 +126,7 @@ Documentation:
 - Template index and quick reference
 
 Automation:
-- scripts/validate_ai_pr.py: Pre-submission validation script
+- scripts/tools/validate_ai_pr.py: Pre-submission validation script
   * Checks linting, commit format, PR structure, language
   * Detects non-English text (enforces English-only requirement)
   * Returns exit code 0/1 for CI integration
@@ -156,7 +156,7 @@ git add .github/*.md
 git commit -m "docs: add AI agent and contribution guidelines"
 
 # Commit 3: Automation
-git add scripts/validate_ai_pr.py
+git add scripts/tools/validate_ai_pr.py
 git commit -m "feat: add AI PR validation script"
 
 # Commit 4: Project docs

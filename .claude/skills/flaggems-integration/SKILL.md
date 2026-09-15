@@ -33,7 +33,7 @@ The integration has three separate surfaces:
 
 | Surface | Source of truth | What it does |
 |---|---|---|
-| Python kernels | `flag_gems._FULL_CONFIG` plus `scripts/codegen_ops.py` | Discovers compatible gems, emits wrappers, and registers `flagos_python` routes |
+| Python kernels | `flag_gems._FULL_CONFIG` plus `scripts/codegen/codegen_ops.py` | Discovers compatible gems, emits wrappers, and registers `flagos_python` routes |
 | C++ kernels | `csrc/aten/flaggems_cpp_kernels.cc` and generated registration | Routes the small explicit C++ FlagGems set without the Python GIL |
 | Runtime selection | `torch_fl/__init__.py` and `torch_fl/configs/backends_*.conf` | Selects the platform config and installs the chosen dispatch registrations |
 
@@ -90,7 +90,7 @@ do not accept an empty generated Python-kernel file as a successful result.
 
 ## Step 2 — discover and classify the Python surface
 
-`scripts/codegen_ops.py` reads the installed torchgen schemas and discovers
+`scripts/codegen/codegen_ops.py` reads the installed torchgen schemas and discovers
 FlagGems functions from `flag_gems._FULL_CONFIG`. The generator filters a gem
 by schema compatibility, positional/keyword arity, supported type annotations,
 `out` behavior, and known recursive or RNG cases. Never hand-copy the complete
@@ -99,7 +99,7 @@ FlagGems config into a torch-fl config.
 Run discovery in the exact environment that will build the generated files:
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 python scripts/codegen_ops.py 2>&1 | tee /tmp/flaggems-codegen.log
+FLAGOS_CODEGEN_ALL=1 python scripts/codegen/codegen_ops.py 2>&1 | tee /tmp/flaggems-codegen.log
 ! grep -E 'SKIP|WARN|\[flaggems\] import failed' /tmp/flaggems-codegen.log
 ```
 
@@ -107,8 +107,8 @@ If CUDA boxing is used, the external CUDA assets may be preloaded only through
 the repository's wrapper, while the active Python torch remains CPU-only:
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 bash scripts/with_cuda_libtorch.sh \
-  python scripts/codegen_ops.py 2>&1 | tee /tmp/flaggems-codegen.log
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh \
+  python scripts/codegen/codegen_ops.py 2>&1 | tee /tmp/flaggems-codegen.log
 ```
 
 Inspect the resulting counts and keep them with the run evidence:
@@ -118,7 +118,7 @@ grep -E 'flaggems|generated|route|SKIP|WARN' /tmp/flaggems-codegen.log || true
 wc -l csrc/aten/generated/flaggems_python_kernels.cc
 ```
 
-A generator change belongs in `scripts/codegen_ops.py` or its supporting
+A generator change belongs in `scripts/codegen/codegen_ops.py` or its supporting
 registry logic, not in generated C++ or config files. Regenerate all affected
 artifacts together, including `flaggems_python_kernels.cc`, `register.inc`, and
 `torch_fl/configs/backends_*.conf`.
@@ -131,7 +131,7 @@ Run the generator twice in the same isolated environment:
 
 ```bash
 git diff --binary > /tmp/flaggems-codegen-1.patch
-FLAGOS_CODEGEN_ALL=1 python scripts/codegen_ops.py \
+FLAGOS_CODEGEN_ALL=1 python scripts/codegen/codegen_ops.py \
   > /tmp/flaggems-codegen-second.log 2>&1
 ! grep -E 'SKIP|WARN|\[flaggems\] import failed' /tmp/flaggems-codegen-second.log
 git diff --binary > /tmp/flaggems-codegen-2.patch
@@ -206,9 +206,13 @@ python tests/integration/ops/test_flaggems_conf_consistency.py -v
 python -m pytest tests/integration/ops/ -m "flaggems or flaggems_python" -q
 
 python tests/manual/flaggems_overload_survey.py \
-  --conf torch_fl/configs/backends_flaggems.conf \
+  --conf torch_fl/configs/backends_cuda.conf \
   --out /tmp/flaggems-overloads.json
 ```
+
+There is no generic `backends_flaggems.conf` any more: FlagGems routing lives in
+each platform's own conf, so survey the conf for the platform under test
+(`backends_ascend.conf`, `backends_musa.conf`, ...).
 
 The survey first rejects synthesized inputs that fail on CPU. Recompute each
 operator verdict from the remaining cases:
@@ -226,6 +230,14 @@ For each claimed platform, capture the hardware model, run date, torch/FlagGems/
 Triton revisions, config and active route-set hashes, survey harness version,
 profiles per overload, raw JSON, and aggregate counts. If hardware is absent,
 mark the row **not revalidated**. Do not copy another platform's rate.
+
+Two standalone tools help when the survey is impractical:
+
+- `scripts/tools/verify_flaggems_ascend.py` re-checks individual overloads on
+  Ascend without a full sweep. Triton JIT dominates, so use `--ops a,b,c` or
+  `--shard i/n` rather than the full run.
+- `scripts/tools/record_musa_flaggems_failures.py` records MUSA ops that fail CI
+  so they move into `NATIVE_TRITON_GAPS`, then regenerates `backends_musa.conf`.
 
 ## Step 7 — update evidence and review the boundary
 

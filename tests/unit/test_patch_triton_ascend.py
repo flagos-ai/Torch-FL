@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for scripts/patch_triton_ascend.py flag stripping.
+"""Unit coverage for scripts/vendor/patch_triton_ascend.py flag stripping.
 
 The rest of that script is exact-string replacement against triton-ascend's
 source, which cannot be tested without the package installed. These two
@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = _REPO_ROOT / "scripts" / "patch_triton_ascend.py"
+_SCRIPT = _REPO_ROOT / "scripts" / "vendor" / "patch_triton_ascend.py"
 
 
 def _load():

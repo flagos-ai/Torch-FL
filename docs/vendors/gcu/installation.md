@@ -37,7 +37,7 @@ Build flags:
 - `FLAGGEMS_PYTHON=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration
 - `--no-build-isolation`: ensures the build uses your installed CPU torch
 
-The build runs `scripts/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning.
+The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning.
 
 ### Codegen validation
 
@@ -95,7 +95,7 @@ The same suites run in CI through [`.github/configs/gcu.yml`](../../../.github/c
 
 ### CPU fallback for missing kernels
 
-Ops without a `topsaten` kernel are **not registered** on `PrivateUse1` at all, so they reach the `cpu_fallback` dispatcher hook instead of raising an error. This keeps models working even when coverage is incomplete. Adding an op is a matter of extending the `OPS` table in `scripts/codegen_gcu.py`.
+Ops without a `topsaten` kernel are **not registered** on `PrivateUse1` at all, so they reach the `cpu_fallback` dispatcher hook instead of raising an error. This keeps models working even when coverage is incomplete. Adding an op is a matter of extending the `OPS` table in `scripts/codegen/codegen_gcu.py`.
 
 ### int64 limitations
 
@@ -147,6 +147,6 @@ All compute ops will fall back to CPU. This mode is useful for testing the runti
 
 ## Reference Documentation
 
-- [Codegen source](../../../scripts/codegen_gcu.py): category-driven kernel generation for `topsaten`
+- [Codegen source](../../../scripts/codegen/codegen_gcu.py): category-driven kernel generation for `topsaten`
 - [Compatibility matrix](../../reference/compatibility.md): platform status and limitations
 - [Environment variables](../../reference/environment-variables.md): runtime environment variables and backend selection

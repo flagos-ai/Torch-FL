@@ -23,7 +23,7 @@ code generator lists them in ``flaggems_recursive_fallback``. This guards the
 whole FlagGems Python surface against drift between the coverage data and the
 codegen output.
 
-The coverage set lives in ``scripts/backend_coverage.py`` rather than in a
+The coverage set lives in ``scripts/codegen/backend_coverage.py`` rather than in a
 ``backends_flaggems.conf``: the confs were unified on one full-coverage table
 per platform, so the shared file only ever read by the generator became a data
 module. This check reads the same module the generator does.
@@ -62,10 +62,10 @@ _SKIP_ROUTE_SET = {"special_i1_out_dispatcher"}
 
 # tests/integration/ops/<this file> -> repo root is three levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_COVERAGE = _REPO_ROOT / "scripts" / "backend_coverage.py"
+_COVERAGE = _REPO_ROOT / "scripts" / "codegen" / "backend_coverage.py"
 _REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
 _KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
-_CODEGEN = _REPO_ROOT / "scripts" / "codegen_ops.py"
+_CODEGEN = _REPO_ROOT / "scripts" / "codegen" / "codegen_ops.py"
 
 # The generated C++ sources this check parses exist only in a repo checkout; they
 # are never shipped in a wheel. Pipelines that stage a wheel-only workspace (the

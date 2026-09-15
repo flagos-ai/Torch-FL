@@ -168,7 +168,7 @@ def test_raw_stream_comes_from_acl_registry_on_ascend(as_ascend, monkeypatch):
 
     A kernel launched on rt stream 0 is not ordered against the aclnn ops that
     produced its inputs; that silently corrupted results once already (see
-    scripts/patch_triton_ascend.py).
+    scripts/vendor/patch_triton_ascend.py).
     """
     from torch_fl.compile import device_interface as di
 

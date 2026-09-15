@@ -495,7 +495,7 @@ tests live alongside it:
   first; under FakeTensor it cannot, since the Python dispatch key sits *above*
   the backend key. Dynamo traces every `nn.Linear` through detach, so this was a
   stack-overflow segfault at trace time. Fixed by emitting `at::native::detach`
-  (`NATIVE_DIRECT_VIEW_OPS` in `scripts/codegen_ops.py`).
+  (`NATIVE_DIRECT_VIEW_OPS` in `scripts/codegen/codegen_ops.py`).
 - **`optional<Tensor>` boxing in in-place kernels.** `gen_inplace` handed only
   plain `at::Tensor` args to `DeviceBoxingGuard`, so `clamp_.Tensor` passed
   unboxed flagos `min`/`max` into a CUDA `self` and crashed. Fixed by

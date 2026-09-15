@@ -28,7 +28,7 @@ Covers both generations of FSDP on the flagos device:
     2. ``split_with_sizes_copy.out`` -- FSDP2's all-gather copy-out -- left its
        ``self`` input on flagos, so the boxing kernel re-dispatched to
        PrivateUse1 into itself and recursed until SIGSEGV. Fixed in
-       scripts/codegen_ops.py by boxing const Tensor inputs of the
+       scripts/codegen/codegen_ops.py by boxing const Tensor inputs of the
        TensorListBoxingGuard kernels.
 
 Correctness is checked against a *single-GPU* reference rather than just

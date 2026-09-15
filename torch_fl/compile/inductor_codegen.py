@@ -126,7 +126,7 @@ class FlagOSAscendDeviceOpOverrides(DeviceOpOverrides):
     def import_get_raw_stream_as(self, name: str) -> str:
         # The ACL stream torch_fl's own aclnn ops run on. Ordering matters: a
         # kernel launched on rt stream 0 is not ordered against the ops producing
-        # its inputs (see scripts/patch_triton_ascend.py).
+        # its inputs (see scripts/vendor/patch_triton_ascend.py).
         return (
             "from torch_fl.accelerator.ascend.acl_stream import "
             f"current_acl_raw_stream as {name}"

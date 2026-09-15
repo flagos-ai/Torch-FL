@@ -334,7 +334,7 @@ stay in sync with the test's (`gen_profiler_baseline.py::run_traced_ops()` versu
 so capture happens once):
 
 ```bash
-PYTHONPATH=$(pwd) bash scripts/with_cuda_libtorch.sh \
+PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh \
     python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops
 ```
 

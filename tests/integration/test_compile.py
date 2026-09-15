@@ -494,7 +494,7 @@ def test_ascend_triton_backend_present():
 
     Fails rather than skips: the alternative is a green suite that proves only
     that the compile path was never taken. See docs/vendors/ascend/installation.md
-    for the triton-ascend + scripts/patch_triton_ascend.py setup.
+    for the triton-ascend + scripts/vendor/patch_triton_ascend.py setup.
     """
     import triton.backends
 
@@ -525,7 +525,7 @@ def test_ascend_raw_stream_matches_torch_fl_stream():
 
     rt stream 0 is not ordered against the ops producing a kernel's inputs, which
     corrupts results silently instead of failing (the nan-loss regression in
-    scripts/patch_triton_ascend.py). Equality with torch_fl's registry is the
+    scripts/vendor/patch_triton_ascend.py). Equality with torch_fl's registry is the
     whole property.
     """
     from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream

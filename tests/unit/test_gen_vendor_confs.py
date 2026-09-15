@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for scripts/gen_vendor_confs.py.
+"""Unit coverage for scripts/codegen/gen_vendor_confs.py.
 
 The generator turns shared FlagGems coverage sources plus each platform's own
 conf into one full-coverage conf per platform, where every op torch_fl can route
@@ -57,7 +57,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "gen_vendor_confs.py"
+SCRIPT = REPO_ROOT / "scripts" / "codegen" / "gen_vendor_confs.py"
 
 
 def _load():
@@ -190,7 +190,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
 
     Known failures (as of 2026-09-15 on MTT S5000, FlagGems 4d9c34775 +
     flagtree 0.6.2a3+mthreads3.6); the full diagnosis for each lives on the set
-    itself in scripts/gen_vendor_confs.py:
+    itself in scripts/codegen/gen_vendor_confs.py:
       - _conj: flag_gems materializes the conjugation that ATen keeps as a lazy
         view, so test_math_bits_contract's `is_conj()` contract breaks. No mudnn
         kernel either, so this one routes to `none` and ATen's composite runs.
@@ -323,7 +323,7 @@ def test_shipped_confs_are_up_to_date():
         for p, (text, _, _) in built.items()
         if (CONF_DIR / f"backends_{p}.conf").read_text() != text
     ]
-    assert not stale, f"stale: {stale}; run scripts/gen_vendor_confs.py"
+    assert not stale, f"stale: {stale}; run scripts/codegen/gen_vendor_confs.py"
 
 
 def test_generation_is_idempotent():
@@ -414,8 +414,8 @@ def test_flaggems_cpp_set_is_a_subset_of_the_python_set():
 def test_tileops_set_survived_the_conf_deletion():
     """backends_tileops.conf carried this set as 60 `tileops` lines in a 2060-line
     file that was otherwise a copy of backends_cuda.conf. It is now
-    TILEOPS_OPS in scripts/backend_coverage.py, regenerated in place by
-    scripts/codegen_tileops.py. The count is pinned because losing entries here
+    TILEOPS_OPS in scripts/codegen/backend_coverage.py, regenerated in place by
+    scripts/codegen/codegen_tileops.py. The count is pinned because losing entries here
     silently shrinks what FLAGOS_USE_TILEOPS=1 can repin."""
     ops = g.tileops_ops()
     assert len(ops) == 60, f"expected 60 tileops ops, got {len(ops)}"

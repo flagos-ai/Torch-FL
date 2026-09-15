@@ -150,7 +150,7 @@ def _raw_stream(device_idx: int) -> int:
     On Ascend this is the aclrtStream from torch_fl's own stream registry. It
     must not fall back to 0: rt stream 0 is not ordered against the aclnn ops
     producing the kernel's inputs, which silently corrupts results rather than
-    failing (see scripts/patch_triton_ascend.py for the nan-loss regression).
+    failing (see scripts/vendor/patch_triton_ascend.py for the nan-loss regression).
     """
     profile = platform_profile()
     if profile.is_cuda_like:

@@ -82,7 +82,7 @@ def active_torch_lib():
 def bundled_lib_dir(bundle_dirname, probe_so):
     """The bundle dir inside this wheel, if the bundling step actually ran.
 
-    ``scripts/bundle_<vendor>_libtorch.sh`` copies the vendor libtorch .so into
+    ``scripts/vendor/bundle_<vendor>_libtorch.sh`` copies the vendor libtorch .so into
     ``torch_fl/<bundle_dirname>/``.  When present this is the preferred source:
     the target machine then needs only the official ``torch+cpu`` wheel plus the
     vendor driver runtime, no vendor torch wheel at all.  Absent (a plain

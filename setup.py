@@ -36,7 +36,7 @@ IS_WINDOWS = platform.system() == "Windows"
 ACCELERATOR = os.environ.get("ACCELERATOR", "cuda").lower()
 
 # Directory inside the wheel holding a bundled forked libtorch, for the backends
-# that ship one (see scripts/bundle_*_libtorch.sh). "lib" means "no separate
+# that ship one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate
 # bundle dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
 # Must match FLAGOS_BUNDLE_LIBDIR in CMakeLists.txt -- _C.so's RUNPATH has to
 # reach the bundle or its auditwheel-mangled deps (libglog-*.so.0) go missing.
@@ -565,7 +565,7 @@ def _bundle_cuda_assets() -> None:
 
     torch_fl's CUDA backend reuses PyTorch's registered CUDA kernels via an
     externally-supplied libtorch_cuda.so (CPU-only pip torch does not ship it).
-    Historically this was LD_PRELOAD-ed by scripts/with_cuda_libtorch.sh; for a
+    Historically this was LD_PRELOAD-ed by scripts/vendor/with_cuda_libtorch.sh; for a
     single self-contained wheel we bundle the assets and preload them from
     torch_fl/__init__.py before `import torch` (see that doc, constraint 1).
     CUDA only.
@@ -749,7 +749,7 @@ def _get_setup_kwargs():
             "lib/*.lib",
             # Self-contained wheels: the vendor's forked libtorch C++ .so bundled
             # here so the process loads that C++ runtime without a separate
-            # vendor torch wheel (see scripts/bundle_*_libtorch.sh, and
+            # vendor torch wheel (see scripts/vendor/bundle_*_libtorch.sh, and
             # torch_fl/accelerator/_vendor_libtorch.py for the relink at import).
             # The trailing * matters for lib_dcu: DTK's auditwheel-mangled
             # torch.libs deps end in a version suffix (libglog-6ed04f2c.so.0.0.0).
@@ -764,7 +764,7 @@ def _get_setup_kwargs():
             "include/*.h",
             # The DTK-private symbol manifest that libflagos_dtk_core_compat.so
             # must export, shipped so an installed wheel can be re-audited with
-            # scripts/check_dcu_core_abi.py against a different DTK release.
+            # scripts/vendor/check_dcu_core_abi.py against a different DTK release.
             "accelerator/dcu/dtk_core_compat_symbols.txt",
             # All backend configs, not just the default: runtime op-routing
             # configs selected via FLAGOS_USE_FLAGGEMS (backends_flaggems.conf)
@@ -867,7 +867,7 @@ def _vendor_supplies_triton() -> bool:
 # open. Newer torch drifts from those bindings, and a mismatch shows up as a
 # wall of compile errors at build time rather than a clean resolver failure --
 # the pin is what turns that into an install-time message. Moving to a newer
-# torch is a deliberate act: re-run scripts/codegen_ops.py, do not hand-edit
+# torch is a deliberate act: re-run scripts/codegen/codegen_ops.py, do not hand-edit
 # the generated files.
 TORCH_PIN = "torch>=2.10,<2.11"
 

@@ -16,7 +16,7 @@
 Full-CUDA-coverage sampling tests.
 
 After the codegen was expanded from the hand-listed 71-op conf to the full set
-of leaf CUDA operators (~1800 ops, see scripts/codegen_ops.py FLAGOS_CODEGEN_ALL
+of leaf CUDA operators (~1800 ops, see scripts/codegen/codegen_ops.py FLAGOS_CODEGEN_ALL
 mode), every op in torch_fl/configs/backends_cuda.conf routes to the boxing CUDA kernel.
 The per-op test files only cover the original 71; this file samples a
 representative slice of the NEWLY registered ops across every codegen category
@@ -37,7 +37,7 @@ skips them on metax/ascend runtimes.
 
 Usage:
     FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-      bash scripts/with_cuda_libtorch.sh \
+      bash scripts/vendor/with_cuda_libtorch.sh \
       pytest tests/integration/ops/test_full_cuda_coverage.py -v
 """
 

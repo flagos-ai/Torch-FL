@@ -47,7 +47,7 @@
 │    • Manual verification                                          │
 │                                                                   │
 │ 4. Validate                                                       │
-│    • python scripts/validate_ai_pr.py --pr-body pr.md             │
+│    • python scripts/tools/validate_ai_pr.py --pr-body pr.md       │
 │                                                                   │
 │ 5. Submit                                                         │
 │    • gh pr create --body-file pr.md --label "ai-generated"        │
@@ -86,7 +86,7 @@
 │ pytest tests/integration/ops/test_*.py -v                         │
 │                                                                   │
 │ # Validation (REQUIRED before PR)                                 │
-│ python scripts/validate_ai_pr.py --pr-body pr.md                  │
+│ python scripts/tools/validate_ai_pr.py --pr-body pr.md            │
 └───────────────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────────────┐

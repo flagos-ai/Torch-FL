@@ -279,7 +279,7 @@ git commit -m "docs: add shared installation and quickstart guides"
 - Reference: `tests/integration/conftest.py`
 - Reference: `tests/integration/ops/conftest.py`
 - Reference: `.github/workflows/lint.yml`
-- Reference: `scripts/codegen_*.py`
+- Reference: `scripts/codegen/codegen_*.py`
 
 **Interfaces:**
 - Consumes: Current build/runtime variable definitions and actual test/lint/codegen commands.
@@ -378,10 +378,10 @@ git commit -m "docs: add configuration and contribution references"
 - Reference: `README.md:224-465`
 - Reference: `.github/configs/{cuda,metax,dcu}.yml`
 - Reference: `.github/scripts/set_env_{cuda,metax,dcu}.sh`
-- Reference: `scripts/with_cuda_libtorch.sh`
-- Reference: `scripts/bundle_maca_libtorch.sh`
-- Reference: `scripts/bundle_ppu_libtorch.sh`
-- Reference: `scripts/bundle_dcu_libtorch.sh`
+- Reference: `scripts/vendor/with_cuda_libtorch.sh`
+- Reference: `scripts/vendor/bundle_maca_libtorch.sh`
+- Reference: `scripts/vendor/bundle_ppu_libtorch.sh`
+- Reference: `scripts/vendor/bundle_dcu_libtorch.sh`
 - Reference: `docs/vendors/cuda/external-libtorch-cuda.md`
 
 **Interfaces:**
@@ -495,9 +495,9 @@ git commit -m "docs: migrate compatibility platform installation guides"
 - Reference: `README.md:467-611`
 - Reference: `.github/configs/ascend.yml`
 - Reference: `.github/scripts/set_env_ascend.sh`
-- Reference: `scripts/codegen_ascend.py`
-- Reference: `scripts/codegen_gcu.py`
-- Reference: `scripts/codegen_mudnn.py`
+- Reference: `scripts/codegen/codegen_ascend.py`
+- Reference: `scripts/codegen/codegen_gcu.py`
+- Reference: `scripts/codegen/codegen_mudnn.py`
 - Reference: `docs/vendors/ascend/{aclnn-codegen,external-libtorch-npu,npu-plan}.md`
 
 **Interfaces:**
@@ -527,7 +527,7 @@ Create `docs/vendors/gcu/installation.md` with:
 - explicit CPU fallback for missing kernels and int64 limitations;
 - optional FlagGems/Triton-GCU only as an experimental route if current source still enables it;
 - verification based on generic factory/operator smoke tests, clearly labelled as manual because there is no GCU CI config;
-- codegen contributor link to `scripts/codegen_gcu.py` and shared testing docs.
+- codegen contributor link to `scripts/codegen/codegen_gcu.py` and shared testing docs.
 
 - [ ] **Step 3: Write the MUSA guide**
 
@@ -597,7 +597,7 @@ Create `docs/vendors/bpu/installation.md` with:
 - supported target and runtime prerequisites;
 - `ACCELERATOR=bpu` installation command;
 - explicit behavior boundary: native device memory/runtime, CPU fallback for eager operators, graph acceleration through `torch.compile(backend="bpu")`, and a separate prebuilt-HBM LLM runtime;
-- hbdk4/box64 setup via `scripts/setup_bpu_hbdk4.sh` only where compilation is needed;
+- hbdk4/box64 setup via `scripts/vendor/setup_bpu_hbdk4.sh` only where compilation is needed;
 - short verification for import/device runtime and links to focused unit tests;
 - links to `integration.md` for partitioning, quantization, cache, zero-copy, fixed-shape limits, benchmark results, and LLM runtime details;
 - no duplicated performance numbers in the installation guide unless they are necessary to explain validation status.

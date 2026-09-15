@@ -120,7 +120,7 @@ explicit `.generator` overloads too is safe and uniform.
    a Python round-trip per RNG call; must stay correct across
    `torch.cuda.manual_seed` (which mutates the same object in place, so a cached
    `at::Generator` handle remains valid).
-2. **Codegen** `scripts/codegen_ops.py` — add a predicate "native kernel with a
+2. **Codegen** `scripts/codegen/codegen_ops.py` — add a predicate "native kernel with a
    `Generator?` arg" and emit the injection line in the affected body templates
    (`gen_functional_pure`, `gen_inplace`, `gen_out_variant`, `gen_tuple_return`,
    and the factory-RNG template). Regenerate `csrc/aten/generated/cuda_kernels.cc`.

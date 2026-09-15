@@ -4,7 +4,7 @@
 
 **Goal:** Make every native-CUDA RNG kernel draw from the same per-device generator FlagGems reads (`torch.cuda.default_generators[device]`), so `torch.manual_seed` unifies both RNG worlds and all RNG becomes reproducible.
 
-**Architecture:** Add one C++ helper (`GetFlagosDefaultCudaGenerator(int64_t)`) that fetches the shim's per-device CUDA generator and returns it as `at::Generator`. Teach `scripts/codegen_ops.py` to emit, in every native RNG kernel body carrying a `Generator?` arg, a one-line "inject shared generator when caller passed none" before the `at::<op>` call. Regenerate `cuda_kernels.cc` and rebuild `_C.so`. No routing/conf changes.
+**Architecture:** Add one C++ helper (`GetFlagosDefaultCudaGenerator(int64_t)`) that fetches the shim's per-device CUDA generator and returns it as `at::Generator`. Teach `scripts/codegen/codegen_ops.py` to emit, in every native RNG kernel body carrying a `Generator?` arg, a one-line "inject shared generator when caller passed none" before the `at::<op>` call. Regenerate `cuda_kernels.cc` and rebuild `_C.so`. No routing/conf changes.
 
 **Tech Stack:** C++17, pybind11, PyTorch 2.10 (CPU wheel + external `libtorch_cuda.so`), Python codegen (torchgen), pytest.
 
@@ -13,7 +13,7 @@
 - Work in a dedicated worktree on branch `rng-completeness-check`; run every command from that worktree's repository root.
 - Env: initialize conda through `source "$(conda info --base)/etc/profile.d/conda.sh"`, then `conda activate torch-fl-210` (torch `2.10.0+cpu`). Use the locally configured proxy, if needed, for network access.
 - Build: `FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON pip install -e . --no-build-isolation` (g++, links torch_cpu; CUDA symbols resolve at runtime).
-- Single-wheel auto-preload build: run tests with plain `python` / `pytest`. Do NOT use `scripts/with_cuda_libtorch.sh` — it double-loads `libc10_cuda.so` → "Duplicated key 'graph_capture_record_stream_reuse'" core dump.
+- Single-wheel auto-preload build: run tests with plain `python` / `pytest`. Do NOT use `scripts/vendor/with_cuda_libtorch.sh` — it double-loads `libc10_cuda.so` → "Duplicated key 'graph_capture_record_stream_reuse'" core dump.
 - Standalone repro scripts MUST `import torch_fl` BEFORE `import torch` (CUDAHooks / auto-preload order). The lazy CUDA generator needs ATen_cuda live — trigger it with a first RNG/CUDA op.
 - Test env for HF models: `HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`; set `HF_HOME` to a local cache directory.
 - RNG reproducibility tests only hold with `FLAGOS_USE_FLAGGEMS=1` for the flaggems_python ops, but native RNG unification is independent of that switch — test both.
@@ -106,7 +106,7 @@ git commit -m "feat(rng): add GetFlagosDefaultCudaGenerator C++ helper"
 ### Task 2: Codegen — inject shared generator into tensor-input RNG kernels
 
 **Files:**
-- Modify: `scripts/codegen_ops.py` — helper predicate + edits to `gen_functional_pure` (~1107), `gen_inplace` (~1151), `gen_out_variant` (~1192), `gen_tuple_return` (~1241)
+- Modify: `scripts/codegen/codegen_ops.py` — helper predicate + edits to `gen_functional_pure` (~1107), `gen_inplace` (~1151), `gen_out_variant` (~1192), `gen_tuple_return` (~1241)
 - Modify (regenerate, do not hand-edit): `csrc/aten/generated/cuda_kernels.cc`
 - Test: Task 4.
 
@@ -118,7 +118,7 @@ git commit -m "feat(rng): add GetFlagosDefaultCudaGenerator C++ helper"
 
 - [ ] **Step 1: Add a shared injection-line helper near the body templates**
 
-In `scripts/codegen_ops.py`, add a module-level helper above `gen_functional_pure` (~line 1105):
+In `scripts/codegen/codegen_ops.py`, add a module-level helper above `gen_functional_pure` (~line 1105):
 
 ```python
 def _generator_inject_line(args, device_expr):
@@ -183,7 +183,7 @@ Use whatever variable name the function already computes for the out tensor(s); 
 
 Run:
 ```bash
-python scripts/codegen_ops.py
+python scripts/codegen/codegen_ops.py
 grep -A4 "NormalInplaceKernelCuda\|MultinomialKernelCuda\|PrivFusedDropoutKernelCuda\|BernoulliTensorOutKernelCuda" csrc/aten/generated/cuda_kernels.cc | head -40
 ```
 Expected: each shows `if (!generator.has_value()) generator = at::native::flagos::GetFlagosDefaultCudaGenerator(<tensor>.get_device());` between the guard and the `at::` call. Non-RNG kernels (e.g. `AddTensorKernelCuda`) unchanged.
@@ -198,7 +198,7 @@ Expected: builds. If `ops.h`/`cuda_kernels.cc` cannot see `GetFlagosDefaultCudaG
 - [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/codegen_ops.py csrc/aten/generated/cuda_kernels.cc
+git add scripts/codegen/codegen_ops.py csrc/aten/generated/cuda_kernels.cc
 git commit -m "feat(rng): inject shared generator into tensor-input native RNG kernels"
 ```
 
@@ -207,7 +207,7 @@ git commit -m "feat(rng): inject shared generator into tensor-input native RNG k
 ### Task 3: Codegen — inject into factory RNG kernels (rand/randint/randperm/randn)
 
 **Files:**
-- Modify: `scripts/codegen_ops.py` — `gen_factory` (~1399), compute-factory branch (~1449-1469)
+- Modify: `scripts/codegen/codegen_ops.py` — `gen_factory` (~1399), compute-factory branch (~1449-1469)
 - Modify (regenerate): `csrc/aten/generated/cuda_kernels.cc`
 - Test: Task 4.
 
@@ -246,7 +246,7 @@ The non-compute branches (`zeros`/`ones`/`full`/`scalar_tensor`) carry no `Gener
 - [ ] **Step 2: Regenerate and eyeball**
 
 ```bash
-python scripts/codegen_ops.py
+python scripts/codegen/codegen_ops.py
 grep -A8 "RandintLowGeneratorKernelCuda\|RandpermGeneratorKernelCuda\|RandGeneratorKernelCuda" csrc/aten/generated/cuda_kernels.cc | head -40
 ```
 Expected: each factory RNG kernel shows `if (!generator.has_value()) generator = at::native::flagos::GetFlagosDefaultCudaGenerator(_cuda_dev.index());` right before its `at::rand/randint/randperm(...)` call.
@@ -261,7 +261,7 @@ Expected: builds.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/codegen_ops.py csrc/aten/generated/cuda_kernels.cc
+git add scripts/codegen/codegen_ops.py csrc/aten/generated/cuda_kernels.cc
 git commit -m "feat(rng): inject shared generator into factory RNG kernels"
 ```
 

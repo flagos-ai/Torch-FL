@@ -28,13 +28,13 @@ workflow can resume without rerunning the hardware suite.
 The normal entry point runs the report-only pipeline:
 
 ```bash
-bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
+bash scripts/transformers/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
 For weak-model guardrails or an explicitly requested safe run:
 
 ```bash
-python scripts/safe_transformers_wrapper.py \
+python scripts/transformers/safe_transformers_wrapper.py \
     test qwen3 "MUSA MTT S5000" --device flagos
 ```
 
@@ -68,7 +68,7 @@ stopped. It is not a confirmed per-test defect.
 ## Stage 2: Triage
 
 ```bash
-python scripts/transformers_triage.py \
+python scripts/transformers/transformers_triage.py \
     /tmp/qwen3-results.json \
     --out /tmp/qwen3-classified.json
 ```
@@ -116,7 +116,7 @@ component prevents unrelated platform backends from sharing a fingerprint.
 ```bash
 TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__version__)')
 
-python scripts/transformers_verify.py \
+python scripts/transformers/transformers_verify.py \
     /tmp/qwen3-classified.json \
     --out /tmp/qwen3-verified.json \
     --test-source-dir /root/.cache/torch_fl/hf-tests \
@@ -149,7 +149,7 @@ per-worker device isolation exists.
 ## Stage 4: Deduplication
 
 ```bash
-python scripts/transformers_deduplicate.py \
+python scripts/transformers/transformers_deduplicate.py \
     /tmp/qwen3-verified.json \
     --out /tmp/qwen3-new.json \
     --coverage-file docs/reference/hf-coverage.md \
@@ -176,7 +176,7 @@ workflow must search the tracker before filing.
 ## Stage 5: Preview Generation
 
 ```bash
-python scripts/transformers_preview_issues.py \
+python scripts/transformers/transformers_preview_issues.py \
     /tmp/qwen3-new.json \
     --chip "MUSA MTT S5000" \
     --transformers-version "${TRANSFORMERS_VERSION}" \
@@ -208,7 +208,7 @@ after the user has reviewed a named set of findings and explicitly authorized
 those fingerprints.
 
 ```bash
-python scripts/transformers_file_issues.py \
+python scripts/transformers/transformers_file_issues.py \
     /tmp/qwen3-new.json \
     --issue-bodies-dir /tmp/qwen3-issues \
     --approve <fingerprint> [<fingerprint> ...] \
@@ -301,9 +301,9 @@ ruff check
 ruff format --check
 pytest tests/unit/test_transformers_hf_tests.py \
        tests/unit/test_transformers_automation.py -q
-python scripts/test_transformers_automation.py
-bash -n scripts/transformers_auto_sweep.sh \
-        scripts/transformers_batch_sweep.sh
+python scripts/transformers/test_transformers_automation.py
+bash -n scripts/transformers/transformers_auto_sweep.sh \
+        scripts/transformers/transformers_batch_sweep.sh
 ```
 
 The smoke test covers triage, deduplication, and preview generation. It

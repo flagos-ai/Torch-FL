@@ -61,13 +61,13 @@ the upstream side, port only the *generator* change, and re-run codegen:
 
 ```bash
 git checkout flagos/main -- csrc/aten/generated/ torch_fl/configs/
-FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen_ops.py
+FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py
 ```
 
 Then confirm idempotency — a second run must produce no diff:
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen_ops.py
+FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py
 git diff --quiet && echo "idempotent" || echo "generator is NOT idempotent"
 ```
 

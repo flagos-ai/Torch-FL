@@ -41,14 +41,14 @@ When user invokes the skill with parameters:
 
 if args.batch:
     if is_weak_model or args.safe:
-        command = f"python scripts/safe_transformers_wrapper.py batch {chip} --device {device}"
+        command = f"python scripts/transformers/safe_transformers_wrapper.py batch {chip} --device {device}"
     else:
-        command = f"bash scripts/transformers_batch_sweep.sh {device} {chip}"
+        command = f"bash scripts/transformers/transformers_batch_sweep.sh {device} {chip}"
 else:
     if is_weak_model or args.safe:
-        command = f"python scripts/safe_transformers_wrapper.py test {model} {chip} --device {device}"
+        command = f"python scripts/transformers/safe_transformers_wrapper.py test {model} {chip} --device {device}"
     else:
-        command = f"bash scripts/transformers_auto_sweep.sh {model} {device} {chip}"
+        command = f"bash scripts/transformers/transformers_auto_sweep.sh {model} {device} {chip}"
 
 # Execute command
 run(command)
@@ -57,19 +57,19 @@ run(command)
 ### Examples
 
 **User**: `/transformers-test --model bert`
-- **Strong model**: `bash scripts/transformers_auto_sweep.sh bert gcu GCU`
-- **Weak model**: `python scripts/safe_transformers_wrapper.py test bert GCU`
+- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU`
+- **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py test bert GCU`
 
 **User**: `/transformers-test --model qwen3 --chip MUSA --device musa`
-- **Strong model**: `bash scripts/transformers_auto_sweep.sh qwen3 musa MUSA`
-- **Weak model**: `python scripts/safe_transformers_wrapper.py test qwen3 MUSA --device musa`
+- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh qwen3 musa MUSA`
+- **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py test qwen3 MUSA --device musa`
 
 **User**: `/transformers-test --batch`
-- **Strong model**: `bash scripts/transformers_batch_sweep.sh gcu GCU`
-- **Weak model**: `python scripts/safe_transformers_wrapper.py batch GCU`
+- **Strong model**: `bash scripts/transformers/transformers_batch_sweep.sh gcu GCU`
+- **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py batch GCU`
 
 **User**: `/transformers-test --model bert --safe`
-- **Any model**: `python scripts/safe_transformers_wrapper.py test bert GCU` (force safe mode)
+- **Any model**: `python scripts/transformers/safe_transformers_wrapper.py test bert GCU` (force safe mode)
 
 ### What It Does
 
@@ -93,17 +93,17 @@ Run tests → measure CPU fallback → triage → verify → deduplicate → pre
 
 ```bash
 # Single model (automated)
-bash scripts/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
 
 # Single model (safe for weak models)
-python scripts/safe_transformers_wrapper.py test bert GCU
+python scripts/transformers/safe_transformers_wrapper.py test bert GCU
 
 # Batch (bert + qwen3)
-bash scripts/transformers_batch_sweep.sh gcu GCU
-python scripts/safe_transformers_wrapper.py batch GCU  # weak model version
+bash scripts/transformers/transformers_batch_sweep.sh gcu GCU
+python scripts/transformers/safe_transformers_wrapper.py batch GCU  # weak model version
 
 # List available models
-python scripts/safe_transformers_wrapper.py list-models
+python scripts/transformers/safe_transformers_wrapper.py list-models
 python tests/manual/transformers_hf_tests.py --list-models
 
 # Manual mode - see detailed steps below
@@ -143,7 +143,7 @@ Tests now support **resilient mode** for unstable platforms (crash recovery):
 
 **Solution**: When you detect you are a weak model, OR when `--safe` flag is passed, use the safe wrapper.
 
-**Safe wrapper**: `scripts/safe_transformers_wrapper.py`
+**Safe wrapper**: `scripts/transformers/safe_transformers_wrapper.py`
 
 **What it prevents**:
 - ❌ Installing packages (`pip install`)
@@ -160,10 +160,10 @@ Tests now support **resilient mode** for unstable platforms (crash recovery):
 **When in safe mode**:
 ```bash
 # Instead of:
-bash scripts/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
 
 # Use:
-python scripts/safe_transformers_wrapper.py test bert GCU
+python scripts/transformers/safe_transformers_wrapper.py test bert GCU
 ```
 
 The safe wrapper validates all parameters and prevents mistakes.
@@ -195,15 +195,15 @@ Based on parsed arguments, construct the appropriate command:
 ```
 if --batch:
     if weak_model or --safe:
-        python scripts/safe_transformers_wrapper.py batch {chip} --device {device}
+        python scripts/transformers/safe_transformers_wrapper.py batch {chip} --device {device}
     else:
-        bash scripts/transformers_batch_sweep.sh {device} {chip}
+        bash scripts/transformers/transformers_batch_sweep.sh {device} {chip}
 
 elif --model:
     if weak_model or --safe:
-        python scripts/safe_transformers_wrapper.py test {model} {chip} --device {device}
+        python scripts/transformers/safe_transformers_wrapper.py test {model} {chip} --device {device}
     else:
-        bash scripts/transformers_auto_sweep.sh {model} {device} {chip}
+        bash scripts/transformers/transformers_auto_sweep.sh {model} {device} {chip}
 ```
 
 ---
@@ -222,7 +222,7 @@ elif --model:
 ```bash
 # Extract parameters from user request
 # Then call:
-python scripts/safe_transformers_wrapper.py test <model> <chip>
+python scripts/transformers/safe_transformers_wrapper.py test <model> <chip>
 ```
 
 **DO NOT** (for weak models):

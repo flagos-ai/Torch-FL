@@ -49,7 +49,7 @@ Build flags:
 - `CUDA_KERNEL=0`: automatically disabled for Ascend (no CUDA runtime exists)
 - `--no-build-isolation`: ensures the build uses your installed CPU torch, not pip's overlay
 
-The build runs `scripts/codegen_ascend.py` to generate operator kernels calling ACLNN APIs (`libopapi.so`) directly. Coverage is category-driven: unary, binary, reductions, and matmul families are generated; ops without an ACLNN mapping fall back to CPU.
+The build runs `scripts/codegen/codegen_ascend.py` to generate operator kernels calling ACLNN APIs (`libopapi.so`) directly. Coverage is category-driven: unary, binary, reductions, and matmul families are generated; ops without an ACLNN mapping fall back to CPU.
 
 ## Verification
 
@@ -155,7 +155,7 @@ Build flags:
 The stock `triton-ascend` package depends on `torch_npu`. Patch it to use the `flagos` device interface instead:
 
 ```bash
-python scripts/patch_triton_ascend.py
+python scripts/vendor/patch_triton_ascend.py
 ```
 
 The script is idempotent. After patching, clear stale kernel cache:
