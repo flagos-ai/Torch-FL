@@ -121,6 +121,35 @@ integration_tests:
       -m "main_ops and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
+  # FLAGOS_USE_FLAGGEMS is set on this command line and deliberately nowhere else.
+  # It selects no conf on any platform any more -- routing is a property of the
+  # build (torch_fl/__init__.py:_select_backend_config) -- but it is still the
+  # gate tests/integration/ops/conftest.py:_flaggems_enabled reads, so without it
+  # every @pytest.mark.flaggems case records a skip instead of a result. The group
+  # above excludes those cases for exactly that reason; this is where they are
+  # measured, and the variable is scoped to this command so the rest of the suite
+  # does not turn into a second measurement of the switch.
+  #
+  # Each case asserts that a FlagGems-marked op dispatches to whatever the conf
+  # routes it to, through tests/integration/ops/backend_conf.py:routed_backend --
+  # never a hard-coded backend name, which would describe whichever platform the
+  # test was written on. That makes this group a routing measurement, not a
+  # FlagGems-only one: of the 13 cases, four are routed to the FlagGems Python
+  # path (abs, neg, silu, where.self), two to its C++ path (embedding, _softmax)
+  # and seven to the cuda boxing kernel (add.Tensor, bmm, cat, mean.dim, mm,
+  # mul.Tensor, sum.dim_IntList) because backends_metax.conf holds the
+  # triton-metax gaps off FlagGems. The C++ pair is also where the two
+  # vocabularies show: the conf spells that path `flaggems_cpp` and the dispatch
+  # log prints `flagos`.
+  #
+  # Measured on the eight-device C550 host on 2026-09-15: 13 passed, 1206
+  # deselected, 1 xpassed in 251s.
+  - name: Run operator tests (FlagGems runtime path, main ops)
+    command: >-
+      FLAGOS_USE_FLAGGEMS=1
+      python -m pytest tests/integration/ops/
+      -m "flaggems and main_ops" -v -s --tb=short
+
   # The MetaX counterpart of test_musa_dispatch.py. backends_metax.conf is
   # FlagGems-first -- 592 of its 2036 ops go to the FlagGems Python path, 12 to
   # its C++ path, and the rest fall back to the cuda boxing kernel -- and this
@@ -130,11 +159,11 @@ integration_tests:
   # against a host-built CPU reference, and the ops measured to fail on a flagos
   # tensor are held off the FlagGems path.
   #
-  # It is marked flaggems_python rather than flaggems on purpose: on MetaX the
-  # FlagGems route is a property of the conf, not of a FLAGOS_USE_FLAGGEMS
-  # runtime switch (that variable no longer selects a conf on any platform), so
-  # gating this group on the switch would record a skip rather than a
-  # measurement.
+  # It is marked flaggems_python rather than flaggems on purpose: the FlagGems
+  # route on MetaX is a property of the conf, not of a FLAGOS_USE_FLAGGEMS runtime
+  # switch (that variable no longer selects a conf on any platform), so this file
+  # is not gated by the switch and runs in every job. The @pytest.mark.flaggems
+  # cohort the switch does gate is measured by the group above.
   #
   # Measured on the eight-device C550 host on 2026-09-15: 90 passed in 756s.
   - name: Run MetaX FlagGems hybrid path tests
