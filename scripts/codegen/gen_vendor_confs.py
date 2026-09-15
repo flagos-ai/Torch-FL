@@ -798,6 +798,17 @@ TILEOPS_PLATFORMS = set()
 # triton-metax rejects, so it stays on the boxing kernel. Recorded here because
 # the conf that used to hold this measurement no longer exists separately; see
 # boxing_cpp_ops(). test_metax_conf_keeps_mm_boxed pins the exception.
+#
+# Verification on this route is not the same as being routed on it: five of these
+# also sit in `metax_triton_fallback` (codegen_ops.py) for a reason recorded
+# there, and route_boxing() checks that gap set first, so the conf keeps `bmm`,
+# `bmm.out`, `sort`, `sort.stable` and `sum.dim_IntList` on the boxing kernel and
+# only 12 of the 17 reach flaggems_cpp. Measured again on the C550 host while
+# reviewing this set: forcing `bmm` or `mm` onto the C++ route with
+# `FLAGOS_OP_bmm=flaggems_cpp` fails on the fp32 inputs `aten::bmm` must serve
+# ("soft-lowp matrix kernel requires a low-precision input"), while `sort` and
+# `embedding` compute the host answer there -- `sort`'s pin is its profiler
+# interaction, not its values, as the codegen_ops.py entry says.
 METAX_CPP_MEASURED = {
     "_softmax",
     "_softmax_backward_data",
