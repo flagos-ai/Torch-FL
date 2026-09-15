@@ -271,16 +271,98 @@ def _load_cudart():
     return _cudart
 
 
-class _StreamShim:
-    """Minimal stream object exposing ``.cuda_stream`` for triton.
+def _real_stream(device_index=0):
+    """Resolve the true current stream as a real ``torch.cuda.Stream``.
 
-    Uses the null/default stream (0), consistent with the boxing path where the
-    caching allocator is given ``stream=nullptr``.
+    ``torch.flagos.current_stream`` reads the stream tuple from the C++ runtime
+    (``_cuda_getCurrentStream``), which the shim below never overwrote, so it
+    denotes the same physical stream the boxing kernels submit to. Returns
+    ``None`` on a runtime with no CUDA stream API to read from.
+    """
+    flagos = getattr(torch, "flagos", None)
+    if flagos is None:
+        return None
+    try:
+        real = flagos.current_stream(device_index)
+    except Exception:
+        return None
+    return real if isinstance(real, torch.cuda.Stream) else None
+
+
+class _StreamShim:
+    """Stream stand-in for the CPU torch wheel, where ``torch.cuda.Stream`` is a
+    dummy base class that raises on construction.
+
+    Triton's launcher reads ``.cuda_stream`` to pick the launch stream; that is 0,
+    the null/default stream, until something selects another one, matching the
+    boxing path where the caching allocator is given ``stream=nullptr``.
+
+    The event/ordering half of the stream API delegates to the real stream
+    (``_real_stream``) rather than being stubbed out. ``torch.cuda.Stream``
+    implements ``wait_stream`` as ``self.wait_event(stream.record_event())``, and
+    ``torch.cuda.StreamContext`` compares ``current_stream().device`` on entry
+    while restoring through ``current_stream().stream_id`` on exit -- so a shim
+    missing any of those makes the whole ``with torch.cuda.stream(...)`` protocol
+    unusable. FlagTree's Triton benchmarks every autotuned FlagGems kernel that
+    way (``triton.testing.do_bench_cudagraph``), and it is what the shim's own
+    ``_synchronize``-only, `.cuda_stream`-only surface broke on PPU.
     """
 
     def __init__(self, index=0):
         self.cuda_stream = 0
         self.device_index = index
+        # Snapshot the stream that is current *now*, rather than reading it on
+        # every attribute access. A stream object has to keep denoting the same
+        # stream for as long as it is held: torch.cuda.StreamContext saves
+        # current_stream() on entry and restores it on exit, so a live view would
+        # restore whatever became current in between -- i.e. never restore at all.
+        self._real = _real_stream(index)
+
+    @property
+    def device(self):
+        """The device this stream belongs to, spelled as torch.cuda spells it.
+
+        ``torch.cuda.StreamContext.__enter__`` compares ``current_stream().device``
+        against the target stream's, so a shim without this attribute breaks every
+        ``with torch.cuda.stream(...)`` block.
+        """
+        return torch.device("cuda", self.device_index)
+
+    @property
+    def stream_id(self):
+        return 0 if self._real is None else self._real.stream_id
+
+    @property
+    def device_type(self):
+        # DeviceType::CUDA; only meaningful when there is a real CUDA stream.
+        return 1 if self._real is None else self._real.device_type
+
+    def record_event(self, event=None):
+        if self._real is None:
+            raise RuntimeError(
+                "cannot record an event on the cuda stream shim: "
+                "torch.flagos is not initialized"
+            )
+        if event is None:
+            # Not ``real.record_event(None)``: that allocates the ``Event`` bound
+            # inside torch/cuda/streams.py, which is the dummy base class on the
+            # CPU torch wheel. ``torch.cuda.Event`` is the working flagos wrapper.
+            event = torch.cuda.Event()
+        event.record(self._real)
+        return event
+
+    def wait_event(self, event):
+        if self._real is None:
+            return None
+        return self._real.wait_event(event)
+
+    def wait_stream(self, other):
+        if self._real is None:
+            return None
+        return self._real.wait_stream(other)
+
+    def query(self):
+        return True if self._real is None else self._real.query()
 
     def synchronize(self):
         _synchronize()
