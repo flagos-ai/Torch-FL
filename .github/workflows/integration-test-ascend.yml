@@ -45,7 +45,7 @@ jobs:
       - flagcicd-910c
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
     container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-ascend-ci
+      image: harbor.baai.ac.cn/flagtree/flagtree-ascend3.5-910c-py311-cann9.0.0-ubuntu22.04-aarch64:202608-torch2.10.0-vllm0.20.2
       options: >-
         --privileged
         --ipc=host
@@ -81,9 +81,6 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: python -m pip install --force-reinstall --no-deps dist/*.whl
-
-      - name: Setup torch_npu header stubs for triton-ascend
-        run: bash scripts/vendor/setup_torch_npu_stubs.sh
 
       - name: Prepare wheel-only test workspace
         run: |

@@ -12,7 +12,7 @@ runtime by the installed wheel except where noted; these are host-side tools.
 | Directory | Purpose |
 |---|---|
 | `codegen/` | Generators. Each reads a source of truth and writes into `csrc/aten/generated/`, `torch_fl/configs/`, or `torch_fl/tileops/generated/`. |
-| `vendor/` | Per-vendor build and setup steps: bundling a vendor libtorch into the wheel, patching triton-ascend, preparing BPU/NPU toolchains. Called by `.github/scripts/set_env_*.sh` and by `setup.py`. |
+| `vendor/` | Per-vendor build and setup steps: bundling a vendor libtorch into the wheel, patching a vendor Triton fork, preparing BPU/NPU toolchains. Called by `.github/scripts/set_env_*.sh` and by `setup.py`. |
 | `transformers/` | The Transformers test → triage → verify → dedup → file-issue pipeline, plus its own smoke test. |
 | `tools/` | Standalone checks that do not belong to the pipeline above: PR validation, a FlagGems-on-Ascend sweep, a MUSA failure recorder, and a pytest-free TileOPs check. |
 
@@ -46,8 +46,7 @@ through writing a `codegen/codegen_<vendor>.py`.
 | `bundle_maca_libtorch.sh` | Copy the MetaX-forked libtorch C++ `.so` into `torch_fl/lib_maca/`. |
 | `bundle_ppu_libtorch.sh` | Copy the locally built PPU libtorch C++ `.so` into `torch_fl/lib_ppu/`. |
 | `check_dcu_core_abi.py` | Assert that the DTK device libraries need no unaccounted vendor-core symbols. Run from `bundle_dcu_libtorch.sh` and from `setup.py`. |
-| `patch_triton_ascend.py` | Patch triton-ascend so it works without a torch_npu dependency. Called from `.github/scripts/set_env_ascend.sh`. |
-| `setup_torch_npu_stubs.sh` | Create minimal torch_npu header stubs for triton-ascend JIT compilation. Called from the Ascend CI workflow. |
+| `patch_triton_ascend.py` | Legacy: patch triton-ascend 3.2.x so it works without a torch_npu dependency. Not called by the Ascend CI route, which runs FlagGems on FlagTree with the in-repo `flagtree_ascend_policy.py` instead. |
 | `setup_bpu_hbdk4.sh` | Install the hbdk4 BPU graph compiler (x86_64-only wheels) plus box64 where on-board compilation is needed. |
 | `with_cuda_libtorch.sh` | Run any command with a version-matched `libtorch_cuda.so` preloaded via `LD_PRELOAD`. Superseded by the single-wheel runtime preload for normal use; still the way to run a CUDA test against an external libtorch. |
 
