@@ -508,6 +508,26 @@ torch._register_device_module("flagos", flagos)
 torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
 
 
+_MUSA_MEM_GET_INFO = []
+
+
+def _musa_mem_get_info():
+    """The MUSA runtime's ``musaMemGetInfo``, resolved through ctypes.
+
+    torch_fl links the MUSA runtime, so the soname resolves without a path --
+    the same lookup the MetaX compat shim uses for mcMemGetInfo. The returned
+    callable takes two out-parameters and reports the *current* device; callers
+    bind the device they want first.
+    """
+    if not _MUSA_MEM_GET_INFO:
+        runtime = ctypes.CDLL("libmusart.so")
+        fn = runtime.musaMemGetInfo
+        fn.argtypes = [ctypes.POINTER(ctypes.c_size_t)] * 2
+        fn.restype = ctypes.c_int
+        _MUSA_MEM_GET_INFO.append(fn)
+    return _MUSA_MEM_GET_INFO[0]
+
+
 def _install_musa_flaggems_compat() -> None:
     """Expose the MUSA surface expected by FlagGems on top of flagos.
 
@@ -516,10 +536,21 @@ def _install_musa_flaggems_compat() -> None:
     native torch_musa plugin cannot claim PrivateUse1 in the same process, so
     provide only the small compatibility surface required during FlagGems
     discovery. The actual tensor device remains ``flagos``.
+
+    The surface is also read by third-party feature detection. Publishing a
+    ``torch_musa`` entry in ``sys.modules`` makes
+    ``importlib.util.find_spec("torch_musa")`` succeed, and libraries gate on
+    exactly that -- transformers' ``is_torch_musa_available()``, then
+    ``set_seed()`` -> ``torch.musa.manual_seed_all``; accelerate's
+    ``is_musa_available()``, then ``set_module_tensor_to_device()`` ->
+    ``torch.musa.empty_cache``. Whatever the injected module makes detectable
+    has to actually answer, so the CUDA-shaped device API is carried below
+    rather than left to raise ``AttributeError`` inside an unrelated caller.
     """
     if _build_accelerator() != "musa" or not _conf_routes_to_flaggems():
         return
 
+    import functools
     import importlib.machinery
     import importlib.util
     import types
@@ -537,6 +568,11 @@ def _install_musa_flaggems_compat() -> None:
         "stream",
         "Event",
         "default_generators",
+        "manual_seed",
+        "manual_seed_all",
+        "initial_seed",
+        "get_rng_state",
+        "set_rng_state",
     ):
         setattr(musa, name, getattr(flagos, name))
 
@@ -552,6 +588,91 @@ def _install_musa_flaggems_compat() -> None:
             flagos.current_device() if device is None else device
         ).name
     )
+
+    # Device management calls other accelerators route here. FlagGems needs
+    # only the device and stream names above, so without these the MUSA branch
+    # those libraries open from the detection described above ends in an
+    # AttributeError inside a caller that never mentioned MUSA.
+    musa.empty_cache = flagos.empty_cache
+    musa.memory_allocated = flagos.memory_allocated
+    musa.memory_reserved = flagos.memory_reserved
+    musa.reset_peak_memory_stats = flagos.reset_peak_memory_stats
+    # torch.cuda spells "read the peak watermark" max_memory_allocated and
+    # "drop it" reset_max_memory_allocated; flagos tracks one peak per pool, so
+    # both reset spellings are the same call. A disabled caching allocator
+    # reports no stats at all, hence the default rather than a KeyError.
+    musa.max_memory_allocated = lambda device=None: flagos.memory_stats(device).get(
+        "peak_allocated_bytes", 0
+    )
+    musa.max_memory_reserved = lambda device=None: flagos.memory_stats(device).get(
+        "peak_reserved_bytes", 0
+    )
+    musa.reset_max_memory_allocated = flagos.reset_peak_memory_stats
+    musa.is_bf16_supported = lambda: torch.bfloat16 in flagos.get_amp_supported_dtype()
+
+    def _mem_get_info(device=None):
+        """(free, total) device bytes, matching `torch.cuda.mem_get_info`.
+
+        musaMemGetInfo takes no index and reads whichever device is current, so
+        bind the requested one for the call and put the previous one back.
+        """
+        if device is None:
+            device = flagos.current_device()
+        elif not isinstance(device, int):
+            index = torch.device(device).index
+            device = flagos.current_device() if index is None else index
+        previous = flagos.current_device()
+        restore = device != previous
+        if restore:
+            flagos.set_device(device)
+        try:
+            free = ctypes.c_size_t(0)
+            total = ctypes.c_size_t(0)
+            status = _musa_mem_get_info()(ctypes.byref(free), ctypes.byref(total))
+            if status != 0:
+                raise RuntimeError(
+                    f"musaMemGetInfo failed on MUSA device {device} (error {status})"
+                )
+            return free.value, total.value
+        finally:
+            if restore:
+                flagos.set_device(previous)
+
+    musa.mem_get_info = _mem_get_info
+
+    def _get_rng_state_all():
+        return [flagos.get_rng_state(index) for index in range(flagos.device_count())]
+
+    def _set_rng_state_all(states):
+        for index, state in enumerate(states):
+            flagos.set_rng_state(state, index)
+
+    musa.get_rng_state_all = _get_rng_state_all
+    musa.set_rng_state_all = _set_rng_state_all
+
+    # transformers' Trainer reads these off `torch.<device>.random`, not off the
+    # device module itself.
+    musa.random = types.ModuleType("torch.musa.random")
+    musa.random.get_rng_state = flagos.get_rng_state
+    musa.random.set_rng_state = flagos.set_rng_state
+    musa.random.get_rng_state_all = _get_rng_state_all
+    musa.random.set_rng_state_all = _set_rng_state_all
+
+    # torch.cuda.amp's entry points, bound to the real autocast/GradScaler
+    # implementations under this backend's registered device name.
+    musa.amp = types.ModuleType("torch.musa.amp")
+    musa.amp.autocast = functools.partial(torch.amp.autocast, "flagos")
+    musa.amp.GradScaler = functools.partial(torch.amp.GradScaler, "flagos")
+    musa.amp.custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="flagos")
+    musa.amp.custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="flagos")
+
+    # `torch_musa` lands `Module.musa` the way the CUDA build lands `Module.cuda`,
+    # and accelerate's `dispatch_model` reads it off the model unconditionally on
+    # its MUSA branch. `generate_methods_for_privateuse1_backend` above produced
+    # the same wrapper under this backend's real name, so alias it rather than
+    # write a second mover.
+    torch.nn.Module.musa = torch.nn.Module.flagos
+
     musa.__spec__ = importlib.machinery.ModuleSpec(
         name="torch.musa", loader=None, origin="torch_fl_shim"
     )

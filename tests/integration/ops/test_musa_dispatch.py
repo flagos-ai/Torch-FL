@@ -41,6 +41,8 @@ import torch_fl  # noqa: F401
 
 
 DEVICE = "flagos:0"
+# Second device for the cross-device copy tests; the MTT S5000 exposes 8.
+DEVICE_B = "flagos:1"
 
 # op name as it appears in the dispatch log -> (snippet, expected backend)
 # Expected backend can be "musa" (mudnn native) or "flagos_python" (FlagGems)
@@ -368,6 +370,138 @@ class TestMusaCorrectness:
         torch.testing.assert_close(
             fn(a_cpu.to(DEVICE)).cpu(), fn(a_cpu), rtol=1e-3, atol=1e-3
         )
+
+
+# Each entry is (name, body, expected device, expected dtype) for
+# _run_cross_device_probe. `body` must leave the copy in `r` and a CPU
+# expectation for it in `ref`. The two devices hold the same values, so a copy
+# that silently reads the wrong device's memory still lands in range and has to
+# be caught by the value comparison rather than by the device check.
+_CROSS_DEVICE_CASES = [
+    (
+        "to_second_device_with_cast",
+        "r = a.to('flagos:1', torch.int32)\nref = a_cpu.to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "to_first_device_with_cast",
+        "r = b.to('flagos:0', torch.int32)\nref = b_cpu.to(torch.int32)",
+        "flagos:0",
+        torch.int32,
+    ),
+    (
+        "to_second_device_strided",
+        "r = a.t().to('flagos:1')\nref = a_cpu.t()",
+        "flagos:1",
+        torch.float32,
+    ),
+    # The shape transformers hits: a boolean mask cast to int32 on the device
+    # that owns the logits (modeling_layers.py, `(input_ids != pad_token_id)
+    # .to(logits.device, torch.int32)`).
+    (
+        "bool_mask_to_second_device",
+        "r = (a > 7).to('flagos:1', torch.int32)\nref = (a_cpu > 7).to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "copy_into_second_device_with_cast",
+        "r = torch.empty(4, 4, dtype=torch.int32, device='flagos:1')\n"
+        "r.copy_(a)\nref = a_cpu.to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "copy_into_second_device_strided",
+        "r = torch.empty(4, 4, device='flagos:1')\nr.copy_(a.t())\nref = a_cpu.t()",
+        "flagos:1",
+        torch.float32,
+    ),
+]
+
+
+def _require_second_device() -> None:
+    """Skip when only one MUSA device is visible.
+
+    The marker file is authoritative for the *platform*, not for how many
+    devices this host exposes; a single-device MUSA machine has nothing to copy
+    between.
+    """
+    if torch_fl.flagos.device_count() < 2:
+        pytest.skip("cross-device copies need a second MUSA device")
+
+
+def _run_cross_device_probe(body: str) -> subprocess.CompletedProcess:
+    """Run `body` over two devices in a fresh interpreter, then a canary.
+
+    The canary re-runs an ordinary kernel on each device afterwards: a
+    cross-device copy that faults poisons the whole device context, so the copy
+    itself may raise while the damage shows up as every *later* op failing.
+    """
+    code = (
+        "import torch, torch_fl\n"
+        f"a = torch.arange(16, dtype=torch.float32, device='{DEVICE}').reshape(4, 4)\n"
+        f"b = torch.arange(16, dtype=torch.float32, device='{DEVICE_B}').reshape(4, 4)\n"
+        "a_cpu, b_cpu = a.cpu(), b.cpu()\n"
+        f"{body}\n"
+        "torch.testing.assert_close(r.cpu(), ref)\n"
+        "print('COPY', r.device, r.dtype)\n"
+        f"c0 = (torch.ones(4, device='{DEVICE}') + 1).sum().item()\n"
+        f"c1 = (torch.ones(4, device='{DEVICE_B}') + 1).sum().item()\n"
+        "print('CANARY', c0, c1)\n"
+    )
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+
+class TestMusaCrossDeviceCopy:
+    """Copying between two MUSA devices must not poison the device context.
+
+    mudnn runs a whole op on one device -- handle, stream and every operand
+    address resolve against whatever device is current -- so a source and a
+    destination on different devices cannot be one Unary::Run. Handed both
+    anyway, mudnn dereferences the foreign pointer, the device raises an illegal
+    memory access, and the context stays poisoned for the rest of the process
+    (issue #250). Issue #265 is the transformers test that reaches it:
+    `device_map="auto"` splits a model over devices 0 and 1, so `input_ids` and
+    `logits` disagree on device and the dtype cast between them crosses devices.
+
+    These run in subprocesses because the failure mode is a dead device, not a
+    raised assertion: run in-process on an unfixed build, the first case would
+    poison the context and the *following* tests in this file would be the ones
+    reporting failures.
+    """
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize(
+        "name,body,want_device,want_dtype",
+        _CROSS_DEVICE_CASES,
+        ids=[case[0] for case in _CROSS_DEVICE_CASES],
+    )
+    def test_cross_device_copy(self, name, body, want_device, want_dtype):
+        _require_second_device()
+        result = _run_cross_device_probe(body)
+        assert result.returncode == 0, f"copy failed:\n{result.stdout}{result.stderr}"
+        assert f"COPY {want_device} {want_dtype}" in result.stdout, result.stdout
+        assert "CANARY 8.0 8.0" in result.stdout, (
+            f"device context was poisoned by the copy:\n{result.stdout}{result.stderr}"
+        )
+        assert "illegal memory access" not in result.stderr, result.stderr
+
+    @pytest.mark.musa
+    def test_cross_device_copy_does_not_wedge_the_allocator(self):
+        """A cross-device copy must still free its staging buffer cleanly.
+
+        The reported banner is `musaFree(...) failed` at teardown rather than
+        the copy itself, so assert on the allocator's own diagnostics: the
+        failing run leaves them on stderr even when every op appears to succeed.
+        """
+        _require_second_device()
+        result = _run_cross_device_probe(
+            "r = a.to('flagos:1', torch.int32)\nref = a_cpu.to(torch.int32)"
+        )
+        assert result.returncode == 0, result.stderr
+        assert "[flagos-musa]" not in result.stderr, result.stderr
 
 
 class TestMusaConvolution:
