@@ -132,8 +132,21 @@ pytest tests/integration/test_amp_contract.py -m amp -v
 
 DCU `torch.compile` is validated with FlagTree's HCU backend on the Hygon
 `gfx936` target. FlagTree replaces the active `triton` module at installation
-time, so build it in a separate environment or install location rather than
-trying to import a `flagtree` module at runtime:
+time, so install it into the environment that will run the kernels rather than
+trying to import a `flagtree` module at runtime.
+
+`.github/scripts/set_env_dcu.sh` installs the vendor wheel for both CI stages,
+from the FlagOS resource index:
+
+```bash
+python3 -m pip uninstall -y triton   # repeat until fully uninstalled
+python3 -m pip install "flagtree===0.6.2a1+hcu3.6" \
+  --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+```
+
+The wheel ships `[triton.backends] hcu = triton.backends.hcu` entry-point
+metadata, so `TRITON_BACKENDS_IN_TREE` is not needed for it. Building the same
+backend from source is the alternative when a newer revision is required:
 
 ```bash
 git clone https://github.com/flagos-ai/FlagTree.git
@@ -142,14 +155,12 @@ export FLAGTREE_BACKEND=hcu
 MAX_JOBS=16 python -m pip install . --no-build-isolation -v
 ```
 
-Use the resulting FlagTree environment together with the PyTorch 2.10 and
-torch-fl installation. These variables select the HCU backend and assert that
-the active Triton is FlagTree:
+These variables select the HCU backend and assert that the active Triton is
+FlagTree:
 
 ```bash
 export FLAGTREE_BACKEND=hcu
 export FLAGOS_USE_FLAGTREE=1
-export TRITON_BACKENDS_IN_TREE=1
 export GEMS_VENDOR=hygon
 
 python -c 'import triton; from triton._flagtree_backend import FLAGTREE_BACKEND; print(triton.__version__, FLAGTREE_BACKEND)'
@@ -159,22 +170,27 @@ pytest tests/integration/test_compile.py -v
 The measured Hygon run used FlagTree 0.6.0, PyTorch 2.10.0, and produced
 `GPUTarget(backend='hip', arch='gfx936', warp_size=64)`. All 15 compile tests
 passed. Compiled outputs and backward gradients remained on `flagos`; eager
-and compiled results matched. The DCU CI manifest does not include this check
-because its pinned image currently supplies DTK Triton rather than a FlagTree
-HCU build.
+and compiled results matched. The DCU CI manifest does not include this check —
+sourcing FlagTree to build the kernels is validated separately from
+`torch.compile`, and the manifest's FlagGems groups already exercise the same
+`hcu` backend on eager paths.
 
 ### Operator Tests (Vendor Backend)
 
 Run the main operator suite against the DCU boxing backend:
 
 ```bash
-pytest tests/unit tests/integration/test_allocator.py \
+pytest tests/integration/test_allocator.py \
   tests/integration/test_factory_ops.py -q
 
 pytest tests/integration/ops/ \
   -m "main_ops and not flaggems and not flaggems_python" \
   -v --tb=short
 ```
+
+`tests/unit/` goes through the per-file runner instead of a single pytest call,
+because one file can take the whole interpreter down (see
+[Running the unit suite](#running-the-unit-suite)).
 
 ### Profiler Parity
 
@@ -189,19 +205,35 @@ See [Profiler Architecture](../../architecture/profiler.md) for details on devic
 
 ## Enabling FlagGems on DCU
 
-DTK ships its own Triton (the `hcu` backend) and a FlagGems build whose `hygon` vendor declares `device_name="cuda"`, which is exactly what the boxing route expects. Both live in the DTK system interpreter, so point your environment at them rather than installing PyPI wheels:
+FlagGems runs on the `hcu` backend of the FlagTree Triton build, whose `hygon`
+vendor declares `device_name="cuda"` — exactly what the boxing route expects. The
+kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
+`FLAGGEMS_KERNEL=0` and `FLAGGEMS_PYTHON=1` are the build switches.
 
-### Step 1: Expose DTK's Triton and FlagGems
+`.github/scripts/set_env_dcu.sh` performs all of the following and exports
+`FLAGOS_USE_FLAGGEMS=1` through `$GITHUB_ENV`, so a CI job runs the FlagGems path
+without re-enabling it inline. The steps below are what that script does, for a
+local install.
+
+### Step 1: Install FlagTree and FlagGems
+
+The DTK image's own Triton carries no `hcu` entry-point metadata and no
+`flag_gems`, so both are installed explicitly. FlagGems is pinned rather than
+tracking master: it moves faster than the vendor Triton it needs, and the pin is
+the revision validated against `flagtree 0.6.2a1+hcu3.6`.
 
 ```bash
-pip install pyyaml sqlalchemy  # flag_gems imports these
-
-mkdir -p <gems-path> && cd <gems-path>
-ln -s /usr/local/lib/python3.10/dist-packages/triton .
-ln -s /usr/local/lib/python3.10/dist-packages/flag_gems .
+python3 -m pip uninstall -y triton   # repeat until fully uninstalled
+python3 -m pip install --no-deps "flagtree===0.6.2a1+hcu3.6" \
+  --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+python3 -m pip install --no-deps \
+  "git+https://github.com/FlagOpen/FlagGems.git@e7b4a865fce6d85861ee91a6aca56564ef9acf7d"
+python3 -m pip install packaging PyYAML==6.0.1 sqlalchemy==2.0.48 'numpy<2'
 ```
 
-Adjust the Python path (`python3.10`) to match your DTK system interpreter.
+`--no-deps` keeps pip from replacing the pinned CPU torch with a transitive
+preference, and `numpy<2` is required because the CPU torch wheel is built
+against the NumPy 1.x ABI.
 
 ### Step 2: Build with FlagGems Python Dispatch
 
@@ -209,6 +241,7 @@ Adjust the Python path (`python3.10`) to match your DTK system interpreter.
 source /opt/dtk/env.sh
 
 ACCELERATOR=dcu \
+  FLAGGEMS_KERNEL=0 \
   FLAGGEMS_PYTHON=1 \
   pip install --no-build-isolation -e .
 ```
@@ -216,30 +249,45 @@ ACCELERATOR=dcu \
 ### Step 3: Runtime Configuration
 
 ```bash
-export PYTHONPATH=<gems-path>
-export TRITON_BACKENDS_IN_TREE=1  # DTK install has no dist-info;
-                                  # entry-point backend discovery finds nothing
 export FLAGOS_USE_FLAGGEMS=1
+export FLAGOS_USE_FLAGGEMS_CPP=0
 ```
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 
 A DCU build records `ACCELERATOR=dcu` in `torch_fl/_build_config.py`, so `FLAGOS_USE_FLAGGEMS=1` alone selects `backends_dcu.conf` — no need to re-export `ACCELERATOR` at runtime.
 
+Confirm what the interpreter actually resolved before trusting the flags:
+
+```bash
+python - <<'PY'
+import torch_fl  # noqa: F401  -- installs the torch.cuda shim; must precede flag_gems
+import triton, triton.backends, flag_gems
+
+assert "hcu" in triton.backends.backends, sorted(triton.backends.backends)
+assert flag_gems.vendor_name == "hygon", flag_gems.vendor_name
+print(triton.__version__, flag_gems.__version__, flag_gems.vendor_name)
+PY
+```
+
 ### FlagGems Configuration
 
-`backends_dcu.conf` is `backends_flaggems.conf` with ops `hcu` Triton cannot compile or run routed back to the cuda boxing kernel:
+`backends_dcu.conf` is `backends_flaggems.conf` with a few ops routed back to the cuda boxing kernel. Most are `hcu` Triton gaps; `_conj` and `relu`/`relu_` are contract cases:
 
 - `silu_backward`: `tl.math.div_rn` has no `create_precise_divf` lowering
 - `slice_backward`: output is correct standalone, but feeding that grad to MIOpen's `convolution_backward` triggers a hardware VMFault
+- `_conj`: FlagGems' `_conj` materializes the conjugated values, while ATen's `conj` is a lazy view that only sets the Conjugate bit; `tests/integration/test_math_bits_contract.py` pins that, and the boxing kernel keeps the view lazy
+- `relu`/`relu_`: FlagGems' `relu_forward_kernel_rank_1` displaces ATen's `at::native::vectorized_elementwise_kernel` from the profiler-parity workload's trace, and `tests/integration/test_profiler_parity.py` requires that trace to carry an `at::native` template kernel; the boxing kernel is what launches one
+
+The complete pinned set, with its per-op diagnosis, is in `backends_dcu.conf`'s own
+header note (`mm`/`bmm` -- FlagGems issue #6227 -- plus `mse_loss` #6221 and
+`transpose.int` #6219).
 
 Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`.
 
 ### FlagGems Verification
 
 ```bash
-export PYTHONPATH=<gems-path>
-export TRITON_BACKENDS_IN_TREE=1
 export FLAGOS_USE_FLAGGEMS=1
 
 pytest tests/integration/ops/ \
@@ -247,7 +295,34 @@ pytest tests/integration/ops/ \
   -v --tb=short
 ```
 
-No marker deselection needed — the FlagGems path is now enabled.
+No marker deselection needed — `FLAGOS_USE_FLAGGEMS=1` is what makes
+`tests/integration/ops/conftest.py` collect the `flaggems`-marked items at all,
+so leaving it out silently deselects the whole group instead of failing it.
+
+## Running the Unit Suite
+
+`tests/unit/` runs one file per interpreter through
+`.github/scripts/run_unit_tests.py` rather than as a single `pytest tests/unit`
+call:
+
+```bash
+UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1 \
+  python .github/scripts/run_unit_tests.py --timeout 300
+```
+
+A unit test file here can take the whole interpreter down without unwinding — an
+invalid device address is reported by the driver as a VMFault, and the process
+dies before pytest can report which test was running — so in a shared
+interpreter one bad file costs every result collected after it, including files
+that had already passed. One process per file keeps the result attributable.
+
+`UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1` covers DCU containers whose RDMA stack faults
+during `exit()`: libibverbs' ELF destructor calls into libnl-route-3's
+`rtnl_tc_unregister`, so a run that already reported every test still ends in a
+dying interpreter. The tolerance applies only when pytest has printed a complete,
+clean summary; a fatal signal before the summary is still a failure. Whether a
+given container has that fault is a property of its image rather than of this
+project, so it stays opt-in instead of being assumed either way.
 
 ## Multi-Card on DCU
 
@@ -289,9 +364,24 @@ PyTorch's `register_privateuse1_backend` makes `at::getAccelerator()` return `Pr
 
 ### Triton: `No backend registered for 'hcu'`
 
-**Cause:** `TRITON_BACKENDS_IN_TREE=1` not set, so entry-point discovery finds nothing.
+**Cause:** the active `triton` is not the flagtree build. DTK's own Triton carries
+no `[triton.backends]` entry-point metadata, so entry-point discovery finds
+nothing — this is what the deleted `TRITON_BACKENDS_IN_TREE=1` workaround used to
+paper over by forcing in-tree lookup.
 
-**Fix:** Export `TRITON_BACKENDS_IN_TREE=1` and ensure `PYTHONPATH` includes the directory with symlinked `triton` and `flag_gems`.
+**Fix:** install the flagtree wheel into the same environment that runs the
+kernels, after removing any other Triton:
+
+```bash
+python3 -m pip uninstall -y triton   # repeat until fully uninstalled
+python3 -m pip install "flagtree===0.6.2a1+hcu3.6" \
+  --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+python3 -c 'import triton, triton.backends; print(sorted(triton.backends.backends))'
+```
+
+If the venv was created by an older setup, delete `site-packages/triton` by path
+first: pip cannot remove a copy that ships no dist-info, and two Tritons in one
+environment resolve by import order.
 
 ### FlagGems: `silu_backward` or `slice_backward` crashes
 

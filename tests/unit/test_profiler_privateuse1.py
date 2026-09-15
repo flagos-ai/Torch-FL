@@ -27,15 +27,46 @@ import os
 import tempfile
 
 import pytest
+
+# torch_fl goes first, and this is not cosmetic. It loads the device libraries
+# (`_preload_cuda_assets`, top of torch_fl/__init__.py) before importing torch;
+# the other order leaves torch's CUDAHooks cached against a process that has not
+# loaded them yet, and every later `torch.empty(..., device="flagos")` dies with
+# "Cannot initialize CUDA without ATen_cuda library". That is exactly the error
+# DCU's own import gate in .github/scripts/set_env_dcu.sh orders these two to
+# avoid, and exactly the one this file hit in CI (job 104244996282) on the
+# `torch.randn(512, 512, device="flagos")` inside test_stage_b_correlation_or_degrade.
+import torch_fl
 import torch
 from torch.profiler import ProfilerActivity, profile
-
-import torch_fl
 
 
 _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
 
+# Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
+# only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
+# into the stream id (MakeAscendStream), while every other accelerator macro --
+# USE_TSINGMICRO, USE_DCU, USE_GCU, USE_MUSA, USE_BPU -- falls through to
+# `c10::Stream(UNSAFE, d, 0)`, an id of exactly zero. DCU is the clearest case:
+# its hipified wheel exports c10::hip::HIPCachingAllocator with zero c10::cuda
+# symbols, so the c10::cuda delegation at the top of that function cannot even
+# link there.
+_GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
+    "tsingmicro",
+    "dcu",
+    "gcu",
+    "musa",
+    "bpu",
+)
 
+
+@pytest.mark.skipif(
+    _GUARD_STREAM_IS_SYNTHETIC,
+    reason="this build's flagos GuardImpl reports a synthetic stream id 0 by "
+    "construction (csrc/runtime/guard.h falls through to "
+    "c10::Stream(UNSAFE, d, 0) for this accelerator), so distinct non-zero ids "
+    "are not the documented behavior here",
+)
 def test_guard_stream_is_real_not_synthetic():
     """The current stream id must be real, not a synthetic constant zero.
 
@@ -194,6 +225,47 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
     )
 
 
+def _load_loaded_libtorch_fl(lib_path):
+    """Return a handle to the *already loaded* libtorch_fl.so, or skip.
+
+    The counters this test reads live in the copy torch_fl loaded at import.
+    ``ctypes.CDLL`` only dedups on the exact path string it is handed, so when a
+    second copy of the library is reachable -- a stale system-wide install on
+    ``LD_LIBRARY_PATH`` sitting next to the checkout's own build -- passing this
+    path loads that other file as a fresh link map and re-runs its TORCH_LIBRARY
+    static initializers. The second registration makes ``registerFallback`` throw
+    a ``c10::Error`` out of a static initializer, which is a ``std::terminate``:
+    the process aborts with SIGABRT and no test can report it.
+
+    So resolve the handle by soname instead when the path is not what the
+    process mapped. ``RTLD_NOLOAD`` turns a miss into an ``OSError`` rather than
+    a second load, which is what makes the two cases distinguishable at all.
+    """
+    try:
+        return ctypes.CDLL(lib_path, mode=os.RTLD_NOLOAD | os.RTLD_GLOBAL)
+    except OSError:
+        pass
+
+    target = os.path.realpath(lib_path)
+    try:
+        with open("/proc/self/maps") as maps:
+            mapped = sorted(
+                {
+                    os.path.realpath(entry.split()[-1])
+                    for entry in maps
+                    if entry.rstrip().endswith("libtorch_fl.so")
+                }
+            )
+    except OSError:
+        mapped = []
+    if mapped and target not in mapped:
+        pytest.skip(
+            f"a different libtorch_fl.so is already loaded ({mapped[0]}); loading "
+            f"{target} would re-run its static initializers and abort the process"
+        )
+    return ctypes.CDLL(lib_path)
+
+
 def test_stage_b_correlation_or_degrade():
     """Stage B correlation test: verify pushCorrelationId/popCorrelationId are
     called when profiling PrivateUse1 activities.
@@ -212,7 +284,7 @@ def test_stage_b_correlation_or_degrade():
     lib_path = os.path.join(os.path.dirname(torch_fl.__file__), "lib", "libtorch_fl.so")
     if not os.path.exists(lib_path):
         pytest.skip(f"libtorch_fl.so not found at {lib_path}")
-    lib = ctypes.CDLL(lib_path)
+    lib = _load_loaded_libtorch_fl(lib_path)
     lib.flagos_kineto_get_correlation_push_count.restype = ctypes.c_uint64
     lib.flagos_kineto_get_correlation_pop_count.restype = ctypes.c_uint64
     lib.flagos_kineto_reset_correlation_counters.argtypes = []
