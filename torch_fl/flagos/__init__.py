@@ -140,6 +140,15 @@ def _lazy_init():
     except Exception:
         pass  # FlagGems unavailable or undetectable here, skip
 
+    # FlagGems locates itself in the device namespace by the vendor's own device
+    # string ("cuda" for nvidia), while torch_fl registers this accelerator as
+    # "flagos". Its ops compare the two and hand the call back to ATen when they
+    # disagree, which they always did -- so the routed ops that make that
+    # comparison never ran their kernel. Realigning the names has to happen after
+    # the import above, because both the detector singleton and the op modules'
+    # module-level copies are fixed by then.
+    _align_flaggems_device_identity()
+
     # Monkey-patch Tensor.__getitem__ to work around PyTorch C++ dispatch issue
     # with advanced indexing on custom devices. The C++ __getitem__ fails for
     # patterns like x[:, tensor_idx] but torch.ops.aten.index.Tensor works.
@@ -686,6 +695,34 @@ class _DeviceProperties:
         # The value is used purely as a string in that hash, so the device name
         # is the honest answer.
         self.gcnArchName = self.name
+
+
+def _align_flaggems_device_identity():
+    """Make FlagGems' device name agree with the one torch_fl registered.
+
+    FlagGems compares the device type of its inputs against the device string its
+    own vendor backend declares before it runs any kernel, falling back to ATen
+    when the two differ. On a generic NVIDIA box those are ``flagos`` (torch_fl's
+    registered backend) and ``cuda`` (what FlagGems' nvidia descriptor says), so
+    every op that makes that comparison fell back and never ran its kernel under
+    the ``backends_cuda.conf`` routing.
+
+    No platform gate here: the remedy is decided by which vendor descriptor
+    FlagGems resolved, and only its nvidia one names this accelerator differently
+    from torch_fl. On every other vendor (Ascend, GCU, DCU, MetaX, MUSA) the call
+    returns immediately -- see
+    ``torch_fl.accelerator.cuda._cuda_compat.patch_flaggems_device_name``, which
+    GCU mirrors in ``torch_fl.accelerator.gcu._gcu_compat``.
+
+    Best-effort -- the name check is a dispatch guard, so failing to realign it
+    costs the routed ops their Triton kernel but must not take down device init.
+    """
+    try:
+        from torch_fl.accelerator.cuda._cuda_compat import patch_flaggems_device_name
+
+        patch_flaggems_device_name()
+    except Exception:
+        pass
 
 
 def _stand_down_foreign_triton_drivers():

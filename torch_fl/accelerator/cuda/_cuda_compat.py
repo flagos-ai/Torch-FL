@@ -30,6 +30,12 @@ those probes, sourcing real values from the CUDA Driver API (``libcuda.so``,
 always present alongside an NVIDIA driver) via ctypes -- no CUDA runtime, no
 torch CUDA build required.
 
+Reporting a real device is necessary but not sufficient: FlagGems also compares
+the *name* of the device on its inputs against the name its own nvidia backend
+declares (``"cuda"``), while torch_fl registers the accelerator as ``flagos``.
+The ops that make that comparison fell back to ATen instead of running their
+kernel -- see ``patch_flaggems_device_name``, which realigns the two.
+
 Enabled by default from ``torch_fl.__init__`` when a generic NVIDIA GPU is
 detected (not MetaX, not Ascend). Disable with ``FLAGOS_DISABLE_CUDA_SHIM=1``.
 
@@ -513,6 +519,114 @@ def patch_torch_cuda_for_flagos():
     _patch_triton_do_bench()
 
     _patched = True
+    return True
+
+
+# FlagGems' own name for this accelerator, and the one its nvidia backend
+# declares. See patch_flaggems_device_name for why they have to agree.
+_FLAGGEMS_DEVICE_NAME = "flagos"
+_VENDOR_DEVICE_NAME = "cuda"
+
+
+def _flag_gems_package_root():
+    """Absolute path of the installed flag_gems package directory, or None."""
+    try:
+        import flag_gems
+    except Exception:
+        return None
+    paths = getattr(flag_gems, "__path__", None)
+    if not paths:
+        return None
+    return os.path.abspath(paths[0]) + os.sep
+
+
+def _is_flag_gems_module(module, root) -> bool:
+    """True for anything loaded out of the flag_gems tree.
+
+    The name test alone is not enough: FlagGems appends its backend directory to
+    ``sys.path`` and imports architecture overrides under bare names (``ampere``,
+    ``hopper``, ``turing`` for nvidia), so those carry no ``flag_gems`` prefix in
+    ``__name__``. They still live inside the tree, which the ``__file__`` test
+    catches.
+    """
+    name = getattr(module, "__name__", "")
+    if name == "flag_gems" or name.startswith("flag_gems."):
+        return True
+    path = getattr(module, "__file__", None)
+    return bool(root and path and os.path.abspath(path).startswith(root))
+
+
+def patch_flaggems_device_name() -> bool:
+    """Point FlagGems' device identity at the name torch_fl registered.
+
+    FlagGems decides per op between running its Triton kernel and handing the
+    call back to ATen by comparing the input's device type against its own
+    backend's device string::
+
+        device = _select_device(a, b)
+        if device.type != _DEVICE_NAME:
+            return torch.ops.aten.mul.Tensor.redispatch(_FALLBACK_KEYSET, a, b)
+
+    For nvidia that string is ``"cuda"``, because its VendorDescriptor declares
+    ``device_name="cuda"``, while a flagos tensor reports ``"flagos"``. The two
+    never compare equal, so a module that makes that comparison takes the
+    fallback branch for every flagos input rather than only for the ones it means
+    to exclude, and its Triton kernel never runs. Eleven of the ``flaggems``
+    routes in ``backends_cuda.conf`` land on such a module. The fallback is also
+    where the CUDA test failure came from: it redispatches to the ``Tensor``
+    overload, which cannot accept the Python scalar that wrapped numbers are now
+    handed over as, so ``mask * 1.3333333333333333`` raised "Expected a value of
+    type 'Tensor' for argument 'other' but instead found type 'float'".
+
+    Renaming the device is preferable to rewriting the comparison because it
+    leaves FlagGems' own bookkeeping intact: ``torch_device_fn`` stays
+    ``torch.cuda``, which the rest of this module already points at the flagos
+    device, and every ``torch.empty(..., device=device)`` inside FlagGems then
+    allocates through the same registered device as the inputs it was handed.
+    GCU applies the same remedy in
+    ``torch_fl.accelerator.gcu._gcu_compat.patch_flaggems_device_name``.
+
+    Must run after ``import flag_gems``: ``DeviceDetector`` is a singleton and
+    copies the name out of the vendor descriptor at construction, and the op
+    modules capture it into a module global as they are imported (``device =
+    device.name`` in 13 of the generic-path modules, ``_DEVICE_NAME`` in
+    ``ops/mul.py``). Correcting the singleton alone would leave each of those
+    literals stale, so every already-loaded flag_gems module is rewritten as
+    well. Idempotent, and a no-op for any vendor other than nvidia.
+    """
+    import importlib.util
+    import sys
+
+    if importlib.util.find_spec("flag_gems") is None:
+        return False
+    try:
+        from flag_gems.runtime.backend.device_finder import DeviceDetector
+    except ImportError:
+        try:
+            from flag_gems.runtime.backend.device import DeviceDetector
+        except ImportError:
+            return False
+
+    detector = DeviceDetector()
+    if detector.vendor_name != "nvidia":
+        return False
+
+    stale = detector.name
+    if stale == _FLAGGEMS_DEVICE_NAME:
+        return True
+    if stale != _VENDOR_DEVICE_NAME:
+        # Another descriptor is in charge; not ours to rewrite.
+        return False
+
+    detector.name = _FLAGGEMS_DEVICE_NAME
+
+    root = _flag_gems_package_root()
+    for module in list(sys.modules.values()):
+        if module is None or not _is_flag_gems_module(module, root):
+            continue
+        for attr in ("device", "_DEVICE_NAME"):
+            if getattr(module, attr, None) == stale:
+                setattr(module, attr, _FLAGGEMS_DEVICE_NAME)
     return True
 
 

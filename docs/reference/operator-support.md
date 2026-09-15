@@ -1000,6 +1000,51 @@ configuration. The library the survey exercised is the FlagGems Python build
 populated and the `flaggems` routes in this cohort really execute FlagGems. The
 A/B runs that set the rollback list used the same library on the same host.
 
+**One device, two names.** FlagGems resolves its own device name from the vendor
+descriptor (`flag_gems/runtime/backend/_nvidia/__init__.py` sets
+`device_name = "cuda"`) and caches it in a process-wide singleton, so a build that
+registers the PrivateUse1 backend as `flagos` carries two names for one device.
+Most of the FlagGems tree reads the singleton at call time and is unaffected by
+that. The exceptions compare `tensor.device.type` against the name: some against
+`flag_gems.device` at call time (`ops/i0.py`, `ops/special_i0e.py`,
+`ops/special_i1.py`, `ops/special_scaled_modified_bessel_k1.py`), others against a
+module-level snapshot taken at import (`ops/mul.py:34`, `ops/smooth_l1_loss.py`).
+On a `flagos` tensor that comparison is always false. In `ops/mul.py` the false
+branch redispatches to the module's own aten reference path,
+`torch.ops.aten.mul.Tensor.redispatch(CompositeExplicitAutograd, a, b)`, which
+requires a Tensor; a Python scalar reaches it only as `float` because
+`csrc/aten/backends/flagos/python_op_caller.cc` unwraps a wrapped number to
+`ScalarToPython(t.item())`. With `mul.Tensor` routed to `flaggems`, every
+`tensor * python_float` therefore raised `RuntimeError: aten::mul() Expected a
+value of type 'Tensor' for argument 'other' but instead found type 'float'`.
+
+`torch_fl/accelerator/cuda/_cuda_compat.py:patch_flaggems_device_name()`, called
+from `torch_fl.flagos.init()` before the first route executes, rewrites the
+singleton's name and every module-level copy of it (`device`, `_DEVICE_NAME`) in
+the loaded `flag_gems` modules to the registered backend name. Nothing in FlagGems
+is patched or forked; the rewrite is applied to the imported modules from
+torch-fl. It is deliberately narrow: it acts only when FlagGems resolved the
+`nvidia` vendor and the name is the vendor literal, so a build whose registration
+already matches, and every other vendor, is left alone.
+
+**The aligned cohort was re-measured and is verdict-identical.** The whole survey
+was rerun on the same host with the alignment active, against the same
+configuration SHA and the same FlagGems revision. All 416 routes were measured in
+both runs, and every one of them returned the same verdict and the same per-case
+status vector: 0 verdict differences and 0 status differences over the 2912
+cases the two runs share. Fifteen cases differ only in the *text* of the error
+they report while carrying `INVALID_CASE` in both runs -- an ATen internal source
+line, the internal function name a `NotImplementedError` mentions, and raw
+pointer addresses on a padding error. The tables below are the aligned run and are
+byte-identical to the pre-fix numbers, so the alignment changes which code path
+FlagGems takes and not what the harness observes. That is the honest scope of this
+evidence: on this host the pre-fix mismatch was reachable through the FlagGems
+entry point but not through the routed path, because the staged accelerator
+library predates the wrapped-number conversion described above, so `tensor *
+python_float` never reached the guard here. The routed failure was reproduced by
+rewriting the names in process (below); the end-to-end crash on a build that does
+carry the conversion is an evidence gap, recorded with the update-history entry.
+
 | Hardware | Total | STRICT | BASIC_ONLY | FAILED | UNTESTED | Basic executable | Basic rate | Strict rate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | NVIDIA A100 | 416 | 321 | 7 | 0 | 88 | 328 | 78.8% | 77.2% |
@@ -1047,17 +1092,49 @@ on.
 | Silently wrong where CUDA boxing also fails | 1 |
 
 *Device guard (13).* The FlagGems kernel rejects its operands before doing any
-work, because `Tensor.is_cuda` is false on the `flagos` PrivateUse1 device even
-though `torch.cuda` is live: `i0`, `i0.out`, `im2col`, `smooth_l1_loss`,
-`smooth_l1_loss.out`, `smooth_l1_loss_backward`, `special_i0e`, `special_i1`,
-`special_modified_bessel_k0`, `special_modified_bessel_k0.out`,
-`special_scaled_modified_bessel_k1`, `special_scaled_modified_bessel_k1.out`,
-`upsample_bicubic2d`. Representative messages: `ValueError: i0: input tensor must
+work. Two different guards produce that rejection, and only one of them is about
+the device *name*:
+
+- **Comparison against the FlagGems device name (9).** `i0`, `i0.out`,
+  `smooth_l1_loss`, `smooth_l1_loss.out`, `smooth_l1_loss_backward`,
+  `special_i0e`, `special_i1`, `special_scaled_modified_bessel_k1`,
+  `special_scaled_modified_bessel_k1.out` compare `tensor.device.type` against the
+  name FlagGems resolved, which is the stale `"cuda"`. With the name aligned they
+  accept a `flagos` operand and run. Measured per op in both arms of an in-process
+  A/B on the same host: `i0`, `special_i0e`, `special_i1`,
+  `special_scaled_modified_bessel_k1` and `smooth_l1_loss` each raise their guard
+  message with the vendor literal restored, and each returns a tensor with the
+  alignment in place. The `smooth_l1_loss` case is the module-level snapshot
+  shape, the other four read the singleton at call time, so both rewrite paths are
+  exercised.
+- **`Tensor.is_cuda` (4).** `im2col`, `special_modified_bessel_k0`,
+  `special_modified_bessel_k0.out` and `upsample_bicubic2d` assert on `is_cuda`
+  itself, which is false on a PrivateUse1 device under any name. Measured in the
+  same A/B: the first, second and fourth still raise `AssertionError: Inputs must
+  be CUDA tensors`, `AssertionError: Tensors must be CUDA tensors` and
+  `ValueError: This Triton kernel requires CUDA tensors` with the alignment in
+  place. These four cannot be routed to FlagGems without an upstream change.
+
+Representative messages from the cohort run: `ValueError: i0: input tensor must
 be on cuda device`, `AssertionError: im2col: Inputs must be CUDA tensors`,
 `AssertionError: smooth_l1_loss: input and target must be CUDA tensors.`,
 `ValueError: special_i0e: Tensors must be cuda tensors`, `ValueError:
 upsample_bicubic2d: This Triton kernel requires CUDA tensors`. CUDA boxing runs
-the same cases correctly.
+the same cases correctly. All thirteen stay on CUDA boxing in the shipped
+configuration: unblocking the guard is not the same as measuring the kernel, and
+the nine name-guarded ops have not been re-measured for correctness on the
+FlagGems route.
+
+The 13 are the subset of guarded ops that *failed* in the cohort run. The guard
+also sits on routes that measured clean and therefore appear in no rollback
+group, because the harness profiles that reach them pass a Tensor where the guard
+is satisfied by a different branch. Eleven `flaggems` routes are in that state:
+`_embedding_bag_dense_backward`, `_upsample_nearest_exact2d_backward`, `eq.Scalar`,
+`eq.Tensor`, `mul.Tensor`, `reflection_pad2d`, `reflection_pad2d.out`,
+`reflection_pad3d`, `reflection_pad3d.out`, `upsample_trilinear3d` and `zero_`.
+All eleven are name-guarded, and they are the routes the alignment changes the
+behaviour of; `mul.Tensor` is the one that failed in CUDA CI, through the scalar
+operand path rather than through any profile the harness synthesizes.
 
 *Wrong result on a profile where CUDA boxing passes (43).* Two subgroups. The
 larger is integer input, where `flag_gems` returns the input dtype (int64) while
@@ -1490,6 +1567,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-15 | NVIDIA A100-SXM4-40GB (8 devices) | CUDA FlagGems device-name alignment | Made FlagGems' device name equal the name torch_fl registers, so FlagGems' own device guards stop rejecting `flagos` operands. Its nvidia descriptor names the device `cuda` (`flag_gems/runtime/backend/_nvidia/__init__.py`) and caches that in a process-wide singleton, so the two guards that compare `tensor.device.type` against the name were always false on a `flagos` tensor. `torch_fl/accelerator/cuda/_cuda_compat.py:patch_flaggems_device_name()`, called from `torch_fl.flagos.init()` before the first route executes, rewrites the singleton and every module-level copy of the name (`device`, `_DEVICE_NAME`) in the already-imported `flag_gems` modules. FlagGems is not patched or forked; the rewrite is applied to the imported modules from torch-fl. It is deliberately narrow: it acts only when FlagGems resolved the `nvidia` vendor and the name is the vendor literal, and it leaves every other vendor and every already-matching registration alone. **No route value changed** — `backends_cuda.conf` is byte-identical (`ab2522b7`, 416 `flaggems` / 1618 `cuda` before and after); what changed is which code path eleven of those routes take. Thirteen guarded overloads stay on CUDA boxing either way: nine of them compare against the device *name* (the alignment unblocks the guard, but they have not been re-measured for correctness on the FlagGems route) and four assert on `Tensor.is_cuda`, which no device name can satisfy. `scripts/codegen/codegen_ops.py:measured_flaggems_rollback` records that split. MetaX, PPU, DCU, Ascend, GCU, MUSA and Tsingmicro are **not revalidated** and no FlagGems route changed for them. | Full survey rerun on the same host against the same conf SHA and FlagGems `7fb49bad47116434961bfb2b912811716d383eaf` with the alignment active: all 416 routes measured in both runs, **0 verdict differences and 0 per-case status differences over the 2912 shared cases**; the two tables above are byte-identical and unchanged at 416 / 321 / 7 / 0 / 88 / 328. Fifteen cases differ only in the *text* of their error (an ATen internal source line, the internal function name a `NotImplementedError` names, raw pointer addresses on a padding error) while carrying `INVALID_CASE` in both runs. The blast radius was measured rather than assumed: of the 2034 routed overloads, 75 sit on a FlagGems module that guards on the device and 11 of those are `flaggems`-routed (`_embedding_bag_dense_backward`, `_upsample_nearest_exact2d_backward`, `eq.Scalar`, `eq.Tensor`, `mul.Tensor`, `reflection_pad2d`, `reflection_pad2d.out`, `reflection_pad3d`, `reflection_pad3d.out`, `upsample_trilinear3d`, `zero_`). The guarded rollback group was re-measured per op in both arms of an in-process A/B that only changes the name: the nine name-guarded overloads raise their guard with the vendor literal restored and return a tensor with the alignment in place (covering both the call-time and the import-time `_DEVICE_NAME` snapshot shapes), and the four `Tensor.is_cuda` overloads are blocked in both arms. New `tests/integration/ops/test_flaggems_device_name.py`: 4 passed in 1.92s with the fix, 3 failed / 1 passed against the reverted source (`assert 'cuda' == 'flagos'` twice, plus the `aten::mul()` RuntimeError). **Evidence gap:** the routed end-to-end crash is not reproducible on this host, because the staged `libtorch_fl.so` predates the wrapped-number conversion (`TensorToPython`) that makes a Python scalar reach `mul.Tensor` as a `float`; here the pre-fix mismatch was reachable through the FlagGems entry point but not through the routed path, so the routed failure is evidenced by the in-process A/B and by the new test rather than by a survey case. |
 | 2026-09-15 | MTT S5000 (8 devices) | MUSA FlagGems gap re-measurement | Re-probed all 18 `NATIVE_TRITON_GAPS["musa"]` entries against the FlagGems revision the MUSA CI job installs, on each entry's recorded failure signature. Four no longer reproduce and are promoted out of the set: `index_add` and `index_add_` (recorded as "returns all zeros") now route to `flaggems` from `none`, and `randn`/`randn_like` (recorded as "crashes unpacking generator state") route to `flaggems` with the mudnn kernel retained as `flaggems  # musa`. The other fourteen keep their routes with provenance updated to `4d9c34775`; `_conj` stays because its probe *passes* (flag_gems materializes the conjugate where ATen's lazy view must set the Conjugate bit). MUSA `flaggems` 464 -> 468, `musa` 51 -> 49, `none` 1521 -> 1519; registered-op set unchanged at 518, `musa_flaggems_register.inc` 357 -> 359 `m.impl` lines. FlagGems is not patched. A100/mc550/PPU/DCU rows and every non-MUSA platform are **not revalidated**. | Per-op probe, one fresh process each, `FLAGOS_OP_*` pinning the op back to FlagGems, `FLAGOS_LOG_DISPATCH=1`/`FLAGOS_LOG_FALLBACK=1`: `index_add`, `index_add_`, `randn`, `randn_like` PASS (0/7, 0/7, 0/4, 0/4) and the 13 entries kept in the set reproduce their recorded signature exactly (bf16 `failed to translate module to LLVM IR`; `no fallback function is registered for schema aten::mul.out` for f32 and bf16, with `aten.mul.out` itself verified usable on MUSA and the `flag_gems/ops/mul.py:587` device-name guard confirmed live; the trailing-store loss at `n = 3,5,6,7,9,15,17,31,33,100`; `RuntimeError: MudnnCopy: unsupported dtype Long -> UInt32`). Comparator control rejects a perturbed reference. Provenance beyond verdicts: `index_add`/`index_add_` each add a new flag_gems code-cache entry, so the mthreads kernel compiled and ran on device, and every fallback line in those rows is the probe's own CPU comparison. End-to-end on the rebuilt library with the shipped conf: 14/14 cases pass, dispatch log showing `index_add`/`index_add_`/`randn`/`randn_like -> flagos_python` against `sort`/`add.Tensor -> musa` regression controls. `index_add` with duplicate indices and `alpha = 2.5` is bounded, not assumed: 11/20 seeds differ from CPU by at most `4.768e-07` (one float32 ULP) on the duplicated rows only, `alpha == 1` bit-exact, matching ATen's documented order-freedom for duplicate indices. CI groups re-run: dispatch 113 passed; factory 46 passed; operator cohort 493 passed/1 skipped/521 deselected/2 xfailed/1 xpassed plus the 3 pre-existing consistency failures; RNG 80 passed/37 deselected with the manifest's `-k` filter. Generators idempotent (`codegen_musa_flaggems.py --check` "is up to date", `gen_vendor_confs.py --check` clean for MUSA); `codegen_musa_flaggems.py` must run before `gen_vendor_confs.py`. `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing ascend/gcu drift failure. `flaggems_overload_survey.py` cannot measure these routes — evidence gap recorded in the section above. |
 | 2026-09-15 | Enflame GCU S60 (8 `flagos` devices) | GCU FlagGems routing | Made `backends_gcu.conf` FlagGems-first via a new generated registration file (`scripts/codegen/codegen_gcu_flaggems.py` -> `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`, 249 `m.impl` lines), included by `csrc/aten/register.cc` after `gcu_register.inc`. GCU `flaggems` 0 -> 257, `gcu` 152 -> 144, `none` 1884 -> 1635; accelerated routes 152 -> 401 (7% -> 19.7%). `NATIVE_TRITON_GAPS["gcu"]` 108 -> 225: 81 routes measured wrong at `float16`/`float32`, plus 36 that fail only for `int64`/`bool` and have a topsaten kernel to fall back to. 76 `int64`-only routes with no topsaten kernel are deliberately **left on FlagGems** rather than demoted to `cpu_fallback` for float too; they now raise `Pipeline run failed` for an `int64` operand where the previous configuration served the call through `cpu_fallback`. FlagGems is not patched or forked. Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no route changed for them. | `flaggems_overload_survey.py` (harness v4) on the S60 against flagtree `0.6.1+enflame3.6` (Triton 3.6, backend `enflame`, FlagGems master `3c6f7537d`), 7 profiles per overload over all 374 FlagGems routes (a transient un-gapped draft of `backends_gcu.conf`, `meta.conf_sha256` `82f801778c…`; it reconciles with the shipped conf as 374 - 117 = 257 and is not byte-recoverable): 314 tested, 121 strict, 121 clean on every exercised profile, 81 wrong at `float16`/`float32`, 112 wrong only for `int64`/`bool`, 60 with no constructible case. Failure families reproduced and recorded: GCU300 `64-bit data type not supported` / `Pipeline run failed: PassManager execution failed` (largest family), `arith.maxsi` UNREACHABLE at `PtrAnalysis.cpp:1711` (`_adaptive_avg_pool2d`), `unsupported extern elementwise: __nv_asinf` UNREACHABLE at `ElementwiseFusionOpToGCU.cpp:874` (`asin`), SIP abort at `dtu_context_obj.cc:693` (`addr`), SIGSEGV (`native_batch_norm`, `_batch_norm_no_update`), and measured wrong values on float profiles (`elu` `max_diff` 0.38-0.89, `histc` up to 1536, `_softmax_backward_data` returning `int8`, `sum.out` returning `(32, 32)` for `()`). Full `.github/configs/gcu.yml` pytest manifest run locally in one pass, all seven groups rc=0: vendor operator cohort 595 passed/32 skipped/499 deselected/2 xfailed/2 xpassed, FlagGems runtime path 9 passed/4 skipped/1116 deselected/1 xpassed, unified RNG 111 passed/4 skipped/1 deselected/1 xpassed, general 46 passed, AMP 27 passed, math-bits 12 passed, `torch.compile` 29 passed/18 skipped; conf consistency 7 passed; routing equals registration (no op routed to `gcu` without a `gcu_register.inc` entry, none registered-but-left-`none`). Both generators idempotent (two runs byte-identical; `--check` exit 0). The environment group (`set_env_gcu.sh`, `CI_STAGE=integration`) was reproduced into a scratch venv: TopsRider discovery, `/dev/gcu0`, the venv bootstrap, CPU torch 2.10.0, flagtree from the FlagOS index and FlagGems `3c6f7537d` from git all succeed, and its Triton/flag_gems verification snippet passes; on the measurement host alone it needs a local, uncommitted retarget of libtriton.so's single glibc-2.38 symbol, because that host is Ubuntu 22.04 while the wheel and the pinned ubuntu24.04 CI image are not. Evidence gaps recorded: the 60 unconstructible routes are not measured, the two batch-norm process deaths are gapped on exit status alone because the harness truncates stderr at 300 bytes, and no part of this change has been executed by CI yet. |
 | 2026-09-15 | Ascend 910 (910/910B host, CANN 9.0.0) — **910C not revalidated** | Ascend FlagTree migration, widened FlagGems route, and a runtime float64 escape | Moved Ascend's FlagGems route from `triton-ascend 3.2.2` to FlagTree `0.6.2a1+ascend3.5` (Triton 3.5) and re-measured the coverage on the new stack instead of inheriting it. `pow.Scalar`, `pow.Tensor_Scalar`, `pow.Tensor_Tensor`, `rsqrt`, `rsqrt_` return to FlagGems (the triton-ascend crash behind FlagGems issue #6226 does not reproduce). 23 overloads return to aclnn: `mm`/`mm.out` (Ascend tune config passes `SPLIT_K` to a kernel that does not take it), the twelve `eq`/`ge`/`gt`/`le`/`lt`/`ne` comparison overloads (float32 evaluation is silently wrong above 2**24), `rand`/`rand_like`/`randperm`/`exponential_`/`native_dropout`/`native_dropout_backward` and `sort`/`sort.stable` (all rejected by BiShengHIR, mostly on the unified-buffer budget), and `mul_.Tensor` (FlagGems' `mul.py` gates on the runtime device *name* and mis-redispatches). Ascend `flaggems` 241 -> 225, `ascend` 133 -> 149, `none` 1662; conf SHA-256 `04a5380a...c252412` (was `8ce7c8c7...4ba3384`). Because a conf cannot express a per-dtype exception, the float64 gap is handled at runtime: `FlagGemsRejectsDtype` in `csrc/aten/common.cc`, consulted by `Dispatcher::ResolveFn`, which sees Tensor, `optional<Tensor>`, Tensor-list, `optional<ScalarType>` and bare `ScalarType` arguments. Also fixed per-device default ACL streams and the executor-cache device key. FlagGems is not patched. All other platform rows are **not revalidated** and no FlagGems route changed for them. | 22-op float64/float32 probe on `flagos:0`: 22/22 float32 and 22/22 float64 pass, against 17 of 22 float64 cases raising `MLIRCompilationError` before the escape. Full `.github/configs/ascend.yml` manifest run locally on an Ascend 910: operator cohort `-m ascend` 38 passed / 1099 deselected, 44 passed with the new test; RNG `-m main_ops` 112 passed / 3 skipped / 1 deselected / 1 xpassed; factory 46 passed; AMP contract 27 passed (4 failing / 23 passing before); math-bits 5 passed / 7 skipped; profiler contract 2 passed / 10 skipped with the MSPTI preload. New `tests/integration/ops/test_dtype_route_fallback.py` (6 passed) pins the float64 escape through `FLAGOS_LOG_DISPATCH=1` in both dtypes in one process. Generator idempotent (two runs byte-identical; `gen_vendor_confs.py --check` clean for Ascend and MUSA). `flaggems_overload_survey.py` cannot measure these routes, so the generic Ascend FlagGems rows are not revalidated — evidence gap recorded in the section above. `tests/unit/test_gen_vendor_confs.py::test_shipped_confs_are_up_to_date` still fails on `backends_gcu.conf`; measured as pre-existing, since the base-commit and branch generators emit byte-identical GCU output. |
