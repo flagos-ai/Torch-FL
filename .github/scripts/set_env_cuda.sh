@@ -662,7 +662,16 @@ print(f"CUDA assets: {Path('.libtorch_cuda_assets').resolve()}")
 PY
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
-  printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
+  # Later steps resolve `bash` and `python` through a PATH the runner assembles
+  # from these lines and from the image config:
+  #   PATH=<lines, reversed, ':'-joined>:<PATH reported by `docker inspect`>
+  # (actions/runner, Handlers/StepHost.cs). This job image declares no PATH in
+  # its image config, so whatever is written here becomes the whole PATH: a bare
+  # `$VENV_ROOT/bin` line would drop `/usr/bin` and `/bin`, and the next
+  # `docker exec` fails with `exec: "bash": executable file not found in $PATH`.
+  # Publish the interpreter's own PATH, venv first, so later steps resolve
+  # commands exactly as this script does.
+  printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
