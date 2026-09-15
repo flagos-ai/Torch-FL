@@ -83,6 +83,19 @@ class _FakeLazyRegistry:
         return self._inner.execute_func(*args, **kwargs)
 
 
+class _RecordingLazyRegistry(_FakeLazyRegistry):
+    """Same, but records which strategies were dispatched."""
+
+    def __init__(self):
+        super().__init__()
+        self.dispatched = []
+
+    def execute_func(self, *args, **kwargs):
+        if len(args) > 1:
+            self.dispatched.append(args[1])
+        return super().execute_func(*args, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _reset_installed_flag():
     """install_policy() records having registered in module state; reset it so
@@ -193,7 +206,8 @@ def test_type_convert_covers_dtypes_inductor_emits(registry):
 def test_install_policy_rejects_real_torch_npu_extension(monkeypatch):
     """If the real torch_npu is loaded it already owns PrivateUse1, so there is
     nothing left for flagos to claim and the policy cannot rescue it. Detected by
-    the compiled _C attribute, which only the real package has."""
+    the absence of the shim marker torch_fl's stub sets on itself: the real
+    package carries `_C` too, so `_C` alone cannot tell the two apart."""
     import types
 
     fake_real = types.ModuleType("torch_npu")
@@ -205,10 +219,15 @@ def test_install_policy_rejects_real_torch_npu_extension(monkeypatch):
 
 def test_install_policy_tolerates_torch_fl_npu_stub(monkeypatch):
     """torch_fl installs its own torch_npu stub for FlagGems, so presence in
-    sys.modules must not be mistaken for the real library."""
+    sys.modules must not be mistaken for the real library. The stub is built the
+    way torch_fl/__init__.py builds it -- `_C` included, since the shim installs
+    one for `torch.npu.current_stream` -- which is why the marker, not `_C`, is
+    what install_policy has to go by."""
     import types
 
-    stub = types.ModuleType("torch_npu")  # no _C, like torch_fl's shim
+    stub = types.ModuleType("torch_npu")
+    stub._C = types.SimpleNamespace()
+    stub.__torch_fl_shim__ = True
     monkeypatch.setitem(sys.modules, "torch_npu", stub)
 
     reg = _FakeLazyRegistry()
@@ -376,6 +395,45 @@ def test_installing_does_not_import_torch_npu(monkeypatch):
     reg.execute_func(policy.POLICY_NAME, "get_cc_cmd", False)
 
     assert "torch_npu" not in sys.modules
+
+
+def test_install_policy_probe_leaves_the_device_alone(monkeypatch):
+    """install_policy() verifies registration by dispatching strategies, so it
+    may only dispatch the ones that cannot initialize the device.
+
+    `get_current_device` forwards to `torch.flagos.current_device()`, and device
+    initialization is itself a caller of install_policy(). Probing it therefore
+    re-enters the install it is meant to verify -- and because the inner call
+    writes `utils.backend_policy` on whatever module is in sys.modules at that
+    moment, a process whose Ascend modules have been swapped (as these tests do,
+    and as any test that stubs them out would) ends up with the policy recorded
+    on the stand-in and `None` on the real module. FlagTree then auto-detects
+    the live policy at first kernel launch, and on Ascend that detection imports
+    torch_npu.
+    """
+    import types
+
+    stub = types.ModuleType("torch_npu")
+    stub._C = types.SimpleNamespace()
+    stub.__torch_fl_shim__ = True
+    monkeypatch.setitem(sys.modules, "torch_npu", stub)
+
+    reg = _RecordingLazyRegistry()
+    fake_backend_register = types.SimpleNamespace(backend_strategy_registry=reg)
+    fake_utils = types.SimpleNamespace(backend_policy=None)
+    fake_pkg = types.ModuleType("triton.backends.ascend")
+    fake_pkg.backend_register = fake_backend_register
+    fake_pkg.utils = fake_utils
+    monkeypatch.setitem(sys.modules, "triton.backends.ascend", fake_pkg)
+    monkeypatch.setitem(
+        sys.modules, "triton.backends.ascend.backend_register", fake_backend_register
+    )
+    monkeypatch.setitem(sys.modules, "triton.backends.ascend.utils", fake_utils)
+
+    assert policy.install_policy() == policy.POLICY_NAME
+    assert "get_current_device" not in reg.dispatched
+    assert set(reg.dispatched) >= {"header_file", "get_cc_cmd"}
+    assert fake_utils.backend_policy == policy.POLICY_NAME
 
 
 def test_reports_backend_import_needing_torch_npu(monkeypatch):

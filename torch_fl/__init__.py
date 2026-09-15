@@ -473,8 +473,9 @@ if os.environ.get("FLAGOS_METAX_COMPAT", "0") == "1":
         patch_torch_cuda_for_metax()
 
 
-# Expose libtorch symbols globally so triton-ascend's JIT-compiled launcher .so
-# can resolve c10/ATen symbols (it links implicitly, not via DT_NEEDED).
+# Expose libtorch symbols globally so the Ascend Triton backend's JIT-compiled
+# launcher .so can resolve c10/ATen symbols (it links implicitly, not via
+# DT_NEEDED). Applies to both FlagTree and the legacy triton-ascend toolchain.
 import ctypes  # noqa: E402
 import os as _os  # noqa: E402
 
@@ -897,9 +898,9 @@ def _patch_flaggems_codegen_config():
       selects the HCCL profile (see comm/process_group.py _VENDOR_PROFILES).
 
     - Ascend (fallback): set GEMS_VENDOR=ascend so FlagGems uses the ASCEND
-      codegen config (prefer_block_pointer=False, avoiding a triton-ascend
-      tl.make_block_ptr bug), and register torch.flagos as a torch.npu shim so
-      FlagGems' gen_torch_device_object('ascend') resolves correctly.
+      codegen config (prefer_block_pointer=False, avoiding the Ascend Triton
+      backend's tl.make_block_ptr bug), and register torch.flagos as a torch.npu
+      shim so FlagGems' gen_torch_device_object('ascend') resolves correctly.
     """
     import os
     import sys
@@ -1011,6 +1012,18 @@ def _patch_flaggems_codegen_config():
     if "GEMS_VENDOR" not in os.environ:
         os.environ["GEMS_VENDOR"] = "ascend"
 
+    # FlagGems' RNG ops (rand/randn/uniform_/exponential_/bernoulli_/
+    # multinomial/native_dropout) unpack the generator state as a CUDA philox
+    # (seed, offset) pair. torch_fl's flagos generator is a CPU mt19937, so
+    # install per-device philox state objects for them -- the same bridge GCU
+    # uses, and for the same reason. Must run before the torch.npu shim below,
+    # which copies default_generators off the flagos module.
+    from torch_fl.accelerator.ascend._ascend_compat import (
+        install_ascend_rng_generators,
+    )
+
+    install_ascend_rng_generators()
+
     # FlagGems' ASCEND backend expects torch.npu to exist (device_name="npu").
     # Provide torch.flagos as a shim so gen_torch_device_object() succeeds.
     # Mark is_available()=False so transformers/accelerate don't think real
@@ -1031,19 +1044,20 @@ def _patch_flaggems_codegen_config():
         _npu_device_shim.default_generators = flagos.default_generators
         # FlagGems' utils/triton_driver_helper.py captures
         # torch_device_fn.get_device_properties at import time and falls back to
-        # triton's driver on AttributeError -- and triton-ascend's version returns
-        # a plain dict, so gems' `get_device_properties(idx).multi_processor_count`
+        # triton's driver on AttributeError -- and the Ascend backend's version
+        # returns a plain dict, so gems' `get_device_properties(idx).multi_processor_count`
         # raises AttributeError deep inside a kernel launch. cumsum hit this on the
         # (1, 151936) logits of Qwen3's sampler, failing every generate() on the
         # gems path while smaller shapes took a branch that never queried it.
         _npu_device_shim.get_device_properties = flagos.get_device_properties
         torch.npu = _npu_device_shim
 
-    # FlagGems' ASCEND backend imports torch_npu in _get_vendor_from_quick_cmd.
-    # Provide a minimal shim module so the import doesn't fail.
+    # The Ascend Triton backend (FlagTree and triton-ascend alike) imports
+    # torch_npu in _get_vendor_from_quick_cmd. Provide a minimal shim module so
+    # the import doesn't fail.
     # Also set __spec__ to satisfy importlib.util.find_spec() checks (used by
     # accelerate.utils.imports.is_npu_available).
-    # triton-ascend backend_register.py also checks torch_npu._C for stream APIs.
+    # backend_register.py also checks torch_npu._C for stream APIs.
     if "torch_npu" not in sys.modules:
         import types
         import importlib.machinery
@@ -1055,7 +1069,7 @@ def _patch_flaggems_codegen_config():
             loader=None,
             origin="torch_fl_shim",
         )
-        # triton-ascend checks hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait")
+        # backend_register.py checks hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait")
         # Provide a minimal _C shim with mock stream functions
         _npu_c_shim = types.ModuleType("torch_npu._C")
 
@@ -1065,6 +1079,12 @@ def _patch_flaggems_codegen_config():
 
         _npu_c_shim._npu_getCurrentRawStreamNoWait = _mock_get_current_stream
         _npu_shim._C = _npu_c_shim
+        # Marks this as torch_fl's stub rather than the real extension. The
+        # real torch_npu owns PrivateUse1 and would lock flagos out, so code
+        # that has to tell them apart (FlagTree's Ascend backend policy, which
+        # uses a torch_npu-backed implementation only if torch_npu is real)
+        # cannot go by presence or by `_C` alone.
+        _npu_shim.__torch_fl_shim__ = True
         sys.modules["torch_npu"] = _npu_shim
         sys.modules["torch_npu._C"] = _npu_c_shim
 
@@ -1155,6 +1175,13 @@ def _keep_device_identity_checks_working(real_device, shim):
     common_constant_types.add(real_device)
 
 
+# Whether _alias_cuda_to_flagos has taken over torch.cuda, i.e. whether every
+# "cuda" this process reports is the flagos device wearing a CUDA name. Read by
+# torch_fl.flagos._stand_down_foreign_triton_drivers. Stays False on a build
+# with real CUDA, where cuda means cuda.
+_cuda_alias_active = False
+
+
 def _alias_cuda_to_flagos():
     """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
 
@@ -1179,6 +1206,13 @@ def _alias_cuda_to_flagos():
         return
     if os.environ.get("FLAGOS_ALIAS_CUDA", "1").lower() in ("0", "off", "false"):
         return
+
+    # From here on, every "cuda" this process sees is this alias. Anything that
+    # treats torch.cuda as a hardware probe has to be told, because it can no
+    # longer distinguish the accelerator from a CUDA device that does not exist;
+    # see torch_fl.flagos._stand_down_foreign_triton_drivers.
+    global _cuda_alias_active
+    _cuda_alias_active = True
 
     from torch.overrides import TorchFunctionMode
 

@@ -42,8 +42,12 @@ ATen against PrivateUse1 -- which under torch_fl *is* flagos -- instead of
 Upstream tracking issue for removing the need for this shim:
 https://github.com/flagos-ai/FlagTree/issues/1046
 
-Nothing here is imported unless FLAGOS_USE_FLAGTREE=1 selects it, so the
-default triton-ascend path is untouched.
+Installed from two places, both no-ops on anything but a FlagTree Ascend build:
+``torch_fl.flagos`` installs it during device init, because FlagGems launches
+kernels eagerly and has to beat the first launch, and the ``torch.compile``
+backend installs it before ``compile_fx``. ``FLAGOS_USE_FLAGTREE=1`` is an
+assertion that the active ``triton`` really is FlagTree -- it cannot switch
+anything on, since the wheel installs itself under the name ``triton``.
 """
 
 from __future__ import annotations
@@ -249,11 +253,12 @@ def install_policy() -> str:
     import torch
 
     # torch_fl installs its own minimal torch_npu stub for FlagGems (see
-    # torch_fl/__init__.py), so mere presence in sys.modules proves nothing. What
-    # matters is whether the *real* extension got loaded and took PrivateUse1:
-    # the stub has no _C, and flagos still owns the backend name.
+    # torch_fl/__init__.py), so presence in sys.modules -- or even the presence
+    # of a `_C` -- proves nothing. The stub marks itself; anything unmarked that
+    # is importable as torch_npu is the real extension, which owns PrivateUse1
+    # and rules flagos out.
     existing = sys.modules.get("torch_npu")
-    if existing is not None and hasattr(existing, "_C"):
+    if existing is not None and not getattr(existing, "__torch_fl_shim__", False):
         raise RuntimeError(
             "The real torch_npu extension is loaded, so it owns the PrivateUse1 "
             "backend and torch_fl cannot own 'flagos'. The flagos FlagTree "
@@ -323,7 +328,17 @@ def install_policy() -> str:
 
     # Verify by dispatch rather than by introspection, for the same reason. A
     # missing strategy otherwise surfaces much later, mid-compile.
-    for name in ("get_current_device", "header_file", "get_cc_cmd"):
+    #
+    # Only side-effect-free strategies are dispatched. `get_current_device`
+    # forwards to `torch.flagos.current_device()`, which initializes the device
+    # -- and device init is one of the callers of this function, so probing it
+    # re-enters the install it is meant to verify. Harmless in production (both
+    # calls resolve the same `utils` module) but not in a process where the
+    # module in sys.modules changed in between, where the inner call installs
+    # into that other module and leaves the real one unselected. Presence of
+    # the device-facing strategies is covered by `_REQUIRED_STRATEGIES` and by
+    # the registration itself instead.
+    for name in ("header_file", "get_cc_cmd", "type_convert", "version_hash"):
         try:
             registry.execute_func(POLICY_NAME, name, *_PROBE_ARGS.get(name, ()))
         except ValueError as exc:
@@ -332,8 +347,8 @@ def install_policy() -> str:
                 "FlagTree's Ascend driver would fail mid-compile."
             ) from exc
         except Exception:
-            # Strategy exists but needs a live device (get_current_device off
-            # hardware). Presence is what matters here.
+            # Strategy exists but failed for an environmental reason (no torch
+            # headers on disk, no numpy). Presence is what matters here.
             pass
 
     # The task queue is torch_npu-only (at_npu::native::OpCommand), and it

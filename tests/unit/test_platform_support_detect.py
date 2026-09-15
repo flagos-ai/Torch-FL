@@ -29,7 +29,6 @@ Run: pytest tests/unit/test_platform_support_detect.py -v
 """
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -61,12 +60,12 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("PPU_HOME", raising=False)
 
 
-def test_accelerator_env_wins_outright():
-    os.environ["ACCELERATOR"] = "ascend"
+def test_accelerator_env_wins_outright(monkeypatch):
+    monkeypatch.setenv("ACCELERATOR", "ascend")
     assert platform_support.detect_platform() == "ascend"
 
 
-def test_dcu_accelerator_is_recognized():
+def test_dcu_accelerator_is_recognized(monkeypatch):
     """ACCELERATOR=dcu must resolve to "dcu", not fall through to "cuda".
 
     DCU is a boxing build, so every other signal detect_platform() consults
@@ -77,7 +76,7 @@ def test_dcu_accelerator_is_recognized():
     dead code -- tests/integration/test_amp_contract.py had two such guards
     that never once evaluated true in CI.
     """
-    os.environ["ACCELERATOR"] = "dcu"
+    monkeypatch.setenv("ACCELERATOR", "dcu")
     assert platform_support.detect_platform() == "dcu"
 
 
@@ -139,6 +138,14 @@ def test_no_marker_and_no_config_falls_back_to_cuda(isolated_torch_fl_import, tm
         sys.path.remove(str(tmp_path))
 
 
-def test_ppu_sdk_env_detected_before_marker_check():
-    os.environ["PPU_SDK"] = "/opt/ppu"
+def test_ppu_sdk_env_detected_before_marker_check(monkeypatch):
+    """PPU_SDK must be set through monkeypatch: it is the *last* test in this
+    module, and the autouse fixture above only runs before each test, so a
+    direct assignment would leak it into every test that follows in the same
+    session. It is not harmless -- FlagGems' DeviceDetector reads PPU_SDK
+    first (flag_gems/runtime/backend/device_finder.py:_get_vendor_from_env)
+    and resolves the whole vendor to "thead"/cuda, so device tests running
+    later in the session get torch.cuda's empty default_generators instead of
+    the NPU ones and fail somewhere unrelated to this module."""
+    monkeypatch.setenv("PPU_SDK", "/opt/ppu")
     assert platform_support.detect_platform() == "ppu"
