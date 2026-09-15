@@ -17,7 +17,7 @@ embedding dispatch tests
 
 Verifies that torch.nn.functional.embedding (aten.embedding):
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems (default) or cuda (via env override)
+  - C++ wrapper routes per the platform conf (or cuda via env override)
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
+
+from backend_conf import routed_backend
 
 
 DEVICE = "flagos:0"
@@ -170,17 +172,23 @@ class TestEmbeddingDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, embedding routes to flagos_python.
+        """Embedding dispatches to the backend this platform's conf routes it to.
 
-        FlagGems and the vendor kernels are both compiled in; FLAGOS_USE_FLAGGEMS=1
-        selects backends_flaggems.conf at import, where embedding has a FlagGems
-        Triton kernel and thus routes to flagos_python.
+        FlagGems-first is the generated default, but it is not unconditional:
+        the CUDA conf returns ``embedding`` to CUDA boxing because the FlagGems
+        route raises ``RuntimeError: Triton Error [CUDA]: context is destroyed``
+        (see measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
+        docs/reference/operator-support.md). Platforms whose conf keeps the
+        FlagGems route still log flagos_python. Asserting the conf's own value
+        keeps this test meaningful on every platform rather than pinning it to
+        the one it was written on.
         """
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] embedding -> flagos_python" in result.stderr, (
-            f"Expected flagos_python log, got:\n{result.stderr}"
+        expected = routed_backend("embedding")
+        assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
+            f"Expected embedding -> {expected}, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
