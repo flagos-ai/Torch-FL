@@ -142,7 +142,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     auto device = ResolveAscendDevice(d);
     return MakeAscendStream(
         device,
-        at::native::flagos::ascend::GetDefaultAclStream());
+        at::native::flagos::ascend::GetDefaultAclStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif

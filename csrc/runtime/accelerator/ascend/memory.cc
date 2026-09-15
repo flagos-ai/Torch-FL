@@ -105,14 +105,16 @@ class MemoryManager {
       default: return ErrorUnknown;
     }
 
-    // aclnn ops enqueue asynchronously on the shared default stream (per-op
+    // aclnn ops enqueue asynchronously on their device's default stream (per-op
     // sync was removed from EXEC_ASCEND_CMD). This blocking aclrtMemcpy runs
     // outside that stream's ordering, so any transfer touching device memory
-    // must first drain the default stream: a D2H read would otherwise observe
+    // must first drain the default streams: a D2H read would otherwise observe
     // stale data, and an H2D/D2D write could race a pending consumer/producer.
-    // Host-to-host transfers touch no device memory and need no barrier.
+    // The caller does not pass the owning device, so every default stream that
+    // has been created is drained (see acl_stream.h). Host-to-host transfers
+    // touch no device memory and need no barrier.
     if (kind != MemcpyHostToHost) {
-      aclrtSynchronizeStream(at::native::flagos::ascend::GetDefaultAclStream());
+      at::native::flagos::ascend::DrainDefaultAclStreams();
     }
 
     aclError err = aclrtMemcpy(dst, count, src, count, acl_kind);
