@@ -2525,6 +2525,151 @@ def main():
             "addmm_",
         }
 
+        # Ops that pass every static discovery gate above but were measured as
+        # broken on the FlagGems route by tests/manual/flaggems_overload_survey.py
+        # on 8x A100, so the shipped conf must send them back to CUDA boxing.
+        # Without this set a plain `FLAGOS_CODEGEN_ALL=1 codegen_ops.py` run
+        # silently re-flags them to flaggems and the checked-in conf stops
+        # reproducing. The per-op failure signatures and the full verdict table
+        # live in docs/reference/operator-support.md.
+        #
+        # The criterion is a paired measurement, not a threshold on the FlagGems
+        # verdict alone. Every op here was run twice by the same harness, once
+        # on the FlagGems route and once on CUDA boxing: it is rolled back when
+        # the FlagGems route fails a case that CUDA boxing answers correctly, or
+        # when it crashes, hangs, or recurses. An op whose failure vector is
+        # identical on both routes is not listed -- rolling it back buys nothing
+        # -- and stays on flaggems as BASIC_ONLY in the support report.
+        measured_flaggems_rollback = {
+            # flag_gems guards on `x.is_cuda` / asserts "must be CUDA tensors".
+            # flagos tensors are PrivateUse1 (Tensor.is_cuda is False) even
+            # though torch.cuda is live, so the guard rejects every input.
+            "i0",
+            "i0.out",
+            "im2col",
+            "smooth_l1_loss",
+            "smooth_l1_loss.out",
+            "smooth_l1_loss_backward",
+            "special_modified_bessel_k0",
+            "special_modified_bessel_k0.out",
+            "upsample_bicubic2d",
+            # Triton CompilationError on this FlagTree build.
+            "norm.ScalarOpt_dim",
+            "randint",
+            "randint_like",
+            "special_chebyshev_polynomial_w",
+            # flag_gems assertion on the argument contract that torch accepts.
+            "_euclidean_dist",
+            "_upsample_bilinear2d_aa",
+            "randperm",
+            "soft_margin_loss",
+            "soft_margin_loss_backward",
+            "topk",
+            # Process crash.
+            "_batch_norm_no_update",
+            "native_batch_norm",
+            # No result within the harness timeout.
+            "lcm",
+            "lcm_",
+            "prod.dim_int",
+            "sum.IntList_out",
+            "sum.dim_IntList",
+            # Unbounded recursion (flag_gems falls back to torch.<op>).
+            "unique_consecutive",
+            # Raising errors that are neither the device guard nor a compile
+            # failure: wrong out dtype, missing out argument, destroyed CUDA
+            # context, unsupported order range, malformed reverse-layout shape.
+            "_cdist_backward",
+            "_log_softmax_backward_data.out",
+            "_softmax_backward_data.out",
+            "cosh.out",
+            "dequantize.self",
+            "elu_backward",
+            "embedding",
+            "mul_.Tensor",
+            "nanmedian.dim_values",
+            "norm.Scalar",
+            "special_chebyshev_polynomial_u",
+            "special_hermite_polynomial_h",
+            "special_i0e",
+            "special_i1",
+            "special_scaled_modified_bessel_k1",
+            "special_scaled_modified_bessel_k1.out",
+            # Wrong numerics or wrong shape against the eager reference.
+            "_log_softmax_backward_data",
+            "_pdist_backward",
+            "_softmax_backward_data",
+            "_unique2",
+            "_weight_norm_interface",
+            "_weight_norm_interface_backward",
+            "elu",
+            "elu_",
+            "histc",
+            "igammac_",
+            "index_copy",
+            "index_copy_",
+            "leaky_relu_",
+            "logsumexp",
+            "median.dim_values",
+            "mse_loss_backward",
+            "nanmedian.out",
+            "native_layer_norm",
+            "range",
+            "scatter.src",
+            "scatter_.src",
+            "special_chebyshev_polynomial_v",
+            "special_shifted_chebyshev_polynomial_u",
+            "special_shifted_chebyshev_polynomial_w",
+            "sum.out",
+            "unfold_backward",
+            "unique_dim",
+            # Integer input: flag_gems returns the input dtype (int64) where
+            # ATen's type promotion returns float32, so the result is the right
+            # shape with the wrong dtype and the wrong values. CUDA boxing
+            # passes the same case.
+            "acosh",
+            "atan2",
+            "atanh",
+            "digamma",
+            "erf",
+            "erfinv",
+            "log",
+            "log1p",
+            "log2",
+            "rad2deg",
+            "special_airy_ai",
+            "special_bessel_j1",
+            "special_xlog1py",
+            # Integer or bool input: flag_gems rejects an argument contract that
+            # ATen accepts (assertion on the dtype set, torch.finfo on an
+            # integer tensor, a TypeError on the promoted result). CUDA boxing
+            # passes the same case.
+            "amin",
+            "logit",
+            "nan_to_num",
+            "special_chebyshev_polynomial_u.n_scalar",
+            "special_modified_bessel_k1",
+            "special_shifted_chebyshev_polynomial_v",
+            # Bool input: Triton CompilationError in the flag_gems kernel.
+            "cummax",
+            "cummin",
+            "index_add",
+            "index_add_",
+            # Bool input: unbounded recursion (flag_gems falls back to the torch
+            # op it is patching).
+            "sgn_",
+            # Bool input: wrong values. CUDA boxing passes the same case.
+            "floor_divide.Scalar",
+            "prod",
+            # float16 input: nll_loss_forward returns wrong loss values
+            # (max_diff 1.16e4 on the harness case) where CUDA boxing passes.
+            "nll_loss_forward",
+            # Integer input: flag_gems returns a silently wrong tensor where
+            # ATen raises "masked_scale not implemented for 'Long'". Both routes
+            # fail the case, but a loud error is the contract ATen defines.
+            "native_dropout_backward",
+        }
+
         conf_lines = conf_license + [
             "# flagos op backend config -- AUTO-GENERATED (full CUDA mode)",
             "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
@@ -2534,10 +2679,18 @@ def main():
             "#",
             "# Exceptions: ops that pass the static discovery gates but cannot use",
             "# the FlagGems route here go back to CUDA boxing",
-            "# (scripts/codegen_ops.py:cuda_route_exceptions). `_conj` is there",
-            "# because flag_gems materializes the value and torch.conj has to stay",
-            "# lazy; the addmm family because FlagTree AABS shrinks its tl.dot K",
-            "# tile below Triton's K >= 16 minimum for small matmuls.",
+            "# (scripts/codegen/codegen_ops.py:cuda_route_exceptions). `_conj` is",
+            "# there because flag_gems materializes the value and torch.conj has to",
+            "# stay lazy; the addmm family because FlagTree AABS shrinks its tl.dot",
+            "# K tile below Triton's K >= 16 minimum for small matmuls.",
+            "#",
+            "# Each exception is a measured result, not a guess: the ops in",
+            "# cuda_route_exceptions are contract/compile exceptions, and the",
+            "# additional ops in measured_flaggems_rollback failed a case on the",
+            "# FlagGems route that the CUDA boxing route answers correctly (or",
+            "# crashed, hung, or recursed) when both were measured with",
+            "# tests/manual/flaggems_overload_survey.py on 8x A100. See",
+            "# docs/reference/operator-support.md for the per-op failure signatures.",
             "#",
             "# A trailing `# tileops` marks an op that also has a TileOPs Triton",
             "# shim (scripts/codegen/backend_coverage.py:TILEOPS_OPS, regenerated by",
@@ -2555,7 +2708,7 @@ def main():
         n_flaggems_routes = 0
         n_cuda_fallback = 0
         for op in sorted(op_info):
-            if op in cuda_route_exceptions:
+            if op in cuda_route_exceptions or op in measured_flaggems_rollback:
                 backend = "cuda"
                 if op in flaggems_py:
                     n_cuda_fallback += 1
