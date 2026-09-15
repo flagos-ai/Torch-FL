@@ -47,6 +47,7 @@ Categories (detected from torchgen metadata):
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -615,20 +616,97 @@ FLAGGEMS_PYTHON_SKIP = {
 
 
 def _normalize_flaggems_qualname(fn):
-    """Return a portable FlagGems qualname for a discovered function.
+    """Return the runtime-resolved FlagGems entry point for a discovered function.
 
-    FlagGems exposes the same operator through generic modules and vendor
-    aliases. The active backend can therefore make ``fn.__module__`` point at a
-    bare package such as ``gcu300.ops.count_nonzero`` or ``_nvidia.ops.mm``.
-    Embedding that runtime-selected alias in generated C++ would make the
-    artifact hardware-specific and fail when loaded on another backend. Every
-    discovered ``*.ops.*`` alias is consequently mapped to the canonical
-    ``flag_gems.ops.*`` package; already-canonical names are left unchanged.
+    ``flag_gems`` re-exports every operator at package level, and that top-level
+    name is the one the active backend has already rebound: importing the package
+    installs the vendor-specialized callable over the generic one
+    (``runtime.backend.SpecOpRegistrar`` writes into the package globals). Taking
+    a module path from ``fn.__module__`` instead pins whichever implementation
+    that module happens to hold, which on a vendor with overrides is the *generic*
+    fallback -- 72 of the 666 kernels generated from the MetaX cohort did exactly
+    that, and ``_log_softmax_backward_data`` then failed on hardware with
+    ``TypeError: dynamic_func() missing 1 required positional argument:
+    'BLOCK_N'`` because the MetaX kernel supplies BLOCK_N through a
+    ``triton.heuristics`` decorator that the generic kernel does not carry (its
+    ``tune_configs.yaml`` entry lists only BLOCK_M).
+
+    Bare ``flag_gems.<name>`` also drops the vendor alias
+    (``_nvidia.ops.mm``, ``gcu300.ops.count_nonzero``, ``_hygon.ops.mul``) that a
+    discovery host would otherwise freeze into the artifact. The name is resolved
+    against the backend that actually loads the extension, so one generated file
+    stays valid on every platform -- the property the previous mapping tried to
+    reach by rewriting aliases to ``flag_gems.ops.*``, which is what made the
+    generic module the pinned target in the first place.
+
+    Measured over the cohort the checked-in kernels were generated from: all 666
+    ``flag_gems.ops.*`` qualnames map to 666 distinct ``flag_gems.<name>`` names,
+    every one of which resolves on the package; 594 resolve to the same callable
+    as before and 72 to the vendor override. No two distinct qualnames collapse
+    onto the same name, and ``PythonOpCache::GetFunc`` already handles the
+    one-dot form (``python_op_caller.cc``, dotted branch).
     """
-    module = getattr(fn, "__module__", "") or ""
-    if not module.startswith("flag_gems.") and ".ops." in module:
-        module = f"flag_gems.ops.{module.split('.ops.', 1)[1]}"
-    return f"{module}.{fn.__name__}"
+    return f"flag_gems.{fn.__name__}"
+
+
+def _wrap_quoted(ops, indent: str) -> List[str]:
+    """Pack quoted op names into <=79-column lines, matching ruff's output."""
+    lines: List[str] = []
+    cur = indent
+    for op in ops:
+        item = f'"{op}",'
+        if cur == indent:
+            cur = cur + item
+        elif len(cur) + 1 + len(item) > 79:
+            lines.append(cur)
+            cur = indent + item
+        else:
+            cur = f"{cur} {item}"
+    if cur.strip():
+        lines.append(cur)
+    return lines
+
+
+def render_flaggems_coverage(ops, excluded) -> Path:
+    """Rewrite FLAGGEMS_PYTHON_OPS inside scripts/backend_coverage.py.
+
+    backend_coverage.py calls itself the generated record of this set, but until
+    now nothing wrote it: the 482-op literal was a hand-carried snapshot of the
+    FlagGems revision CI pinned. Re-running the discovery against a newer flag_gems
+    grew the generated kernels while this ceiling stayed put, which silently capped
+    every conf built from it -- gen_vendor_confs.py takes FLAGGEMS_PYTHON_OPS as
+    the maximum a platform may route to the Python path, so the new ops could never
+    reach a conf no matter how many kernels were generated for them.
+
+    ``excluded`` is flaggems_recursive_fallback | flaggems_runtime_broken. Both
+    sets name ops whose Python kernel must stay generated but must NOT be a
+    default route (unsupported). They are therefore subtracted here: this file is
+    the *ceiling* every conf is intersected with, so listing them would make
+    gen_vendor_confs.py route them to flagos_python on every platform. They stay
+    reachable through FLAGOS_OP_<op>=flagos_python, which is what the retained
+    kernels are for.
+
+    Keeping the write here makes the round trip self-consistent: discovery sets the
+    ceiling, the ceiling bounds the confs, and test_flaggems_conf_consistency.py
+    checks the three against each other.
+    """
+    ops = sorted(set(ops) - set(excluded))
+    body = "\n".join(_wrap_quoted(ops, indent="    "))
+    new = f"FLAGGEMS_PYTHON_OPS = frozenset({{\n{body}\n}})  # fmt: skip"
+    path = Path(__file__).resolve().parent / "backend_coverage.py"
+    patched, n = re.subn(
+        r"FLAGGEMS_PYTHON_OPS = frozenset\(\{.*?\}\)  # fmt: skip",
+        lambda _: new,
+        path.read_text(),
+        count=1,
+        flags=re.DOTALL,
+    )
+    if n != 1:
+        raise SystemExit(
+            f"{path.name}: could not find the FLAGGEMS_PYTHON_OPS block to rewrite"
+        )
+    path.write_text(patched)
+    return path
 
 
 def discover_flaggems_ops(codegen_ops, funcs):
@@ -2741,8 +2819,12 @@ def main():
         # `device.type != "cuda"` guard whose body re-enters torch.<same op>:
         # mul is the only one. as_strided_copy / conv_transpose2d / scaled_mm
         # have the same guard but return a clone / None / False, so they degrade
-        # safely. mul_.Tensor is also safe: it calls the gems helper with out=A,
-        # which exits via `torch.mul(..., out=)` -> mul.out -> cuda.
+        # safely.
+        #
+        # mul_.Tensor carries the same guard but is NOT safe, and is routed
+        # through flaggems_runtime_broken instead: it reaches the guard with
+        # out=A, and the fallback branch for `out is not None` redispatching to
+        # aten.mul.out has no kernel to land on (see the entry there).
         flaggems_recursive_fallback = {
             "mul.Tensor",
         }
@@ -2799,6 +2881,44 @@ def main():
             "_upsample_bilinear2d_aa",
             "_upsample_nearest_exact2d_backward",
             "upsample_trilinear3d",
+            # (2) same cause, confirmed by differential testing on MetaX C550
+            # (flag_gems 5.4.0rc2.post1+g5a58df410, flagtree 0.6.1+metax3.6).
+            # Inputs were built once on CPU and moved with .to("flagos"), so both
+            # arms see identical values; the cuda route passes every one of them.
+            # Each guard is a literal device-type test, which no PrivateUse1
+            # tensor can satisfy, so these fail identically on every flagos
+            # platform -- they are not MetaX-specific.
+            #   binary_cross_entropy(-.out): ops/binary_cross_entropy.py:177
+            #     `if not (input.is_cuda and target.is_cuda): raise` ->
+            #     AssertionError "...must be CUDA tensors for Triton kernel."
+            #   hardtanh_backward: ops/hardtanh_backward.py:54
+            #     `assert grad_output.is_cuda and self.is_cuda` -> bare
+            #     AssertionError.
+            #   igammac(.out): "igammac: first input tensor must be on cuda
+            #     device" (ValueError).
+            #   special_modified_bessel_i0(.out): "input tensor must be on CUDA
+            #     device" / "input and output tensors must be on CUDA device".
+            #   _fake_quantize_learnable_per_tensor_affine_backward:
+            #     ops/_fake_quantize_learnable_per_tensor_affine_backward.py:90
+            #     `if grad.device.type != "cuda" or self.device.type != "cuda":
+            #     raise ValueError("Inputs must be on a CUDA device.")`; reached
+            #     both directly and through the forward's autograd.
+            #   upsample_bilinear2d: ops/upsample_bilinear2d.py:154
+            #     `assert input.device.type == runtime.device.name`. On MetaX
+            #     runtime.device.name is "cuda" (the _metax VendorDescriptor
+            #     declares device_name="cuda"), so a flagos tensor fails the
+            #     assert. _upsample_bilinear2d_aa (below) shares the aa-variant
+            #     code and was measured CORRECT on hardware -- only the plain
+            #     variant is listed here.
+            "binary_cross_entropy",
+            "binary_cross_entropy.out",
+            "hardtanh_backward",
+            "igammac",
+            "igammac.out",
+            "special_modified_bessel_i0",
+            "special_modified_bessel_i0.out",
+            "_fake_quantize_learnable_per_tensor_affine_backward",
+            "upsample_bilinear2d",
             # (3) DTK triton cannot compile the gems kernel
             "gcd",
             "gcd.out",
@@ -2823,12 +2943,12 @@ def main():
             # launches are ordered with the flagos current stream.
             "index_select",
             # (5) the recorded qualname names a gems callable that no longer
-            # exists. Discovery freezes `fn.__module__ + "." + fn.__name__` into
-            # the generated kernel, so a config is only valid against the exact
+            # exists. Discovery freezes `flag_gems.<fn.__name__>` into the
+            # generated kernel, so a config is only valid against the exact
             # FlagGems cohort it was generated from -- these 10 were present in
             # the 7fb49bad cohort but not in 5.3.5. PythonOpCache::GetFunc then
-            # fails both its module import and its flag_gems.ops retry, and the
-            # op raises AttributeError on first call rather than degrading.
+            # fails the package lookup and the op raises AttributeError on first
+            # call rather than degrading.
             # `unsqueeze` is the worst of these: plain `x[None]` breaks.
             "_embedding_bag_per_sample_weights_backward",
             "_native_batch_norm_legit_functional",
@@ -2840,6 +2960,24 @@ def main():
             "special_bessel_j1",
             "unsqueeze",
             "unsqueeze_",
+            # (6) gems takes the `device.type != _DEVICE_NAME` guard and the
+            # branch it lands in has nowhere to go. ops/mul.py:579
+            # mul_broadcast_func selects the device of its inputs and, for a
+            # flagos tensor, calls
+            # `torch.ops.aten.mul.out.redispatch(_FALLBACK_KEYSET, a, b, out=out)`
+            # with _FALLBACK_KEYSET = {CompositeExplicitAutograd}. mul.out has no
+            # kernel registered under that key, so the redispatch raises
+            # `NotImplementedError: There were no tensor arguments to this
+            # function ..., but no fallback function is registered for schema
+            # aten::mul.out`. mul_ is the only caller that always passes out=,
+            # which is why mul.Tensor (routed via flaggems_recursive_fallback)
+            # behaves differently. Measured on MetaX C550: both
+            # torch.ops.aten.mul_.Tensor(a, 0.5) and (a, b) raise, while
+            # mul_broadcast_func(a, b) without out= returns correct values.
+            # Tensor.mul_(python_float) is the shape the optimizer tests use --
+            # Tensor.mul_ dispatches to aten.mul_.Tensor, not mul_.Scalar -- so
+            # this route breaks adamw-style foreach/param updates.
+            "mul_.Tensor",
         }
 
         # Both sets force a route back to cuda, for different reasons; the conf
@@ -2852,6 +2990,17 @@ def main():
         # as FLAGGEMS_PYTHON_OPS, and the per-op FlagGems routing is stated
         # directly in each platform's own conf by scripts/codegen/gen_vendor_confs.py.
         flaggems_forced_cuda = flaggems_recursive_fallback | flaggems_runtime_broken
+
+        # Publish the coverage ceiling this run discovered, minus the override-only
+        # ops above. scripts/gen_vendor_confs.py intersects every platform conf
+        # with this set, so it is the one place the FlagGems Python surface is
+        # declared for all platforms at once.
+        coverage_path = render_flaggems_coverage(flaggems_py, flaggems_forced_cuda)
+        print(
+            f"   updated {coverage_path.name}: FLAGGEMS_PYTHON_OPS = "
+            f"{len(flaggems_py) - len(flaggems_forced_cuda & set(flaggems_py))} ops "
+            f"({len(flaggems_forced_cuda & set(flaggems_py))} override-only excluded)"
+        )
 
         # backends_metax.conf: FlagGems-first like every generated conf, but
         # the ops triton-metax / flag_gems cannot run on the flagos device are
@@ -2938,6 +3087,70 @@ def main():
             # mcErrorIllegalAddress), poisoning every subsequent op -- unrecoverable
             # in-process. Route to the cuda boxing kernel, which is bounds-safe.
             "slice_backward",
+            # Route regressions found by the differential survey of the 166 ops
+            # MetaX gained when FLAGGEMS_PYTHON_OPS was widened to the FlagGems
+            # master @ 5a58df410 cohort (flag_gems 5.4.0rc2.post1+g5a58df410,
+            # flagtree 0.6.1+metax3.6, MetaX C550, 2026-09-15). Each op was run
+            # on both routes through the same `2d-f32` profile -- one input pair
+            # built on the host and moved with `.to("flagos")`, so both arms see
+            # identical values -- and each one PASSES on cuda while failing on
+            # flaggems. `tests/manual/flaggems_overload_survey.py` produced both
+            # verdicts (the cuda arm with FLAGOS_OP_<op>=cuda).
+            #
+            #  - gems asserts the input is a real CUDA tensor
+            #    (`special_bessel_j0` "Tensors must be CUDA tensors";
+            #    `special_i1e(.out)` "Tensors must be cuda tensors";
+            #    `special_chebyshev_polynomial_w.out` "input x must be on cuda
+            #    device"). Same literal `device.type == "cuda"` guard class as
+            #    flaggems_runtime_broken group (2), so these are not
+            #    MetaX-specific -- they belong there at the next ceiling
+            #    revision; held here so this change stays inside MetaX.
+            "special_bessel_j0",
+            "special_i1e",
+            "special_i1e.out",
+            "special_chebyshev_polynomial_w.out",
+            #  - the gems wrapper raises before it can serve the caller, so the
+            #    op aborts rather than returning anything: `nansum.out` returns
+            #    None and is copy_'d ("'NoneType' object has no attribute
+            #    copy_'"), `lu_unpack.out` writes a (0,) buffer against a (32,)
+            #    result, `linalg_matrix_exp.out` demands `out` as a keyword
+            #    (TypeError), and `_cdist_forward` rejects `compute_mode=None`
+            #    ("None is not a valid value for compute_mode") where ATen
+            #    accepts it.
+            "nansum.out",
+            "lu_unpack.out",
+            "linalg_matrix_exp.out",
+            "_cdist_forward",
+            #  - the gems kernel runs to completion and returns the wrong result,
+            #    which no caller notices without comparing values.
+            #    `_compute_linear_combination` (.out) reaches max_diff 22.12 /
+            #    1.91e+37, `_fused_rms_norm` returns (32,) where ATen returns
+            #    (32, 1), `igamma`/`igamma_` return finite values where ATen
+            #    returns NaN on the negative domain (the same one-sided
+            #    disagreement measured for `igammac_`, which is held in
+            #    flaggems_runtime_broken), `logit_backward` max_diff=nan, and
+            #    `special_shifted_chebyshev_polynomial_t` max_diff 361.53.
+            #    `sum.out` is the mildest of these and is shape-only: it returns
+            #    the (32, 32) `out` buffer where ATen returns the 0-dim result
+            #    view, so a caller that reduces into a larger buffer reads the
+            #    wrong shape even though the sum itself landed.
+            "sum.out",
+            "_compute_linear_combination",
+            "_compute_linear_combination.out",
+            "_fused_rms_norm",
+            "igamma",
+            "igamma_",
+            "logit_backward",
+            "special_shifted_chebyshev_polynomial_t",
+            # NOT held, for the record: five of the 21 ops the same survey flagged
+            # fail on the cuda route too, so holding them would not fix anything.
+            # `_native_batch_norm_legit.no_stats` segfaults on both routes;
+            # `linalg_lstsq` and `log_sigmoid_backward(.grad_input)` return wrong
+            # values on both; `linalg_eig` returns host-matching eigenvalues on
+            # flaggems but raises "MAGMA requires compiling PyTorch" on cuda, so
+            # flaggems is the better route even though the survey calls it WRONG
+            # (the comparison is against eigenvectors, which are defined only up
+            # to phase).
         }
         mfg_conf_path = repo_root / "torch_fl/configs/backends_metax.conf"
         mfg_lines = conf_license + [

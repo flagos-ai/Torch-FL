@@ -230,19 +230,36 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     registered = g.vendor_registered_ops("musa")
     gaps = g.NATIVE_TRITON_GAPS.get("musa", set())
 
-    # All FlagGems ops except those in gaps should be registered
-    expected_registered_from_flaggems = flaggems_py - gaps
-    assert expected_registered_from_flaggems <= registered, (
-        "Some FlagGems ops not registered"
+    # The shared ceiling is discovered from the installed flag_gems package, so it
+    # is wider than any one vendor's measured cohort. Ops it gained after MUSA's
+    # last FlagGems run are held on the mudnn kernel (FLAGGEMS_PENDING_NATIVE_OPS,
+    # scripts/gen_vendor_confs.py) and are neither registered nor routed here, so
+    # they are out of scope for this test. The cohort below is derived rather than
+    # pinned: widening either coverage set moves it without an edit here.
+    pending = (
+        g.FLAGGEMS_PENDING_NATIVE_OPS
+        if "musa" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
+        else set()
     )
+    cohort = flaggems_py - pending
+
+    # All FlagGems ops in the measured cohort, except those in gaps, are registered
+    expected_registered_from_flaggems = cohort - gaps
+    missing = sorted(expected_registered_from_flaggems - registered)
+    assert not missing, f"FlagGems ops not registered: {missing}"
 
     # Count flaggems routes
     flaggems_routes = {
         op for op, key in routes.items() if key.split("#")[0].strip() == "flaggems"
     }
 
-    # 482 FlagGems ops minus the gaps above are registered and routed to flaggems.
-    assert len(flaggems_routes) == len(expected_registered_from_flaggems)
+    # The cohort minus the gaps above is registered and routed to flaggems.
+    short = sorted(expected_registered_from_flaggems - flaggems_routes)
+    extra = sorted(flaggems_routes - expected_registered_from_flaggems)
+    assert not short and not extra, (
+        f"cohort not routed to flaggems: {short}; "
+        f"routed to flaggems outside the cohort: {extra}"
+    )
     assert gaps == {
         "_conj",
         "add.Tensor",
@@ -277,7 +294,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     # invariant, so that adding an op to either coverage set never needs an edit.
     mudnn_only = native - flaggems_py
     assert mudnn_only, "mudnn must still back the ops FlagGems does not cover"
-    unrouted = sorted(op for op in flaggems_py - gaps if routes.get(op) == "none")
+    unrouted = sorted(op for op in cohort - gaps if routes.get(op) == "none")
     assert not unrouted, f"FlagGems ops left with no route: {unrouted}"
 
 

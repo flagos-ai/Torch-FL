@@ -55,11 +55,6 @@ from pathlib import Path
 import pytest
 
 
-# ``special_i1.out`` is deliberately routed to CUDA in the generated config;
-# torchgen still emits the shared dispatcher wrapper, but no Python kernel.
-_SKIP_ROUTE_SET = {"special_i1_out_dispatcher"}
-
-
 # tests/integration/ops/<this file> -> repo root is three levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _COVERAGE = _REPO_ROOT / "scripts" / "codegen" / "backend_coverage.py"
@@ -270,28 +265,52 @@ class TestFlagGemsConfConsistency:
 
     @pytest.mark.anyplatform
     def test_counts_match(self):
-        """Configured plus override-only routes match generated kernels."""
+        """Configured plus override-only routes match generated kernels exactly.
+
+        A set comparison rather than a length comparison: equal counts can hide a
+        route with no kernel against a kernel with no route, which is precisely
+        the drift this guards.
+        """
         conf_disp, _ = _conf_dispatchers()
         override_disp, _ = _override_only_dispatchers()
         cc_disp = _cc_flagos_python_dispatchers()
         expected = conf_disp | override_disp
-        expected -= _SKIP_ROUTE_SET
-        assert len(expected) == len(cc_disp), (
-            f"flagos_python route count mismatch: conf={len(conf_disp)} "
-            f"override_only={len(override_disp)} kernels={len(cc_disp)}"
+        missing = sorted(cc_disp - expected)
+        extra = sorted(expected - cc_disp)
+        assert not missing and not extra, (
+            "kFlagGems kernels with no route: "
+            f"{missing}; routes with no kFlagGems kernel: {extra}"
         )
 
-    def test_python_kernels_use_canonical_modules(self):
-        """Generated calls must not freeze a vendor architecture alias."""
+    def test_python_kernels_use_runtime_resolved_names(self):
+        """Generated calls must name the package-level FlagGems entry point.
+
+        ``flag_gems.<fn>`` is the name the active backend has already rebound to
+        its vendor-specialized callable (``SpecOpRegistrar`` writes into the
+        package globals at import). Anything deeper -- ``flag_gems.ops.<mod>.<fn>``
+        or a vendor alias such as ``_metax.ops.log_softmax.log_softmax_backward``
+        or ``_hygon.ops.mul`` -- pins one implementation instead: the vendor alias
+        fails outright on a host that lacks that module, and the generic module
+        path silently picks the generic kernel where the platform ships an
+        override (72 of 666 kernels did, and ``_log_softmax_backward_data`` then
+        raised ``TypeError: dynamic_func() missing 1 required positional
+        argument: 'BLOCK_N'`` on MetaX hardware).
+
+        So the requirement is one dot: the ``flag_gems`` package, then the
+        operator name. ``PythonOpCache::GetFunc`` resolves that through its
+        dotted branch by importing the prefix and taking the attribute.
+        """
         paths = re.findall(
             r'CallPythonOp_\w+\("([^"]+)"',
             _read(_KERNELS_CC),
         )
         assert paths, f"no Python operation calls found in {_KERNELS_CC.name}"
         noncanonical = sorted(
-            path for path in paths if not path.startswith("flag_gems.ops.")
+            path
+            for path in paths
+            if not path.startswith("flag_gems.") or path.count(".") != 1
         )
         assert not noncanonical, (
-            "generated FlagGems calls must use flag_gems.ops.* rather than a "
-            f"vendor-specific module path: {noncanonical}"
+            "generated FlagGems calls must be the two-component package-level "
+            f"name flag_gems.<op>, not a module path or vendor alias: {noncanonical}"
         )

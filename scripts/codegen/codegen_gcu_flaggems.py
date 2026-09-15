@@ -9,12 +9,21 @@ slot: the call does not box to CPU, it reaches the dispatcher's empty
 ``kFlagGems`` slot and raises "backend not registered".
 
 The list is ``FLAGGEMS_PYTHON_OPS`` minus ``NATIVE_TRITON_GAPS['gcu']``, minus
-whatever ``gcu_register.inc`` already claims. Each op is emitted with the
+``FLAGGEMS_PENDING_NATIVE_OPS`` (for as long as ``gcu`` is in
+``FLAGGEMS_PENDING_NATIVE_VENDORS``), minus whatever ``gcu_register.inc``
+already claims. Each op is emitted with the
 wrapper symbol read back from the CUDA codegen's ``generated/register.inc``
 rather than derived from the op name: ``add.Tensor`` is served by
 ``WrapperAddTensor`` while ``_adaptive_avg_pool2d`` is served by
 ``WrapperPrivAdaptiveAvgPool2d``, and only the generated file knows which is
 which -- guessing the prefix is what broke the first version of the MUSA file.
+
+The pending subtraction is what keeps this generator in step with
+``gen_vendor_confs.py``: that script's ``build_all()`` holds the same set off
+``flaggems`` in the confs, so registering an op here that the conf does not
+route would add an m.impl() nothing dispatches to while changing which op the
+conf sends to topsaten. Both sides must read the same set, or re-running one
+generator alone silently moves the other's routes.
 
 Usage:
     python3 scripts/codegen/codegen_gcu_flaggems.py            # rewrite the .inc
@@ -71,8 +80,13 @@ def target_ops() -> list:
         REPO / "csrc/aten/backends/gcu/generated/gcu_register.inc"
     )
     gaps = g.NATIVE_TRITON_GAPS.get("gcu", set())
+    pending = (
+        g.FLAGGEMS_PENDING_NATIVE_OPS
+        if "gcu" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
+        else frozenset()
+    )
 
-    wanted = (set(FLAGGEMS_PYTHON_OPS) - gaps) - native
+    wanted = (set(FLAGGEMS_PYTHON_OPS) - gaps) - native - pending
     unknown = sorted(wanted - set(wrappers))
     if unknown:
         raise SystemExit(
@@ -81,7 +95,11 @@ def target_ops() -> list:
             + f"\n{REGISTER_INC.relative_to(REPO)} has no m.impl() line for these ops."
         )
 
-    return sorted(wanted), sorted(native & set(FLAGGEMS_PYTHON_OPS)), sorted(gaps)
+    return (
+        sorted(wanted),
+        sorted((native & set(FLAGGEMS_PYTHON_OPS)) - pending),
+        sorted(gaps),
+    )
 
 
 def render() -> str:

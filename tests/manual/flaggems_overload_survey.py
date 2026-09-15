@@ -22,6 +22,14 @@ Two support levels are reported:
 An overload with no CPU-valid synthesized case is UNTESTED, never a failure or a
 pass. Raw per-case evidence is retained in JSON for later auditing.
 
+The full matrix is seven profiles per overload. On a large route set (MetaX's
+592, say) the ``2d-f32`` profile alone is the useful screening pass -- it is the
+one that exercises ordinary arguments, including the negative values that expose
+a kernel computing a finite answer on a domain where ATen returns NaN -- and
+``--profiles 2d-f32`` runs it without the five dtype/layout variants. A subset
+run records the subset it used in ``meta.profiles``; do not compare a subset
+summary against a full-matrix one.
+
 Usage:
   python tests/manual/flaggems_overload_survey.py \
       --conf torch_fl/configs/backends_cuda.conf \
@@ -75,10 +83,13 @@ PROFILES = (
 
 HARNESS_VERSION = 6
 
-# Backend::kFlagGems under every spelling ParseBackendName accepts. The current
-# configurations spell it "flaggems"; the two legacy names stay in the set
-# because the baseline cohort was measured under them, and a conf that uses
-# either would otherwise be surveyed as if it routed nothing to FlagGems.
+# Backend::kFlagGems under every spelling ParseBackendName accepts
+# (csrc/aten/common.cc): the current configurations spell it "flaggems", and the
+# two legacy names stay in the set because the baseline cohort was measured
+# under them. A conf that uses either spelling would otherwise be surveyed as if
+# it routed nothing to FlagGems -- which is how reading only the legacy name
+# silently measured an empty route set on every conf rewritten since the
+# vocabulary change.
 _FLAGGEMS_PYTHON_BACKENDS = frozenset({"flaggems", "flaggems_python", "flagos_python"})
 
 
@@ -438,18 +449,20 @@ for p in profiles:
 '''
 
 
-def run_overload(child: Path, op: str, env: dict, timeout: int) -> list[dict]:
-    """Run every profile for one overload in a single child process.
+def run_overload(
+    child: Path, op: str, env: dict, timeout: int, profiles: list[dict]
+) -> list[dict]:
+    """Run every requested profile for one overload in a single child process.
 
     One process per overload rather than per case: importing torch dominates
     runtime otherwise. Each profile still reports its own line, so a process that
     dies mid-way is attributed to the exact profile that killed it instead of
     discarding the overload.
     """
-    pending = [p["name"] for p in PROFILES]
+    pending = [p["name"] for p in profiles]
     try:
         proc = subprocess.run(
-            [sys.executable, str(child), op, json.dumps(list(PROFILES))],
+            [sys.executable, str(child), op, json.dumps(list(profiles))],
             capture_output=True,
             text=True,
             env=env,
@@ -536,9 +549,28 @@ def main() -> None:
     parser.add_argument("--conf", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--ops", help="comma-separated exact overload names")
+    parser.add_argument(
+        "--profiles",
+        help=(
+            "comma-separated profile names to run (default: all). A subset is a "
+            "screening pass, not a second full matrix: the summary counts the "
+            "profiles it ran"
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--rerun", action="store_true")
     args = parser.parse_args()
+
+    profiles = list(PROFILES)
+    if args.profiles:
+        wanted = [name.strip() for name in args.profiles.split(",") if name.strip()]
+        known = {p["name"]: p for p in PROFILES}
+        unknown = [name for name in wanted if name not in known]
+        if unknown:
+            parser.error(
+                f"unknown profile(s): {', '.join(unknown)}; known: {', '.join(known)}"
+            )
+        profiles = [known[name] for name in wanted]
 
     conf_bytes = args.conf.read_bytes()
     conf_sha256 = hashlib.sha256(conf_bytes).hexdigest()
@@ -574,7 +606,7 @@ def main() -> None:
             "harness_version": HARNESS_VERSION,
             "registered": len(routes),
             "routes": routes,
-            "profiles": list(PROFILES),
+            "profiles": profiles,
             "unit": "active unique ATen overload",
         }
     )
@@ -588,7 +620,7 @@ def main() -> None:
     try:
         pending = [op for op in routes if args.rerun or op not in state["results"]]
         for index, op in enumerate(pending, 1):
-            cases = run_overload(child, op, env, args.timeout)
+            cases = run_overload(child, op, env, args.timeout, profiles)
             state["results"][op] = {"cases": cases}
             state["summary"] = summarize(routes, state["results"])
             atomic_write(args.out, state)

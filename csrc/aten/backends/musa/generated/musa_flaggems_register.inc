@@ -33,7 +33,7 @@
 //   - sub.Tensor
 //   - sub_.Tensor
 //
-// Total: 359 ops registered here, 122 further FlagGems ops already claimed by musa_register.inc.
+// Total: 359 ops registered here, 121 further FlagGems ops already claimed by musa_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_batch_norm_no_update", WrapperPrivBatchNormNoUpdate);

@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -119,12 +121,20 @@ class TestMeanDimDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, mean.dim routes to flagos_python."""
+        """mean.dim dispatches to whatever backend this platform's conf lists.
+
+        FlagGems-first is the generated default, but it is not unconditional:
+        MetaX keeps mean.dim on the cuda boxing kernel because gems' non-inner-dim
+        path uses a CUDA context triton-metax rejects. Asserting the conf's own
+        value keeps this test meaningful on every platform rather than pinning it
+        to the one it was written on.
+        """
         result = _run_mean_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] mean.dim -> flagos_python" in result.stderr
+        expected = routed_backend("mean.dim")
+        assert f"[flagos dispatch] mean.dim -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops

@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -115,12 +117,20 @@ class TestSoftmaxDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, _softmax routes to flagos_python."""
+        """_softmax dispatches to whatever backend this platform's conf lists.
+
+        The conf name and the log name differ: the FlagGems C++ path is
+        ``flaggems_cpp`` in the conf and ``-> flagos`` in the log, the Python path
+        ``flaggems``/``-> flagos_python`` (csrc/aten/dispatcher.h, LogDispatch).
+        routed_backend() owns that mapping, so this asserts the platform's real
+        route instead of the one the test was written on.
+        """
         result = _run_softmax_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] _softmax -> flagos_python" in result.stderr
+        expected = routed_backend("_softmax")
+        assert f"[flagos dispatch] _softmax -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops

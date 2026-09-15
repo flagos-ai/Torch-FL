@@ -241,6 +241,11 @@ export FLAGTREE_BACKEND=metax
 MAX_JOBS=64 python -m pip install . --no-build-isolation -v
 ```
 
+A released MetaX FlagTree wheel is available from the FlagOS index
+(`flagtree==0.6.1+metax3.6`; see *FlagGems on MetaX* below) — building from source
+is what the revision-pinned evidence above used, and the two install the same
+`triton` module.
+
 Then run the compile contract with that environment's site-packages ahead of the
 normal MetaX Triton installation:
 
@@ -258,32 +263,43 @@ tracing, and output/gradient residency on `flagos`. The installed MetaX Triton
 path passed the same applicable tests; only the FlagTree-identity test is skipped
 outside a FlagTree environment.
 
-## Optional: FlagGems on MetaX
+## FlagGems on MetaX
 
-The MetaX boxing wheel compiles FlagGems Python-dispatch kernels by default, so FlagGems is a runtime switch. Enabling it requires two additional target-side dependencies:
+The MetaX boxing wheel compiles the FlagGems Python dispatch slot by default, and `backends_metax.conf` is FlagGems-first and is the only conf a MetaX boxing build ships. `import torch_fl` therefore routes 592 of the conf's 2036 ops to the FlagGems Python path and 12 to the FlagGems C++ path on its own; the rest fall back to the CUDA boxing kernel (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and other ops `triton-metax` cannot compile — FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects).
+
+There is no switch that turns this on: routing is a property of the build (`torch_fl/__init__.py:_select_backend_config`), not of an environment variable. The practical consequence is that FlagGems is a runtime **dependency** rather than an option — an op routed to a FlagGems backend whose callable is absent raises at dispatch instead of falling back to boxing.
+
+Two target-side dependencies, neither of them on PyPI:
 
 ```bash
 # On the target MetaX machine, in addition to torch+cpu and torch_fl:
-pip install triton-metax flag_gems
+# FlagTree's MetaX Triton build. It installs as the `triton` module and supplies
+# the `metax` backend the generated kernels were measured against.
+python3 -m pip uninstall -y triton  # repeat until fully uninstalled
+pip install flagtree==0.6.1+metax3.6 \
+  --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+
+# FlagGems, at the revision the checked-in kernels were generated from.
+pip install "git+https://github.com/FlagOpen/FlagGems.git@5a58df410c551c4f4eb41d31887cd75fd596804a"
 ```
 
-`triton-metax` emits `mcfatbin` for MetaX GPUs; `flag_gems` provides the Triton kernel library.
+The FlagGems revision is load-bearing, not cosmetic. A generated kernel calls its operator by package-level name (`flag_gems.<name>`), resolved by `getattr` at dispatch time (`csrc/aten/backends/flagos/python_op_caller.cc:GetFunc`), so a cohort that does not define one of those names fails exactly the routes that use it. The revision above resolves all 666 names the checked-in `csrc/aten/generated/flaggems_python_kernels.cc` calls; `.github/scripts/set_env_metax.sh` measures that ratio before every integration job and refuses to run when it is not `0/666`.
+
+That measurement has an import-order requirement of its own, because the setup venv runs the stock `torch+cpu` wheel: its `torch/lib` carries no `libtorch_cuda.so`, so `torch.cuda.is_available()` is `False` until `torch_fl` has relinked that directory to the MetaX libtorch. In that state the MetaX Triton backend reports itself inactive (`triton/backends/metax/driver.py:is_active`), and `flag_gems` reaches `triton.runtime.driver.active` while it is being imported (`flag_gems.fused` -> `pointwise_dynamic` -> `triton.runtime.jit.parse` -> the Triton hint manager's backend lookup), so a bare `import flag_gems` in the venv fails with `RuntimeError: 0 active drivers ([]). There should only be one.` — the FlagGems install is fine, the probe is simply running too early. The ratio is therefore taken in a process that imports `torch_fl` first, at the end of the setup script rather than beside the FlagGems install, since `torch_fl` is not importable until `setup.py build_ext` has run. The same rule applies to any ad-hoc `FLAGOS_METAX_BOXING=1` check against the venv: `import torch_fl` first, or the device surface is not there yet.
 
 ### Runtime Configuration
 
 ```bash
-export FLAGOS_METAX_BOXING=1
-export FLAGOS_USE_FLAGGEMS=1  # Opt into FlagGems; unset = pure boxing
+export FLAGOS_METAX_BOXING=1  # selects backends_metax.conf
 ```
 
-`import torch_fl` then auto-selects `backends_metax.conf`, which routes most ops to FlagGems' Triton kernels and falls back to the CUDA boxing kernel for ops `triton-metax` cannot compile (`mm`/`bmm`/`mean.dim` — FlagGems uses a SPLIT_K kwarg or CUDA-context path `triton-metax` rejects).
+`FLAGOS_USE_FLAGGEMS` is not part of this. It no longer selects a conf on any platform; it survives as the gate `tests/integration/ops/conftest.py:_flaggems_enabled` reads to decide whether `@pytest.mark.flaggems` cases run or record a skip. Setting it does not change routing.
 
 ### FlagGems Verification
 
 ```bash
 export FLAGOS_METAX_BOXING=1
-export FLAGOS_USE_FLAGGEMS=1
-python -c "
+FLAGOS_LOG_DISPATCH=1 python -c "
 import torch_fl, torch
 x = torch.randn(1024, device='flagos:0')
 result = torch.nn.functional.silu(x).sum()
@@ -291,7 +307,9 @@ print(f'FlagGems SILU result: {result.cpu().item():.4f}')
 "
 ```
 
-Without `triton-metax`/`flag_gems` installed, leave `FLAGOS_USE_FLAGGEMS` unset — the pure boxing path has no extra dependencies.
+The dispatch log line the run prints for `silu` names the backend that served it (`[flagos dispatch] silu -> flagos_python`) — the conf's route, not an environment switch. `tests/integration/ops/backend_conf.py:routed_backend()` resolves that name from the conf so a test can assert it on any platform.
+
+Without FlagTree or FlagGems installed, the 604 ops routed to a FlagGems backend raise at dispatch; there is no pure-boxing configuration of this wheel.
 
 ## Distributed (Experimental)
 
@@ -325,11 +343,11 @@ MetaX carries FSDP2 and Qwen3 training parity work in repository history, but th
 
 **Expected behavior.** The bundled forked libtorch causes the wheel to exceed PyPI's 100 MB limit (~1.1 GB). Distribute via a private package index or direct file transfer.
 
-### FlagGems: `triton-metax` not found
+### FlagGems: `ModuleNotFoundError: No module named 'flag_gems'`
 
-**Cause:** `triton-metax` is not available on PyPI; it must come from a vendor-specific index.
+**Cause:** `backends_metax.conf` routes 592 ops to the FlagGems Python path by default, and `csrc/aten/backends/flagos/python_op_caller.cc:GetFunc` resolves each kernel by `getattr` on `flag_gems` at dispatch time. Without the package those routes raise rather than fall back to boxing.
 
-**Fix:** Obtain `triton-metax` from the MetaX developer portal or your vendor contact. If unavailable, disable FlagGems (unset `FLAGOS_USE_FLAGGEMS`) and use the pure boxing path.
+**Fix:** Install FlagGems and a MetaX FlagTree Triton as shown in *FlagGems on MetaX* above. When reusing a copy that is already on the machine, check that it resolves the names rather than that it reports a version: an editable source tree reports `flag_gems.__version__ == "0.0.0"`.
 
 ## Further Reading
 

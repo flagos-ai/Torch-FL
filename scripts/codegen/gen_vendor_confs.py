@@ -101,8 +101,8 @@ from backend_coverage import (  # noqa: E402
 # skips the op, and these three platforms are the ones that skip:
 #
 #   platform  registration branch in csrc/aten/register.cc   m.impl count
-#   musa      musa_register.inc + musa_flaggems_register.inc  158
-#   gcu       gcu_register.inc + gcu_flaggems_register.inc     546
+#   musa      musa_register.inc + musa_flaggems_register.inc  517
+#   gcu       gcu_register.inc + gcu_flaggems_register.inc     401
 #   ascend    ascend_register.inc                              372
 #
 # metax, tsingmicro and dcu fall through to the `#else` branch and register the
@@ -798,6 +798,17 @@ TILEOPS_PLATFORMS = set()
 # triton-metax rejects, so it stays on the boxing kernel. Recorded here because
 # the conf that used to hold this measurement no longer exists separately; see
 # boxing_cpp_ops(). test_metax_conf_keeps_mm_boxed pins the exception.
+#
+# Verification on this route is not the same as being routed on it: five of these
+# also sit in `metax_triton_fallback` (codegen_ops.py) for a reason recorded
+# there, and route_boxing() checks that gap set first, so the conf keeps `bmm`,
+# `bmm.out`, `sort`, `sort.stable` and `sum.dim_IntList` on the boxing kernel and
+# only 12 of the 17 reach flaggems_cpp. Measured again on the C550 host while
+# reviewing this set: forcing `bmm` or `mm` onto the C++ route with
+# `FLAGOS_OP_bmm=flaggems_cpp` fails on the fp32 inputs `aten::bmm` must serve
+# ("soft-lowp matrix kernel requires a low-precision input"), while `sort` and
+# `embedding` compute the host answer there -- `sort`'s pin is its profiler
+# interaction, not its values, as the codegen_ops.py entry says.
 METAX_CPP_MEASURED = {
     "_softmax",
     "_softmax_backward_data",
@@ -817,6 +828,153 @@ METAX_CPP_MEASURED = {
     "topk",
     "zeros",
 }
+
+# Ops codegen_ops.py's `flaggems_runtime_broken` group (5) holds off the FlagGems
+# path because the generation cohort at the time did not define their recorded
+# `flag_gems.<name>` entry point. That premise is stale: the kernels are now
+# generated from the pinned cohort (FlagGems master @ 5a58df410,
+# 5.4.0rc2.post1+g5a58df410), and each of these names resolves at package level
+# there. Re-measured on MetaX C550, one input set built on the host and moved
+# with `.to("flagos:0")` so both arms see identical values, once per arm with
+# `FLAGOS_OP_<op>` forcing the route:
+#
+#   - all 8 compute the CPU answer on the `flaggems` (flagos_python) route;
+#   - 2 of them, `special_bessel_j1` and `linalg_ldl_solve`, FAIL on the cuda
+#     boxing route today (maca raises cudaErrorMemoryValueTooLarge, and its
+#     cusolverDnXsytrs_bufferSize is unavailable), so the FlagGems route is a
+#     fix rather than a preference.
+#
+# That first probe fed `torch.rand(4, 4) + 0.5`, i.e. strictly positive inputs,
+# which is why `igammac_` was promoted and then withdrawn: re-measuring it with
+# `tests/manual/flaggems_overload_survey.py` (whose floating profiles are built
+# with `torch.randn`, so arguments go negative) and with a direct A/B probe over
+# `torch.randn(8, 8)` inputs showed the gems kernel returns finite values where
+# ATen's CPU and the cuda boxing route both return NaN -- `a=-1.1524, b=+0.9200`
+# gives `0.0275` against NaN, `a=+0.8487, b=-1.4782` and `a=+0.3223, b=-1.6293`
+# give `1.0` against NaN, 36 of 64 elements disagreed in that probe and the
+# whole of the disagreement was one-sided (no input produced NaN on the device
+# that was finite on the host). `igammac_` therefore stays on the boxing kernel,
+# which reproduces the CPU NaN mask exactly (51/51 NaN, 0 one-sided). The
+# remaining 7 keep their promotion, with one recorded gap: `special_bessel_j1`
+# returns the input dtype for integral inputs (`torch.special.bessel_j1` on an
+# int64/bool tensor yields int64/bool zeros) where ATen promotes to float32, so
+# it is correct for the floating dtypes it exists for and silently wrong-typed
+# for the rest. It is still kept on the FlagGems route because the alternative
+# is not a correct route but no route at all -- the boxing kernel raises
+# `mcErrorMemoryValueTooLarge` for every dtype.
+#
+# Only the 7 measured-good ops are listed, and only for MetaX. The group (5)
+# hold stays in codegen_ops.py for every other platform: the names resolve
+# against the generation cohort, not against the FlagGems build a platform
+# happens to install, and DCU/Ascend consume vendor-provided FlagGems rather
+# than the pinned one. `max_unpool3d` also stays held -- its gems signature is
+# `(input, indices, kernel_size, stride, padding, output_size)` while ATen's is
+# `(self, indices, output_size, stride, padding)`, so the generated call passes
+# the output size as the kernel size and returns a (1,2,6,6,6) tensor where the
+# boxing route returns (1,2,4,4,4). `cudnn_batch_norm_backward` was not
+# re-measured. See boxing_measured_python_ops().
+METAX_FLAGGEMS_MEASURED = {
+    "_embedding_bag_per_sample_weights_backward",
+    "_native_batch_norm_legit_functional",
+    "binary_cross_entropy_with_logits",
+    "linalg_ldl_solve",
+    "special_bessel_j1",
+    "unsqueeze",
+    "unsqueeze_",
+}
+
+# FlagGems coverage that arrived from a discovery widening rather than from a
+# measurement on the native-kernel vendors, and the vendors that therefore keep
+# the routes their own last FlagGems run measured.
+#
+# FLAGGEMS_PYTHON_OPS is discovered from the installed flag_gems package and is
+# the ceiling every conf is intersected with (codegen_ops.py's
+# render_flaggems_coverage writes it), so re-running the discovery against a
+# newer FlagGems widens what *every* platform may route to that path. A conf is
+# what a run executes, though, and a route is only worth the hardware measured
+# behind it, so an op the discovery has just handed to the Python path must not
+# move a vendor off its own kernel before that vendor's FlagGems suite has run
+# against the new cohort. It is the register-then-measure loop NATIVE_TRITON_GAPS
+# documents, entered from the other end: there an op joins the gaps once CI
+# fails, here it stays on the vendor kernel until CI runs at all.
+#
+# The 2026-09-15 run (FlagGems master 5a58df410, whose entry points now resolve
+# at package level as `flag_gems.<name>` instead of through `flag_gems.ops.*`)
+# took the ceiling from 482 to 639 ops. MetaX measured the widened set --
+# tests/integration/ops/test_metax_flaggems.py routes and executes 592 of them on
+# C550 -- and so takes the ceiling whole. MUSA, GCU and Ascend have not re-run,
+# and their shipped confs were generated against the 482-op cohort, so their
+# routes stay where those runs left them.
+#
+# Deleting a vendor from FLAGGEMS_PENDING_NATIVE_VENDORS once its suite passes
+# against the widened cohort is the whole promotion: rerun
+# scripts/gen_vendor_confs.py and every op that vendor registers moves to the
+# FlagGems path in one step. Deleting an op from the set instead is for the case
+# where a vendor has measured that one op alone.
+#
+# The per-vendor register generators read this set too
+# (codegen_gcu_flaggems.py, codegen_musa_flaggems.py). They emit the m.impl()
+# lines that give the conf's `flaggems` routes a registered slot, so an op this
+# set keeps off the conf must not be registered there either: registering it
+# would claim the op on PrivateUse1 for a backend the conf never dispatches to,
+# and the vendor kernel that is supposed to serve it would stop being reached.
+FLAGGEMS_PENDING_NATIVE_VENDORS = ("ascend", "gcu", "musa")
+FLAGGEMS_PENDING_NATIVE_OPS = frozenset({
+    "_adaptive_avg_pool2d_backward", "_adaptive_avg_pool3d_backward",
+    "_batch_norm_with_update_functional", "_cdist_forward",
+    "_cholesky_solve_helper", "_compute_linear_combination",
+    "_compute_linear_combination.out", "_conj_copy.out",
+    "_convert_weight_to_int4pack", "_dirichlet_grad",
+    "_fake_quantize_learnable_per_channel_affine_backward",
+    "_fake_quantize_learnable_per_tensor_affine",
+    "_fake_quantize_per_tensor_affine_cachemask_tensor_qparams",
+    "_fused_moving_avg_obs_fq_helper", "_fused_rms_norm",
+    "_fused_rms_norm_backward", "_native_batch_norm_legit",
+    "_native_batch_norm_legit.no_stats",
+    "_native_batch_norm_legit.no_stats_out", "_native_batch_norm_legit.out",
+    "_native_batch_norm_legit_no_training", "_pdist_forward",
+    "_scaled_dot_product_efficient_attention", "_sparse_semi_structured_addmm",
+    "_upsample_bilinear2d_aa_backward", "_upsample_nearest_exact1d_backward",
+    "_upsample_nearest_exact1d_backward.grad_input", "_weight_int8pack_mm",
+    "acos_", "adaptive_avg_pool3d_backward.grad_input", "adaptive_max_pool2d",
+    "adaptive_max_pool2d_backward", "adaptive_max_pool3d", "addbmm", "addbmm_",
+    "addmv_", "addr_", "alias", "alias_copy.out", "atan2_", "atanh_",
+    "baddbmm_", "binary_cross_entropy_backward", "bitwise_right_shift.Tensor",
+    "bitwise_right_shift_.Tensor", "blackman_window",
+    "blackman_window.periodic", "cholesky_inverse", "cholesky_solve",
+    "cholesky_solve.out", "conj_physical_", "convolution_overrideable",
+    "convolution_overrideable.out", "cudnn_convolution_transpose", "cumsum_",
+    "dist", "embedding_renorm_", "empty_permuted", "eq_.Scalar", "eq_.Tensor",
+    "erfc", "erfc_", "fake_quantize_per_channel_affine_cachemask",
+    "fake_quantize_per_channel_affine_cachemask.out", "grid_sampler_3d",
+    "grid_sampler_3d_backward", "hardshrink", "hardshrink.out",
+    "hardsigmoid_backward", "hardswish", "hardswish.out", "hardswish_backward",
+    "hardtanh", "hardtanh.out", "hardtanh_", "hash_tensor", "heaviside",
+    "heaviside_", "huber_loss", "huber_loss.out", "hypot_", "igamma",
+    "igamma_", "index_fill.int_Scalar", "index_fill.int_Tensor",
+    "index_fill_.int_Scalar", "index_fill_.int_Tensor", "isposinf",
+    "le_.Scalar", "le_.Tensor", "leaky_relu_backward", "linalg_cross",
+    "linalg_cross.out", "linalg_eig", "linalg_householder_product",
+    "linalg_lstsq", "linalg_lu", "linalg_lu.out", "linalg_lu_factor_ex",
+    "linalg_lu_factor_ex.out", "linalg_matrix_exp", "linalg_matrix_exp.out",
+    "linalg_qr", "linalg_qr.out", "linalg_solve_triangular",
+    "linalg_solve_triangular.out", "log_sigmoid_backward",
+    "log_sigmoid_backward.grad_input", "log_sigmoid_forward", "logit_backward",
+    "lu_unpack", "lu_unpack.out", "masked_scatter_backward",
+    "max_pool2d_with_indices_backward", "max_pool3d_with_indices_backward",
+    "miopen_batch_norm", "miopen_batch_norm_backward", "nan_to_num_", "nansum",
+    "nansum.out", "ne_.Scalar", "ne_.Tensor", "nextafter.out",
+    "nonzero_static", "ormqr", "polygamma", "polygamma.out", "polygamma_",
+    "reflection_pad2d_backward", "replication_pad2d", "replication_pad2d.out",
+    "replication_pad2d_backward", "replication_pad2d_backward.grad_input",
+    "replication_pad3d_backward", "scatter_add", "sgn", "sgn.out", "sign",
+    "sign.out", "slice.Tensor", "special_bessel_j0", "special_bessel_y0",
+    "special_bessel_y1", "special_chebyshev_polynomial_w.out", "special_erfcx",
+    "special_hermite_polynomial_h.n_scalar", "special_i0e.out", "special_i1e",
+    "special_i1e.out", "special_legendre_polynomial_p", "special_log_ndtr",
+    "special_ndtri", "special_shifted_chebyshev_polynomial_t", "take",
+    "take.out", "view_as_complex", "xlogy_.Scalar_Other", "xlogy_.Tensor",
+})  # fmt: skip
 
 LICENSE = """\
 # Copyright 2026 FlagOS Contributors
@@ -956,6 +1114,23 @@ def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
     linger here.
     """
     return METAX_CPP_MEASURED & fg_cpp if filename == "backends_metax.conf" else set()
+
+
+def boxing_measured_python_ops(filename: str) -> set:
+    """Extra FlagGems Python ops a boxing platform routes on measured evidence.
+
+    These ops are outside the shared coverage ceiling (``FLAGGEMS_PYTHON_OPS``)
+    because codegen_ops.py's ``flaggems_runtime_broken`` holds them for every
+    platform -- a cohort claim that only the platform holding the matching
+    FlagGems build can discharge. MetaX has, so it routes them; see
+    METAX_FLAGGEMS_MEASURED for the measurement and for why the hold stays
+    elsewhere.
+
+    Returning them from here rather than widening the coverage set is what keeps
+    the other platforms' confs byte-identical: a platform not named below gains
+    nothing from a measurement taken on this one.
+    """
+    return METAX_FLAGGEMS_MEASURED if filename == "backends_metax.conf" else set()
 
 
 def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
@@ -1139,6 +1314,10 @@ def build_all(conf_dir: Path) -> dict:
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
         py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()
         py_here = py_here - NATIVE_TRITON_GAPS.get(vendor, set())
+        # Coverage the shared ceiling gained since this vendor's last FlagGems
+        # run stays on the vendor kernel; see FLAGGEMS_PENDING_NATIVE_OPS.
+        if vendor in FLAGGEMS_PENDING_NATIVE_VENDORS:
+            py_here = py_here - FLAGGEMS_PENDING_NATIVE_OPS
         # Native kernel wins wherever both exist; FlagGems keeps the ops the
         # vendor has no kernel for. See NATIVE_KERNEL_PREFERRED.
         if vendor in NATIVE_KERNEL_PREFERRED:
@@ -1160,6 +1339,14 @@ def build_all(conf_dir: Path) -> dict:
 
     for platform, sparse_conf in BOXING_PLATFORMS.items():
         gaps = boxing_triton_gaps(conf_dir, sparse_conf, fg_py, fg_cpp)
+        # A measured FlagGems route outranks the gap this file's own `cuda`
+        # entries would otherwise recover: the op is spelled `cuda` today
+        # because the shared coverage set holds it, not because this platform
+        # measured a triton gap, so it has to come off `gaps` as well as onto
+        # `py_here` -- route_boxing() checks the gap set first.
+        measured = boxing_measured_python_ops(sparse_conf)
+        gaps -= measured
+        py_here = fg_py | measured
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.
         cpp_here = (
@@ -1169,7 +1356,7 @@ def build_all(conf_dir: Path) -> dict:
         )
         tileops_here = tileops if platform in TILEOPS_PLATFORMS else set()
         routes = {
-            op: route_boxing(op, cpp_here, fg_py, gaps, tileops_here)
+            op: route_boxing(op, cpp_here, py_here, gaps, tileops_here)
             for op in sorted(all_ops)
         }
         out[platform] = (
