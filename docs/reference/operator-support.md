@@ -472,86 +472,235 @@ mixed-device operands on the `*_out` overloads (`mul.out`, `add.out`, `div.out`)
 fail generically for every `flaggems`-routed op on this stack; both operands must
 be on `flagos`. Neither is in scope here.
 
-### CUDA FlagGems-first routing with FlagTree Triton 3.6 (2026-09-14)
+### CUDA FlagGems-first routing with FlagTree Triton 3.6 (2026-09-15)
 
-CUDA full-coverage code generation now routes every FlagGems Python wrapper whose
-ATen schema the boxed adapter can satisfy to `flaggems` instead of CUDA boxing.
-`torch_fl/configs/backends_cuda.conf` moves from 13 to **520 `flaggems` routes**
-and from 2021 to **1514 `cuda` routes**. The TileOPs annotation moves with them:
-46 ops now read `flaggems  # tileops`, where before all 51 annotated ops read
-`cuda  # tileops`. Route priority, `flaggems_cpp > flaggems > tileops > <vendor> >
-none`, is unchanged, no CUDA boxing kernel was added, removed, or reimplemented,
-and no other platform's configuration was touched.
+CUDA full-coverage code generation routes every FlagGems Python wrapper whose ATen
+schema the boxed adapter can satisfy to `flaggems` instead of CUDA boxing, and
+returns to CUDA boxing the ones that then measured worse there.
+`torch_fl/configs/backends_cuda.conf` moves from 13 to **416 `flaggems` routes**
+and from 2021 to **1618 `cuda` routes**. The TileOPs annotation moves with the
+surviving routes: 40 of the 51 annotated ops now read `flaggems  # tileops` and 11
+read `cuda  # tileops`, where before all 51 read `cuda  # tileops`. Route priority,
+`flaggems_cpp > flaggems > tileops > <vendor> > none`, is unchanged, no CUDA boxing
+kernel was added, removed, or reimplemented, and no other platform's configuration
+was touched. Two of the 13 `flaggems` routes `main` already carried, `embedding`
+and `sum.dim_IntList`, measured worse on FlagGems and are returned to CUDA boxing;
+the other 11 (`_softmax`, `abs`, `add.Tensor`, `bmm`, `mean.dim`, `mm`, `neg`,
+`silu`, `sin`, `sqrt`, `where.self`) keep their route.
+
+**Routing is a guess; the rollback is the measurement.** The generator's first
+pass is mechanical -- it checks that the ATen schema is one the boxed adapter can
+satisfy -- and 98 of the 514 candidate routes failed that check in practice: each
+one failed a case on the FlagGems route that CUDA boxing answers correctly, or
+crashed, hung, or recursed. Those 98 are listed in `measured_flaggems_rollback` in
+`scripts/codegen/codegen_ops.py` and route to `cuda` in the checked-in
+configuration, so the file is derived from the generator rather than hand-edited.
+The criterion is a paired measurement, not a threshold on the FlagGems verdict
+alone: every op in the set was run twice by the same harness, once on each route.
+An op whose failure vector is identical on both routes is **not** rolled back --
+returning it to CUDA boxing would buy nothing -- and stays on `flaggems` as
+`BASIC_ONLY`. Seven ops are in that state; they are listed below.
 
 **Cohort.** This is a second cohort, not a re-measurement of the baseline tables
 above. Those measure the generic `backends_flaggems.conf` route set (546 active
 routes, harness version 4) on four platforms; the numbers below measure the CUDA
-full-coverage configuration (520 active routes, harness version 6) on A100. The
+full-coverage configuration (416 active routes, harness version 6) on A100. The
 denominators differ, so no row of one cohort may be compared with, or subtracted
 from, a row of the other.
 
 | Field | Value |
 |---|---|
-| torch-fl source | `13cbf4b` — the survey ran against `c2804ea`, its pre-rebase equivalent; the two trees differ only in upstream MUSA commits and the measured configuration and harness are byte-identical in both |
+| torch-fl source | `93568ac` |
 | FlagGems source | `7fb49bad47116434961bfb2b912811716d383eaf` (`flag_gems` 5.3.4.post1.dev1+g7fb49bad4) |
 | Triton provider | `flagtree==0.6.2a2` (source-free; provides `triton` 3.6.0, `is_flagtree_active()` true) |
 | CPU PyTorch | `2.10.0+cpu` with staged `cu130` accelerator assets |
 | Configuration | `torch_fl/configs/backends_cuda.conf` |
-| Configuration SHA-256 | `224f9d7c17f84db4e2a3aac5ab21efd2c34651083c701478a288489600a41397` |
-| Active route-set SHA-256 | `290e7c9003438ddc20250e837123a68a1df8fa9acbbc221695f68ef09cb2ebcd` |
+| Configuration SHA-256 | `ab2522b7fec9363699452249900b28188ce78ba3ca16b481be34927dbe933ede` |
+| Active route-set SHA-256 | `0b344884e9bb318a29d28a5b99b36b652f48f3d773576a9dade0391e3a9912e5` |
 | Survey harness | `tests/manual/flaggems_overload_survey.py`, version 6 |
-| Survey harness SHA-256 | `11e219b9ed0ed8d40cc03b1e2a8921490d6ff2ad35f3f15a8c0d5f1fcbed4cce` |
-| Registered and active routes | 520 |
+| Survey harness SHA-256 | `31334631cc42d3e9df947fa101bd2a5e905f690ba5cc7e5dfcab3d9feb2a709f` |
+| Registered and active routes | 416 |
 | Profiles per overload | 7 |
 
-Measured on one host with 8 x NVIDIA A100-SXM4-40GB. Unlike the baseline cohort,
-this row is a revalidation: the hardware was available and the survey was rerun
-against the changed configuration.
+Measured on one host with 8 x NVIDIA A100-SXM4-40GB. This row is a revalidation:
+the hardware was available and the survey was rerun against the changed
+configuration. The library the survey exercised is the FlagGems Python build
+(`CUDA_KERNEL=ON`, `FLAGGEMS_PYTHON=ON`), so the FlagGems dispatcher slot is
+populated and the `flaggems` routes in this cohort really execute FlagGems. The
+A/B runs that set the rollback list used the same library on the same host.
 
 | Hardware | Total | STRICT | BASIC_ONLY | FAILED | UNTESTED | Basic executable | Basic rate | Strict rate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| NVIDIA A100 | 520 | 393 | 23 | 13 | 91 | 416 | 80.0% | 75.6% |
+| NVIDIA A100 | 416 | 321 | 7 | 0 | 88 | 328 | 78.8% | 77.2% |
 
 | Hardware | PASS | INVALID_CASE | UNVERIFIABLE | ERROR | WRONG | CRASH | TIMEOUT | Context poison |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| NVIDIA A100 | 2281 | 1266 | 0 | 33 | 46 | 14 | 0 | 0 |
+| NVIDIA A100 | 1817 | 1085 | 0 | 2 | 8 | 0 | 0 | 0 |
 
-For this row, `STRICT + BASIC_ONLY + FAILED + UNTESTED = 520` and
-`Basic executable = STRICT + BASIC_ONLY = 416`. The case-level counts sum to
-3640, which is the 520 routes x 7 profiles the harness ran.
+For this row, `STRICT + BASIC_ONLY + FAILED + UNTESTED = 416` and
+`Basic executable = STRICT + BASIC_ONLY = 328`. The case-level counts sum to 2912,
+which is the 416 routes x 7 profiles the harness ran.
 
-**Failed and partial overloads.** 36 of the 520 overloads recorded at least one
-`WRONG`, `ERROR`, or `CRASH` case. 13 passed no valid case at all — `FAILED` —
-and 23 passed some but not all — `BASIC_ONLY`:
+**Partial overloads.** No overload passed zero valid cases, so there is no
+`FAILED` list. Seven recorded `PASS` on some valid cases and something else on
+others, and each of the seven also produced exactly that status vector on the CUDA
+boxing route in the paired run: `kthvalue`, `median.dim`, `mm`, `mm.out`, `mode`,
+`sort`, `sort.stable`. Five of them (`kthvalue`, `median.dim`, `mode`, `sort`,
+`sort.stable`) disagree with CPU on the `2d-i64` profile (`mode`, `sort` and
+`sort.stable` also on `2d-bool`), where the harness compares duplicate values by
+identity and reports `unequal` on both routes; `mm` and `mm.out` raise
+`RuntimeError: self must be a matrix` on the same profile on both routes. None of
+the seven is a FlagGems-route defect, so they are reported `BASIC_ONLY` rather
+than rolled back or claimed as `STRICT`. The remaining 88 overloads are
+`UNTESTED`: no CPU-valid synthesized case existed for them under the seven
+measured profiles, which is neither a pass nor a failure. That set is dominated
+by backward and pooling overloads whose schemas the synthesizer cannot fill
+(`_flash_attention_backward`, `avg_pool3d_backward`, `nll_loss_backward`, the
+`bitwise_*_.Scalar` family).
 
-- `FAILED`: `_batch_norm_no_update`, `native_batch_norm`,
-  `_log_softmax_backward_data`, `_log_softmax_backward_data.out`,
-  `_softmax_backward_data`, `_softmax_backward_data.out`, `_pdist_backward`,
-  `mse_loss_backward`, `median.dim_values`, `nanmedian.dim_values`,
-  `scatter.src`, `scatter_.src`, `unique_dim`.
-- `BASIC_ONLY`: `_unique2`, `_weight_norm_interface`,
-  `_weight_norm_interface_backward`, `addmm`, `addmm.out`, `addmm_`, `angle`,
-  `histc`, `igammac_`, `index_copy`, `index_copy_`, `kthvalue`, `median.dim`,
-  `mm`, `mm.out`, `mode`, `nanmedian.dim`, `native_dropout_backward`,
-  `native_layer_norm`, `sort`, `sort.stable`, `topk`,
-  `unique_consecutive`.
+**The 98 overloads returned to CUDA boxing.** The groups below are the ones
+`measured_flaggems_rollback` itself carries; an op that fails differently on
+different profiles is counted once, under the failure the rollback was decided
+on.
 
-All 14 `CRASH` cases are return code `-11` and belong to two overloads,
-`_batch_norm_no_update` and `native_batch_norm`, seven profiles each. The
-remaining 91 overloads are `UNTESTED`: no CPU-valid synthesized case existed for
-them under the seven measured profiles, which is neither a pass nor a failure.
-That set is dominated by backward and pooling overloads whose schemas the
-synthesizer cannot fill (`_flash_attention_backward`, `avg_pool3d_backward`,
-`nll_loss_backward`, the `bitwise_*_.Scalar` family).
+| Group | Ops |
+|---|---:|
+| Rejected by a `is_cuda` device guard | 13 |
+| Wrong result on a profile where CUDA boxing passes | 43 |
+| Rejected by an argument or domain contract narrower than ATen | 12 |
+| Triton `CompilationError` | 8 |
+| Other runtime error | 12 |
+| Exceeds the per-op time budget | 5 |
+| Unbounded recursion | 2 |
+| Process crash | 2 |
+| Silently wrong where CUDA boxing also fails | 1 |
 
-**Attribution.** The same 36 overloads were run a second time against a
-configuration that routes all of them to CUDA boxing, which is the route set
-before this change. 34 produced identical case statuses. `index_copy` and
-`index_copy_` traded the `2d-i64` status between the two runs while both runs
-recorded five `WRONG` cases for the pair; that is the tie order of duplicate
-indices in the synthesizer's index tensor, not a routing difference. No failure
-in the table above is introduced by the FlagGems-first routing: the same set
-fails on the CUDA boxing route under the same environment.
+*Device guard (13).* The FlagGems kernel rejects its operands before doing any
+work, because `Tensor.is_cuda` is false on the `flagos` PrivateUse1 device even
+though `torch.cuda` is live: `i0`, `i0.out`, `im2col`, `smooth_l1_loss`,
+`smooth_l1_loss.out`, `smooth_l1_loss_backward`, `special_i0e`, `special_i1`,
+`special_modified_bessel_k0`, `special_modified_bessel_k0.out`,
+`special_scaled_modified_bessel_k1`, `special_scaled_modified_bessel_k1.out`,
+`upsample_bicubic2d`. Representative messages: `ValueError: i0: input tensor must
+be on cuda device`, `AssertionError: im2col: Inputs must be CUDA tensors`,
+`AssertionError: smooth_l1_loss: input and target must be CUDA tensors.`,
+`ValueError: special_i0e: Tensors must be cuda tensors`, `ValueError:
+upsample_bicubic2d: This Triton kernel requires CUDA tensors`. CUDA boxing runs
+the same cases correctly.
+
+*Wrong result on a profile where CUDA boxing passes (43).* Two subgroups. The
+larger is integer input, where `flag_gems` returns the input dtype (int64) while
+ATen's type promotion returns float32, so the dtype and the values are both wrong
+(13): `acosh`, `atan2`, `atanh`, `digamma`, `erf`, `erfinv`, `log`, `log1p`,
+`log2`, `rad2deg`, `special_airy_ai`, `special_bessel_j1`, `special_xlog1py`. The
+other 30 are `_log_softmax_backward_data`, `_pdist_backward`, `_softmax_backward_data`,
+`_unique2`, `_weight_norm_interface`, `_weight_norm_interface_backward`, `elu`,
+`elu_`, `floor_divide.Scalar`, `histc`, `igammac_`, `index_copy`, `index_copy_`,
+`leaky_relu_`, `logsumexp`, `median.dim_values`, `mse_loss_backward`,
+`nanmedian.out`, `native_layer_norm`, `nll_loss_forward`, `prod`, `range`,
+`scatter.src`, `scatter_.src`, `special_chebyshev_polynomial_v`,
+`special_shifted_chebyshev_polynomial_u`, `special_shifted_chebyshev_polynomial_w`,
+`sum.out`, `unfold_backward`, `unique_dim`. Measured deviations include `elu` at
+`max_diff 0.690`, `histc` at `max_diff 1024.0`, `_weight_norm_interface` at
+`max_diff 8.1e34`, `nll_loss_forward` wrong on `2d-f16`, `_unique2` returning
+three values where ATen returns one, `sum.out` returning a `(32, 32)` tensor for a
+scalar reduction, and `range` returning float64 for a float32 input.
+
+*Argument or domain contract narrower than ATen (12).* The kernel asserts a dtype
+set, calls `torch.finfo`, or otherwise rejects an input ATen accepts:
+`_euclidean_dist` (`AssertionError: x1 must be a 2D tensor`),
+`_upsample_bilinear2d_aa` (bare `AssertionError`), `randperm` (bare
+`AssertionError`), `special_shifted_chebyshev_polynomial_v`, `topk`
+(`AssertionError: Currently only support topk in last dimension`),
+`soft_margin_loss` (`AssertionError: soft_margin_loss: input and target must be
+cuda tensors for Triton kernel.`), `soft_margin_loss_backward` (`AssertionError:
+soft_margin_loss_backward: grad_output, self, and target must have the same number
+of elements`), `amin` (`AssertionError: amin only supports float dtypes`), `logit`
+(`TypeError: logit expected a floating point tensor as input`), `nan_to_num`,
+`special_chebyshev_polynomial_u.n_scalar`, `special_modified_bessel_k1`.
+
+*Triton `CompilationError` (8).* `norm.ScalarOpt_dim`, `randint`, `randint_like`,
+`special_chebyshev_polynomial_w`, and the four bool-input ops `cummax`, `cummin`,
+`index_add`, `index_add_`. The compiler names the generated line: the philox seed
+conversion (`philox_seed = philox_seed.to(tl.int64)`) for `randint`/`randint_like`,
+`X = X + pid * N` for `norm.ScalarOpt_dim`, `offset0 = (tile_id0 * ...)` for
+`special_chebyshev_polynomial_w`, and the int8 element-type check for the bool
+inputs. All of them compile on the CUDA boxing route.
+
+*Other runtime error (12).* `_cdist_backward` (`IndexError: tuple index out of
+range`), `_log_softmax_backward_data.out` and `_softmax_backward_data.out`
+(`RuntimeError: ...: expected grad_input dtype torch.int8, got torch.float32`),
+`cosh.out` (`TypeError: cosh_out() missing 1 required positional argument:
+'out'`), `dequantize.self` (`NotImplementedError: Could not run 'aten::int_repr'
+with arguments from the 'CPU' backend`), `elu_backward` and `embedding`
+(`RuntimeError: Triton Error [CUDA]: context is destroyed`), `mul_.Tensor`
+(`NotImplementedError: There were no tensor arguments to this function`),
+`nanmedian.dim_values` (`RuntimeError: shape '[32]' is invalid for input of size
+1024`), `norm.Scalar` (`RuntimeError: Please look up dimensions by name, got: name
+= None.`), `special_chebyshev_polynomial_u` (`ValueError: Chebyshev polynomial
+order n must be in [0, 5], got values in [-3, 4]`), `special_hermite_polynomial_h`
+(`ValueError: special_hermite_polynomial_h only supports n in [0, 9], got n in
+[-3, 3]`).
+
+*Time budget (5).* `lcm`, `lcm_`, `prod.dim_int`, `sum.IntList_out` and
+`sum.dim_IntList` exceed the harness's per-op budget. The first two hang on
+`2d-i64` and the last three on `2d-bool`; both are profiles where the CUDA boxing
+route returns immediately.
+
+*Unbounded recursion (2).* `unique_consecutive` and `sgn_` raise
+`RecursionError: maximum recursion depth exceeded`: `flag_gems` falls back to the
+torch op it is patching.
+
+*Process crash (2).* `native_batch_norm` and `_batch_norm_no_update` exit with
+return code `-11` on all seven profiles. They do so on the CUDA boxing route as
+well, so this is not a FlagGems-specific defect; they are rolled back because a
+7/7 crash is not a support claim, not because CUDA boxing answers them.
+
+*Silently wrong where CUDA boxing also fails (1).* `native_dropout_backward`
+returns a wrong tensor where CUDA boxing raises `NotImplementedError:
+"masked_scale" not implemented for 'Long'`. Both routes fail that case, so the
+paired criterion alone would keep it on `flaggems`; it is returned to CUDA boxing
+anyway, because a loud error is the contract ATen defines there and a wrong tensor
+is not.
+
+**Withdrawn cohort.** An earlier entry in this report recorded 520 active routes
+for the same change, at configuration SHA-256
+`224f9d7c17f84db4e2a3aac5ab21efd2c34651083c701478a288489600a41397` and harness
+SHA-256 `11e219b9ed0ed8d40cc03b1e2a8921490d6ff2ad35f3f15a8c0d5f1fcbed4cce`. That
+measurement is withdrawn. It ran against a `libtorch_fl.so` whose FlagGems Python
+dispatcher slot was empty, and `Dispatcher::GetFn` (`csrc/aten/dispatcher.h`)
+degrades `Backend::kFlagGems` to `cuda_fn_` when the slot is absent, so every
+`flaggems` route in that run executed CUDA boxing and the cohort recorded
+CUDA-boxing behaviour under a FlagGems label. The raw cases show it: of the 98
+overloads this change returns to CUDA boxing, 88 recorded `PASS` in the withdrawn
+cohort where the same overload on the same hardware fails on the FlagGems route.
+The withdrawn cohort's own 36-overload re-route check -- which forced every
+failing overload onto CUDA boxing -- found 34 of 36 case-status vectors unchanged,
+which is what a degraded route set predicts and the one result a populated
+FlagGems route cannot produce. This is also why the rollback criterion had to
+become a paired measurement: one survey cannot tell a FlagGems failure from a
+CUDA-boxing success if the FlagGems slot may be empty. No number from the
+withdrawn cohort is carried forward anywhere in this report.
+
+**Generator reproducibility and cohort size, with an evidence gap.** The
+checked-in configuration is the generator's output over a FlagGems cohort of 520
+wrappers: masking the wrappers the locally installed FlagGems exposes on top of
+that cohort and rerunning `FLAGOS_CODEGEN_ALL=1 scripts/codegen/codegen_ops.py`
+reproduces `torch_fl/configs/backends_cuda.conf`'s route values exactly, apart
+from nine `# tileops` annotation lines the checked-in file does not carry -- the
+same nine that `main`'s configuration is already missing, since `TILEOPS_OPS` in
+`scripts/codegen/backend_coverage.py` lists 60 ops while the file annotates 51. In
+this environment the recorded FlagGems revision exposes 52 further wrappers
+(`_cdist_forward`, `addbmm`, `cholesky_solve`, `huber_loss`, `linalg_lstsq`,
+`polygamma`, `scatter_add`, `sign`, `take`, `_fused_rms_norm` and 42 others), and
+the checked-in configuration routes all of them to `cuda`. They were never
+candidates for the FlagGems route in this cohort, so this measurement says nothing
+about them in either direction: they are **not revalidated**. Putting them on the
+FlagGems route requires regenerating *and* rebuilding `libtorch_fl.so` -- the
+generated `flaggems_python_kernels.cc` is what populates the dispatcher slot, so
+routing them without rebuilding would reproduce exactly the silent degradation
+described above -- followed by a fresh survey. That work is not part of this
+change.
 
 **FlagTree in CI.** The CUDA manifest installs the FlagTree Triton provider and
 the FlagGems overloads in the job, on top of a pinned image. A FlagTree wheel is
@@ -859,7 +1008,8 @@ MetaX kernel mode or for additional MACA releases and devices.
 |---|---|---|---|---|
 | 2026-09-15 | MTT S5000 (8 devices) | MUSA integer division (issue #266) | Fixed two integer-division defects in the generator, not with handwritten kernels. `int64 / int64` raised `Unsupported binary mode: TRUEDIV, with left data type: INT64` because the generated kernels took `result_dtype` from `at::result_type` (int64) while ATen promotes integer true division to float32; `_TRUEDIV_INT_TO_FLOAT` now widens integral results, guarded on `!rounding_mode.has_value()` so `'floor'`/`'trunc'` keep int64. Integer `//`, `floor_divide`, and `floor_divide_` silently lost the trailing element on non-power-of-two `numel` in FlagGems; new `binary_mode` / `binary_inplace_mode` categories plus the `floor_divide_.Tensor` native entry route `div.Tensor_mode`, `div_.Tensor_mode`, `floor_divide` and `floor_divide_.Tensor` through mudnn `FLOORDIV`/`TRUNCATEDIV`/`TRUEDIV` via `SetMudnnDivMode`. MUSA `flaggems` 468 -> 464, `musa` 47 -> 51, `none` 1521; registered-op set unchanged at 518 (three overloads moved from the FlagGems registration to the native one). FlagGems is not patched. Other platforms are **not revalidated** and no FlagGems route changed for them. | 59-case CPU-parity probe on `flagos:0` run against both this tree and a base-commit worktree (out-of-place, in-place, scalar and tensor operands, both rounding modes, negatives, `out=`, broadcasting, and `floor_divide` at `n = 2,3,4,5,7,8,15,17,33,100`): 39 exact / 7 float-approximate / 13 mismatches before, 43 exact / 14 float-approximate / 1 error-text match / 1 probe-harness mismatch after. Integer floor division and every `rounding_mode` case exact; the float-approximate cases are true division one float32 ULP from CPU and reproduce identically on pure-float inputs on the base tree (pre-existing mudnn `TRUEDIV` arithmetic, not this change). `FLAGOS_LOG_DISPATCH=1` shows all five overloads on `-> musa`; pinning the four rerouted overloads back onto FlagGems via `FLAGOS_OP_*` reproduces the tail loss (`[5, 5, 0]` for `[5, 5, 6]` at n=3) and leaves true division correct, isolating the routing fix causally. Full `.github/configs/musa.yml` run locally: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 493 passed/1 skipped/513 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. Generator idempotent (two runs byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `flaggems_overload_survey.py` cannot measure these routes: it selects `flagos_python` entries, and the rerouted overloads are exactly the ones that left that route — evidence gap recorded in the section above. Three pre-existing `test_flaggems_conf_consistency.py` failures (`mm`/`bmm`/`addmm` dispatcher drift) reproduce byte-identically against the pristine conf. |
 | 2026-09-14 | MTT S5000 (8 devices) | MUSA FlagGems routing and in-place arithmetic fallback | Restored the MUSA FlagGems registration generator, taking MUSA from 158 to 515 registered ops and from 122 to 468 `flaggems` routes (`musa` 36 -> 47, `none` 1878 -> 1521). Moved 14 ops into `NATIVE_TRITON_GAPS["musa"]` so they fall back to mudnn instead: `add/sub/div.Tensor` and their in-place forms plus `mul_.Tensor` (bf16 wrapped-number promotion reaches `llvm.musa.float2bfloat16` with a double operand), `randn`/`randn_like`, `sort`/`sort.stable`, and `_conj`/`index_add`/`index_add_`, which route to `none` because mudnn has no kernel for them. FlagGems is not patched. Ascend, GCU, DCU, MetaX and PPU rows are **not revalidated** by this change and no FlagGems route was altered for them. | Every group of `.github/configs/musa.yml` run locally on hardware: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 490 passed/2 skipped/512 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. The bf16 gap was reproduced causally with `FLAGOS_OP_add__Tensor=flaggems`, which reproduces the remote CI's `failed to translate module to LLVM IR` on `test_autocast_fp32_policy[dtype1]` and passes on the shipped route. Three `flaggems`-marked dispatch-log tests that hard-coded `flagos_python`/`cuda` were rewritten to read the route from the platform conf (`tests/integration/ops/backend_conf.py`); they were the only failures in CI group 7 on `6f8128e` and pass on every platform's conf afterwards. Generator idempotent (`codegen_mudnn.py` twice, byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing failure (ascend/gcu conf staleness, unrelated). Three pre-existing `test_flaggems_conf_consistency.py` failures reproduce byte-identically against `d0e2d1a`'s data files, so they are not introduced by this change. |
-| 2026-09-14 | NVIDIA A100-SXM4-40GB (8 devices) | CUDA full-coverage configuration (520 active routes, harness v6) | Updated full CUDA code generation so schema-compatible FlagGems Python wrappers are routed to `flaggems` instead of CUDA boxing; the checked-in CUDA configuration moves from 13 to 520 `flaggems` routes and from 2021 to 1514 `cuda` routes, with 46 of the 51 TileOPs-annotated routes following it. CUDA CI installs the NVIDIA source-free `flagtree===0.6.2a2` wheel and the current FlagGems default branch (`master`; the repository has no `main` branch). Route priority is unchanged and no other platform's configuration was altered. **MetaX, PPU, DCU, Ascend and GCU are not revalidated.** | Measured with `tests/manual/flaggems_overload_survey.py` (v6, SHA-256 `11e219b9`) against `torch_fl/configs/backends_cuda.conf` (SHA-256 `224f9d7c`, active route-set SHA-256 `290e7c90`) at torch-fl `13cbf4b` with FlagGems `7fb49bad47116434961bfb2b912811716d383eaf`: 520 registered, STRICT 393, BASIC_ONLY 23, FAILED 13, UNTESTED 91; case-level PASS 2281 / INVALID_CASE 1266 / ERROR 33 / WRONG 46 / CRASH 14 / TIMEOUT 0 / UNVERIFIABLE 0 / context poison 0 (3640 = 520 x 7). 36 overloads recorded a failure; the same 36 rerun on the CUDA-boxing route set produced 34 identical case statuses, with `index_copy`/`index_copy_` trading one `2d-i64` status, so no failure is introduced by the rerouting. FlagTree Triton 3.6 could not run on the pinned CI image (Ubuntu 22.04, glibc 2.35, against the `GLIBC_2.38` the FlagTree wheels bind); the survey ran on a local Ubuntu 24.04 host (glibc 2.39) and `.github/scripts/set_env_cuda.sh` guards the image glibc before installing FlagTree. See "CUDA FlagGems-first routing with FlagTree Triton 3.6 (2026-09-14)" for the cohort definition and the failed-overload list. |
+| 2026-09-15 | NVIDIA A100-SXM4-40GB (8 devices) | CUDA full-coverage configuration (416 active routes, harness v6) | Full CUDA code generation now routes schema-compatible FlagGems Python wrappers to `flaggems`, with the overloads that then measured worse there returned to CUDA boxing; the checked-in CUDA configuration moves from 13 to 416 `flaggems` routes and from 2021 to 1618 `cuda` routes, with 40 of the 51 TileOPs-annotated routes following it. Two of the 13 pre-existing `flaggems` routes, `embedding` and `sum.dim_IntList`, go back to CUDA boxing; the other 11 keep theirs. The 98 returned overloads are recorded in `scripts/codegen/codegen_ops.py:measured_flaggems_rollback`, so the configuration is generator output rather than a hand edit. CUDA CI installs the NVIDIA source-free `flagtree==0.6.2a2` wheel and the current FlagGems default branch (`master`; the repository has no `main` branch). Route priority is unchanged and no other platform's configuration was altered. **MetaX, PPU, DCU, Ascend and GCU are not revalidated.** | Measured with `tests/manual/flaggems_overload_survey.py` (v6, SHA-256 `31334631`) against `torch_fl/configs/backends_cuda.conf` (SHA-256 `ab2522b7`, active route-set SHA-256 `0b344884`) at torch-fl `93568ac` with FlagGems `7fb49bad47116434961bfb2b912811716d383eaf`: 416 registered, STRICT 321, BASIC_ONLY 7, FAILED 0, UNTESTED 88; case-level PASS 1817 / INVALID_CASE 1085 / ERROR 2 / WRONG 8 / CRASH 0 / TIMEOUT 0 / UNVERIFIABLE 0 / context poison 0 (2912 = 416 x 7). Every rollback was decided by a paired run of the same harness on the same host, once per route: an overload goes back to CUDA boxing when the FlagGems route fails a case CUDA boxing answers correctly, or crashes, hangs, or recurses; an overload whose failure vector is identical on both routes stays on `flaggems` as BASIC_ONLY. The seven partial overloads (`kthvalue`, `median.dim`, `mm`, `mm.out`, `mode`, `sort`, `sort.stable`) produced identical case-status vectors on both routes, so no residual failure is attributable to the routing. The generator reproduces the configuration's route values exactly over its 520-wrapper FlagGems cohort; the locally installed FlagGems exposes 52 wrappers beyond that cohort, which stay on `cuda` and are **not revalidated** (evidence gap recorded in the section). FlagTree Triton 3.6 needs glibc >= 2.38 and the CUDA CI image is now Ubuntu 24.04, so the manifest's FlagTree steps run there; the survey ran on a local Ubuntu 24.04 host (glibc 2.39). The 2026-09-14 CUDA row below is **withdrawn**: it was measured while the FlagGems Python dispatcher slot was empty, so its `flaggems` routes executed CUDA boxing. See "CUDA FlagGems-first routing with FlagTree Triton 3.6 (2026-09-15)" for the cohort definition and the per-group rollback list. |
+| 2026-09-14 | NVIDIA A100-SXM4-40GB (8 devices) | CUDA full-coverage configuration (520 active routes, harness v6) — **withdrawn** | **Withdrawn cohort:** measured while the FlagGems Python dispatcher slot was empty, so every `flaggems` route in this row executed CUDA boxing and its verdicts are not FlagGems results. Superseded by the 2026-09-15 row. Updated full CUDA code generation so schema-compatible FlagGems Python wrappers are routed to `flaggems` instead of CUDA boxing; the checked-in CUDA configuration moves from 13 to 520 `flaggems` routes and from 2021 to 1514 `cuda` routes, with 46 of the 51 TileOPs-annotated routes following it. CUDA CI installs the NVIDIA source-free `flagtree===0.6.2a2` wheel and the current FlagGems default branch (`master`; the repository has no `main` branch). Route priority is unchanged and no other platform's configuration was altered. **MetaX, PPU, DCU, Ascend and GCU are not revalidated.** | Measured with `tests/manual/flaggems_overload_survey.py` (v6, SHA-256 `11e219b9`) against `torch_fl/configs/backends_cuda.conf` (SHA-256 `224f9d7c`, active route-set SHA-256 `290e7c90`) at torch-fl `13cbf4b` with FlagGems `7fb49bad47116434961bfb2b912811716d383eaf`: 520 registered, STRICT 393, BASIC_ONLY 23, FAILED 13, UNTESTED 91; case-level PASS 2281 / INVALID_CASE 1266 / ERROR 33 / WRONG 46 / CRASH 14 / TIMEOUT 0 / UNVERIFIABLE 0 / context poison 0 (3640 = 520 x 7). 36 overloads recorded a failure; the same 36 rerun on the CUDA-boxing route set produced 34 identical case statuses, with `index_copy`/`index_copy_` trading one `2d-i64` status. Under the degraded route set that identity is expected and is not evidence that the rerouting is safe; the paired re-measurement in the 2026-09-15 row replaces this attribution. FlagTree Triton 3.6 could not run on the pinned CI image (Ubuntu 22.04, glibc 2.35, against the `GLIBC_2.38` the FlagTree wheels bind); the survey ran on a local Ubuntu 24.04 host (glibc 2.39) and `.github/scripts/set_env_cuda.sh` guards the image glibc before installing FlagTree. See "Withdrawn cohort" in "CUDA FlagGems-first routing with FlagTree Triton 3.6 (2026-09-15)" for why this row cannot be compared with the current configuration. |
 | 2026-09-11 | None (CPU-only host) | Unified MetaX confs (refactor/unified-vendor-confs) | Collapsed `backends_metax_flaggems.conf` and `backends_metax_flaggems_cpp.conf` into a single `backends_metax.conf`. The 17 on-device-verified C++ routes are now in the file unconditionally; a build without `FLAGGEMS_KERNEL=ON` degrades them to the boxing kernel via `Dispatcher::GetFn` instead of raising. `METAX_CPP_MEASURED` in `gen_vendor_confs.py` records the measured set explicitly since the file it was formerly recovered from no longer exists. `mm` remains on the boxing kernel (MetaX C550 shared-memory limit). `_select_backend_config()` now routes both `FLAGOS_USE_FLAGGEMS` and `FLAGOS_USE_FLAGGEMS_CPP` to the same `backends_metax.conf` under `FLAGOS_METAX_BOXING=1`. **All hardware rows not revalidated.** | Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), `tests/unit/test_gen_vendor_confs.py` passes with updated test names. |
 | 2026-09-10 | None (CPU-only host) | Full-coverage MUSA/GCU/Ascend and boxing configurations | Converted the MUSA, GCU, Ascend and boxing configurations to full coverage: all 2036 routable ops listed exactly once under `flaggems_cpp` / `flaggems` / `<vendor>` / `none`, priority in that order, generated by `scripts/codegen/gen_vendor_confs.py`. Every accelerated route is now gated on the platform's real PrivateUse1 registration set, read from the generated `*_register.inc` files, because CUDA-measured FlagGems coverage is a ceiling and not a per-platform routing set (Ascend 374, GCU 152, MUSA 158 registered of 2036). MetaX and Tsingmicro register the full generated list, so `none` would raise there instead of boxing to `cpu_fallback`; Tsingmicro's configuration stays hand-written. **All hardware rows not revalidated.** | No route measured. `flaggems_overload_survey.py` cannot run on this host: Triton 3.7.1 exposes only `amd`/`nvidia` backends and `import flag_gems` fails. Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), routing equals registration exactly on all three vendors, `tests/unit/test_gen_vendor_confs.py`: 27 passed, `tests/unit/`: 303 passed, 96 skipped, 2 pre-existing profiler failures (`CXXABI_1.3.15` libstdc++ skew) unrelated to routing. |
 | 2026-08-31 | MetaX C550 (8 devices) | FlagGems qualname/cohort skew | Rerouted 10 FlagGems entries whose generated Python qualnames are absent from the current FlagGems tree to the CUDA boxing path in the generic, DCU, and MetaX FlagGems configurations. The generic FlagGems cohort was not revalidated on the other platforms. | On MetaX, `x[None]`, `binary_cross_entropy_with_logits`, and the affected dispatch paths now resolve through CUDA boxing; the issue #218 `mul_` reproducer still passes. `special_bessel_j1` retains a pre-existing MACA boxing failure unrelated to FlagGems. The 10 routes were not measured by the standard overload survey. |

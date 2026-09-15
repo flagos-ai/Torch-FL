@@ -2552,6 +2552,10 @@ def main():
             "smooth_l1_loss_backward",
             "special_modified_bessel_k0",
             "special_modified_bessel_k0.out",
+            "special_i0e",
+            "special_i1",
+            "special_scaled_modified_bessel_k1",
+            "special_scaled_modified_bessel_k1.out",
             "upsample_bicubic2d",
             # Triton CompilationError on this FlagTree build.
             "norm.ScalarOpt_dim",
@@ -2591,10 +2595,6 @@ def main():
             "norm.Scalar",
             "special_chebyshev_polynomial_u",
             "special_hermite_polynomial_h",
-            "special_i0e",
-            "special_i1",
-            "special_scaled_modified_bessel_k1",
-            "special_scaled_modified_bessel_k1.out",
             # Wrong numerics or wrong shape against the eager reference.
             "_log_softmax_backward_data",
             "_pdist_backward",
