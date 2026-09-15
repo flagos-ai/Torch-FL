@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hand-maintained input to ``scripts/codegen_tileops.py``.
+"""Hand-maintained input to ``scripts/codegen/codegen_tileops.py``.
 
 Everything the TileOPs manifest already records (signatures, dtypes, workload
 shapes) is read straight from ``tileops/manifest/*.yaml`` by the generator. This

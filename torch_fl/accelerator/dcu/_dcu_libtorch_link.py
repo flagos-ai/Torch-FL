@@ -29,7 +29,7 @@ Default (decoupled) mode
     from compiling against DTK's patched ``ATen/autocast_mode.h``).  All 32 are
     supplied by ``libflagos_dtk_core_compat.so``, which is loaded first and
     throws a descriptive error if a DTK-private op is ever actually called.
-    ``scripts/check_dcu_core_abi.py`` re-proves that gap at build time.
+    ``scripts/vendor/check_dcu_core_abi.py`` re-proves that gap at build time.
 
     Nothing under the official ``torch/lib`` is touched, so the wheel is
     installable next to a stock torch and uninstalling torch_fl leaves no trace.
@@ -41,7 +41,7 @@ Legacy mode (``FLAGOS_DCU_VENDOR_CORE=1``)
     their schema wrappers and autograd registrations live in the core fork.  It
     mutates the torch installation in place (reversible via
     ``torch/lib/_orig_backup/``) and needs the matching full bundle from
-    ``FLAGOS_DCU_VENDOR_CORE=1 bash scripts/bundle_dcu_libtorch.sh``.
+    ``FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh``.
 
 Why the preload must happen before ``import torch``: PyTorch caches its
 CUDAHooks on first import (docs/vendors/cuda/external-libtorch-cuda.md,
@@ -52,7 +52,7 @@ kernels did register.
 The DTK driver stack (``libgalaxyhip.so.5``, ``libMIOpen.so.1``,
 ``librocblas.so.4``, ``librccl.so.1``, ...) stays on the target under
 ``/opt/dtk`` and is reached through the RUNPATH baked in by
-``cmake/FlagosRpath.cmake`` / ``scripts/bundle_dcu_libtorch.sh``.
+``cmake/FlagosRpath.cmake`` / ``scripts/vendor/bundle_dcu_libtorch.sh``.
 """
 
 import ctypes
@@ -247,7 +247,7 @@ def preload_dcu_device_libs():
             else:
                 raise FileNotFoundError(
                     f"DCU/DTK device library missing: {os.path.join(lib_dir, name)}. "
-                    "Run scripts/bundle_dcu_libtorch.sh, or point "
+                    "Run scripts/vendor/bundle_dcu_libtorch.sh, or point "
                     "FLAGOS_DCU_TORCH_LIB at a DTK torch/lib."
                 )
         try:
@@ -284,7 +284,7 @@ def ensure_dcu_libtorch_links():
                 f"bundle, but {bundle} has none ({', '.join(absent)} missing). "
                 "This wheel was bundled in decoupled mode. Either unset "
                 "FLAGOS_DCU_VENDOR_CORE, or rebuild the bundle with "
-                "FLAGOS_DCU_VENDOR_CORE=1 bash scripts/bundle_dcu_libtorch.sh."
+                "FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh."
             )
     return ensure_vendor_libtorch_links(
         _BUNDLE_DIR,

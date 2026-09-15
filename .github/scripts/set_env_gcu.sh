@@ -19,6 +19,12 @@
 # may be present in the base image is intentionally not copied into the
 # isolated environment: this backend builds against stock CPU PyTorch and
 # links TopsRider's libtopsrt/libtopsaten libraries instead.
+#
+# The FlagGems Python path is provisioned here the same way set_env_musa.sh
+# provisions it: the generated configs/backends_gcu.conf routes most overloads
+# to a FlagGems Triton kernel and the rest to the native topsaten kernel, so the
+# isolated venv needs a Triton build carrying the "enflame" backend (flagtree)
+# plus FlagGems itself. See docs/vendors/gcu/flaggems-setup.md.
 set -euo pipefail
 
 case "${CI_STAGE:-}" in
@@ -32,6 +38,7 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
 
 discover_tops_root() {
   local candidate found
@@ -102,12 +109,15 @@ export CUDA_KERNEL=0
 export METAX_KERNEL=0
 export ASCEND_KERNEL=0
 export MUSA_KERNEL=0
-# The base image currently has no triton_gcu/FlagGems package. Keep the native
-# Topsaten path deterministic; FlagGems can be enabled later when the vendor
-# Triton stack is explicitly provisioned and validated.
+# FLAGGEMS_KERNEL=0: the FlagGems C++ kernels (liboperators.so) need
+# FLAGGEMS_KERNEL=ON, which is not built here. FLAGGEMS_PYTHON=1 is what makes
+# the flaggems routes in backends_gcu.conf resolvable at all: setup.py turns
+# FLAGGEMS_PYTHON on for ACCELERATOR=gcu, but this environment variable is
+# applied afterwards and would otherwise switch it back off, producing a wheel
+# whose conf routes ops to dispatcher slots that were never compiled in.
 export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON="${FLAGOS_GCU_FLAGGEMS_PYTHON:-0}"
-export FLAGOS_USE_FLAGGEMS=0
+export FLAGGEMS_PYTHON="${FLAGOS_GCU_FLAGGEMS_PYTHON:-1}"
+export FLAGOS_USE_FLAGGEMS="${FLAGOS_GCU_USE_FLAGGEMS:-1}"
 export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
@@ -193,6 +203,99 @@ print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
 print(f"Topsaten library: {os.environ['TOPSATEN_LIB']}")
+PY
+
+# --- Enflame Triton (flagtree) + FlagGems ------------------------------------
+# Installed for both stages, not just integration: build and integration share
+# one platform job, and restricting this to CI_STAGE=integration would leave the
+# build job's venv without flag_gems -- the wheel then fails as soon as a
+# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+#
+# --no-deps on both source packages so pip cannot replace the pinned CPU torch
+# 2.10 with something a transitive requirement prefers.
+#
+# Retries are deliberate: the flagtree wheel is large and the shared mirror can
+# close the response early (IncompleteRead) even though the package is there.
+# Retrying just the failed package beats restarting all of setup.
+pip_retry() {
+  local attempt=1
+  while true; do
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
+# An NVIDIA triton wheel must not be present: it carries no "enflame" backend,
+# so flag_gems' backend discovery fails and every FlagGems route raises at
+# import. flagtree installs its own `triton` package under the same import name
+# without registering a `triton` distribution, so remove any real one first --
+# repeatedly, because a partially uninstalled triton leaves a dist record that
+# keeps the stale files in place. This is the uninstall step from the vendor
+# install instructions, run against the isolated interpreter.
+while "$VENV_PYTHON" -m pip show triton >/dev/null 2>&1; do
+  "$VENV_PYTHON" -m pip uninstall -y triton || break
+done
+"$VENV_PYTHON" -m pip uninstall -y triton_gcu torch_gcu 2>/dev/null || true
+
+# flagtree is the Triton build carrying the "enflame" backend. 3.6 is not a
+# preference but a requirement: current FlagGems uses tl.map_elementwise and
+# triton.knobs, which a Triton 3.1 build does not have -- that pair fails at
+# import, so the flagtree and FlagGems pins move together.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.1+enflame3.6}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+
+# flagtree may bring torch_gcu as a dependency or bundle it in the wheel.
+# Uninstall it again to keep the isolated venv free of the vendor ABI.
+"$VENV_PYTHON" -m pip uninstall -y torch_gcu 2>/dev/null || true
+
+# Pinned rather than tracking master: FlagGems moves faster than the vendor
+# Triton it needs, and an unpinned install is one upstream commit away from
+# requiring a Triton the flagtree pin above does not provide. 3c6f7537d is the
+# FlagGems master tip that was validated against flagtree 0.6.1+enflame3.6 on
+# the S60; see docs/vendors/gcu/flaggems-test-results.md for the measured
+# routing that pin produced.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
+
+# FlagGems' own runtime deps, installed one at a time for the IncompleteRead
+# reason above. numpy is deliberately not listed: the CPU torch wheel does not
+# pull it in, and nothing on this path imports it -- FlagGems' GCU route and the
+# integration tests are both numpy-free. pip still warns that flag_gems declares
+# a numpy requirement it cannot satisfy; that warning is expected here and is not
+# a failure, because flag_gems is installed with --no-deps.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+
+# --- Verify the Triton stack imports -----------------------------------------
+# flagtree must be the only provider of the `triton` package: a stock wheel left
+# behind by the base image carries no "enflame" backend and FlagGems' backend
+# discovery would fail against it.
+#
+# flag_gems itself is not imported here. FlagGems 5.x resolves its vendor through
+# the torch_fl device surface, which does not exist until the wheel is installed,
+# so a bare `import flag_gems` raises "No device were detected on your machine".
+# The integration "Check isolated GCU environment" group does that import once
+# torch_fl is importable, and is the check that matters.
+"$VENV_PYTHON" - <<'PY'
+import importlib.util
+
+import triton
+
+assert "enflame" in triton.backends.backends, sorted(triton.backends.backends)
+assert importlib.util.find_spec("flag_gems") is not None, "flag_gems is not installed"
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print("flag_gems: installed")
 PY
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then

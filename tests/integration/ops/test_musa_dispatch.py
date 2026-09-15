@@ -41,6 +41,8 @@ import torch_fl  # noqa: F401
 
 
 DEVICE = "flagos:0"
+# Second device for the cross-device copy tests; the MTT S5000 exposes 8.
+DEVICE_B = "flagos:1"
 
 # op name as it appears in the dispatch log -> (snippet, expected backend)
 # Expected backend can be "musa" (mudnn native) or "flagos_python" (FlagGems)
@@ -367,6 +369,238 @@ class TestMusaCorrectness:
         a_cpu = torch.randn(16, 8)
         torch.testing.assert_close(
             fn(a_cpu.to(DEVICE)).cpu(), fn(a_cpu), rtol=1e-3, atol=1e-3
+        )
+
+
+# Each entry is (name, body, expected device, expected dtype) for
+# _run_cross_device_probe. `body` must leave the copy in `r` and a CPU
+# expectation for it in `ref`. The two devices hold the same values, so a copy
+# that silently reads the wrong device's memory still lands in range and has to
+# be caught by the value comparison rather than by the device check.
+_CROSS_DEVICE_CASES = [
+    (
+        "to_second_device_with_cast",
+        "r = a.to('flagos:1', torch.int32)\nref = a_cpu.to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "to_first_device_with_cast",
+        "r = b.to('flagos:0', torch.int32)\nref = b_cpu.to(torch.int32)",
+        "flagos:0",
+        torch.int32,
+    ),
+    (
+        "to_second_device_strided",
+        "r = a.t().to('flagos:1')\nref = a_cpu.t()",
+        "flagos:1",
+        torch.float32,
+    ),
+    # The shape transformers hits: a boolean mask cast to int32 on the device
+    # that owns the logits (modeling_layers.py, `(input_ids != pad_token_id)
+    # .to(logits.device, torch.int32)`).
+    (
+        "bool_mask_to_second_device",
+        "r = (a > 7).to('flagos:1', torch.int32)\nref = (a_cpu > 7).to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "copy_into_second_device_with_cast",
+        "r = torch.empty(4, 4, dtype=torch.int32, device='flagos:1')\n"
+        "r.copy_(a)\nref = a_cpu.to(torch.int32)",
+        "flagos:1",
+        torch.int32,
+    ),
+    (
+        "copy_into_second_device_strided",
+        "r = torch.empty(4, 4, device='flagos:1')\nr.copy_(a.t())\nref = a_cpu.t()",
+        "flagos:1",
+        torch.float32,
+    ),
+]
+
+
+def _require_second_device() -> None:
+    """Skip when only one MUSA device is visible.
+
+    The marker file is authoritative for the *platform*, not for how many
+    devices this host exposes; a single-device MUSA machine has nothing to copy
+    between.
+    """
+    if torch_fl.flagos.device_count() < 2:
+        pytest.skip("cross-device copies need a second MUSA device")
+
+
+def _run_cross_device_probe(body: str) -> subprocess.CompletedProcess:
+    """Run `body` over two devices in a fresh interpreter, then a canary.
+
+    The canary re-runs an ordinary kernel on each device afterwards: a
+    cross-device copy that faults poisons the whole device context, so the copy
+    itself may raise while the damage shows up as every *later* op failing.
+    """
+    code = (
+        "import torch, torch_fl\n"
+        f"a = torch.arange(16, dtype=torch.float32, device='{DEVICE}').reshape(4, 4)\n"
+        f"b = torch.arange(16, dtype=torch.float32, device='{DEVICE_B}').reshape(4, 4)\n"
+        "a_cpu, b_cpu = a.cpu(), b.cpu()\n"
+        f"{body}\n"
+        "torch.testing.assert_close(r.cpu(), ref)\n"
+        "print('COPY', r.device, r.dtype)\n"
+        f"c0 = (torch.ones(4, device='{DEVICE}') + 1).sum().item()\n"
+        f"c1 = (torch.ones(4, device='{DEVICE_B}') + 1).sum().item()\n"
+        "print('CANARY', c0, c1)\n"
+    )
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+
+# The expression transformers actually reaches (modeling_layers.py:167):
+# `input_ids` and `logits` land on different devices under device_map="auto",
+# and the bool pad mask is cast to int32 across them. Crossing devices *and*
+# changing dtype is the mudnn path in StageSourceOnDstDevice.
+_ORDERING_STEP = f"((x > 0).to('{DEVICE_B}', torch.int32))"
+_ORDERING_REF = "(x_cpu > 0).to(torch.int32)"
+
+# Iterations for the ordering probe, and the tensor size they run at.
+#
+# The hazard is a race, not a deterministic wrong answer, so a single execution
+# of the copy -- what test_cross_device_copy does -- mostly passes on an unfixed
+# build. Measured on MTT S5000 at 4 Mi elements, against a control build with
+# only the two peer-device barriers removed and everything else identical: 7
+# mismatches in 800 calls over four runs (3/2/1/1), every run failing; 0 in 600
+# calls over three runs with the barriers in place. That is ~1% per call, so the
+# 200 below fail an unfixed build most of the time but not always: a green run
+# is weak evidence the barrier is present, and that rate is what the guard is
+# worth.
+#
+# The same-dtype cross-device copy (copy_ops.cc, CrossDeviceMemcpy) is
+# measurably rarer -- 2 mismatches in 20000 calls -- so sampling it here would
+# need a run an order of magnitude longer for the same power. It is covered for
+# correctness by test_cross_device_copy above; its race is not gated here.
+_ORDERING_ITERS = 200
+_ORDERING_NUMEL = 1 << 22
+
+
+def _run_ordering_probe(step: str, ref: str, iters: int) -> subprocess.CompletedProcess:
+    """Run `step` `iters` times across devices and report the mismatch count.
+
+    The loop alternates between two sources with different contents. That
+    matters for detection: the caching allocator hands the next copy the block
+    the previous one just filled, so re-running one source would leave
+    stale-but-*correct* results in the recycled block, and a copy that never
+    landed would read them and pass. Alternating means the stale block holds
+    the other source's values, which the comparison catches.
+
+    A mismatch is reported as (iteration, first differing index, got, want);
+    the first six elements are the same in the observed failures, so the index
+    is what identifies one.
+    """
+    code = f"""
+import torch, torch_fl
+
+srcs = [
+    torch.arange({_ORDERING_NUMEL}, dtype=torch.int64, device='{DEVICE}'),
+    torch.arange({_ORDERING_NUMEL}, dtype=torch.int64, device='{DEVICE}') + 1,
+]
+refs = []
+for x in srcs:
+    x_cpu = x.cpu()
+    refs.append({ref})
+
+bad = 0
+first = None
+for i in range({iters}):
+    x = srcs[i % 2]
+    r = {step}
+    want = refs[i % 2]
+    got = r.cpu()
+    try:
+        torch.testing.assert_close(got, want)
+    except AssertionError:
+        bad += 1
+        if first is None:
+            j = int((got != want).nonzero()[0])
+            first = (i, j, got.flatten()[j].item(), want.flatten()[j].item())
+print('ORDERING', bad, {iters}, first)
+"""
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+
+class TestMusaCrossDeviceCopy:
+    """Copying between two MUSA devices must not poison the device context.
+
+    mudnn runs a whole op on one device -- handle, stream and every operand
+    address resolve against whatever device is current -- so a source and a
+    destination on different devices cannot be one Unary::Run. Handed both
+    anyway, mudnn dereferences the foreign pointer, the device raises an illegal
+    memory access, and the context stays poisoned for the rest of the process
+    (issue #250). Issue #265 is the transformers test that reaches it:
+    `device_map="auto"` splits a model over devices 0 and 1, so `input_ids` and
+    `logits` disagree on device and the dtype cast between them crosses devices.
+
+    These run in subprocesses because the failure mode is a dead device, not a
+    raised assertion: run in-process on an unfixed build, the first case would
+    poison the context and the *following* tests in this file would be the ones
+    reporting failures.
+
+    The cases above assert the answer once, which is the right shape for a
+    deterministic wrong answer. A cross-device copy has a second, separate
+    hazard that is not deterministic -- it is ordered only against the queue of
+    the device it is issued on, so the destination can be read before the
+    transfer lands (issue #281) -- and that one is covered by the repeating
+    probe below.
+    """
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize(
+        "name,body,want_device,want_dtype",
+        _CROSS_DEVICE_CASES,
+        ids=[case[0] for case in _CROSS_DEVICE_CASES],
+    )
+    def test_cross_device_copy(self, name, body, want_device, want_dtype):
+        _require_second_device()
+        result = _run_cross_device_probe(body)
+        assert result.returncode == 0, f"copy failed:\n{result.stdout}{result.stderr}"
+        assert f"COPY {want_device} {want_dtype}" in result.stdout, result.stdout
+        assert "CANARY 8.0 8.0" in result.stdout, (
+            f"device context was poisoned by the copy:\n{result.stdout}{result.stderr}"
+        )
+        assert "illegal memory access" not in result.stderr, result.stderr
+
+    @pytest.mark.musa
+    def test_cross_device_copy_does_not_wedge_the_allocator(self):
+        """A cross-device copy must still free its staging buffer cleanly.
+
+        The reported banner is `musaFree(...) failed` at teardown rather than
+        the copy itself, so assert on the allocator's own diagnostics: the
+        failing run leaves them on stderr even when every op appears to succeed.
+        """
+        _require_second_device()
+        result = _run_cross_device_probe(
+            "r = a.to('flagos:1', torch.int32)\nref = a_cpu.to(torch.int32)"
+        )
+        assert result.returncode == 0, result.stderr
+        assert "[flagos-musa]" not in result.stderr, result.stderr
+
+    @pytest.mark.musa
+    def test_cross_device_copy_lands_before_it_is_read(self):
+        """A copy across devices must be visible to the receiving device.
+
+        A blocking musaMemcpy is ordered only against the device that is
+        current when it is issued; the receiving device's queue is not ordered
+        against it, so a consumer there can read the destination before the
+        transfer lands. Draining either device's *default stream* does not
+        close it -- only a device-wide sync of the issuing device does.
+
+        Probabilistic by construction: this is a sampled guard, not a proof.
+        See _ORDERING_ITERS for what it is worth on an unfixed build.
+        """
+        _require_second_device()
+        result = _run_ordering_probe(_ORDERING_STEP, _ORDERING_REF, _ORDERING_ITERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"ORDERING 0 {_ORDERING_ITERS} " in result.stdout, (
+            "a copy that crossed devices was read before it landed:\n"
+            f"{result.stdout}{result.stderr}"
         )
 
 

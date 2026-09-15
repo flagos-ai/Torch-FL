@@ -5,8 +5,11 @@
 This is a manual hardware survey, not a pytest test. CI does not invoke files in
 ``tests/manual``.
 
-The unit of measurement is an active, unique ``flagos_python`` overload from
-``backends_flaggems.conf``. Each overload runs in a fresh child process through
+The unit of measurement is an active, unique FlagGems overload in the platform
+conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has its own
+``backends_<platform>.conf``) -- a `flaggems` route, or the legacy
+`flagos_python` spelling the retired ``backends_flaggems.conf`` used. Each
+overload runs in a fresh child process through
 ``torch.ops.aten.<name>.<overload>``. Inputs are synthesized from the real ATen
 schema and are first validated on CPU; device results are then compared with the
 same overload on CPU.
@@ -29,7 +32,7 @@ summary against a full-matrix one.
 
 Usage:
   python tests/manual/flaggems_overload_survey.py \
-      --conf torch_fl/configs/backends_flaggems.conf \
+      --conf torch_fl/configs/backends_cuda.conf \
       --out /tmp/flaggems-overloads.json
 
 Resume after interruption by running the same command again. Use ``--rerun`` to
@@ -81,12 +84,15 @@ PROFILES = (
 HARNESS_VERSION = 5
 
 
-# Every conf key that reaches the FlagGems Python/Triton slot
+# Route spellings that mean "the FlagGems Python/Triton path"
 # (Backend::kFlagGems). `flagos_python` is the legacy spelling kept working by
-# csrc/aten/common.cc:ParseBackendName; the shared five-key confs say
-# `flaggems`. Reading only the legacy name silently measured an empty route set
-# on every conf rewritten since the vocabulary change.
-FLAGGEMS_PYTHON_KEYS = frozenset({"flagos_python", "flaggems"})
+# csrc/aten/common.cc:ParseBackendName and the one the retired
+# backends_flaggems.conf used; the per-platform confs generated from
+# backend_coverage.py spell it `flaggems`. Accepting both is what lets this
+# survey measure a platform's real routes -- reading only the legacy name
+# silently measured an empty route set on every conf rewritten since the
+# vocabulary change.
+FLAGGEMS_ROUTES = frozenset({"flagos_python", "flaggems"})
 
 
 def active_routes(path: Path) -> list[str]:
@@ -96,7 +102,7 @@ def active_routes(path: Path) -> list[str]:
         if not line or "=" not in line:
             continue
         op, backend = (part.strip() for part in line.split("=", 1))
-        if backend in FLAGGEMS_PYTHON_KEYS:
+        if backend in FLAGGEMS_ROUTES:
             routes.add(op)
     return sorted(routes)
 

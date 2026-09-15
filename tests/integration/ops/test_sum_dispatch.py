@@ -142,11 +142,14 @@ class TestSumDimDispatch:
         """sum.dim_IntList dispatches to whatever backend this platform's conf lists.
 
         FlagGems-first is the generated default, but it is not unconditional:
-        MetaX keeps this overload on the cuda boxing kernel while its activity
-        handling in the profiler workload is being stabilized (see
-        metax_triton_fallback in scripts/codegen_ops.py). Asserting the conf's own
-        value keeps this test meaningful on every platform rather than pinning it
-        to the one it was written on.
+        GCU routes sum.dim_IntList to its native ``gcu`` kernel because the
+        FlagGems kernel carries a 64-bit type the GCU300 front end rejects for
+        an int64 operand (see NATIVE_TRITON_GAPS["gcu"]), and MetaX keeps this
+        overload on the cuda boxing kernel while its activity handling in the
+        profiler workload is being stabilized (see metax_triton_fallback in
+        scripts/codegen/codegen_ops.py). Asserting the conf's own value keeps
+        this test meaningful on every platform rather than pinning it to the one
+        it was written on.
         """
         result = _run_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}

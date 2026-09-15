@@ -32,7 +32,7 @@ import textwrap
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "check_dcu_core_abi.py"
+SCRIPT = REPO_ROOT / "scripts" / "vendor" / "check_dcu_core_abi.py"
 
 _spec = importlib.util.spec_from_file_location("check_dcu_core_abi", SCRIPT)
 abi = importlib.util.module_from_spec(_spec)

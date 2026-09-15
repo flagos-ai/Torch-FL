@@ -67,7 +67,7 @@ To build the bundle:
 
 ```bash
 ACCELERATOR=dcu python setup.py build_ext --inplace   # builds the ABI shim
-bash scripts/bundle_dcu_libtorch.sh                    # stages DTK's device libs
+bash scripts/vendor/bundle_dcu_libtorch.sh                    # stages DTK's device libs
 ```
 
 `FLAGOS_DCU_VENDOR_CORE=1` on both commands selects the legacy mode, which

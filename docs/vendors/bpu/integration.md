@@ -29,7 +29,7 @@ generated against one specific ATen surface. A newer torch drifts from them and
 fails as a wall of compile errors at build time rather than a clean resolver
 error, so the pin is what turns a confusing build break into an install-time
 message. Moving to a newer torch is a deliberate act: re-run
-`scripts/codegen_ops.py`, do not hand-edit the generated files.
+`scripts/codegen/codegen_ops.py`, do not hand-edit the generated files.
 
 The verified board environment uses `torch 2.10.0+cpu` with a Python 3.14
 aarch64 interpreter (the cp314 aarch64 wheel exists on PyPI).
@@ -120,7 +120,7 @@ no VM and no cross-compile host.
 One command sets it up:
 
 ```bash
-scripts/setup_bpu_hbdk4.sh --wheels /path/to/oe/wheels
+scripts/vendor/setup_bpu_hbdk4.sh --wheels /path/to/oe/wheels
 export FLAGOS_BPU_X86_PYTHON=~/hbdk4-x86/python/bin/python3.11
 export FLAGOS_BPU_X86_EMULATOR=~/hbdk4-x86/bin/box64
 ```

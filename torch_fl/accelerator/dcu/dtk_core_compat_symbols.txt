@@ -1,6 +1,6 @@
 # Symbols imported from DTK 2604's forked PyTorch core that the official PyTorch
 # 2.10 core does not export. csrc/runtime/accelerator/dcu/dtk_core_compat.cc must
-# export all of these, and scripts/check_dcu_core_abi.py rejects any new import
+# export all of these, and scripts/vendor/check_dcu_core_abi.py rejects any new import
 # outside this compatibility superset at bundle time.
 #
 # All 32 come from DTK's patch to ATen/autocast_mode.h, which adds its fused ops

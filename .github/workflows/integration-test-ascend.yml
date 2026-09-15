@@ -83,7 +83,7 @@ jobs:
         run: python -m pip install --force-reinstall --no-deps dist/*.whl
 
       - name: Setup torch_npu header stubs for triton-ascend
-        run: bash scripts/setup_torch_npu_stubs.sh
+        run: bash scripts/vendor/setup_torch_npu_stubs.sh
 
       - name: Prepare wheel-only test workspace
         run: |

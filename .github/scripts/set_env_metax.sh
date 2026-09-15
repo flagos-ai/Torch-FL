@@ -394,4 +394,4 @@ fi
 
 # Populate the ignored package-data directory after the optional native
 # prebuild. This also normalizes the native RPATHs before wheel/editable install.
-bash scripts/bundle_maca_libtorch.sh
+bash scripts/vendor/bundle_maca_libtorch.sh

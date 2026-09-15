@@ -13,7 +13,7 @@
 - Worktree: `profiler-support`, branch `worktree-profiler-support`
 - Build env: `torch-fl-211` conda env (2.11.0+cpu + external libtorch_cuda cu12.8)
 - Build: set `CUDA_HOME` to the local CUDA toolkit, then run `cmake --build build --target install`
-- Test: `PYTHONPATH=$(pwd) bash scripts/with_cuda_libtorch.sh python -m pytest ...`
+- Test: `PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh python -m pytest ...`
 - Git: `git -c user.name=lvyufeng -c user.email=lvyufeng@cqu.edu.cn commit`
 - Network: load the locally configured proxy, if needed, before GitHub operations
 - CMake: uses `GLOB_RECURSE` — new files auto-included, deleted files need `rm -rf build; cmake -B build`
@@ -208,7 +208,7 @@ export CPLUS_INCLUDE_PATH=$CUDA_HOME/targets/x86_64-linux/include:$CPLUS_INCLUDE
 conda activate torch-fl-211
 cmake --build build --target install
 
-PYTHONPATH=$(pwd) bash scripts/with_cuda_libtorch.sh \
+PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh \
   python tests/scratch/verify_correlation_foundation.py
 ```
 
@@ -810,7 +810,7 @@ Expected: clean compile, cupti_device_tracer.cc compiled and linked.
 - [ ] **Step 10: Verify tracer compiles and loads (smoke test)**
 
 ```bash
-PYTHONPATH=$(pwd) bash scripts/with_cuda_libtorch.sh python -c "
+PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh python -c "
 import torch_fl
 print('torch_fl loaded, CUPTI tracer initialized if available')
 "

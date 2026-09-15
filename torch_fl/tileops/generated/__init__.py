@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Products of ``scripts/codegen_tileops.py``. Regenerate, do not hand-edit.
+"""Products of ``scripts/codegen/codegen_tileops.py``. Regenerate, do not hand-edit.
 
   - :mod:`~torch_fl.tileops.generated.routes`  the routing table (``ROUTES``)
   - :mod:`~torch_fl.tileops.generated.shims`   one free function per route, the

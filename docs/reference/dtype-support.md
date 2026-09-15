@@ -111,7 +111,7 @@ integer types, but individual ACLNN operators have narrower contracts:
   wrapper and are outside the supported contract.
 
 The fallback is correctness-oriented and may be slower than a native kernel.
-New Ascend operator routes must be added through `scripts/codegen_ascend.py` and
+New Ascend operator routes must be added through `scripts/codegen/codegen_ascend.py` and
 regenerated; generated output is not an independent source of truth.
 
 ## Testing Contract

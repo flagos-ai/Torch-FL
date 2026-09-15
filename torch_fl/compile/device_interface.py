@@ -60,8 +60,9 @@ DEVICE_TYPE = "flagos"
 # torch.flagos and the vendor Triton driver instead of proxying to CUDA.
 #
 # MUSA reaches Triton through MThreads FlagTree; GCU reaches it through
-# Enflame's triton_gcu plugin, already redirected onto flagos by
-# torch_fl.accelerator.gcu._gcu_compat.patch_triton_gcu_for_flagos(). The
+# FlagTree's enflame backend (or Enflame's older triton_gcu plugin), already
+# redirected onto flagos by
+# torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). The
 # distinction that matters to this module is the same for both, so keep the
 # checks keyed on this set rather than on a vendor name.
 _NATIVE_ACCELERATORS = frozenset({"musa", "gcu"})
@@ -150,7 +151,7 @@ def _raw_stream(device_idx: int) -> int:
     On Ascend this is the aclrtStream from torch_fl's own stream registry. It
     must not fall back to 0: rt stream 0 is not ordered against the aclnn ops
     producing the kernel's inputs, which silently corrupts results rather than
-    failing (see scripts/patch_triton_ascend.py for the nan-loss regression).
+    failing (see scripts/vendor/patch_triton_ascend.py for the nan-loss regression).
     """
     profile = platform_profile()
     if profile.is_cuda_like:

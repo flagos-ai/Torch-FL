@@ -154,7 +154,7 @@ reproducer, root-cause analysis, code locations, and reviewer completion.
 The filing tool requires explicit fingerprints:
 
 ```bash
-python scripts/transformers_file_issues.py findings.json \
+python scripts/transformers/transformers_file_issues.py findings.json \
     --approve <fingerprint> [<fingerprint> ...]
 ```
 

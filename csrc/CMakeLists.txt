@@ -525,7 +525,7 @@ endif()
 # instead. Everything else the backend put on CMAKE_INSTALL_RPATH is kept,
 # including FlagGems' liboperators.so dir, so the C++ FlagGems path
 # (FLAGGEMS_KERNEL, kFlagOs) still resolves without LD_LIBRARY_PATH. Mirrors the
-# patchelf pass in scripts/bundle_*_libtorch.sh.
+# patchelf pass in scripts/vendor/bundle_*_libtorch.sh.
 flagos_set_portable_rpath(${LIBRARY_NAME})
 
 install(TARGETS ${LIBRARY_NAME}

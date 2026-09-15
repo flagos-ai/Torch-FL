@@ -453,10 +453,10 @@ self-check, TileOPs on CUDA, routes A and B, `torch.library` registration of
 `aten::mm`, performance plus boxing overhead plus streams, and the minimal cache
 collision repro). The parts worth keeping long-term now live in the repository:
 
-- `scripts/run_tileops_checks.py` -- numerical and fallback checks for all 60
+- `scripts/tools/run_tileops_checks.py` -- numerical and fallback checks for all 60
   routes, with no pytest dependency.
 - `tests/integration/ops/test_tileops_generated.py` -- the full generated suite.
-- `scripts/codegen_tileops.py --check` -- a gate on generated-artifact
+- `scripts/codegen/codegen_tileops.py --check` -- a gate on generated-artifact
   consistency.
 
 For the environment these need, see `codegen-design.md` section 6.3.

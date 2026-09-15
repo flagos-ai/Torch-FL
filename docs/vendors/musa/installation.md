@@ -41,7 +41,7 @@ Build flags:
 - `FLAGGEMS_KERNEL=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
 
-The build runs `scripts/codegen_mudnn.py` to generate kernels. Coverage is **64 generated ops** plus 2 handwritten convolution kernels; native RNG kernels add muRAND-backed `rand`/`randn`, `rand_like`/`randn_like`, `randint`, `normal_`, `uniform_`, `random_`, and mudnn dropout paths. Everything outside those sets reaches the `cpu_fallback`.
+The build runs `scripts/codegen/codegen_mudnn.py` to generate kernels. Coverage is **64 generated ops** plus 2 handwritten convolution kernels; native RNG kernels add muRAND-backed `rand`/`randn`, `rand_like`/`randn_like`, `randint`, `normal_`, `uniform_`, `random_`, and mudnn dropout paths. Everything outside those sets reaches the `cpu_fallback`.
 
 ### Why no-build-isolation is required
 
@@ -137,7 +137,7 @@ pytest tests/integration/ops/test_common_ops.py -v -s --tb=short
 
 ### Generated operators (64 ops)
 
-Category-driven codegen via `scripts/codegen_mudnn.py` covers:
+Category-driven codegen via `scripts/codegen/codegen_mudnn.py` covers:
 
 - **Unary**: abs, sqrt, rsqrt, exp, log, log2, log10, log1p, sin, cos, acos, atan, tanh, sigmoid, silu, relu, gelu, erf, floor, ceil, sign
 - **Binary**: add, mul, sub, div, pow, eq, ne, lt, le, gt, ge, maximum, minimum, logical_and, logical_or, logical_xor
@@ -382,6 +382,6 @@ All compute ops will fall back to CPU. This mode is useful for testing the runti
 
 ## Reference Documentation
 
-- [Codegen source](../../../scripts/codegen_mudnn.py): category-driven kernel generation for `mudnn`
+- [Codegen source](../../../scripts/codegen/codegen_mudnn.py): category-driven kernel generation for `mudnn`
 - [Compatibility matrix](../../reference/compatibility.md): platform status and limitations
 - [Environment variables](../../reference/environment-variables.md): runtime environment variables and backend selection

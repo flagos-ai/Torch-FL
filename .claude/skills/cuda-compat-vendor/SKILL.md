@@ -127,13 +127,13 @@ already built without CUDA entries, and no later `CDLL` repairs it. The failure
 is silent — ops quietly run on CPU, or you get a device-mismatch error far from
 the cause.
 
-`scripts/with_cuda_libtorch.sh` exists precisely so nobody has to remember the
+`scripts/vendor/with_cuda_libtorch.sh` exists precisely so nobody has to remember the
 `LD_PRELOAD` + `LD_LIBRARY_PATH` incantation. Run **everything** through it:
 
 ```bash
-scripts/with_cuda_libtorch.sh python -c "import torch_fl, torch; \
+scripts/vendor/with_cuda_libtorch.sh python -c "import torch_fl, torch; \
     print(torch.randn(4,4,device='flagos') @ torch.randn(4,4,device='flagos'))"
-scripts/with_cuda_libtorch.sh pytest tests/integration/ops/ -v
+scripts/vendor/with_cuda_libtorch.sh pytest tests/integration/ops/ -v
 ```
 
 If the vendor's `.so` lives somewhere non-default, point the script at it rather
@@ -170,7 +170,7 @@ Build-only success proves very little here — constraint 4 means the interestin
 failures are at runtime. Compare against CPU:
 
 ```bash
-scripts/with_cuda_libtorch.sh pytest tests/integration/ops/ \
+scripts/vendor/with_cuda_libtorch.sh pytest tests/integration/ops/ \
   -m "not flaggems and not flaggems_python" -v
 ```
 
@@ -178,7 +178,7 @@ Then confirm boxing is actually happening rather than silently falling back to
 CPU. A passing numerical test does **not** prove the vendor kernel ran:
 
 ```bash
-scripts/with_cuda_libtorch.sh python - <<'PY'
+scripts/vendor/with_cuda_libtorch.sh python - <<'PY'
 import torch_fl, torch
 x = torch.randn(64, 64, device="flagos")
 y = (x @ x).sum()
@@ -205,7 +205,7 @@ scheme exists to avoid.
 
 - Step 1's dispatcher dump shows CUDA entries for `mm`/`add`/`_softmax`/`bmm`
 - Build succeeds with g++ only, no nvcc, linking only `torch_cpu_library`
-- `import torch_fl` clean through `scripts/with_cuda_libtorch.sh`
+- `import torch_fl` clean through `scripts/vendor/with_cuda_libtorch.sh`
 - Operator suite passes, modulo the cold-start artifact above
 - Tensors stay on `flagos` through a compute chain (boxing confirmed, not fallback)
 - `torch.__version__` still ends in `+cpu`

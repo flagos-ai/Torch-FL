@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -199,20 +199,22 @@ class TestMmDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """mm dispatches to whatever backend this platform's conf lists.
+        """With the FlagGems runtime path available, mm keeps the route its conf selects.
 
-        FlagGems-first is the generated default, but it is not unconditional:
-        MetaX keeps mm on the cuda boxing kernel because gems' mm passes a SPLIT_K
-        kwarg triton-metax rejects. Asserting the conf's own value keeps this test
-        meaningful on every platform rather than pinning it to the one it was
-        written on.
+        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so on a platform whose
+        conf keeps mm on the vendor kernel (GCU and PPU route it there, because
+        FlagGems' mm passes a matmul kwarg the vendor Triton rejects) the
+        FlagGems route this case is named for does not exist and there is
+        nothing to assert. Skips instead of failing, so the case stays honest on
+        the platforms where the conf does route mm to FlagGems.
         """
+        if routed_backend_or_none("mm") != "flagos_python":
+            pytest.skip("mm does not route through FlagGems on this platform")
         result = _run_mm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        expected = routed_backend("mm")
-        assert f"[flagos dispatch] mm -> {expected}" in result.stderr, (
-            f"Expected {expected} dispatch log, got:\n{result.stderr}"
+        assert "[flagos dispatch] mm -> flagos_python" in result.stderr, (
+            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
@@ -238,17 +240,23 @@ class TestMmDispatchLog:
 
     @pytest.mark.flaggems
     def test_dispatch_log_mm_out_flaggems_runtime(self):
-        """With the FlagGems runtime path on, mm.out falls back to the vendor kernel.
+        """With the FlagGems runtime path available, mm.out keeps the route its conf selects.
 
-        FlagGems has no Triton kernel for mm.out, so backends_flaggems.conf keeps
-        it on cuda: verifies per-op graceful fallback under the runtime switch.
+        FlagGems has no Triton kernel for mm.out, so the confs that route mm to
+        FlagGems still send mm.out to a vendor kernel, and GCU sends both there.
+        What the case pins is that the route survives with the FlagGems runtime
+        path compiled in, so it asserts the conf's own value rather than one
+        platform's backend name.
         """
+        expected = routed_backend_or_none("mm.out")
+        if expected is None:
+            pytest.skip("mm.out is routed to 'none' on this platform")
         result = _run_mm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"},
             use_out=True,
         )
-        assert "[flagos dispatch] mm.out -> cuda" in result.stderr, (
-            f"Expected cuda fallback dispatch log, got:\n{result.stderr}"
+        assert f"[flagos dispatch] mm.out -> {expected}" in result.stderr, (
+            f"Expected mm.out -> {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

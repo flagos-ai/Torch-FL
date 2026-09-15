@@ -31,7 +31,7 @@ from torch_fl.accelerator.bpu import compiler as C
 
 @pytest.fixture
 def fake_x86(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A directory tree shaped like scripts/setup_bpu_hbdk4.sh produces."""
+    """A directory tree shaped like scripts/vendor/setup_bpu_hbdk4.sh produces."""
     root = tmp_path / "hbdk4-x86"
     py = root / "python" / "bin" / "python3.11"
     py.parent.mkdir(parents=True)

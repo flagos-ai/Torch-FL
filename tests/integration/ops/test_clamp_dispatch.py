@@ -20,7 +20,7 @@ Guards the ``optional<Tensor>`` boxing in the generated in-place kernels.
 ``clamp_.Tensor`` takes ``optional<Tensor> min`` / ``optional<Tensor> max``.
 ``DeviceBoxingGuard`` only rewrites the tensors it is handed, so an unboxed
 ``min``/``max`` reaches a CUDA ``self`` still carrying a flagos device -- which
-crashes rather than failing cleanly. ``scripts/codegen_ops.py`` materializes each
+crashes rather than failing cleanly. ``scripts/codegen/codegen_ops.py`` materializes each
 optional into a holder (``min_t``/``max_t``) before the guard; these tests hold
 that in place across regenerations.
 

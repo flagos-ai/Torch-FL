@@ -61,7 +61,7 @@ skipping the separate design phase when the path forward is clear.
 **Pre-submission validation:**
 ```bash
 # Run this before creating any PR
-python scripts/validate_ai_pr.py --pr-body pr_description.md
+python scripts/tools/validate_ai_pr.py --pr-body pr_description.md
 ```
 
 **Mandatory requirements for AI PRs:**

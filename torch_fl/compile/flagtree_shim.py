@@ -163,13 +163,14 @@ def get_gcu_current_raw_stream(device: Any = None) -> int:
 
     The GCU counterpart of ``get_musa_current_raw_stream``, and the import target
     of the raw-stream line inductor writes into generated code. torch_fl's
-    ``TopsStream`` exposes the handle as ``gcu_stream`` -- the same name Enflame's
-    ``triton_gcu`` driver reads off its own stream objects -- so a compiled
-    kernel submits to the stream the eager topsaten kernels already use.
+    ``TopsStream`` exposes the handle as ``gcu_stream`` -- the same name
+    FlagTree's enflame backend (and Enflame's ``triton_gcu`` plugin) reads off
+    its own stream objects -- so a compiled kernel submits to the stream the
+    eager topsaten kernels already use.
 
     Unlike MUSA, no driver rebinding happens here: ``import torch_fl`` already
-    points ``triton_gcu`` at flagos through
-    ``torch_fl.accelerator.gcu._gcu_compat.patch_triton_gcu_for_flagos()``.
+    points the vendor Triton backend at flagos through
+    ``torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos()``.
     """
     from torch_fl import flagos
     from torch_fl.compile.device_interface import FlagOSDeviceInterface

@@ -26,7 +26,7 @@ document buckets them by cause, for working through in batches.
 >   not forward it — an upstream bug).
 
 The data comes from reconciling the per-branch rejection logic in `discover_flaggems_ops()`
-(`scripts/codegen_ops.py`); the buckets match the actual codegen rejections exactly.
+(`scripts/codegen/codegen_ops.py`); the buckets match the actual codegen rejections exactly.
 
 > **Important correction (measured 2026-07)**: the ①no_dispatcher bucket (88) is **mostly not a
 > functional gap**. Probing them individually on real hardware under flagos

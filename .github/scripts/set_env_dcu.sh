@@ -320,7 +320,7 @@ fi
 # FLAGOS_DCU_VENDOR_CORE=1 selects the legacy full-core bundle + relink; CI
 # smoke-tests that path separately below.
 DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
-  PYTHON="$VENV_PYTHON" bash scripts/bundle_dcu_libtorch.sh
+  PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
 
 # Wheel invariants for the decoupled default. A vendor core .so in lib_dcu means
 # the wheel would shadow the official core through RPATH order, i.e. silently
@@ -408,7 +408,7 @@ PY
     echo "Legacy-mode smoke: full-core bundle"
     DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
       PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
-      bash scripts/bundle_dcu_libtorch.sh
+      bash scripts/vendor/bundle_dcu_libtorch.sh
     FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
 import torch_fl  # noqa: F401  (relinks torch/lib, then preloads DTK's core)
 import torch
@@ -445,7 +445,7 @@ PY
 
     echo "Restoring the decoupled bundle for the wheel"
     DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
-      PYTHON="$VENV_PYTHON" bash scripts/bundle_dcu_libtorch.sh
+      PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
     python - <<'PY'
 from pathlib import Path
 import sys

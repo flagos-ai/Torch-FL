@@ -385,7 +385,7 @@ fi
 # Bundle PPU core+CUDA+MKL .so into torch_fl/lib_ppu/ and rewrite the plugin
 # RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-bash scripts/bundle_ppu_libtorch.sh
+bash scripts/vendor/bundle_ppu_libtorch.sh
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "::error::nvidia-smi is unavailable"

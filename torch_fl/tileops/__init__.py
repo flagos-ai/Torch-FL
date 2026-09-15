@@ -23,7 +23,7 @@ the kernels themselves are Python, and the generated stubs call back into
 
   - :mod:`~torch_fl.tileops.runtime`  instance cache, boxing, recipe builders
   - :mod:`~torch_fl.tileops.spec`     hand-maintained codegen input
-  - :mod:`~torch_fl.tileops.generated`  products of ``scripts/codegen_tileops.py``
+  - :mod:`~torch_fl.tileops.generated`  products of ``scripts/codegen/codegen_tileops.py``
 
 Nothing is imported eagerly: ``runtime`` pulls in TileOPs (and therefore
 TileLang) only once a route is first exercised, so ``import torch_fl`` stays

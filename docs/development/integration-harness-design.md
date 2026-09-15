@@ -117,7 +117,7 @@ run the kernels.
 2. **Pin the environment.** `torch==2.9.x+cpu` — CPU-only, deliberately. The
    CUDA-compatible path supplies GPU symbols out-of-band (command 3), so a CUDA
    pip torch in the env is a liability, not a help.
-3. **Re-run ATen codegen against the new schema.** `scripts/codegen_ops.py`
+3. **Re-run ATen codegen against the new schema.** `scripts/codegen/codegen_ops.py`
    reads torchgen's packaged `native_functions.yaml`, so a torch bump changes its
    output. Regenerate `csrc/aten/generated/{ops.h,ops.cc,cuda_kernels.cc,register.inc}`.
 4. **Reconcile per-operator signature splits.** The known failure mode is
@@ -132,7 +132,7 @@ run the kernels.
 
 ### Exit criteria
 
-- `python scripts/codegen_ops.py` emits the full conf op count with no WARNINGs
+- `python scripts/codegen/codegen_ops.py` emits the full conf op count with no WARNINGs
 - second codegen run leaves `git diff` empty
 - `import torch_fl` clean, no signature mismatch
 - `torch.__version__` still ends in `+cpu`
@@ -260,7 +260,7 @@ CPU-only pip torch plus an externally supplied `libtorch_cuda.so` registers real
 CUDA implementations for `aten::mm` / `add` / `_softmax` / `bmm` and computes
 correct results (`mm max_err = 9.5e-06`). The hard constraint is **load timing**:
 the library must be loaded before `import torch`, hence `LD_PRELOAD` and
-`scripts/with_cuda_libtorch.sh`.
+`scripts/vendor/with_cuda_libtorch.sh`.
 
 ### Phase 3a — Establish CUDA compatibility (a gate, not an assumption)
 

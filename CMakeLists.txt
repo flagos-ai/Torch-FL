@@ -17,7 +17,7 @@ cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 set(ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, or bpu")
 
 # Directory inside the wheel holding a bundled forked libtorch, when the backend
-# ships one (see scripts/bundle_*_libtorch.sh). "lib" means "no separate bundle
+# ships one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate bundle
 # dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
 # Set per backend below; consumed by cmake/FlagosRpath.cmake.
 set(FLAGOS_BUNDLE_LIBDIR "lib")
@@ -64,7 +64,7 @@ elseif(ACCELERATOR STREQUAL "metax")
     set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
   endif()
   # Self-contained wheel: forked libtorch bundled by
-  # scripts/bundle_maca_libtorch.sh (the maca runtime stays on the target).
+  # scripts/vendor/bundle_maca_libtorch.sh (the maca runtime stays on the target).
   set(FLAGOS_BUNDLE_LIBDIR "lib_maca")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "tsingmicro")
@@ -81,7 +81,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
   set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
   # Self-contained wheel: DTK's forked libtorch (libtorch_cpu.so carries hip
   # symbols and needs libgalaxyhip.so.5) is bundled here by
-  # scripts/bundle_dcu_libtorch.sh. The DTK driver itself stays on the target.
+  # scripts/vendor/bundle_dcu_libtorch.sh. The DTK driver itself stays on the target.
   set(FLAGOS_BUNDLE_LIBDIR "lib_dcu")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "gcu")
@@ -268,7 +268,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
   #   hip/lib, lib64         hip runtime
   #   aillvm/lib             libomp.so
   #   .hyhal/rocm_smi/lib    librocm_smi64.so.2
-  # Keep in sync with VENDOR_RPATH in scripts/bundle_dcu_libtorch.sh.
+  # Keep in sync with VENDOR_RPATH in scripts/vendor/bundle_dcu_libtorch.sh.
   set(_dcu_rpath_dirs
       "${DCU_CUDA_ROOT}/lib64" "${DTK_ROOT}/lib" "${DTK_ROOT}/hip/lib"
       "${DTK_ROOT}/lib64" "${DTK_ROOT}/aillvm/lib" "${DTK_ROOT}/llvm/lib"

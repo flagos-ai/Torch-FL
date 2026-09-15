@@ -42,7 +42,7 @@ Branching from another version branch inherits that version's signature fixes,
 which are exactly what you are trying to re-derive. Start from `main`.
 
 Note that `main` may not carry codegen infrastructure at all — at time of writing
-`2.13` is the reference implementation for it. If `scripts/codegen_ops.py` is
+`2.13` is the reference implementation for it. If `scripts/codegen/codegen_ops.py` is
 absent on your base, port the infra first (see [[cuda-op-integration]] Step 0,
 which lists the precise file set to `git checkout 2.13 --`).
 
@@ -63,12 +63,12 @@ the entire port — check it again at the end.
 
 ## Step 2 — regenerate ATen codegen
 
-`scripts/codegen_ops.py` reads torchgen's *packaged* `native_functions.yaml`,
+`scripts/codegen/codegen_ops.py` reads torchgen's *packaged* `native_functions.yaml`,
 which means its output is a function of the installed torch version. Regenerate
 after the pin, never before:
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 python scripts/codegen_ops.py
+FLAGOS_CODEGEN_ALL=1 python scripts/codegen/codegen_ops.py
 ```
 
 Emitted into `csrc/aten/generated/`: `ops.h` (typedefs + `DECLARE_DISPATCHER`),
@@ -84,7 +84,7 @@ CUDA torch wheel; keep the active pip torch CPU-only. Do not inherit vendor-box
 or vendor shim and produce false registration failures.
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 bash scripts/with_cuda_libtorch.sh python scripts/codegen_ops.py \
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh python scripts/codegen/codegen_ops.py \
   2>&1 | tee /tmp/torch-codegen.log
 
 # 1. No dropped operators. Any "SKIP <op>" or "WARN" means an op failed to
@@ -99,7 +99,7 @@ FLAGOS_CODEGEN_ALL=1 bash scripts/with_cuda_libtorch.sh python scripts/codegen_o
 # 2. Idempotency. Compare two complete generated patches, not the working tree
 #    against HEAD (a valid version port is expected to differ from HEAD).
 git diff --binary > /tmp/codegen-1.patch
-FLAGOS_CODEGEN_ALL=1 bash scripts/with_cuda_libtorch.sh python scripts/codegen_ops.py \
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh python scripts/codegen/codegen_ops.py \
   > /tmp/torch-codegen-second.log 2>&1
 git diff --binary > /tmp/codegen-2.patch
 cmp -s /tmp/codegen-1.patch /tmp/codegen-2.patch && echo idempotent
@@ -127,7 +127,7 @@ RuntimeError: Mismatch in kernel C++ signatures
 A TensorList argument is spelled either `ArrayRef<Tensor>` or `IListRef<Tensor>`
 in the dispatcher signature, and **which one is per-operator, decided by
 torchgen's own rule** — not a global setting. torch_fl mirrors that rule in
-`scripts/codegen_ops.py` (see the comment block around line 56 and
+`scripts/codegen/codegen_ops.py` (see the comment block around line 56 and
 `use_arrayref`-style logic near line 2065). When PyTorch reclassifies an op
 between minors, the mirrored rule goes stale for that op and registration aborts
 at import.
@@ -184,8 +184,8 @@ error to codegen.
 Then, through the preload wrapper:
 
 ```bash
-bash scripts/with_cuda_libtorch.sh python -c "import torch_fl; print('ok')"
-bash scripts/with_cuda_libtorch.sh python -m pytest tests/integration/ops/ \
+bash scripts/vendor/with_cuda_libtorch.sh python -c "import torch_fl; print('ok')"
+bash scripts/vendor/with_cuda_libtorch.sh python -m pytest tests/integration/ops/ \
     -m "not flaggems and not flaggems_python" -q
 ```
 
@@ -216,10 +216,10 @@ A version port that leaves the docs claiming the old range is half-done. Update:
 ## Done criteria
 
 - `torch.__version__` still ends in `+cpu`
-- `FLAGOS_CODEGEN_ALL=1 python scripts/codegen_ops.py` runs clean: no `SKIP`, no
+- `FLAGOS_CODEGEN_ALL=1 python scripts/codegen/codegen_ops.py` runs clean: no `SKIP`, no
   `WARN`, and a second run leaves no diff
 - Operator count matches what the conf lists (no silent drops vs the base branch)
-- `import torch_fl` is clean through `scripts/with_cuda_libtorch.sh`
+- `import torch_fl` is clean through `scripts/vendor/with_cuda_libtorch.sh`
 - `tests/integration/ops/` passes modulo the allocator cold-start tests above
 - Version claims in `compatibility.md` / `README.md` match reality
 - `ruff check .` and `ruff format --check .` pass — see [[pre-pr-checks]]

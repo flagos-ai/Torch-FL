@@ -98,7 +98,7 @@ export FLAGGEMS_PYTHON=1
 # rewrite the default: that rewrite is an exact-string replace written against
 # triton-ascend 3.2.0 and silently stopped matching on the 3.2.2 wheel pinned
 # below, which left taskqueue on. The empty OpCommand.h stub written by
-# scripts/setup_torch_npu_stubs.sh is only sufficient while taskqueue is off --
+# scripts/vendor/setup_torch_npu_stubs.sh is only sufficient while taskqueue is off --
 # with it on, the generated launcher references the symbol and the JIT compile
 # fails with "'at_npu' has not been declared", which is what broke 11 Ascend
 # operator tests in run 34786387238. An env var cannot version-rot.
@@ -266,7 +266,7 @@ pip_retry --index-url "$PIP_INDEX_URL" 'numpy>=1.20,<2.0'
 # the 3.5 branch require unreliable gitcode.com submodules and exceed the CI
 # timeout; the 3.2.x wheel is stable and fast.
 pip_retry --no-deps --extra-index-url 'https://triton-ascend.osinfra.cn/pypi/simple' 'triton-ascend==3.2.2'
-"$VENV_PYTHON" "$REPO_ROOT/scripts/patch_triton_ascend.py"
+"$VENV_PYTHON" "$REPO_ROOT/scripts/vendor/patch_triton_ascend.py"
 
 # Fail early in the wheel-only stage if the pinned FlagGems/Triton pair
 # can be imported together. The build stage cannot run this check because

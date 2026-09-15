@@ -33,7 +33,7 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -160,6 +160,14 @@ class TestEmbeddingDispatchLog:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for embedding.
+
+        Skipped where the conf routes embedding to ``none``: the op is then not
+        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
+        the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("embedding") is None:
+            pytest.skip("embedding is routed to 'none' on this platform")
         result = _run_embedding_subprocess(
             {
                 "FLAGOS_LOG_DISPATCH": "1",
@@ -172,22 +180,22 @@ class TestEmbeddingDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """embedding dispatches to whatever backend this platform's conf lists.
+        """With the FlagGems runtime path available, embedding keeps its conf route.
 
-        Neither the conf vocabulary nor the log vocabulary is the only one in
-        play, and they do not agree: the FlagGems C++ path is spelled
-        ``flaggems_cpp`` in the conf and ``-> flagos`` in the log, the Python path
-        ``flaggems``/``-> flagos_python`` (csrc/aten/dispatcher.h, LogDispatch;
-        both log names are kept for test compatibility). routed_backend() owns
-        that mapping, so this asserts the platform's real route instead of the one
-        the test was written on.
+        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so this is a check
+        that the FlagGems runtime path is compiled in and routing still agrees
+        with the conf rather than a switch that turns FlagGems on. Skipped where
+        the conf routes embedding away from FlagGems: GCU leaves it to
+        cpu_fallback because the FlagGems embedding kernel cannot compile the
+        int64 index operand that GCU300 rejects.
         """
+        if routed_backend_or_none("embedding") != "flagos_python":
+            pytest.skip("embedding does not route through FlagGems on this platform")
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        expected = routed_backend("embedding")
-        assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
-            f"Expected {expected} log, got:\n{result.stderr}"
+        assert "[flagos dispatch] embedding -> flagos_python" in result.stderr, (
+            f"Expected flagos_python log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

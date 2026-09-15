@@ -45,7 +45,7 @@ The BPU backend provides three distinct execution paths:
 Graph compilation requires hbdk4, which ships x86_64-only wheels. On-board compilation runs under box64 emulation:
 
 ```bash
-scripts/setup_bpu_hbdk4.sh --wheels /path/to/oe/wheels
+scripts/vendor/setup_bpu_hbdk4.sh --wheels /path/to/oe/wheels
 export FLAGOS_BPU_X86_PYTHON=~/hbdk4-x86/python/bin/python3.11
 export FLAGOS_BPU_X86_EMULATOR=~/hbdk4-x86/bin/box64
 ```

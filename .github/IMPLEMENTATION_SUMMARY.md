@@ -21,7 +21,7 @@ A comprehensive issue/PR template system designed for the torch_fl project, with
 - Human reviewer assignment
 
 ### 3. **Automated Validation**
-- Pre-submission validation script (`scripts/validate_ai_pr.py`)
+- Pre-submission validation script (`scripts/tools/validate_ai_pr.py`)
 - Checks linting, commit messages, PR structure, language
 - Exit code 0/1 for CI integration
 
@@ -61,7 +61,7 @@ CONTRIBUTING.md                     - Complete contribution guide
 
 ### Automation
 ```
-scripts/validate_ai_pr.py          - Pre-submission validation script
+scripts/tools/validate_ai_pr.py          - Pre-submission validation script
 ```
 
 ## 🔧 How to Use
@@ -122,7 +122,7 @@ scripts/validate_ai_pr.py          - Pre-submission validation script
 4. **Validate before submission**:
    ```bash
    # Run validation script
-   python scripts/validate_ai_pr.py --pr-body pr_description.md
+   python scripts/tools/validate_ai_pr.py --pr-body pr_description.md
    ```
 
 5. **Create PR with AI template**:
@@ -157,7 +157,7 @@ Templates explicitly state what will cause rejection:
 ### For AI Agents
 ```bash
 # Pre-flight checks
-python scripts/validate_ai_pr.py --pr-body pr.md
+python scripts/tools/validate_ai_pr.py --pr-body pr.md
 
 # Linting
 ruff check
@@ -185,7 +185,7 @@ gh pr create --title "feat: add new feature"
 
 ## 📊 Validation Script Details
 
-`scripts/validate_ai_pr.py` performs:
+`scripts/tools/validate_ai_pr.py` performs:
 
 | Check | What it does |
 |-------|-------------|
@@ -266,7 +266,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate AI PR
         run: |
-          python scripts/validate_ai_pr.py \
+          python scripts/tools/validate_ai_pr.py \
             --pr-body <(gh pr view ${{ github.event.pull_request.number }} \
             --json body -q .body)
 ```
@@ -296,7 +296,7 @@ CLAUDE.md (top-level conventions)
     └── AI-specific docs
         ├── .github/AI_AGENT_GUIDE.md (comprehensive guide)
         ├── .github/CLAUDE_CODE_GUIDE.md (Claude Code specific)
-        └── scripts/validate_ai_pr.py (automation)
+        └── scripts/tools/validate_ai_pr.py (automation)
 ```
 
 ## ❓ FAQ

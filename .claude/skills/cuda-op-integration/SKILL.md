@@ -32,14 +32,14 @@ the preloaded `libtorch_cuda.so`.
 
 ## The three pillars (read these files first)
 
-- `scripts/codegen_ops.py` — the generator. Reads the conf + torchgen's packaged
+- `scripts/codegen/codegen_ops.py` — the generator. Reads the conf + torchgen's packaged
   `native_functions.yaml`, emits 4 files into `csrc/aten/generated/`:
   `ops.h` (typedefs + `DECLARE_DISPATCHER`), `ops.cc` (`ADD_IMPL_TO_DISPATCHER`),
   `cuda_kernels.cc` (boxing kernels + `REGISTER_IMPL_TO_DISPATCHER`), `register.inc`
   (wrapper fns + `m.impl()` lines, `#include`d twice by register.cc).
 - `csrc/aten/device_boxing.h` — `DeviceBoxingGuard` / `TensorListBoxingGuard` /
   `MaterializeToTensorVec` / `Box`/`UnboxToFlagos`. The runtime mechanism.
-- `scripts/with_cuda_libtorch.sh` — wraps any command with the LD_PRELOAD +
+- `scripts/vendor/with_cuda_libtorch.sh` — wraps any command with the LD_PRELOAD +
   LD_LIBRARY_PATH needed to inject the external CUDA libs. Test/run through this.
 - `docs/vendors/cuda/external-libtorch-cuda.md` — full rationale + the 4 hard
   constraints. Read it once before adapting a new version.
@@ -55,12 +55,12 @@ its own conda env with `torch==<ver>+cpu` and a matching `libtorch_cuda.so`.
 `2.13` (the reference implementation) with `git checkout 2.13 -- <paths>`:
 
 ```
-scripts/codegen_ops.py
-scripts/extract_name_map.py
+scripts/codegen/codegen_ops.py
+scripts/codegen/extract_name_map.py
 csrc/aten/device_boxing.h
 csrc/aten/dispatcher.h
 csrc/aten/register.cc
-scripts/with_cuda_libtorch.sh
+scripts/vendor/with_cuda_libtorch.sh
 docs/vendors/cuda/external-libtorch-cuda.md
 ```
 
@@ -107,7 +107,7 @@ libtorch_nvshmem.so,libcaffe2_nvrtc.so} <repo>/.libtorch_cuda_assets/
 conda activate libtorch_<ver> && cd <repo>
 
 # a) generate
-python scripts/codegen_ops.py           # writes csrc/aten/generated/*
+python scripts/codegen/codegen_ops.py           # writes csrc/aten/generated/*
 
 # b) build CPU-only (FlagGems OFF because it needs flag_gems; CUDA boxing ON)
 FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON \
@@ -115,7 +115,7 @@ FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON \
 
 # c) smoke test THROUGH the wrapper (LD_PRELOAD external libtorch_cuda.so)
 FLAGOS_BACKEND_CONFIG=torch_fl/backends_cuda.conf \
-  bash scripts/with_cuda_libtorch.sh python -c "
+  bash scripts/vendor/with_cuda_libtorch.sh python -c "
 import torch_fl, torch
 a=torch.randn(4,4,device='flagos:0'); b=torch.randn(4,4,device='flagos:0')
 print(torch.add(a,b).cpu()); print(torch.cat([a,b]).shape)
@@ -124,7 +124,7 @@ torch._foreach_add_(t,[torch.ones(3,device='flagos:0')]*2); print('OK')"
 
 # d) full op suite (deselect flaggems markers — that backend isn't built)
 FLAGOS_BACKEND_CONFIG=torch_fl/backends_cuda.conf \
-  bash scripts/with_cuda_libtorch.sh \
+  bash scripts/vendor/with_cuda_libtorch.sh \
   pytest tests/integration/ops/ -q -m "not flaggems and not flaggems_python"
 ```
 
@@ -147,7 +147,7 @@ TensorList C++ types, and they are **inconsistent across operators**:
 A single global `use_ilistref_for_tensor_lists` setting **cannot** satisfy both. The
 generator therefore sets it **per operator** via `torchgen.local.parametrize(...)`
 inside the op loop, driven by the `ARRAYREF_OPS` set at the top of
-`scripts/codegen_ops.py`.
+`scripts/codegen/codegen_ops.py`.
 
 **When adapting a new version:** the *membership* of `ARRAYREF_OPS` can change. The
 error message tells you exactly which way each op must go — read both kernels:
@@ -184,7 +184,7 @@ Any *other* compute-factory added to the conf needs the same CUDA-device treatme
 `libtorch_cuda.so` **must** load before `import torch`. Loading it after → kernels
 register fine but device init throws "Cannot initialize CUDA without ATen_cuda
 library" (torch caches stub CUDAHooks at first `import torch`). This is why testing
-goes through `scripts/with_cuda_libtorch.sh` (LD_PRELOAD) and not a late
+goes through `scripts/vendor/with_cuda_libtorch.sh` (LD_PRELOAD) and not a late
 `ctypes.CDLL`. Never call `torch.cuda.*` from tests — the flagos boxing path stays in
 C++ and sidesteps torch's Python `_lazy_init` gate.
 
@@ -221,7 +221,7 @@ allocator — that reaches into `torch.cuda` internals the scheme deliberately a
 
 ## Done criteria
 
-- `python scripts/codegen_ops.py` emits 71 ops (or whatever the conf lists), no WARNINGs.
+- `python scripts/codegen/codegen_ops.py` emits 71 ops (or whatever the conf lists), no WARNINGs.
 - Build succeeds with `FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON`.
 - `import torch_fl` is clean (no signature mismatch, no segfault) through the wrapper.
 - `pytest tests/integration/ops/ -m "not flaggems and not flaggems_python"` passes,

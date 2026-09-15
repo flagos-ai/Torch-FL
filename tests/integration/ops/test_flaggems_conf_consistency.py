@@ -23,7 +23,7 @@ code generator lists them in ``flaggems_recursive_fallback``. This guards the
 whole FlagGems Python surface against drift between the coverage data and the
 codegen output.
 
-The coverage set lives in ``scripts/backend_coverage.py`` rather than in a
+The coverage set lives in ``scripts/codegen/backend_coverage.py`` rather than in a
 ``backends_flaggems.conf``: the confs were unified on one full-coverage table
 per platform, so the shared file only ever read by the generator became a data
 module. This check reads the same module the generator does.
@@ -57,10 +57,10 @@ import pytest
 
 # tests/integration/ops/<this file> -> repo root is three levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_COVERAGE = _REPO_ROOT / "scripts" / "backend_coverage.py"
+_COVERAGE = _REPO_ROOT / "scripts" / "codegen" / "backend_coverage.py"
 _REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
 _KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
-_CODEGEN = _REPO_ROOT / "scripts" / "codegen_ops.py"
+_CODEGEN = _REPO_ROOT / "scripts" / "codegen" / "codegen_ops.py"
 
 # The generated C++ sources this check parses exist only in a repo checkout; they
 # are never shipped in a wheel. Pipelines that stage a wheel-only workspace (the
@@ -150,27 +150,22 @@ def _wrapper_to_dispatcher() -> dict[str, str]:
     comment (``// ... m.impl() lines.``) otherwise matches ``(\\w+)\\([^;{]*\\)``
     and consumes the first real wrapper definition along with it.
 
-    Bodies are read up to the ``\\n}`` that closes them instead of being matched
-    in a single pattern: the software-low-precision matrix wrappers
-    (``mm``/``bmm``/``addmm``/``_scaled_mm`` and their variants) open with a
-    ``#if defined(FLAGOS_SOFT_LOWP)`` branch that returns the
-    ``at::native::flagos::soft_lowp::*`` implementation, so the dispatcher call is
-    no longer adjacent to the opening brace. Searching the body for the first
-    ``*_dispatcher(`` looks past that branch; anchoring on the ``_dispatcher``
-    suffix keeps the soft_lowp call itself from matching.
+    The dispatcher call is searched for anywhere in the wrapper body rather than
+    anchored to the first statement. The soft-lowp-gated wrappers (``mm``,
+    ``bmm``, ``addmm`` and their variants) open with an
+    ``#if defined(FLAGOS_SOFT_LOWP)`` prelude that returns through the
+    ``soft_lowp::`` shim before falling through to the dispatcher, so an
+    anchored pattern silently reports those wrappers as unmapped and every op
+    they bridge as an orphan.
     """
-    source = _read(_REGISTER_INC)
-    mapping: dict[str, str] = {}
-    for match in re.finditer(r"\b(Wrapper\w*)\([^;{]*\)\s*\{", source):
-        end = source.find("\n}", match.end())
-        if end == -1:
-            continue
-        call = re.search(
-            r"(?:at::native::flagos::)?(\w+_dispatcher)\(", source[match.end() : end]
-        )
+    out: dict[str, str] = {}
+    for name, body in re.findall(
+        r"\b(Wrapper\w*)\([^;{]*\)\s*\{(.*?)\n\}", _read(_REGISTER_INC), re.S
+    ):
+        call = re.search(r"(?:at::native::flagos::)?(\w+_dispatcher)\(", body)
         if call:
-            mapping[match.group(1)] = call.group(1)
-    return mapping
+            out.setdefault(name, call.group(1))
+    return out
 
 
 def _cc_flagos_python_dispatchers() -> set[str]:

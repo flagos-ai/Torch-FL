@@ -124,7 +124,7 @@ than exceptions.
 
 ## Step 3 — the generator
 
-Create `scripts/codegen_<vendor>.py` modelled on `scripts/codegen_ascend.py`,
+Create `scripts/codegen/codegen_<vendor>.py` modelled on `scripts/codegen/codegen_ascend.py`,
 which has four parts:
 
 - **`OPS`** — `schema op name → (category, vendor-name override)`. **The only
@@ -133,7 +133,7 @@ which has four parts:
   registration in the same backend slot **crashes at import**, so an op is either
   generated or hand-written, never both.
 - **`CATEGORIES`** — `category → kernel body template`.
-- **Name reuse** — import `schema_to_cpp_name` from `scripts/codegen_ops.py`.
+- **Name reuse** — import `schema_to_cpp_name` from `scripts/codegen/codegen_ops.py`.
   If `XxxFn`/`xxx_dispatcher` names diverge from `csrc/aten/generated/ops.h`, the
   link fails.
 
@@ -154,7 +154,7 @@ exists. Declaring your own typedefs produces either a duplicate-symbol link
 failure or, worse, a second dispatcher nothing routes to — so the kernel compiles,
 registers, and never runs.
 
-Reuse `schema_to_cpp_name` from `scripts/codegen_ops.py` rather than
+Reuse `schema_to_cpp_name` from `scripts/codegen/codegen_ops.py` rather than
 reimplementing the name mangling.
 
 ## Step 4 — backend slot and routing

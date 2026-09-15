@@ -8,7 +8,7 @@
 
 ## 1. Why the CUDA codegen cannot be copied
 
-On the CUDA side, `scripts/codegen_ops.py` generates `generated/cuda_kernels.cc` whose kernel
+On the CUDA side, `scripts/codegen/codegen_ops.py` generates `generated/cuda_kernels.cc` whose kernel
 body is a single `at::op(args)` — `DeviceBoxingGuard` rewrites the device metadata of a flagos
 (PrivateUse1) tensor to CUDA, reusing PyTorch's already-registered CUDA kernel directly. That
 shortcut does not exist on Ascend:
@@ -319,7 +319,7 @@ path: sub, div, pow, and the rest.
   (e.g. `square`/`isnan`/`isfinite` are excluded automatically for lack of a dispatcher or a
   symbol).
 
-## 6. The generator, `scripts/codegen_ascend.py`
+## 6. The generator, `scripts/codegen/codegen_ascend.py`
 
 Structure:
 
@@ -331,7 +331,7 @@ Structure:
 - Reuses `codegen_ops.py:schema_to_cpp_name` so `XxxFn`/`xxx_dispatcher` align exactly with
   `ops.h`.
 
-Usage: `python scripts/codegen_ascend.py [--category unary] [--no-conf]` (default: all).
+Usage: `python scripts/codegen/codegen_ascend.py [--category unary] [--no-conf]` (default: all).
 
 Output:
 

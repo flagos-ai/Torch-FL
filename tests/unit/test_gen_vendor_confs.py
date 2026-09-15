@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for scripts/gen_vendor_confs.py.
+"""Unit coverage for scripts/codegen/gen_vendor_confs.py.
 
 The generator turns shared FlagGems coverage sources plus each platform's own
 conf into one full-coverage conf per platform, where every op torch_fl can route
@@ -57,7 +57,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "gen_vendor_confs.py"
+SCRIPT = REPO_ROOT / "scripts" / "codegen" / "gen_vendor_confs.py"
 
 
 def _load():
@@ -188,9 +188,9 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     Strategy: register everything → run CI → move failures to NATIVE_TRITON_GAPS.
     This maximizes coverage while maintaining correctness via the fallback list.
 
-    Known failures (as of 2026-09-14 on MTT S5000, FlagGems 4d9c34775 +
+    Known failures (as of 2026-09-15 on MTT S5000, FlagGems 4d9c34775 +
     flagtree 0.6.2a3+mthreads3.6); the full diagnosis for each lives on the set
-    itself in scripts/gen_vendor_confs.py:
+    itself in scripts/codegen/gen_vendor_confs.py:
       - _conj: flag_gems materializes the conjugation that ATen keeps as a lazy
         view, so test_math_bits_contract's `is_conj()` contract breaks. No mudnn
         kernel either, so this one routes to `none` and ATen's composite runs.
@@ -203,12 +203,23 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         _foreach_add_, and so AdamW's foreach path) onto the .Tensor overload, so
         the in-place entries are what actually keep those callers off the failing
         kernel. mul_.Tensor is listed even though mul.Tensor is already native.
-      - index_add/index_add_: return all zeros instead of accumulating.
-      - randn/randn_like: crash unpacking generator state.
+      - div.Tensor_mode/div_.Tensor_mode/floor_divide/floor_divide_.Tensor
+        (issue #266): on integer inputs flag_gems loses the trailing store, so
+        every non-power-of-two numel returns a stale last element. Both
+        rounding-mode overloads and the base/in-place floor_divide spellings hit
+        it, and the Scalar forms decompose onto them, so `a // b`, `a // 2`,
+        torch.floor_divide(a, b) and a.div_(b, rounding_mode='floor') all do.
       - sort/sort.stable: flag_gems' radix sort casts its histogram to uint32
         internally and mudnn's CAST has no UInt16/32/64 case, so the cast raises
         before the sort runs. mudnn's own sort is correct here; argsort and
         msort decompose onto sort.
+
+    index_add/index_add_ and randn/randn_like were removed from this set on
+    2026-09-15: re-measured on MTT S5000 against both the current FlagGems and
+    the CI pin, neither recorded signature reproduces, so both pairs route back
+    to flaggems (the index pair was previously `none`, not `musa`). See the set
+    itself in scripts/codegen/gen_vendor_confs.py for the per-op evidence and
+    docs/reference/operator-support.md for the report.
 
     Ops in NATIVE_TRITON_GAPS are NOT registered (to avoid "backend not registered"
     errors when they route to none/musa).
@@ -254,12 +265,12 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         "add.Tensor",
         "add_.Tensor",
         "div.Tensor",
+        "div.Tensor_mode",
         "div_.Tensor",
-        "index_add",
-        "index_add_",
+        "div_.Tensor_mode",
+        "floor_divide",
+        "floor_divide_.Tensor",
         "mul_.Tensor",
-        "randn",
-        "randn_like",
         "sort",
         "sort.stable",
         "sub.Tensor",
@@ -330,7 +341,7 @@ def test_shipped_confs_are_up_to_date():
         for p, (text, _, _) in built.items()
         if (CONF_DIR / f"backends_{p}.conf").read_text() != text
     ]
-    assert not stale, f"stale: {stale}; run scripts/gen_vendor_confs.py"
+    assert not stale, f"stale: {stale}; run scripts/codegen/gen_vendor_confs.py"
 
 
 def test_generation_is_idempotent():
@@ -421,8 +432,8 @@ def test_flaggems_cpp_set_is_a_subset_of_the_python_set():
 def test_tileops_set_survived_the_conf_deletion():
     """backends_tileops.conf carried this set as 60 `tileops` lines in a 2060-line
     file that was otherwise a copy of backends_cuda.conf. It is now
-    TILEOPS_OPS in scripts/backend_coverage.py, regenerated in place by
-    scripts/codegen_tileops.py. The count is pinned because losing entries here
+    TILEOPS_OPS in scripts/codegen/backend_coverage.py, regenerated in place by
+    scripts/codegen/codegen_tileops.py. The count is pinned because losing entries here
     silently shrinks what FLAGOS_USE_TILEOPS=1 can repin."""
     ops = g.tileops_ops()
     assert len(ops) == 60, f"expected 60 tileops ops, got {len(ops)}"

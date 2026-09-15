@@ -12,8 +12,8 @@ publishes GitHub issues by itself.
 ### One model
 
 ```bash
-bash scripts/transformers_auto_sweep.sh bert gcu GCU
-bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
+bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
 Arguments:
@@ -28,7 +28,7 @@ Arguments:
 ### Batch wrapper
 
 ```bash
-bash scripts/transformers_batch_sweep.sh gcu GCU
+bash scripts/transformers/transformers_batch_sweep.sh gcu GCU
 ```
 
 The batch wrapper runs its configured model list one architecture at a time. It
@@ -56,12 +56,12 @@ python tests/manual/transformers_hf_tests.py \
     --out "${RESULT_ROOT}-results.json"
 
 # 2. Classify failures and measured CPU fallbacks.
-python scripts/transformers_triage.py \
+python scripts/transformers/transformers_triage.py \
     "${RESULT_ROOT}-results.json" \
     --out "${RESULT_ROOT}-classified.json"
 
 # 3. Verify candidate failures serially in fresh subprocesses.
-python scripts/transformers_verify.py \
+python scripts/transformers/transformers_verify.py \
     "${RESULT_ROOT}-classified.json" \
     --out "${RESULT_ROOT}-verified.json" \
     --test-source-dir /root/.cache/torch_fl/hf-tests \
@@ -69,14 +69,14 @@ python scripts/transformers_verify.py \
     --workers 1
 
 # 4. Check exact fingerprints and semantic duplicate candidates.
-python scripts/transformers_deduplicate.py \
+python scripts/transformers/transformers_deduplicate.py \
     "${RESULT_ROOT}-verified.json" \
     --out "${RESULT_ROOT}-new.json" \
     --coverage-file docs/reference/hf-coverage.md \
     --repo flagos-ai/Torch-FL
 
 # 5. Generate incomplete drafts for human review.
-python scripts/transformers_preview_issues.py \
+python scripts/transformers/transformers_preview_issues.py \
     "${RESULT_ROOT}-new.json" \
     --chip "${CHIP}" \
     --transformers-version "${TRANSFORMERS_VERSION}" \
@@ -93,7 +93,7 @@ After the user explicitly approves named fingerprints, file only that approved
 set:
 
 ```bash
-python scripts/transformers_file_issues.py \
+python scripts/transformers/transformers_file_issues.py \
     "${RESULT_ROOT}-new.json" \
     --issue-bodies-dir "${RESULT_ROOT}-issues" \
     --approve <fingerprint> [<fingerprint> ...] \
@@ -255,7 +255,7 @@ Complete the draft and obtain explicit fingerprint-level authorization before
 retrying. A dry run still requires an approved fingerprint:
 
 ```bash
-python scripts/transformers_file_issues.py \
+python scripts/transformers/transformers_file_issues.py \
     /tmp/qwen3-new.json \
     --issue-bodies-dir /tmp/qwen3-issues \
     --approve <fingerprint> \

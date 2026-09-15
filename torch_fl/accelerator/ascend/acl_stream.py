@@ -313,7 +313,7 @@ def current_acl_raw_stream(device=None) -> int:
     it must be the *same* stream torch_fl's aclnn ops run on: torch_fl creates
     its own stream, and a kernel launched on rt stream 0 has no ordering against
     the ops producing its inputs (see the nan-loss regression documented in
-    scripts/patch_triton_ascend.py).
+    scripts/vendor/patch_triton_ascend.py).
 
     Kept separate from `current_acl_stream` because callers on the launch path
     only need the integer and must not pay for an AclStream wrapper per kernel.

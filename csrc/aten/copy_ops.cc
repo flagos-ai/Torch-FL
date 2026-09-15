@@ -13,7 +13,10 @@
 #include <ATen/ops/_to_copy.h>
 #include <ATen/ops/_to_copy_ops.h>
 #include <ATen/ops/copy_native.h>
+#include <c10/core/DeviceGuard.h>
 #include <flagos.h>
+
+#include <optional>
 #include "device_boxing.h"
 // Included unconditionally: the #else branches below cover TsingMicro, GCU and
 // MUSA-without-mudnn as well as Ascend, and this header supplies inline no-op
@@ -22,6 +25,8 @@
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
+#elif defined(USE_MUSA)
+#include "runtime/accelerator/musa/musa_stream.h"
 #endif
 
 // On the CUDA-family backends (including MetaX boxing) the flagos device shares
@@ -33,7 +38,7 @@
 // symbols the shim never declares (`'hipStreamCaptureStatus' was not declared`),
 // and c10::cuda::getCurrentCUDAStream would not link there anyway -- DTK exports
 // c10::hip with zero c10::cuda symbols. DCU still shares the vendor's streams,
-// so it needs *some* barrier; see SyncCurrentStreamBeforeBlockingCopy below.
+// so it needs *some* barrier; see BlockingCopyGuard below.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU)
 #define FLAGOS_COPY_HAS_CUDA_STREAM 1
@@ -44,31 +49,153 @@ namespace at::native::flagos {
 
 namespace {
 
-// `Memcpy` is the *synchronous* cudaMemcpy, which only orders against the
-// legacy default stream. PyTorch creates its side streams with
-// cudaStreamNonBlocking, so work enqueued on one is NOT awaited by a plain
-// cudaMemcpy: the copy can read a buffer before the kernel producing it has
-// run. That is a silent wrong-data bug, not a crash -- FSDP2 CPU offload hit it
-// because its gradient D2H happens inside the reduce-scatter stream, and the
-// gradient reached the CPU as zeros (or as a previous tensor's contents).
+// Every `Memcpy` in this file is the *synchronous* one, and a synchronous
+// memcpy is a blocking call with two preconditions, both about which device is
+// current when it is issued.
 //
-// Synchronizing the current stream before a blocking copy restores the
-// semantics callers expect from a synchronous memcpy. It is a no-op on the
-// default stream (already ordered), so the common path is unaffected.
-inline void SyncCurrentStreamBeforeBlockingCopy() {
-#if defined(FLAGOS_COPY_HAS_CUDA_STREAM)
-  auto stream = c10::cuda::getCurrentCUDAStream();
-  if (stream.stream() != nullptr) {
-    stream.synchronize();
+// 1. The device the copy touches has to *be* the current one. A blocking
+//    memcpy orders against the device selected at issue time, not against the
+//    device that owns the buffer. MUSA makes the consequence blunt: reading
+//    back a tensor on flagos:1 while flagos:0 was current returned the
+//    buffer's *pre-kernel* contents -- 18 of 20 host reads of an addmm output
+//    came back as the zeros the output was allocated with, and 18 of 20 became
+//    0 of 20 once the read bound flagos:1 first (issue #281). Model-parallel
+//    workloads hit this constantly rather than rarely: with
+//    device_map="auto" the ambient device is whichever one ran last, which is
+//    usually not the one holding the tensor being read back.
+//
+// 2. That device's queue has to be drained. `Memcpy` only orders against the
+//    legacy default stream, and PyTorch creates its side streams with
+//    cudaStreamNonBlocking, so work enqueued on one is NOT awaited by a plain
+//    cudaMemcpy: the copy can read a buffer before the kernel producing it has
+//    run. That is a silent wrong-data bug, not a crash -- FSDP2 CPU offload hit
+//    it because its gradient D2H happens inside the reduce-scatter stream, and
+//    the gradient reached the CPU as zeros (or as a previous tensor's
+//    contents).
+//
+// Doing 1 first is also what makes 2 target the right queue: the CUDA-family
+// stream lookup below resolves against whatever device is current, so draining
+// without the guard drains the ambient device rather than the tensor's.
+//
+// Both are no-ops on the common path -- the inner device guard is only emplaced
+// for a tensor that really lives elsewhere, and a drain of the default stream is
+// already ordered -- so single-device callers pay a GetDevice and the stream
+// probe this file already paid.
+class BlockingCopyGuard {
+ public:
+  // `on_device` is the accelerator-side operand the copy touches: the source
+  // for a D2H or D2D copy (the buffer being read), the destination for an H2D
+  // one. It must outlive the guard, which is to say the whole copy.
+  explicit BlockingCopyGuard(const at::Tensor& on_device) {
+    const auto device = on_device.device();
+    if (device.is_privateuseone() && device.has_index()) {
+      int current = -1;
+      if (::GetDevice(&current) == Success && current != device.index()) {
+        // Constructing a c10::DeviceGuard unconditionally costs ~2.8us/call,
+        // since its ctor and dtor both route through the guard registry
+        // (empty.cc measures the same trade-off); skipping it when the device
+        // already matches removes that from the single-device path.
+        guard_.emplace(device);
+      }
+    }
+    DrainCurrentQueue();
   }
+
+  BlockingCopyGuard(const BlockingCopyGuard&) = delete;
+  BlockingCopyGuard& operator=(const BlockingCopyGuard&) = delete;
+
+ private:
+  void DrainCurrentQueue() {
+#if defined(FLAGOS_COPY_HAS_CUDA_STREAM)
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    if (stream.stream() != nullptr) {
+      stream.synchronize();
+    }
 #elif defined(USE_DCU)
-  // DCU shares the vendor's streams, so it needs this barrier just as much as
-  // the other CUDA-family backends -- but it cannot ask which stream is current
-  // (no c10::cuda symbols in a hipified wheel; see the guard above). Fall back to
-  // a device-wide sync: a superset of the per-stream wait, so still correct,
-  // just coarser. Only reached on the blocking-copy paths.
+    // DCU shares the vendor's streams, so it needs this barrier just as much as
+    // the other CUDA-family backends -- but it cannot ask which stream is
+    // current (no c10::cuda symbols in a hipified wheel; see the guard above).
+    // Fall back to a device-wide sync: a superset of the per-stream wait, so
+    // still correct, just coarser. Only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
+#elif defined(USE_MUSA)
+    // No c10::cuda to ask here either, but the shared per-device stream is
+    // reachable directly. Every producer submits to it -- mudnn through
+    // EXEC_MUDNN_CMD, FlagGems and Triton through flagtree_shim -- so draining
+    // it is the barrier the CUDA arm gets from stream.synchronize(). The guard
+    // above is what makes GetDefaultMusaStream() resolve to *this tensor's*
+    // device; it keys off the current device, like the mudnn handle.
+    musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
+#endif
+  }
+
+  std::optional<c10::DeviceGuard> guard_;
+};
+
+// The guard and the copy it protects always travel together: the guard has to
+// be alive while the memcpy is issued, which is one statement's worth of scope.
+// `on_device` is the accelerator-side operand the copy touches -- the source for
+// a D2H or D2D copy, the destination for an H2D one. Callers that hold the raw
+// pointers already, and need the guard to span more than one memcpy, use
+// BlockingCopyGuard directly.
+void BlockingMemcpy(
+    void* dst,
+    const void* src,
+    size_t nbytes,
+    MemcpyKind kind,
+    const at::Tensor& on_device) {
+  BlockingCopyGuard barrier(on_device);
+  Memcpy(dst, src, nbytes, kind);
+}
+
+// A blocking `Memcpy` is blocking only against the device that is current when
+// it is issued: the transfer is submitted to that device's queue, and nothing
+// orders it against the *peer* device's. A same-device copy never notices --
+// BlockingCopyGuard already drained the one queue involved -- but a copy that
+// crosses devices can be read by the destination before it lands.
+//
+// Measured on MTT S5000 / mudnn v3300, on the 13x7 `input_ids != pad` mask cast
+// from flagos:0 to int32 on flagos:1 -- modeling_layers.py:167, the expression
+// that fails test_model_parallelism under device_map="auto": the result came
+// back as uninitialized memory at 1 call in 2000 in one process and 1-2 in
+// 20000 in another, and draining the *default stream* of either device first
+// changed nothing -- only a device-wide sync did, 0 failures in 20000 in every
+// process. So the transfer is not ordered against the destination's default
+// stream either, which is what rules out the per-stream wait BlockingCopyGuard
+// uses everywhere else. The end-to-end measurement agrees: on two builds that
+// differ only in this barrier, Qwen3ModelTest::test_model_parallelism failed 8
+// of 9 fresh processes without it -- 10 to 20 of 26 elements wrong, max|d|
+// 0.20 to 0.46 -- and 0 of 9 with it. Issue #281.
+//
+// Device-wide, therefore, and skipped unless the copy really crosses devices, so
+// the single-device path pays one device comparison and nothing else.
+void SyncPeerCopyVisibility(const at::Tensor& src, const at::Tensor& dst) {
+  if (src.device() == dst.device()) {
+    return;
+  }
+#if defined(USE_MUSA)
+  // The only platform with a measurement of this hazard. The CUDA-family
+  // backends get the same guarantee from cudaMemcpy's own semantics, and a
+  // device-wide sync there would be a real cost on every peer copy.
   ::DeviceSynchronize();
 #endif
+}
+
+// The device-to-device copy whose two ends are both known, which is what makes
+// the peer-visibility sync above possible. It has to be issued inside the
+// guard's scope: BlockingCopyGuard restores the previous device on teardown, so
+// a `BlockingMemcpy` followed by a separate device sync would drain whatever
+// device happened to be ambient before rather than the one that owns the
+// transfer.
+void CrossDeviceMemcpy(
+    void* dst_ptr,
+    const void* src_ptr,
+    size_t nbytes,
+    const at::Tensor& src,
+    const at::Tensor& dst) {
+  BlockingCopyGuard barrier(src);
+  Memcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
+  SyncPeerCopyVisibility(src, dst);
 }
 
 // The maca CUDA copy kernel (reached via DeviceBoxingGuard + at::native::copy_)
@@ -90,8 +217,9 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
 // Copy `src` (a flagos device tensor) into `dst` (a flagos device tensor),
 // casting dtype and honoring both tensors' strides, via a host round-trip.
 // This is the fallback for dtype casts the native CUDA copy kernel cannot do
-// (see cast_needs_cpu_roundtrip). The blocking Memcpys drain the current stream
-// first so a kernel result produced on a side stream is visible.
+// (see cast_needs_cpu_roundtrip). Each blocking Memcpy binds the device of the
+// buffer it touches and drains that device's queue first -- src and dst need not
+// live on the same device, so the guard is per-copy rather than per-function.
 void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   at::Tensor src_contig = src.is_contiguous()
       ? src
@@ -99,10 +227,13 @@ void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   size_t nbytes = src_contig.numel() * src_contig.element_size();
   at::Tensor cpu_src =
       at::empty(src_contig.sizes(), src_contig.options().device(at::kCPU));
-  SyncCurrentStreamBeforeBlockingCopy();
   if (nbytes > 0) {
-    Memcpy(
-        cpu_src.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+    BlockingMemcpy(
+        cpu_src.data_ptr(),
+        src_contig.data_ptr(),
+        nbytes,
+        MemcpyDeviceToHost,
+        src_contig);
   }
 
   // Map dst's whole storage (not just its view) into CPU byte memory so a
@@ -117,11 +248,12 @@ void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   char* dst_storage_base =
       static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
   if (dst_storage_nbytes > 0) {
-    Memcpy(
+    BlockingMemcpy(
         cpu_dst_storage.data_ptr(),
         dst_storage_base,
         dst_storage_nbytes,
-        MemcpyDeviceToHost);
+        MemcpyDeviceToHost,
+        dst);
   }
 
   at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
@@ -133,11 +265,12 @@ void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   at::native::copy_(cpu_dst, cpu_src, false);
 
   if (dst_storage_nbytes > 0) {
-    Memcpy(
+    BlockingMemcpy(
         dst_storage_base,
         cpu_dst_storage.data_ptr(),
         dst_storage_nbytes,
-        MemcpyHostToDevice);
+        MemcpyHostToDevice,
+        dst);
   }
 }
 
@@ -199,10 +332,12 @@ at::Tensor _copy_from(
         self.sizes().equals(dst.sizes()) &&
         self.scalar_type() == dst.scalar_type()) {
       // Fast path: both contiguous, same shape and dtype → direct memcpy.
+      // Both operands are flagos tensors but not necessarily on the same one, so
+      // this goes through the peer-aware form.
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0) {
-        SyncCurrentStreamBeforeBlockingCopy();
-        Memcpy(dst.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice);
+        CrossDeviceMemcpy(
+            dst.data_ptr(), self.data_ptr(), nbytes, self, dst);
       }
     } else {
 #if defined(FLAGOS_MUSA_KERNEL)
@@ -236,11 +371,12 @@ at::Tensor _copy_from(
         at::Tensor cpu_src =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
         if (nbytes > 0) {
-          Memcpy(
+          BlockingMemcpy(
               cpu_src.data_ptr(),
               self_contig.data_ptr(),
               nbytes,
-              MemcpyDeviceToHost);
+              MemcpyDeviceToHost,
+              self_contig);
         }
         size_t dst_storage_nbytes = dst.storage().nbytes();
         at::Tensor cpu_dst_storage = at::empty(
@@ -251,11 +387,12 @@ at::Tensor _copy_from(
         char* dst_storage_base =
             static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
         if (dst_storage_nbytes > 0) {
-          Memcpy(
+          BlockingMemcpy(
               cpu_dst_storage.data_ptr(),
               dst_storage_base,
               dst_storage_nbytes,
-              MemcpyDeviceToHost);
+              MemcpyDeviceToHost,
+              dst);
         }
 
         at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
@@ -266,11 +403,12 @@ at::Tensor _copy_from(
             dst.strides());
         at::native::copy_(cpu_dst, cpu_src, false);
         if (dst_storage_nbytes > 0) {
-          Memcpy(
+          BlockingMemcpy(
               dst_storage_base,
               cpu_dst_storage.data_ptr(),
               dst_storage_nbytes,
-              MemcpyHostToDevice);
+              MemcpyHostToDevice,
+              dst);
         }
       }
 #endif
@@ -292,7 +430,13 @@ at::Tensor _copy_from(
   // produced by kernels on a non-default stream (and `contiguous()` above may
   // itself have just enqueued one there), which a synchronous cudaMemcpy does
   // not wait for. Drain the current stream first.
-  SyncCurrentStreamBeforeBlockingCopy();
+  //
+  // The guard binds the accelerator-side operand whichever side it is on -- the
+  // source when the source is the flagos tensor, the destination otherwise --
+  // because exactly one of the four branches below has a flagos source. On a
+  // CUDA-platform backend a flagos tensor's index is the CUDA index of the same
+  // physical device, so a "CUDA" destination binds correctly too.
+  BlockingCopyGuard barrier(self_contig.is_privateuseone() ? self_contig : dst);
 
   if (self.is_cpu() && dst.is_privateuseone()) {
     if (dst.is_contiguous()) {
@@ -364,12 +508,15 @@ at::Scalar _local_scalar_dense(const at::Tensor& self) {
   at::Tensor cpu_tensor = at::empty({1}, self.options().device(at::kCPU));
   // `.item()` on a value just computed on a side stream must see that kernel's
   // result, and a blocking cudaMemcpy does not wait for a non-blocking stream.
-  SyncCurrentStreamBeforeBlockingCopy();
-  Memcpy(
+  // It also has to be issued while *self's* device is current -- `.item()` is the
+  // most common host read in a model (loss printing, `if loss > x`, schedulers)
+  // and is usually called on a tensor whose device is not the ambient one.
+  BlockingMemcpy(
       cpu_tensor.data_ptr(),
       self.data_ptr(),
       self.element_size(),
-      MemcpyDeviceToHost);
+      MemcpyDeviceToHost,
+      self);
   return cpu_tensor.item();
 }
 
@@ -453,8 +600,12 @@ at::Tensor _to_copy(
         self_contig.options().device(c10::Device(c10::kCUDA, device_index)));
     size_t nbytes = self_contig.numel() * self_contig.element_size();
     if (nbytes > 0) {
-      SyncCurrentStreamBeforeBlockingCopy();
-      Memcpy(temp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      BlockingMemcpy(
+          temp.data_ptr(),
+          self_contig.data_ptr(),
+          nbytes,
+          MemcpyDeviceToDevice,
+          self_contig);
     }
     result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
 #else
@@ -503,11 +654,12 @@ at::Tensor _to_copy(
         at::Tensor cpu_tensor =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
         if (nbytes > 0) {
-          Memcpy(
+          BlockingMemcpy(
               cpu_tensor.data_ptr(),
               self_contig.data_ptr(),
               nbytes,
-              MemcpyDeviceToHost);
+              MemcpyDeviceToHost,
+              self_contig);
         }
         cpu_tensor = cpu_tensor.to(dtype);
         result = at::empty(
@@ -515,11 +667,12 @@ at::Tensor _to_copy(
             cpu_tensor.options().device(c10::Device(c10::kPrivateUse1, device_index)));
         size_t result_nbytes = cpu_tensor.numel() * cpu_tensor.element_size();
         if (result_nbytes > 0) {
-          Memcpy(
+          BlockingMemcpy(
               result.data_ptr(),
               cpu_tensor.data_ptr(),
               result_nbytes,
-              MemcpyHostToDevice);
+              MemcpyHostToDevice,
+              result);
         }
       }
 #else
@@ -550,12 +703,10 @@ at::Tensor _to_copy(
           self_contig.options().device(c10::Device(c10::kPrivateUse1, device_index)));
       size_t nbytes = self_contig.numel() * self_contig.element_size();
       if (nbytes > 0) {
-        SyncCurrentStreamBeforeBlockingCopy();
-        Memcpy(
-            result.data_ptr(),
-            self_contig.data_ptr(),
-            nbytes,
-            MemcpyDeviceToDevice);
+        // `device` may name a different flagos device than self's, which is the
+        // cross-device case `device_map="auto"` hits on every forward.
+        CrossDeviceMemcpy(
+            result.data_ptr(), self_contig.data_ptr(), nbytes, self_contig, result);
       }
     }
   } else if (src_is_flagos && dst_is_cpu) {
@@ -564,8 +715,12 @@ at::Tensor _to_copy(
         at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
     size_t nbytes = self_contig.numel() * self_contig.element_size();
     if (nbytes > 0) {
-      SyncCurrentStreamBeforeBlockingCopy();
-      Memcpy(temp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      BlockingMemcpy(
+          temp.data_ptr(),
+          self_contig.data_ptr(),
+          nbytes,
+          MemcpyDeviceToHost,
+          self_contig);
     }
     result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
   } else if (!src_is_flagos && dst_is_flagos) {
@@ -579,7 +734,7 @@ at::Tensor _to_copy(
         src_contig.options().device(c10::Device(c10::kPrivateUse1, device_index)));
     size_t nbytes = src_contig.numel() * src_contig.element_size();
     if (nbytes > 0) {
-      SyncCurrentStreamBeforeBlockingCopy();
+      BlockingCopyGuard barrier(result);
       if (self.is_cpu()) {
         Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyHostToDevice);
       } else if (self.is_cuda()) {
@@ -597,7 +752,12 @@ at::Tensor _to_copy(
           cpu_tensor.options().device(c10::Device(c10::kPrivateUse1, device_index)));
       size_t nbytes = cpu_tensor.numel() * cpu_tensor.element_size();
       if (nbytes > 0) {
-        Memcpy(result.data_ptr(), cpu_tensor.data_ptr(), nbytes, MemcpyHostToDevice);
+        BlockingMemcpy(
+            result.data_ptr(),
+            cpu_tensor.data_ptr(),
+            nbytes,
+            MemcpyHostToDevice,
+            result);
       }
     } else {
       result = cpu_tensor.to(device);

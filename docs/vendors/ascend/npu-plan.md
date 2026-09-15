@@ -24,7 +24,7 @@
 
 ## 1. Why aclnn codegen
 
-On the CUDA side, `scripts/codegen_ops.py` generates 3429 boxing fallbacks
+On the CUDA side, `scripts/codegen/codegen_ops.py` generates 3429 boxing fallbacks
 (`cuda_kernels.cc`) from `native_functions.yaml`: rewrite a flagos tensor's metadata, then
 forward to `at::xxx` (the native CUDA kernel).
 
@@ -56,7 +56,7 @@ bulk from an `aten→aclnn` mapping table plus per-category templates.
 | Internal dispatcher | `csrc/aten/dispatcher.h` (`REGISTER_IMPL_TO_DISPATCHER(..., Backend::kAscend, ...)`) | ✅ usable |
 | Hand-written operators | `backends/ascend/*.cc` (33: mm/bmm/add/mul/cat/embedding/softmax/sum/nll_loss/index/…) | ⚠️ dangling headers; needs fixing |
 | Backend selection config | `torch_fl/configs/backends_ascend.conf` (per-op `flaggems\|ascend`) | ✅ usable |
-| codegen framework | `scripts/codegen_ops.py` + `generated/name_map.json` (authoritative symbol naming) | ✅ skeleton is reusable |
+| codegen framework | `scripts/codegen/codegen_ops.py` + `generated/name_map.json` (authoritative symbol naming) | ✅ skeleton is reusable |
 | Runtime (stream/allocator/device) | `csrc/runtime/accelerator/ascend/` | ✅ exists |
 
 ## 3. Approach (layered; backend chosen per op via the conf)

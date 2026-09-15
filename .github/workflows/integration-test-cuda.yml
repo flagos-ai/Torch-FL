@@ -45,7 +45,7 @@ jobs:
       - torch-fl-nv
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
     container:
-      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:8f6aec7fbd4b56c8d925169029462a09a0a58758fde0576b1509b2eed7627e25
+      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:eea3302ee25e0e3390aef4aa1a603dfe03aa93ab043f1571cb86f7a2a3026e02
       volumes:
         - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
       options: >-
