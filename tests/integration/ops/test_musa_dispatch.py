@@ -454,6 +454,78 @@ def _run_cross_device_probe(body: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
 
 
+# The expression transformers actually reaches (modeling_layers.py:167):
+# `input_ids` and `logits` land on different devices under device_map="auto",
+# and the bool pad mask is cast to int32 across them. Crossing devices *and*
+# changing dtype is the mudnn path in StageSourceOnDstDevice.
+_ORDERING_STEP = f"((x > 0).to('{DEVICE_B}', torch.int32))"
+_ORDERING_REF = "(x_cpu > 0).to(torch.int32)"
+
+# Iterations for the ordering probe, and the tensor size they run at.
+#
+# The hazard is a race, not a deterministic wrong answer, so a single execution
+# of the copy -- what test_cross_device_copy does -- mostly passes on an unfixed
+# build. Measured on MTT S5000 at 4 Mi elements, against a control build with
+# only the two peer-device barriers removed and everything else identical: 7
+# mismatches in 800 calls over four runs (3/2/1/1), every run failing; 0 in 600
+# calls over three runs with the barriers in place. That is ~1% per call, so the
+# 200 below fail an unfixed build most of the time but not always: a green run
+# is weak evidence the barrier is present, and that rate is what the guard is
+# worth.
+#
+# The same-dtype cross-device copy (copy_ops.cc, CrossDeviceMemcpy) is
+# measurably rarer -- 2 mismatches in 20000 calls -- so sampling it here would
+# need a run an order of magnitude longer for the same power. It is covered for
+# correctness by test_cross_device_copy above; its race is not gated here.
+_ORDERING_ITERS = 200
+_ORDERING_NUMEL = 1 << 22
+
+
+def _run_ordering_probe(step: str, ref: str, iters: int) -> subprocess.CompletedProcess:
+    """Run `step` `iters` times across devices and report the mismatch count.
+
+    The loop alternates between two sources with different contents. That
+    matters for detection: the caching allocator hands the next copy the block
+    the previous one just filled, so re-running one source would leave
+    stale-but-*correct* results in the recycled block, and a copy that never
+    landed would read them and pass. Alternating means the stale block holds
+    the other source's values, which the comparison catches.
+
+    A mismatch is reported as (iteration, first differing index, got, want);
+    the first six elements are the same in the observed failures, so the index
+    is what identifies one.
+    """
+    code = f"""
+import torch, torch_fl
+
+srcs = [
+    torch.arange({_ORDERING_NUMEL}, dtype=torch.int64, device='{DEVICE}'),
+    torch.arange({_ORDERING_NUMEL}, dtype=torch.int64, device='{DEVICE}') + 1,
+]
+refs = []
+for x in srcs:
+    x_cpu = x.cpu()
+    refs.append({ref})
+
+bad = 0
+first = None
+for i in range({iters}):
+    x = srcs[i % 2]
+    r = {step}
+    want = refs[i % 2]
+    got = r.cpu()
+    try:
+        torch.testing.assert_close(got, want)
+    except AssertionError:
+        bad += 1
+        if first is None:
+            j = int((got != want).nonzero()[0])
+            first = (i, j, got.flatten()[j].item(), want.flatten()[j].item())
+print('ORDERING', bad, {iters}, first)
+"""
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+
 class TestMusaCrossDeviceCopy:
     """Copying between two MUSA devices must not poison the device context.
 
@@ -470,6 +542,13 @@ class TestMusaCrossDeviceCopy:
     raised assertion: run in-process on an unfixed build, the first case would
     poison the context and the *following* tests in this file would be the ones
     reporting failures.
+
+    The cases above assert the answer once, which is the right shape for a
+    deterministic wrong answer. A cross-device copy has a second, separate
+    hazard that is not deterministic -- it is ordered only against the queue of
+    the device it is issued on, so the destination can be read before the
+    transfer lands (issue #281) -- and that one is covered by the repeating
+    probe below.
     """
 
     @pytest.mark.musa
@@ -502,6 +581,27 @@ class TestMusaCrossDeviceCopy:
         )
         assert result.returncode == 0, result.stderr
         assert "[flagos-musa]" not in result.stderr, result.stderr
+
+    @pytest.mark.musa
+    def test_cross_device_copy_lands_before_it_is_read(self):
+        """A copy across devices must be visible to the receiving device.
+
+        A blocking musaMemcpy is ordered only against the device that is
+        current when it is issued; the receiving device's queue is not ordered
+        against it, so a consumer there can read the destination before the
+        transfer lands. Draining either device's *default stream* does not
+        close it -- only a device-wide sync of the issuing device does.
+
+        Probabilistic by construction: this is a sampled guard, not a proof.
+        See _ORDERING_ITERS for what it is worth on an unfixed build.
+        """
+        _require_second_device()
+        result = _run_ordering_probe(_ORDERING_STEP, _ORDERING_REF, _ORDERING_ITERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"ORDERING 0 {_ORDERING_ITERS} " in result.stdout, (
+            "a copy that crossed devices was read before it landed:\n"
+            f"{result.stdout}{result.stderr}"
+        )
 
 
 class TestMusaConvolution:

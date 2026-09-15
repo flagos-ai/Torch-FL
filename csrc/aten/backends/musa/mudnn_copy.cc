@@ -53,9 +53,10 @@ at::Tensor StageSourceOnDstDevice(const at::Tensor& src, const at::Tensor& dst) 
     // it is issued, and every producer on src's device -- mudnn, FlagGems,
     // Triton -- writes to that device's default stream. Drain that queue before
     // reading through it. (copy_ops.cc has the same barrier in
-    // SyncCurrentStreamBeforeBlockingCopy, but it compiles out on MUSA: the
+    // BlockingCopyGuard, but its CUDA arm compiles out on MUSA: the
     // FLAGOS_COPY_HAS_CUDA_STREAM guard excludes USE_MUSA, since there is no
-    // c10::cuda here to ask for the current stream.)
+    // c10::cuda here to ask for the current stream. Its MUSA arm drains
+    // GetDefaultMusaStream(), which is what this line does.)
     MusaDeviceGuard src_guard(src);
     musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
     musaMemcpy(
@@ -63,6 +64,19 @@ at::Tensor StageSourceOnDstDevice(const at::Tensor& src, const at::Tensor& dst) 
         src_contig.const_data_ptr(),
         nbytes,
         musaMemcpyDeviceToDevice);
+
+    // ... and the drain above is not enough to make the transfer *visible* to
+    // dst. The copy is submitted to src's queue, and the mudnn CAST that
+    // EXEC_MUDNN_CMD runs next argues against dst's queue, which is not ordered
+    // against src's. Measured on MTT S5000: the 13x7 bool -> int32 mask cast
+    // this function serves returned uninitialized memory at 1 call in 2000 in
+    // one process and 1-2 in 20000 in another, and draining either device's
+    // default stream -- including the two this function and EXEC_MUDNN_CMD
+    // already perform -- did not remove it; a device-wide sync of the issuing
+    // device did, 0 in 20000. Same hazard and same barrier as
+    // SyncPeerCopyVisibility in copy_ops.cc, which is where the same-dtype half
+    // of this copy is handled. Issue #281.
+    musaDeviceSynchronize();
   }
   return staged;
 }
