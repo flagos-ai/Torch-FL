@@ -19,7 +19,9 @@ FlagTree is a Triton fork that substitutes itself for Triton *at install time*:
 its wheel is named ``flagtree``, but the module it installs is ``triton``, and
 installing it uninstalls the official ``triton``. So inductor's own
 ``import triton`` already resolves to FlagTree once it is installed, and nothing
-here needs to patch ``sys.modules`` -- there is no ``flagtree`` module to import.
+here needs to patch ``sys.modules``. Newer wheels also ship a ``flagtree``
+package, but it is the FlagPrism debugger/profiler host rather than the
+compiler, so importing it is never how you reach FlagTree.
 
 Most of this module therefore only *reports* which Triton is active, so that
 FLAGOS_USE_FLAGTREE=1 can assert FlagTree is really in use instead of silently
@@ -114,8 +116,9 @@ def require_flagtree() -> None:
         "not FlagTree. FlagTree replaces triton at install time; it is not "
         "something this process can switch on. Build it from source "
         "(https://github.com/flagos-ai/FlagTree) -- there is no 'flagtree' "
-        "package on PyPI, and 'import flagtree' never works because the module "
-        "it installs is named 'triton'. Unset FLAGOS_USE_FLAGTREE to compile "
+        "package on PyPI, and 'import flagtree' reaches the FlagPrism debugger/"
+        "profiler namespace, not the compiler -- the compiler it installs is "
+        "named 'triton'. Unset FLAGOS_USE_FLAGTREE to compile "
         "with stock Triton instead."
     )
 

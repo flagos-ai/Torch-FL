@@ -749,15 +749,40 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     assert patches["compile_threads"] == 4
 
 
-def test_flagtree_is_never_importable_as_flagtree():
-    """Guard the packaging trap: the wheel is 'flagtree', the module is 'triton'.
+def test_flagtree_compiler_is_reached_through_triton():
+    """Guard the packaging trap: the compiler is imported as `triton`.
 
-    A future contributor reaching for `import flagtree` would write code that can
-    only ever raise, which is exactly the bug this test pins down.
+    FlagTree is distributed under the name `flagtree` but installs its *compiler*
+    as `triton`, uninstalling the official Triton to take its place. That is why
+    inductor's own `import triton` already resolves to FlagTree and why nothing
+    here patches `sys.modules`. A contributor reaching for `import flagtree` to
+    reach the compiler is the mistake this test pins down.
+
+    The trap used to be loud: the wheel shipped no `flagtree` package, so the
+    import raised. From 0.6.2a2 it ships one -- the FlagPrism debugger/profiler
+    host -- and the import now *succeeds*, returning something that is not the
+    compiler. Assert on what `flagtree` is, not on whether it imports: it is a
+    satellite of `triton`, not a second copy of it.
     """
-    import importlib.util
+    if not HAS_TRITON:
+        pytest.skip("no Triton in this environment, so there is no trap to guard")
 
-    assert importlib.util.find_spec("flagtree") is None
+    if importlib.util.find_spec("flagtree") is None:
+        # Pre-0.6.2 wheels ship no `flagtree` package at all.
+        return
+
+    import flagtree
+    import triton
+
+    # The compiler entry points are `triton`'s, and `flagtree` does not shadow
+    # them. `flagtree.language` borrows from `triton.language.core` rather than
+    # providing a frontend of its own.
+    assert flagtree is not triton
+    for entry_point in ("jit", "compile"):
+        assert not hasattr(flagtree, entry_point), (
+            f"flagtree now exposes '{entry_point}'; the compiler module is still "
+            f"triton, so this guard needs revisiting rather than relaxing"
+        )
 
 
 @pytest.mark.skipif(
