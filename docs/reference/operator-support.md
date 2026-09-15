@@ -553,25 +553,36 @@ indices in the synthesizer's index tensor, not a routing difference. No failure
 in the table above is introduced by the FlagGems-first routing: the same set
 fails on the CUDA boxing route under the same environment.
 
-**FlagTree in CI.** The CUDA manifest's FlagTree steps (the `Check FlagTree and
-FlagGems` gate and the `FLAGOS_USE_FLAGTREE=1` torch.compile run) cannot execute
-on the pinned CI image. That image is Ubuntu 22.04, glibc 2.35. Every published
-FlagTree NVIDIA wheel binds the C23 `strtol` family at `GLIBC_2.38` — `__isoc23_strtol`
-in 0.5.0/0.5.1, `__isoc23_strtol`/`__isoc23_strtoll`/`__isoc23_strtoull` from
-0.6.0 through 0.6.2a2 — so the wheel installs and then `import triton` fails on a
-missing symbol. `LD_PRELOAD` cannot substitute for it: `DT_VERNEED` is resolved
-against the named file `libc.so.6`, so a shim under another soname is never
-consulted. The A100 numbers above were therefore measured on a local Ubuntu 24.04
-host (glibc 2.39), which satisfies the requirement the manifest checks.
-`.github/scripts/set_env_cuda.sh` now compares the image glibc against
-`TORCH_FL_FLAGTREE_MIN_GLIBC` (default `2.38`) before installing FlagTree, so the
-job fails naming the image requirement instead of reporting a Triton symbol
-error. Closing this needs a rebuilt CUDA CI image on Ubuntu 24.04 that keeps the
-same `/opt/venv` payload; `.github/configs/cuda.yml` and
-`.github/workflows/integration-test-cuda.yml` carry the digest and have to change
-together. The MetaX, PPU, DCU, Ascend and GCU rows are **not revalidated** by
-this change: their configurations are untouched and their numbers still describe
-the baseline cohort.
+**FlagTree in CI.** The CUDA manifest installs the FlagTree Triton provider and
+the FlagGems overloads in the job, on top of a pinned image. A FlagTree wheel is
+a source-free build that links its bundled `libtriton.so` against the glibc
+symbol versions of the distribution it was built on, which puts a floor under the
+userland the job can run in: every published NVIDIA wheel binds the C23 `strtol`
+family at `GLIBC_2.38` — `__isoc23_strtol` in 0.5.0/0.5.1,
+`__isoc23_strtol`/`__isoc23_strtoll`/`__isoc23_strtoull` from 0.6.0 through
+0.6.2a2 — so on an older userland the wheel installs and then `import triton`
+fails on a missing symbol. `LD_PRELOAD` cannot substitute for it: `DT_VERNEED` is
+resolved against the named file `libc.so.6`, so a shim under another soname is
+never consulted.
+
+The CUDA CI image carried by both entry points is now Ubuntu 24.04 (glibc 2.39),
+so the image satisfies that floor and the manifest's FlagTree steps — the
+`Check FlagTree and FlagGems` gate and the `FLAGOS_USE_FLAGTREE=1` torch.compile
+run — can execute there. The A100 numbers above were measured on a local Ubuntu
+24.04 host (glibc 2.39), so this cohort and the CI image now share a userland.
+`.github/scripts/set_env_cuda.sh` compares the image glibc against
+`TORCH_FL_FLAGTREE_MIN_GLIBC` (default `2.38`) before installing FlagTree, so a
+future rebuild on an older userland fails naming the image requirement instead of
+reporting a Triton symbol error.
+
+`set_env_cuda.sh` takes the accelerator PyTorch, and the FlagGems C++ operators
+that go with it, from the interpreter the image already ships
+(`TORCH_FL_CUDA_VENDOR_MODE=auto` resolves to the image when it imports a CUDA
+`torch`), and falls back to `bootstrap` — installing the cu130 build into a
+job-local interpreter and compiling the operators there — for an image that
+carries neither. The MetaX, PPU, DCU, Ascend and GCU rows are **not revalidated**
+by this change: their configurations are untouched and their numbers still
+describe the baseline cohort.
 
 ### MUSA FlagGems routing restored, in-place arithmetic routed back to mudnn (2026-09-14)
 
