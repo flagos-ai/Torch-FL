@@ -47,7 +47,6 @@ jobs:
     container:
       image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
       volumes:
-        - /workspace/FlagGems:/workspace/FlagGems:ro
         - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
       options: >-
         --shm-size=4g
