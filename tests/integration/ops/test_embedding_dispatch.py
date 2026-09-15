@@ -33,7 +33,7 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -160,6 +160,14 @@ class TestEmbeddingDispatchLog:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for embedding.
+
+        Skipped where the conf routes embedding to ``none``: the op is then not
+        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
+        the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("embedding") is None:
+            pytest.skip("embedding is routed to 'none' on this platform")
         result = _run_embedding_subprocess(
             {
                 "FLAGOS_LOG_DISPATCH": "1",
@@ -174,15 +182,20 @@ class TestEmbeddingDispatchLog:
     def test_dispatch_log_flaggems_runtime(self):
         """Embedding dispatches to the backend this platform's conf routes it to.
 
-        FlagGems-first is the generated default, but it is not unconditional:
-        the CUDA conf returns ``embedding`` to CUDA boxing because the FlagGems
-        route raises ``RuntimeError: Triton Error [CUDA]: context is destroyed``
-        (see measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
-        docs/reference/operator-support.md). Platforms whose conf keeps the
-        FlagGems route still log flagos_python. Asserting the conf's own value
-        keeps this test meaningful on every platform rather than pinning it to
-        the one it was written on.
+        ``FLAGOS_USE_FLAGGEMS`` only asks for the runtime path; the conf decides
+        the route, and FlagGems-first is not unconditional. The CUDA conf
+        returns ``embedding`` to CUDA boxing because the FlagGems route raises
+        ``RuntimeError: Triton Error [CUDA]: context is destroyed`` (see
+        measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
+        docs/reference/operator-support.md), and GCU leaves it to cpu_fallback
+        because the FlagGems embedding kernel cannot compile the int64 index
+        operand GCU300 rejects. Platforms whose conf keeps the FlagGems route
+        still log flagos_python, so asserting the conf's own value keeps this
+        test meaningful on every platform rather than pinning it to the one it
+        was written on.
         """
+        if routed_backend_or_none("embedding") != "flagos_python":
+            pytest.skip("embedding does not route through FlagGems on this platform")
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )

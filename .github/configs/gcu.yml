@@ -51,6 +51,11 @@ integration_tests:
 
       import torch
       import torch_fl
+      # torch_fl must precede flag_gems. FlagGems 5.x resolves its vendor from the
+      # torch_fl device surface, so importing it against stock CPU PyTorch raises
+      # "No device were detected on your machine !".
+      import triton
+      import flag_gems
 
       torch_path = Path(torch.__file__).resolve()
       package_root = Path(torch_fl.__file__).resolve().parent
@@ -63,22 +68,42 @@ integration_tests:
       count = torch_fl.flagos.device_count()
       assert count >= 8, f"expected at least 8 GCU devices, got {count}"
 
+      # The FlagGems stack has to be the flagtree build, not a stock triton wheel
+      # left behind by the image: only flagtree carries the enflame backend, and
+      # without it every FlagGems route in backends_gcu.conf fails to compile.
+      assert "enflame" in triton.backends.backends, sorted(triton.backends.backends)
+      assert flag_gems.vendor_name == "enflame", flag_gems.vendor_name
+
       print(f"CPU PyTorch: {torch.__version__}")
       print(f"torch path: {torch_path}")
       print(f"torch_fl path: {torch_fl.__file__}")
       print(f"GCU devices: {count}")
+      print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+      print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
       PY
 
   # Marker selection, not a file allowlist: the earlier nine-file list was a
   # bring-up scaffold, and pinning an allowlist hides every operator added
-  # after it. FlagGems is excluded because it needs the vendor Triton stack,
-  # which this image does not install (the same exclusion CUDA/DCU apply to
-  # their non-FlagGems step).
+  # after it. The FlagGems Python routes are exercised by their own group below,
+  # the same split CUDA/DCU use.
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
       -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
+
+  # The FlagGems runtime path. FLAGOS_USE_FLAGGEMS gates the flaggems-marked
+  # cases in conftest.py; set_env_gcu.sh exports it, and it is repeated here so
+  # the group keeps its meaning if that default is ever flipped back.
+  #
+  # FlagGems is not an opt-in for routing on GCU -- backends_gcu.conf already
+  # routes by default -- so this group is a contract check on the ops that
+  # select a FlagGems route, not a switch that turns FlagGems on.
+  - name: Run operator tests (FlagGems runtime path, main ops)
+    command: >-
+      FLAGOS_USE_FLAGGEMS=1
+      python -m pytest tests/integration/ops/
+      -m "flaggems and main_ops" -v -s --tb=short
 
   # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX. The generator
   # contract, the shared-state round trip, and the integer range semantics are

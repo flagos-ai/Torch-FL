@@ -209,12 +209,17 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         rounding-mode overloads and the base/in-place floor_divide spellings hit
         it, and the Scalar forms decompose onto them, so `a // b`, `a // 2`,
         torch.floor_divide(a, b) and a.div_(b, rounding_mode='floor') all do.
-      - index_add/index_add_: return all zeros instead of accumulating.
-      - randn/randn_like: crash unpacking generator state.
       - sort/sort.stable: flag_gems' radix sort casts its histogram to uint32
         internally and mudnn's CAST has no UInt16/32/64 case, so the cast raises
         before the sort runs. mudnn's own sort is correct here; argsort and
         msort decompose onto sort.
+
+    index_add/index_add_ and randn/randn_like were removed from this set on
+    2026-09-15: re-measured on MTT S5000 against both the current FlagGems and
+    the CI pin, neither recorded signature reproduces, so both pairs route back
+    to flaggems (the index pair was previously `none`, not `musa`). See the set
+    itself in scripts/codegen/gen_vendor_confs.py for the per-op evidence and
+    docs/reference/operator-support.md for the report.
 
     Ops in NATIVE_TRITON_GAPS are NOT registered (to avoid "backend not registered"
     errors when they route to none/musa).
@@ -248,11 +253,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         "div_.Tensor_mode",
         "floor_divide",
         "floor_divide_.Tensor",
-        "index_add",
-        "index_add_",
         "mul_.Tensor",
-        "randn",
-        "randn_like",
         "sort",
         "sort.stable",
         "sub.Tensor",

@@ -32,6 +32,8 @@ import sys
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -99,6 +101,14 @@ class TestWhereDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for where.self.
+
+        Skipped where the conf routes where.self to ``none``: the op is then not
+        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
+        the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("where.self") is None:
+            pytest.skip("where.self is routed to 'none' on this platform")
         result = _run_subprocess(
             {
                 "FLAGOS_LOG_DISPATCH": "1",
@@ -111,7 +121,16 @@ class TestWhereDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, where.self routes to flagos_python."""
+        """With the FlagGems runtime path available, where.self keeps its conf route.
+
+        Skipped where the conf routes where.self away from FlagGems. GCU does:
+        FlagGems' kernel compiles for float32/float16/int32, but an int64
+        operand hits GCU300's "64-bit data type not supported" rejection, so the
+        op stays unregistered and ATen's composite runs on the CPU instead of
+        turning a working cpu_fallback into a hard error.
+        """
+        if routed_backend_or_none("where.self") != "flagos_python":
+            pytest.skip("where.self does not route through FlagGems on this platform")
         result = _run_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )

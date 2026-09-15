@@ -154,14 +154,23 @@ def _wrapper_to_dispatcher() -> dict[str, str]:
     The wrapper name is anchored to ``Wrapper`` because the file's own header
     comment (``// ... m.impl() lines.``) otherwise matches ``(\\w+)\\([^;{]*\\)``
     and consumes the first real wrapper definition along with it.
+
+    The dispatcher call is searched for anywhere in the wrapper body rather than
+    anchored to the first statement. The soft-lowp-gated wrappers (``mm``,
+    ``bmm``, ``addmm`` and their variants) open with an
+    ``#if defined(FLAGOS_SOFT_LOWP)`` prelude that returns through the
+    ``soft_lowp::`` shim before falling through to the dispatcher, so an
+    anchored pattern silently reports those wrappers as unmapped and every op
+    they bridge as an orphan.
     """
-    return dict(
-        re.findall(
-            r"\b(Wrapper\w*)\([^;{]*\)\s*\{\s*(?:return\s+)?"
-            r"(?:at::native::flagos::)?(\w+_dispatcher)\(",
-            _read(_REGISTER_INC),
-        )
-    )
+    out: dict[str, str] = {}
+    for name, body in re.findall(
+        r"\b(Wrapper\w*)\([^;{]*\)\s*\{(.*?)\n\}", _read(_REGISTER_INC), re.S
+    ):
+        call = re.search(r"(?:at::native::flagos::)?(\w+_dispatcher)\(", body)
+        if call:
+            out.setdefault(name, call.group(1))
+    return out
 
 
 def _cc_flagos_python_dispatchers() -> set[str]:

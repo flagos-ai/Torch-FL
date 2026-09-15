@@ -141,15 +141,18 @@ class TestSumDimDispatch:
     def test_dispatch_log_flaggems_runtime(self):
         """sum.dim_IntList dispatches to the backend this platform's conf routes it to.
 
-        FlagGems-first is the generated default, but it is not unconditional:
-        the CUDA conf returns ``sum.dim_IntList`` to CUDA boxing because the
+        FlagGems-first is the generated default, but it is not unconditional.
+        The CUDA conf returns ``sum.dim_IntList`` to CUDA boxing because the
         FlagGems route exceeds the survey's per-op time budget on the ``2d-bool``
         profile while the boxing route returns immediately (see
         measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
-        docs/reference/operator-support.md). Platforms whose conf keeps the
-        FlagGems route still log flagos_python. Asserting the conf's own value
-        keeps this test meaningful on every platform rather than pinning it to
-        the one it was written on.
+        docs/reference/operator-support.md), and GCU routes it to its native
+        ``gcu`` kernel because the FlagGems kernel carries a 64-bit type the
+        GCU300 front end rejects for an int64 operand (see
+        NATIVE_TRITON_GAPS["gcu"]). Platforms whose conf keeps the FlagGems
+        route still log flagos_python, so asserting the conf's own value keeps
+        this test meaningful on every platform rather than pinning it to the one
+        it was written on.
         """
         result = _run_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}

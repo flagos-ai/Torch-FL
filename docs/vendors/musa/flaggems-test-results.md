@@ -69,24 +69,25 @@ cd /publi-flash/lvyufeng/PyTorch-Plugin-FL
 ### MUSA Dispatch Tests
 **File**: `tests/integration/ops/test_musa_dispatch.py`
 
-**Results**: ✅ **104 passed, 1 skipped** (100% pass rate)
+**Results**: ✅ **113 passed** (100% pass rate)
 
 **Command**:
 ```bash
 pytest tests/integration/ops/test_musa_dispatch.py -m musa -v
 ```
 
-**Test Duration**: ~84 seconds
+**Test Duration**: ~185 seconds
 
 **Key Changes**:
 - Updated test expectations to match FlagGems-first routing strategy
-- 464 ops route to `flaggems` (FlagGems Triton kernels)
-- 51 ops route to `musa` (mudnn native kernels): 36 that FlagGems does not
-  cover at all, plus 15 of the 18 `NATIVE_TRITON_GAPS["musa"]` ops that FlagGems
+- 468 ops route to `flaggems` (FlagGems Triton kernels)
+- 49 ops route to `musa` (mudnn native kernels): 36 that FlagGems does not
+  cover at all, plus 13 of the 14 `NATIVE_TRITON_GAPS["musa"]` ops that FlagGems
   cannot execute correctly on this stack
-- The remaining 3 gaps (`_conj`, `index_add`, `index_add_`) route to `none`:
-  mudnn has no kernel for them either, so they reach ATen's CPU fallback
-  instead of a registered-but-wrong dispatcher slot
+- The remaining gap (`_conj`) routes to `none`: it is a contract entry — ATen's
+  `conj` is a lazy view that must set the Conjugate bit, FlagGems materializes it,
+  and mudnn has no Conjugate-bit path either, so leaving the op unregistered and
+  letting ATen's composite implement it is the correct route
 
 **Routing Expectations**:
 | Operator | Expected Backend | Reason |
@@ -235,14 +236,21 @@ kernels:
 - **Resolution**: those ops are listed in `NATIVE_TRITON_GAPS["musa"]` and route
   to the mudnn native kernel. FlagGems is not patched.
 
-### FlagGems random number generation
+### FlagGems random number generation — resolved
 
-- **Issue**: `philox_backend_seed_offset` function expects 2 values but gets more
-- **Impact**: Direct `flag_gems.enable()` + `torch.randn` on flagos device fails
-- **Workaround**: `randn` and `randn_like` are in `NATIVE_TRITON_GAPS["musa"]`, so
-  torch_fl routes them to the mudnn/muRAND native kernels; the FlagGems-side bug
-  remains open upstream and is not worked around in this repository.
-- **Status**: Bug in FlagGems master with torch 2.10 compatibility
+- **Former issue**: `philox_backend_seed_offset` function expects 2 values but
+  gets more, so direct `flag_gems.enable()` + `torch.randn` on the flagos device
+  crashed. `randn` and `randn_like` were consequently listed in
+  `NATIVE_TRITON_GAPS["musa"]` while the FlagGems-side bug stayed open upstream.
+- **Re-measured 2026-09-15, no longer reproduces**: with FlagGems `4d9c34775` and
+  flagtree `0.6.2a3+mthreads3.6`, `torch.randn` on `flagos:0` is finite,
+  reproducible from `torch.manual_seed`, sensitive to a changed seed over 65536
+  samples, and correct in float32/float16/bfloat16 (`std ≈ 0.97`); `randn_like`
+  inherits shape and dtype. FlagGems now runs off the Philox bridge torch_fl
+  installs for MUSA, which is exactly the generator state the old crash was about.
+- **Status**: both ops were removed from `NATIVE_TRITON_GAPS["musa"]` and route to
+  `flaggems`, with the mudnn/muRAND native kernels retained as the fallback
+  (`flaggems  # musa`).
 
 ### Triton Backend Warning
 ```
@@ -257,6 +265,25 @@ falling back to event timing
 ### Latest commit on this branch
 
 ```
+fix: promote four MUSA FlagGems gap entries back to FlagGems
+```
+
+**Changes**:
+- Re-measured every `NATIVE_TRITON_GAPS["musa"]` entry on its recorded failure
+  signature against the FlagGems revision the MUSA CI job installs (`4d9c34775`)
+  and against the CI pin. Four entries no longer reproduce and leave the set:
+  `index_add` and `index_add_` (recorded as "returns all zeros instead of
+  accumulating") now route to `flaggems` from `none`, and `randn`/`randn_like`
+  (recorded as "crashes unpacking generator state") route to `flaggems` with the
+  mudnn/muRAND kernel retained as a fallback
+- MUSA routing: 468 `flaggems`, 49 `musa`, 1519 `none`
+- The other fourteen entries keep their routes; each was re-probed and reproduces
+  its signature exactly, so the provenance comment in
+  `scripts/codegen/gen_vendor_confs.py` is updated to the current revision
+
+### Previous commit
+
+```
 fix: route MUSA integer division through mudnn and promote true division
 ```
 
@@ -266,9 +293,9 @@ fix: route MUSA integer division through mudnn and promote true division
   handing `int64` to mudnn's `TRUEDIV`, and the four integer floor-division
   overloads route to mudnn instead of the FlagGems kernel that loses its
   trailing store
-- MUSA routing: 464 `flaggems`, 51 `musa`, 1521 `none`
+- MUSA routing at that commit: 464 `flaggems`, 51 `musa`, 1521 `none`
 
-### Previous commit
+### Earlier commit
 
 ```
 test: update MUSA dispatch tests to accept FlagGems routing
@@ -347,20 +374,35 @@ them:
 | # | CI group | Local result |
 |---|---|---|
 | 1 | Isolated MUSA environment preflight | OK — CPU PyTorch 2.10.0+cpu, MUSA devices: 8 |
-| 2 | `test_musa_dispatch.py -m musa` | **104 passed, 1 skipped** (83.01s) |
+| 2 | `test_musa_dispatch.py -m musa` | **113 passed** (185.29s) |
 | 3 | `test_factory_ops.py` | **46 passed** |
-| 4 | `test_amp_contract.py -m amp` | **27 passed** |
-| 5 | `test_math_bits_contract.py -m math_bits` | **12 passed** |
-| 6 | `test_profiler_contract.py -m profiler` | **10 passed, 1 skipped, 1 xpassed** |
-| 7 | `tests/integration/ops/` in a wheel-only workspace | **493 passed, 1 skipped, 513 deselected, 2 xfailed, 1 xpassed** (128.28s) |
+| 4 | `test_amp_contract.py -m amp` | **27 passed** (not re-run for the gap promotion) |
+| 5 | `test_math_bits_contract.py -m math_bits` | **12 passed** (not re-run for the gap promotion) |
+| 6 | `test_profiler_contract.py -m profiler` | **10 passed, 1 skipped, 1 xpassed** (not re-run for the gap promotion) |
+| 7 | `tests/integration/ops/` in a wheel-only workspace | **493 passed, 1 skipped, 521 deselected, 2 xfailed, 1 xpassed** (182.27s), plus the 3 pre-existing failures below |
 | 8 | `test_rng_dispatch.py -m main_ops` | **80 passed, 37 deselected** |
+
+Groups 2, 3, 7 and 8 were re-run for the FlagGems gap promotion; groups 4, 5 and 6
+do not exercise the promoted ops and their numbers are from the integer-division
+change on the same tree.
 
 Group 7's three failures are `test_flaggems_conf_consistency.py`
 (`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
 `test_counts_match`), which report `mm`/`bmm`/`addmm` dispatcher drift in
 `csrc/aten/generated/`. They reproduce byte-identically against the pristine
 `backends_musa.conf` on the same tree, so they are pre-existing and unrelated to
-integer division.
+integer division or to the promoted routes.
+
+Group 8 needs the manifest's own `-k` filter. Without it the suite reports 8
+`TestRngSeedSource` failures on this host, all from the runner's broken muRAND:
+`torch.empty(8).normal_()` raises `murandGenerateNormal failed: LAUNCH_FAILURE`,
+the generator path raises `murand normal stream sync failed`, and `randperm`
+raises err 700 (illegal memory access). The device RNG itself is healthy
+(`torch.randn(1024, device='flagos:0')` has `std ≈ 1.0` on all 8 devices), the
+same 8 failures appear with the previous conf stashed in, and the upstream MUSA CI
+job reports the identical "80 passed, 37 deselected" on the same image. The
+manifest already documents this as a driver/toolkit/image regression rather than a
+`torch_fl` defect.
 
 Group 7 is run with `FLAGOS_USE_FLAGGEMS=1`, matching
 `.github/scripts/set_env_musa.sh`: the group's marker expression does not
@@ -387,11 +429,16 @@ checks is byte-identical to a fresh generation.
   `backends_ascend.conf` and `backends_gcu.conf`; that drift predates this work
   and those platforms are out of scope here.
 
+Order matters between the first and third: `gen_vendor_confs.py` reads the
+on-disk `musa_flaggems_register.inc` to decide which ops the platform registers,
+so `codegen_musa_flaggems.py` must run **before** it. Running them the other way
+round leaves `index_add` and `index_add_` at `none`.
+
 ## Summary
 
 ✅ **Environment configured with flagtree + FlagGems master**  
-✅ **All eight MUSA CI groups pass locally**  
-✅ **FlagGems-first routing validated: 464 routed to FlagGems, 51 to mudnn native, 1521 to `none`**  
+✅ **All eight MUSA CI groups run locally; group 7 carries the three pre-existing `test_flaggems_conf_consistency.py` failures, and group 8 needs the manifest's `-k` filter for the broken-runner muRAND condition**  
+✅ **FlagGems-first routing validated: 468 routed to FlagGems, 49 to mudnn native, 1519 to `none`**  
 ✅ **Every operator FlagGems cannot execute correctly on this stack falls back to mudnn, without patching FlagGems**
 
 The MUSA platform integrates FlagGems as the primary execution backend, with

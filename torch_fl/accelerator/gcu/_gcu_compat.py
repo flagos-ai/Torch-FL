@@ -15,13 +15,21 @@
 """
 FlagGems compatibility layer for Enflame GCU.
 
-FlagGems' Triton kernels reach the GCU through Enflame's ``triton_gcu`` plugin
-(the vendor Triton backend; ``pip install triton-gcu`` from the FlagOS enflame
-index, plus the ``triton-gcu`` deb that installs the ``/opt/triton_gcu``
-compiler toolchain). That plugin was written against Enflame's own ``torch_gcu``
-plugin, which claims PrivateUse1 and names the device ``gcu``. torch_fl claims
-PrivateUse1 first and names it ``flagos``, and a process can rename PrivateUse1
-only once -- so every place triton_gcu says "gcu" has to be redirected here.
+FlagGems' Triton kernels reach the GCU through a vendor Triton backend. Two
+packagings of that backend are supported, and a box has exactly one of them:
+
+* ``triton_gcu`` -- the plugin (``pip install triton-gcu`` from the FlagOS
+  enflame index, plus the ``triton-gcu`` deb that installs the
+  ``/opt/triton_gcu`` compiler toolchain). The backend lives under
+  ``triton_gcu.triton.{backend,driver,toolkit}``.
+* FlagTree (``flagtree==0.6.1+enflame3.6``) -- a Triton fork that installs
+  itself *as* ``triton``, so the backend is ``triton.backends.enflame.*`` and
+  there is no ``triton_gcu`` module at all. This is the packaging CI uses.
+
+Both were written against Enflame's own ``torch_gcu`` plugin, which claims
+PrivateUse1 and names the device ``gcu``. torch_fl claims PrivateUse1 first and
+names it ``flagos``, and a process can rename PrivateUse1 only once -- so every
+place the vendor backend says "gcu" has to be redirected here.
 
 None of this changes what the kernels compute; it only makes the vendor backend
 agree with torch_fl about what the device is called and how to time a kernel.
@@ -195,6 +203,32 @@ def is_triton_gcu_available() -> bool:
     )
 
 
+def is_flagtree_enflame_available() -> bool:
+    """True when the importable ``triton`` is FlagTree with an enflame backend.
+
+    Presence in ``triton.backends.backends`` is the whole precondition: that
+    registry is built from the installed backend packages, so an "enflame" entry
+    means ``triton.backends.enflame.{backend,driver,toolkit}`` are importable.
+    Unlike ``triton_gcu`` there is no second half to check -- the same wheel
+    ships the ``triton-gcu{300,400}-opt`` compiler binaries that the backend
+    shells out to.
+
+    ``is_flagtree_active()`` is not required. Stock Triton would have to grow a
+    vendor enflame backend before this could fire on it, and the name rewrites
+    below are correct for that case too, so gating on the FlagTree marker would
+    only turn a working box into a broken one if the marker check regressed.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("triton") is None:
+        return False
+    try:
+        import triton.backends
+    except ImportError:
+        return False
+    return "enflame" in getattr(triton.backends, "backends", {})
+
+
 class _WallClockEvent:
     """Wall-clock stand-in for a CUDA-style timing Event.
 
@@ -267,6 +301,102 @@ def _patch_vendor_device_name() -> None:
     descriptor._flagos_patched = True
 
 
+def _pin_vendor_driver_to_flagos(flagos, inner_driver_cls, wrapper_driver_cls) -> None:
+    """Make a vendor Triton driver report devices the way torch_fl does.
+
+    Shared by both vendor packagings (``triton_gcu`` and FlagTree's enflame
+    backend); they differ only in which module the two classes live in. The
+    wrapper class is the one that caches itself in a class attribute named
+    ``instance`` and holds the real driver as ``_driver``.
+
+    Three things are wrong once PrivateUse1 is named ``flagos`` rather than
+    ``gcu``, and one is wrong independently of the name:
+
+    1. Both classes define ``get_current_device``, and the wrapper copies the
+       inner one's bound method onto itself in ``__init__``. On flagos that
+       method either returns a ``torch.device("gcu", ...)`` index or -- when the
+       vendor driver took its ``COMPILE_ARCH`` constructor branch -- the literal
+       ``0``. The literal is the dangerous one: a kernel operating on flagos:1
+       would launch against device 0 and read another device's memory, and since
+       a tops pointer only resolves against the current device, in practice it
+       hangs.
+
+    2. ``get_active_torch_device`` builds ``torch.device("gcu", ...)`` directly.
+
+    3. Patching the classes is not enough, and this is the subtle part:
+       ``GCUDriver.__init__`` assigns ``self.get_current_device = lambda ...``
+       as an *instance attribute*, which shadows anything set on the class, and
+       the wrapper's ``__init__`` then copies that attribute onto itself. The
+       wrapper caches only its instance (in ``__new__``), so ``__init__`` -- and
+       with it a fresh inner driver -- re-runs on every ``_GCUDriver()`` call,
+       undoing a class patch. So wrap both constructors and drop the attribute
+       after each one runs.
+
+    Symptom when this is wrong: >=3 kernel launches on device 0 followed by one
+    on another device kills the driver outright ("Receive Sip error message",
+    then "Receive Abort message from KMD: Sip exception"), taking the process
+    with it. Fewer than three launches survive, which is what made this look
+    like a bug in whichever op happened to run first.
+    """
+    import torch
+
+    current_device = staticmethod(lambda: flagos.current_device())
+    inner_driver_cls.get_current_device = current_device
+    wrapper_driver_cls.get_current_device = current_device
+    wrapper_driver_cls.get_active_torch_device = lambda self: torch.device(
+        "flagos", flagos.current_device()
+    )
+
+    def _patch_init(cls):
+        original = cls.__init__
+        if getattr(original, "_flagos_patched", False):
+            return
+
+        @functools.wraps(original)
+        def __init__(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            # Drop the instance attribute so the class-level staticmethod above
+            # is what lookups find.
+            self.__dict__.pop("get_current_device", None)
+
+        __init__._flagos_patched = True
+        cls.__init__ = __init__
+
+    _patch_init(inner_driver_cls)
+    _patch_init(wrapper_driver_cls)
+
+    # An instance built before this point still holds the copied attribute.
+    existing = getattr(wrapper_driver_cls, "instance", None)
+    if existing is not None:
+        existing.__dict__.pop("get_current_device", None)
+        inner = getattr(existing, "_driver", None)
+        if inner is not None:
+            inner.__dict__.pop("get_current_device", None)
+
+
+def _derive_compile_arch(get_arch) -> None:
+    """Set ``COMPILE_ARCH`` from the arch the driver reports, when unset.
+
+    Lets the vendor driver skip its torch-facing device lookup during
+    construction. Derive the value ("dtu-enflame-tops--gcu300" -> "gcu300")
+    rather than hardcoding a chip. A failure here is not fatal: leaving
+    COMPILE_ARCH unset makes the driver resolve the arch from the live device,
+    which works once the device shims above are in place.
+    """
+    if "COMPILE_ARCH" in os.environ:
+        return
+
+    import re
+
+    try:
+        arch = get_arch()
+    except Exception:
+        return
+    match = re.search(r"gcu\d+", arch)
+    if match:
+        os.environ["COMPILE_ARCH"] = match.group(0)
+
+
 def patch_triton_gcu_for_flagos() -> bool:
     """Redirect Enflame's triton_gcu backend onto torch_fl's flagos device.
 
@@ -317,80 +447,99 @@ def patch_triton_gcu_for_flagos() -> bool:
     #    ordering, so keep it installed for FSDP and other stream consumers.
     torch.gcu = flagos
 
-    # 5. Setting COMPILE_ARCH (below) takes a GCUDriver constructor branch that
-    #    hardcodes `get_current_device = lambda: 0`, so a kernel operating on
-    #    flagos:1 would launch against device 0 and read another device's memory
-    #    -- in practice it hangs, since a tops pointer only resolves against the
-    #    current device (see the tops-pointers-are-device-scoped note).
-    #
-    #    Both driver classes need fixing: _GCUDriver.__init__ copies the inner
-    #    GCUDriver's bound method onto the instance, so patching only the wrapper
-    #    class would be undone by the next construction. get_current_stream keeps
-    #    the branch's 0 (the default stream), which is what the launcher wants.
-    #    get_active_torch_device also builds a torch.device("gcu", ...).
-    #    Patching the classes is not enough, and this is the subtle part:
-    #    GCUDriver.__init__ assigns `self.get_current_device = lambda idx=0: 0`
-    #    as an *instance attribute*, which shadows anything set on the class, and
-    #    _GCUDriver.__init__ then copies that attribute onto itself. _GCUDriver
-    #    caches only its instance (in __new__), so __init__ -- and with it a fresh
-    #    GCUDriver -- re-runs on every `_GCUDriver()` call, undoing a class patch.
-    #    So wrap both constructors and re-assign the attribute afterwards.
-    #
-    #    Symptom when this is wrong: >=3 kernel launches on device 0 followed by
-    #    one on another device kills the driver outright ("Receive Sip error
-    #    message", then "Receive Abort message from KMD: Sip exception"), taking
-    #    the process with it. Fewer than three launches survive, which is what
-    #    made this look like a bug in whichever op happened to run first.
-    _current_device = staticmethod(lambda: flagos.current_device())
-    _driver.GCUDriver.get_current_device = _current_device
-    _driver._GCUDriver.get_current_device = _current_device
-    _driver._GCUDriver.get_active_torch_device = lambda self: torch.device(
-        "flagos", flagos.current_device()
-    )
-
-    def _patch_init(cls):
-        original = cls.__init__
-        if getattr(original, "_flagos_patched", False):
-            return
-
-        @functools.wraps(original)
-        def __init__(self, *args, **kwargs):
-            original(self, *args, **kwargs)
-            # Drop the instance attribute so the class-level staticmethod above
-            # is what lookups find. get_current_stream keeps the constructor's 0
-            # (the default stream), which is what the launcher wants.
-            self.__dict__.pop("get_current_device", None)
-
-        __init__._flagos_patched = True
-        cls.__init__ = __init__
-
-    _patch_init(_backend.GCUDriver)
-    _patch_init(_driver._GCUDriver)
-
-    #    An instance built before this point still holds the copied attribute.
-    _existing = getattr(_driver._GCUDriver, "instance", None)
-    if _existing is not None:
-        _existing.__dict__.pop("get_current_device", None)
-        if getattr(_existing, "_driver", None) is not None:
-            _existing._driver.__dict__.pop("get_current_device", None)
-
-    # COMPILE_ARCH lets GCUDriver skip the torch.gcu stream lookup during its
-    # own construction. Derive it from the arch the driver reports
-    # ("dtu-enflame-tops--gcu300" -> "gcu300") rather than hardcoding a chip.
-    if "COMPILE_ARCH" not in os.environ:
-        import re
-
-        try:
-            arch = _driver._GCUDriver().get_arch()
-            match = re.search(r"gcu\d+", arch)
-            if match:
-                os.environ["COMPILE_ARCH"] = match.group(0)
-        except Exception:
-            # Leave COMPILE_ARCH unset: the driver then resolves the arch from
-            # the live device, which works once the shims above are in place.
-            pass
+    # 5. Pin the driver's device lookups (see _pin_vendor_driver_to_flagos for
+    #    why the class patches alone are not enough), then let COMPILE_ARCH
+    #    short-circuit the driver's own torch-facing construction path.
+    _pin_vendor_driver_to_flagos(flagos, _backend.GCUDriver, _driver._GCUDriver)
+    _derive_compile_arch(lambda: _driver._GCUDriver().get_arch())
 
     return True
+
+
+def patch_flagtree_enflame_for_flagos() -> bool:
+    """Redirect FlagTree's enflame backend onto torch_fl's flagos device.
+
+    The FlagTree counterpart of ``patch_triton_gcu_for_flagos``. Same three
+    redirects -- ``torch.gcu``, the module-level ``device_name``, and the
+    driver's device lookups -- but the backend lives at
+    ``triton.backends.enflame.*`` because FlagTree installs itself as ``triton``
+    rather than as a separate plugin.
+
+    Returns False (having changed nothing) when no FlagTree enflame backend is
+    installed, so callers can fall through to the topsaten/CPU paths.
+    """
+    if not is_flagtree_enflame_available():
+        return False
+
+    import torch
+
+    from torch_fl import flagos
+
+    import triton.backends
+    import triton.backends.enflame.backend as _backend
+    import triton.backends.enflame.toolkit as _toolkit
+
+    # The registry entry is how the rest of FlagTree finds this driver, so patch
+    # the class it hands out rather than a fresh import of the same module.
+    wrapper_driver_cls = triton.backends.backends["enflame"].driver
+
+    # 1. The driver reaches the runtime through torch.gcu, which is what
+    #    torch_gcu would have provided. get_device_interface() returns it too,
+    #    so the launcher picks up the same object.
+    if not hasattr(torch, "gcu"):
+        torch.gcu = flagos
+
+    # 2. toolkit/backend build torch device strings from a module-level
+    #    device_name = "gcu", which backend.py picks up via a star import -- so
+    #    patching the toolkit alone would not reach the driver's own global.
+    _toolkit.device_name = "flagos"
+    _backend.device_name = "flagos"
+
+    # 3. The autotuner's L2-flush buffer is allocated with a hardcoded
+    #    device='gcu'. The device index matters as much as the name: do_bench
+    #    allocates this buffer once and then calls clear_cache(cache) -- i.e.
+    #    cache.zero_() -- between timing runs, interleaved with the kernel it is
+    #    autotuning. Written as device="flagos" the buffer lands on whatever
+    #    device was current at allocation, so autotuning an op on flagos:1 while
+    #    flagos:0 is current has zero_ writing device-0 memory from a device-1
+    #    context -- the SIP fault described in _pin_vendor_driver_to_flagos.
+    #    Naming the current device pins the buffer to the same device as the
+    #    kernel. The size is FlagTree's own L2-flush size, kept as-is.
+    _cache_size = 256 * 1024 * 1024
+    wrapper_driver_cls.get_empty_cache_for_benchmark = lambda self: torch.empty(
+        int(_cache_size // 4),
+        dtype=torch.int,
+        device=torch.device("flagos", flagos.current_device()),
+    )
+
+    # 4. Pin the driver's device lookups.
+    _pin_vendor_driver_to_flagos(flagos, _backend.GCUDriver, wrapper_driver_cls)
+
+    return True
+
+
+def is_gcu_triton_available() -> bool:
+    """True when a usable vendor Triton backend for the GCU is installed.
+
+    Either packaging counts -- FlagTree's enflame backend or the older
+    ``triton_gcu`` plugin. Callers use this to decide whether FlagGems' Triton
+    kernels can run at all, so the question is "is there a backend", not "which
+    one"; ``patch_gcu_triton_for_flagos`` handles the difference.
+    """
+    return is_flagtree_enflame_available() or is_triton_gcu_available()
+
+
+def patch_gcu_triton_for_flagos() -> bool:
+    """Redirect whichever vendor Triton backend is installed onto flagos.
+
+    FlagTree first: a box that has both installed is one where FlagTree's
+    ``triton`` won the import, so ``triton_gcu``'s backend is not the one the
+    kernels will be compiled by. Idempotent, and returns False when neither is
+    installed so callers can leave the topsaten/CPU paths in charge.
+    """
+    if is_flagtree_enflame_available():
+        return patch_flagtree_enflame_for_flagos()
+    return patch_triton_gcu_for_flagos()
 
 
 def patch_flaggems_device_name() -> bool:

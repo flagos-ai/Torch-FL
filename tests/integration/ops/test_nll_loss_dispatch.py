@@ -34,6 +34,8 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -171,6 +173,14 @@ class TestNllLossDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_forward_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for nll_loss_forward.
+
+        Skipped where the conf routes nll_loss_forward to ``none``: the op is
+        then not claimed on PrivateUse1 at all, so the call reaches cpu_fallback
+        before the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("nll_loss_forward") is None:
+            pytest.skip("nll_loss_forward is routed to 'none' on this platform")
         result = _run_subprocess_forward(
             {
                 "FLAGOS_LOG_DISPATCH": "1",
@@ -182,6 +192,14 @@ class TestNllLossDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_backward_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for nll_loss_backward.
+
+        Skipped where the conf routes nll_loss_backward to ``none``: the op is
+        then not claimed on PrivateUse1 at all, so the call reaches cpu_fallback
+        before the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("nll_loss_backward") is None:
+            pytest.skip("nll_loss_backward is routed to 'none' on this platform")
         result = _run_subprocess_backward(
             {
                 "FLAGOS_LOG_DISPATCH": "1",

@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -266,7 +268,16 @@ class TestBmmDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, bmm routes to flagos_python."""
+        """With the FlagGems runtime path available, bmm keeps the route its conf selects.
+
+        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so on a platform whose
+        conf keeps bmm on the vendor kernel (GCU and PPU route it to their
+        native matmul) the FlagGems route this case is named for does not exist
+        and there is nothing to assert. Skips instead of failing, so the case
+        stays honest on the platforms where the conf does route bmm to FlagGems.
+        """
+        if routed_backend_or_none("bmm") != "flagos_python":
+            pytest.skip("bmm does not route through FlagGems on this platform")
         result = _run_bmm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
@@ -287,7 +298,13 @@ class TestBmmDispatchLog:
 
     @pytest.mark.flaggems
     def test_dispatch_log_bmm_out_flaggems_runtime(self):
-        """With the FlagGems runtime path on, bmm.out routes to flagos_python."""
+        """With the FlagGems runtime path available, bmm.out keeps its conf route.
+
+        Same containment as ``test_dispatch_log_flaggems_runtime``: the conf,
+        not ``FLAGOS_USE_FLAGGEMS``, decides the route.
+        """
+        if routed_backend_or_none("bmm.out") != "flagos_python":
+            pytest.skip("bmm.out does not route through FlagGems on this platform")
         result = _run_bmm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"},
             use_out=True,

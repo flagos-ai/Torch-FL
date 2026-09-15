@@ -32,6 +32,8 @@ import sys
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -87,6 +89,14 @@ class TestBitwiseAndDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The per-op override selects the FlagGems Python path for bitwise_and.Tensor.
+
+        Skipped where the conf routes bitwise_and.Tensor to ``none``: the op is
+        then not claimed on PrivateUse1 at all, so the call reaches cpu_fallback
+        before the dispatcher and no override can show up in the log.
+        """
+        if routed_backend_or_none("bitwise_and.Tensor") is None:
+            pytest.skip("bitwise_and.Tensor is routed to 'none' on this platform")
         result = _run_subprocess(
             {
                 "FLAGOS_LOG_DISPATCH": "1",

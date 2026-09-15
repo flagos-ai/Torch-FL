@@ -47,6 +47,25 @@ _LOG_NAME = {
 }
 
 
+def _conf_route(op: str) -> str:
+    """Raw conf value for ``op`` -- ``none`` included, and ``none`` unmapped.
+
+    An op missing from the conf is a generation gap rather than a routing
+    decision, so it raises here for both public accessors instead of being
+    folded into one of them.
+    """
+    conf = os.environ.get("FLAGOS_BACKEND_CONFIG")
+    assert conf, (
+        "FLAGOS_BACKEND_CONFIG is unset; import torch_fl before asking for a route"
+    )
+    with open(conf) as f:
+        for line in f:
+            name, sep, value = line.split("#")[0].partition("=")
+            if sep and name.strip() == op:
+                return value.strip()
+    raise AssertionError(f"{op} is not listed in {conf}")
+
+
 def routed_backend(op: str) -> str:
     """Backend name this platform's conf routes ``op`` to, as the log prints it.
 
@@ -59,18 +78,26 @@ def routed_backend(op: str) -> str:
     the conf is a generation gap -- both are failures a caller wants to see, not
     values to assert against.
     """
-    conf = os.environ.get("FLAGOS_BACKEND_CONFIG")
-    assert conf, (
-        "FLAGOS_BACKEND_CONFIG is unset; import torch_fl before asking for a route"
+    backend = _conf_route(op)
+    conf = os.environ["FLAGOS_BACKEND_CONFIG"]
+    assert backend != "none", (
+        f"{op} is routed to 'none' in {conf}: it reaches cpu_fallback "
+        "and never logs a dispatch, so there is no route to assert"
     )
-    with open(conf) as f:
-        for line in f:
-            name, sep, value = line.split("#")[0].partition("=")
-            if sep and name.strip() == op:
-                backend = value.strip()
-                assert backend != "none", (
-                    f"{op} is routed to 'none' in {conf}: it reaches cpu_fallback "
-                    "and never logs a dispatch, so there is no route to assert"
-                )
-                return _LOG_NAME.get(backend, backend)
-    raise AssertionError(f"{op} is not listed in {conf}")
+    return _LOG_NAME.get(backend, backend)
+
+
+def routed_backend_or_none(op: str) -> str | None:
+    """Like ``routed_backend``, but ``None`` for an op the conf routes to ``none``.
+
+    The two accessors split on what the caller does with a cpu_fallback route.
+    ``routed_backend`` is for a test asserting a log line: there is nothing to
+    assert, so raising is the useful answer. This one is for a test that is
+    *vacuous* rather than wrong on a platform that does not route the op -- a
+    per-overload routing assertion on a platform whose conf hands the op to
+    cpu_fallback, say -- and wants to skip instead of fail. ``None`` here means
+    "the op is deliberately unaccelerated on this platform", not "no impl was
+    found"; an op absent from the conf still raises.
+    """
+    backend = _conf_route(op)
+    return None if backend == "none" else _LOG_NAME.get(backend, backend)
