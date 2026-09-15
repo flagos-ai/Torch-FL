@@ -2541,21 +2541,28 @@ def main():
         # identical on both routes is not listed -- rolling it back buys nothing
         # -- and stays on flaggems as BASIC_ONLY in the support report.
         measured_flaggems_rollback = {
-            # flag_gems guards on `x.is_cuda` / asserts "must be CUDA tensors".
-            # flagos tensors are PrivateUse1 (Tensor.is_cuda is False) even
-            # though torch.cuda is live, so the guard rejects every input.
+            # flag_gems guards on a device check that a flagos tensor fails, so
+            # the kernel rejects every input. Nine of these compare the device
+            # *name* against the one flag_gems resolved; the CUDA device-name
+            # alignment in torch_fl makes that comparison true, but they are
+            # kept on CUDA boxing because the FlagGems route has not been
+            # re-measured for correctness since.
             "i0",
             "i0.out",
-            "im2col",
             "smooth_l1_loss",
             "smooth_l1_loss.out",
             "smooth_l1_loss_backward",
-            "special_modified_bessel_k0",
-            "special_modified_bessel_k0.out",
             "special_i0e",
             "special_i1",
             "special_scaled_modified_bessel_k1",
             "special_scaled_modified_bessel_k1.out",
+            # The remaining four assert on `x.is_cuda`, which is False for a
+            # PrivateUse1 tensor even though torch.cuda is live. No device name
+            # makes that true, so these cannot run FlagGems without an upstream
+            # change.
+            "im2col",
+            "special_modified_bessel_k0",
+            "special_modified_bessel_k0.out",
             "upsample_bicubic2d",
             # Triton CompilationError on this FlagTree build.
             "norm.ScalarOpt_dim",
