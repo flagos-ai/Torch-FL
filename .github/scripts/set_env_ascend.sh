@@ -225,12 +225,23 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade pip setuptools wheel cmake
+  # `build` is explicit rather than assumed: the job runs `python -m build
+  # --wheel --no-isolation`, and the FlagTree image does not ship it. A missing
+  # `build` does not fail cleanly -- the repo's own CMake `build/` directory is
+  # found first as a namespace package and the step dies with the misleading
+  # "No module named build.__main__; 'build' is a package and cannot be directly
+  # executed".
+  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade \
+    pip setuptools wheel cmake build
   "$VENV_PYTHON" -m pip install --index-url "$CPU_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
-  if [[ "$CI_STAGE" == "integration" ]]; then
-    "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
-  fi
+  # Unconditional, unlike the other vendors: Ascend's job builds the wheel and
+  # runs the tests under one CI_STAGE=build invocation, so gating pytest on
+  # CI_STAGE=integration installs it in no job at all. The previous CI image hid
+  # this by shipping a prebuilt /opt/torch-fl-ascend-venv that already had it;
+  # the FlagTree image does not, and the flagtree wheel is cp311-only anyway, so
+  # that Python 3.12 venv could not have been reused here.
+  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
