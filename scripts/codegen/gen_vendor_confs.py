@@ -227,12 +227,124 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # what an op with no FlagGems coverage looks like, so the two cases cannot be
 # told apart by reading the file back. Stated here instead.
 #
-# ascend: pow/rsqrt crash bishengir-compile with "LLVM ERROR: unsupported
-# datatype for arith::ExtFOp to hfusion" (triton-ascend 3.2.2, CANN 9.0.0,
-# Ascend910_9382). Measured in CI run 34792677968: these were the only 2
-# failures left of 38 tests once the torch_npu build flags were stripped, and
-# both have native aclnn kernels, so the vendor route is a real fallback rather
-# than a loss of coverage. Filed upstream as FlagGems issue #6226.
+# ascend: pow/rsqrt used to be excluded here. They crashed bishengir-compile with
+# "LLVM ERROR: unsupported datatype for arith::ExtFOp to hfusion" on triton-ascend
+# 3.2.2 / CANN 9.0.0 / Ascend910_9382 (CI run 34792677968, filed upstream as
+# FlagGems issue #6226). That stack is no longer what Ascend runs -- FlagGems now
+# goes through FlagTree 0.6.2a1+ascend3.5 (Triton 3.5) -- so the exclusion was
+# re-measured rather than inherited. On Ascend910 with CANN 9.0.0, FlagTree
+# 0.6.2a1+ascend3.5 and FlagGems d45285ba, all five ops -- pow.Scalar,
+# pow.Tensor_Scalar, pow.Tensor_Tensor, rsqrt and rsqrt_ -- compile, run on the
+# FlagGems route and match the CPU reference for shapes (1,), (7,), (128, 256)
+# and (3, 5, 17) in fp32/fp16/bf16, three seeds each, plus the backward through
+# the FlagGems kernels. They are no longer excluded.
+#
+# ascend: mul_.Tensor is here for a defect inside FlagGems, not in the Triton
+# backend. flag_gems/ops/mul.py is the only operator module in FlagGems that gates
+# its Triton path on the runtime device *name* -- `_DEVICE_NAME =
+# runtime_device.name` (line 34) -- and when the operand's device type differs it
+# falls back with `torch.ops.aten.mul.out.redispatch(_FALLBACK_KEYSET, a, b,
+# out=out)` (line 589). On this backend the runtime name is "npu" while the
+# tensor's device type is "flagos", so the fallback always fires, and it hands the
+# boxed `mul.out` schema the caller's raw operand: `t.mul_(b)` dies with
+# "Unable to cast ... to Tensor" against aten::mul.out(Tensor self, Tensor other,
+# ...), and the `.Scalar` spelling with "Expected a value of type 'Tensor' for
+# argument 'other' but instead found type 'float'". ATen boxes mul_.Scalar onto
+# mul_.Tensor, so one entry covers both spellings. No other elementwise op is
+# affected because no other module carries that gate -- measured: add_.Tensor,
+# div_.Tensor, sub_.Tensor and add_.Scalar all pass on the FlagGems route while
+# mul_.Tensor and mul_.Scalar both fail. Ascend has a native mul kernel, so the
+# route back is free. mul.Tensor is outside the FlagGems coverage set already, so
+# only the in-place form needed an entry. Measured on Ascend910 with FlagGems
+# d45285ba + FlagTree 0.6.2a1+ascend3.5. Not yet filed upstream.
+#
+# ascend: sort/sort.stable fail inside the kernel's own compilation:
+# flag_gems/ops/sort.py:111 is rejected by BiShengHIR with "error: ub overflow,
+# requires 4620288 bits while 1572864 bits available! (possible reason: tiling
+# basic block is too large ...)", and the op never launches (measured both through
+# torch.sort and torch.sort(stable=True) on Ascend910 with FlagTree
+# 0.6.2a1+ascend3.5). This is the same kernel the MUSA entry below routes around
+# for a different reason -- there the failure is mudnn's missing uint32 cast, here
+# it is the Ascend compiler's unified-buffer budget. Ascend's own sort emits both
+# the values and the indices, and argsort/msort are composites over sort, so one
+# entry covers all four.
+#
+# ascend: the last three generator-consuming RNG ops, which fail *after* the
+# philox bridge (torch_fl/accelerator/ascend/_ascend_compat.py) fixes the state
+# contract, plus randperm, which was never a generator problem at all. Each dies
+# inside BiShengHIR's compilation of the FlagGems kernel, so the op never
+# launches. Measured on Ascend910 with FlagGems 6d31db9aa + FlagTree
+# 0.6.2a1+ascend3.5:
+#
+#   rand, rand_like  flag_gems/ops/rand.py:35 is rejected with "ub overflow,
+#                    requires 2294016 bits while 1572864 bits available!",
+#                    the same unified-buffer budget that rejects sort below.
+#                    The .out overloads are already native and unaffected.
+#   exponential_     flag_gems/ops/exponential_.py:152 rejects the kernel's own
+#                    compare: "'arith.cmpi' op attribute 'predicate' is not a
+#                    valid ...". FlagGems' Ascend vendor list already carries this
+#                    op in CUSTOMIZED_UNUSED_OPS, so upstream agrees it is unused.
+#   randperm         wrong before it is slow. randperm(50) returns all zeros --
+#                    silently, and identically for two different seeds, which is
+#                    what the RNG dispatch test reads as "ignores the seed" --
+#                    while randperm(2000) fails to compile with "ub overflow,
+#                    requires 10092544 bits" through topk.py:266 -> topk.py:193.
+#                    The failure is shape-dependent, so a small-N check proves
+#                    nothing about the route.
+#   native_dropout,  flag_gems/ops/dropout.py:33 is rejected the same way, and
+#   native_dropout_  again only for large tensors: the 100_000-element dropout in
+#   backward         tests/integration/ops/test_rng_dispatch.py needs 5112576
+#                    bits of unified buffer, while the 256-element one the same
+#                    file uses elsewhere fits. Both overloads have an aclnn
+#                    kernel, so the route back is free; the ATen composite the
+#                    test describes as unreachable-by-seed is not what `ascend`
+#                    resolves to.
+#
+# Ascend's own kernels implement all six, so the route back is free.
+#
+# ascend: every comparison overload FlagGems routes here, because the kernels
+# evaluate the comparison in float32 -- flag_gems/ops/{ge,gt,le,lt}.py apply
+# `x.to(tl.float32)` to the operand and eq/ne cast both sides. That is exact for
+# the float dtypes these kernels were written for and silently wrong for integer
+# operands wider than float32's 24-bit mantissa. Two measured defects, both on
+# Ascend910 with FlagGems 6d31db9aa + FlagTree 0.6.2a1+ascend3.5:
+#
+#   1. the cast itself. `ge` over [2**53+1, 2**53] against the same operands
+#      shifted by one returns [True, True] where ATen returns [False, False],
+#      and `eq` over four distinct int64 values reports all four equal.
+#   2. the scalar operand. A Python int outside int32 range collapses to 0
+#      before the comparison, which is what `torch.all(values >= -(1 << 63))` in
+#      tests/integration/ops/test_rng_dispatch.py trips over. A one-line Triton
+#      kernel with no FlagGems involved reproduces it:
+#      `tl.load(x).to(tl.float32) >= y` over [-(1<<63), -1, 0, 1] returns
+#      [F, F, T, T] for y = -(1<<63) and [F, T, T, T] for y = 1<<40, where ATen
+#      returns all-False for both. The same kernel with a float y, or with a
+#      0-dim int64 tensor operand, is correct -- so it is the int-to-float32
+#      scalar path, not the width of the value.
+#
+# (1) is a FlagGems defect and (2) is a backend one; neither has a routing-free
+# workaround, and both are silent. Ascend implements all twelve overloads
+# through aclnn, so the route back is free. Not yet filed upstream.
+#
+# ascend: mm and mm.out, for the same defect MetaX routes around below -- the
+# Ascend tune config tunes a kernel that cannot accept one of its own keys.
+# flag_gems/runtime/backend/_ascend/tune_configs.yaml declares
+# BLOCK_M/BLOCK_N/BLOCK_K/SPLIT_K for `mm:`, while the kernel that key is fetched
+# for -- flag_gems/ops/mm.py:mm_kernel_general, wrapped in
+# `@libtuner(configs=runtime.get_tuned_config("mm"))` and reached from `mm` /
+# `mm_out` through the general path -- takes only
+# BLOCK_M/BLOCK_N/BLOCK_K/GROUP_M/IS_FP64. The first call therefore dies inside
+# the autotuner's own benchmark run, before any kernel is compiled, with
+# "KeyError: 'Keyword argument SPLIT_K was specified but unrecognised'" raised
+# from triton/spec/ascend/runtime/jit.py:_pack_args. Measured on Ascend910 /
+# CANN 9.0.0 / FlagTree 0.6.2a1+ascend3.5 against the revision CI pins (FlagGems
+# d45285ba) and against master (6d31db9aa); the yaml entry and the kernel
+# signature are identical in both. Ascend has aclnn kernels for both overloads,
+# so the route back is free. The rest of the family is unaffected: bmm, bmm.out
+# and addmm run on FlagGems and match a float64 CPU reference to 1.6e-7
+# relative, three orders tighter than the aclnn path's 1.7e-4, so the gap is
+# exactly these two overloads. matmul is not in the FlagGems coverage this conf
+# is generated from and already routes to `ascend`. Not yet filed upstream.
 #
 # musa: index_add and randn_like/randn were the first entries in this set (#275,
 # 2026-09-15), recorded as "index_add returns all zeros instead of accumulating"
@@ -434,11 +546,29 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # (5.4.0.dev0) + flagtree 0.6.1+enflame3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
-        "pow.Scalar",
-        "pow.Tensor_Scalar",
-        "pow.Tensor_Tensor",
-        "rsqrt",
-        "rsqrt_",
+        "eq.Scalar",
+        "eq.Tensor",
+        "exponential_",
+        "ge.Scalar",
+        "ge.Tensor",
+        "gt.Scalar",
+        "gt.Tensor",
+        "le.Scalar",
+        "le.Tensor",
+        "lt.Scalar",
+        "lt.Tensor",
+        "mm",
+        "mm.out",
+        "mul_.Tensor",
+        "native_dropout",
+        "native_dropout_backward",
+        "ne.Scalar",
+        "ne.Tensor",
+        "rand",
+        "rand_like",
+        "randperm",
+        "sort",
+        "sort.stable",
     },
     "gcu": {
         # Pointwise overloads broken by ATen's float64 wrapped-number boxing.

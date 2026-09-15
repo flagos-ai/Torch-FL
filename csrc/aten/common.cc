@@ -380,4 +380,20 @@ Backend GetBackendForOp(const std::string& op_name) {
   return it != table.end() ? it->second : Backend::kFlagGems;
 }
 
+bool FlagGemsRejectsDtype(at::ScalarType dtype) {
+#if defined(USE_ASCEND)
+  // See the declaration in common.h for the measurement. float64 is the only
+  // dtype FlagGems' Ascend route could not serve across the pointwise family;
+  // fp32/fp16/bf16/int64/bool all compile and run.
+  return dtype == at::kDouble;
+#else
+  // No vendor route is known to be dtype-limited in this way. MUSA's
+  // FlagGems gaps are per-op (a Python-float operand against a bf16 tensor)
+  // and are already recorded in NATIVE_TRITON_GAPS, so they are not reached
+  // from here.
+  (void)dtype;
+  return false;
+#endif
+}
+
 } // namespace at::native::flagos
