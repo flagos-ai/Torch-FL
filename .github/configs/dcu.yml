@@ -59,6 +59,13 @@ integration_wheel_source: local-build
 # (backends_dcu.conf, DTK triton hcu + cuda boxing fallback) mirror
 # CUDA's manifest. Inference/training are deferred until the runner has a model
 # mount and the first CI run confirms the card count.
+#
+# FlagTree (the DTK triton build carrying the hcu backend) and FlagGems are
+# provisioned by set_env_dcu.sh and enabled by default: the script installs both,
+# exports FLAGOS_USE_FLAGGEMS=1 through $GITHUB_ENV, and refuses to continue if
+# the hcu backend or the hygon vendor is not what the process actually resolved.
+# No group below re-enables the path inline -- what runs here is what a stock DCU
+# install gets.
 integration_tests:
   - name: Check device availability
     command: |
@@ -81,6 +88,7 @@ integration_tests:
       print(f"DCU assets: {package_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
+
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
@@ -88,7 +96,6 @@ integration_tests:
       -v -s --tb=short
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops" -v -s --tb=short
   - name: Run DCU low-precision matrix tests
@@ -122,3 +129,43 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_profiler_parity.py
       -v -m main_ops --tb=short
+
+  # Last on purpose. run_integration_tests.py returns as soon as one group
+  # fails, so the order decides which signal a run produces: with the unit group
+  # first, a repository-wide check that has nothing to do with DCU decides
+  # whether any DCU hardware group runs at all. That is not hypothetical -- it
+  # is what happened on run 34931465738 (job 104260457173), where
+  # tests/unit/test_gen_vendor_confs.py stopped the run on the pre-existing
+  # Ascend/GCU conf drift from #272 and the FlagGems group was never reached.
+  # The device-dependent groups above are this platform's own measurement, so
+  # they go first; this one reports its verdict at the end either way.
+  #
+  # One process per file: a unit test file here can take the whole interpreter
+  # down -- an invalid device address is reported by the driver as a VMFault and
+  # kills the process without unwinding -- and in a shared interpreter that costs
+  # every result collected after it, including files that had already passed.
+  #
+  # UNIT_TESTS_ALLOW_TEARDOWN_CRASH covers containers whose RDMA stack faults
+  # during exit(): libibverbs' ELF destructor calls into libnl-route-3's
+  # rtnl_tc_unregister, so a run that already reported every test still ends in
+  # a dying interpreter. Whether a given runner has it is a property of the
+  # container image rather than of this project, so it stays opt-in here instead
+  # of being assumed either way. The opt-in forgives a signal only after pytest
+  # has printed a complete, clean summary; a signal before the summary is still
+  # a failure.
+  #
+  # This is the one group that runs in the checkout rather than in the prepared
+  # wheel-only workspace. tests/unit is a source-tree suite: it reads scripts/,
+  # csrc/, .github/workflows/ and the rest of torch_fl/ relative to the
+  # repository root, so running it from a directory holding only tests/ and
+  # pyproject.toml fails seven files on FileNotFoundError before any assertion
+  # runs -- and it cannot be fixed by copying those in, because a copied tree
+  # stops describing the checkout it is supposed to guard. The checkout is
+  # importable: the wheel build leaves torch_fl/_C.so and torch_fl/lib/*.so in
+  # the tree, so the suite exercises the same build the wheel was cut from. The
+  # integration groups above stay wheel-only on purpose.
+  - name: Run unit tests (per file)
+    command: >-
+      cd "$GITHUB_WORKSPACE" &&
+      UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
+      python .github/scripts/run_unit_tests.py --timeout 300
