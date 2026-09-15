@@ -32,6 +32,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -197,12 +199,20 @@ class TestMmDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, mm routes to flagos_python."""
+        """mm dispatches to whatever backend this platform's conf lists.
+
+        FlagGems-first is the generated default, but it is not unconditional:
+        MetaX keeps mm on the cuda boxing kernel because gems' mm passes a SPLIT_K
+        kwarg triton-metax rejects. Asserting the conf's own value keeps this test
+        meaningful on every platform rather than pinning it to the one it was
+        written on.
+        """
         result = _run_mm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] mm -> flagos_python" in result.stderr, (
-            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
+        expected = routed_backend("mm")
+        assert f"[flagos dispatch] mm -> {expected}" in result.stderr, (
+            f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

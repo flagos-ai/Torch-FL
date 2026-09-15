@@ -33,6 +33,8 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend
+
 
 DEVICE = "flagos:0"
 
@@ -170,17 +172,22 @@ class TestEmbeddingDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, embedding routes to flagos_python.
+        """embedding dispatches to whatever backend this platform's conf lists.
 
-        FlagGems and the vendor kernels are both compiled in; FLAGOS_USE_FLAGGEMS=1
-        selects backends_flaggems.conf at import, where embedding has a FlagGems
-        Triton kernel and thus routes to flagos_python.
+        Neither the conf vocabulary nor the log vocabulary is the only one in
+        play, and they do not agree: the FlagGems C++ path is spelled
+        ``flaggems_cpp`` in the conf and ``-> flagos`` in the log, the Python path
+        ``flaggems``/``-> flagos_python`` (csrc/aten/dispatcher.h, LogDispatch;
+        both log names are kept for test compatibility). routed_backend() owns
+        that mapping, so this asserts the platform's real route instead of the one
+        the test was written on.
         """
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] embedding -> flagos_python" in result.stderr, (
-            f"Expected flagos_python log, got:\n{result.stderr}"
+        expected = routed_backend("embedding")
+        assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
+            f"Expected {expected} log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
