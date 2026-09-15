@@ -23,8 +23,10 @@ silently returns the unconjugated / unnegated values (#209).
 The bits are a platform-neutral property of PyTorch's dispatcher, not of any
 vendor runtime, so every backend that reaches those shared copy paths is held to
 the same contract here. Complex support is uneven across vendors, so the complex
-cases probe the device once and skip where the dtype is unavailable; the
-Negative-bit cases use float32 and run everywhere.
+cases probe the device and skip where the capability is unavailable -- separately
+for materializing the bit and for running complex elementwise compute, which do
+not coincide on every vendor; the Negative-bit cases use float32 and run
+everywhere.
 """
 
 import pytest
@@ -59,9 +61,36 @@ def _conjugate_materialization_supported() -> bool:
     return True
 
 
+def _complex_arithmetic_supported() -> bool:
+    """Report whether the backend can run an elementwise op on complex values.
+
+    Materializing a Conjugate bit only needs byte copies, so a backend can
+    satisfy the materialization contract above while having no complex *compute*.
+    PPU is exactly that case: the copy helpers run its vendor kernels, but
+    ``add`` is routed to FlagGems, whose Triton dtype table has no complex128
+    entry and raises before the kernel is built. The consumer case is the only
+    one that crosses that boundary, so it is gated separately instead of
+    skipping the complex cases the backend does support.
+    """
+    if not _conjugate_materialization_supported():
+        return False
+    try:
+        torch.flagos.set_device(0)
+        probe = torch.tensor(_COMPLEX_INPUT, dtype=torch.complex128, device="flagos:0")
+        (probe + 0).cpu()
+    except Exception:
+        return False
+    return True
+
+
 requires_complex = pytest.mark.skipif(
     not _conjugate_materialization_supported(),
     reason="backend cannot materialize Conjugate bits on the flagos device",
+)
+
+requires_complex_arithmetic = pytest.mark.skipif(
+    not _complex_arithmetic_supported(),
+    reason="backend cannot run complex elementwise ops on the flagos device",
 )
 
 
@@ -148,7 +177,7 @@ def test_explicit_host_copy_materializes_conjugate_bit(conj_tensor):
 
 
 @pytest.mark.anyplatform
-@requires_complex
+@requires_complex_arithmetic
 def test_consumer_op_sees_materialized_conjugate(conj_tensor):
     # A plain elementwise consumer: covers the path where an operator resolves
     # the bit through the shared copy helpers rather than resolving it itself.

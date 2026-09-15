@@ -42,6 +42,8 @@ import torch
 
 import torch_fl  # noqa: F401  (registers the flagos PrivateUse1 backend)
 
+from profiler_support import append_boxing_path_probe
+
 _BASELINE_PATH = (
     Path(__file__).resolve().parents[1] / "data" / "profiler_cuda_baseline.json"
 )
@@ -96,7 +98,7 @@ def _run_traced_ops():
 
     5x matmul+relu (Task 1's gate workload: proven to produce sgemm kernels,
     elementwise kernels, cuBLAS workspace memsets and a D2H copy), plus a
-    16-element sort.
+    16-element sort, plus one LU factorisation.
 
     The sort earns its place: ``bitonicSortKVInPlace`` launches at
     ``block=[16,1,1]``, the only kernel in reach whose block size is NOT a
@@ -104,6 +106,15 @@ def _run_traced_ops():
     ceil agree for every block size that IS a multiple of 32 -- so without this
     kernel, assertion 3's warps-per-SM value could not distinguish a correct
     implementation from a ceil bug.
+
+    The LU factorisation earns its place the same way, for the baseline's
+    ``gpu_memset`` / ``External id`` / demangling requirements: it is the only
+    op here that is still on the CUDA boxing path. The other five are routed to
+    FlagGems by the default CUDA conf, and a Triton kernel allocates no cuBLAS
+    workspace, reports no ``External id`` and carries no ``::``-qualified symbol
+    -- so on that routing the trace has none of the three, and assertions 1, 3
+    and 5a lose their subject. ``append_boxing_path_probe`` owns the details and
+    the reason it is gated per platform.
     """
     x = torch.randn(1024, 1024, device=DEVICE)
     y = torch.randn(1024, 1024, device=DEVICE)
@@ -119,6 +130,7 @@ def _run_traced_ops():
         for _ in range(5):
             z = (x @ y).relu()
         torch.sort(small)
+        append_boxing_path_probe(DEVICE)
         z.sum().item()  # force sync so device activity lands inside the window
 
     return prof

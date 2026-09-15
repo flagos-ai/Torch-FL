@@ -2517,9 +2517,11 @@ def main():
     (out_dir / "register.inc").write_text("\n".join(lines) + "\n")
     print(f"   generated {len(op_info)} wrappers + impls")
 
-    # In full mode, regenerate backends_cuda.conf so GetBackendForOp routes every
-    # generated op to cuda. Ops NOT in op_info (skipped) are absent -> they hit
-    # the PrivateUse1 cpu_fallback, exactly as before this change.
+    # In full mode, regenerate backends_cuda.conf with the FlagGems Python path
+    # first. The discovery result is schema- and arity-gated, so only ops with a
+    # generated, callable-compatible FlagGems wrapper are routed there; every
+    # remaining generated op keeps the CUDA boxing backend. Ops NOT in op_info
+    # (skipped) are absent -> they hit the PrivateUse1 cpu_fallback.
     if all_cuda:
         # Every generated conf carries the repo's Apache header; without it each
         # regeneration would strip the header off the checked-in files.
@@ -2539,11 +2541,234 @@ def main():
             "# limitations under the License.",
             "",
         ]
+        # Route exceptions that only apply to this conf. `flag_gems` defects
+        # that any device can hit live in flaggems_recursive_fallback /
+        # flaggems_runtime_broken below, which the metax and dcu confs also fold
+        # in; these are CUDA-conf-specific, so they are deliberately NOT shared
+        # with the other vendors.
+        #
+        # `_conj` is a contract exception, not a compile one. ATen's aten::_conj
+        # returns a conjugate view, so `torch.conj` has to stay lazy and
+        # tests/integration/test_math_bits_contract.py pins that with
+        # `is_conj()`. flag_gems' _conj is a real kernel that materializes the
+        # value, so on the FlagGems route the lazy view is replaced with an eager
+        # copy and 7 of the 12 math-bits contract cases fail with "torch.conj
+        # must stay lazy for this contract to apply". MetaX carries the same
+        # exemption in metax_triton_fallback below; the cuda boxing path is ATen's
+        # own _conj, which keeps the bit.
+        #
+        # addmm is a FlagTree/Triton compile exception. Current flag_gems master
+        # compiles addmm through _accumulate_dot, which
+        # calls tl.dot unconditionally, and tl.dot requires K >= 16
+        # (triton/language/semantic.py: "Input shapes should have M >= 1, N >= 1
+        # and K >= 16"). Every BLOCK_SIZE_* in flag_gems' addmm drives a tl.load,
+        # and FlagTree's AABS (triton.knobs.autotuning.adjust_block_size, on by
+        # default) shrinks a block down to next_power_of_2(extent) instead of up
+        # to a tl.dot-compatible size, so a small-K matmul is compiled with
+        # BLOCK_SIZE_K = 8 and the kernel fails to compile rather than producing
+        # a wrong result.
+        #
+        # Measured on 8x A100 (FlagTree 0.6.2a2, flag_gems 4d9c34775) with a
+        # fresh FLAGGEMS_CACHE_DIR and M = N = 8: K = 8 raises the AssertionError
+        # above and K = 9 compiles, matching next_power_of_2(9) = 16. The test
+        # that surfaced this builds nn.Linear(8, 8) over a (4, 8) batch, i.e.
+        # addmm with M = 4, K = 8, N = 8:
+        # tests/integration/test_factory_ops.py::TestCopyTransfer::
+        # test_module_cpu_after_forward.
+        #
+        # Turning AABS off is not a workaround: with FLAGTREE_AABS=0 the same
+        # shape fails differently ("out of resource: shared memory, Required:
+        # 196608, Hardware limit: 166912"), because the block is then sized for
+        # the full K rather than for the extent. The defect is recent -- at
+        # flag_gems 7fb49bad4 addmm compiled and passed at 8x8x8, and the
+        # _accumulate_dot refactor landed between that revision and 4d9c34775.
+        #
+        # addmm is the only dot-family op affected: mm, bmm, mv, dot, baddbmm,
+        # addmv, addr and outer all pass at 8x8x8 on the same build.
+        # flag_gems/ops/flash_attention_backward.py carries the same workaround
+        # for the same AABS behaviour (_disable_aabs_for_small_seqlen); the real
+        # fix belongs in flag_gems' addmm.
+        #
+        # The kernel stays generated (reachable via FLAGOS_OP_addmm=flaggems for
+        # debugging) and only the default route goes to the cuda boxing kernel,
+        # which has no minimum-K constraint.
+        cuda_route_exceptions = {
+            # contract: keep torch.conj lazy (see above)
+            "_conj",
+            # compile: FlagTree AABS shrinks tl.dot's K tile below 16 (see above)
+            "addmm",
+            "addmm.dtype",
+            "addmm.dtype_out",
+            "addmm.out",
+            "addmm_",
+        }
+
+        # Ops that pass every static discovery gate above but were measured as
+        # broken on the FlagGems route by tests/manual/flaggems_overload_survey.py
+        # on 8x A100, so the shipped conf must send them back to CUDA boxing.
+        # Without this set a plain `FLAGOS_CODEGEN_ALL=1 codegen_ops.py` run
+        # silently re-flags them to flaggems and the checked-in conf stops
+        # reproducing. The per-op failure signatures and the full verdict table
+        # live in docs/reference/operator-support.md.
+        #
+        # The criterion is a paired measurement, not a threshold on the FlagGems
+        # verdict alone. Every op here was run twice by the same harness, once
+        # on the FlagGems route and once on CUDA boxing: it is rolled back when
+        # the FlagGems route fails a case that CUDA boxing answers correctly, or
+        # when it crashes, hangs, or recurses. An op whose failure vector is
+        # identical on both routes is not listed -- rolling it back buys nothing
+        # -- and stays on flaggems as BASIC_ONLY in the support report.
+        measured_flaggems_rollback = {
+            # flag_gems guards on `x.is_cuda` / asserts "must be CUDA tensors".
+            # flagos tensors are PrivateUse1 (Tensor.is_cuda is False) even
+            # though torch.cuda is live, so the guard rejects every input.
+            "i0",
+            "i0.out",
+            "im2col",
+            "smooth_l1_loss",
+            "smooth_l1_loss.out",
+            "smooth_l1_loss_backward",
+            "special_modified_bessel_k0",
+            "special_modified_bessel_k0.out",
+            "special_i0e",
+            "special_i1",
+            "special_scaled_modified_bessel_k1",
+            "special_scaled_modified_bessel_k1.out",
+            "upsample_bicubic2d",
+            # Triton CompilationError on this FlagTree build.
+            "norm.ScalarOpt_dim",
+            "randint",
+            "randint_like",
+            "special_chebyshev_polynomial_w",
+            # flag_gems assertion on the argument contract that torch accepts.
+            "_euclidean_dist",
+            "_upsample_bilinear2d_aa",
+            "randperm",
+            "soft_margin_loss",
+            "soft_margin_loss_backward",
+            "topk",
+            # Process crash.
+            "_batch_norm_no_update",
+            "native_batch_norm",
+            # No result within the harness timeout.
+            "lcm",
+            "lcm_",
+            "prod.dim_int",
+            "sum.IntList_out",
+            "sum.dim_IntList",
+            # Unbounded recursion (flag_gems falls back to torch.<op>).
+            "unique_consecutive",
+            # Raising errors that are neither the device guard nor a compile
+            # failure: wrong out dtype, missing out argument, destroyed CUDA
+            # context, unsupported order range, malformed reverse-layout shape.
+            "_cdist_backward",
+            "_log_softmax_backward_data.out",
+            "_softmax_backward_data.out",
+            "cosh.out",
+            "dequantize.self",
+            "elu_backward",
+            "embedding",
+            "mul_.Tensor",
+            "nanmedian.dim_values",
+            "norm.Scalar",
+            "special_chebyshev_polynomial_u",
+            "special_hermite_polynomial_h",
+            # Wrong numerics or wrong shape against the eager reference.
+            "_log_softmax_backward_data",
+            "_pdist_backward",
+            "_softmax_backward_data",
+            "_unique2",
+            "_weight_norm_interface",
+            "_weight_norm_interface_backward",
+            "elu",
+            "elu_",
+            "histc",
+            "igammac_",
+            "index_copy",
+            "index_copy_",
+            "leaky_relu_",
+            "logsumexp",
+            "median.dim_values",
+            "mse_loss_backward",
+            "nanmedian.out",
+            "native_layer_norm",
+            "range",
+            "scatter.src",
+            "scatter_.src",
+            "special_chebyshev_polynomial_v",
+            "special_shifted_chebyshev_polynomial_u",
+            "special_shifted_chebyshev_polynomial_w",
+            "sum.out",
+            "unfold_backward",
+            "unique_dim",
+            # Integer input: flag_gems returns the input dtype (int64) where
+            # ATen's type promotion returns float32, so the result is the right
+            # shape with the wrong dtype and the wrong values. CUDA boxing
+            # passes the same case.
+            "acosh",
+            "atan2",
+            "atanh",
+            "digamma",
+            "erf",
+            "erfinv",
+            "log",
+            "log1p",
+            "log2",
+            "rad2deg",
+            "special_airy_ai",
+            "special_bessel_j1",
+            "special_xlog1py",
+            # Integer or bool input: flag_gems rejects an argument contract that
+            # ATen accepts (assertion on the dtype set, torch.finfo on an
+            # integer tensor, a TypeError on the promoted result). CUDA boxing
+            # passes the same case.
+            "amin",
+            "logit",
+            "nan_to_num",
+            "special_chebyshev_polynomial_u.n_scalar",
+            "special_modified_bessel_k1",
+            "special_shifted_chebyshev_polynomial_v",
+            # Bool input: Triton CompilationError in the flag_gems kernel.
+            "cummax",
+            "cummin",
+            "index_add",
+            "index_add_",
+            # Bool input: unbounded recursion (flag_gems falls back to the torch
+            # op it is patching).
+            "sgn_",
+            # Bool input: wrong values. CUDA boxing passes the same case.
+            "floor_divide.Scalar",
+            "prod",
+            # float16 input: nll_loss_forward returns wrong loss values
+            # (max_diff 1.16e4 on the harness case) where CUDA boxing passes.
+            "nll_loss_forward",
+            # Integer input: flag_gems returns a silently wrong tensor where
+            # ATen raises "masked_scale not implemented for 'Long'". Both routes
+            # fail the case, but a loud error is the contract ATen defines.
+            "native_dropout_backward",
+        }
+
         conf_lines = conf_license + [
             "# flagos op backend config -- AUTO-GENERATED (full CUDA mode)",
             "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
-            "# Every generated boxing kernel is routed to the cuda backend; ops not",
-            "# listed here are not registered and fall through to cpu_fallback.",
+            "# FlagGems-first: discovered compatible ops use the flaggems Python",
+            "# backend; all remaining generated ops use CUDA boxing. Ops not listed",
+            "# here are not registered and fall through to cpu_fallback.",
+            "#",
+            "# Exceptions: ops that pass the static discovery gates but cannot use",
+            "# the FlagGems route here go back to CUDA boxing",
+            "# (scripts/codegen/codegen_ops.py:cuda_route_exceptions). `_conj` is",
+            "# there because flag_gems materializes the value and torch.conj has to",
+            "# stay lazy; the addmm family because FlagTree AABS shrinks its tl.dot",
+            "# K tile below Triton's K >= 16 minimum for small matmuls.",
+            "#",
+            "# Each exception is a measured result, not a guess: the ops in",
+            "# cuda_route_exceptions are contract/compile exceptions, and the",
+            "# additional ops in measured_flaggems_rollback failed a case on the",
+            "# FlagGems route that the CUDA boxing route answers correctly (or",
+            "# crashed, hung, or recursed) when both were measured with",
+            "# tests/manual/flaggems_overload_survey.py on 8x A100. See",
+            "# docs/reference/operator-support.md for the per-op failure signatures.",
             "#",
             "# A trailing `# tileops` marks an op that also has a TileOPs Triton",
             "# shim (scripts/codegen/backend_coverage.py:TILEOPS_OPS, regenerated by",
@@ -2558,14 +2783,26 @@ def main():
             "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
             "",
         ]
+        n_flaggems_routes = 0
+        n_cuda_fallback = 0
         for op in sorted(op_info):
+            if op in cuda_route_exceptions or op in measured_flaggems_rollback:
+                backend = "cuda"
+                if op in flaggems_py:
+                    n_cuda_fallback += 1
+            else:
+                backend = "flaggems" if op in flaggems_py else "cuda"
+            if backend == "flaggems":
+                n_flaggems_routes += 1
             suffix = "  # tileops" if op in TILEOPS_OPS else ""
-            conf_lines.append(f"{op} = cuda{suffix}")
+            conf_lines.append(f"{op} = {backend}{suffix}")
         conf_path.write_text("\n".join(conf_lines) + "\n")
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
-            f"   regenerated {conf_path.name} with {len(op_info)} cuda routes "
-            f"({tileops_annotated} annotated # tileops)"
+            f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
+            f"and {len(op_info) - n_flaggems_routes} cuda routes "
+            f"({tileops_annotated} annotated # tileops, "
+            f"{n_cuda_fallback} flaggems ops forced back to cuda)"
         )
 
         # Ops whose flag_gems implementation falls back to `torch.<op>` when the

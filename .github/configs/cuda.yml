@@ -17,6 +17,13 @@ display_name: CUDA
 # Platform-specific preparation is implemented outside the common workflows.
 setup_script: .github/scripts/set_env_cuda.sh
 
+# Carries CUDA PyTorch, the FlagGems C++ operators, and an Ubuntu 24.04 userland
+# recent enough for the FlagTree wheels the job installs (they bind GLIBC_2.38).
+# Both CUDA entry points use it: the integration pipeline pins the same digest in
+# integration-test-cuda.yml, and the manual Build Wheel path reaches it through
+# the shared, vendor-agnostic workflows, which also need Python and git in the
+# image. set_env_cuda.sh checks the image glibc before installing FlagTree, so a
+# future rebuild on an older userland fails naming the requirement.
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:eea3302ee25e0e3390aef4aa1a603dfe03aa93ab043f1571cb86f7a2a3026e02
 
 runner_labels:
@@ -66,6 +73,33 @@ integration_tests:
       print(f"CUDA assets: {package_lib}")
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
+  - name: Check FlagTree and FlagGems
+    command: |
+      python - <<'PY'
+      import importlib.metadata
+      import os
+      from pathlib import Path
+
+      import torch_fl
+      import flag_gems
+      import triton
+      from torch_fl.compile.flagtree_shim import is_flagtree_active
+
+      # The FlagTree wheel is source-free: it ships its own Triton, and the
+      # expected version comes from the setup script so the two stay in step.
+      expected = os.environ.get("FLAGTREE_VERSION", "0.6.2a2")
+      distribution = importlib.metadata.distribution("flagtree")
+      assert distribution.version == expected, distribution.version
+      assert is_flagtree_active(), triton.__file__
+
+      triton_root = Path(triton.__file__).resolve().parent
+      assert Path(distribution.locate_file("triton")).resolve() == triton_root, triton_root
+      assert triton.__version__.startswith("3.6."), triton.__version__
+      print(f"FlagTree: {expected}")
+      print(f"Triton: {triton.__version__} ({triton_root})")
+      print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
+      print(f"torch_fl: {torch_fl.__file__}")
+      PY
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
@@ -108,8 +142,9 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py
       --model "$MODEL_PATH" -v -s --tb=short
-  - name: Run torch.compile tests
+  - name: Run torch.compile tests with FlagTree
     command: >-
+      FLAGOS_USE_FLAGTREE=1
       python -m pytest tests/integration/test_compile.py
       -v -s --tb=short
   - name: Run training tests

@@ -17,7 +17,7 @@ sum.dim_IntList dispatch tests
 
 Verifies that torch.sum (dim variant):
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems_python backend (default)
+  - C++ wrapper routes per the platform conf (or cuda via env override)
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -139,15 +139,21 @@ class TestSumDimDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """sum.dim_IntList dispatches to whatever backend this platform's conf lists.
+        """sum.dim_IntList dispatches to the backend this platform's conf routes it to.
 
-        FlagGems-first is the generated default, but it is not unconditional:
-        GCU routes sum.dim_IntList to its native ``gcu`` kernel because the
-        FlagGems kernel carries a 64-bit type the GCU300 front end rejects for
-        an int64 operand (see NATIVE_TRITON_GAPS["gcu"]), and MetaX keeps this
-        overload on the cuda boxing kernel while its activity handling in the
-        profiler workload is being stabilized (see metax_triton_fallback in
-        scripts/codegen/codegen_ops.py). Asserting the conf's own value keeps
+        FlagGems-first is the generated default, but it is not unconditional.
+        The CUDA conf returns ``sum.dim_IntList`` to CUDA boxing because the
+        FlagGems route exceeds the survey's per-op time budget on the ``2d-bool``
+        profile while the boxing route returns immediately (see
+        measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
+        docs/reference/operator-support.md), GCU routes it to its native
+        ``gcu`` kernel because the FlagGems kernel carries a 64-bit type the
+        GCU300 front end rejects for an int64 operand (see
+        NATIVE_TRITON_GAPS["gcu"]), and MetaX keeps this overload on the cuda
+        boxing kernel while its activity handling in the profiler workload is
+        being stabilized (see metax_triton_fallback in
+        scripts/codegen/codegen_ops.py). Platforms whose conf keeps the FlagGems
+        route still log flagos_python, so asserting the conf's own value keeps
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """

@@ -17,18 +17,21 @@ name: Integration Tests (CUDA)
 on:
   workflow_call:
     inputs:
+      # Longer than the other platforms: this job builds the accelerator payload
+      # (CUDA PyTorch, the FlagGems C++ operators) that a prebuilt image used to
+      # supply, so it spends minutes the image-based jobs spend on a pull.
       timeout-minutes:
         description: "Timeout for the entire job in minutes"
         required: false
         type: number
-        default: 60
+        default: 120
   workflow_dispatch:
     inputs:
       timeout-minutes:
         description: "Timeout for the entire job in minutes"
         required: false
         type: number
-        default: 60
+        default: 120
 
 jobs:
   # The test list lives in .github/configs/cuda.yml, not inline here. See
@@ -45,6 +48,12 @@ jobs:
       - torch-fl-nv
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
     container:
+      # The FlagOS CUDA image rather than a stock NVIDIA one: it already carries
+      # the CUDA PyTorch and the FlagGems C++ operators that `set_env_cuda.sh`
+      # would otherwise have to produce in the job, and its Ubuntu 24.04 userland
+      # is the glibc baseline the FlagTree wheels this job installs are built
+      # for. The CUDA line it ships is 13.0, which is what the script's cu130
+      # PyTorch pin and its `torch.version.cuda == "13.0"` assertion expect.
       image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:eea3302ee25e0e3390aef4aa1a603dfe03aa93ab043f1571cb86f7a2a3026e02
       volumes:
         - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro

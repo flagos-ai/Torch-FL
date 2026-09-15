@@ -17,7 +17,7 @@ embedding dispatch tests
 
 Verifies that torch.nn.functional.embedding (aten.embedding):
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems (default) or cuda (via env override)
+  - C++ wrapper routes per the platform conf (or cuda via env override)
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -33,7 +33,7 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -180,22 +180,28 @@ class TestEmbeddingDispatchLog:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path available, embedding keeps its conf route.
+        """Embedding dispatches to the backend this platform's conf routes it to.
 
-        ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so this is a check
-        that the FlagGems runtime path is compiled in and routing still agrees
-        with the conf rather than a switch that turns FlagGems on. Skipped where
-        the conf routes embedding away from FlagGems: GCU leaves it to
-        cpu_fallback because the FlagGems embedding kernel cannot compile the
-        int64 index operand that GCU300 rejects.
+        ``FLAGOS_USE_FLAGGEMS`` only asks for the runtime path; the conf decides
+        the route, and FlagGems-first is not unconditional. The CUDA conf
+        returns ``embedding`` to CUDA boxing because the FlagGems route raises
+        ``RuntimeError: Triton Error [CUDA]: context is destroyed`` (see
+        measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
+        docs/reference/operator-support.md), and GCU leaves it to cpu_fallback
+        because the FlagGems embedding kernel cannot compile the int64 index
+        operand GCU300 rejects. Platforms whose conf keeps the FlagGems route
+        still log flagos_python, so asserting the conf's own value keeps this
+        test meaningful on every platform rather than pinning it to the one it
+        was written on.
         """
         if routed_backend_or_none("embedding") != "flagos_python":
             pytest.skip("embedding does not route through FlagGems on this platform")
         result = _run_embedding_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] embedding -> flagos_python" in result.stderr, (
-            f"Expected flagos_python log, got:\n{result.stderr}"
+        expected = routed_backend("embedding")
+        assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
+            f"Expected embedding -> {expected}, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

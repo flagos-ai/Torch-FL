@@ -17,13 +17,13 @@ Full-CUDA-coverage sampling tests.
 
 After the codegen was expanded from the hand-listed 71-op conf to the full set
 of leaf CUDA operators (~1800 ops, see scripts/codegen/codegen_ops.py FLAGOS_CODEGEN_ALL
-mode), every op in torch_fl/configs/backends_cuda.conf routes to the boxing CUDA kernel.
-The per-op test files only cover the original 71; this file samples a
-representative slice of the NEWLY registered ops across every codegen category
-and checks:
+mode), every op in torch_fl/configs/backends_cuda.conf is routed to either the
+FlagGems Python path or the CUDA boxing kernel. The per-op test files only cover
+the original 71; this file samples a representative slice of the NEWLY
+registered ops across every codegen category and checks:
 
   1. correctness: flagos result matches the CPU reference, and
-  2. routing: the op actually dispatches to `cuda` (NOT cpu_fallback).
+  2. routing: the op uses its configured backend (NOT cpu_fallback).
 
 Category coverage (see codegen_ops.py):
   functional_pure  unary/binary elementwise + reductions (tanh, gelu, addmm, ...)
@@ -53,10 +53,9 @@ import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
-# The pure-boxing conf shipped alongside torch_fl (every op -> cuda). Used by
-# TestNewOpDispatchRouting to assert boxing routing independently of the
-# ambient FLAGOS_USE_FLAGGEMS setting.
-_BOXING_CONF = pathlib.Path(torch_fl.__file__).parent / "configs" / "backends_cuda.conf"
+# The CUDA conf shipped alongside torch_fl. Used by TestNewOpDispatchRouting to
+# assert the generated default route independently of ambient opt-in variables.
+_CUDA_CONF = pathlib.Path(torch_fl.__file__).parent / "configs" / "backends_cuda.conf"
 
 
 # ---------------------------------------------------------------------------
@@ -276,22 +275,35 @@ class TestForeachNewOps:
 
 
 # ---------------------------------------------------------------------------
-# Routing: sampled new ops dispatch to cuda, not cpu_fallback
+# Routing: sampled new ops dispatch to their configured backend
 # ---------------------------------------------------------------------------
 
 
+def _configured_backend(op):
+    for raw in _CUDA_CONF.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        name, backend = (part.strip() for part in line.split("=", 1))
+        if name == op:
+            return backend
+    raise AssertionError(f"{op} is missing from {_CUDA_CONF}")
+
+
+def _dispatch_log_backend(backend):
+    """Map the config spelling to the legacy name used by dispatch logging."""
+    if backend == "flaggems":
+        return "flagos_python"
+    return backend
+
+
 class TestNewOpDispatchRouting:
-    """Confirm representative new ops route through the CUDA dispatcher.
+    """Confirm representative new ops use their generated default backend.
 
     A regression here (op silently handled by cpu_fallback) would still produce
-    correct numbers but lose the whole point of the CUDA registration, so we
-    assert on the dispatch log explicitly.
-
-    This is a property of the *boxing* conf, so the subprocess pins
-    FLAGOS_BACKEND_CONFIG=backends_cuda.conf. Without that pin the assertion
-    depends on the ambient FLAGOS_USE_FLAGGEMS: with the FlagGems path on,
-    these ops legitimately route to flagos_python instead (that routing is
-    covered by the per-op ``@flaggems`` tests).
+    correct numbers but lose the whole point of the generated registration, so
+    we assert on the dispatch log explicitly. The subprocess pins the CUDA conf
+    while the expected backend is read from that same generated source of truth.
     """
 
     ROUTED_OPS = [
@@ -308,13 +320,12 @@ class TestNewOpDispatchRouting:
 
     @pytest.mark.parametrize("op,snippet", ROUTED_OPS, ids=[o[0] for o in ROUTED_OPS])
     @pytest.mark.cuda
-    def test_dispatches_to_cuda(self, op, snippet):
+    def test_dispatches_to_configured_backend(self, op, snippet):
         env = os.environ.copy()
         env["FLAGOS_LOG_DISPATCH"] = "1"
-        # Pin the boxing conf: FLAGOS_BACKEND_CONFIG wins over FLAGOS_USE_FLAGGEMS
-        # in _select_backend_config(), so this asserts the boxing routing whether
-        # or not the ambient env has the FlagGems path switched on.
-        env["FLAGOS_BACKEND_CONFIG"] = str(_BOXING_CONF)
+        # Pin the generated CUDA conf so the subprocess uses the same route that
+        # _configured_backend() reads, regardless of ambient opt-in variables.
+        env["FLAGOS_BACKEND_CONFIG"] = str(_CUDA_CONF)
         code = f"import torch_fl, torch; {snippet}"
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -322,9 +333,11 @@ class TestNewOpDispatchRouting:
             capture_output=True,
             text=True,
         )
-        assert f"[flagos dispatch] {op} -> cuda" in result.stderr, (
-            f"expected {op} -> cuda, got:\n{result.stderr}"
+        expected_backend = _configured_backend(op)
+        logged_backend = _dispatch_log_backend(expected_backend)
+        assert f"[flagos dispatch] {op} -> {logged_backend}" in result.stderr, (
+            f"expected {op} -> {logged_backend}, got:\n{result.stderr}"
         )
         assert f"[flagos cpu_fallback] aten::{op}" not in result.stderr, (
-            f"{op} fell back to CPU instead of routing to cuda:\n{result.stderr}"
+            f"{op} fell back to CPU instead of its configured backend:\n{result.stderr}"
         )

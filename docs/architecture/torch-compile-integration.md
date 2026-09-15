@@ -73,8 +73,14 @@ time**, which is the whole thing to understand about it:
 
 - Its wheel is named `flagtree`, but the module it installs is **`triton`**.
 - Installing it **uninstalls the official `triton`** and takes its place.
-- So `import flagtree` never works, and inductor's own `import triton` already
-  resolves to FlagTree once installed. Nothing in `torch_fl` patches `sys.modules`.
+- So inductor's own `import triton` already resolves to FlagTree once installed,
+  and nothing in `torch_fl` patches `sys.modules`.
+
+Wheels from 0.6.2 on also install a real `flagtree` package, which is the
+FlagPrism debugger/profiler host -- it borrows the DSL out of
+`triton.language.core` rather than providing a compiler of its own. Importing it
+is still not how you reach FlagTree; reach for `triton` and check which build it
+is with `is_flagtree_active()`.
 
 There is no `flagtree` package on PyPI; build it from source. On a machine whose
 `triton` is in use by FlagGems, build into a separate virtualenv, since the
@@ -454,8 +460,9 @@ python -c 'import triton; print(triton.__path__)'
 python -c 'import importlib.util as u; print(u.find_spec("triton._flagtree_spec") is not None)'
 ```
 
-Do not reach for `import flagtree` when debugging this; that module does not
-exist at any point, whether or not FlagTree is installed.
+Do not reach for `import flagtree` when debugging this; on recent wheels it
+imports, but what it gives you is the FlagPrism debugger/profiler namespace, not
+the compiler. The compiler is `triton`, whichever build it is.
 
 ## Testing
 
