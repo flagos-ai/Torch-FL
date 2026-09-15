@@ -31,8 +31,19 @@ def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
     _require_flaggems_mthreads()
     calls = []
 
-    def track(module_name, function_name):
-        module = importlib.import_module(module_name)
+    def track(qualname):
+        """Patch the entry point the generated kernel actually calls.
+
+        The codegen freezes the *package-level* name -- ``flag_gems.<fn>``, see
+        ``_normalize_flaggems_qualname`` in scripts/codegen_ops.py -- and
+        ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
+        the attribute. So the observable call site is ``flag_gems.<fn>``.
+        Patching ``flag_gems.ops.<module>.<fn>`` instead writes to a different
+        attribute slot that happens to hold the same object, and the wrapper is
+        never entered.
+        """
+        module_path, _, function_name = qualname.rpartition(".")
+        module = importlib.import_module(module_path)
         original = getattr(module, function_name)
 
         def wrapper(*args, **kwargs):
@@ -41,13 +52,13 @@ def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
 
         monkeypatch.setattr(module, function_name, wrapper)
 
-    track("flag_gems.ops.all", "all")
-    track("flag_gems.ops.all", "all_dims")
-    track("flag_gems.ops.any", "any")
-    track("flag_gems.ops.any", "any_dims")
-    track("flag_gems.ops.repeat_interleave", "repeat_interleave_tensor")
-    track("flag_gems.ops.index_add", "index_add")
-    track("flag_gems.ops.index_add", "index_add_")
+    track("flag_gems.all")
+    track("flag_gems.all_dims")
+    track("flag_gems.any")
+    track("flag_gems.any_dims")
+    track("flag_gems.repeat_interleave_tensor")
+    track("flag_gems.index_add")
+    track("flag_gems.index_add_")
 
     values = torch.tensor([[1, 0, 1], [1, 1, 1]], device=DEVICE)
     assert torch.equal(torch.all(values).cpu(), torch.all(values.cpu()))

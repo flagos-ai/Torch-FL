@@ -37,7 +37,14 @@ export MACA_HOME=/opt/maca
 export FLAGOS_METAX_BOXING=1
 export FLAGOS_METAX_CUDART_SHIM=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
-export FLAGOS_USE_FLAGGEMS=0
+# Which op takes which backend is stated in backends_metax.conf, not here: that
+# file is full-coverage and lists all five keys per op
+# (flaggems_cpp > flaggems > tileops > cuda), and _select_backend_config() picks
+# it from FLAGOS_METAX_BOXING alone. FLAGOS_USE_FLAGGEMS used to select a
+# separate backends_flaggems.conf and no longer selects anything, so setting it
+# to 0 here only misled: conftest.py's _flaggems_enabled() still reads it, which
+# silently skipped every @pytest.mark.flaggems case on a platform whose conf
+# routes 592 ops through the FlagGems Python path.
 export FLAGGEMS_KERNEL=0
 export FLAGGEMS_PYTHON=1
 export FLAGOS_WHEEL_LOCAL=metax3.8.0
@@ -87,7 +94,7 @@ PY
 # Expose the vendor Triton (triton-metax) and FlagGems to the CPU torch venv.
 # torch.compile needs Triton: the active torch is the CPU wheel, which ships no
 # Triton, so inductor raises TritonMissing without this. FlagGems is required
-# because backends_metax.conf routes 451 ops to the Python FlagGems path by
+# because backends_metax.conf routes 592 ops to the Python FlagGems path by
 # default (FLAGGEMS_PYTHON=1 above compiles the dispatcher slot).
 #
 # The vendor packages live in the image's MetaX torch install, which we
@@ -159,8 +166,23 @@ PY
   if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
     echo "FlagGems not found in vendor interpreters. Installing from source..."
     # FlagGems is not available on PyPI. Install from GitHub.
-    # Use a pinned ref for reproducibility (matching the baseline from docs/reference/operator-support.md).
-    python -m pip install --no-deps git+https://github.com/FlagOpen/FlagGems.git@7fb49bad
+    #
+    # The ref is not free-floating. A generated kernel calls its operator by the
+    # package-level name (`flag_gems.<name>`, see
+    # scripts/codegen_ops.py:_normalize_flaggems_qualname), which is exactly the
+    # name the active backend rebound at import -- that is what makes one
+    # generated file correct on every platform. The other side of that is a
+    # cohort dependency: a name only resolves if the installed FlagGems defines
+    # it. So the pin has to be the cohort the checked-in kernels were generated
+    # from, which is the one every routing decision in backends_metax.conf was
+    # measured against:
+    #
+    #   5.4.0rc2.post1+g5a58df410, master @ 5a58df410 (2026-09-15)
+    #
+    # The previous pin (@7fb49bad) predates that cohort in both directions: 10
+    # names the artifact no longer carries were still configured against it, and
+    # names the artifact does carry are absent from it.
+    python -m pip install --no-deps git+https://github.com/FlagOpen/FlagGems.git@5a58df410c551c4f4eb41d31887cd75fd596804a
 
     # After installation, resolve the package location in the venv itself
     VENDOR_FLAGGEMS_ROOT="$(python - <<'PY'
@@ -177,7 +199,7 @@ PY
 
     if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
       echo "::error::Failed to install FlagGems from source. The MetaX backend" \
-           "requires FlagGems because backends_metax.conf routes 451 ops to the" \
+           "requires FlagGems because backends_metax.conf routes 592 ops to the" \
            "Python FlagGems path."
       exit 1
     fi
@@ -218,7 +240,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     VIRTUAL_ENV PYTHONNOUSERSITE ACCELERATOR METAX_PATH MACA_PATH MACA_HOME \
     FLAGOS_METAX_BOXING FLAGOS_METAX_CUDART_SHIM \
-    FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_USE_FLAGGEMS \
+    FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGGEMS_KERNEL FLAGGEMS_PYTHON FLAGOS_WHEEL_LOCAL \
     FLAGOS_MACA_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
