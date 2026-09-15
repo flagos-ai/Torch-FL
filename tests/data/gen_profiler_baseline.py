@@ -68,6 +68,14 @@ def run_traced_ops(device):
     the ceil the spec claimed, and the two forms agree for *every* block size
     that is a multiple of 32 -- so without this kernel the warps-per-SM
     assertion cannot distinguish a correct implementation from a ceil bug.
+
+    The LU factorisation is appended unconditionally here, unlike in the two
+    flagos copies of this workload, which route it through
+    ``profiler_support.append_boxing_path_probe``: stock torch+cuda always has
+    cuSOLVER, while the flagos copies have to ask whether their conf sends
+    ``linalg_lu_factor_ex`` to a device backend before paying for the call. It
+    contributes cuSOLVER's getrf workspace memset and C++-template kernel names,
+    which is what those copies need it for.
     """
     x = torch.randn(1024, 1024, device=device)
     y = torch.randn(1024, 1024, device=device)
@@ -85,6 +93,7 @@ def run_traced_ops(device):
         for _ in range(5):
             z = (x @ y).relu()
         torch.sort(small)
+        torch.linalg.lu_factor(torch.randn(64, 64, device=device))
         z.sum().item()  # force sync so device activity lands inside the window
 
     return prof

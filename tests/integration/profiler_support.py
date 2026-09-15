@@ -133,6 +133,49 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     )
 
 
+def append_boxing_path_probe(device=None, platform=None):
+    """Append the one workload op that still runs on the device backend.
+
+    Under a FlagGems-first conf (``backends_cuda.conf``) every op the shared
+    workload used to reach cuBLAS with -- ``mm``, ``relu``, ``sort``, ``sum``,
+    ``randn`` -- is a Triton kernel. That costs the trace three things the
+    profiler contract asserts on, all measured on A100:
+
+    * no cuBLAS gemm-workspace zeroing, so no ``gpu_memset`` record at all
+      (the category disappears and ``test_profiler_memset_events`` fails);
+    * no ``External id`` among the kernel ``args``, so device time cannot be
+      attributed to the launching op;
+    * no ``::``-qualified kernel name, so the demangling assertion has no
+      subject and stops testing anything.
+
+    ``torch.linalg.lu_factor`` puts all three back. ``linalg_lu_factor_ex`` is
+    routed ``cuda`` by every conf that implements it, its cuSOLVER getrf zeroes
+    a workspace (a ``gpu_memset`` owned by ``aten::linalg_lu_factor_ex``, 512
+    bytes at this size) and its kernels are C++ templates whose names carry
+    ``::``.
+
+    64x64 is the smallest size measured to still allocate that workspace, and
+    costs ~32 KB plus one call -- far below the 1024x1024 ``linalg.solve`` that
+    was the first candidate. Sizes 16/32/64/128 were all measured to produce the
+    record; the larger ones buy nothing.
+
+    Gated on the memset capability rather than appended unconditionally. The
+    probe exists to produce a memset record, so a backend whose contract asserts
+    on one is the only place it earns its cost; elsewhere it adds a call the
+    platform does not check, and on backends routing ``linalg_lu_factor_ex`` to
+    ``none`` (ascend, gcu, musa) it is not on the device path at all.
+    """
+    platform = detect_platform() if platform is None else platform
+    if not capabilities_for_platform(platform).memset:
+        return
+
+    import torch
+
+    torch.linalg.lu_factor(
+        torch.randn(64, 64, device=_torch_device() if device is None else device)
+    )
+
+
 @pytest.fixture(scope="session")
 def profiler_capabilities():
     """Capabilities for the active hardware/backend."""
@@ -157,6 +200,10 @@ def profile_result():
     still passing on backends whose sort allocates zeroed scratch -- so shrinking
     this workload silently converts the memset assertion into a no-op on some
     vendors and a failure on others.
+
+    ``append_boxing_path_probe`` closes the other half of that hole: a conf that
+    reroutes the matmul away from cuBLAS removes the memset for a reason that has
+    nothing to do with workload size. See its docstring.
     """
     if detect_platform() == "metax":
         pytest.skip("MetaX profiler trace export is currently unstable")
@@ -177,6 +224,7 @@ def profile_result():
         for _ in range(5):
             z = (x @ y).relu()
         torch.sort(small)
+        append_boxing_path_probe(device)
         z.sum().item()  # force sync so device activity lands inside the window
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as trace_file:
