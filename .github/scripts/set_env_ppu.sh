@@ -21,9 +21,14 @@
 # build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
-#   3. Exports ACCELERATOR=cuda + PPU_SDK + the two CUDA-assets kill switches.
-#   4. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
+#   3. Installs the FlagGems stack into it: FlagTree (the FlagOS triton dist
+#      with the `ppu` backend) and FlagGems master from git.
+#   4. Exports ACCELERATOR=cuda + PPU_SDK + the two CUDA-assets kill switches.
+#   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
 #      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
+#
+# Nothing here reads a host bind mount, so the environment is fully reproducible
+# from the image plus this script's indexes.
 #
 # Core replacement itself is automatic at `import torch_fl` time
 # (torch_fl/__init__.py:222-232), gated only on lib_ppu/libtorch_cuda.so
@@ -50,6 +55,25 @@ CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 # Tsinghua mirrors once the pod proxy allows them.
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
+
+# FlagTree is the FlagOS Triton distribution, and its `ppu` variant *is* the
+# `triton` package: the wheel ships triton/ (with triton/FLAGTREE_BACKEND =
+# ppu), not a triton plugin, so it replaces the vendor triton rather than
+# sitting beside it. cp312 only, hosted on the FlagOS index. The runner's HTTP
+# proxy does not allowlist that index (it answers CONNECT with 500), so the
+# install below reaches it directly -- see prefer_direct_route. Install it as:
+#   python3.12 -m pip install flagtree===0.6.2a2+ppu3.6 \
+#     --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2+ppu3.6}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+
+# FlagGems master, installed into the venv instead of imported from the
+# /workspace/FlagGems bind mount this script used to require: that mount was not
+# present on every runner pod, and its absence aborted the job in environment
+# setup (see the install below). `master` by request; override with
+# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
 # CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image
@@ -155,12 +179,11 @@ echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
 # PPU build_ext runs with FLAGGEMS_KERNEL=OFF (setup.py cuda-branch default), so
 # the C++ FlagGems dispatch (which needs liboperators.so + FlagGemsConfig.cmake)
-# is never linked and find_package(FlagGems) is skipped. The PPU image ships
-# FlagGems as source only (/workspace/FlagGems has no build/ or lib/), and
-# FLAGGEMS_PYTHON=ON compiles the Python-path kernels without importing flag_gems
-# at build time. The cuda-style FlagGems C++ asset discovery is therefore omitted
-# here. Runtime flag_gems import for the FlagGems test step relies on the editable
-# .pth already on the container filesystem.
+# is never linked and find_package(FlagGems) is skipped. FLAGGEMS_PYTHON=ON
+# compiles the Python-path kernels without importing flag_gems at build time, so
+# the cuda-style FlagGems C++ asset discovery is omitted here. The runtime
+# flag_gems import for the FlagGems test step comes from the venv install further
+# down, not from the container filesystem.
 
 # PPU core libs are a local USE_CUDA=1 build, not an upstream wheel. They carry
 # the undefined symbols libtorch_fl.so needs, so they must be bundled and later
@@ -217,6 +240,119 @@ fi
 # index-url choice and applies regardless of which index ends up serving it.
 export PIP_DEFAULT_TIMEOUT=120
 
+# FlagTree is a ~363 MB wheel served by a shared mirror, and the FlagGems git
+# install has to resolve github.com through the same proxy. Both are large
+# enough that a single transient reset would otherwise fail the job in setup,
+# so retry them the way set_env_musa.sh does.
+pip_retry() {
+  local attempt=1
+  while true; do
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+      return 0
+    fi
+    if ((attempt >= 5)); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
+# --- Reaching a host around the runner's HTTP proxy --------------------------
+# The runner injects HTTP(S)_PROXY into the job container along with its own
+# allowlist and NO_PROXY list (this pod: localhost,127.0.0.1,10.1.12.192,
+# 10.1.12.38,harbor.baai.ac.cn,.example.com). Two of those entries resolve to
+# public addresses (harbor.baai.ac.cn is 120.92.122.200, the same /16 as
+# resource.flagos.net), and the container is a NAT'd docker bridge off the
+# runner host, so this pod does open public connections without the proxy.
+# resource.flagos.net is simply not on that list: pip tunnels to it, the proxy
+# refuses the CONNECT, and pip reports 'Tunnel connection failed: 500 Internal
+# Server Error' as "Could not find a version that satisfies the requirement
+# flagtree===" -- an unreachable index that reads like a missing wheel. The
+# 2026-09-15 run spent all five pip_retry attempts and 21 minutes on that, while
+# the sibling MUSA runner's proxy serves the same index fine, so the working
+# route is a property of the pod rather than of the index.
+#
+# So probe the unproxied route and, when it answers, add just that host to
+# NO_PROXY/no_proxy: pip's requests stack reads either case, git reads the
+# lowercase one through libcurl. When the probe fails the environment is left
+# exactly as the runner set it, so a pod that can only leave through the proxy
+# keeps the previous behaviour instead of trading a 500 for a connect timeout.
+# TORCH_FL_PROXY_ROUTE=direct|proxy skips the probe.
+add_no_proxy_host() {
+  NO_PROXY="${NO_PROXY:+${NO_PROXY},}$1"
+  no_proxy="${no_proxy:+${no_proxy},}$1"
+  export NO_PROXY no_proxy
+}
+
+host_of_url() {
+  local host="${1#*://}"
+  host="${host%%/*}"
+  printf '%s' "${host%%:*}"
+}
+
+# Succeeds if an unproxied GET of the URL gets an HTTP answer at all. The
+# status is not the question: this probe only asks whether the pod can open the
+# connection, and the index URL as configured has no trailing slash, so a 404
+# here still proves the route works and a proxy-tunnelled request does not get
+# that far. Only a transport failure -- DNS, connect, TLS, proxy refusal --
+# counts as unreachable.
+direct_route_reachable() {
+  "$VENV_PYTHON" - "$1" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+# Trust whatever pip trusts -- certifi, not the system CA store -- so a store
+# difference cannot make this probe fail where the real install would succeed.
+handlers = [urllib.request.ProxyHandler({})]
+try:
+    import certifi
+    import ssl
+
+    handlers.append(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=certifi.where()))
+    )
+except ImportError:
+    pass
+opener = urllib.request.build_opener(*handlers)
+try:
+    with opener.open(sys.argv[1], timeout=15) as response:
+        status = response.status
+except urllib.error.HTTPError as exc:
+    status = exc.code
+except Exception as exc:
+    print(f"{sys.argv[1]} unreachable without the proxy: {exc!r}")
+    sys.exit(1)
+print(f"{sys.argv[1]} -> HTTP {status} without the proxy")
+PY
+}
+
+# $1 = URL, $2 = what it serves, for the log line.
+prefer_direct_route() {
+  local url="$1" what="$2" host
+  host="$(host_of_url "$url")"
+  case "${TORCH_FL_PROXY_ROUTE:-auto}" in
+    proxy)
+      echo "Using the runner proxy for $host ($what): TORCH_FL_PROXY_ROUTE=proxy"
+      return 0
+      ;;
+    direct)
+      add_no_proxy_host "$host"
+      echo "Bypassing the runner proxy for $host ($what): TORCH_FL_PROXY_ROUTE=direct"
+      return 0
+      ;;
+  esac
+  if direct_route_reachable "$url"; then
+    add_no_proxy_host "$host"
+    echo "Bypassing the runner proxy for $host ($what): it answers directly"
+  else
+    echo "::warning::Using the runner proxy for $host ($what), which did not answer without it. If the proxy then refuses the CONNECT with 500, this host has to be allowlisted on the runner's proxy or added to its NO_PROXY."
+  fi
+}
+
 # patchelf is missing by default on PPU nodes (bundle_common.sh notes it is
 # absent on all four vendor nodes). Install it into the venv so bundle_ppu's
 # bundle_require_patchelf check passes; mirrors the DCU line (commit 6568415).
@@ -251,26 +387,24 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # fix for the 5.x regression.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
     pytest "transformers>=4.51,<5" sentencepiece tiktoken protobuf
-  # flag_gems runtime path (step 4) imports from the mounted source via the
-  # _flag_gems_mounted_source.pth above. The CI image lacks flag_gems' pure
-  # Python deps (sqlalchemy/PyYAML/packaging -- not in the image site-packages,
-  # verified by import failure). numpy ships with the stock +cpu torch wheel
-  # installed above, so it is not re-pinned here to avoid a numpy/torch version
-  # clash. Versions follow /workspace/FlagGems/pyproject.toml dependencies.
+  # FlagGems' pure Python deps. The CI image lacks them (sqlalchemy/PyYAML/
+  # packaging -- not in the image site-packages, verified by import failure).
+  # numpy ships with the stock +cpu torch wheel installed above, so it is not
+  # re-pinned here to avoid a numpy/torch version clash. Versions follow
+  # FlagGems' pyproject.toml dependencies.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
     "packaging>=26.0" "PyYAML==6.0.1" "sqlalchemy==2.0.48"
 fi
 
-# Keep the vendor FlagGems/Triton Python packages available without copying the
-# vendor torch package. They are used by the CUDA runtime path; the active torch
-# package remains the CPU wheel below. PPU flag_gems is a PEP 660 editable
-# install: site-packages has no flag_gems/ dir, only an
-# __editable__.flag_gems-<ver>.pth + __editable___flag_gems_<ver>_finder.py that
-# resolve the import to /workspace/FlagGems/src/flag_gems. dist-info alone is
-# not enough -- without the .pth + finder, venv python raises
-# ModuleNotFoundError on `import flag_gems` (step 4 FlagGems runtime path).
+# Keep the vendor FlagCX runtime available without copying the vendor torch
+# package; the active torch package remains the CPU wheel installed above.
+# `flag_gems` and `triton` are deliberately NOT in this list: the image's
+# flag_gems is a PEP 660 editable install pointing at /workspace/FlagGems (the
+# mount this script no longer requires), and its triton is the vendor build
+# (3.5.0+v0.2.0.ppu2.1.0, backends ['amd','nvidia']). Copying either would
+# shadow the FlagTree triton and the FlagGems master installed below.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
+for package in triton_kernels flagcx; do
   if [[ -d "$VENDOR_SITE/$package" ]]; then
     cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
   fi
@@ -279,8 +413,8 @@ for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
     cp -a "$metadata" "$VENV_SITE/"
   done
   # PEP 660 editable installs: copy the .pth (import hook) + finder .py (resolves
-  # the package to its source dir, e.g. /workspace/FlagGems) so venv python can
-  # import the package. dist-info alone does not register the import hook.
+  # the package to its source dir) so venv python can import the package.
+  # dist-info alone does not register the import hook.
   for pth in "$VENDOR_SITE"/__editable__."$package"*.pth; do
     [[ -e "$pth" ]] || continue
     cp -a "$pth" "$VENV_SITE/"
@@ -291,29 +425,40 @@ for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
   done
 done
 
-# CI image (harbor inference-xpu-pytorch) ships no flag_gems package. Discover
-# the mounted source in either the normal src layout or a repository-root
-# package layout, then fail during environment setup if neither is available.
-# A plain path .pth keeps the acceptance environment non-editable while making
-# the mounted source importable by the venv Python.
-_flaggems_sources=(
-  /workspace/FlagGems/src
-  /workspace/FlagGems
-)
-FLAGGEMS_SOURCE=""
-for _candidate in "${_flaggems_sources[@]}"; do
-  if [[ -d "$_candidate/flag_gems" ]]; then
-    FLAGGEMS_SOURCE="$_candidate"
-    break
-  fi
-done
-if [[ -z "$FLAGGEMS_SOURCE" ]]; then
-  echo "::error::FlagGems source is not available under /workspace/FlagGems"
-  echo "::error::Expected flag_gems under: ${_flaggems_sources[*]}"
-  exit 1
+# Install the FlagGems stack instead of importing it from a host mount.
+#
+# This replaces a probe of /workspace/FlagGems that hard-failed the job when the
+# bind mount was absent, which is what every PPU run did once the runner pod
+# stopped carrying it. Installing removes the dependency on runner-side state
+# entirely.
+#
+# Why --no-deps on both: flag_gems would otherwise pull PyPI's NVIDIA `triton`,
+# replacing the FlagTree build installed one line earlier, and it would also
+# re-resolve `torch`, replacing the pinned CPU wheel this whole setup depends on
+# (the PPU core libs are symlinked over *that* wheel's libs at import time).
+# FlagGems' own runtime deps are installed explicitly above.
+#
+# FlagTree first: it owns the `triton` package, and flag_gems' vendor detection
+# reads triton's registry at import time (FlagGems master picks its `thead`
+# backend whenever PPU_SDK is in the environment -- exported near the bottom of
+# this script -- so no GEMS_VENDOR wiring is needed here).
+#
+# Integration stage only: it is the only stage that imports flag_gems (the
+# dedicated PPU workflow runs everything in one job), and the C++ build needs
+# neither triton nor flag_gems -- the FlagGems Python kernels are compiled from
+# the checked-in csrc/aten/generated/flaggems_python_kernels.cc. Add it to the
+# build stage if PPU is ever wired into build-wheel-common.yml.
+if [[ "$CI_STAGE" == "integration" ]]; then
+  # Route the two external fetches around the runner's proxy where the pod can
+  # reach them directly: FlagTree comes from resource.flagos.net, which this
+  # pod's proxy refuses, and FlagGems master is a large checkout from
+  # github.com, which the same treatment at worst leaves on the proxy. See
+  # prefer_direct_route above.
+  prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
+  pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+  prefer_direct_route "$FLAGGEMS_REPO" "FlagGems git checkout"
+  pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
 fi
-printf '%s\n' "$FLAGGEMS_SOURCE" > "$VENV_SITE/_flag_gems_mounted_source.pth"
-echo "FlagGems source: $FLAGGEMS_SOURCE"
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -410,19 +555,42 @@ print(f"CPU torch path: {torch_path}")
 print(f"PPU bundle: {Path('torch_fl/lib_ppu').resolve()}")
 PY
 
-# Prove the mounted FlagGems source is importable in this venv, so a missing or
-# unreadable mount fails here instead of turning into a wall of identical
-# ModuleNotFoundError test failures in the FlagGems runtime step. flag_gems
-# queries torch.cuda at import time, so torch_fl must be imported first: that is
-# what swaps the stock CPU core libs for the PPU build bundled above. The check
-# therefore has to run after bundle_ppu_libtorch.sh, and only in the integration
-# stage, which is where flag_gems' pure Python deps are installed.
+# Prove the installed FlagGems stack is importable and wired to PPU, so a broken
+# install fails here instead of turning into a wall of identical failures in the
+# FlagGems runtime step. flag_gems queries torch.cuda at import time, so torch_fl
+# must be imported first: that is what swaps the stock CPU core libs for the PPU
+# build bundled above. The check therefore has to run after
+# bundle_ppu_libtorch.sh, and only in the integration stage, which is where
+# flagtree and flag_gems are installed.
+#
+# The three assertions are the ones that actually went wrong while bringing this
+# up: the installed `triton` must be FlagTree's (its registry exposes the `ppu`
+# backend, the vendor build exposes ['amd', 'nvidia']), flag_gems must have picked
+# the `thead` vendor from PPU_SDK rather than falling back to nvidia, and it must
+# resolve to the venv rather than the image's editable-install path.
 if [[ "$CI_STAGE" == "integration" ]]; then
   python - <<'PY'
+import os
+from pathlib import Path
+import sys
+
 import torch_fl  # noqa: F401  (swaps in the bundled PPU libtorch core)
 import flag_gems
+import triton
+import triton.backends
 
-print(f"flag_gems: {flag_gems.__file__}")
+venv = sys.prefix
+assert str(Path(triton.__file__).resolve()).startswith(venv), triton.__file__
+assert "ppu" in triton.backends.backends, list(triton.backends.backends)
+assert str(Path(flag_gems.__file__).resolve()).startswith(venv), flag_gems.__file__
+
+vendor = flag_gems.runtime.backend.device_finder.DeviceDetector()._get_vendor_from_env()
+assert vendor == "thead", f"flag_gems selected vendor {vendor!r}; PPU_SDK={os.environ.get('PPU_SDK')!r}"
+
+print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
+print(f"triton backends: {sorted(triton.backends.backends)}")
+print(f"flag_gems: {flag_gems.__version__} -> {flag_gems.__file__}")
+print(f"flag_gems vendor: {vendor}")
 PY
 fi
 

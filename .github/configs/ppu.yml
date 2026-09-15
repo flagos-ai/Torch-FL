@@ -23,12 +23,12 @@ runner_labels:
 
 container_volumes:
   # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
-  # CUDA_SDK/lib64/libcudart.so; no host mount needed. FlagGems source is not
-  # in the image (find returns nothing); the runner pod mounts the shared CPFS
-  # PV at /workspace/FlagGems, and docker create -v bind-mounts it through to
-  # the job container (verified: ls lists the source tree). set_env then
-  # synthesizes a .pth so venv python can import flag_gems from this path.
-  - /workspace/FlagGems:/workspace/FlagGems:ro
+  # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
+  # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
+  # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
+  # installs the FlagGems stack into the job venv from the FlagOS index (FlagTree)
+  # and from git (FlagGems master), so the environment is reproducible from the
+  # image plus those two indexes alone.
   - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 integration_environment:
@@ -122,20 +122,19 @@ integration_tests:
       -m "main_ops and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
-  # PPU triton (vendor build copied into the venv) does not recognise the
-  # `num_ldmatrixes` keyword that FlagGems' _hygon mm/bmm kernel passes to
-  # triton's mm_kernel -- KeyError at triton/runtime/jit.py:_pack_args (mm),
-  # and bmm hits the same kernel and times out at 60s inside triton
-  # compilation. The remaining 13 flaggems main_ops pass. No CPU fallback.
-  # Filed upstream as FlagGems issue #6225. backends_ppu.conf pins mm/bmm to
-  # the vendor kernel, so these deselects now only cover the two dispatch-log
-  # tests that assert the FlagGems route itself.
+  # The venv triton is FlagTree's ppu build (triton 3.6.0, backends {'ppu'}),
+  # not the vendor 3.5.0+v0.2.0.ppu2.1.0 (backends {'amd','nvidia'}) -- see
+  # set_env_ppu.sh, which installs flagtree==0.6.2a2+ppu3.6 plus FlagGems master
+  # into the job venv. mm/bmm stay on the vendor route because FlagGems' _hygon
+  # mm kernel passes a `num_ldmatrixes` keyword that the triton mm_kernel does
+  # not accept: KeyError at triton/runtime/jit.py:_pack_args for mm, and bmm
+  # hits the same kernel and times out at 60s inside triton compilation. Filed
+  # upstream as FlagGems issue #6225. backends_ppu.conf pins mm/bmm to the
+  # vendor kernel, so these deselects now only cover the two dispatch-log
+  # tests that assert the FlagGems route itself. The remaining flaggems
+  # main_ops pass.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      if [[ -z "${FLAGGEMS_SOURCE:-}" ]]; then
-        echo "FlagGems source is unavailable; skipping optional FlagGems runtime tests"
-        exit 0
-      fi
       FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops"
