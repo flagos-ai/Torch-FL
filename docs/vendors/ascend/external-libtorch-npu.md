@@ -110,7 +110,7 @@ is the one we already occupy.
   `PrivateUse1` key layer naturally. torch_npu implemented itself as **another PrivateUse1
   backend**, contending with torch_fl for the same key.
 - For Ascend, the existing route stands: hand-written / CANN-backed operators under
-  `csrc/aten/backends/ascend/`, or FlagGems + triton-ascend. `libtorch_npu.so` cannot be
+  `csrc/aten/backends/ascend/`, or FlagGems on FlagTree. `libtorch_npu.so` cannot be
   loaded externally as a zero-cost fallback layer.
 - If reusing torch_npu's already-implemented NPU kernels is genuinely desirable, the mechanism
   is not "load the .so" but **explicitly forwarding to torch_npu's op implementations at the

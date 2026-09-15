@@ -163,16 +163,19 @@ validation.
    cannot provide. See `flagtree_shim.py` for how FlagTree reaches MUSA through
    `torch_fl` rather than the `torch_musa` plugin
 5. Ascend is experimental: serial compilation by default, no C++ wrapper codegen,
-   and three toolchain workarounds. Validated on a real 910 (`Ascend910_9382`,
-   CANN 9.0.0, triton-ascend 3.2.0, torch 2.10.0+cpu) for the graphs in
-   `tests/integration/test_compile.py`; whole-model compilation is not yet
-   exercised
+   and three toolchain workarounds. The quoted validation on a real 910
+   (`Ascend910_9382`, CANN 9.0.0, torch 2.10.0+cpu) was measured against
+   triton-ascend 3.2.0 and has **not** been re-measured since Ascend's FlagGems
+   route moved to FlagTree 0.6.2a1+ascend3.5 (Triton 3.5); treat the compile
+   numbers as unvalidated on the current toolchain, which no CI step exercises
 
 ## Future Work
 
 - [x] Exercise `torch.compile(backend="flagos")` on FlagTree-built NVIDIA,
       Hygon HCU, MetaX, and MThreads MUSA environments
 - [x] Ascend via triton-ascend (experimental)
-- [ ] Retire the Ascend workarounds as triton-ascend fixes land
+- [ ] Re-validate the Ascend torch.compile path on FlagTree, the backend the
+      FlagGems route now runs on, and retire the triton-ascend workarounds once
+      its replacements land
 - [ ] Benchmark fusion gains against stock inductor+triton on cuda
 - [ ] Multi-GPU compilation support

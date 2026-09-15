@@ -24,7 +24,7 @@
 |---|---|---|---|---|---|---|---|---|
 | NVIDIA CUDA | `ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
 | MetaX | `ACCELERATOR=metax` | CUDA-boxing reuse via `cu-bridge`/mxcc, or native MetaX kernels | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
-| Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, optional FlagGems via triton-ascend | Stable (CI-covered ops, RNG suite) | Experimental (inductor via triton-ascend 3.2.0, measured on 910; three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Experimental (Python dispatch; not CI-tested on Ascend) | Beta |
+| Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 routes fall back to ACLNN) | Beta |
 | PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
 | Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
@@ -110,25 +110,38 @@ categories, and `test_profiler_parity.py` is excluded from CI until it does (sam
 204-208); the native HCCL fallback and the `flagos→npu` zero-copy view are architectural
 routing, not on-hardware-verified collectives (same file, lines 67-75).
 
+The FlagGems route runs on FlagTree (`0.6.2a1+ascend3.5`, Triton 3.5), and the
+route table is generated FlagGems-first with ACLNN as the fallback for everything
+FlagGems cannot compile or run. Because a conf cannot express a per-dtype
+exception, float64 calls that the conf routes to FlagGems are redirected to
+ACLNN at runtime by `FlagGemsRejectsDtype` (`csrc/aten/common.cc`); see
+[`docs/reference/operator-support.md`](operator-support.md) for the measured
+route delta. The 910C CI runner is **not revalidated** — these results were
+measured on a 910/910B host.
+
 `torch.compile(backend="flagos")` is experimentally validated on Ascend through
-`triton-ascend` 3.2.0, not FlagTree. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
+`triton-ascend` 3.2.0. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
 torch 2.10.0+cpu, Python 3.10): `tests/integration/test_compile.py` passes 30 of 32 with a
-cold inductor cache, the two skips being the FlagTree-only and MetaX-only cases. FlagTree
-itself is **not** validated on Ascend: its Ascend backend exists only on the 3.5 line, and
-it routes its host runtime through `torch_npu`, which claims PrivateUse1 and so prevents
-`torch_fl` from registering `flagos` at all. `torch_fl/compile/flagtree_ascend_policy.py`
-registers a torch_npu-free backend policy to lift that block, but it is verified only up to
-compiling the emitted C++ against ATen and resolving every strategy through FlagTree's real
-registry — no FlagTree build carrying the Ascend backend is installed here, so end-to-end
-kernel execution through FlagTree remains unvalidated
-([upstream issue](https://github.com/flagos-ai/FlagTree/issues/1046)). Forward, backward, fused
+cold inductor cache, the two skips being the FlagTree-only and MetaX-only cases. That
+measurement predates the move of Ascend's FlagGems route to FlagTree, and no CI step
+or hand run has re-measured the compile path on the current toolchain, so treat these
+numbers as unvalidated there. Forward, backward, fused
 elementwise and matmul+normalization graphs match eager. Three triton-ascend defects are
 worked around rather than avoided — a miscompiled masked byte load, `ub overflow` raised as
 a hard error, and a compile-worker/parent launch segfault — so the platform compiles
 serially by default and has no C++ wrapper codegen; see
 [`docs/architecture/torch-compile-integration.md`](../architecture/torch-compile-integration.md).
-This is not in CI: the Ascend runner image does not carry `triton-ascend`, so the compile
-suite must be run by hand on hardware that does.
+Whether any of the three still applies to FlagTree is unmeasured.
+This is not in CI: the Ascend runner image does not carry the Triton toolchain, so the
+compile suite must be run by hand on hardware that does.
+
+FlagTree's Ascend backend resolves its host runtime through `torch_npu`, which claims
+PrivateUse1 and so would prevent `torch_fl` from registering `flagos` at all.
+`torch_fl/compile/flagtree_ascend_policy.py` registers a torch_npu-free backend policy to
+lift that block, and `torch_fl.flagos` installs it during device init so that eagerly
+launched FlagGems kernels take it; the emitted C++ compiles against real ATen headers and
+every strategy resolves through FlagTree's real registry
+([upstream issue](https://github.com/flagos-ai/FlagTree/issues/1046)).
 
 ### PPU
 

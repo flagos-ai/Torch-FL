@@ -665,6 +665,156 @@ pre-existing Ascend `pow`/`rsqrt` set.
 not touch. Separately, the stale `backends_gcu.conf` / `backends_ascend.conf`
 reported by `test_shipped_confs_are_up_to_date` are pre-existing generator drift on
 two out-of-scope platforms. Neither is in scope here.
+### Ascend moves from triton-ascend to FlagTree, and widens the FlagGems route (2026-09-15)
+
+Ascend's FlagGems route used to run on `triton-ascend 3.2.2`. It now runs on the
+vendor's own Triton distribution, FlagTree `0.6.2a1+ascend3.5` (Triton 3.5), and
+the FlagGems coverage was re-measured on that stack rather than carried over from
+the old one. Two changes follow from the re-measurement:
+
+- **`pow` and `rsqrt` come back to FlagGems.** They were excluded under
+  triton-ascend 3.2.2 because they crashed `bishengir-compile` with
+  `LLVM ERROR: unsupported datatype for arith::ExtFOp to hfusion` (CI run
+  34792677968, filed as FlagGems issue #6226). On FlagTree they compile: all
+  five overloads — `pow.Scalar`, `pow.Tensor_Scalar`, `pow.Tensor_Tensor`,
+  `rsqrt`, `rsqrt_` — match the CPU reference for shapes `(1,)`, `(7,)`,
+  `(128, 256)` and `(3, 5, 17)` in fp32/fp16/bf16, three seeds each, plus the
+  backward through the FlagGems kernels.
+- **Twenty-three overloads move the other way, back to aclnn.** Each was
+  measured on the new stack and each has a native kernel, so the route back
+  costs no coverage. They fall into five groups:
+  - `mm`, `mm.out` — the Ascend tune config tunes a kernel that cannot accept one
+    of its own keys (`tune_configs.yaml` declares `SPLIT_K` for `mm:` while
+    `mm_kernel_general` does not take it), so the first call dies inside the
+    autotuner's own benchmark run with `KeyError: 'Keyword argument SPLIT_K was
+    specified but unrecognised'` before any kernel is compiled. The rest of the
+    family is fine: `bmm`, `bmm.out` and `addmm` run on FlagGems and match a
+    float64 CPU reference to `1.6e-7` relative, three orders tighter than the
+    aclnn path's `1.7e-4`.
+  - twelve comparison overloads (`eq`/`ge`/`gt`/`le`/`lt`/`ne`, `.Scalar` and
+    `.Tensor`) — the kernels evaluate in float32 (`x.to(tl.float32)`), which is
+    silently wrong for integer operands wider than float32's 24-bit mantissa:
+    `ge` over `[2**53+1, 2**53]` reports `[True, True]` where ATen returns
+    `[False, False]`, and a Python scalar operand outside int32 range collapses
+    to 0 before the comparison. Both the cast and the scalar path reproduce in a
+    one-line Triton kernel with no FlagGems involved.
+  - `rand`, `rand_like`, `randperm`, `exponential_`, `native_dropout`,
+    `native_dropout_backward` — each dies inside BiShengHIR's compilation of the
+    FlagGems kernel, so the op never launches. `rand`/`rand_like` and the
+    large-tensor dropout path hit the unified-buffer budget
+    (`ub overflow, requires 2294016 bits while 1572864 bits available!`);
+    `exponential_` is rejected on its own `arith.cmpi` attribute and is already
+    in FlagGems' Ascend `CUSTOMIZED_UNUSED_OPS`; `randperm` is wrong before it is
+    slow (`randperm(50)` returns all zeros for two different seeds, while
+    `randperm(2000)` fails to compile through `topk.py`). The dropout failure is
+    shape-dependent — the 100 000-element case needs 5112576 bits while the
+    256-element case in the same test file fits — so a small-N check proves
+    nothing about the route.
+  - `sort`, `sort.stable` — rejected by BiShengHIR with `ub overflow, requires
+    4620288 bits while 1572864 bits available!`. This is the same kernel MUSA
+    routes around for a different reason; here it is the compiler's
+    unified-buffer budget, not a missing cast. `argsort`/`msort` are composites
+    over `sort`, so one entry covers all four.
+  - `mul_.Tensor` — a FlagGems defect, not a backend one. `flag_gems/ops/mul.py`
+    is the only operator module that gates its Triton path on the runtime device
+    *name* and then re-dispatches with `torch.ops.aten.mul.out.redispatch(...,
+    a, b, out=out)`. Here the runtime name is `npu` while the tensor's device
+    type is `flagos`, so the fallback always fires and hands the boxed schema the
+    caller's raw operand. `mul_.Scalar` is boxed onto `mul_.Tensor` by ATen, so
+    one entry covers both spellings; `add_`/`div_`/`sub_` are unaffected because
+    no other module carries that gate.
+
+**Runtime dtype escape.** The exclusion above is expressible in a conf because it
+is per-op. A per-dtype exception is not: a conf has no way to say "FlagGems,
+except for float64". On this stack that exception is real and broad — BiShengHIR
+rejects the float64 instantiation of nearly every pointwise kernel FlagGems
+emits. Measured: `add`, `sub`, `div`, `neg`, `abs`, `exp`, `log`, `sqrt`,
+`reciprocal`, `where`, `clamp`, `fill_`, `zeros_like`, `ones_like`, `ones`,
+`full` and `arange` over float64 all raise `MLIRCompilationError`, while `mul`,
+`cat`, `eq` and `lt` compile. The exception therefore lives at runtime:
+`FlagGemsRejectsDtype` in `csrc/aten/common.cc`, consulted by
+`Dispatcher::ResolveFn` (`csrc/aten/dispatcher.h`) where the arguments are still
+visible. It is a dtype-only predicate, and it sees Tensors, `optional<Tensor>`,
+Tensor lists, `optional<ScalarType>` and bare `ScalarType`, so the factories that
+carry the dtype as an argument rather than in a tensor are covered too. When the
+dtype is rejected and the platform has a vendor kernel, the call resolves to the
+vendor slot and `FLAGOS_LOG_DISPATCH` logs that backend, not `flaggems`.
+
+**Route delta.** Ascend `flaggems` 241 -> **225**, `ascend` 133 -> **149**,
+`none` 1662 unchanged (2036 routable ops); 30 overloads moved, 7 to FlagGems and
+23 back. Conf SHA-256
+`04a5380ab55c127d82c0657c2a02c20593257364c582be154cbfdb060c252412` (was
+`8ce7c8c733c7b0b040a5ac38e0ba1a2f6fc997f230209cbc9de24c74ba3384`). The generated
+conf remains byte-identical across two runs of
+`scripts/codegen/gen_vendor_confs.py`.
+
+**Other Ascend changes in the same cohort**, all measured on the same stack:
+
+- Ascend defaults to FlagTree instead of `triton-ascend`, and FlagGems is
+  imported after `torch_fl` so the `torch.npu` shim absorbs the backend's
+  discovery-time import without a real torch-npu. A thin `triton.experimental.tle`
+  placeholder keeps `import flag_gems` working where AscendSHMEM is absent.
+- RNG: the generator state contract FlagGems' RNG kernels expect is bridged onto
+  the platform's default generators, which is what lets the generator-consuming
+  tests reach the dtype and compilation failures above instead of failing earlier
+  on the state shape.
+- Per-device default ACL streams, so a drain on one device no longer synchronizes
+  another device's stream, and the executor cache key carries the device index.
+  A failed `aclrtCreateStream` is no longer cached as a null stream, which would
+  have pinned that device to the runtime default stream — and left it undrained,
+  since `DrainDefaultAclStreams` skips null entries — for the life of the process.
+
+**Measured on an Ascend 910 host** (4 devices, server-class 910/910B, **not** the
+910C the CI image targets) with CANN 9.0.0, FlagTree `0.6.2a1+ascend3.5`
+(Triton 3.5.1) and FlagGems `5.4.0rc2.post1+g6d31db9aa` — the CI pin is the
+different revision `d45285ba`, and every gap above was re-checked against both:
+
+- A 22-op float64/float32 probe over `flagos:0`: **22/22 float32** and
+  **22/22 float64** pass. Before the runtime escape, 17 of the 22 float64 cases
+  raised `MLIRCompilationError`.
+- `tests/integration/ops/` with `-m ascend`: **38 passed, 1099 deselected**;
+  **44 passed** with the new `test_dtype_route_fallback.py` (below) included.
+- `tests/integration/ops/test_rng_dispatch.py -m main_ops`: **112 passed, 3
+  skipped, 1 deselected, 1 xpassed**.
+- `tests/integration/test_factory_ops.py`: **46 passed**.
+- `tests/integration/test_amp_contract.py -m amp`: **27 passed** (4 failing / 23
+  passing before the runtime escape).
+- `tests/integration/test_math_bits_contract.py -m math_bits`: **5 passed, 7
+  skipped**.
+- `tests/integration/test_profiler_contract.py -m profiler` with the MSPTI
+  preload: **2 passed, 10 skipped**.
+
+**New regression test.** `tests/integration/ops/test_dtype_route_fallback.py`
+(6 cases) is the CI-visible contract for the runtime escape: it drives one
+subprocess probe over both dtypes with `FLAGOS_LOG_DISPATCH=1`, asserts that every
+float64 call the conf sends to FlagGems is answered by the native backend, that
+float32 keeps whatever route the conf chose, that a route the conf made itself is
+untouched, and that the float64 answers match a CPU reference rather than merely
+not raising. It also pins that the per-op backend cache does not pin an op to one
+backend for good — both dtypes run in one process and take different routes.
+
+**Evidence gaps.** Two, both recorded rather than papered over:
+
+- The CI target is a 910C image; the host used here is a 910/910B. The route
+  table, the FlagGems revision and the compiler are the ones CI uses, but the
+  silicon is not, so no 910C row is claimed and the CI run is the only 910C
+  evidence for this change.
+- `tests/manual/flaggems_overload_survey.py` cannot measure these routes. It
+  selects overloads whose conf value is the FlagGems route, and the float64
+  escape is a runtime decision that no conf value reflects; the Ascend rows of
+  the generic FlagGems baseline above are unchanged by this work and are **not
+  revalidated**. The evidence is targeted float64 probing plus the full CI
+  manifest, not a synthesized overload survey.
+
+**One pre-existing failure, unchanged by this work.**
+`tests/unit/test_gen_vendor_confs.py::test_shipped_confs_are_up_to_date` still
+reports `backends_gcu.conf` as stale. This is measured, not assumed: the branch
+generator and the base-commit generator produce **byte-identical GCU output**
+(`head==now True`), and the shipped GCU conf is stale under both, so the drift
+predates this change and is orthogonal to Ascend. It is left alone rather than
+regenerated, because a GCU conf regeneration is an 88-route, 590-line diff that
+belongs with a GCU change. Ascend and MUSA are clean under the branch generator
+(`--check` reports only `backends_gcu.conf`).
 
 ### MUSA integer division: mudnn `TRUEDIV` promotion and FlagGems floor-divide tail store (2026-09-15)
 
@@ -1075,6 +1225,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 |---|---|---|---|---|
 | 2026-09-15 | MTT S5000 (8 devices) | MUSA FlagGems gap re-measurement | Re-probed all 18 `NATIVE_TRITON_GAPS["musa"]` entries against the FlagGems revision the MUSA CI job installs, on each entry's recorded failure signature. Four no longer reproduce and are promoted out of the set: `index_add` and `index_add_` (recorded as "returns all zeros") now route to `flaggems` from `none`, and `randn`/`randn_like` (recorded as "crashes unpacking generator state") route to `flaggems` with the mudnn kernel retained as `flaggems  # musa`. The other fourteen keep their routes with provenance updated to `4d9c34775`; `_conj` stays because its probe *passes* (flag_gems materializes the conjugate where ATen's lazy view must set the Conjugate bit). MUSA `flaggems` 464 -> 468, `musa` 51 -> 49, `none` 1521 -> 1519; registered-op set unchanged at 518, `musa_flaggems_register.inc` 357 -> 359 `m.impl` lines. FlagGems is not patched. A100/mc550/PPU/DCU rows and every non-MUSA platform are **not revalidated**. | Per-op probe, one fresh process each, `FLAGOS_OP_*` pinning the op back to FlagGems, `FLAGOS_LOG_DISPATCH=1`/`FLAGOS_LOG_FALLBACK=1`: `index_add`, `index_add_`, `randn`, `randn_like` PASS (0/7, 0/7, 0/4, 0/4) and the 13 entries kept in the set reproduce their recorded signature exactly (bf16 `failed to translate module to LLVM IR`; `no fallback function is registered for schema aten::mul.out` for f32 and bf16, with `aten.mul.out` itself verified usable on MUSA and the `flag_gems/ops/mul.py:587` device-name guard confirmed live; the trailing-store loss at `n = 3,5,6,7,9,15,17,31,33,100`; `RuntimeError: MudnnCopy: unsupported dtype Long -> UInt32`). Comparator control rejects a perturbed reference. Provenance beyond verdicts: `index_add`/`index_add_` each add a new flag_gems code-cache entry, so the mthreads kernel compiled and ran on device, and every fallback line in those rows is the probe's own CPU comparison. End-to-end on the rebuilt library with the shipped conf: 14/14 cases pass, dispatch log showing `index_add`/`index_add_`/`randn`/`randn_like -> flagos_python` against `sort`/`add.Tensor -> musa` regression controls. `index_add` with duplicate indices and `alpha = 2.5` is bounded, not assumed: 11/20 seeds differ from CPU by at most `4.768e-07` (one float32 ULP) on the duplicated rows only, `alpha == 1` bit-exact, matching ATen's documented order-freedom for duplicate indices. CI groups re-run: dispatch 113 passed; factory 46 passed; operator cohort 493 passed/1 skipped/521 deselected/2 xfailed/1 xpassed plus the 3 pre-existing consistency failures; RNG 80 passed/37 deselected with the manifest's `-k` filter. Generators idempotent (`codegen_musa_flaggems.py --check` "is up to date", `gen_vendor_confs.py --check` clean for MUSA); `codegen_musa_flaggems.py` must run before `gen_vendor_confs.py`. `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing ascend/gcu drift failure. `flaggems_overload_survey.py` cannot measure these routes — evidence gap recorded in the section above. |
 | 2026-09-15 | Enflame GCU S60 (8 `flagos` devices) | GCU FlagGems routing | Made `backends_gcu.conf` FlagGems-first via a new generated registration file (`scripts/codegen/codegen_gcu_flaggems.py` -> `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`, 249 `m.impl` lines), included by `csrc/aten/register.cc` after `gcu_register.inc`. GCU `flaggems` 0 -> 257, `gcu` 152 -> 144, `none` 1884 -> 1635; accelerated routes 152 -> 401 (7% -> 19.7%). `NATIVE_TRITON_GAPS["gcu"]` 108 -> 225: 81 routes measured wrong at `float16`/`float32`, plus 36 that fail only for `int64`/`bool` and have a topsaten kernel to fall back to. 76 `int64`-only routes with no topsaten kernel are deliberately **left on FlagGems** rather than demoted to `cpu_fallback` for float too; they now raise `Pipeline run failed` for an `int64` operand where the previous configuration served the call through `cpu_fallback`. FlagGems is not patched or forked. Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no route changed for them. | `flaggems_overload_survey.py` (harness v4) on the S60 against flagtree `0.6.1+enflame3.6` (Triton 3.6, backend `enflame`, FlagGems master `3c6f7537d`), 7 profiles per overload over all 374 FlagGems routes (a transient un-gapped draft of `backends_gcu.conf`, `meta.conf_sha256` `82f801778c…`; it reconciles with the shipped conf as 374 - 117 = 257 and is not byte-recoverable): 314 tested, 121 strict, 121 clean on every exercised profile, 81 wrong at `float16`/`float32`, 112 wrong only for `int64`/`bool`, 60 with no constructible case. Failure families reproduced and recorded: GCU300 `64-bit data type not supported` / `Pipeline run failed: PassManager execution failed` (largest family), `arith.maxsi` UNREACHABLE at `PtrAnalysis.cpp:1711` (`_adaptive_avg_pool2d`), `unsupported extern elementwise: __nv_asinf` UNREACHABLE at `ElementwiseFusionOpToGCU.cpp:874` (`asin`), SIP abort at `dtu_context_obj.cc:693` (`addr`), SIGSEGV (`native_batch_norm`, `_batch_norm_no_update`), and measured wrong values on float profiles (`elu` `max_diff` 0.38-0.89, `histc` up to 1536, `_softmax_backward_data` returning `int8`, `sum.out` returning `(32, 32)` for `()`). Full `.github/configs/gcu.yml` pytest manifest run locally in one pass, all seven groups rc=0: vendor operator cohort 595 passed/32 skipped/499 deselected/2 xfailed/2 xpassed, FlagGems runtime path 9 passed/4 skipped/1116 deselected/1 xpassed, unified RNG 111 passed/4 skipped/1 deselected/1 xpassed, general 46 passed, AMP 27 passed, math-bits 12 passed, `torch.compile` 29 passed/18 skipped; conf consistency 7 passed; routing equals registration (no op routed to `gcu` without a `gcu_register.inc` entry, none registered-but-left-`none`). Both generators idempotent (two runs byte-identical; `--check` exit 0). The environment group (`set_env_gcu.sh`, `CI_STAGE=integration`) was reproduced into a scratch venv: TopsRider discovery, `/dev/gcu0`, the venv bootstrap, CPU torch 2.10.0, flagtree from the FlagOS index and FlagGems `3c6f7537d` from git all succeed, and its Triton/flag_gems verification snippet passes; on the measurement host alone it needs a local, uncommitted retarget of libtriton.so's single glibc-2.38 symbol, because that host is Ubuntu 22.04 while the wheel and the pinned ubuntu24.04 CI image are not. Evidence gaps recorded: the 60 unconstructible routes are not measured, the two batch-norm process deaths are gapped on exit status alone because the harness truncates stderr at 300 bytes, and no part of this change has been executed by CI yet. |
+| 2026-09-15 | Ascend 910 (910/910B host, CANN 9.0.0) — **910C not revalidated** | Ascend FlagTree migration, widened FlagGems route, and a runtime float64 escape | Moved Ascend's FlagGems route from `triton-ascend 3.2.2` to FlagTree `0.6.2a1+ascend3.5` (Triton 3.5) and re-measured the coverage on the new stack instead of inheriting it. `pow.Scalar`, `pow.Tensor_Scalar`, `pow.Tensor_Tensor`, `rsqrt`, `rsqrt_` return to FlagGems (the triton-ascend crash behind FlagGems issue #6226 does not reproduce). 23 overloads return to aclnn: `mm`/`mm.out` (Ascend tune config passes `SPLIT_K` to a kernel that does not take it), the twelve `eq`/`ge`/`gt`/`le`/`lt`/`ne` comparison overloads (float32 evaluation is silently wrong above 2**24), `rand`/`rand_like`/`randperm`/`exponential_`/`native_dropout`/`native_dropout_backward` and `sort`/`sort.stable` (all rejected by BiShengHIR, mostly on the unified-buffer budget), and `mul_.Tensor` (FlagGems' `mul.py` gates on the runtime device *name* and mis-redispatches). Ascend `flaggems` 241 -> 225, `ascend` 133 -> 149, `none` 1662; conf SHA-256 `04a5380a...c252412` (was `8ce7c8c7...4ba3384`). Because a conf cannot express a per-dtype exception, the float64 gap is handled at runtime: `FlagGemsRejectsDtype` in `csrc/aten/common.cc`, consulted by `Dispatcher::ResolveFn`, which sees Tensor, `optional<Tensor>`, Tensor-list, `optional<ScalarType>` and bare `ScalarType` arguments. Also fixed per-device default ACL streams and the executor-cache device key. FlagGems is not patched. All other platform rows are **not revalidated** and no FlagGems route changed for them. | 22-op float64/float32 probe on `flagos:0`: 22/22 float32 and 22/22 float64 pass, against 17 of 22 float64 cases raising `MLIRCompilationError` before the escape. Full `.github/configs/ascend.yml` manifest run locally on an Ascend 910: operator cohort `-m ascend` 38 passed / 1099 deselected, 44 passed with the new test; RNG `-m main_ops` 112 passed / 3 skipped / 1 deselected / 1 xpassed; factory 46 passed; AMP contract 27 passed (4 failing / 23 passing before); math-bits 5 passed / 7 skipped; profiler contract 2 passed / 10 skipped with the MSPTI preload. New `tests/integration/ops/test_dtype_route_fallback.py` (6 passed) pins the float64 escape through `FLAGOS_LOG_DISPATCH=1` in both dtypes in one process. Generator idempotent (two runs byte-identical; `gen_vendor_confs.py --check` clean for Ascend and MUSA). `flaggems_overload_survey.py` cannot measure these routes, so the generic Ascend FlagGems rows are not revalidated — evidence gap recorded in the section above. `tests/unit/test_gen_vendor_confs.py::test_shipped_confs_are_up_to_date` still fails on `backends_gcu.conf`; measured as pre-existing, since the base-commit and branch generators emit byte-identical GCU output. |
 | 2026-09-15 | MTT S5000 (8 devices) | MUSA integer division (issue #266) | Fixed two integer-division defects in the generator, not with handwritten kernels. `int64 / int64` raised `Unsupported binary mode: TRUEDIV, with left data type: INT64` because the generated kernels took `result_dtype` from `at::result_type` (int64) while ATen promotes integer true division to float32; `_TRUEDIV_INT_TO_FLOAT` now widens integral results, guarded on `!rounding_mode.has_value()` so `'floor'`/`'trunc'` keep int64. Integer `//`, `floor_divide`, and `floor_divide_` silently lost the trailing element on non-power-of-two `numel` in FlagGems; new `binary_mode` / `binary_inplace_mode` categories plus the `floor_divide_.Tensor` native entry route `div.Tensor_mode`, `div_.Tensor_mode`, `floor_divide` and `floor_divide_.Tensor` through mudnn `FLOORDIV`/`TRUNCATEDIV`/`TRUEDIV` via `SetMudnnDivMode`. MUSA `flaggems` 468 -> 464, `musa` 47 -> 51, `none` 1521; registered-op set unchanged at 518 (three overloads moved from the FlagGems registration to the native one). FlagGems is not patched. Other platforms are **not revalidated** and no FlagGems route changed for them. | 59-case CPU-parity probe on `flagos:0` run against both this tree and a base-commit worktree (out-of-place, in-place, scalar and tensor operands, both rounding modes, negatives, `out=`, broadcasting, and `floor_divide` at `n = 2,3,4,5,7,8,15,17,33,100`): 39 exact / 7 float-approximate / 13 mismatches before, 43 exact / 14 float-approximate / 1 error-text match / 1 probe-harness mismatch after. Integer floor division and every `rounding_mode` case exact; the float-approximate cases are true division one float32 ULP from CPU and reproduce identically on pure-float inputs on the base tree (pre-existing mudnn `TRUEDIV` arithmetic, not this change). `FLAGOS_LOG_DISPATCH=1` shows all five overloads on `-> musa`; pinning the four rerouted overloads back onto FlagGems via `FLAGOS_OP_*` reproduces the tail loss (`[5, 5, 0]` for `[5, 5, 6]` at n=3) and leaves true division correct, isolating the routing fix causally. Full `.github/configs/musa.yml` run locally: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 493 passed/1 skipped/513 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. Generator idempotent (two runs byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `flaggems_overload_survey.py` cannot measure these routes: it selects `flagos_python` entries, and the rerouted overloads are exactly the ones that left that route — evidence gap recorded in the section above. Three pre-existing `test_flaggems_conf_consistency.py` failures (`mm`/`bmm`/`addmm` dispatcher drift) reproduce byte-identically against the pristine conf. |
 | 2026-09-14 | MTT S5000 (8 devices) | MUSA FlagGems routing and in-place arithmetic fallback | Restored the MUSA FlagGems registration generator, taking MUSA from 158 to 515 registered ops and from 122 to 468 `flaggems` routes (`musa` 36 -> 47, `none` 1878 -> 1521). Moved 14 ops into `NATIVE_TRITON_GAPS["musa"]` so they fall back to mudnn instead: `add/sub/div.Tensor` and their in-place forms plus `mul_.Tensor` (bf16 wrapped-number promotion reaches `llvm.musa.float2bfloat16` with a double operand), `randn`/`randn_like`, `sort`/`sort.stable`, and `_conj`/`index_add`/`index_add_`, which route to `none` because mudnn has no kernel for them. FlagGems is not patched. Ascend, GCU, DCU, MetaX and PPU rows are **not revalidated** by this change and no FlagGems route was altered for them. | Every group of `.github/configs/musa.yml` run locally on hardware: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 490 passed/2 skipped/512 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. The bf16 gap was reproduced causally with `FLAGOS_OP_add__Tensor=flaggems`, which reproduces the remote CI's `failed to translate module to LLVM IR` on `test_autocast_fp32_policy[dtype1]` and passes on the shipped route. Three `flaggems`-marked dispatch-log tests that hard-coded `flagos_python`/`cuda` were rewritten to read the route from the platform conf (`tests/integration/ops/backend_conf.py`); they were the only failures in CI group 7 on `6f8128e` and pass on every platform's conf afterwards. Generator idempotent (`codegen_mudnn.py` twice, byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing failure (ascend/gcu conf staleness, unrelated). Three pre-existing `test_flaggems_conf_consistency.py` failures reproduce byte-identically against `d0e2d1a`'s data files, so they are not introduced by this change. |
 | 2026-09-11 | None (CPU-only host) | Unified MetaX confs (refactor/unified-vendor-confs) | Collapsed `backends_metax_flaggems.conf` and `backends_metax_flaggems_cpp.conf` into a single `backends_metax.conf`. The 17 on-device-verified C++ routes are now in the file unconditionally; a build without `FLAGGEMS_KERNEL=ON` degrades them to the boxing kernel via `Dispatcher::GetFn` instead of raising. `METAX_CPP_MEASURED` in `gen_vendor_confs.py` records the measured set explicitly since the file it was formerly recovered from no longer exists. `mm` remains on the boxing kernel (MetaX C550 shared-memory limit). `_select_backend_config()` now routes both `FLAGOS_USE_FLAGGEMS` and `FLAGOS_USE_FLAGGEMS_CPP` to the same `backends_metax.conf` under `FLAGOS_METAX_BOXING=1`. **All hardware rows not revalidated.** | Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), `tests/unit/test_gen_vendor_confs.py` passes with updated test names. |

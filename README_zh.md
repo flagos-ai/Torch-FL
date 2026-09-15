@@ -93,7 +93,7 @@ torch-fl 在项目层面提供以下能力：
 |---|---|---|---|---|
 | NVIDIA CUDA | 基于外部 `libtorch_cuda.so` 的 CUDA boxing | Eager、autograd、分布式（FlagCX/NCCL）、profiler（CUPTI）、FlagGems（Python + C++） | **稳定** | [CUDA](docs/vendors/cuda/installation.md) |
 | MetaX | 通过 cu-bridge 进行 CUDA boxing，或使用 MetaX 原生内核 | Eager、autograd | **稳定** | [MetaX](docs/vendors/metax/installation.md) |
-| Ascend | 原生 ACLNN 后端，可选通过 triton-ascend 使用 FlagGems | Eager、autograd、RNG 套件 | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
+| Ascend | 原生 ACLNN 后端，通过 FlagTree（Triton 3.5）使用 FlagGems | Eager、autograd、RNG 套件 | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
 | PPU | 针对 PPU CUDA 13 兼容 SDK 的 CUDA boxing | Eager、autograd | **实验性** | [PPU](docs/vendors/ppu/installation.md) |
 | 海光 DCU | 基于 hipify DTK torch 的 CUDA boxing | Eager、autograd、profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | 燧原 GCU | 原生 topsaten 后端，未路由及 int64 算子使用 CPU 回退 | Eager | **实验性** | [GCU](docs/vendors/gcu/installation.md) |
