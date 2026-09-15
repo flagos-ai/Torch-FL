@@ -208,6 +208,11 @@ OPS = {
     ),
     "logical_xor": ("binary_cmp", "LOGICAL_XOR"),
     "floor_divide": ("binary", "FLOORDIV"),
+    # floor_divide_ keeps FLOORDIV and the in-place templates; div's *_mode
+    # variants take the mudnn mode from aten's rounding_mode at run time.
+    "floor_divide_.Tensor": ("binary_inplace", "FLOORDIV"),
+    "div.Tensor_mode": ("binary_mode", "ROUNDING_MODE"),
+    "div_.Tensor_mode": ("binary_inplace_mode", "ROUNDING_MODE"),
     # ---- P1: activation backwards ----
     # SIGMOID_BW/TANH_BW take (grad, output); aten passes `output` in that slot
     # too, so the template is shared. The rest take (grad, input).
@@ -468,11 +473,64 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 _BINARY_PROLOGUE = """\
   auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.to(compute_device, result_dtype);
+{promote_truediv}  auto self_c = self.to(compute_device, result_dtype);
   auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape);
   auto other_b = other_c.expand(out_shape);
+"""
+
+# True division is the one binary op whose *result category* at::result_type gets
+# wrong: TensorIterator builds the div kernel with promote_integer_inputs_to_float,
+# so an integral result dtype is widened to the default dtype and the quotient is
+# computed in floating point. `int64 / int64` is float32 in aten, while
+# at::result_type answers int64 -- and that int64 is exactly what the generated
+# kernel handed to mudnn, which rejects it ("Unsupported binary mode: TRUEDIV,
+# with left data type: INT64", issue #266). bool goes the same way: at::result_type
+# promotes it to bool and aten divides it in float.
+#
+# This is the whole correction. at::result_type already carries the wrapped-number
+# rule (`int64 / 2.0` -> float32, `int64 + float64 tensor` -> float64, both
+# verified against CPU), so an operand of floating type keeps the dtype aten gives
+# the op and the guard below cannot touch it.
+#
+# The fragments contain single braces: they reach the templates as format *values*
+# rather than being concatenated into the template source, and str.format does not
+# look inside a substituted value.
+_TRUEDIV_INT_TO_FLOAT = """\
+  if (at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
+"""
+
+# `div.Tensor_mode` carries rounding_mode, and aten's promotion only applies to
+# the absent-mode (true division) case: 'floor' and 'trunc' are defined on
+# integers, so `torch.div(a, b, rounding_mode='floor')` is int64 for int64
+# operands and must stay int64.
+_TRUEDIV_INT_TO_FLOAT_IF_UNROUNDED = """\
+  if (!rounding_mode.has_value() &&
+      at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
+"""
+
+# Shared by `binary` and `binary_mode`. `{mode_set}` rather than a literal
+# `SetMode` because the *_mode categories derive the mode from a runtime string.
+_BINARY_TAIL = """\
+  auto out = at::empty(out_shape, self_c.options());
+{empty_guard}
+  musa_ops::MudnnTensorWrapper t_self(self_b);
+  musa_ops::MudnnTensorWrapper t_other(other_b);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  musa_ops::mudnn::Binary op;
+{mode_set}
+  EXEC_MUDNN_CMD(
+      "{at_op}", self_c,
+      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 """
 
 T_BINARY = (
@@ -485,22 +543,28 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   }}
 """
     + _BINARY_PROLOGUE
-    + """\
-  auto out = at::empty(out_shape, self_c.options());
-{empty_guard}
-  musa_ops::MudnnTensorWrapper t_self(self_b);
-  musa_ops::MudnnTensorWrapper t_other(other_b);
-  musa_ops::MudnnTensorWrapper t_out(out);
-  musa_ops::mudnn::Binary op;
-  op.SetMode(musa_ops::mudnn::Binary::Mode::{mode});
-  EXEC_MUDNN_CMD(
-      "{at_op}", self_c,
-      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
-  return out;
-}}
+    + _BINARY_TAIL
+)
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+# div.Tensor_mode: the same arithmetic as `binary`, with two differences -- the
+# mudnn mode comes from aten's `rounding_mode` string at run time, and the
+# integral-input promotion applies only when that string is absent (see
+# _TRUEDIV_INT_TO_FLOAT_IF_UNROUNDED). The Scalar overloads (`torch.div(a, 2,
+# rounding_mode='floor')`) decompose into this one before dispatch, so there is
+# no separate scalar template.
+T_BINARY_MODE = (
+    """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other,
+                   ::std::optional<c10::string_view> rounding_mode) {{
+  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+      !musa_ops::{dtype_pred}(other.scalar_type())) {{
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::{at_op}(self.cpu(), other.cpu(), rounding_mode)
+        .to(fallback_device);
+  }}
 """
+    + _BINARY_PROLOGUE
+    + _BINARY_TAIL
 )
 
 T_BINARY_ALPHA = (
@@ -575,7 +639,7 @@ _BINARY_INPLACE_PROLOGUE = """\
     other_dtype = c10::get_default_dtype_as_scalartype();
   }}
   auto result_dtype = c10::promoteTypes(self.scalar_type(), other_dtype);
-  TORCH_CHECK(
+{promote_truediv}  TORCH_CHECK(
       c10::canCast(result_dtype, self.scalar_type()),
       "result type ", result_dtype,
       " can't be cast to the desired output type ", self.scalar_type());
@@ -584,7 +648,14 @@ _BINARY_INPLACE_PROLOGUE = """\
   // reads 0-strides correctly, so broadcasting costs no allocation.
   auto other_c = other.to(self.device(), result_dtype).expand(self.sizes());
   musa_ops::mudnn::Binary op;
-  op.SetMode(musa_ops::mudnn::Binary::Mode::{mode});
+"""
+
+# The mode assignment sits between the prologue and the body because
+# `div_.Tensor_mode` derives the mode from a runtime string rather than from the
+# OPS table, and because the alpha variant has to configure alpha on `op` in the
+# same window -- both must be set before either dispatch arm runs `op`.
+_BINARY_INPLACE_MODE = """\
+{mode_set}
 """
 
 # The two dispatch arms, which both end in `return self;`. Split out of the
@@ -632,6 +703,28 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other) {{
   }}
 """
     + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_MODE
+    + _BINARY_INPLACE_BODY
+)
+
+# div_.Tensor_mode: `binary_inplace` with the mode taken from rounding_mode.
+# `int64.div_(int64, rounding_mode=None)` raises aten's own cast error here,
+# because the unrounded case promotes the compute dtype to float32 and the
+# prologue's canCast check then rejects it -- measured identical on CPU.
+T_BINARY_INPLACE_MODE = (
+    """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other,
+                    ::std::optional<c10::string_view> rounding_mode) {{
+  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+      !musa_ops::{dtype_pred}(other.scalar_type())) {{
+    auto cpu = self.cpu();
+    cpu.{at_op}(other.cpu(), rounding_mode);
+    self.copy_(cpu);
+    return self;
+  }}
+"""
+    + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_MODE
     + _BINARY_INPLACE_BODY
 )
 
@@ -648,6 +741,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& other,
   }}
 """
     + _BINARY_INPLACE_PROLOGUE
+    + _BINARY_INPLACE_MODE
     + """\
   // Before either arm runs `op`. mudnn's Binary carries the alpha as an untyped
   // Scalar, so it is narrowed here to the compute dtype's C type; leaving it
@@ -698,7 +792,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 # the separate *_BY_ALPHA modes, which we do not use).
 _SCALAR_PROLOGUE = """\
   auto result_dtype = at::result_type(self, other);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+{promote_truediv}  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
 """
 
 # Braces stay doubled: this fragment is concatenated into a template that is
@@ -2514,8 +2608,10 @@ CATEGORIES = {
     "unary_alpha_const": T_UNARY_ALPHA_CONST,
     "unary_two_pass": T_UNARY_TWO_PASS,
     "binary": T_BINARY,
+    "binary_mode": T_BINARY_MODE,
     "binary_alpha": T_BINARY_ALPHA,
     "binary_inplace": T_BINARY_INPLACE,
+    "binary_inplace_mode": T_BINARY_INPLACE_MODE,
     "binary_alpha_inplace": T_BINARY_ALPHA_INPLACE,
     "binary_cmp": T_BINARY_CMP,
     "unary_scalar": T_UNARY_SCALAR,
@@ -2575,8 +2671,10 @@ ARITHMETIC_CATEGORIES = {
     "unary_alpha_const",
     "unary_two_pass",
     "binary",
+    "binary_mode",
     "binary_alpha",
     "binary_inplace",
+    "binary_inplace_mode",
     "binary_alpha_inplace",
     "unary_scalar",
     "unary_scalar_alpha",
@@ -2621,8 +2719,10 @@ CATEGORY_CLASS = {
     "unary_alpha_const": "Unary",
     "unary_two_pass": "Unary",
     "binary": "Binary",
+    "binary_mode": "Binary",
     "binary_alpha": "Binary",
     "binary_inplace": "Binary",
+    "binary_inplace_mode": "Binary",
     "binary_alpha_inplace": "Binary",
     "binary_cmp": "Binary",
     "unary_scalar": "Unary",
@@ -2846,9 +2946,23 @@ def main():
             continue
         fn, disp = schema_to_cpp_name(op)
         kernel = fn[:-2] + "KernelMusa"  # SqrtFn -> SqrtKernelMusa
+        # `div`'s integral-input promotion, which at::result_type does not carry
+        # (see _TRUEDIV_INT_TO_FLOAT). Only the true-division categories get it:
+        # 'floor'/'trunc' are defined on integers and keep int64, and the other
+        # binary modes (MUL, ADD_ALPHA, comparisons) never widen.
+        if cat in ("binary_mode", "binary_inplace_mode"):
+            promote_truediv = _TRUEDIV_INT_TO_FLOAT_IF_UNROUNDED
+            # The mudnn mode is a runtime argument here, so the fixed-mode line
+            # the other Binary templates emit is replaced by the mapping call.
+            mode_set = "  musa_ops::SetMudnnDivMode(op, rounding_mode);"
+        else:
+            mode_set = f"  op.SetMode(musa_ops::mudnn::Binary::Mode::{mode_name});"
+            promote_truediv = _TRUEDIV_INT_TO_FLOAT if mode_name == "TRUEDIV" else ""
         fmt = dict(
             kernel=kernel,
             mode=mode_name,
+            mode_set=mode_set,
+            promote_truediv=promote_truediv,
             fn=fn,
             disp=disp,
             at_op=AT_OP_OVERRIDES.get(op, base),

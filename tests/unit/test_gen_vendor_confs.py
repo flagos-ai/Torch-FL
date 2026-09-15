@@ -188,7 +188,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     Strategy: register everything → run CI → move failures to NATIVE_TRITON_GAPS.
     This maximizes coverage while maintaining correctness via the fallback list.
 
-    Known failures (as of 2026-09-14 on MTT S5000, FlagGems 4d9c34775 +
+    Known failures (as of 2026-09-15 on MTT S5000, FlagGems 4d9c34775 +
     flagtree 0.6.2a3+mthreads3.6); the full diagnosis for each lives on the set
     itself in scripts/gen_vendor_confs.py:
       - _conj: flag_gems materializes the conjugation that ATen keeps as a lazy
@@ -203,6 +203,12 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         _foreach_add_, and so AdamW's foreach path) onto the .Tensor overload, so
         the in-place entries are what actually keep those callers off the failing
         kernel. mul_.Tensor is listed even though mul.Tensor is already native.
+      - div.Tensor_mode/div_.Tensor_mode/floor_divide/floor_divide_.Tensor
+        (issue #266): on integer inputs flag_gems loses the trailing store, so
+        every non-power-of-two numel returns a stale last element. Both
+        rounding-mode overloads and the base/in-place floor_divide spellings hit
+        it, and the Scalar forms decompose onto them, so `a // b`, `a // 2`,
+        torch.floor_divide(a, b) and a.div_(b, rounding_mode='floor') all do.
       - index_add/index_add_: return all zeros instead of accumulating.
       - randn/randn_like: crash unpacking generator state.
       - sort/sort.stable: flag_gems' radix sort casts its histogram to uint32
@@ -237,7 +243,11 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         "add.Tensor",
         "add_.Tensor",
         "div.Tensor",
+        "div.Tensor_mode",
         "div_.Tensor",
+        "div_.Tensor_mode",
+        "floor_divide",
+        "floor_divide_.Tensor",
         "index_add",
         "index_add_",
         "mul_.Tensor",

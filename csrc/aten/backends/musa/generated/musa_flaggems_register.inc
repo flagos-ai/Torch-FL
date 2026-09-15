@@ -22,7 +22,11 @@
 //   - add.Tensor
 //   - add_.Tensor
 //   - div.Tensor
+//   - div.Tensor_mode
 //   - div_.Tensor
+//   - div_.Tensor_mode
+//   - floor_divide
+//   - floor_divide_.Tensor
 //   - index_add
 //   - index_add_
 //   - mul_.Tensor
@@ -33,7 +37,7 @@
 //   - sub.Tensor
 //   - sub_.Tensor
 //
-// Total: 360 ops registered here, 119 further FlagGems ops already claimed by musa_register.inc.
+// Total: 357 ops registered here, 122 further FlagGems ops already claimed by musa_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_batch_norm_no_update", WrapperPrivBatchNormNoUpdate);
@@ -145,11 +149,9 @@
   m.impl("digamma", WrapperDigamma);
   m.impl("digamma_", WrapperDigammaInplace);
   m.impl("div.Scalar_mode", WrapperDivScalarMode);
-  m.impl("div.Tensor_mode", WrapperDivTensorMode);
   m.impl("div.out", WrapperDivOut);
   m.impl("div_.Scalar", WrapperDivInplaceScalar);
   m.impl("div_.Scalar_mode", WrapperDivInplaceScalarMode);
-  m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
   m.impl("dot", WrapperDot);
   m.impl("elu_", WrapperEluInplace);
   m.impl("elu_backward", WrapperEluBackward);
@@ -175,7 +177,6 @@
   m.impl("floor_", WrapperFloorInplace);
   m.impl("floor_divide.Scalar", WrapperFloorDivideScalar);
   m.impl("floor_divide_.Scalar", WrapperFloorDivideInplaceScalar);
-  m.impl("floor_divide_.Tensor", WrapperFloorDivideInplaceTensor);
   m.impl("fmax", WrapperFmax);
   m.impl("fmax.out", WrapperFmaxOut);
   m.impl("fmin", WrapperFmin);

@@ -281,6 +281,27 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa"}
 # same kernel through the stable entry point, and argsort/msort are composites
 # over sort, so this one entry fixes all four. Measured on MTT S5000 with FlagGems
 # 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
+#
+# musa: integer division. Two separate defects, both in the *integral* path and
+# both silent -- the kernel returns a plausible answer with the wrong dtype or
+# one stale element, so nothing upstream can be blamed for it (issue #266).
+#
+# `floor_divide` and `floor_divide_.Tensor` lose the last element's store for
+# integer operands on the mthreads Triton backend: with a = [10,20,30] and
+# b = [2,4,5], `a // b` returns [5,5,<garbage>] wherever numel is not a power of
+# two (measured wrong at n = 3,5,6,7,9,15,17,31,33,100; right at n = 1,2,4,8,16,
+# 32,64,1024). Float operands are correct at every size. mudnn's FLOORDIV is the
+# same mode the op already claims, so routing it back is free.
+#
+# `div.Tensor_mode` / `div_.Tensor_mode` are wrong differently: FlagGems computes
+# the integer `rounding_mode='floor'`/`'trunc'` forms as integer division but
+# drops the same trailing element, and the absent-mode form is correct only
+# because the promotion to float happens to hide it. The mudnn kernels added for
+# them take the mode from aten's `rounding_mode` at run time, so one entry covers
+# all three spellings. `floor_divide.Scalar` and the `div.*_mode` scalar forms are
+# composites over the Tensor entries above, so they follow those routes.
+#
+# Measured on MTT S5000 with FlagGems 4d9c34775 + flagtree 0.6.2a3+mthreads3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
         "pow.Scalar",
@@ -294,7 +315,11 @@ NATIVE_TRITON_GAPS = {
         "add.Tensor",
         "add_.Tensor",
         "div.Tensor",
+        "div.Tensor_mode",
         "div_.Tensor",
+        "div_.Tensor_mode",
+        "floor_divide",
+        "floor_divide_.Tensor",
         "index_add",
         "index_add_",
         "mul_.Tensor",

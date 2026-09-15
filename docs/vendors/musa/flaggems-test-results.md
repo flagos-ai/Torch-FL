@@ -80,9 +80,13 @@ pytest tests/integration/ops/test_musa_dispatch.py -m musa -v
 
 **Key Changes**:
 - Updated test expectations to match FlagGems-first routing strategy
-- 468 ops route to `flaggems` (FlagGems Triton kernels)
-- 47 ops route to `musa` (mudnn native kernels): 36 that FlagGems does not cover at all, plus 11 of the 14 `NATIVE_TRITON_GAPS["musa"]` ops that FlagGems cannot execute correctly on this stack
-- The remaining 3 gaps (`_conj`, `index_add`, `index_add_`) route to `none`: mudnn has no kernel for them either, so they reach ATen's CPU fallback instead of a registered-but-wrong dispatcher slot
+- 464 ops route to `flaggems` (FlagGems Triton kernels)
+- 51 ops route to `musa` (mudnn native kernels): 36 that FlagGems does not
+  cover at all, plus 15 of the 18 `NATIVE_TRITON_GAPS["musa"]` ops that FlagGems
+  cannot execute correctly on this stack
+- The remaining 3 gaps (`_conj`, `index_add`, `index_add_`) route to `none`:
+  mudnn has no kernel for them either, so they reach ATen's CPU fallback
+  instead of a registered-but-wrong dispatcher slot
 
 **Routing Expectations**:
 | Operator | Expected Backend | Reason |
@@ -90,6 +94,9 @@ pytest tests/integration/ops/test_musa_dispatch.py -m musa -v
 | `mm` | `flaggems` | FlagGems coverage |
 | `add.Tensor` | `musa` | FlagGems bf16 wrapped-number lowering fails |
 | `mul.Tensor` | `musa` | mudnn native only |
+| `div.Tensor` | `musa` | FlagGems bf16 wrapped-number lowering fails |
+| `div.Tensor_mode` | `musa` | FlagGems loses the trailing store on integer inputs |
+| `floor_divide` | `musa` | FlagGems loses the trailing store on integer inputs |
 | `_softmax` | `flaggems` | FlagGems coverage |
 | `relu` | `flaggems` | FlagGems coverage |
 | `mm.out` | `flaggems` | FlagGems coverage |
@@ -144,6 +151,67 @@ pytest tests/integration/test_factory_ops.py -v
 
 ## Known Issues
 
+### Integer division dropped the trailing element, and `int64 / int64` raised
+
+[Issue #266](https://github.com/flagos-ai/Torch-FL/issues/266). Two independent
+defects, both fixed in the platform code generator rather than with handwritten
+kernels:
+
+- **FlagGems integer floor division loses its final store on this stack.** On
+  integer inputs the kernel writes a wrong last element whenever `numel` is not a
+  power of two — wrong at `n = 3, 5, 6, 7, 9, 15, 17, 31, 33, 100`, correct at
+  `n = 1, 2, 4, 8, 16, 32, 64, 1024`. Float inputs are correct. This reached
+  `a // b`, `a // 2`, `torch.floor_divide(a, b)`, `a.clone().floor_divide_(b)`,
+  and the rounding-mode division overloads.
+- **mudnn's `TRUEDIV` has no integer overload.** `a / b`, `torch.div(a, b)`, and
+  `a.div_(b)` on integer tensors failed with
+  `Unsupported binary mode: TRUEDIV, with left data type: INT64`, because the
+  generated kernel took `result_dtype` from `at::result_type(self, other)` —
+  which is the integer type itself — while ATen's true division promotes integer
+  inputs to `float32` through `promote_integer_inputs_to_float`.
+
+- **Resolution**: `div.Tensor_mode`, `div_.Tensor_mode`, `floor_divide`, and
+  `floor_divide_.Tensor` are listed in `NATIVE_TRITON_GAPS["musa"]` and route to
+  mudnn (`FLOORDIV` / `TRUNCATEDIV` / `TRUEDIV`, selected at run time from ATen's
+  `rounding_mode` string). The true-division kernels widen an integral result to
+  `at::get_default_dtype_as_scalartype()`, guarded on the absence of a
+  `rounding_mode` so `'floor'` and `'trunc'` keep `int64`. FlagGems is not
+  patched.
+- **Measured**: a 59-case CPU-parity probe over out-of-place, in-place, scalar
+  and tensor operands, both rounding modes, negative operands, `out=`,
+  broadcasting, and `floor_divide` at `n = 2, 3, 4, 5, 7, 8, 15, 17, 33, 100`
+  was run against both this tree and a second worktree built at the base commit
+  (`flagos/main`, `6b978c0`):
+
+  | Tree | Result |
+  |---|---|
+  | before (`6b978c0`) | `39 exact, 7 float-approximate, 0 error-text matches, 13 mismatches (of 59)` |
+  | after (this branch) | `43 exact, 14 float-approximate, 1 error-text match, 1 mismatch (of 59)` |
+
+  The 13 base-tree mismatches are exactly the two defects above. On the fixed
+  tree every integer floor-division and `rounding_mode` case is exact, and the
+  in-place `int64` true-division case `a.div_(b)` keeps ATen's own
+  `result type Float can't be cast to the desired output type Long`,
+  byte-identical to CPU. Two qualifications, both measured: the 14
+  float-approximate cases are `truediv` results differing from CPU by exactly one
+  float32 ULP (`5.960e-08`) at `n = 5, 7, 8, 15, 17, 33, 100`, and the pure-float
+  spellings — which never touched the FlagGems floor-divide kernel — show the
+  identical `5.960e-08` on the base tree, so this is mudnn `TRUEDIV` arithmetic
+  versus CPU libm and predates the change; the remaining mismatch is the probe's
+  own `out=` helper passing CPU tensors to a Triton path and raising identically
+  on both trees, not a property of the operators. Full CI manifest re-run: see
+  the table below.
+- **The two fixes are independent, and the routing one is causal.** Forcing the
+  four rerouted ops back onto FlagGems with `FLAGOS_OP_div__Tensor_mode=flaggems
+  FLAGOS_OP_div___Tensor_mode=flaggems FLAGOS_OP_floor_divide=flaggems
+  FLAGOS_OP_floor_divide___Tensor=flaggems` reproduces the tail loss exactly and
+  nothing else: at `n = 3` with `a = [10, 20, 30]`, `b = [2, 4, 5]`, `a // b`,
+  `a // 2`, `torch.floor_divide(a, b)`, `torch.div(a, b, rounding_mode='floor')`,
+  `'trunc'`, `a.clone().floor_divide_(b)` and `a.clone().div_(b, rounding_mode=
+  'floor')` all return `[5, 5, 0]` where CPU returns `[5, 5, 6]`, while
+  `a / b` and `torch.div(a, b)` (true division, which never used the FlagGems
+  kernel) stay correct. The same 10 cases are all correct on the shipped route.
+
 ### FlagGems bf16 wrapped-number promotion reaches an unsupported LLVM intrinsic
 
 - **Issue**: ATen boxes a Python-float operand into a float64 0-dim tensor
@@ -187,6 +255,20 @@ falling back to event timing
 ## Commit History
 
 ### Latest commit on this branch
+
+```
+fix: route MUSA integer division through mudnn and promote true division
+```
+
+**Changes**:
+- Fixed issue #266 in the generator: integer true division now computes in
+  `float32` per ATen's `promote_integer_inputs_to_float` contract instead of
+  handing `int64` to mudnn's `TRUEDIV`, and the four integer floor-division
+  overloads route to mudnn instead of the FlagGems kernel that loses its
+  trailing store
+- MUSA routing: 464 `flaggems`, 51 `musa`, 1521 `none`
+
+### Previous commit
 
 ```
 test: update MUSA dispatch tests to accept FlagGems routing
@@ -265,13 +347,20 @@ them:
 | # | CI group | Local result |
 |---|---|---|
 | 1 | Isolated MUSA environment preflight | OK — CPU PyTorch 2.10.0+cpu, MUSA devices: 8 |
-| 2 | `test_musa_dispatch.py -m musa` | **104 passed, 1 skipped** (83.78s) |
+| 2 | `test_musa_dispatch.py -m musa` | **104 passed, 1 skipped** (83.01s) |
 | 3 | `test_factory_ops.py` | **46 passed** |
 | 4 | `test_amp_contract.py -m amp` | **27 passed** |
 | 5 | `test_math_bits_contract.py -m math_bits` | **12 passed** |
 | 6 | `test_profiler_contract.py -m profiler` | **10 passed, 1 skipped, 1 xpassed** |
-| 7 | `tests/integration/ops/` in a wheel-only workspace | **490 passed, 2 skipped, 512 deselected, 2 xfailed, 1 xpassed** (126.75s) |
+| 7 | `tests/integration/ops/` in a wheel-only workspace | **493 passed, 1 skipped, 513 deselected, 2 xfailed, 1 xpassed** (128.28s) |
 | 8 | `test_rng_dispatch.py -m main_ops` | **80 passed, 37 deselected** |
+
+Group 7's three failures are `test_flaggems_conf_consistency.py`
+(`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
+`test_counts_match`), which report `mm`/`bmm`/`addmm` dispatcher drift in
+`csrc/aten/generated/`. They reproduce byte-identically against the pristine
+`backends_musa.conf` on the same tree, so they are pre-existing and unrelated to
+integer division.
 
 Group 7 is run with `FLAGOS_USE_FLAGGEMS=1`, matching
 `.github/scripts/set_env_musa.sh`: the group's marker expression does not
@@ -302,7 +391,7 @@ checks is byte-identical to a fresh generation.
 
 ✅ **Environment configured with flagtree + FlagGems master**  
 ✅ **All eight MUSA CI groups pass locally**  
-✅ **FlagGems-first routing validated: 468 routed to FlagGems, 47 to mudnn native, 1521 to `none`**  
+✅ **FlagGems-first routing validated: 464 routed to FlagGems, 51 to mudnn native, 1521 to `none`**  
 ✅ **Every operator FlagGems cannot execute correctly on this stack falls back to mudnn, without patching FlagGems**
 
 The MUSA platform integrates FlagGems as the primary execution backend, with

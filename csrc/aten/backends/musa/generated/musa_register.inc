@@ -47,7 +47,9 @@
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("div.Tensor_mode", WrapperDivTensorMode);
   m.impl("div_.Tensor", WrapperDivInplaceTensor);
+  m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
   m.impl("elu", WrapperElu);
   m.impl("embedding", WrapperEmbedding);
   m.impl("eq.Scalar", WrapperEqScalar);
@@ -58,6 +60,7 @@
   m.impl("fill_.Scalar", WrapperFillInplaceScalar);
   m.impl("floor", WrapperFloor);
   m.impl("floor_divide", WrapperFloorDivide);
+  m.impl("floor_divide_.Tensor", WrapperFloorDivideInplaceTensor);
   m.impl("fmod.Scalar", WrapperFmodScalar);
   m.impl("fmod.Tensor", WrapperFmodTensor);
   m.impl("gather", WrapperGather);

@@ -345,6 +345,127 @@ This is targeted dtype evidence for CANN 9.0, not a claim that every ACLNN
 operator accepts every ACL dtype. Complex and quantized dtypes remain outside
 this cohort.
 
+### MUSA integer division: mudnn `TRUEDIV` promotion and FlagGems floor-divide tail store (2026-09-15)
+
+[Issue #266](https://github.com/flagos-ai/Torch-FL/issues/266) reported two
+distinct integer-division defects on MUSA, both reproduced on the eight-device
+MTT S5000 host. They are fixed in the platform code generator, not with
+handwritten kernels:
+
+- **`int64 / int64` raised.** `a / b`, `torch.div(a, b)`, and `a.div_(b)` on
+  integer tensors failed with
+  `Failed: Unsupported binary mode: TRUEDIV, with left data type: INT64`. The
+  generated `Binary` kernels derived `result_dtype = at::result_type(self, other)`,
+  which for two integers is the integer type itself; mudnn's `TRUEDIV` has no
+  integer overload, so the status was `NOT_SUPPORTED`. ATen's own semantics are
+  different: TensorIterator builds the true-division kernel with
+  `promote_integer_inputs_to_float`, so `int64 / int64` yields `float32` even
+  though `at::result_type(int64, int64)` is `int64`.
+- **Integer floor division returned a stale trailing element.** `a // b`,
+  `a // 2`, `torch.floor_divide(a, b)`, and `a.clone().floor_divide_(b)` gave a
+  wrong last value on inputs whose `numel` is not a power of two (wrong at
+  `n = 3, 5, 6, 7, 9, 15, 17, 31, 33, 100`; correct at `n = 1, 2, 4, 8, 16, 32,
+  64, 1024`). FlagGems' Triton kernel loses the final store on this stack.
+  Float inputs were correct, the in-place form failed identically, and the same
+  defect reached `torch.div(a, b, rounding_mode='floor'|'trunc')` and
+  `a.div_(b, rounding_mode='floor')`, which route through the `div.Tensor_mode`
+  / `div_.Tensor_mode` overloads.
+
+**Generator changes** (`scripts/codegen_mudnn.py`, `scripts/gen_vendor_confs.py`):
+
+- `_TRUEDIV_INT_TO_FLOAT` widens an integral `result_dtype` to
+  `at::get_default_dtype_as_scalartype()` on the true-division path, so the
+  computation happens in float and the result is cast back per ATen's
+  `result_type` contract. `_TRUEDIV_INT_TO_FLOAT_IF_UNROUNDED` applies the same
+  widening to the `*_mode` categories but only when `rounding_mode` is absent:
+  `'floor'` and `'trunc'` are defined on integers and must keep `int64`. This
+  is measured CPU behaviour, not an inference — `torch.div(a, b,
+  rounding_mode=None)` on `int64` returns `float32` while `rounding_mode='floor'`
+  returns `int64`.
+- Two new template categories, `binary_mode` and `binary_inplace_mode`, generate
+  `div.Tensor_mode` and `div_.Tensor_mode` against the native kernel. The mudnn
+  mode comes from ATen's runtime `rounding_mode` string through
+  `musa_ops::SetMudnnDivMode` (`nullopt -> TRUEDIV`, `"floor" -> FLOORDIV`,
+  `"trunc" -> TRUNCATEDIV`). ATen validates that string before dispatch
+  (`div expected rounding_mode to be one of None, 'trunc', or 'floor'`), so the
+  helper's final arm is only there to keep it total. The Scalar spellings
+  (`torch.div(a, 2, rounding_mode='floor')`) decompose into the Tensor overloads
+  before dispatch, so no separate Scalar template is needed.
+- `floor_divide_.Tensor` is added to the native `OPS` table.
+- `NATIVE_TRITON_GAPS["musa"]` gains four entries — `div.Tensor_mode`,
+  `div_.Tensor_mode`, `floor_divide`, `floor_divide_.Tensor` — so
+  `gen_vendor_confs.py` routes them to `musa` and
+  `codegen_musa_flaggems.py` drops them from the FlagGems registration.
+
+**Route delta.** MUSA `flaggems` 468 -> **464**, `musa` 47 -> **51**, `none`
+1521 unchanged (2036 routable ops). The registered-op set is unchanged at 518:
+three overloads moved from `musa_flaggems_register.inc` (362 -> 359 `m.impl`
+lines) to `musa_register.inc` (156 -> 159). The `int64` in-place true-division
+forms keep ATen's own error, `result type Float can't be cast to the desired
+output type Long`, which the in-place prologue's `c10::promoteTypes` +
+`c10::canCast` check reproduces exactly — measured byte-identical on CPU.
+
+**Measured on the MTT S5000 host** with CPU PyTorch 2.10.0, mudnn v3300,
+FlagGems `4d9c34775` (5.4.0rc2.post1+g4d9c34775) and flagtree
+`0.6.2a3+mthreads3.6` (Triton 3.6, backend `mthreads`):
+
+- A CPU-parity probe covering 59 integer and float division cases — out-of-place,
+  in-place, scalar and tensor operands, both rounding modes, negative operands,
+  `out=`, broadcasting, and `floor_divide` at
+  `n = 2, 3, 4, 5, 7, 8, 15, 17, 33, 100` — was run against both the fixed tree
+  and a second worktree built at the base commit (`6b978c0`). Before:
+  **39 exact, 7 float-approximate, 13 mismatches**. After: **43 exact,
+  14 float-approximate, 1 error-text match, 1 mismatch**. Every integer
+  floor-division and `rounding_mode` case is exact, and the in-place `int64`
+  true-division case reproduces ATen's own
+  `result type Float can't be cast to the desired output type Long` byte for
+  byte. Two qualifications, both measured: (a) the 14 float-approximate cases are
+  `truediv` results differing from CPU by exactly one float32 ULP (`5.960e-08`)
+  at `n = 5, 7, 8, 15, 17, 33, 100`, and the pure-float spellings — which never
+  touched the FlagGems floor-divide kernel — show the identical `5.960e-08` on
+  the base tree, so this is mudnn `TRUEDIV` arithmetic versus CPU libm and
+  predates the change; (b) the remaining mismatch is the probe's own `out=`
+  harness passing CPU tensors to a Triton path and raising identically on both
+  trees, not a property of the operators.
+- `FLAGOS_LOG_DISPATCH=1` confirms the routes at runtime: `div.Tensor`,
+  `div.Tensor_mode`, `div_.Tensor`, `floor_divide`, and `floor_divide_.Tensor`
+  all resolve to `-> musa`.
+- The two defects are independent, and the routing half is causal. Pinning the
+  four rerouted overloads back onto FlagGems with `FLAGOS_OP_*` reproduces the
+  trailing-store loss exactly and nothing else: at `n = 3`, `a // b`, `a // 2`,
+  `torch.floor_divide(a, b)`, both `rounding_mode` values, and both in-place
+  spellings return `[5, 5, 0]` where CPU returns `[5, 5, 6]`, while true division
+  — never on that kernel — stays correct. All ten cases are correct on the
+  shipped route.
+- The full `.github/configs/musa.yml` manifest run locally: dispatch
+  **104 passed, 1 skipped**; factory **46 passed**; AMP **27 passed**;
+  math-bits **12 passed**; profiler **10 passed, 1 skipped, 1 xpassed**;
+  operator cohort **493 passed, 1 skipped, 513 deselected, 2 xfailed,
+  1 xpassed**; RNG **80 passed, 37 deselected**.
+- Generator idempotency: `codegen_mudnn.py` run twice produces byte-identical
+  `musa_kernels.cc`, `musa_register.inc` and `musa_flaggems_register.inc`;
+  `codegen_musa_flaggems.py --check` reports "is up to date";
+  `gen_vendor_confs.py --check` is clean for MUSA.
+
+**Evidence gap.** `tests/manual/flaggems_overload_survey.py` cannot measure this
+change. The harness selects overloads whose conf value is `flagos_python`, and
+the four rerouted overloads are precisely the ones that are no longer on that
+route; the unified per-platform confs also spell the FlagGems route `flaggems`,
+and the `backends_flaggems.conf` the harness was written against was removed by
+`d0e2d1a`. The evidence above is targeted CPU-parity probing plus the full CI
+manifest, not a synthesized overload survey. The generic FlagGems baseline rows
+are unchanged by this work and are **not revalidated**; no FlagGems route was
+altered for any other platform.
+
+**Two pre-existing conditions, unchanged by this work.** Three assertions in
+`tests/integration/ops/test_flaggems_conf_consistency.py`
+(`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
+`test_counts_match`) fail against the pristine conf as well, on `mm`/`bmm`/`addmm`
+dispatcher drift in `csrc/aten/generated/` that this change does not touch. And
+mixed-device operands on the `*_out` overloads (`mul.out`, `add.out`, `div.out`)
+fail generically for every `flaggems`-routed op on this stack; both operands must
+be on `flagos`. Neither is in scope here.
+
 ### MUSA FlagGems routing restored, in-place arithmetic routed back to mudnn (2026-09-14)
 
 The MUSA FlagGems registration generator was restored
@@ -474,7 +595,10 @@ compiler sees — and every accelerated route is required to be in it.
 **The MUSA row was superseded on 2026-09-14** — the MUSA FlagGems registration
 generator was restored, taking MUSA to 468 `flaggems` / 47 `musa` / 1521 `none`
 and 515 registered ops. See "MUSA FlagGems routing restored, in-place arithmetic
-routed back to mudnn (2026-09-14)" below. The Ascend and GCU numbers are the ones
+routed back to mudnn (2026-09-14)" below. It moved again on 2026-09-15 to
+464 `flaggems` / 51 `musa` / 1521 `none`, with the registered-op set unchanged
+at 518. See "MUSA integer division: mudnn `TRUEDIV` promotion and FlagGems
+floor-divide tail store (2026-09-15)". The Ascend and GCU numbers are the ones
 committed in their shipped configurations; re-running `gen_vendor_confs.py`
 today would move Ascend to 243 `flaggems` / 131 `ascend`, a pre-existing drift
 that predates this work and is out of scope here.
@@ -615,6 +739,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-15 | MTT S5000 (8 devices) | MUSA integer division (issue #266) | Fixed two integer-division defects in the generator, not with handwritten kernels. `int64 / int64` raised `Unsupported binary mode: TRUEDIV, with left data type: INT64` because the generated kernels took `result_dtype` from `at::result_type` (int64) while ATen promotes integer true division to float32; `_TRUEDIV_INT_TO_FLOAT` now widens integral results, guarded on `!rounding_mode.has_value()` so `'floor'`/`'trunc'` keep int64. Integer `//`, `floor_divide`, and `floor_divide_` silently lost the trailing element on non-power-of-two `numel` in FlagGems; new `binary_mode` / `binary_inplace_mode` categories plus the `floor_divide_.Tensor` native entry route `div.Tensor_mode`, `div_.Tensor_mode`, `floor_divide` and `floor_divide_.Tensor` through mudnn `FLOORDIV`/`TRUNCATEDIV`/`TRUEDIV` via `SetMudnnDivMode`. MUSA `flaggems` 468 -> 464, `musa` 47 -> 51, `none` 1521; registered-op set unchanged at 518 (three overloads moved from the FlagGems registration to the native one). FlagGems is not patched. Other platforms are **not revalidated** and no FlagGems route changed for them. | 59-case CPU-parity probe on `flagos:0` run against both this tree and a base-commit worktree (out-of-place, in-place, scalar and tensor operands, both rounding modes, negatives, `out=`, broadcasting, and `floor_divide` at `n = 2,3,4,5,7,8,15,17,33,100`): 39 exact / 7 float-approximate / 13 mismatches before, 43 exact / 14 float-approximate / 1 error-text match / 1 probe-harness mismatch after. Integer floor division and every `rounding_mode` case exact; the float-approximate cases are true division one float32 ULP from CPU and reproduce identically on pure-float inputs on the base tree (pre-existing mudnn `TRUEDIV` arithmetic, not this change). `FLAGOS_LOG_DISPATCH=1` shows all five overloads on `-> musa`; pinning the four rerouted overloads back onto FlagGems via `FLAGOS_OP_*` reproduces the tail loss (`[5, 5, 0]` for `[5, 5, 6]` at n=3) and leaves true division correct, isolating the routing fix causally. Full `.github/configs/musa.yml` run locally: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 493 passed/1 skipped/513 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. Generator idempotent (two runs byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `flaggems_overload_survey.py` cannot measure these routes: it selects `flagos_python` entries, and the rerouted overloads are exactly the ones that left that route — evidence gap recorded in the section above. Three pre-existing `test_flaggems_conf_consistency.py` failures (`mm`/`bmm`/`addmm` dispatcher drift) reproduce byte-identically against the pristine conf. |
 | 2026-09-14 | MTT S5000 (8 devices) | MUSA FlagGems routing and in-place arithmetic fallback | Restored the MUSA FlagGems registration generator, taking MUSA from 158 to 515 registered ops and from 122 to 468 `flaggems` routes (`musa` 36 -> 47, `none` 1878 -> 1521). Moved 14 ops into `NATIVE_TRITON_GAPS["musa"]` so they fall back to mudnn instead: `add/sub/div.Tensor` and their in-place forms plus `mul_.Tensor` (bf16 wrapped-number promotion reaches `llvm.musa.float2bfloat16` with a double operand), `randn`/`randn_like`, `sort`/`sort.stable`, and `_conj`/`index_add`/`index_add_`, which route to `none` because mudnn has no kernel for them. FlagGems is not patched. Ascend, GCU, DCU, MetaX and PPU rows are **not revalidated** by this change and no FlagGems route was altered for them. | Every group of `.github/configs/musa.yml` run locally on hardware: dispatch 104 passed/1 skipped, factory 46 passed, AMP 27 passed, math-bits 12 passed, profiler 10 passed/1 skipped/1 xpassed, operator cohort 490 passed/2 skipped/512 deselected/2 xfailed/1 xpassed, RNG 80 passed/37 deselected. The bf16 gap was reproduced causally with `FLAGOS_OP_add__Tensor=flaggems`, which reproduces the remote CI's `failed to translate module to LLVM IR` on `test_autocast_fp32_policy[dtype1]` and passes on the shipped route. Three `flaggems`-marked dispatch-log tests that hard-coded `flagos_python`/`cuda` were rewritten to read the route from the platform conf (`tests/integration/ops/backend_conf.py`); they were the only failures in CI group 7 on `6f8128e` and pass on every platform's conf afterwards. Generator idempotent (`codegen_mudnn.py` twice, byte-identical; `codegen_musa_flaggems.py --check` and `gen_vendor_confs.py --check` clean for MUSA). `tests/unit/test_gen_vendor_confs.py`: 34 passed, 1 pre-existing failure (ascend/gcu conf staleness, unrelated). Three pre-existing `test_flaggems_conf_consistency.py` failures reproduce byte-identically against `d0e2d1a`'s data files, so they are not introduced by this change. |
 | 2026-09-11 | None (CPU-only host) | Unified MetaX confs (refactor/unified-vendor-confs) | Collapsed `backends_metax_flaggems.conf` and `backends_metax_flaggems_cpp.conf` into a single `backends_metax.conf`. The 17 on-device-verified C++ routes are now in the file unconditionally; a build without `FLAGGEMS_KERNEL=ON` degrades them to the boxing kernel via `Dispatcher::GetFn` instead of raising. `METAX_CPP_MEASURED` in `gen_vendor_confs.py` records the measured set explicitly since the file it was formerly recovered from no longer exists. `mm` remains on the boxing kernel (MetaX C550 shared-memory limit). `_select_backend_config()` now routes both `FLAGOS_USE_FLAGGEMS` and `FLAGOS_USE_FLAGGEMS_CPP` to the same `backends_metax.conf` under `FLAGOS_METAX_BOXING=1`. **All hardware rows not revalidated.** | Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), `tests/unit/test_gen_vendor_confs.py` passes with updated test names. |
 | 2026-09-10 | None (CPU-only host) | Full-coverage MUSA/GCU/Ascend and boxing configurations | Converted the MUSA, GCU, Ascend and boxing configurations to full coverage: all 2036 routable ops listed exactly once under `flaggems_cpp` / `flaggems` / `<vendor>` / `none`, priority in that order, generated by `scripts/gen_vendor_confs.py`. Every accelerated route is now gated on the platform's real PrivateUse1 registration set, read from the generated `*_register.inc` files, because CUDA-measured FlagGems coverage is a ceiling and not a per-platform routing set (Ascend 374, GCU 152, MUSA 158 registered of 2036). MetaX and Tsingmicro register the full generated list, so `none` would raise there instead of boxing to `cpu_fallback`; Tsingmicro's configuration stays hand-written. **All hardware rows not revalidated.** | No route measured. `flaggems_overload_survey.py` cannot run on this host: Triton 3.7.1 exposes only `amd`/`nvidia` backends and `import flag_gems` fails. Mechanical evidence only — generator idempotent (two runs, empty diff; `--check` exits 0), routing equals registration exactly on all three vendors, `tests/unit/test_gen_vendor_confs.py`: 27 passed, `tests/unit/`: 303 passed, 96 skipped, 2 pre-existing profiler failures (`CXXABI_1.3.15` libstdc++ skew) unrelated to routing. |

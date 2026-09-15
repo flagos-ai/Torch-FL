@@ -33,6 +33,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -165,6 +166,24 @@ inline mudnn::Handle& GetMudnnHandle() {
   }
   it->second->SetAllowTF32(at::globalContext().allowTF32CuBLAS());
   return *it->second;
+}
+
+// `div`'s rounding_mode string picks the mudnn binary mode: an absent mode is
+// true division, "floor" is FLOORDIV, "trunc" is TRUNCATEDIV. aten validates the
+// string ("div expected rounding_mode to be one of None, 'trunc', or 'floor'")
+// before the op is dispatched, so the last arm is only there to keep the helper
+// total. `floor_divide` reaches the same FLOORDIV through its own OPS entry,
+// which sets the mode directly rather than going through here.
+inline void SetMudnnDivMode(
+    mudnn::Binary& op,
+    const ::std::optional<c10::string_view>& rounding_mode = ::std::nullopt) {
+  if (!rounding_mode.has_value()) {
+    op.SetMode(mudnn::Binary::Mode::TRUEDIV);
+  } else if (*rounding_mode == "floor") {
+    op.SetMode(mudnn::Binary::Mode::FLOORDIV);
+  } else {
+    op.SetMode(mudnn::Binary::Mode::TRUNCATEDIV);
+  }
 }
 
 // Describes an aten tensor to mudnn. Sizes and strides are copied because

@@ -547,6 +547,9 @@ at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   }
   auto compute_device = self.is_cpu() ? other.device() : self.device();
   auto result_dtype = at::result_type(self, other);
+  if (at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
   auto self_c = self.to(compute_device, result_dtype);
   auto other_c = other.to(compute_device, result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -1034,6 +1037,9 @@ at::Tensor& DivInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
     other_dtype = c10::get_default_dtype_as_scalartype();
   }
   auto result_dtype = c10::promoteTypes(self.scalar_type(), other_dtype);
+  if (at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
   TORCH_CHECK(
       c10::canCast(result_dtype, self.scalar_type()),
       "result type ", result_dtype,
@@ -1361,6 +1367,9 @@ at::Tensor DivScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
     return at::div(self.cpu(), other).to(self.device());
   }
   auto result_dtype = at::result_type(self, other);
+  if (at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
   // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
@@ -2430,6 +2439,173 @@ at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other
 }
 
 REGISTER_IMPL_TO_DISPATCHER(FloorDivideFn, floor_divide_dispatcher, Backend::kMusa, FloorDivideKernelMusa)
+
+at::Tensor& FloorDivideInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other) {
+  if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
+      !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
+    auto cpu = self.cpu();
+    cpu.floor_divide_(other.cpu());
+    self.copy_(cpu);
+    return self;
+  }
+  // Before anything touches `other`: mudnn rejects zero-element operands
+  // (NOT_SUPPORTED), and in-place arithmetic on an empty self is a no-op, so
+  // neither the conversion nor the run should happen.
+  if (self.numel() == 0) return self;
+  // The dtype rule aten's TensorIterator applies to a wrapped-number operand,
+  // reproduced here rather than delegated to at::result_type: the operand
+  // contributes its own scalar type, except that a floating one contributes the
+  // *default* dtype instead of double. Measured on CPU, this is what makes
+  // `bf16.add_(1.0)` compute in float32 and narrow back to bfloat16 (rather
+  // than raising), `int64.add_(1)` stay int64, and `int64.add_(1.0)` promote to
+  // float32 and then fail the cast check below -- aten's own error for it.
+  auto other_dtype = other.scalar_type();
+  if (other.unsafeGetTensorImpl()->is_wrapped_number() &&
+      at::isFloatingType(other_dtype)) {
+    other_dtype = c10::get_default_dtype_as_scalartype();
+  }
+  auto result_dtype = c10::promoteTypes(self.scalar_type(), other_dtype);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, self.scalar_type()),
+      "result type ", result_dtype,
+      " can't be cast to the desired output type ", self.scalar_type());
+  // A non-device operand (the wrapped number, a CPU tensor) has to be moved
+  // before mudnn can read it; expand() to self's shape stays a view, and mudnn
+  // reads 0-strides correctly, so broadcasting costs no allocation.
+  auto other_c = other.to(self.device(), result_dtype).expand(self.sizes());
+  musa_ops::mudnn::Binary op;
+  op.SetMode(musa_ops::mudnn::Binary::Mode::FLOORDIV);
+  if (self.scalar_type() == result_dtype) {
+    // The common case: compute straight into self's storage. mudnn's Binary is
+    // elementwise, so out aliasing in1 is safe -- every element is read before
+    // the same element is written, including under a broadcast.
+    musa_ops::MudnnTensorWrapper t_self(self);
+    musa_ops::MudnnTensorWrapper t_other(other_c);
+    EXEC_MUDNN_CMD(
+        "floor_divide_", self,
+        op.Run(_mudnn_h, t_self.get(), t_self.get(), t_other.get()));
+    return self;
+  }
+  // The computation widens; run into a temp of the compute dtype and narrow on
+  // the way back.
+  auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  auto self_wide = self.to(result_dtype);
+  musa_ops::MudnnTensorWrapper t_self(self_wide);
+  musa_ops::MudnnTensorWrapper t_other(other_c);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  EXEC_MUDNN_CMD(
+      "floor_divide_", self,
+      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
+  self.copy_(out);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FloorDivideInplaceTensorFn, floor_divide_inplace_tensor_dispatcher, Backend::kMusa, FloorDivideInplaceTensorKernelMusa)
+
+at::Tensor DivTensorModeKernelMusa(const at::Tensor& self, const at::Tensor& other,
+                   ::std::optional<c10::string_view> rounding_mode) {
+  if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
+      !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
+    auto fallback_device = self.is_cpu() ? other.device() : self.device();
+    return at::div(self.cpu(), other.cpu(), rounding_mode)
+        .to(fallback_device);
+  }
+  auto compute_device = self.is_cpu() ? other.device() : self.device();
+  auto result_dtype = at::result_type(self, other);
+  if (!rounding_mode.has_value() &&
+      at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
+  auto self_c = self.to(compute_device, result_dtype);
+  auto other_c = other.to(compute_device, result_dtype);
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto self_b = self_c.expand(out_shape);
+  auto other_b = other_c.expand(out_shape);
+  auto out = at::empty(out_shape, self_c.options());
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
+
+  musa_ops::MudnnTensorWrapper t_self(self_b);
+  musa_ops::MudnnTensorWrapper t_other(other_b);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  musa_ops::mudnn::Binary op;
+  musa_ops::SetMudnnDivMode(op, rounding_mode);
+  EXEC_MUDNN_CMD(
+      "div", self_c,
+      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivTensorModeFn, div_tensor_mode_dispatcher, Backend::kMusa, DivTensorModeKernelMusa)
+
+at::Tensor& DivInplaceTensorModeKernelMusa(at::Tensor& self, const at::Tensor& other,
+                    ::std::optional<c10::string_view> rounding_mode) {
+  if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
+      !musa_ops::MudnnSupportsArithmeticDtype(other.scalar_type())) {
+    auto cpu = self.cpu();
+    cpu.div_(other.cpu(), rounding_mode);
+    self.copy_(cpu);
+    return self;
+  }
+  // Before anything touches `other`: mudnn rejects zero-element operands
+  // (NOT_SUPPORTED), and in-place arithmetic on an empty self is a no-op, so
+  // neither the conversion nor the run should happen.
+  if (self.numel() == 0) return self;
+  // The dtype rule aten's TensorIterator applies to a wrapped-number operand,
+  // reproduced here rather than delegated to at::result_type: the operand
+  // contributes its own scalar type, except that a floating one contributes the
+  // *default* dtype instead of double. Measured on CPU, this is what makes
+  // `bf16.add_(1.0)` compute in float32 and narrow back to bfloat16 (rather
+  // than raising), `int64.add_(1)` stay int64, and `int64.add_(1.0)` promote to
+  // float32 and then fail the cast check below -- aten's own error for it.
+  auto other_dtype = other.scalar_type();
+  if (other.unsafeGetTensorImpl()->is_wrapped_number() &&
+      at::isFloatingType(other_dtype)) {
+    other_dtype = c10::get_default_dtype_as_scalartype();
+  }
+  auto result_dtype = c10::promoteTypes(self.scalar_type(), other_dtype);
+  if (!rounding_mode.has_value() &&
+      at::isIntegralType(result_dtype, /*includeBool=*/true)) {
+    result_dtype = at::get_default_dtype_as_scalartype();
+  }
+  TORCH_CHECK(
+      c10::canCast(result_dtype, self.scalar_type()),
+      "result type ", result_dtype,
+      " can't be cast to the desired output type ", self.scalar_type());
+  // A non-device operand (the wrapped number, a CPU tensor) has to be moved
+  // before mudnn can read it; expand() to self's shape stays a view, and mudnn
+  // reads 0-strides correctly, so broadcasting costs no allocation.
+  auto other_c = other.to(self.device(), result_dtype).expand(self.sizes());
+  musa_ops::mudnn::Binary op;
+  musa_ops::SetMudnnDivMode(op, rounding_mode);
+  if (self.scalar_type() == result_dtype) {
+    // The common case: compute straight into self's storage. mudnn's Binary is
+    // elementwise, so out aliasing in1 is safe -- every element is read before
+    // the same element is written, including under a broadcast.
+    musa_ops::MudnnTensorWrapper t_self(self);
+    musa_ops::MudnnTensorWrapper t_other(other_c);
+    EXEC_MUDNN_CMD(
+        "div_", self,
+        op.Run(_mudnn_h, t_self.get(), t_self.get(), t_other.get()));
+    return self;
+  }
+  // The computation widens; run into a temp of the compute dtype and narrow on
+  // the way back.
+  auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  auto self_wide = self.to(result_dtype);
+  musa_ops::MudnnTensorWrapper t_self(self_wide);
+  musa_ops::MudnnTensorWrapper t_other(other_c);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  EXEC_MUDNN_CMD(
+      "div_", self,
+      op.Run(_mudnn_h, t_out.get(), t_self.get(), t_other.get()));
+  self.copy_(out);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorModeFn, div_inplace_tensor_mode_dispatcher, Backend::kMusa, DivInplaceTensorModeKernelMusa)
 
 at::Tensor SigmoidBackwardKernelMusa(const at::Tensor& grad_output, const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(grad_output.scalar_type()) ||
