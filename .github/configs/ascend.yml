@@ -124,9 +124,18 @@ integration_tests:
   # -- is attached as data to this process by the common integration runner, so
   # no vendor detail leaks into the command and unrelated Ascend processes do
   # not inherit CANN 9.0's unstable interposer. See docs/architecture/profiler.md.
+  #
+  # INTEGRATION_ALLOW_TEARDOWN_CRASH is the second half of that instability:
+  # the same interposer faults sporadically during interpreter teardown, after
+  # pytest has printed a complete, clean summary (observed: 2 passed, 10
+  # skipped, then SIGSEGV seconds later). The runner forgives a fatal signal
+  # only on top of such a summary -- a signal before it, or a summary
+  # reporting failures, still fails. Quoted "1": the manifest validates
+  # environment values as strings.
   - name: Unified profiler contract
     environment:
       LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
+      INTEGRATION_ALLOW_TEARDOWN_CRASH: "1"
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
