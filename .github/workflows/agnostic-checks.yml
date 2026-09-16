@@ -83,6 +83,7 @@ jobs:
             tests/unit/test_dcu_env_script.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_integration_workdir.py \
+            tests/unit/test_ops_conftest_platform.py \
             tests/unit/test_patch_triton_ascend.py \
             tests/unit/test_platform_support_detect.py \
             tests/unit/test_run_integration_tests.py \

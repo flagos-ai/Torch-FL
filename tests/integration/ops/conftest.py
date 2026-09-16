@@ -24,6 +24,12 @@ def _detect_platform() -> str:
     the tests against an installed wheel. The lib/flagos_platform marker that
     native-kernel builds write is authoritative in that case, and the resolved
     FLAGOS_BACKEND_CONFIG name is the last resort.
+
+    PPU is the exception to the ACCELERATOR rule: it is a CUDA-ABI boxing
+    backend whose build and CI deliberately report ACCELERATOR=cuda, so the
+    variable cannot tell it apart. It is detected through the same signals
+    torch_fl itself uses (torch_fl._is_ppu_build): the PPU_SDK / PPU_HOME
+    environment, else the lib_ppu/ bundle directory the wheel ships.
     """
     accelerator = os.environ.get("ACCELERATOR", "").lower()
     if accelerator == "ascend":
@@ -34,18 +40,27 @@ def _detect_platform() -> str:
         return "musa"
     if accelerator == "dcu":
         return "dcu"
+    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
+        return "ppu"
 
     try:
         import torch_fl
 
-        marker = os.path.join(
-            os.path.dirname(torch_fl.__file__), "lib", "flagos_platform"
-        )
-        with open(marker) as f:
-            platform = f.read().strip().lower()
-        if platform:
-            return platform
-    except (ImportError, OSError):
+        lib_root = os.path.dirname(torch_fl.__file__)
+        try:
+            with open(os.path.join(lib_root, "lib", "flagos_platform")) as f:
+                marker = f.read().strip().lower()
+            if marker:
+                return marker
+        except OSError:
+            pass
+        # PPU wheels ship no flagos_platform marker (CMake writes it only for
+        # gcu/musa/bpu/ascend); their signal is the lib_ppu/ bundle dir. This
+        # check must not sit behind the marker read: a missing marker raises
+        # before it, which is exactly the PPU layout.
+        if os.path.isdir(os.path.join(lib_root, "lib_ppu")):
+            return "ppu"
+    except ImportError:
         pass
 
     backend_cfg = os.environ.get("FLAGOS_BACKEND_CONFIG", "").lower()
@@ -55,6 +70,8 @@ def _detect_platform() -> str:
         return "metax"
     if "musa" in backend_cfg:
         return "musa"
+    if "ppu" in backend_cfg:
+        return "ppu"
     return "default"
 
 
@@ -68,6 +85,12 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
     "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
+    # PPU is a CUDA-ABI boxing backend: the CUDA dispatch key carries vendor
+    # kernels, so cuda-marked tests run here -- same skip set as "default",
+    # which is where PPU implicitly landed before it was named. Naming it
+    # makes the platform first-class in this gate instead of correct by
+    # accident of the fallback bucket.
+    "ppu": ("metax", "ascend", "musa", "dcu"),
     "default": ("metax", "ascend", "musa", "dcu"),
     "dcu": ("metax", "ascend", "musa", "gcu"),
 }
