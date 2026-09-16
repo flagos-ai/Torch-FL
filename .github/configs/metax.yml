@@ -211,9 +211,11 @@ integration_tests:
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
 
-  # Measured on the eight-device C550 host on 2026-09-15: 25 passed, 21 skipped,
-  # 1 failed -- test_torch_backends_entry_point_is_registered, which asserts an
-  # installed torch.backends entry point and cannot hold in this build-tree run
-  # (the same image gap set_env_musa.sh documents).
+  # Measured on the eight-device C550 host on 2026-09-15: 25 passed, 21 skipped.
+  # The entry-point test (test_torch_backends_entry_point_is_registered) needs
+  # the pip-installed wheel: the entry point is declared in pyproject.toml and
+  # CI installs dist/*.whl before running, so it holds here -- and the metax
+  # job including this last group has gone green since. It only fails in a
+  # build-tree run without an install (the case an older note recorded here).
   - name: Run torch.compile tests
     command: python -m pytest tests/integration/test_compile.py -v --tb=short

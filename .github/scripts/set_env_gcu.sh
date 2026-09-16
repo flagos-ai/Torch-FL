@@ -206,10 +206,12 @@ print(f"Topsaten library: {os.environ['TOPSATEN_LIB']}")
 PY
 
 # --- Enflame Triton (flagtree) + FlagGems ------------------------------------
-# Installed for both stages, not just integration: build and integration share
-# one platform job, and restricting this to CI_STAGE=integration would leave the
-# build job's venv without flag_gems -- the wheel then fails as soon as a
-# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+# Installed for both stages, not just integration. Unlike the dedicated
+# single-job pipelines, GCU runs separate build (CI_STAGE=build) and integration
+# (CI_STAGE=integration) jobs, each executing this script into its own venv --
+# so gating this on integration would leave the build job's venv without
+# flag_gems, failing the build-stage import check below (and any FlagGems-first
+# route at dispatch). Same install, split jobs.
 #
 # --no-deps on both source packages so pip cannot replace the pinned CPU torch
 # 2.10 with something a transitive requirement prefers.

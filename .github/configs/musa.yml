@@ -188,20 +188,20 @@ integration_tests:
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - tests/integration/test_compile.py. torch.compile needs the vendor
-  #     flagtree (flagtree-0.5.0+mthreads3.1, Triton 3.1, backend "mthreads");
-  #     set_env_musa.sh deliberately does not link one, and stock PyPI triton is
-  #     not a substitute -- it ships no mthreads backend and cannot compile a
-  #     MUSA kernel at all. The suite itself is green on the MTT S5000 with that
-  #     runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1 failed, the
-  #     failure being the torch.backends entry-point case, which asserts an
-  #     installed wheel and cannot hold in a build-tree run). Add this group when
-  #     the image bakes the vendor triton stack; it is an image gap, not a code
-  #     one.
-  #   - tests/integration/ops/test_musa_flaggems.py (FLAGOS_USE_FLAGGEMS=1
-  #     hybrid route). Same vendor-triton prerequisite as compile: its two cases
-  #     skip without FlagGems installed, so adding the group to this image would
-  #     record a pass that measured nothing.
+  #   - tests/integration/test_compile.py. The old reason (needing vendor
+  #     flagtree 0.5.0+mthreads3.1 while the script linked none) is gone:
+  #     set_env_musa.sh now installs flagtree 0.6.2a3+mthreads3.6 plus FlagGems
+  #     master into the job venv. Still withheld because compiling on this
+  #     runner is unmeasured -- the runner's murand regression above shows its
+  #     toolkit is not the validated S5000 stack. The torch.backends
+  #     entry-point case needs the installed wheel (which CI provides), so that
+  #     old sub-clause is stale too. Enable after one measured hardware run,
+  #     not before.
+  #   - tests/integration/ops/test_musa_flaggems.py. Same story: the "skips
+  #     without FlagGems installed" clause is stale -- FlagGems is installed
+  #     now, so these two musa-marked cases would RUN rather than skip, with an
+  #     unmeasured outcome. Add the group after measuring it on hardware, not
+  #     before.
   #   - tests/integration/test_profiler_parity.py. Unlike the contract group
   #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
   #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,

@@ -42,6 +42,8 @@ container_options: >-
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
 
+# Dedicated-pipeline timeout lives in integration-test-cuda.yml (default 120);
+# this field governs the shared/manual wheel-build path (build-wheel-cuda.yml).
 timeout_minutes: 60
 wheel_artifact_name: wheel-cuda
 # Keep CUDA integration self-contained; transferring the ~475MB wheel through

@@ -56,7 +56,9 @@ container_options: >-
 timeout_minutes: 120
 wheel_artifact_name: wheel-ascend
 # Ascend does not bundle a vendor libtorch, so its wheel is small enough to pass
-# through Actions artifacts. Test the exact wheel produced by the build job.
+# through Actions artifacts. Reserved for the shared/manual wheel-build path:
+# the dedicated ascend pipeline builds and tests in one job (CI_STAGE=build)
+# and never transfers the wheel, so CI does not consume this field today.
 integration_wheel_source: artifact
 
 integration_tests:
