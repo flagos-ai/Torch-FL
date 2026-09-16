@@ -457,6 +457,24 @@ PRIORITY = {
 }
 
 
+def measured_environment(test_json: Dict) -> Dict:
+    """The environment the measurement ran in.
+
+    Triage used to return findings and a summary and drop everything else, so
+    the verifier could not learn which ``transformers`` version produced them
+    and fell back to the newest cached source tree --- a 5.12.1 run was verified
+    against 5.14.1. The run's own environment is carried through instead. In
+    ``--all`` mode the environment lives on each model block; one interpreter
+    measured them all, so the first block that has one answers for the run.
+    """
+    if test_json.get("environment"):
+        return test_json["environment"]
+    for block in test_json.get("models") or []:
+        if block.get("environment"):
+            return block["environment"]
+    return {}
+
+
 def triage_failures(test_json: Dict) -> Dict:
     """
     Triage every non-passing test across every measured model.
@@ -525,6 +543,7 @@ def triage_failures(test_json: Dict) -> Dict:
 
     return {
         "findings": findings,
+        "environment": measured_environment(test_json),
         "summary": {
             "total_failures": total,
             "actionable": sum(1 for f in findings if f["actionable"]),

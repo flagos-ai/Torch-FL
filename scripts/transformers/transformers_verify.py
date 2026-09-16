@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,13 @@ from typing import Dict, Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = REPO_ROOT / "tests" / "manual" / "hf_device_spec.py"
 SOURCE_HELPER = REPO_ROOT / "tests" / "manual" / "transformers_hf_source.py"
+
+# pytest's summary line is the only place the isolated run states how many tests
+# it ran; ``in 10.30s`` identifies that line.
+SUMMARY_LINE_RE = re.compile(r"\bin\s+\d+(?:\.\d+)?s\b")
+OUTCOME_COUNT_RE = re.compile(
+    r"(\d+)\s+(passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b"
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -53,15 +61,50 @@ def isolated_env(test_source_dir: Path, workdir: Path) -> dict[str, str]:
     env["FLAGOS_LOG_FALLBACK"] = "1"
     env.pop("TRANSFORMERS_TEST_DEVICE", None)
     env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
+    # This mirrors the runner's ``child_env``. This repository also has a
+    # top-level ``tests`` package, so the source tree stays ahead of the
+    # repository root; the repository root is moved to the end rather than
+    # dropped, because ``hf_device_spec.py`` imports ``torch_fl`` and a checkout
+    # that was never installed can only provide it through the caller's
+    # PYTHONPATH. Dropping it made every isolated run die of
+    # ``ModuleNotFoundError: No module named 'torch_fl'`` before collecting a
+    # test, which the verifier could only record as ``ERROR``.
     entries = [
-        entry
+        str(Path(entry).resolve())
         for entry in env.get("PYTHONPATH", "").split(os.pathsep)
-        if entry and Path(entry).resolve() != REPO_ROOT
+        if entry
     ]
+    repo_entries = [entry for entry in entries if entry == str(REPO_ROOT)]
+    path_entries = [entry for entry in entries if entry != str(REPO_ROOT)]
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(workdir), str(test_source_dir), str(test_source_dir / "utils"), *entries]
+        [
+            str(workdir),
+            str(test_source_dir),
+            str(test_source_dir / "utils"),
+            *path_entries,
+            *repo_entries,
+        ]
     )
     return env
+
+
+def isolated_outcomes(output: str) -> tuple[int, set[str]]:
+    """The test count and outcome names pytest reported for one isolated run.
+
+    "An isolation result is valid only when pytest collected exactly one test"
+    is the documented rule, and this is the only place that can enforce it: a
+    nodeid pytest cannot select exits with a usage error, which used to be
+    recorded as an ordinary ``ERROR`` beside real per-test evidence. Reading the
+    last line that carries a duration keeps a traceback mentioning "2 failed"
+    from being counted as a result.
+    """
+    lines = [line for line in output.splitlines() if SUMMARY_LINE_RE.search(line)]
+    if not lines:
+        return 0, set()
+    matches = OUTCOME_COUNT_RE.findall(lines[-1])
+    return sum(int(count) for count, _ in matches), {
+        name.rstrip("s") for _, name in matches
+    }
 
 
 def run_isolated_test(
@@ -127,19 +170,37 @@ def run_isolated_test(
 
     duration = time.time() - started
     combined = result.stdout + result.stderr
-    if result.returncode == 0:
-        status = "SKIP" if " skipped" in combined.lower() else "PASS"
+    reported, outcomes = isolated_outcomes(combined)
+    if reported != 1:
+        # A nodeid that cannot be selected, or a run that collected the whole
+        # directory, says nothing about this finding. Recording it as anything
+        # but ERROR would turn an empty rerun into evidence.
+        status = "ERROR"
+        detail = (
+            f"the isolated run reported {reported} tests instead of one; the "
+            "nodeid did not select a single test\n" + combined[-8000:]
+        )
+    elif "error" in outcomes:
+        # A setup or teardown failure is not a per-test device defect.
+        status = "ERROR"
+        detail = combined[-8000:]
+    elif result.returncode == 0:
+        status = "SKIP" if "skipped" in outcomes else "PASS"
+        detail = combined[-8000:]
     elif result.returncode == 1:
         status = "FAIL"
+        detail = combined[-8000:]
     else:
         status = "ERROR"
+        detail = combined[-8000:]
 
     return {
         "status": status,
-        "detail": combined[-8000:],
+        "detail": detail,
         "duration_s": round(duration, 1),
         "command": command_str,
         "returncode": result.returncode,
+        "reported_tests": reported,
     }
 
 
@@ -171,6 +232,7 @@ def apply_isolation(finding: Dict, isolation_result: Dict) -> None:
     finding["isolation_detail"] = isolation_result["detail"]
     finding["isolation_duration_s"] = isolation_result["duration_s"]
     finding["isolation_command"] = isolation_result["command"]
+    finding["isolation_reported_tests"] = isolation_result.get("reported_tests")
     if status == "TIMEOUT" and finding["class"] != "CRASH":
         finding["isolation_note"] = (
             f"the isolated run timed out; reclassified from {finding['class']} to CRASH"
@@ -332,6 +394,18 @@ def main() -> int:
     with open(args.out, "w") as file:
         json.dump(result, file, indent=2)
     print(f"\nWriting {args.out}")
+
+    # An isolation that selected no test measured nothing. That is a defect in
+    # the harness, not a result, and reporting it as an ordinary run would let
+    # "0 new findings" stand for "0 findings checked".
+    verified = [f for f in result["findings"] if f.get("verification_required", True)]
+    if verified and all(f.get("isolation_reported_tests") == 0 for f in verified):
+        print(
+            f"error: none of the {len(verified)} isolated runs selected a single "
+            "test; nothing was measured, so no finding is confirmed",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

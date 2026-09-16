@@ -364,6 +364,13 @@ The cache lives under `~/.cache/torch_fl/hf-tests` and is keyed by version.
 defaults `--test-source-dir` to the same resolved root, so verification reads the
 tree that produced the finding rather than a second tree it found on its own.
 
+The version it verifies against comes from the run, not from the cache listing.
+Triage carries the measured environment through to its output, and the verifier
+reads `transformers` from there; a findings file with no environment falls back
+to the newest cached tree and says so. That fallback is how a 5.12.1
+measurement once got isolated against a 5.14.1 checkout, so treat the warning as
+a defect in the pipeline rather than as noise.
+
 Before the first batch, the runner runs a preflight in a child process and
 records it under `environment.preflight`: `torch_fl` imports (with its resolved
 path), the registered PrivateUse1 name equals the spec's `DEVICE_NAME`,
@@ -540,6 +547,33 @@ to pytest. Never pass both a bare architecture directory and selected nodeids:
 pytest unions those selectors and silently runs the entire directory. Verify the
 result says `collected == 1` (or exactly the requested batch size) before treating
 it as isolation evidence.
+
+`transformers_verify.py` enforces that rule instead of trusting it. The outcome
+of an isolated run is read from pytest's own summary line, and a run that
+reported anything other than exactly one test is recorded as `ERROR`, because a
+nodeid pytest cannot select exits with a usage error and says nothing about the
+finding. When every isolation of a run selected zero tests, the verifier exits
+`2`: otherwise a report of "no new findings" would stand for "nothing was
+checked".
+
+The nodeids it is handed are canonicalized first. pytest reports a nodeid it was
+given without the file part, so a batch selector of
+`tests/models/bert/test_modeling_bert.py::BertModelTest::test_x` comes back as
+`::BertModelTest::test_x`, which pytest will not accept as a selector — a whole
+sweep's isolations collected nothing for this reason. Each recorded nodeid is
+restored from the nodeid that was selected, matched on its `::Class::test` tail;
+a tail shared by two selected nodeids is left as reported, since guessing which
+file was meant would attribute a result to a file that did not produce it.
+
+The isolated child also has to be able to import what the measurement imported.
+`transformers_verify.py` builds its subprocess environment the same way the
+runner does — source tree first, the caller's `PYTHONPATH` next, a
+caller-supplied repository root last — rather than a second, subtly different
+environment of its own. `hf_device_spec.py` imports `torch_fl`, so on a machine
+running an uninstalled checkout that repository root is the only thing that makes
+the spec importable; without it every isolation dies of
+`ModuleNotFoundError: No module named 'torch_fl'` before collecting a test, and
+the verifier can only call that `ERROR`.
 
 Verification defaults to one subprocess at a time. Multiple subprocesses may
 still contend for the same accelerator and memory pool, so parallel verification
@@ -756,6 +790,16 @@ and `transformers_deduplicate.py` reads it back (accepting the standalone
 forms resolve the reference from the row's own issue cell and the nearest
 preceding `## Baseline:` heading. Rows that predate the convention are left
 blank rather than back-filled with invented hashes.
+
+The baseline read is scoped to the hardware this run measured, by
+`--hardware` (the sweep passes its `--chip` through). Pass it: MetaX and MUSA
+both register their PrivateUse1 device as `flagos`, so a finding's component
+cannot tell the two boards apart, and an unscoped read merges every
+`## Baseline:` section as though this run had measured on each of them. A defect
+measured on one board would then be suppressed as already known by a section
+measured on another. A section measured elsewhere is skipped and reported, and a
+label matching no section is reported too, because no finding can then be
+compared against an earlier measurement of the same tuple.
 
 State the chip and the model in the title, and the `transformers` version, so
 the title alone identifies the measurement:

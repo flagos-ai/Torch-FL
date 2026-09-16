@@ -116,6 +116,12 @@ every outcome is `ENVIRONMENT_ERROR` reports that count in its summary instead o
 `PRECISION_KNOWN_ISSUE` and `UNKNOWN` remain visible for review but should not be
 published without further investigation.
 
+Triage carries the measured environment through to its output as `environment`,
+taken from the run's own record (`--all` mode keeps it per model block, and the
+first block that has one answers for the run). Verification reads the
+`transformers` version from there, so a cache holding several source trees cannot
+verify a finding against one that did not produce it.
+
 ### CPU fallback
 
 A passing model assertion can still produce `OP_CPU_FALLBACK`. The operator is a
@@ -168,14 +174,40 @@ python scripts/transformers/transformers_verify.py \
 `--test-source-dir` defaults to the runner's own cache root: `HF_COVERAGE_CACHE`
 if set, else `~/.cache/torch_fl/hf-tests`. Pass it explicitly only to verify
 against a tree the runner did not produce. The versions verified against come
-from the findings JSON, not from the reviewing interpreter.
+from the findings JSON, not from the reviewing interpreter: triage records the
+environment the measurement ran in, and the verifier reads `transformers` from
+it. A findings file with no environment falls back to the newest cached source
+tree and says so.
 
 The verifier recreates the official runner's pytest environment and runs exactly
 one selected nodeid in each fresh subprocess. Passing both the architecture
 directory and a nodeid is forbidden because pytest treats the selectors as a
 union and runs the whole directory.
 
-An isolation result is valid only when pytest collected exactly one test.
+That environment is the runner's `child_env`, entry for entry: the source tree
+leads so that `tests.models...` resolves into the measured tree, the caller's
+`PYTHONPATH` follows, and a repository root the caller supplied is moved to the
+end rather than dropped. `hf_device_spec.py` imports `torch_fl`, so a checkout
+that was never installed is importable only through that entry. Dropping it turns
+every isolation into `ModuleNotFoundError: No module named 'torch_fl'` before a
+single test is collected, and the verifier can only record that as `ERROR`, which
+reads like an unhealthy device and is really an unhealthy harness.
+
+An isolation result is valid only when pytest collected exactly one test, and the
+verifier enforces it rather than trusting it: the outcome is read from pytest's
+own summary line, and anything other than one test is recorded as `ERROR`. A
+nodeid pytest cannot select exits with a usage error, which is a defect in the
+harness and not per-test evidence. When every isolation of a run selected zero
+tests, the verifier exits `2` instead of reporting the run as clean — otherwise
+"no new findings" would stand for "nothing was checked".
+
+The nodeids the runner records are canonicalized before verification. pytest
+reports a nodeid it was given without the file part, so a batch selector of
+`tests/models/bert/test_modeling_bert.py::BertModelTest::test_x` comes back as
+`::BertModelTest::test_x`, which is not selectable. Each recorded nodeid is
+restored from the nodeid that was selected, matched on its `::Class::test` tail;
+a tail shared by two selected nodeids is left as reported, because guessing which
+file was meant would attribute a result to the wrong one.
 
 ### Verdict mapping
 
@@ -198,8 +230,20 @@ python scripts/transformers/transformers_deduplicate.py \
     /tmp/qwen3-verified.json \
     --out /tmp/qwen3-new.json \
     --coverage-file docs/reference/hf-coverage.md \
+    --hardware "MUSA MTT S5000" \
     --repo flagos-ai/Torch-FL
 ```
+
+`--hardware` is the board this run measured, and it is what scopes the baseline
+read. It is not optional in practice: MetaX and MUSA both register their
+PrivateUse1 device as `flagos`, so a finding's component cannot tell the two
+apart, and without the label every `## Baseline:` section in the coverage record
+is merged as if this run had measured on each of them. A finding measured on one
+board would then be suppressed as already known by a section measured on another.
+Sections measured elsewhere are skipped and reported; a label that matches no
+section is reported too, because no finding can then be matched against an
+earlier measurement. `transformers_auto_sweep.sh` passes its `--chip` argument
+through as `--hardware`.
 
 Deduplication checks:
 
@@ -329,6 +373,12 @@ A baseline is scoped to the measured hardware, device, Transformers version, and
 torch_fl commit. It supports comparisons and regression claims; it is not a
 permission gate that suppresses every first-sweep defect.
 
+The hardware scope is real, not documentation-only: deduplication reads only the
+sections whose heading shares a word with the `--hardware` label, so a run on
+`MetaX C550` is compared against the `MetaX` measurement and not against the
+`MUSA MTT S5000` one. Two vendors can register the same device name, so the
+section heading is the only place the boards can be told apart.
+
 A first sweep may produce an issue when an individual finding has complete
 evidence, independent reproduction where required, a named cause, deduplication,
 a finished issue body, and explicit authorization. Describe it as observed on
@@ -399,7 +449,9 @@ on the original suite failure.
 ### A nodeid rerun collects many tests
 
 Remove the architecture directory from the pytest command. Pass the nodeid only
-and confirm the output says one test was collected.
+and confirm the output says one test was collected. The verifier checks this
+itself: a run reporting anything other than one test is recorded as `ERROR`, and
+if no isolation of a run selected exactly one test the verifier exits `2`.
 
 ### A semantic duplicate candidate appears
 
@@ -426,10 +478,11 @@ bash -n scripts/transformers/transformers_auto_sweep.sh \
 
 The regression suite covers triage on both output shapes, the
 all-`ENVIRONMENT_ERROR` summary, fingerprint normalization and stability, the
-baseline round-trip, dedup failure modes, preview/filer parity, and the device
-contract. It intentionally excludes GitHub filing because generated drafts
-require human completion and explicit authorization; the refusals are asserted in
-the tests instead.
+baseline round-trip and its hardware scope, nodeid canonicalization, the
+exactly-one-test isolation rule, dedup failure modes, preview/filer parity, and
+the device contract. It intentionally excludes GitHub filing because generated
+drafts require human completion and explicit authorization; the refusals are
+asserted in the tests instead.
 
 ## Related Documentation
 

@@ -78,6 +78,7 @@ python scripts/transformers/transformers_deduplicate.py \
     "${RESULT_ROOT}-verified.json" \
     --out "${RESULT_ROOT}-new.json" \
     --coverage-file docs/reference/hf-coverage.md \
+    --hardware "${CHIP}" \
     --repo flagos-ai/Torch-FL
 
 # 5. Generate incomplete drafts for human review.
@@ -202,7 +203,21 @@ pytest \
     tests/models/qwen3/test_modeling_qwen3.py::Qwen3ModelTest::test_example
 ```
 
-An isolation result is valid only when pytest collected exactly one test.
+An isolation result is valid only when pytest collected exactly one test. The
+verifier reads the count from pytest's summary line and records anything else as
+`ERROR`; a run in which no isolation selected a single test exits `2`, because
+"no new findings" must not be able to stand for "nothing was checked".
+
+The isolated subprocess gets the same environment the measurement had --- source
+tree first, then your own `PYTHONPATH`, with any repository root you passed kept
+at the end. Keep that root on `PYTHONPATH` when the checkout is not installed:
+`hf_device_spec.py` imports `torch_fl`, and without it every isolation stops at
+`ModuleNotFoundError` before running a test.
+
+`--hardware` scopes the baseline read to the board this run measured. It is what
+separates two vendors that register the same PrivateUse1 device name, so a
+finding measured on one board is not suppressed by a baseline measured on
+another.
 
 ## Output Files
 

@@ -62,7 +62,22 @@ def is_separator_row(cells: list[str]) -> bool:
     return bool(cells) and all(SEPARATOR_CELL_RE.match(cell) for cell in cells)
 
 
-def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
+def hardware_matches(section_label: str, hardware: str) -> bool:
+    """Whether a baseline heading describes the hardware a run measured.
+
+    A baseline is scoped to its hardware, and this is the only place the two can
+    be told apart: MetaX and MUSA both register their PrivateUse1 device as
+    ``flagos``, so the finding's component cannot distinguish them. Vendors name
+    boards as vendor plus part number (``MetaX C550``, ``MUSA MTT S5000``), so a
+    heading and a chip label describe the same hardware when they share a word.
+    """
+    words = {word.casefold() for word in hardware.split()}
+    return any(word.casefold() in words for word in section_label.split())
+
+
+def extract_baseline_fingerprints(
+    coverage_file: Path, hardware: Optional[str] = None
+) -> Dict[str, str]:
     """
     Extract known fingerprints from hf-coverage.md baseline.
 
@@ -72,6 +87,11 @@ def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
     from the row's own issue cell, falling back to the nearest preceding
     ``## Baseline:`` heading, so an unrelated ``#N`` elsewhere in the file can
     no longer be attributed to this fingerprint.
+
+    ``hardware`` scopes the read to the baseline measured on that board. Without
+    it every ``## Baseline:`` section is merged, and because both vendors report
+    the same device name, a finding measured on one board would be suppressed as
+    already known by a section measured on another.
 
     Returns: {fingerprint: reference}
     """
@@ -85,12 +105,20 @@ def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
     fingerprints: Dict[str, str] = {}
     baseline = "unknown"
     columns: Dict[str, int] = {}
+    eligible = hardware is None
+    measured: list[str] = []
+    skipped: list[str] = []
 
     for line in content.splitlines():
         heading = BASELINE_HEADING_RE.match(line)
         if heading:
             baseline = heading.group(1)
             columns = {}
+            eligible = hardware is None or hardware_matches(baseline, hardware)
+            (measured if eligible else skipped).append(baseline)
+            continue
+
+        if not eligible:
             continue
 
         cells = table_cells(line)
@@ -122,6 +150,23 @@ def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
         for marker in MARKER_RE.finditer(line):
             fingerprints.setdefault(marker.group(1), f"baseline:{baseline}")
 
+    if hardware is None:
+        if measured:
+            print(
+                "Warning: no --hardware given; fingerprints are read from every "
+                "baseline section as if this run had measured on each of them"
+            )
+    else:
+        if skipped:
+            print(
+                f"Skipped {len(skipped)} baseline section(s) measured on other "
+                f"hardware: {', '.join(skipped)}"
+            )
+        if not measured:
+            print(
+                f"Warning: no baseline section measures '{hardware}'; no finding "
+                "can be matched against an earlier measurement on this board"
+            )
     print(f"Loaded {len(fingerprints)} fingerprints from baseline")
     return fingerprints
 
@@ -241,6 +286,7 @@ def deduplicate_findings(
     coverage_file: Path,
     repo: str,
     skip_github: bool,
+    hardware: Optional[str] = None,
 ) -> Dict:
     """
     Deduplicate findings against baseline and GitHub.
@@ -250,6 +296,7 @@ def deduplicate_findings(
         coverage_file: path to docs/reference/hf-coverage.md
         repo: GitHub repo "owner/repo"
         skip_github: if True, only check baseline (faster for testing)
+        hardware: the board this run measured, so only its own baselines apply
 
     Returns:
         findings_json with dedup info added and filtered to NEW only
@@ -257,7 +304,7 @@ def deduplicate_findings(
     findings = findings_json["findings"]
 
     # Load baseline fingerprints
-    baseline_fps = extract_baseline_fingerprints(coverage_file)
+    baseline_fps = extract_baseline_fingerprints(coverage_file, hardware)
 
     print(f"\nDeduplicating {len(findings)} findings...")
 
@@ -387,6 +434,14 @@ def main():
         help="GitHub repo for issue search (default: flagos-ai/Torch-FL)",
     )
     parser.add_argument(
+        "--hardware",
+        default=None,
+        help=(
+            "Hardware label this run measured (e.g. 'MetaX C550'); only baseline "
+            "sections measured on the same board are read"
+        ),
+    )
+    parser.add_argument(
         "--skip-github",
         action="store_true",
         help="Skip GitHub issue search (faster, for testing)",
@@ -405,6 +460,7 @@ def main():
         args.coverage_file,
         args.repo,
         args.skip_github,
+        args.hardware,
     )
 
     print("\nDeduplication summary:")

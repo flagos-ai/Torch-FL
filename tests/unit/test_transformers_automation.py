@@ -907,3 +907,228 @@ def test_chip_label_rejects_a_label_that_names_no_known_vendor(label):
     wrapper = load("safe_transformers_wrapper")
     with pytest.raises(SystemExit):
         wrapper.validate_chip(label)
+
+
+# --- what a run reports about itself ------------------------------------------
+
+BERT_NODEID = (
+    "tests/models/bert/test_modeling_bert.py::BertModelTest::test_attention_outputs"
+)
+
+
+def test_triage_keeps_the_environment_the_verifier_reads_the_version_from():
+    """The version must come from the run, not from the cache directory listing.
+
+    Triage returned findings and a summary only, so the verifier fell back to
+    the newest cached source tree: a 5.12.1 measurement was isolated against a
+    5.14.1 checkout, with one warning as the only trace of it.
+    """
+    result = triage.triage_failures(
+        measured_model(
+            "bert",
+            [raw_test(BERT_NODEID, outcome="failed", longrepr=UNSUPPORTED_DETAIL)],
+        )
+    )
+    assert result["environment"]["transformers"] == ENVIRONMENT["transformers"]
+    assert verify.recorded_version(result) == ENVIRONMENT["transformers"]
+
+
+def test_triage_keeps_the_environment_of_a_full_sweep():
+    """``--all`` keeps the environment per model block; one interpreter measured
+    them all, so the run's own environment still has to reach the verifier."""
+    aggregate = all_aggregate(
+        [
+            measured_model(
+                "bert",
+                [raw_test(BERT_NODEID, outcome="failed", longrepr=UNSUPPORTED_DETAIL)],
+            )
+        ]
+    )
+    assert (
+        verify.recorded_version(triage.triage_failures(aggregate))
+        == (ENVIRONMENT["transformers"])
+    )
+
+
+def test_reported_nodeid_gets_its_file_back():
+    """pytest reports a nodeid it was given without the file part.
+
+    Every batch recorded ``::BertModelTest::test_x``, and the verifier passed
+    that back to pytest, which rejected it as a directory argument containing a
+    selection. All nine isolations of a full sweep collected nothing.
+    """
+    tests = [
+        {"nodeid": "::BertModelTest::test_attention_outputs"},
+        {"nodeid": "::BertModelTest::test_cpu_offload"},
+    ]
+    runner.canonicalize_nodeids(
+        tests,
+        [
+            BERT_NODEID,
+            "tests/models/bert/test_modeling_bert.py::BertModelTest::test_cpu_offload",
+        ],
+    )
+    assert tests[0]["nodeid"] == BERT_NODEID
+    assert tests[1]["nodeid"].endswith("::BertModelTest::test_cpu_offload")
+    assert "test_modeling_bert.py" in tests[1]["nodeid"]
+
+
+def test_a_nodeid_tail_two_files_share_is_left_as_reported():
+    """Restoring a shared tail by guess would attribute a result to a file that
+    did not produce it, so the reported form is kept instead."""
+    tests = [{"nodeid": "::BertModelTest::test_save"}]
+    runner.canonicalize_nodeids(
+        tests,
+        [
+            "tests/models/bert/test_modeling_bert.py::BertModelTest::test_save",
+            "tests/models/bert/test_tokenization_bert.py::BertModelTest::test_save",
+        ],
+    )
+    assert tests[0]["nodeid"] == "::BertModelTest::test_save"
+
+
+def test_a_nodeid_that_already_names_its_file_is_unchanged():
+    tests = [{"nodeid": BERT_NODEID}]
+    runner.canonicalize_nodeids(tests, [BERT_NODEID])
+    assert tests[0]["nodeid"] == BERT_NODEID
+
+
+def test_isolation_counts_only_the_summary_line_of_its_own_run():
+    assert verify.isolated_outcomes("no tests ran in 0.00s") == (0, set())
+    # A traceback that happens to mention a count must not become the result.
+    assert verify.isolated_outcomes("assert 2 failed in 5s\n1 passed in 5.00s") == (
+        1,
+        {"passed"},
+    )
+
+
+def isolated_source(tmp_path):
+    """A source tree with the two directories the isolation workdir links to."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src").mkdir()
+    return tmp_path
+
+
+def test_the_isolated_run_keeps_the_repository_importable(tmp_path, monkeypatch):
+    """``hf_device_spec.py`` imports ``torch_fl``, so the repository root the
+    parent was given must survive into the child; it is moved behind the source
+    tree rather than dropped, because the source tree has to own
+    ``tests.models...`` and the repository root has to provide ``torch_fl``."""
+    source = isolated_source(tmp_path)
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join([str(verify.REPO_ROOT), "/tmp/elsewhere"])
+    )
+    entries = verify.isolated_env(source, tmp_path / "work")["PYTHONPATH"].split(
+        os.pathsep
+    )
+    assert str(verify.REPO_ROOT) in entries
+    assert entries.index(str(source)) < entries.index(str(verify.REPO_ROOT))
+    assert entries.index("/tmp/elsewhere") < entries.index(str(verify.REPO_ROOT))
+    assert entries[0] == str(tmp_path / "work")
+
+
+def test_an_isolation_that_selected_no_test_is_an_error_not_evidence(
+    tmp_path, monkeypatch
+):
+    def usage_error(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=4,
+            stdout="",
+            stderr=(
+                "ERROR: directory argument cannot contain :: selection parts: "
+                "::BertModelTest::test_attention_outputs\nno tests ran in 0.00s\n"
+            ),
+        )
+
+    monkeypatch.setattr(verify.subprocess, "run", usage_error)
+    result = verify.run_isolated_test(
+        "::BertModelTest::test_attention_outputs", isolated_source(tmp_path), 5
+    )
+    assert result["status"] == "ERROR"
+    assert result["reported_tests"] == 0
+    assert "instead of one" in result["detail"]
+    assert verify.determine_verdict(result["status"], "CRASH") == "INCONCLUSIVE"
+
+
+def test_an_isolated_setup_error_is_not_a_confirmed_defect(tmp_path, monkeypatch):
+    def setup_error(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="1 error in 3.10s\n"
+        )
+
+    monkeypatch.setattr(verify.subprocess, "run", setup_error)
+    result = verify.run_isolated_test(BERT_NODEID, isolated_source(tmp_path), 5)
+    assert result["status"] == "ERROR"
+    assert result["reported_tests"] == 1
+
+
+def test_one_isolated_failure_is_still_confirmed_evidence(tmp_path, monkeypatch):
+    def one_failure(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="1 failed, 54 warnings in 10.30s\n",
+        )
+
+    monkeypatch.setattr(verify.subprocess, "run", one_failure)
+    result = verify.run_isolated_test(BERT_NODEID, isolated_source(tmp_path), 5)
+    assert result["status"] == "FAIL"
+    assert result["reported_tests"] == 1
+    assert verify.determine_verdict(result["status"], "CRASH") == "CONFIRMED"
+
+
+TWO_VENDOR_BASELINE = """# HuggingFace Transformers Coverage
+
+## Baseline: MUSA MTT S5000
+
+| Fingerprint | Class | Subject | Affected tests | Issue |
+| --- | --- | --- | --- | --- |
+| `aa11bb22cc33` | `CRASH` | musa crash | 1 | [#250](https://example.invalid/250) |
+
+## Baseline: MetaX C550
+
+| Fingerprint | Class | Subject | Affected tests | Issue |
+| --- | --- | --- | --- | --- |
+| `dd44ee55ff66` | `CRASH` | metax crash | 1 | [#302](https://example.invalid/302) |
+"""
+
+
+def test_baseline_read_is_scoped_to_the_measured_hardware(tmp_path):
+    coverage = tmp_path / "hf-coverage.md"
+    coverage.write_text(TWO_VENDOR_BASELINE)
+    assert dedup.extract_baseline_fingerprints(coverage, "MetaX C550") == {
+        "dd44ee55ff66": "issue #302"
+    }
+    assert dedup.extract_baseline_fingerprints(coverage, "MUSA MTT S5000") == {
+        "aa11bb22cc33": "issue #250"
+    }
+    assert dedup.extract_baseline_fingerprints(coverage, "GCU") == {}
+
+
+def test_a_finding_is_not_known_from_another_vendors_baseline(tmp_path):
+    """Both vendors register their device as ``flagos``, so the finding's
+    component cannot tell them apart and the section heading has to."""
+    coverage = tmp_path / "hf-coverage.md"
+    coverage.write_text(TWO_VENDOR_BASELINE)
+
+    elsewhere = dedup.deduplicate_findings(
+        {"findings": [actionable_finding("aa11bb22cc33")], "summary": {}},
+        coverage,
+        "flagos-ai/Torch-FL",
+        skip_github=True,
+        hardware="MetaX C550",
+    )
+    assert elsewhere["summary"]["dedup"]["IN_BASELINE"] == 0
+    assert elsewhere["summary"]["dedup"]["NOT_CHECKED"] == 1
+
+    same_board = dedup.deduplicate_findings(
+        {"findings": [actionable_finding("aa11bb22cc33")], "summary": {}},
+        coverage,
+        "flagos-ai/Torch-FL",
+        skip_github=True,
+        hardware="MUSA MTT S5000",
+    )
+    assert same_board["summary"]["dedup"]["IN_BASELINE"] == 1
+    assert same_board["findings"] == []

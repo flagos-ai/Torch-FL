@@ -146,6 +146,15 @@ a fresh pytest subprocess. It reconstructs the official environment with:
 - backend autoload disabled;
 - fallback logging enabled.
 
+The subprocess environment is the runner's `child_env`, not a second definition of
+it. The source tree leads so that HF's `tests.models...` imports resolve into the
+measured tree, the caller's `PYTHONPATH` follows, and a repository root the caller
+supplied is moved to the end instead of being dropped: `hf_device_spec.py` imports
+`torch_fl`, and a checkout that was never installed is importable only through
+that entry. Dropping it made every isolation fail to collect with
+`ModuleNotFoundError: No module named 'torch_fl'`, which the verifier could only
+report as `ERROR` and which reads like a device fault rather than a harness one.
+
 Verification defaults to one worker and rejects parallel execution because
 separate processes may still share an accelerator and memory pool.
 
@@ -160,14 +169,21 @@ An isolated `TIMEOUT` means the finding is a hang, so its filed class becomes
 verifier otherwise preserves is the one triage assigned. `--test-source-dir`
 defaults to the runner's own cache root (`HF_COVERAGE_CACHE`, else
 `~/.cache/torch_fl/hf-tests`), and the versions verified against are the ones
-recorded in the findings JSON, so a multi-version cache cannot verify a finding
-against a tree that did not produce it.
+recorded in the findings JSON --- triage carries the measured environment
+through to its output, and the verifier reads `transformers` from there --- so a
+multi-version cache cannot verify a finding against a tree that did not produce
+it.
 
 ### Deduplication
 
 `scripts/transformers/transformers_deduplicate.py` checks exact fingerprints in the coverage
 record, issue bodies, and issue comments. It then searches by subject for older
 issues that predate fingerprints.
+
+The coverage record is read per board: `--hardware` selects the `## Baseline:`
+sections that describe the hardware this run measured, and sections belonging to
+another board are skipped and reported. Both vendors that register a `flagos`
+PrivateUse1 device name would otherwise share one merged set of fingerprints.
 
 Semantic matches are emitted as `REVIEW_CANDIDATE` and blocked from filing until
 a human compares the component and mechanism. Collateral and inconclusive
@@ -313,7 +329,12 @@ hand-written and had drifted from what the runner emits.
 ## Important Invariants
 
 1. A selected-nodeid subprocess must not also receive the architecture directory.
-2. A valid isolation rerun collects exactly one test.
+2. A valid isolation rerun collects exactly one test. The verifier reads that
+   count from pytest's own summary line, records any other count as `ERROR`, and
+   exits `2` when no isolation of a run selected a single test. A nodeid the
+   runner recorded without its file part is restored from the nodeid that was
+   selected, matched on its `::Class::test` tail; a tail two files share is left
+   as reported.
 3. Completed records from a crashed batch are never overwritten.
 4. A run-level poison marker does not identify the triggering test.
 5. A passing assertion with CPU fallback is not accelerator success.
@@ -339,6 +360,20 @@ hand-written and had drifted from what the runner emits.
     diagnosis; a check that raises while reporting a problem adds "the
     environment checks could not run" rather than killing the child, because "no
     verdict" is indistinguishable from a child that never started.
+15. A baseline belongs to one board. Deduplication reads only the sections whose
+    heading names the hardware a run measured, because two vendors can register
+    the same PrivateUse1 device name, and an unscoped read would let one board's
+    measurement suppress a finding measured on another.
+16. The version a finding is verified against comes from the run that produced
+    it. Triage carries the measured environment through; the newest cached
+    source tree is a fallback that announces itself, not the default.
+17. An isolation reproduces the environment that produced the finding. The
+    verifier reuses the runner's `child_env` ordering --- source tree first, the
+    caller's `PYTHONPATH` next, a caller-supplied repository root last --- so
+    `hf_device_spec.py` can import `torch_fl` from a checkout that was never
+    installed. A child that cannot import the device build dies before it
+    collects a test, and that kind of failure must not sit beside genuine
+    per-test evidence as one more `ERROR`.
 
 ## Usage
 
@@ -374,6 +409,7 @@ python scripts/transformers/transformers_deduplicate.py \
     verified.json \
     --out new.json \
     --coverage-file docs/reference/hf-coverage.md \
+    --hardware "MUSA MTT S5000" \
     --repo flagos-ai/Torch-FL
 
 python scripts/transformers/transformers_preview_issues.py \

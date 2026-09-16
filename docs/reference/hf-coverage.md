@@ -61,6 +61,14 @@ fingerprint match is not the only dedup path: the subject and component are also
 searched, and a semantic match is surfaced as `REVIEW_CANDIDATE` for a human to
 compare rather than treated as an automatic duplicate.
 
+Each `## Baseline:` section describes one board, and deduplication reads only the
+sections belonging to the board a run measured — `transformers_deduplicate.py`
+matches its `--hardware` label against the section heading and reports the
+sections it skipped. This is not a formality: two vendors may register their
+PrivateUse1 device under the same name, so the heading is the only place the
+boards can be told apart, and an unscoped read would let a measurement on one
+board be suppressed as already known by a measurement on another.
+
 Issue #267 was closed and replaced by #268 because its first draft listed
 incorrect parameterized nodeids. The initial baseline remains useful as the raw
 suite measurement, but the corrected per-test isolation is the evidence used for

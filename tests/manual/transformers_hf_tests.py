@@ -358,6 +358,32 @@ def reduce_records(records: list[dict]) -> dict:
     }
 
 
+def canonicalize_nodeids(tests: list[dict], selected: list[str]) -> None:
+    """Restore the file part pytest drops from a selected nodeid.
+
+    A nodeid passed on the command line comes back from the plugin as
+    ``::BertModelTest::test_x``: pytest builds the reported nodeid from the
+    directory it was pointed at rather than from the file that holds the test,
+    and the file part is lost. Every recorded nodeid that reaches triage, the
+    verifier, and the isolation rerun has to be selectable again, so each is
+    restored from the nodeid that was actually selected, matched on its
+    ``::Class::test`` tail. A tail shared by two selected nodeids is left alone:
+    guessing which file was meant would be worse than the reported form.
+    """
+    tails: dict[str, list[str]] = {}
+    for nodeid in selected:
+        tail = nodeid[nodeid.find("::") :] if "::" in nodeid else ""
+        if tail:
+            tails.setdefault(tail, []).append(nodeid)
+
+    for test in tests:
+        nodeid = test.get("nodeid") or ""
+        tail = nodeid[nodeid.find("::") :] if "::" in nodeid else ""
+        candidates = tails.get(tail) or []
+        if len(candidates) == 1:
+            test["nodeid"] = candidates[0]
+
+
 def fallback_ops(tests: list[dict]) -> list[str]:
     """Return the unique operators that executed through CPU fallback."""
     return sorted({op for test in tests for op in test.get("cpu_fallback_ops", [])})
@@ -875,6 +901,7 @@ def run_test_batch(
         )
 
         reduced = reduce_records(read_report(report))
+        canonicalize_nodeids(reduced["tests"], batch_nodeids)
         crashed = pytest_process_crashed(proc.returncode)
 
         result = {

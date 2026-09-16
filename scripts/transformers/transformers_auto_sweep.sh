@@ -219,6 +219,7 @@ if ! ${PYTHON} scripts/transformers/transformers_deduplicate.py \
     "${WORK_DIR}/verified.json" \
     --out "${WORK_DIR}/new.json" \
     --coverage-file docs/reference/hf-coverage.md \
+    --hardware "${CHIP}" \
     --repo "${REPO}"; then
     echo "error: deduplication failed; no finding may be treated as new" >&2
     exit 2
