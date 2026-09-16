@@ -39,6 +39,12 @@ iterates all architecture keys exposed by the installed Transformers version,
 with one isolated subprocess per architecture; it does not enumerate Hub
 checkpoints or download model weights.
 
+Exit codes separate "what was measured" from "whether it worked":
+0 the measurement is clean, 1 something was measured and something failed,
+2 nothing was measured because the environment, the source tree, or the
+preflight check in :func:`preflight` failed. A caller must not read 2 as a
+coverage result.
+
 Issue filing is deliberately not part of this runner. It writes an auditable
 JSON result that a later reporter consumes, so that executing tests and writing
 to a shared tracker stay separable.
@@ -63,15 +69,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from transformers_hf_source import (  # noqa: E402 - local manual-test helper
     SourceError,
     atomic_write,
+    device_name,
     resolve_version,
     use_source,
 )
 
 HARNESS_VERSION = 1
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = Path(__file__).resolve().parent / "hf_device_spec.py"
+
+
+def spec_device() -> str:
+    """The accelerator the official tests execute on.
+
+    The device spec is the contract HuggingFace reads, so its ``DEVICE_NAME``
+    is the only name this runner may report.  A caller-supplied device string
+    cannot be verified against the spec and can therefore be silently wrong.
+    """
+    return device_name(DEVICE_SPEC)
+
 
 # One illegal access poisons the device context for the rest of the process.
 # Same pattern set as the model probe, so both harnesses call a fault a fault.
@@ -492,7 +510,7 @@ def test_dir(source: Path, model: str) -> Path:
     return source / "tests" / "models" / module_name(model)
 
 
-def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
+def child_env(source: Path, report: Path | None = None, offline: bool = False) -> dict:
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
@@ -502,7 +520,8 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     # ``flagos`` would fail at torch.device() validation.
     env.pop("TRANSFORMERS_TEST_DEVICE", None)
     env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
-    env["HF_TEST_REPORT"] = str(report)
+    if report is not None:
+        env["HF_TEST_REPORT"] = str(report)
     # This repository also has a top-level ``tests`` package. If it stays
     # importable, HF's ``tests.models...`` imports resolve into the wrong tree
     # and every model test errors on import.
@@ -521,6 +540,183 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
         env["TRANSFORMERS_OFFLINE"] = "1"
     env["_HF_TESTS_SOURCE"] = str(source)
     return env
+
+
+# The preflight runs in the child environment, because the failures worth
+# catching here --- a hook the spec does not expose, a device name that does not
+# match the registration, an accelerator the driver cannot see --- appear only
+# once the device spec is imported in the process that will execute the tests.
+PREFLIGHT = r"""
+import importlib.util
+import json
+import sys
+
+spec_path, expected_device, expected_version, report_path = sys.argv[1:5]
+report = {"problems": []}
+problems = report["problems"]
+
+
+def check_hook(name):
+    value = getattr(module, name, None)
+    report.setdefault("hooks", {})[name] = callable(value)
+    if not callable(value):
+        problems.append(f"the device spec exposes no callable {name}")
+    return value
+
+
+try:
+    import torch_fl
+
+    report["torch_fl"] = getattr(torch_fl, "__file__", "unknown")
+except Exception as exc:
+    report["torch_fl"] = None
+    problems.append(f"torch_fl did not import: {exc!r}")
+
+try:
+    import torch
+
+    report["registered_device"] = torch._C._get_privateuse1_backend_name()
+except Exception as exc:
+    report["registered_device"] = None
+    problems.append(f"could not read the registered PrivateUse1 name: {exc!r}")
+
+module = None
+count_fn = None
+try:
+    loader = importlib.util.spec_from_file_location("hf_device_spec_preflight", spec_path)
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    report["spec_device"] = getattr(module, "DEVICE_NAME", None)
+    count_fn = check_hook("DEVICE_COUNT_FN")
+    check_hook("MANUAL_SEED_FN")
+    check_hook("EMPTY_CACHE_FN")
+except Exception as exc:
+    problems.append(f"the device spec did not import: {exc!r}")
+
+report["expected_device"] = expected_device
+if module is not None and report.get("spec_device") != expected_device:
+    problems.append(
+        f"the device spec names {report['spec_device']!r}, not {expected_device!r}"
+    )
+registered = report.get("registered_device")
+if registered is not None and registered != expected_device:
+    problems.append(
+        f"torch_fl registers {registered!r} but the tests run on {expected_device!r}"
+    )
+
+if callable(count_fn):
+    try:
+        report["device_count"] = count_fn()
+    except Exception as exc:
+        report["device_count"] = None
+        problems.append(f"enumerating accelerator devices failed: {exc!r}")
+    else:
+        count = report["device_count"]
+        if not isinstance(count, int) or count < 1:
+            problems.append(
+                "no accelerator is visible: device_count() reported "
+                f"{count!r}"
+            )
+
+try:
+    import transformers
+
+    report["transformers"] = transformers.__version__
+except Exception as exc:
+    report["transformers"] = None
+    problems.append(f"transformers did not import: {exc!r}")
+if report.get("transformers") not in (None, expected_version):
+    problems.append(
+        f"transformers {report['transformers']} is installed but the source tree "
+        f"is {expected_version}"
+    )
+
+with open(report_path, "w") as file:
+    json.dump(report, file, indent=1, sort_keys=True)
+"""
+
+
+def read_preflight(path: Path) -> dict | None:
+    try:
+        report = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def preflight(source: Path, version: str, offline: bool, timeout: int = 600) -> dict:
+    """Prove the child environment can execute the official tests at all.
+
+    The check runs in a subprocess built by :func:`child_env` --- the same
+    environment the tests get --- because a parent that imports ``torch``
+    successfully says nothing about a child that must import the device spec,
+    claim the accelerator and find its hooks.  A failure here invalidates the
+    whole measurement, so it is reported before the first test runs rather than
+    inferred from tens of thousands of errors afterwards.
+    """
+    device = spec_device()
+    command: list[str] = []
+    workdir = Path(tempfile.mkdtemp(prefix="hf-preflight-"))
+    try:
+        spec = workdir / DEVICE_SPEC.name
+        script = workdir / "hf_preflight.py"
+        report_path = workdir / "preflight.json"
+        shutil.copyfile(DEVICE_SPEC, spec)
+        script.write_text(PREFLIGHT)
+
+        command = [
+            sys.executable,
+            str(script),
+            str(spec),
+            device,
+            version,
+            str(report_path),
+        ]
+        started = time.time()
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=child_env(source, offline=offline),
+                cwd=str(workdir),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ran": True,
+                "device": device,
+                "duration_s": round(time.time() - started, 1),
+                "command": " ".join(command),
+                "problems": [f"the preflight did not finish within {timeout}s"],
+            }
+
+        report = read_preflight(report_path)
+        if report is None:
+            return {
+                "ran": True,
+                "device": device,
+                "duration_s": round(time.time() - started, 1),
+                "command": " ".join(command),
+                "returncode": proc.returncode,
+                "stderr_tail": proc.stderr.strip()[-2000:] or None,
+                "problems": [
+                    "the preflight published no verdict "
+                    f"(exit {proc.returncode}); the child died while starting up"
+                ],
+            }
+        report.update(
+            {
+                "ran": True,
+                "duration_s": round(time.time() - started, 1),
+                "command": " ".join(command),
+                "returncode": proc.returncode,
+            }
+        )
+        report.setdefault("problems", [])
+        return report
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def pytest_command(
@@ -566,7 +762,7 @@ def collect_all_tests(model: str, source: Path, args: argparse.Namespace) -> dic
         (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
         (workdir / "src").symlink_to(source / "src", target_is_directory=True)
 
-        env = child_env(source, args.device, workdir / "dummy.jsonl", args.offline)
+        env = child_env(source, workdir / "dummy.jsonl", args.offline)
         env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
 
         command = pytest_command(
@@ -630,7 +826,7 @@ def run_test_batch(
         (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
         (workdir / "src").symlink_to(source / "src", target_is_directory=True)
 
-        env = child_env(source, args.device, report, args.offline)
+        env = child_env(source, report, args.offline)
         env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
         env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
 
@@ -717,6 +913,7 @@ def reset_device_context(device: str):
 
 def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> dict:
     """Resilient mode: run tests in batches, continue on crash."""
+    device = spec_device()
     target = test_dir(source, model)
     if not target.is_dir():
         return {
@@ -795,7 +992,7 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
 
                 # Try to release cached allocations. A poisoned accelerator
                 # context may require a process/driver reset; this is best effort.
-                reset_device_context(args.device)
+                reset_device_context(device)
 
             else:
                 print(f"[Batch {batch_name}] ✓ {len(batch_result['tests'])} results")
@@ -823,7 +1020,7 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
                     }
                 )
 
-            reset_device_context(args.device)
+            reset_device_context(device)
 
     duration = round(time.time() - started, 1)
 
@@ -879,7 +1076,7 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
     (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
     (workdir / "src").symlink_to(source / "src", target_is_directory=True)
-    env = child_env(source, args.device, report, args.offline)
+    env = child_env(source, report, args.offline)
     env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
     env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
     command = pytest_command(
@@ -959,15 +1156,16 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     return result
 
 
-def fingerprint(model: str, device: str, test: dict) -> str:
-    """Fingerprint the cause, not the occurrence.
+def occurrence_fingerprint(model: str, device: str, test: dict) -> str:
+    """Name one failing occurrence, not the cause behind it.
 
-    Addresses, shapes, durations, and temporary paths are stripped so that a
-    differing pointer value does not read as a different failure. The later
-    reporter uses this for dedup; nothing here writes to a tracker.
+    The nodeid is part of the payload, so two tests that fail for the same
+    reason get two fingerprints. Causes are fingerprinted later, by the
+    reporter, from the class, component, subject and mechanism; keeping the two
+    distinct is what stops a sweep from counting one defect 400 times.
     """
     detail = test.get("detail") or ""
-    normalized = re.sub(r"0x[0-9a-f]+", "0xADDR", detail, flags=re.IGNORECASE)
+    normalized = re.sub(r"0x[0-9a-f]+", "<ADDR>", detail, flags=re.IGNORECASE)
     normalized = re.sub(r"\b\d+\.\d+s\b", "TIMEs", normalized)
     normalized = re.sub(r"/tmp/[^\s'\"]+", "/tmp/PATH", normalized)
     normalized = re.sub(r"\b\d+\b", "N", normalized)
@@ -980,13 +1178,14 @@ def prepare_result(
 ) -> dict:
     """Run one model and attach the stable top-level result metadata."""
     result = run_tests(model, source, args)
+    device = environment_data.get("device") or spec_device()
     result["schema_version"] = SCHEMA_VERSION
     result["model"] = {"requested": model, "module": module_name(model)}
     result["environment"] = dict(environment_data)
     result["verdict"] = verdict(result)
     for test in result["tests"]:
         if test["status"] in ("FAIL", "ERROR", "ENVIRONMENT_ERROR"):
-            test["fingerprint"] = fingerprint(model, args.device, test)
+            test["occurrence_fingerprint"] = occurrence_fingerprint(model, device, test)
     return result
 
 
@@ -1126,6 +1325,56 @@ def summarize(result: dict) -> str:
     return "\n".join(lines)
 
 
+def invalid_result(environment_data: dict, report: dict) -> dict:
+    """A result that says no measurement happened, and why.
+
+    Written even when the run aborts, so a pipeline that only reads the JSON
+    cannot mistake "the environment was broken" for "nothing failed".
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": "invalid",
+        "environment": dict(environment_data) | {"preflight": report},
+        "error": "; ".join(report["problems"]),
+        "verdict": "ENVIRONMENT_ERROR",
+    }
+
+
+def measured_anything(result: dict) -> bool:
+    """True when at least one test actually produced a result."""
+    models = result.get("models")
+    if models is None:
+        models = [result]
+    return any(
+        test.get("status") == "PASS"
+        for model in models
+        for test in model.get("tests", [])
+    )
+
+
+def exit_code(result: dict) -> int:
+    """Map a finished run to its process exit code.
+
+    0  the measurement is clean
+    1  something was measured and something failed
+    2  nothing was measured: the environment, the source, or the preflight failed
+
+    The distinction matters to the caller: 1 is a report, 2 is a pipeline that
+    must not be summarized as a coverage result.
+    """
+    if result.get("error"):
+        return 2
+    verdict = result["verdict"]
+    if verdict == "PASS":
+        return 0
+    # An environment error means the assertions never ran. Only when it is the
+    # whole outcome is the measurement itself invalid; alongside real results
+    # it is one more finding to report.
+    if verdict == "ENVIRONMENT_ERROR" and not measured_anything(result):
+        return 2
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run HuggingFace's official Transformers tests on an accelerator"
@@ -1143,7 +1392,6 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument(
         "--list-models", action="store_true", help="list available architectures"
     )
-    parser.add_argument("--device", default="flagos")
     parser.add_argument(
         "--transformers-version",
         default="latest",
@@ -1202,6 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("choose exactly one of --model, --all, or --list-models")
 
     try:
+        device = spec_device()
         resolution = resolve_version(args.transformers_version, args.offline)
         source = use_source(
             resolution["version"],
@@ -1213,13 +1462,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"environment error: {exc}", file=sys.stderr)
         return 2
 
-    env = environment(args.device)
+    source_path = Path(source["path"])
+    report = preflight(source_path, resolution["version"], args.offline)
+    if report["problems"]:
+        print(
+            f"environment error: {len(report['problems'])} problem(s)",
+            file=sys.stderr,
+        )
+        for problem in report["problems"]:
+            print(f"  - {problem}", file=sys.stderr)
+        if args.out:
+            atomic_write(
+                args.out,
+                invalid_result(
+                    {"device": device, "source_path": source["path"]}, report
+                ),
+            )
+        return 2
+
+    env = environment(device)
     env["transformers_requested"] = resolution["requested"]
     env["transformers_latest"] = resolution["latest"]
     env["source_path"] = source["path"]
     env["source_version"] = source["version"]
+    env["preflight"] = report
 
-    source_path = Path(source["path"])
     print(
         f"transformers {env['transformers']}  torch {env['torch']}"
         f"  torch_fl {env['torch_fl_commit']}"
@@ -1249,7 +1516,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         atomic_write(args.out, result)
         print(f"\nJSON written to {args.out}")
-    return 0 if result["verdict"] == "PASS" else 1
+    return exit_code(result)
 
 
 if __name__ == "__main__":

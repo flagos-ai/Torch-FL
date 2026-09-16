@@ -1,123 +1,230 @@
 #!/bin/bash
 # End-to-end measurement: test → triage → verify → deduplicate → preview issues
 # Copyright 2026 FlagOS Contributors
+#
+# Usage: $0 <model> [chip] [repo]
+#
+# The run measures a device; it does not modify anything. Every step is checked
+# explicitly rather than with ``set -e``, because the pipeline has to tell three
+# outcomes apart: clean (0), measured-with-findings (1), and nothing-was-measured
+# (2). Only the last one stops the pipeline, and it stops it loudly --- a broken
+# environment must never be summarized as a clean sweep.
 
-set -e
+set -uo pipefail
 
-MODEL=$1
-DEVICE=${2:-gcu}
-CHIP=${3:-GCU}
-REPO=${4:-flagos-ai/Torch-FL}
+MODEL=${1:-}
+CHIP=${2:-GCU}
+REPO=${3:-flagos-ai/Torch-FL}
+PYTHON=${PYTHON:-python3}
 
 if [ -z "$MODEL" ]; then
-    echo "Usage: $0 <model> [device] [chip] [repo]"
+    echo "Usage: $0 <model> [chip] [repo]"
     echo ""
     echo "Examples:"
-    echo "  $0 bert                              # Use defaults: gcu, GCU, flagos-ai/Torch-FL"
-    echo "  $0 qwen3 gcu GCU flagos-ai/Torch-FL  # Explicit all params"
-    echo "  $0 bert musa MUSA flagos-ai/Torch-FL"
+    echo "  $0 bert                             # defaults: GCU, flagos-ai/Torch-FL"
+    echo "  $0 qwen3 'MUSA MTT S5000' flagos-ai/Torch-FL"
     echo ""
     echo "Supported chips: MUSA, GCU, Ascend, MetaX, PPU, IPU, Gaudi, MLU"
+    echo "The device is not a parameter: it is whatever tests/manual/hf_device_spec.py"
+    echo "registers, and the runner derives it from that file."
+    echo ""
+    echo "Set PYTHON to the interpreter that has the accelerator build installed."
     exit 1
 fi
 
 WORK_DIR=/tmp/transformers-auto-sweep-${MODEL}-$(date +%Y%m%d-%H%M%S)
-mkdir -p ${WORK_DIR}
+mkdir -p "${WORK_DIR}"
 
 echo "======================================================================="
 echo "Transformers Auto Sweep + Issue Preview"
 echo "======================================================================="
 echo "Model:    $MODEL"
-echo "Device:   $DEVICE"
 echo "Chip:     $CHIP"
 echo "Repo:     $REPO"
+echo "Python:   $PYTHON"
 echo "Work Dir: $WORK_DIR"
 echo "======================================================================="
 echo ""
 
+# Step 0: the interpreter. A box whose ``python`` has no torch, transformers or
+# torch_fl otherwise fails much later, as "the model name must be wrong".
+echo "[0/6] Checking ${PYTHON} for torch, transformers and torch_fl..."
+if ! MISSING=$(${PYTHON} -c '
+import importlib
+
+missing = []
+for name in ("torch", "transformers", "torch_fl"):
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        missing.append(f"{name} ({exc})")
+print("; ".join(missing))
+' 2>&1); then
+    echo "environment error: ${PYTHON} could not run the import check:" >&2
+    echo "  ${MISSING}" >&2
+    echo "  Set PYTHON to an interpreter that has the accelerator build installed." >&2
+    exit 2
+fi
+if [ -n "${MISSING}" ]; then
+    echo "environment error: ${PYTHON} cannot import the test environment:" >&2
+    echo "  ${MISSING}" >&2
+    echo "  Set PYTHON to an interpreter that has the accelerator build installed." >&2
+    exit 2
+fi
+echo "✓ ${PYTHON} has torch, transformers and torch_fl"
+
 # Step 1: Run tests (resilient mode)
+echo ""
 echo "[1/6] Running tests (resilient mode)..."
 echo "  Batch size: 20 tests"
 echo "  Batch timeout: 15 minutes"
 echo ""
 
-python tests/manual/transformers_hf_tests.py \
-    --model ${MODEL} \
-    --device ${DEVICE} \
+${PYTHON} tests/manual/transformers_hf_tests.py \
+    --model "${MODEL}" \
     --resilient \
     --batch-size 20 \
     --batch-timeout 900 \
-    --out ${WORK_DIR}/test-results.json \
-    || {
-        echo ""
-        echo "Warning: Tests completed with errors (this is expected in resilient mode)"
-    }
+    --out "${WORK_DIR}/test-results.json"
+TEST_STATUS=$?
 
-# Check if results were generated
-if [ ! -f ${WORK_DIR}/test-results.json ]; then
-    echo ""
-    echo "ERROR: No test results generated"
-    echo "Check if the model name is correct: $MODEL"
-    exit 1
+case ${TEST_STATUS} in
+    0)
+        echo ""
+        echo "✓ Measured: every test passed"
+        ;;
+    1)
+        echo ""
+        echo "✓ Measured: failures were recorded (resilient mode continued past them)"
+        ;;
+    2)
+        echo "" >&2
+        echo "environment error: nothing was measured" >&2
+        echo "  The runner refused to report a result. Its preflight report is in" >&2
+        echo "  ${WORK_DIR}/test-results.json" >&2
+        exit 2
+        ;;
+    *)
+        echo "" >&2
+        echo "environment error: the runner exited ${TEST_STATUS}" >&2
+        exit 2
+        ;;
+esac
+
+if [ ! -f "${WORK_DIR}/test-results.json" ]; then
+    echo "" >&2
+    echo "environment error: the runner wrote no result for ${MODEL}" >&2
+    exit 2
 fi
 
-TEST_COUNT=$(python3 -c "import json; d=json.load(open('${WORK_DIR}/test-results.json')); print(len(d.get('tests', [])))" 2>/dev/null || echo "0")
+RUN_STATUS=$(${PYTHON} -c "import json; print(json.load(open('${WORK_DIR}/test-results.json')).get('run', {}).get('status', 'unknown'))" 2>/dev/null || echo "unknown")
+TEST_COUNT=$(${PYTHON} -c "import json; print(len(json.load(open('${WORK_DIR}/test-results.json')).get('tests', [])))" 2>/dev/null || echo "0")
 echo ""
-echo "✓ Captured ${TEST_COUNT} test results"
+echo "✓ Captured ${TEST_COUNT} test results (run status: ${RUN_STATUS})"
 
-if [ "$TEST_COUNT" -eq 0 ]; then
-    echo "ERROR: No tests completed successfully"
-    exit 1
+if [ "${TEST_COUNT}" -eq 0 ]; then
+    echo "" >&2
+    echo "environment error: the runner recorded no tests (run status: ${RUN_STATUS})" >&2
+    echo "  ${MODEL} is a registry key, so an empty run is an environment problem," >&2
+    echo "  not a wrong model name. Check the preflight report in test-results.json." >&2
+    exit 2
 fi
 
 # Step 2: Triage
 echo ""
 echo "[2/6] Triaging failures..."
-python scripts/transformers/transformers_triage.py \
-    ${WORK_DIR}/test-results.json \
-    --out ${WORK_DIR}/classified.json
+if ! ${PYTHON} scripts/transformers/transformers_triage.py \
+    "${WORK_DIR}/test-results.json" \
+    --out "${WORK_DIR}/classified.json"; then
+    echo "error: triage failed; the measurement is not classified" >&2
+    exit 2
+fi
 
-CLASSIFIED_COUNT=$(python3 -c "import json; d=json.load(open('${WORK_DIR}/classified.json')); print(len(d.get('findings', [])))" 2>/dev/null || echo "0")
-echo "✓ Classified ${CLASSIFIED_COUNT} findings"
+read -r CLASSIFIED_COUNT ACTIONABLE_COUNT ENV_ERROR_COUNT < <(${PYTHON} -c "
+import json
 
-if [ "$CLASSIFIED_COUNT" -eq 0 ]; then
+data = json.load(open('${WORK_DIR}/classified.json'))
+findings = data.get('findings', [])
+actionable = [f for f in findings if f.get('actionable', True)]
+print(len(findings), len(actionable), data.get('summary', {}).get('environment_error', 0))
+" 2>/dev/null || echo "0 0 0")
+
+echo "✓ Classified ${CLASSIFIED_COUNT} findings (${ACTIONABLE_COUNT} actionable)"
+
+if [ "${CLASSIFIED_COUNT}" -eq 0 ]; then
     echo ""
     echo "No failures to triage. All tests passed!"
+    exit 0
+fi
+
+if [ "${ACTIONABLE_COUNT}" -eq 0 ]; then
+    echo ""
+    if [ "${ENV_ERROR_COUNT}" -gt 0 ]; then
+        echo "environment error: ${ENV_ERROR_COUNT} test(s) never ran" >&2
+        echo "  Fix the environment and re-run; this sweep is not a coverage result." >&2
+        exit 2
+    fi
+    echo "Every failure was a test error, not a platform defect. Nothing to file."
+    echo "Results saved in: ${WORK_DIR}"
     exit 0
 fi
 
 # Step 3: Verify (serial isolation)
 echo ""
 echo "[3/6] Verifying failures in isolation (serial)..."
-python scripts/transformers/transformers_verify.py \
-    ${WORK_DIR}/classified.json \
-    --out ${WORK_DIR}/verified.json \
-    --test-source-dir /root/.cache/torch_fl/hf-tests \
-    --transformers-version "$(python3 -c 'import transformers; print(transformers.__version__)')" \
+if ! ${PYTHON} scripts/transformers/transformers_verify.py \
+    "${WORK_DIR}/classified.json" \
+    --out "${WORK_DIR}/verified.json" \
     --workers 1 \
-    --timeout 120 \
-    || {
-        echo ""
-        echo "Warning: Verification completed with some errors"
-    }
+    --timeout 120; then
+    echo "error: verification failed; findings are not confirmed" >&2
+    exit 2
+fi
 
-VERIFIED_COUNT=$(python3 -c "import json; d=json.load(open('${WORK_DIR}/verified.json')); print(len(d.get('findings', [])))" 2>/dev/null || echo "0")
+VERIFIED_COUNT=$(${PYTHON} -c "import json; print(len(json.load(open('${WORK_DIR}/verified.json')).get('findings', [])))" 2>/dev/null || echo "0")
 echo "✓ Verified ${VERIFIED_COUNT} findings"
 
 # Step 4: Deduplicate
 echo ""
 echo "[4/6] Deduplicating against baseline and GitHub..."
-python scripts/transformers/transformers_deduplicate.py \
-    ${WORK_DIR}/verified.json \
-    --out ${WORK_DIR}/new.json \
+if ! ${PYTHON} scripts/transformers/transformers_deduplicate.py \
+    "${WORK_DIR}/verified.json" \
+    --out "${WORK_DIR}/new.json" \
     --coverage-file docs/reference/hf-coverage.md \
-    --repo ${REPO}
+    --repo "${REPO}"; then
+    echo "error: deduplication failed; no finding may be treated as new" >&2
+    exit 2
+fi
 
-NEW_COUNT=$(python3 -c "import json; d=json.load(open('${WORK_DIR}/new.json')); print(len(d.get('findings', [])))" 2>/dev/null || echo "0")
-echo "✓ Found ${NEW_COUNT} new findings"
+# The counts live in ``summary.dedup``, not in the findings array: only NEW
+# findings reach ``findings``, so counting them there would always report zero
+# unchecked and the warning below could never fire.
+read -r NEW_COUNT KNOWN_COUNT UNCHECKED_COUNT < <(${PYTHON} -c "
+import json
 
-if [ "$NEW_COUNT" -eq 0 ]; then
+dedup = json.load(open('${WORK_DIR}/new.json')).get('summary', {}).get('dedup', {})
+unchecked = dedup.get('DEDUP_UNAVAILABLE', 0) + dedup.get('NOT_CHECKED', 0)
+known = sum(dedup.get(name, 0) for name in ('IN_BASELINE', 'DUPLICATE', 'REVIEW_CANDIDATE'))
+print(dedup.get('NEW', 0), known, unchecked)
+" 2>/dev/null || echo "0 0 0")
+
+echo "✓ Deduplication: ${NEW_COUNT} new, ${KNOWN_COUNT} already tracked, ${UNCHECKED_COUNT} unchecked"
+
+if [ "${UNCHECKED_COUNT}" -gt 0 ]; then
+    echo "" >&2
+    echo "warning: ${UNCHECKED_COUNT} finding(s) were never checked against GitHub" >&2
+    echo "  (dedup_status DEDUP_UNAVAILABLE or NOT_CHECKED). They are not known to be" >&2
+    echo "  new, so this run must not be presented as a filing opportunity." >&2
+fi
+
+if [ "${NEW_COUNT}" -eq 0 ]; then
     echo ""
+    if [ "${UNCHECKED_COUNT}" -gt 0 ]; then
+        echo "No finding could be confirmed new: ${UNCHECKED_COUNT} of them were never" >&2
+        echo "  checked against the tracker. This is not a clean deduplication result." >&2
+        echo "Results saved in: ${WORK_DIR}"
+        exit 1
+    fi
     echo "No new issues to file. All findings are known!"
     echo "Results saved in: ${WORK_DIR}"
     exit 0
@@ -127,25 +234,21 @@ fi
 echo ""
 echo "[5/6] Generating issue previews..."
 
-# Get transformers version
-TF_VERSION=$(python3 -c "import transformers; print(transformers.__version__)" 2>/dev/null || echo "unknown")
-
-# Get torch_fl commit
-TF_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-
-python scripts/transformers/transformers_preview_issues.py \
-    ${WORK_DIR}/new.json \
-    --chip ${CHIP} \
-    --transformers-version ${TF_VERSION} \
-    --torch-fl-commit ${TF_COMMIT} \
-    --issue-bodies-dir ${WORK_DIR}/issues \
-    --out ${WORK_DIR}/preview.md
+${PYTHON} scripts/transformers/transformers_preview_issues.py \
+    "${WORK_DIR}/new.json" \
+    --chip "${CHIP}" \
+    --issue-bodies-dir "${WORK_DIR}/issues" \
+    --out "${WORK_DIR}/preview.md" \
+    || {
+        echo "error: generating the preview failed" >&2
+        exit 2
+    }
 
 echo ""
 echo "======================================================================="
 echo "Issue Preview (${NEW_COUNT} issues)"
 echo "======================================================================="
-cat ${WORK_DIR}/preview.md
+cat "${WORK_DIR}/preview.md"
 echo ""
 echo "======================================================================="
 
@@ -154,8 +257,15 @@ echo ""
 echo "[6/6] Issue previews are ready for human review."
 echo "No GitHub writes were performed."
 echo ""
+
+if [ "${UNCHECKED_COUNT}" -gt 0 ]; then
+    echo "STOP: ${UNCHECKED_COUNT} finding(s) could not be deduplicated against GitHub."
+    echo "Resolve the search failure before approving anything above."
+    echo ""
+fi
+
 echo "File only explicitly approved fingerprints, for example:"
-echo "  python scripts/transformers/transformers_file_issues.py ${WORK_DIR}/new.json \\"
+echo "  ${PYTHON} scripts/transformers/transformers_file_issues.py ${WORK_DIR}/new.json \\"
 echo "      --approve <fingerprint> [<fingerprint> ...] \\"
 echo "      --repo ${REPO} \\"
 echo "      --issue-bodies-dir ${WORK_DIR}/issues"
@@ -166,10 +276,11 @@ echo "======================================================================="
 echo "Results saved in: ${WORK_DIR}"
 echo ""
 echo "Files:"
-echo "  - test-results.json   (raw test output)"
+echo "  - test-results.json   (raw test output, includes the preflight report)"
 echo "  - classified.json     (triaged findings)"
 echo "  - verified.json       (isolated verification)"
 echo "  - new.json            (deduplicated new findings)"
 echo "  - preview.md          (issue preview)"
 echo "  - issues/*.md         (individual issue bodies)"
+echo "  - issues/*.json       (title and label sidecars the filer reads)"
 echo "======================================================================="

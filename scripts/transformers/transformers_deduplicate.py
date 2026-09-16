@@ -15,10 +15,15 @@ Usage:
 
 Output schema adds to each finding:
     {
-      "dedup_status": "NEW"|"IN_BASELINE"|"DUPLICATE"|"COLLATERAL",
-      "dedup_ref": "issue #123" or "baseline:qwen3:2026-09-02",
+      "dedup_status": "NEW"|"IN_BASELINE"|"DUPLICATE"|"COLLATERAL"|"INCONCLUSIVE"|
+                      "NOT_ACTIONABLE"|"DEDUP_UNAVAILABLE"|"NOT_CHECKED",
+      "dedup_ref": "issue #123" or "baseline:MUSA MTT S5000",
       "should_file": true|false
     }
+
+Only findings whose dedup status is ``NEW`` reach ``findings``. The counts for
+every status are recorded under ``summary.dedup``, which is the only way a
+caller can tell "nothing new" apart from "the check never ran".
 """
 
 import argparse
@@ -28,10 +33,45 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Optional
 
+BASELINE_HEADING_RE = re.compile(r"^##\s+Baseline:\s*(.+?)\s*$")
+TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
+FINGERPRINT_TOKEN_RE = re.compile(r"\b([a-f0-9]{12})\b")
+ISSUE_REF_RE = re.compile(r"#(\d+)")
+MARKER_RE = re.compile(r"Fingerprint:?\s*`?([a-f0-9]{12})`?", re.I)
+SEPARATOR_CELL_RE = re.compile(r"^:?-{2,}:?$")
+
+
+class GitHubSearchUnavailable(RuntimeError):
+    """The GitHub check could not run, so no finding may be called new.
+
+    This is deliberately not ``None``. A search that never executed and a search
+    that found nothing are different facts, and the old code conflated them: any
+    ``gh`` failure was printed as a warning and the finding was filed again.
+    """
+
+
+def table_cells(line: str) -> list[str]:
+    """Split one Markdown table row into its cells."""
+    match = TABLE_ROW_RE.match(line)
+    if not match:
+        return []
+    return [cell.strip() for cell in match.group(1).split("|")]
+
+
+def is_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(SEPARATOR_CELL_RE.match(cell) for cell in cells)
+
 
 def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
     """
     Extract known fingerprints from hf-coverage.md baseline.
+
+    Two spellings are accepted, because the document carries both: the
+    ``Fingerprint`` column of a baseline cause table, and the standalone
+    ``Fingerprint: `hash``` line that issue bodies use. The reference is taken
+    from the row's own issue cell, falling back to the nearest preceding
+    ``## Baseline:`` heading, so an unrelated ``#N`` elsewhere in the file can
+    no longer be attributed to this fingerprint.
 
     Returns: {fingerprint: reference}
     """
@@ -42,30 +82,78 @@ def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
     with open(coverage_file) as f:
         content = f.read()
 
-    fingerprints = {}
+    fingerprints: Dict[str, str] = {}
+    baseline = "unknown"
+    columns: Dict[str, int] = {}
 
-    # Pattern: | <fingerprint> | <class> | <subject> | <issue> |
-    # or: Fingerprint: `<hash>`
-    for match in re.finditer(r"Fingerprint:?\s*`?([a-f0-9]{12})`?", content, re.I):
-        fp = match.group(1)
+    for line in content.splitlines():
+        heading = BASELINE_HEADING_RE.match(line)
+        if heading:
+            baseline = heading.group(1)
+            columns = {}
+            continue
 
-        # Try to find context (which baseline/issue)
-        # Look backwards for "Baseline:" or issue reference
-        before = content[: match.start()]
-        baseline_match = re.search(r"## Baseline:\s*([^\n]+)", before)
-        issue_match = re.search(r"#(\d+)", before[-200:])
+        cells = table_cells(line)
+        if cells:
+            names = [cell.strip("`* ").lower() for cell in cells]
+            if "fingerprint" in names:
+                columns = {name: index for index, name in enumerate(names)}
+                continue
+            if not columns or is_separator_row(cells):
+                continue
+            index = columns.get("fingerprint")
+            if index is None or index >= len(cells):
+                continue
+            token = FINGERPRINT_TOKEN_RE.search(cells[index])
+            if not token:
+                continue
+            issue = columns.get("issue")
+            issue_cell = (
+                cells[issue] if issue is not None and issue < len(cells) else ""
+            )
+            issue_match = ISSUE_REF_RE.search(issue_cell)
+            fingerprints[token.group(1)] = (
+                f"issue #{issue_match.group(1)}"
+                if issue_match
+                else f"baseline:{baseline}"
+            )
+            continue
 
-        if issue_match:
-            ref = f"issue #{issue_match.group(1)}"
-        elif baseline_match:
-            ref = f"baseline:{baseline_match.group(1)}"
-        else:
-            ref = "baseline:unknown"
-
-        fingerprints[fp] = ref
+        for marker in MARKER_RE.finditer(line):
+            fingerprints.setdefault(marker.group(1), f"baseline:{baseline}")
 
     print(f"Loaded {len(fingerprints)} fingerprints from baseline")
     return fingerprints
+
+
+def gh_search(cmd: list[str], description: str) -> Optional[str]:
+    """Run one ``gh`` query and return its first matching line, if any.
+
+    A missing binary, a timeout and a non-zero exit are all reported as
+    ``GitHubSearchUnavailable``: from the caller's side they mean the same
+    thing --- the check did not happen --- and a finding whose duplicate check
+    did not happen must not be declared new.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitHubSearchUnavailable(f"{description} timed out") from exc
+    except OSError as exc:
+        raise GitHubSearchUnavailable(f"{description} could not run: {exc}") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = detail[0] if detail else f"exit {result.returncode}"
+        raise GitHubSearchUnavailable(f"{description} failed: {reason}")
+
+    output = result.stdout.strip()
+    return output.split("\n")[0] if output else None
 
 
 def search_github_issues(
@@ -82,37 +170,34 @@ def search_github_issues(
         repo: "owner/repo"
 
     Returns:
-        "issue #123" if found, None otherwise
+        "issue #123" if found, None if the search ran and found nothing
+
+    Raises:
+        GitHubSearchUnavailable: the search could not be performed
     """
     # Search fingerprints in issue bodies first.
-    cmd = [
-        "gh",
-        "api",
-        f"repos/{repo}/issues",
-        "--paginate",
-        "-X",
-        "GET",
-        "-f",
-        "state=all",
-        "--jq",
-        f'.[] | select(.body // "" | contains("{fingerprint}")) | "#\\(.number) \\(.state) \\(.title)"',
-    ]
+    match = gh_search(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/issues",
+            "--paginate",
+            "-X",
+            "GET",
+            "-f",
+            "state=all",
+            "--jq",
+            f'.[] | select(.body // "" | contains("{fingerprint}")) | "#\\(.number) \\(.state) \\(.title)"',
+        ],
+        "issue body search",
+    )
+    if match:
+        return match
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            first_match = result.stdout.strip().split("\n")[0]
-            return first_match
-
-        # Also search in comments
-        cmd_comments = [
+    # Then in comments: a fingerprint is often added while discussing a
+    # pre-existing issue rather than in its original body.
+    match = gh_search(
+        [
             "gh",
             "api",
             f"repos/{repo}/issues/comments",
@@ -121,49 +206,32 @@ def search_github_issues(
             "GET",
             "--jq",
             f'.[] | select(.body // "" | contains("{fingerprint}")) | "comment on #\\(.issue_url | split("/") | .[-1])"',
-        ]
+        ],
+        "issue comment search",
+    )
+    if match:
+        return match
 
-        result = subprocess.run(
-            cmd_comments,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            first_match = result.stdout.strip().split("\n")[0]
-            return first_match
-
-        # Fingerprints are new, so older issues need a semantic fallback. Search
-        # only after exact body/comment checks, then require human review before
-        # deciding whether the candidate has the same mechanism and component.
-        query = f'"{subject}" repo:{repo} is:issue'
-        semantic = subprocess.run(
-            [
-                "gh",
-                "api",
-                "search/issues",
-                "-X",
-                "GET",
-                "-f",
-                f"q={query}",
-                "--jq",
-                '.items[] | "#\\(.number) \\(.state) \\(.title)"',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if semantic.returncode == 0 and semantic.stdout.strip():
-            first_match = semantic.stdout.strip().split("\n")[0]
-            return f"semantic candidate for {component}: {first_match}"
-
-    except subprocess.TimeoutExpired:
-        print(f"  Warning: GitHub search timed out for {fingerprint}")
-    except Exception as e:
-        print(f"  Warning: GitHub search failed for {fingerprint}: {e}")
+    # Fingerprints are new, so older issues need a semantic fallback. Search
+    # only after exact body/comment checks, then require human review before
+    # deciding whether the candidate has the same mechanism and component.
+    query = f'"{subject}" repo:{repo} is:issue'
+    match = gh_search(
+        [
+            "gh",
+            "api",
+            "search/issues",
+            "-X",
+            "GET",
+            "-f",
+            f"q={query}",
+            "--jq",
+            '.items[] | "#\\(.number) \\(.state) \\(.title)"',
+        ],
+        "semantic search",
+    )
+    if match:
+        return f"semantic candidate for {component}: {match}"
 
     return None
 
@@ -194,82 +262,102 @@ def deduplicate_findings(
     print(f"\nDeduplicating {len(findings)} findings...")
 
     new_findings = []
-    dedup_counts = {
+    dedup_counts: Dict[str, int] = {
         "NEW": 0,
         "IN_BASELINE": 0,
         "DUPLICATE": 0,
         "COLLATERAL": 0,
         "INCONCLUSIVE": 0,
+        "NOT_ACTIONABLE": 0,
         "REVIEW_CANDIDATE": 0,
+        "DEDUP_UNAVAILABLE": 0,
+        "NOT_CHECKED": 0,
     }
 
-    for i, finding in enumerate(findings):
+    def record(finding: Dict, status: str, ref: Optional[str], index: int) -> None:
+        finding["dedup_status"] = status
+        finding["dedup_ref"] = ref
+        finding["should_file"] = False
+        dedup_counts[status] = dedup_counts.get(status, 0) + 1
+        suffix = f" ({ref})" if ref else ""
+        print(f"  [{index}/{len(findings)}] {finding['subject']}: {status}{suffix}")
+
+    for i, finding in enumerate(findings, start=1):
         fp = finding["fingerprint"]
         verdict = finding.get("verdict", "UNKNOWN")
 
-        # Skip collateral findings entirely
-        if verdict == "COLLATERAL":
-            finding["dedup_status"] = "COLLATERAL"
-            finding["dedup_ref"] = "isolation test passed/skipped"
-            finding["should_file"] = False
-            dedup_counts["COLLATERAL"] += 1
-            print(
-                f"  [{i + 1}/{len(findings)}] {finding['subject']}: COLLATERAL (skip)"
+        # A finding that claims no platform defect cannot be filed, whatever a
+        # later check would say about it.
+        if not finding.get("actionable", True):
+            record(
+                finding,
+                "NOT_ACTIONABLE",
+                f"{finding['class']} claims no platform defect",
+                i,
             )
             continue
 
+        # Skip collateral findings entirely
+        if verdict == "COLLATERAL":
+            record(finding, "COLLATERAL", "isolation test passed/skipped", i)
+            continue
+
         if verdict == "INCONCLUSIVE":
-            finding["dedup_status"] = "INCONCLUSIVE"
-            finding["dedup_ref"] = "isolation did not produce a test verdict"
-            finding["should_file"] = False
-            dedup_counts["INCONCLUSIVE"] += 1
-            print(
-                f"  [{i + 1}/{len(findings)}] {finding['subject']}: INCONCLUSIVE (skip)"
+            record(
+                finding,
+                "INCONCLUSIVE",
+                "isolation did not produce a test verdict",
+                i,
+            )
+            continue
+
+        if verdict != "CONFIRMED":
+            record(
+                finding,
+                "INCONCLUSIVE",
+                f"verdict {verdict} is not CONFIRMED",
+                i,
             )
             continue
 
         # Check baseline
         if fp in baseline_fps:
-            finding["dedup_status"] = "IN_BASELINE"
-            finding["dedup_ref"] = baseline_fps[fp]
-            finding["should_file"] = False
-            dedup_counts["IN_BASELINE"] += 1
-            print(
-                f"  [{i + 1}/{len(findings)}] {finding['subject']}: IN_BASELINE ({baseline_fps[fp]})"
-            )
+            record(finding, "IN_BASELINE", baseline_fps[fp], i)
             continue
 
         # Check GitHub issues
-        if not skip_github:
+        if skip_github:
+            record(finding, "NOT_CHECKED", "--skip-github was requested", i)
+            continue
+
+        try:
             github_match = search_github_issues(
                 fp,
                 repo,
                 finding["subject"],
                 finding.get("component", "unknown"),
             )
-            if github_match:
-                finding["dedup_status"] = (
-                    "REVIEW_CANDIDATE"
-                    if github_match.startswith("semantic candidate")
-                    else "DUPLICATE"
-                )
-                finding["dedup_ref"] = github_match
-                finding["should_file"] = False
-                dedup_counts.setdefault(finding["dedup_status"], 0)
-                dedup_counts[finding["dedup_status"]] += 1
-                print(
-                    f"  [{i + 1}/{len(findings)}] {finding['subject']}: "
-                    f"{finding['dedup_status']} ({github_match})"
-                )
-                continue
+        except GitHubSearchUnavailable as exc:
+            record(finding, "DEDUP_UNAVAILABLE", str(exc), i)
+            continue
 
-        # New finding
+        if github_match:
+            record(
+                finding,
+                "REVIEW_CANDIDATE"
+                if github_match.startswith("semantic candidate")
+                else "DUPLICATE",
+                github_match,
+                i,
+            )
+            continue
+
         finding["dedup_status"] = "NEW"
         finding["dedup_ref"] = None
         finding["should_file"] = True
         dedup_counts["NEW"] += 1
         new_findings.append(finding)
-        print(f"  [{i + 1}/{len(findings)}] {finding['subject']}: NEW")
+        print(f"  [{i}/{len(findings)}] {finding['subject']}: NEW")
 
     findings_json["findings"] = new_findings
     findings_json["summary"]["dedup"] = dedup_counts

@@ -13,6 +13,13 @@ Usage:
     # Dry run (don't actually file)
     python scripts/transformers/transformers_file_issues.py /tmp/qwen3-new.json \
         --approve a1b2c3d4e5f6 --dry-run
+
+The title and the labels of every issue come from the sidecar written by
+``transformers_preview_issues.py``, and a draft that still carries an
+``<!-- UNFILLED: ... -->`` marker, placeholder prose, or an unticked human
+review box is refused. Both rules exist for the same reason: what a reviewer
+approved is what gets submitted, and a draft that is not finished does not
+reach the tracker.
 """
 
 import argparse
@@ -21,7 +28,19 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+# A draft is filable only when none of these remain. The first is the sentinel
+# every unfilled field carries; the second catches the free-text placeholder
+# prose earlier drafts used, which no mechanical check could detect; the third
+# is the template's own human-review checkbox, still unticked.
+UNFILLED_RE = re.compile(r"<!--\s*UNFILLED:\s*(?P<field>[^>]*?)\s*-->")
+PROSE_RE = re.compile(r"(?im)^[^\n]*\bfill in\b[^\n]*$")
+REVIEW_RE = re.compile(r"- \[ \] Human reviewer has completed")
+
+BASELINE_HEADING_RE = re.compile(r"^##\s+Baseline:\s*(.+?)\s*$")
+TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
+CELL_SEPARATOR_RE = re.compile(r"^:?-{2,}:?$")
 
 
 def file_github_issue(
@@ -105,36 +124,132 @@ def extract_body_metadata(body_text: str, key: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def get_issue_labels(finding: Dict) -> List[str]:
-    """Determine appropriate labels for finding."""
-    labels = ["ai-generated"]
+def unready_markers(body_text: str) -> List[str]:
+    """Everything that still blocks a draft from being filed.
 
-    failure_class = finding["class"]
-    if failure_class == "CRASH":
-        labels.extend(["bug", "P0"])
-    elif failure_class in (
-        "OP_UNSUPPORTED",
-        "OP_CPU_FALLBACK",
-        "FEATURE_UNSUPPORTED",
-    ):
-        labels.append("enhancement")
-    elif failure_class == "PRECISION":
-        labels.append("bug")
-    else:
-        labels.append("bug")
+    The old gate matched two exact strings, so lowercase placeholder prose and
+    any placeholder it did not know about were publishable. This returns the
+    reasons themselves, which makes both the refusal and its message precise.
+    """
+    markers = [f"unfilled field: {field}" for field in UNFILLED_RE.findall(body_text)]
+    markers += [
+        f"placeholder prose: {line.strip()}" for line in PROSE_RE.findall(body_text)
+    ]
+    if REVIEW_RE.search(body_text):
+        markers.append("human review checklist is still unticked")
+    return markers
 
-    return labels
+
+def read_sidecar(issue_bodies_dir: Path, fingerprint: str) -> Dict:
+    """The title and labels the preview decided for one finding.
+
+    The preview owns both so that the filer cannot disagree with what a reviewer
+    approved: rebuilding a title from body prose and re-deriving labels from the
+    class was a second, silently divergent opinion.
+    """
+    sidecar = issue_bodies_dir / f"issue-{fingerprint}.json"
+    if not sidecar.exists():
+        raise FileNotFoundError(
+            f"{sidecar}: metadata sidecar not found; regenerate the drafts with "
+            "transformers_preview_issues.py so every body has one"
+        )
+    metadata = json.loads(sidecar.read_text())
+    if metadata.get("fingerprint") != fingerprint:
+        raise ValueError(
+            f"{sidecar}: records fingerprint {metadata.get('fingerprint')!r}, "
+            f"expected {fingerprint!r}"
+        )
+    if not metadata.get("title"):
+        raise ValueError(f"{sidecar}: records no title")
+    if not metadata.get("labels"):
+        raise ValueError(f"{sidecar}: records no labels")
+    return metadata
+
+
+def split_row(line: str) -> Optional[List[str]]:
+    """Split one Markdown table row into its cells, or return None."""
+    match = TABLE_ROW_RE.match(line)
+    if not match:
+        return None
+    return [cell.strip() for cell in match.group(1).split("|")]
+
+
+def is_separator_row(cells: List[str]) -> bool:
+    return bool(cells) and all(CELL_SEPARATOR_RE.match(cell) for cell in cells)
+
+
+def render_row(cells: List[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def cause_table(lines: List[str]) -> Optional[Dict]:
+    """Locate the cause table of the most recent ``## Baseline:`` section.
+
+    The section's first table is the Field/Value run record, so the cause table
+    is identified by its header instead: it is the first table below the heading
+    that classifies causes, which means a ``Class`` and a ``Subject`` column.
+    """
+    heading = None
+    for index, line in enumerate(lines):
+        if BASELINE_HEADING_RE.match(line):
+            heading = index
+    if heading is None:
+        return None
+
+    for index in range(heading + 1, len(lines) - 1):
+        header = split_row(lines[index])
+        separator = split_row(lines[index + 1])
+        if not header or not separator or not is_separator_row(separator):
+            continue
+        columns = [cell.strip("`* ").lower() for cell in header]
+        if "class" not in columns or "subject" not in columns:
+            continue
+        end = index + 2
+        while end < len(lines):
+            cells = split_row(lines[end])
+            if cells is None or is_separator_row(cells):
+                break
+            end += 1
+        return {
+            "header": index,
+            "first_row": index + 2,
+            "end": end,
+            "columns": columns,
+        }
+    return None
+
+
+def add_fingerprint_column(lines: List[str], table: Dict) -> None:
+    """Give a cause table the column the dedup reader keys on.
+
+    Rewriting rows in place keeps every line index valid, so the caller can keep
+    using the table it just measured.
+    """
+    for index in range(table["header"], table["end"]):
+        cells = split_row(lines[index])
+        if index == table["header"]:
+            cells.insert(0, "Fingerprint")
+        elif is_separator_row(cells):
+            cells.insert(0, "---")
+        else:
+            cells.insert(0, "")
+        lines[index] = render_row(cells)
+    table["columns"] = ["fingerprint", *table["columns"]]
 
 
 def update_baseline_with_issues(
     findings_json: Dict,
     filed_issues: Dict[str, int],
     coverage_file: Path,
+    repo: str,
 ) -> None:
     """
-    Update docs/reference/hf-coverage.md with filed issue numbers.
+    Record filed issue numbers in docs/reference/hf-coverage.md.
 
-    This appends a findings table to the most recent baseline entry.
+    Rows are inserted into the most recent baseline's cause table, with the
+    ``Fingerprint`` column the deduplication reader reads. The previous version
+    appended a separate table after the trailing prose, which the reader never
+    looked at, so a filed cause stayed "new" forever.
     """
     if not filed_issues:
         print("No issues filed, skipping baseline update")
@@ -144,31 +259,47 @@ def update_baseline_with_issues(
         print(f"Warning: Coverage file not found: {coverage_file}")
         return
 
-    # Generate findings table
-    table_lines = [
-        "",
-        "| Fingerprint | Class | Subject | Issue |",
-        "| --- | --- | --- | --- |",
+    filed = [
+        finding
+        for finding in findings_json["findings"]
+        if finding["fingerprint"] in filed_issues
     ]
+    if not filed:
+        print(
+            "No filed finding is present in the findings JSON, skipping baseline update"
+        )
+        return
 
-    for finding in findings_json["findings"]:
-        fp = finding["fingerprint"]
-        if fp in filed_issues:
-            issue_num = filed_issues[fp]
-            table_lines.append(
-                f"| `{fp}` | {finding['class']} | {finding['subject']} | "
-                f"[#{issue_num}](https://github.com/flagos-ai/Torch-FL/issues/{issue_num}) |"
-            )
+    lines = coverage_file.read_text().splitlines()
+    table = cause_table(lines)
+    if table is None:
+        raise ValueError(
+            f"{coverage_file}: no '## Baseline:' section with a Class/Subject cause "
+            "table; add the baseline entry before recording filed issues, "
+            "because a row written anywhere else can never be read back"
+        )
+    if "fingerprint" not in table["columns"]:
+        add_fingerprint_column(lines, table)
 
-    table = "\n".join(table_lines)
+    rows = []
+    for finding in filed:
+        issue_num = filed_issues[finding["fingerprint"]]
+        values = {
+            "fingerprint": f"`{finding['fingerprint']}`",
+            "class": f"`{finding['class']}`",
+            "subject": finding["subject"],
+            "affected tests": str(finding.get("count", "")),
+            "issue": f"[#{issue_num}](https://github.com/{repo}/issues/{issue_num})",
+        }
+        rows.append(render_row([values.get(name, "") for name in table["columns"]]))
 
-    # Append to coverage file
-    with open(coverage_file, "a") as f:
-        f.write("\n")
-        f.write(table)
-        f.write("\n")
+    lines[table["end"] : table["end"]] = rows
+    coverage_file.write_text("\n".join(lines) + "\n")
 
-    print(f"Updated {coverage_file} with {len(filed_issues)} issue references")
+    print(
+        f"Updated {coverage_file} with {len(rows)} issue reference(s) "
+        "in the most recent baseline cause table"
+    )
 
 
 def main():
@@ -238,24 +369,35 @@ def main():
         subjects = ", ".join(f["subject"] for f in non_confirmed)
         raise ValueError("Only CONFIRMED findings may be filed; blocked: " + subjects)
 
-    incomplete_bodies = []
+    # Everything a filing needs is collected before the first GitHub write, so a
+    # missing sidecar or an unfinished draft cannot leave a half-filed batch.
+    drafts: List[Tuple[Dict, Path, Dict]] = []
+    problems: List[str] = []
     for finding in to_file:
-        body_file = args.issue_bodies_dir / f"issue-{finding['fingerprint']}.md"
+        fp = finding["fingerprint"]
+        body_file = args.issue_bodies_dir / f"issue-{fp}.md"
         if not body_file.exists():
+            problems.append(f"{body_file}: issue body file not found")
             continue
-        body_text = body_file.read_text()
-        if (
-            "Fill in before filing" in body_text
-            or "- [ ] Human reviewer has completed" in body_text
-        ):
-            incomplete_bodies.append(str(body_file))
-    if incomplete_bodies:
+        try:
+            metadata = read_sidecar(args.issue_bodies_dir, fp)
+        except (OSError, ValueError) as exc:
+            problems.append(str(exc))
+            continue
+        markers = unready_markers(body_file.read_text())
+        if markers:
+            problems.append(f"{body_file}: " + "; ".join(markers))
+            continue
+        drafts.append((finding, body_file, metadata))
+
+    if problems:
         raise ValueError(
-            "Issue drafts still contain mandatory review placeholders: "
-            + ", ".join(incomplete_bodies)
+            "Refusing to file: these drafts are not ready:\n  "
+            + "\n  ".join(problems)
+            + "\nFill in the drafts and re-run; nothing was filed."
         )
 
-    if not to_file:
+    if not drafts:
         print("No findings to file.")
         return
 
@@ -263,60 +405,18 @@ def main():
     filed_issues = {}  # {fingerprint: issue_number}
     failed_issues = []
 
-    for i, finding in enumerate(to_file):
+    for i, (finding, body_file, metadata) in enumerate(drafts):
         fp = finding["fingerprint"]
         subject = finding["subject"]
 
-        print(f"\n[{i + 1}/{len(to_file)}] Filing {subject} ({fp})...")
-
-        # Load title from issue body (first line after ## header)
-        body_file = args.issue_bodies_dir / f"issue-{fp}.md"
-        if not body_file.exists():
-            print(f"  Error: Issue body file not found: {body_file}")
-            failed_issues.append((fp, "body file not found"))
-            continue
-
-        # Extract title from first heading in body
-        with open(body_file) as f:
-            lines = f.readlines()
-            title = None
-            for line in lines:
-                if line.startswith("## "):
-                    # Use the subject as title instead
-                    # We'll construct it from finding metadata
-                    break
-
-        # Get platform and version metadata from the generated body.
-        with open(body_file) as f:
-            body_text = f.read()
-            chip_match = extract_body_metadata(
-                body_text, "Platform"
-            ) or extract_body_metadata(body_text, "Chip")
-            tf_version = extract_body_metadata(body_text, "Transformers")
-            chip_match = chip_match or "Unknown"
-            tf_version = tf_version or "unknown"
-
-        # Reconstruct title
-        model = finding["models"][0] if finding["models"] else "unknown"
-        title = f"[AI][{chip_match}] {model}: {subject}"
-        if finding["class"] in ("OP_UNSUPPORTED", "OP_CPU_FALLBACK"):
-            action = (
-                " uses CPU fallback"
-                if finding["class"] == "OP_CPU_FALLBACK"
-                else " not supported"
-            )
-            title += f"{action} (transformers {tf_version})"
-        elif finding["class"] == "CRASH":
-            title += f" crash (transformers {tf_version})"
-        else:
-            title += f" failure (transformers {tf_version})"
-
-        labels = get_issue_labels(finding)
+        print(f"\n[{i + 1}/{len(drafts)}] Filing {subject} ({fp})...")
+        print(f"  Title: {metadata['title']}")
+        print(f"  Labels: {', '.join(metadata['labels'])}")
 
         issue_num = file_github_issue(
-            title,
+            metadata["title"],
             body_file,
-            labels,
+            metadata["labels"],
             args.repo,
             args.dry_run,
         )
@@ -329,7 +429,7 @@ def main():
             print("  ❌ Failed")
 
         # Rate limiting delay
-        if i < len(to_file) - 1:
+        if i < len(drafts) - 1:
             time.sleep(args.delay)
 
     # Summary
@@ -356,10 +456,14 @@ def main():
             findings_json,
             filed_issues,
             args.coverage_file,
+            args.repo,
         )
 
     print("\nDone.")
+    # A run that could not file everything is not a successful run, even if some
+    # issues were created; the caller has to see it in the exit code.
+    return 1 if failed_issues else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

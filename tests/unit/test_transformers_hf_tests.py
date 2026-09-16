@@ -170,7 +170,7 @@ def test_module_name_uses_transformers_mapping(monkeypatch, tmp_path):
 
 def test_child_env_sets_hf_device_contract(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
-    env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", True)
+    env = runner.child_env(tmp_path, tmp_path / "report.jsonl", True)
     assert "TRANSFORMERS_TEST_DEVICE" not in env
     assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert env["TRANSFORMERS_TEST_DEVICE_SPEC"] == "hf_device_spec.py"
@@ -184,7 +184,7 @@ def test_child_env_sets_hf_device_contract(monkeypatch, tmp_path):
 
 def test_child_env_does_not_override_test_behaviour(monkeypatch, tmp_path):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", False)
+    env = runner.child_env(tmp_path, tmp_path / "report.jsonl", False)
     assert "HF_HUB_OFFLINE" not in env
     assert "TRANSFORMERS_OFFLINE" not in env
 
@@ -204,7 +204,7 @@ def test_pytest_command_does_not_union_directory_with_selected_nodeids(tmp_path)
 
 
 def test_child_env_enables_cpu_fallback_measurement(tmp_path):
-    env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", False)
+    env = runner.child_env(tmp_path, tmp_path / "report.jsonl", False)
     assert env["FLAGOS_LOG_FALLBACK"] == "1"
 
 
@@ -463,11 +463,11 @@ def test_pytest_internal_and_usage_exit_codes_are_not_crashes():
     assert runner.pytest_process_crashed(-11)
 
 
-def test_fingerprint_normalizes_addresses_and_paths():
+def test_occurrence_fingerprint_normalizes_addresses_and_paths():
     first = {"status": "FAIL", "nodeid": "x", "detail": "ptr 0xabc /tmp/foo 123"}
     second = {"status": "FAIL", "nodeid": "x", "detail": "ptr 0xdef /tmp/bar 456"}
-    assert runner.fingerprint("bert", "flagos", first) == runner.fingerprint(
-        "bert", "flagos", second
+    assert runner.occurrence_fingerprint("bert", "flagos", first) == (
+        runner.occurrence_fingerprint("bert", "flagos", second)
     )
 
 
@@ -526,9 +526,8 @@ def test_resilient_crash_preserves_completed_test_results(monkeypatch, tmp_path)
     assert result["summary"] == {"FAIL": 1, "BATCH_CRASHED": 1}
 
 
-def test_all_mode_runs_each_architecture_and_writes_progressively(
-    monkeypatch, tmp_path
-):
+def stub_run_environment(monkeypatch, tmp_path, preflight_report=None):
+    """Stub everything a run needs except the tests themselves."""
     monkeypatch.setattr(
         runner,
         "resolve_version",
@@ -553,6 +552,17 @@ def test_all_mode_runs_each_architecture_and_writes_progressively(
             "torch_fl_commit": "abc1234",
         },
     )
+    monkeypatch.setattr(
+        runner,
+        "preflight",
+        lambda *a, **k: preflight_report or {"ran": True, "problems": []},
+    )
+
+
+def test_all_mode_runs_each_architecture_and_writes_progressively(
+    monkeypatch, tmp_path
+):
+    stub_run_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(runner, "sweep_models", lambda: ["bert", "qwen3"])
     monkeypatch.setattr(runner, "module_name", lambda model: model)
 
@@ -587,3 +597,33 @@ def test_all_mode_runs_each_architecture_and_writes_progressively(
     # The partial file existed before the last architecture ran.
     assert snapshots[0] is None
     assert snapshots[1]["aggregate"]["completed"] == 1
+
+
+def test_all_mode_refuses_a_broken_environment_before_running_tests(
+    monkeypatch, tmp_path
+):
+    """A preflight failure is exit 2 and a result file that says so.
+
+    The pipeline reads the exit code, so an environment that cannot run the
+    tests has to be distinguishable from a sweep that ran and found failures.
+    """
+    stub_run_environment(
+        monkeypatch,
+        tmp_path,
+        {"ran": True, "problems": ["no accelerator is visible: device_count() is 0"]},
+    )
+    monkeypatch.setattr(runner, "sweep_models", lambda: ["bert", "qwen3"])
+
+    def fail_run_tests(*args, **kwargs):
+        raise AssertionError("no test may run once the preflight failed")
+
+    monkeypatch.setattr(runner, "run_tests", fail_run_tests)
+
+    out = tmp_path / "all.json"
+    assert runner.main(["--all", "--out", str(out)]) == 2
+
+    written = json.loads(out.read_text())
+    assert written["mode"] == "invalid"
+    assert written["verdict"] == "ENVIRONMENT_ERROR"
+    assert "no accelerator is visible" in written["error"]
+    assert written["environment"]["preflight"]["problems"]

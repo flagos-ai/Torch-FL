@@ -28,17 +28,21 @@ workflow can resume without rerunning the hardware suite.
 The normal entry point runs the report-only pipeline:
 
 ```bash
-bash scripts/transformers/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
+bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
 ```
 
 For weak-model guardrails or an explicitly requested safe run:
 
 ```bash
 python scripts/transformers/safe_transformers_wrapper.py \
-    test qwen3 "MUSA MTT S5000" --device flagos
+    test qwen3 "MUSA MTT S5000"
 ```
 
 Both commands stop after preview generation.
+
+The sweep's exit code states what it measured: `0` measured and clean, `1`
+measured with findings awaiting review, `2` nothing measured. Only `2` means the
+run is not a coverage result.
 
 ## Stage 1: Official Test Run
 
@@ -48,19 +52,30 @@ mode:
 ```bash
 python tests/manual/transformers_hf_tests.py \
     --model qwen3 \
-    --device flagos \
     --resilient \
     --out /tmp/qwen3-results.json
 ```
 
+There is no `--device` argument. The test device is the `DEVICE_NAME` in
+`tests/manual/hf_device_spec.py`, which is the contract HuggingFace reads, and
+the runner derives it from that file and records it as `environment.device`.
+
 The runner:
 
 - loads the device through `TRANSFORMERS_TEST_DEVICE_SPEC`;
+- runs a preflight in a child process before the first batch and records it
+  under `environment.preflight`;
 - disables optional backend autoloading that can break collection;
 - enables `FLAGOS_LOG_FALLBACK=1`;
 - executes selected nodeids in isolated batches;
 - preserves completed records when a batch crashes or times out;
 - atomically rewrites the aggregate report after each batch.
+
+The preflight checks that `torch_fl` imports, that the registered PrivateUse1
+name equals the spec's `DEVICE_NAME`, that `torch.flagos.device_count()` is
+positive, that the three HF hooks are callable, and that the installed
+`transformers` version is the requested one. A run that fails it measured
+nothing and exits `2`.
 
 A `BATCH_CRASHED` record means that nodeid did not report before its batch
 stopped. It is not a confirmed per-test defect.
@@ -82,6 +97,18 @@ Triage recognizes these actionable classes:
 | `FEATURE_UNSUPPORTED` | A non-operator API or device feature is unavailable |
 | `PRECISION` | Device output differs from the CPU baseline |
 | `CRASH` | Per-test evidence shows a fatal device/process failure or timeout |
+
+Two further classes are reported but are not actionable:
+
+| Class | Meaning |
+| --- | --- |
+| `TEST_ERROR` | The test's own setup, teardown, or collection failed |
+| `ENVIRONMENT_ERROR` | A missing module, import failure, or absent accelerator |
+
+They appear in the report and in `--out` with `actionable = false` and
+`verification_required = false`, and they never reach the tracker. A run whose
+every outcome is `ENVIRONMENT_ERROR` reports that count in its summary instead of
+"all tests passed"; the runner exits `2` for it, because nothing was measured.
 
 `PRECISION_KNOWN_ISSUE` and `UNKNOWN` remain visible for review but should not be
 published without further investigation.
@@ -111,6 +138,17 @@ failure class | responsible component | subject | normalized mechanism
 Model names and nodeids are occurrences, not cause identity. Including the
 component prevents unrelated platform backends from sharing a fingerprint.
 
+There is one implementation of this, `generate_fingerprint` in
+`scripts/transformers/transformers_triage.py`, together with the
+`normalize_error` it hashes. It is idempotent: re-normalizing an already
+normalized mechanism yields the same string, and the mechanism comes from the
+exception's stable final line rather than a fixed window of the traceback, so
+nothing inserted above the exception changes the hash. `compute_fingerprint`
+remains as an alias for older callers.
+
+The per-test value the runner writes is `occurrence_fingerprint`. It includes the
+nodeid and identifies one test result, which is why it is not used for dedup.
+
 ## Stage 3: Serial Verification
 
 ```bash
@@ -119,11 +157,15 @@ TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__vers
 python scripts/transformers/transformers_verify.py \
     /tmp/qwen3-classified.json \
     --out /tmp/qwen3-verified.json \
-    --test-source-dir /root/.cache/torch_fl/hf-tests \
     --transformers-version "${TRANSFORMERS_VERSION}" \
     --workers 1 \
     --timeout 120
 ```
+
+`--test-source-dir` defaults to the runner's own cache root: `HF_COVERAGE_CACHE`
+if set, else `~/.cache/torch_fl/hf-tests`. Pass it explicitly only to verify
+against a tree the runner did not produce. The versions verified against come
+from the findings JSON, not from the reviewing interpreter.
 
 The verifier recreates the official runner's pytest environment and runs exactly
 one selected nodeid in each fresh subprocess. Passing both the architecture
@@ -167,8 +209,27 @@ An exact match is a duplicate. A semantic match is marked
 `REVIEW_CANDIDATE` and requires a human to compare the component and mechanism.
 It is not silently treated as the same root cause.
 
+The check fails closed. A `gh` call that is missing, times out, or exits
+non-zero marks the finding `DEDUP_UNAVAILABLE` with `should_file = false`, and
+`--skip-github` marks it `NOT_CHECKED`, also with `should_file = false`. Only a
+search that ran and returned nothing yields `NEW`. An unreachable tracker is not
+evidence that a defect is new.
+
+Those counts are read from `summary.dedup`: only `NEW` findings are carried in
+the findings array, so a caller that inspected the array alone could not tell
+"nothing new" from "nothing was checked". `transformers_auto_sweep.sh` counts
+them that way and exits `1` rather than reporting a clean dedup when findings
+remain unchecked.
+
+The coverage record is the cause table in `docs/reference/hf-coverage.md`, keyed
+by its leading `Fingerprint` column; the standalone ``Fingerprint: `hash` ``
+line is accepted too, because that is how issue bodies carry it. Rows that
+predate the convention are left blank rather than back-filled with invented
+hashes.
+
 Collateral and inconclusive findings are omitted from the output intended for
-issue preview.
+issue preview, as are `TEST_ERROR` and `ENVIRONMENT_ERROR` findings and any
+baseline hit.
 
 Use `--skip-github` only for local tests of the tooling. A real publication
 workflow must search the tracker before filing.
@@ -185,7 +246,11 @@ python scripts/transformers/transformers_preview_issues.py \
     --out /tmp/qwen3-preview.md
 ```
 
-The tool writes one Markdown body per fingerprint and a consolidated preview.
+The tool writes one Markdown body per fingerprint and a consolidated preview,
+plus an `issue-<fingerprint>.json` sidecar per draft holding the title, labels,
+class, subject, and the fingerprint the file is named for. The filer submits the
+sidecar, so the preview and the filed issue cannot disagree.
+
 Drafts follow the repository's AI issue template structure, but they are
 intentionally incomplete. Before publication, a human or capable agent must add
 and validate:
@@ -197,6 +262,10 @@ and validate:
 - a specific proposed solution;
 - responsible code locations with line numbers;
 - a completed issue checklist.
+
+Unfilled values are written as `<!-- UNFILLED: <field> -->` markers, because a
+free-text placeholder cannot be checked mechanically. The filer refuses any draft
+that still contains one.
 
 The preview's proposed operator solution directs non-CUDA-compatible platforms
 to their code generator rather than handwritten per-operator kernels.
@@ -219,16 +288,21 @@ The filing tool rejects:
 
 - fingerprints not present in the input;
 - findings whose verdict is not `CONFIRMED`;
+- findings classified `TEST_ERROR` or `ENVIRONMENT_ERROR`;
 - drafts that still contain required review placeholders;
-- missing body files.
+- sidecars whose recorded fingerprint is not the one they are named for;
+- missing body files or sidecars.
+
+It pre-collects every problem across all drafts and reports them together,
+before any GitHub write, so a run is never left half-filed.
 
 There is no bulk `--approve-all` path. Approval for one finding does not cover
 later findings or another tracker action.
 
 When issues are created successfully, the tool appends their fingerprints and
-issue numbers to `docs/reference/hf-coverage.md`. Commit that documentation
-change through the normal fork-and-PR workflow; the script must not push a
-branch itself.
+issue numbers to the cause table of the last `## Baseline:` section in
+`docs/reference/hf-coverage.md`. Commit that documentation change through the
+normal fork-and-PR workflow; the script must not push a branch itself.
 
 ## Failure Classes and Labels
 
@@ -238,9 +312,13 @@ branch itself.
 | `OP_CPU_FALLBACK` | `enhancement`, `ai-generated` |
 | `FEATURE_UNSUPPORTED` | `enhancement`, `ai-generated` |
 | `PRECISION` | `bug`, `ai-generated` |
-| `CRASH` | `bug`, `P0`, `ai-generated` |
+| `CRASH` | `bug`, `ai-generated` |
+| `TEST_ERROR` | `ai-generated`, not filed |
+| `ENVIRONMENT_ERROR` | `ai-generated`, not filed |
 
-Confirm the repository's current labels before publication.
+Confirm the repository's current labels before publication. No priority label is
+assigned automatically: the classifier cannot tell a P0 from a P2, and a wrong
+priority on a filed issue is worse than none.
 
 ## Baseline Semantics
 
@@ -255,14 +333,25 @@ the pinned tuple, not as a regression without an earlier matching measurement.
 
 ## Safe Wrapper Boundaries
 
-The safe wrapper validates model, device, chip, and repository parameters and
+The safe wrapper validates model, chip, and repository parameters and
 invokes only the checked report-only scripts. It does not install dependencies,
-edit source files, change the parent shell environment, or publish issues.
+edit source files, change the parent shell environment, or publish issues. It
+has no device parameter: the device name comes from
+`tests/manual/hf_device_spec.py`.
 
 If preflight dependencies are missing, stop and report the environment problem
 rather than modifying the torch installation during the measurement.
 
 ## Troubleshooting
+
+### Every result is `ENVIRONMENT_ERROR`
+
+Nothing was measured. The runner exits `2` for this. Read
+`environment.preflight` in the report: it names which check failed — the
+`torch_fl` import, a PrivateUse1 name that does not match the spec's
+`DEVICE_NAME`, a device count of zero, a missing HF hook, or a `transformers`
+version that is not the requested one. Fix the environment and re-run; do not
+treat the run as coverage, and do not file an issue from it.
 
 ### All findings are `UNKNOWN`
 
@@ -301,14 +390,16 @@ ruff check
 ruff format --check
 pytest tests/unit/test_transformers_hf_tests.py \
        tests/unit/test_transformers_automation.py -q
-python scripts/transformers/test_transformers_automation.py
 bash -n scripts/transformers/transformers_auto_sweep.sh \
         scripts/transformers/transformers_batch_sweep.sh
 ```
 
-The smoke test covers triage, deduplication, and preview generation. It
-intentionally excludes GitHub filing because generated drafts require human
-completion and explicit authorization.
+The regression suite covers triage on both output shapes, the
+all-`ENVIRONMENT_ERROR` summary, fingerprint normalization and stability, the
+baseline round-trip, dedup failure modes, preview/filer parity, and the device
+contract. It intentionally excludes GitHub filing because generated drafts
+require human completion and explicit authorization; the refusals are asserted in
+the tests instead.
 
 ## Related Documentation
 

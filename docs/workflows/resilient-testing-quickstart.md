@@ -12,27 +12,35 @@ publishes GitHub issues by itself.
 ### One model
 
 ```bash
-bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
-bash scripts/transformers/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
+bash scripts/transformers/transformers_auto_sweep.sh bert GCU
+bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
 ```
 
 Arguments:
 
 1. Model architecture name, such as `bert` or `qwen3`.
-2. Torch device name. Use the device accepted by the runner; for the standard
-   torch_fl PrivateUse1 flow this is normally `flagos`.
-3. Hardware name used in the report and issue preview.
-4. Optional repository for duplicate search, defaulting to
+2. Hardware name used in the report and issue preview.
+3. Optional repository for duplicate search, defaulting to
    `flagos-ai/Torch-FL`.
+
+There is no device argument. The test device is the `DEVICE_NAME` in
+`tests/manual/hf_device_spec.py`, which is the contract HuggingFace reads; the
+runner derives the name from that file.
+
+Each model's sweep exits `0` when it measured clean, `1` when it measured
+findings to review, and `2` when it measured nothing. Only `2` means the result
+is not coverage.
 
 ### Batch wrapper
 
 ```bash
-bash scripts/transformers/transformers_batch_sweep.sh gcu GCU
+bash scripts/transformers/transformers_batch_sweep.sh GCU
 ```
 
 The batch wrapper runs its configured model list one architecture at a time. It
-still stops before issue publication.
+still stops before issue publication, and it reports `Nothing to file`,
+`Findings`, and `Not measured` as separate counts, exiting `2` when any model
+measured nothing.
 
 ## Manual Workflow
 
@@ -41,7 +49,6 @@ outputs:
 
 ```bash
 MODEL=qwen3
-DEVICE=flagos
 CHIP="MUSA MTT S5000"
 RESULT_ROOT=/tmp/transformers-${MODEL}
 TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__version__)')
@@ -49,7 +56,6 @@ TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__vers
 # 1. Run official tests in resilient batches.
 python tests/manual/transformers_hf_tests.py \
     --model "${MODEL}" \
-    --device "${DEVICE}" \
     --resilient \
     --batch-size 20 \
     --batch-timeout 900 \
@@ -64,7 +70,6 @@ python scripts/transformers/transformers_triage.py \
 python scripts/transformers/transformers_verify.py \
     "${RESULT_ROOT}-classified.json" \
     --out "${RESULT_ROOT}-verified.json" \
-    --test-source-dir /root/.cache/torch_fl/hf-tests \
     --transformers-version "${TRANSFORMERS_VERSION}" \
     --workers 1
 
@@ -85,9 +90,12 @@ python scripts/transformers/transformers_preview_issues.py \
     --out "${RESULT_ROOT}-preview.md"
 ```
 
-Review the preview and each body file. Complete the environment, reproducer,
-root-cause analysis, solution, code locations, and checklist before requesting
-publication.
+Review the preview and each body file. Each draft is paired with an
+`issue-<fingerprint>.json` sidecar holding its title, labels, class, and subject;
+the filer submits the sidecar, so what is reviewed is what is filed. Drafts
+still carrying an `<!-- UNFILLED: <field> -->` marker are refused, as are bodies
+with placeholder prose. Complete the environment, reproducer, root-cause
+analysis, solution, code locations, and checklist before requesting publication.
 
 After the user explicitly approves named fingerprints, file only that approved
 set:
@@ -164,7 +172,21 @@ operator.
 - `PASS` or `SKIP`: `COLLATERAL`.
 - pytest setup, import, collection, or runner error: `INCONCLUSIVE`.
 
-Only confirmed findings can pass the filing gate.
+An isolated `TIMEOUT` means the finding is a hang, so its filed class becomes
+`CRASH` and an `isolation_note` records the reclassification. Every other
+verdict keeps the class triage assigned.
+
+Only confirmed findings can pass the filing gate. Findings classified
+`TEST_ERROR` or `ENVIRONMENT_ERROR` cannot pass it at all: they are reported, not
+filed.
+
+### Environment errors
+
+A missing module or an import failure is an `ENVIRONMENT_ERROR`; like
+`TEST_ERROR`, it is reported with `actionable = false` and never filed. A run
+whose every outcome is `ENVIRONMENT_ERROR` exits `2` and its summary reports the
+environment error count rather than an empty pass. Read
+`environment.preflight` to see which check failed.
 
 ## Exact Test Isolation
 
@@ -194,6 +216,7 @@ verified.json      isolation outcomes and verdicts
 new.json           findings remaining after deduplication
 preview.md          consolidated human review preview
 issues/*.md         individual incomplete issue drafts
+issues/*.json       the title, labels, class, and subject each draft is filed with
 ```
 
 Keep these files together when investigating or citing a run.
@@ -211,7 +234,9 @@ python tests/manual/transformers_hf_tests.py --model bert --collect-only
 ```
 
 A source-version mismatch or collection failure is an environment result, not a
-backend finding.
+backend finding. The runner reports it as exit `2` with
+`environment.preflight` naming the check that failed; fix the environment and
+re-run rather than reading the empty report as a pass.
 
 ### Every batch crashes
 
@@ -248,11 +273,15 @@ The filer deliberately rejects:
 
 - unknown or unapproved fingerprints;
 - non-confirmed findings;
-- missing body files;
+- findings classified `TEST_ERROR` or `ENVIRONMENT_ERROR`;
+- missing body files or sidecars;
+- sidecars whose recorded fingerprint is not the one they are named for;
 - drafts containing mandatory review placeholders.
 
-Complete the draft and obtain explicit fingerprint-level authorization before
-retrying. A dry run still requires an approved fingerprint:
+It reports every problem across all drafts at once, before any GitHub write, so
+fix the whole list rather than one item at a time. Complete the draft and obtain
+explicit fingerprint-level authorization before retrying. A dry run still
+requires an approved fingerprint:
 
 ```bash
 python scripts/transformers/transformers_file_issues.py \

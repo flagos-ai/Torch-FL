@@ -25,10 +25,15 @@ When user invokes the skill with parameters:
 **Parse these parameters**:
 - `--model <name>`: Model to test (required unless --batch)
 - `--chip <name>`: Chip name for issues (default: GCU)
-- `--device <name>`: Device for torch (default: gcu)
 - `--batch`: Run batch mode (bert + qwen3)
 - `--safe`: Force safe mode for weak models
 - `--manual`: Run manual mode (don't file issues automatically)
+
+There is no `--device`. The test device is the `DEVICE_NAME` in
+`tests/manual/hf_device_spec.py`, which is the contract HuggingFace reads; the
+runner derives the name from that file. A second copy on the command line could
+only ever disagree with the spec and would be recorded as provenance without
+being enforced.
 
 **Default behavior** (no --safe, no --manual):
 - **Strong models (Opus)**: Run automated pipeline
@@ -41,14 +46,14 @@ When user invokes the skill with parameters:
 
 if args.batch:
     if is_weak_model or args.safe:
-        command = f"python scripts/transformers/safe_transformers_wrapper.py batch {chip} --device {device}"
+        command = f"python scripts/transformers/safe_transformers_wrapper.py batch {chip}"
     else:
-        command = f"bash scripts/transformers/transformers_batch_sweep.sh {device} {chip}"
+        command = f"bash scripts/transformers/transformers_batch_sweep.sh {chip}"
 else:
     if is_weak_model or args.safe:
-        command = f"python scripts/transformers/safe_transformers_wrapper.py test {model} {chip} --device {device}"
+        command = f"python scripts/transformers/safe_transformers_wrapper.py test {model} {chip}"
     else:
-        command = f"bash scripts/transformers/transformers_auto_sweep.sh {model} {device} {chip}"
+        command = f"bash scripts/transformers/transformers_auto_sweep.sh {model} {chip}"
 
 # Execute command
 run(command)
@@ -57,15 +62,15 @@ run(command)
 ### Examples
 
 **User**: `/transformers-test --model bert`
-- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU`
+- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh bert GCU`
 - **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py test bert GCU`
 
-**User**: `/transformers-test --model qwen3 --chip MUSA --device musa`
-- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh qwen3 musa MUSA`
-- **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py test qwen3 MUSA --device musa`
+**User**: `/transformers-test --model qwen3 --chip MUSA`
+- **Strong model**: `bash scripts/transformers/transformers_auto_sweep.sh qwen3 MUSA`
+- **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py test qwen3 MUSA`
 
 **User**: `/transformers-test --batch`
-- **Strong model**: `bash scripts/transformers/transformers_batch_sweep.sh gcu GCU`
+- **Strong model**: `bash scripts/transformers/transformers_batch_sweep.sh GCU`
 - **Weak model**: `python scripts/transformers/safe_transformers_wrapper.py batch GCU`
 
 **User**: `/transformers-test --model bert --safe`
@@ -93,13 +98,13 @@ Run tests → measure CPU fallback → triage → verify → deduplicate → pre
 
 ```bash
 # Single model (automated)
-bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers/transformers_auto_sweep.sh bert GCU
 
 # Single model (safe for weak models)
 python scripts/transformers/safe_transformers_wrapper.py test bert GCU
 
 # Batch (bert + qwen3)
-bash scripts/transformers/transformers_batch_sweep.sh gcu GCU
+bash scripts/transformers/transformers_batch_sweep.sh GCU
 python scripts/transformers/safe_transformers_wrapper.py batch GCU  # weak model version
 
 # List available models
@@ -133,7 +138,44 @@ Tests now support **resilient mode** for unstable platforms (crash recovery):
 - Stable: `--batch-size 50`
 - Large models: `--batch-timeout 1800`
 
-## Safety Mode for Weak Models (NEW)
+## Parameter Reference
+
+### Skill Arguments
+
+When invoked as `/transformers-test [args]`, parse these flags:
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--model` | string | required* | Model name (bert, qwen3, etc.) |
+| `--chip` | string | GCU | Chip name for issue titles |
+| `--batch` | boolean | false | Run batch mode (bert+qwen3) |
+| `--safe` | boolean | auto** | Force safe mode for weak models |
+| `--manual` | boolean | false | Manual mode (no auto issue filing) |
+
+*Required unless `--batch` is specified
+**Auto-detected based on model capability
+
+### Command Mapping
+
+Based on parsed arguments, construct the appropriate command:
+
+```
+if --batch:
+    if weak_model or --safe:
+        python scripts/transformers/safe_transformers_wrapper.py batch {chip}
+    else:
+        bash scripts/transformers/transformers_batch_sweep.sh {chip}
+
+elif --model:
+    if weak_model or --safe:
+        python scripts/transformers/safe_transformers_wrapper.py test {model} {chip}
+    else:
+        bash scripts/transformers/transformers_auto_sweep.sh {model} {chip}
+```
+
+---
+
+## Safety Mode for Weak Models
 
 **Weak models** (Qwen-27B, Sonnet 5, smaller models) often have poor instruction following:
 - Installing packages when they shouldn't
@@ -160,7 +202,7 @@ Tests now support **resilient mode** for unstable platforms (crash recovery):
 **When in safe mode**:
 ```bash
 # Instead of:
-bash scripts/transformers/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers/transformers_auto_sweep.sh bert GCU
 
 # Use:
 python scripts/transformers/safe_transformers_wrapper.py test bert GCU
@@ -168,62 +210,13 @@ python scripts/transformers/safe_transformers_wrapper.py test bert GCU
 
 The safe wrapper validates all parameters and prevents mistakes.
 
----
-
-## Parameter Reference
-
-### Skill Arguments
-
-When invoked as `/transformers-test [args]`, parse these flags:
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--model` | string | required* | Model name (bert, qwen3, etc.) |
-| `--chip` | string | GCU | Chip name for issue titles |
-| `--device` | string | gcu | Device name for torch |
-| `--batch` | boolean | false | Run batch mode (bert+qwen3) |
-| `--safe` | boolean | auto** | Force safe mode for weak models |
-| `--manual` | boolean | false | Manual mode (no auto issue filing) |
-
-*Required unless `--batch` is specified
-**Auto-detected based on model capability
-
-### Command Mapping
-
-Based on parsed arguments, construct the appropriate command:
-
-```
-if --batch:
-    if weak_model or --safe:
-        python scripts/transformers/safe_transformers_wrapper.py batch {chip} --device {device}
-    else:
-        bash scripts/transformers/transformers_batch_sweep.sh {device} {chip}
-
-elif --model:
-    if weak_model or --safe:
-        python scripts/transformers/safe_transformers_wrapper.py test {model} {chip} --device {device}
-    else:
-        bash scripts/transformers/transformers_auto_sweep.sh {model} {device} {chip}
-```
-
----
-
-## Scope and prerequisites
-- ❌ Modifying environment variables
-- ❌ Running dangerous commands
-- ✅ Only allows validated, pre-approved operations
-
 **Parameters validated**:
 - Model name (against allowlist)
 - Chip name (against allowlist)
-- Device name (against allowlist)
 
-**Usage for weak models**:
-```bash
-# Extract parameters from user request
-# Then call:
-python scripts/transformers/safe_transformers_wrapper.py test <model> <chip>
-```
+There is no device parameter to validate: the device name comes from
+`tests/manual/hf_device_spec.py`, which the wrapper does not let the caller
+override.
 
 **DO NOT** (for weak models):
 1. Modify the command or add extra parameters
@@ -347,6 +340,42 @@ prepared tree, or use `--offline` to require an existing versioned cache. A
 version-mismatched source tree produces failures that belong to HF, not to
 torch_fl. The runner injects `flagos` through
 `TRANSFORMERS_TEST_DEVICE_SPEC=tests/manual/hf_device_spec.py`.
+
+The cache lives under `~/.cache/torch_fl/hf-tests` and is keyed by version.
+`HF_COVERAGE_CACHE` overrides its location, and `transformers_verify.py`
+defaults `--test-source-dir` to the same resolved root, so verification reads the
+tree that produced the finding rather than a second tree it found on its own.
+
+Before the first batch, the runner runs a preflight in a child process and
+records it under `environment.preflight`: `torch_fl` imports (with its resolved
+path), the registered PrivateUse1 name equals the spec's `DEVICE_NAME`,
+`torch.flagos.device_count()` is positive, the three HF hooks are callable, and
+`transformers.__version__` is the requested one. A run that fails preflight
+measured nothing, and says so instead of reporting an empty pass.
+
+That distinction is the exit-code contract, and every wrapper and script in this
+pipeline consumes it:
+
+| Exit | Meaning | What to do |
+|------|---------|------------|
+| `0` | Measured, and no findings | Coverage evidence; record it |
+| `1` | Measured, with findings to review | Continue to Steps 3-9 |
+| `2` | Nothing measured (environment, source, or preflight failure) | Fix the environment and re-run; this is not coverage |
+
+An exit `2` is never a coverage result and must not be summarized as "tests
+passed". `transformers_auto_sweep.sh` and `transformers_batch_sweep.sh` map the
+three codes to `clean` / `findings` / `not measured` and exit `2` themselves when
+any model measured nothing.
+
+### The device name has exactly one source
+
+The test device is the `DEVICE_NAME` in `tests/manual/hf_device_spec.py`. The
+runner parses it with `ast` and records it as `environment.device`; that value
+becomes the `component` of every finding and therefore part of every
+fingerprint. No command-line flag sets it. A second copy on the command line
+could only ever disagree with the spec, and `reset_device_context()` compares
+against the same value, so a wrong copy silently turns device-poisoning
+detection into a no-op.
 
 Some official tests download tiny fixtures from the Hugging Face Hub. If
 `huggingface.co` is unreachable, do not classify the resulting retries or
@@ -498,13 +527,26 @@ not hide it merely because the model assertion passed.
 Every failure or measured fallback must land in exactly one class. The class
 selects the issue label and decides whether the finding is actionable:
 
-| Class | Signal | Labels |
-|---|---|---|
-| `OP_UNSUPPORTED` | `NOT_SUPPORTED`, `backend not registered`, `could not run 'aten::…'` | `enhancement`, `ai-generated` |
-| `OP_CPU_FALLBACK` | `[flagos cpu_fallback] aten::<op>` during a model test | `enhancement`, `ai-generated` |
-| `FEATURE_UNSUPPORTED` | non-operator runtime or feature gap | `enhancement`, `ai-generated` |
-| `PRECISION` | ran, but disagrees with the CPU baseline | `bug`, `ai-generated` |
-| `CRASH` | segfault, poison, or timeout | `bug`, `ai-generated` |
+| Class | Signal | Labels | Actionable |
+|---|---|---|---|
+| `OP_UNSUPPORTED` | `NOT_SUPPORTED`, `backend not registered`, `could not run 'aten::…'` | `enhancement`, `ai-generated` | yes |
+| `OP_CPU_FALLBACK` | `[flagos cpu_fallback] aten::<op>` during a model test | `enhancement`, `ai-generated` | yes |
+| `FEATURE_UNSUPPORTED` | non-operator runtime or feature gap | `enhancement`, `ai-generated` | yes |
+| `PRECISION` | ran, but disagrees with the CPU baseline | `bug`, `ai-generated` | yes |
+| `CRASH` | segfault, poison, or timeout | `bug`, `ai-generated` | yes |
+| `TEST_ERROR` | setup/teardown/collection failure in the test itself | `ai-generated` | no |
+| `ENVIRONMENT_ERROR` | missing module, import error, or absent accelerator | `ai-generated` | no |
+
+The last two carry no defect claim. `TEST_ERROR` is a failure in the test's own
+fixture or collection, and `ENVIRONMENT_ERROR` means the measurement did not
+happen (a missing dependency, an import error, no visible device). Both are
+reported — they appear in the report and in `--out` — and neither may be filed.
+`transformers_triage.py` marks them `actionable = false` and
+`verification_required = false`; `transformers_preview_issues.py` never drafts
+them and `transformers_file_issues.py` refuses them.
+
+A run whose every result is `ENVIRONMENT_ERROR` is the case this guards, and its
+summary reports the environment error rather than "all tests passed".
 
 Use only labels that exist in this repository. As of this writing the tracker
 has `bug`, `enhancement`, `documentation`, `ai-generated`, `duplicate`,
@@ -571,9 +613,9 @@ per platform buries the signal under duplicates.
 Two different fingerprints are in play, and confusing them is the usual mistake:
 
 - the **occurrence fingerprint** that `tests/manual/transformers_hf_tests.py`
-  writes into each test record. It includes the model, the device, and the test
-  node ID, so it identifies one test result and is deliberately unsuitable for
-  dedup;
+  writes into each test record as `occurrence_fingerprint`. It includes the
+  model, the device, and the test node ID, so it identifies one test result and
+  is deliberately unsuitable for dedup;
 - the **cause fingerprint** below, which drops model and node ID so that the same
   defect reached from ten models collapses to one value. It must include the
   responsible component/backend; otherwise identical vendor wording can merge
@@ -583,24 +625,23 @@ Compute the cause fingerprint from the finding you established in Step 6, not
 from raw pytest output:
 
 ```python
-import hashlib, re
+from transformers_triage import generate_fingerprint
 
-def normalize(text: str) -> str:
-    t = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", text)
-    t = re.sub(r"/tmp/[^\s'\"]+", "/tmp/PATH", t)
-    t = re.sub(r"(/[^\s'\"]*)?/(site-packages|torch_fl|tests)/", r"/PATH/\2/", t)
-    t = re.sub(r"\b\d+\.\d+s\b", "TIMEs", t)
-    t = re.sub(r"\[[\d,\s]+\]", "[SHAPE]", t)
-    # keep diagnostic codes; collapse every other literal number
-    t = re.sub(r"(?<!err )(?<!code )(?<!errno )\b\d+\b", "N", t)
-    return re.sub(r"\s+", " ", t).strip()[-200:]
-
-def cause_fingerprint(failure_class, component, subject, mechanism):
-    payload = "|".join(
-        [failure_class, component, subject, normalize(mechanism)]
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+mechanism = mechanism_from(representative_detail)  # normalized final line
+fingerprint = generate_fingerprint(failure_class, component, subject, mechanism)
 ```
+
+There is exactly one implementation of this. `scripts/transformers/transformers_triage.py`
+owns `normalize_error`, `mechanism_from`, `shorten`, and `generate_fingerprint`,
+and every tool in the pipeline calls them; do not re-derive the hash here or in
+an ad-hoc script. The earlier version of this step inlined a recipe that hashed a
+raw 200-character window of the traceback and normalized addresses to `0xADDR` —
+a token its own address pattern matched again, so each pass of the pipeline
+produced a different fingerprint for an unchanged defect. The current
+implementation normalizes each varying token to a form its own pattern cannot
+rematch, and takes the mechanism from the exception's stable final line rather
+than a fixed window, so nothing inserted above the exception shifts the hash.
+`compute_fingerprint` remains as an alias for older callers.
 
 `subject` is `aten::<op>.<overload>` when an operator was named, otherwise the
 feature or module that failed (`sdpa`, `torch.compile`, `flash_attention_2`).
@@ -651,12 +692,35 @@ gh api search/issues -X GET \
   action; a maintainer may have closed it as intentional or unsupported;
 - no match: it is eligible for a new issue under Step 8.
 
+**A check that could not run is not a new finding.** If `gh` is missing, times
+out, or exits non-zero, the finding is `DEDUP_UNAVAILABLE` with
+`should_file = false`; with `--skip-github` it is `NOT_CHECKED`, also with
+`should_file = false`. Only a search that ran and returned nothing yields `NEW`.
+Treating an unreachable tracker as "no duplicate found" is how the same defect
+gets filed twice, so the pipeline fails closed here rather than open.
+
 For dedup to work, every issue and every comment the skill writes must carry the
 value in exactly this form, on its own line:
 
 ```text
 Fingerprint: `cce6ae545772`
 ```
+
+`docs/reference/hf-coverage.md` records it the same way, as the leading
+`Fingerprint` column of each baseline's cause table:
+
+```markdown
+| Fingerprint | Class | Subject | Affected tests | Issue |
+|---|---|---|---|---|
+| `cce6ae545772` | CRASH | device context poisoned | test_a, test_b | #301 |
+```
+
+`transformers_file_issues.py` writes that column when it records a filed issue,
+and `transformers_deduplicate.py` reads it back (accepting the standalone
+``Fingerprint: `hash` `` line as well, which is the form issue bodies use). Both
+forms resolve the reference from the row's own issue cell and the nearest
+preceding `## Baseline:` heading. Rows that predate the convention are left
+blank rather than back-filled with invented hashes.
 
 State the chip and the model in the title, and the `transformers` version, so
 the title alone identifies the measurement:
@@ -775,6 +839,16 @@ Add the fingerprint line from Step 7 and state the model and test node ID that
 led to the finding. Keep raw JSON out of the issue. Assign an issue owner only
 if the user names one or repository policy requires one; an issue assignee is
 not a PR reviewer.
+
+When the draft comes from `transformers_preview_issues.py`, the body it wrote is
+the body that gets filed. Each draft is paired with an `issue-<fingerprint>.json`
+sidecar holding the title, labels, class, and the fingerprint the file is named
+for, and `transformers_file_issues.py` submits exactly that — it does not
+re-derive a title or guess a label set. A draft still carrying an
+`<!-- UNFILLED: ... -->` marker or placeholder prose is rejected by name before
+any GitHub write happens, and the filer collects every such problem across all
+drafts and reports them together rather than filing the first few and failing on
+the fourth.
 
 Nothing here bypasses the report-only default. When in doubt, produce the
 ready-to-file text and wait.

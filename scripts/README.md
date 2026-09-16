@@ -56,15 +56,22 @@ The pipeline is `test → triage → verify → deduplicate → preview/file iss
 
 | Script | Purpose |
 |---|---|
-| `transformers_auto_sweep.sh` | End-to-end driver: runs all of the below for one model. `./transformers_auto_sweep.sh <model> [device] [chip] [repo]` |
-| `transformers_batch_sweep.sh` | Runs the sweep across the built-in model list. `./transformers_batch_sweep.sh [device] [chip] [repo]` |
+| `transformers_auto_sweep.sh` | End-to-end driver: runs all of the below for one model. `./transformers_auto_sweep.sh <model> [chip] [repo]` |
+| `transformers_batch_sweep.sh` | Runs the sweep across the built-in model list. `./transformers_batch_sweep.sh [chip] [repo]` |
 | `safe_transformers_wrapper.py` | Runs one model's test under a guard, designed to survive weak models. |
-| `transformers_triage.py` | Classify a test report into failure classes. |
+| `transformers_triage.py` | Classify a test report into failure classes. Owns `normalize_error` and `generate_fingerprint`; nothing else in the pipeline computes a cause fingerprint. |
 | `transformers_verify.py` | Re-check each finding in a fresh pytest subprocess. |
-| `transformers_deduplicate.py` | Collapse findings that share a root cause. |
-| `transformers_preview_issues.py` | Render the issues that would be filed, without filing them. |
-| `transformers_file_issues.py` | File the issues. |
-| `test_transformers_automation.py` | Smoke test for the pipeline itself; run it after changing any script in this directory. |
+| `transformers_deduplicate.py` | Collapse findings that share a root cause. Fails closed: a GitHub search that could not run yields `DEDUP_UNAVAILABLE`, not `NEW`. |
+| `transformers_preview_issues.py` | Render the issues that would be filed, without filing them, plus an `issue-<fingerprint>.json` sidecar per draft. |
+| `transformers_file_issues.py` | File exactly the previewed drafts and their sidecars. |
+
+There is no device argument anywhere in this pipeline. The test device is the
+`DEVICE_NAME` in `tests/manual/hf_device_spec.py`, which is what HuggingFace
+reads, and the runner derives the name from that file.
+
+The pipeline's regression tests live in
+`tests/unit/test_transformers_automation.py`; run them after changing any script
+in this directory.
 
 ## tools/
 

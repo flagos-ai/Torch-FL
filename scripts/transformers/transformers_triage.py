@@ -7,29 +7,33 @@ Automatically classify test failures from transformers_hf_tests.py JSON output.
 Usage:
     python scripts/transformers/transformers_triage.py /tmp/qwen3.json --out /tmp/qwen3-findings.json
 
+Both runner output shapes are accepted: one model at the top level, and the
+``--all`` aggregate, which keeps each model in ``models[]``.
+
 Output schema:
     {
       "findings": [
         {
           "fingerprint": "a1b2c3d4e5f6",
           "class": "OP_UNSUPPORTED",
+          "component": "flagos",
           "subject": "aten::index_copy_.out",
-          "mechanism": "NotImplementedError: backend not registered",
-          "nodeids": ["test_...::test_save_load", ...],
+          "mechanism": "NotImplementedError: Could not run 'aten::index_copy_.out' ...",
+          "nodeids": ["tests/models/qwen3/...::test_save_load", ...],
           "models": ["qwen3"],
-          "representative_nodeid": "test_...::test_save_load",
+          "representative_nodeid": "tests/models/qwen3/...::test_save_load",
           "representative_detail": "full error text",
-          "count": 1
+          "count": 1,
+          "actionable": true,
+          "verification_required": true
         }
       ],
       "summary": {
         "total_failures": 20,
-        "op_unsupported": 5,
-        "precision": 3,
-        "crash": 1,
-        "feature_unsupported": 2,
-        "precision_known_issue": 8,
-        "unknown": 1
+        "actionable": 8,
+        "environment_error": 3,
+        "statuses": {"FAIL": 17, "ENVIRONMENT_ERROR": 3},
+        "classes": {"CRASH": 1, "OP_UNSUPPORTED": 5, "ENVIRONMENT_ERROR": 3}
       }
     }
 """
@@ -40,9 +44,30 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
 CPU_FALLBACK_CLASS = "OP_CPU_FALLBACK"
+TEST_ERROR_CLASS = "TEST_ERROR"
+ENVIRONMENT_ERROR_CLASS = "ENVIRONMENT_ERROR"
+
+# Statuses the runner writes for tests that are not a pass. ``XPASS`` is
+# deliberately absent: an unexpected pass is a pass, and counting it as a defect
+# would turn the suite's own expectations into platform findings.
+DEFECT_STATUSES = ("FAIL", "ERROR")
+ENVIRONMENT_STATUSES = ("ENVIRONMENT_ERROR",)
+COLLECTION_STATUSES = ("COLLECT_ERROR", "BATCH_CRASHED")
+FAILING_STATUSES = DEFECT_STATUSES + ENVIRONMENT_STATUSES + COLLECTION_STATUSES
+
+# Classes that never claim a platform defect. They stay in the report --- an
+# environment that never reached the accelerator has to be visible --- but no
+# isolated re-run can turn them into a backend problem, so the filing path must
+# skip them. ``PRECISION_KNOWN_ISSUE`` is on this list because the classifier
+# has always documented it as not filed.
+NON_ACTIONABLE_CLASSES = (
+    TEST_ERROR_CLASS,
+    ENVIRONMENT_ERROR_CLASS,
+    "PRECISION_KNOWN_ISSUE",
+)
 
 
 def extract_op_name(detail: str) -> str:
@@ -82,30 +107,81 @@ def extract_feature(detail: str) -> str:
 
 
 def normalize_error(text: str) -> str:
-    """Normalize error text for fingerprinting."""
-    # Remove addresses
-    t = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", text)
+    """Replace everything that varies between two runs of one failure.
 
-    # Remove temp paths
-    t = re.sub(r"/tmp/[^\s\'\"]+", "/tmp/PATH", t)
+    Every substitution is idempotent, and each writes a token that its own
+    pattern cannot match again. That is the whole point: the previous spelling
+    replaced addresses with ``0xADDR``, and since ``0xADD`` is itself valid hex,
+    re-normalizing the result produced ``0xADDRR`` and then ``0xADDRRR``, so the
+    same failure fingerprinted differently at every stage of the pipeline.
+    """
+    # Addresses. The legacy ``0xADDR`` token is folded in first: text that was
+    # normalized by an older version of this function still circulates in saved
+    # results and cached baselines.
+    t = text.replace("0xADDR", "<ADDR>")
+    t = re.sub(r"0x[0-9a-fA-F]+", "<ADDR>", t)
 
-    # Normalize site-packages paths
-    t = re.sub(r"(/[^\s\'\"]*)?/(site-packages|torch_fl|tests)/", r"/PATH/\2/", t)
+    # Temp paths and library paths become one token, without the matched words,
+    # so the pattern cannot match a second time.
+    t = re.sub(r"/tmp/[^\s'\"]+", "<TMP>", t)
+    t = re.sub(r"(?:/[^\s'\"]*)?/(?:site-packages|torch_fl|tests)/", "<PATH>/", t)
 
-    # Remove timing info
-    t = re.sub(r"\b\d+\.\d+s\b", "TIMEs", t)
+    # Timing info
+    t = re.sub(r"\b\d+\.\d+s\b", "<TIME>", t)
 
     # Collapse tensor shapes
-    t = re.sub(r"\[[\d,\s]+\]", "[SHAPE]", t)
+    t = re.sub(r"\[[\d,\s]+\]", "<SHAPE>", t)
 
     # Keep diagnostic codes, collapse other numbers
     t = re.sub(r"(?<!err )(?<!code )(?<!errno )\b\d+\b", "N", t)
 
     # Normalize whitespace
-    t = re.sub(r"\s+", " ", t).strip()
+    return re.sub(r"\s+", " ", t).strip()
 
-    # Take last 200 chars (most specific part)
-    return t[-200:]
+
+def shorten(text: str, limit: int = 200) -> str:
+    """Bound a statement without cutting a word in half.
+
+    Both ends are kept, as the runner does for its tracebacks: the exception
+    type sits at the front and the most specific detail at the back.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    marker = " ... "
+    head = (limit - len(marker)) // 2
+    tail = limit - len(marker) - head
+    front = text[:head].rsplit(" ", 1)[0]
+    back = text[-tail:].split(" ", 1)[-1]
+    return f"{front}{marker}{back}"
+
+
+def exception_line(detail: str) -> str:
+    """The line of a traceback that states the failure itself.
+
+    pytest's short format ends with the exception, which is the most specific
+    statement the output contains. A caret marker (``~~~^~~~``) and pytest's
+    bare ``E`` continuation carry no information and are skipped.
+    """
+    for line in reversed((detail or "").splitlines()):
+        stripped = re.sub(r"^E\s+", "", line.strip()).strip()
+        if not stripped or set(stripped) <= set("~^"):
+            continue
+        return stripped
+    return ""
+
+
+def mechanism_from(detail: str) -> str:
+    """The shortest statement that still identifies one failure.
+
+    A fixed window of the raw traceback was neither stable nor readable: it cut
+    mid-word, and anything inserted above the exception shifted the window and
+    therefore the fingerprint of an unchanged defect.
+    """
+    line = exception_line(detail)
+    if not line:
+        return "no output captured"
+    return shorten(normalize_error(line))
 
 
 def detect_crash(test_record: Dict) -> Tuple[bool, str]:
@@ -150,28 +226,50 @@ def detect_crash(test_record: Dict) -> Tuple[bool, str]:
             return True, "device_runtime_crash"
 
     # 6. Process crash (no detail but failed)
-    if test_record["status"] == "FAIL" and not detail.strip():
+    if test_record.get("status") == "FAIL" and not detail.strip():
         return True, "empty_failure_likely_crash"
 
     return False, ""
 
 
+def missing_module(detail: str) -> str | None:
+    """Name the import a broken environment failed on, when it says so."""
+    match = re.search(r"No module named '?([\w.]+)'?", detail)
+    return match.group(1) if match else None
+
+
 def classify_failure(test_record: Dict) -> Tuple[str, str]:
     """
-    Classify a test failure.
+    Classify a test record that did not pass.
 
     Returns: (failure_class, subject)
 
     Classes:
     - OP_UNSUPPORTED: missing operator
+    - OP_CPU_FALLBACK: operator ran through the host fallback
     - PRECISION: numerical mismatch
     - CRASH: segfault, timeout, device poisoning
     - FEATURE_UNSUPPORTED: missing feature/API
     - PRECISION_KNOWN_ISSUE: SDPA tolerance (not filed)
+    - TEST_ERROR: the test body never ran, or never reported
+    - ENVIRONMENT_ERROR: the environment, not the platform, failed
     - UNKNOWN: unclassified
+
+    The status decides first. A setup or teardown error, a collection failure
+    and a lost batch all mean the assertion never executed, so running the
+    platform-defect patterns over their output would invent a finding from text
+    that no test produced.
     """
-    detail = test_record.get("detail", "")
-    nodeid = test_record["nodeid"]
+    detail = test_record.get("detail") or ""
+    nodeid = test_record.get("nodeid") or ""
+    status = test_record.get("status") or "FAIL"
+
+    if status in ENVIRONMENT_STATUSES:
+        return ENVIRONMENT_ERROR_CLASS, missing_module(detail) or "environment"
+    if status == "ERROR":
+        return TEST_ERROR_CLASS, "setup_or_teardown_error"
+    if status in COLLECTION_STATUSES:
+        return TEST_ERROR_CLASS, status.lower()
 
     # Check crash first
     is_crash, crash_type = detect_crash(test_record)
@@ -217,15 +315,25 @@ def classify_failure(test_record: Dict) -> Tuple[str, str]:
     return "UNKNOWN", "unclassified"
 
 
-def compute_fingerprint(
+def generate_fingerprint(
     failure_class: str,
     component: str,
     subject: str,
     mechanism: str,
 ) -> str:
-    """Compute a cause fingerprint without model or nodeid occurrence data."""
+    """Hash one cause, without any model or nodeid occurrence data.
+
+    This is the only fingerprint the pipeline files against. Two tests that fail
+    for the same reason on the same component share it, so a defect that breaks
+    400 tests is one finding; the same defect on a different backend does not,
+    so a fix verified on one platform is not assumed to hold on another.
+    """
     payload = "|".join((failure_class, component, subject, mechanism))
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+# The old name, kept because the verifier and the unit tests import it.
+compute_fingerprint = generate_fingerprint
 
 
 def extract_model_from_nodeid(nodeid: str) -> str:
@@ -243,42 +351,90 @@ def extract_model_from_nodeid(nodeid: str) -> str:
     return "unknown"
 
 
-def extract_component(test_json: Dict) -> str:
-    """Identify the measured backend for cross-platform cause deduplication."""
-    environment = test_json.get("environment", {})
-    device = environment.get("device") or test_json.get("run", {}).get("device")
-    return str(device or "unknown")
+def component_of(block: Dict, fallback: Dict) -> str:
+    """The backend a model's tests were measured on.
+
+    Read from the environment the runner recorded, and never from a value a
+    caller passed in: the runner derives ``device`` from the device spec, so
+    this is the one spelling guaranteed to name the accelerator the tests
+    actually used. A device string supplied on the command line could disagree
+    with the spec and silently mis-attribute every fingerprint computed from it.
+    """
+    environment = block.get("environment") or fallback or {}
+    return str(environment.get("device") or "unknown")
 
 
-def fallback_findings(test_json: Dict, component: str) -> list[Dict]:
+def run_units(test_json: Dict) -> Iterator[Dict]:
+    """Yield each measured model as a self-contained unit.
+
+    The runner writes two shapes. One model is the whole document; ``--all``
+    keeps every model under ``models[]`` with no top-level ``tests`` key.
+    Reading only the flat shape is why a full sweep used to triage to zero
+    findings, so both are folded into the same unit here.
+    """
+    fallback_environment = test_json.get("environment") or {}
+    blocks = test_json.get("models") if test_json.get("mode") == "all" else None
+    for block in blocks if blocks is not None else [test_json]:
+        model = (block.get("model") or {}).get("requested")
+        yield {
+            "tests": block.get("tests") or [],
+            "collect_errors": block.get("collect_errors") or [],
+            "component": component_of(block, fallback_environment),
+            "model": model,
+        }
+
+
+def failing_records(unit: Dict) -> Iterator[Dict]:
+    """Yield every record that did not pass, including collection failures.
+
+    Only ``FAIL`` used to be read, so a run in which every test errored out on a
+    missing hook was summarized as "all tests passed".
+    """
+    for record in unit["tests"]:
+        if record.get("status") in FAILING_STATUSES:
+            yield record
+    for record in unit["collect_errors"]:
+        if record.get("status") in FAILING_STATUSES:
+            yield record
+
+
+def models_of(nodeids: List[str], model: str | None) -> List[str]:
+    """The architectures a finding was observed in."""
+    if model:
+        return [model]
+    return sorted({extract_model_from_nodeid(nodeid) for nodeid in nodeids})
+
+
+def fallback_findings(unit: Dict) -> list[Dict]:
     """Turn measured CPU fallbacks into operator implementation findings."""
     occurrences: dict[str, list[dict]] = defaultdict(list)
-    for test in test_json.get("tests", []):
-        for op in test.get("cpu_fallback_ops", []):
+    for test in unit["tests"]:
+        for op in test.get("cpu_fallback_ops") or []:
             occurrences[op].append(test)
 
     findings = []
     for op, tests in sorted(occurrences.items()):
         mechanism = f"[flagos cpu_fallback] {op}"
+        nodeids = [test["nodeid"] for test in tests]
+        component = unit["component"]
         findings.append(
             {
-                "fingerprint": compute_fingerprint(
+                "fingerprint": generate_fingerprint(
                     CPU_FALLBACK_CLASS, component, op, mechanism
                 ),
                 "class": CPU_FALLBACK_CLASS,
                 "component": component,
                 "subject": op,
                 "mechanism": mechanism,
-                "nodeids": [test["nodeid"] for test in tests],
-                "models": sorted(
-                    {extract_model_from_nodeid(test["nodeid"]) for test in tests}
-                ),
+                "nodeids": nodeids,
+                "models": models_of(nodeids, unit["model"]),
                 "representative_nodeid": tests[0]["nodeid"],
                 "representative_detail": (
                     f"{op} executed through torch_fl's CPU fallback while the "
                     "test otherwise continued."
                 ),
                 "count": len(tests),
+                "actionable": True,
                 "verification_required": False,
                 "verdict": "CONFIRMED",
             }
@@ -286,51 +442,61 @@ def fallback_findings(test_json: Dict, component: str) -> list[Dict]:
     return findings
 
 
+# Most severe first. TEST_ERROR and ENVIRONMENT_ERROR sit last: they are
+# reported so a broken environment stays visible, but they claim no defect.
+PRIORITY = {
+    "CRASH": 0,
+    "OP_UNSUPPORTED": 1,
+    CPU_FALLBACK_CLASS: 1,
+    "PRECISION": 2,
+    "FEATURE_UNSUPPORTED": 3,
+    "PRECISION_KNOWN_ISSUE": 4,
+    TEST_ERROR_CLASS: 5,
+    ENVIRONMENT_ERROR_CLASS: 5,
+    "UNKNOWN": 6,
+}
+
+
 def triage_failures(test_json: Dict) -> Dict:
     """
-    Triage all test failures and group by cause fingerprint.
+    Triage every non-passing test across every measured model.
 
-    Returns findings dict with fingerprinted failures.
+    Returns findings grouped by cause fingerprint.
     """
-    tests = test_json.get("tests", [])
-    component = extract_component(test_json)
-
-    # Collect failures
-    failures = [t for t in tests if t["status"] == "FAIL"]
-
-    # Group by fingerprint
     fingerprint_map: Dict[str, List[Dict]] = defaultdict(list)
-    class_counts = defaultdict(int)
+    fallbacks: list[Dict] = []
+    class_counts: Dict[str, int] = defaultdict(int)
+    status_counts: Dict[str, int] = defaultdict(int)
+    total = 0
 
-    for test in failures:
-        failure_class, subject = classify_failure(test)
-        class_counts[failure_class.lower().replace("_", "")] += 1
-
-        mechanism = normalize_error(test.get("detail", ""))
-        fingerprint = compute_fingerprint(failure_class, component, subject, mechanism)
-
-        fingerprint_map[fingerprint].append(
-            {
-                "nodeid": test["nodeid"],
-                "detail": test.get("detail", ""),
+    for unit in run_units(test_json):
+        for record in failing_records(unit):
+            total += 1
+            status_counts[record.get("status") or "FAIL"] += 1
+            failure_class, subject = classify_failure(record)
+            cause = {
+                "nodeid": record.get("nodeid") or "<unknown>",
+                "detail": record.get("detail") or "",
                 "class": failure_class,
-                "component": component,
+                "component": unit["component"],
                 "subject": subject,
-                "mechanism": mechanism,
-                "model": extract_model_from_nodeid(test["nodeid"]),
+                "mechanism": mechanism_from(record.get("detail") or ""),
+                "model": unit["model"]
+                or extract_model_from_nodeid(record.get("nodeid") or ""),
             }
-        )
+            fingerprint = generate_fingerprint(
+                failure_class, unit["component"], subject, cause["mechanism"]
+            )
+            fingerprint_map[fingerprint].append(cause)
 
-    # Build findings list
+        # CPU fallback is a correctness success but an accelerator coverage
+        # failure, so it is a finding even in a run where nothing failed.
+        fallbacks.extend(fallback_findings(unit))
+
     findings = []
     for fingerprint, records in fingerprint_map.items():
-        # Pick representative (first occurrence)
         rep = records[0]
-
-        # Aggregate models and nodeids
-        models = sorted(set(r["model"] for r in records))
-        nodeids = [r["nodeid"] for r in records]
-
+        nodeids = [record["nodeid"] for record in records]
         findings.append(
             {
                 "fingerprint": fingerprint,
@@ -339,36 +505,34 @@ def triage_failures(test_json: Dict) -> Dict:
                 "subject": rep["subject"],
                 "mechanism": rep["mechanism"],
                 "nodeids": nodeids,
-                "models": models,
+                "models": models_of(nodeids, rep["model"]),
                 "representative_nodeid": rep["nodeid"],
                 "representative_detail": rep["detail"],
                 "count": len(records),
+                "actionable": rep["class"] not in NON_ACTIONABLE_CLASSES,
+                "verification_required": rep["class"] not in NON_ACTIONABLE_CLASSES,
+                "verdict": (
+                    "INCONCLUSIVE" if rep["class"] in NON_ACTIONABLE_CLASSES else None
+                ),
             }
         )
+    findings.extend(fallbacks)
 
-    # CPU fallback is a correctness-success but an accelerator coverage failure.
-    fallback_items = fallback_findings(test_json, component)
-    findings.extend(fallback_items)
-    if fallback_items:
-        class_counts[CPU_FALLBACK_CLASS.lower().replace("_", "")] += len(fallback_items)
+    for finding in findings:
+        class_counts[finding["class"]] += 1
 
-    # Sort by class priority: CRASH > unsupported/fallback > precision > feature.
-    priority = {
-        "CRASH": 0,
-        "OP_UNSUPPORTED": 1,
-        CPU_FALLBACK_CLASS: 1,
-        "PRECISION": 2,
-        "FEATURE_UNSUPPORTED": 3,
-        "PRECISION_KNOWN_ISSUE": 4,
-        "UNKNOWN": 5,
-    }
-    findings.sort(key=lambda f: (priority.get(f["class"], 99), f["subject"]))
+    findings.sort(key=lambda f: (PRIORITY.get(f["class"], 99), f["subject"]))
 
     return {
         "findings": findings,
         "summary": {
-            "total_failures": len(failures),
-            **dict(class_counts),
+            "total_failures": total,
+            "actionable": sum(1 for f in findings if f["actionable"]),
+            "environment_error": sum(
+                1 for f in findings if f["class"] == ENVIRONMENT_ERROR_CLASS
+            ),
+            "statuses": dict(sorted(status_counts.items())),
+            "classes": dict(sorted(class_counts.items())),
         },
     }
 

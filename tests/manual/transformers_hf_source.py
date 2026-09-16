@@ -21,6 +21,7 @@ repository fixtures outside ``tests/`` as well as shared files inside it.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -108,6 +109,44 @@ def cache_root(cache_dir: str | os.PathLike[str] | None = None) -> Path:
     if value := os.environ.get("HF_COVERAGE_CACHE"):
         return Path(value).expanduser()
     return DEFAULT_CACHE
+
+
+def device_name(spec_path: str | os.PathLike[str]) -> str:
+    """Read ``DEVICE_NAME`` from a Transformers device-spec module.
+
+    The spec file is the device contract: it is what the runner hands to
+    ``TRANSFORMERS_TEST_DEVICE_SPEC``, and its ``DEVICE_NAME`` is the device the
+    tests actually execute on.  Nothing else may name that device, so every
+    caller derives the name from here instead of carrying a copy that can drift.
+
+    The file is parsed rather than imported: importing it loads ``torch_fl`` and
+    claims the accelerator, which a reporter running in the parent process must
+    not do just to learn a string.
+    """
+    path = Path(spec_path)
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise SourceError(f"cannot read device spec {path}: {exc}") from exc
+
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "DEVICE_NAME":
+                try:
+                    value = ast.literal_eval(node.value)
+                except ValueError as exc:
+                    raise SourceError(
+                        f"DEVICE_NAME in {path} is not a literal string"
+                    ) from exc
+                if not isinstance(value, str) or not value:
+                    raise SourceError(
+                        f"DEVICE_NAME in {path} is not a non-empty string"
+                    )
+                return value
+
+    raise SourceError(f"no DEVICE_NAME assignment found in {path}")
 
 
 def source_dir(version: str, cache_dir: str | os.PathLike[str] | None = None) -> Path:

@@ -9,9 +9,16 @@ Usage (what weak models should do):
     python scripts/transformers/safe_transformers_wrapper.py test bert GCU
     python scripts/transformers/safe_transformers_wrapper.py list-models
     python scripts/transformers/safe_transformers_wrapper.py batch GCU
+
+There is no device argument. The device is whatever
+``tests/manual/hf_device_spec.py`` registers, and the runner derives it from
+that file; a second, unchecked copy here could only ever disagree with it and
+was recorded as provenance without being enforced.
 """
 
 import argparse
+import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,19 +49,33 @@ ALLOWED_CHIPS = [
     "MLU",
 ]
 
-# Allowlist of devices
-ALLOWED_DEVICES = [
-    "gcu",
-    "musa",
-    "ascend",
-    "metax",
-    "ppu",
-    "ipu",
-    "gaudi",
-    "mlu",
-]
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_HELPER = REPO_ROOT / "tests" / "manual" / "transformers_hf_source.py"
+
+
+def cache_root() -> Path:
+    """The one cache root the runner and the verifier must both use."""
+    spec = importlib.util.spec_from_file_location(
+        "transformers_hf_source", SOURCE_HELPER
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return Path(module.cache_root())
+
+
+def run_sweep(script: Path, argv: list) -> int:
+    """Run one shell step with the shared cache root exported to it."""
+    root = cache_root()
+    env = dict(os.environ, HF_COVERAGE_CACHE=str(root))
+    cmd = ["bash", str(script), *argv]
+    print(f"Cache:   {root}")
+    print(f"Command: {' '.join(cmd)}")
+    print()
+    try:
+        return subprocess.run(cmd, cwd=REPO_ROOT, env=env).returncode
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        return 130
 
 
 def validate_model(model: str) -> str:
@@ -95,28 +116,14 @@ def validate_chip(chip: str) -> str:
     sys.exit(1)
 
 
-def validate_device(device: str) -> str:
-    """Validate device name against allowlist."""
-    device_lower = device.lower()
-
-    if device_lower in ALLOWED_DEVICES:
-        return device_lower
-
-    print(f"ERROR: Device '{device}' not in allowlist", file=sys.stderr)
-    print(f"Allowed devices: {', '.join(ALLOWED_DEVICES)}", file=sys.stderr)
-    sys.exit(1)
-
-
 def cmd_test(args):
     """Run test for a single model (safe wrapper around transformers_auto_sweep.sh)."""
     model = validate_model(args.model)
     chip = validate_chip(args.chip)
-    device = validate_device(args.device)
     repo = args.repo or "flagos-ai/Torch-FL"
 
     print("▶ Running transformers test:")
     print(f"  Model:  {model}")
-    print(f"  Device: {device}")
     print(f"  Chip:   {chip}")
     print(f"  Repo:   {repo}")
     print()
@@ -126,28 +133,16 @@ def cmd_test(args):
         print(f"ERROR: Script not found: {script}", file=sys.stderr)
         sys.exit(1)
 
-    cmd = ["bash", str(script), model, device, chip, repo]
-
-    print(f"Command: {' '.join(cmd)}")
-    print()
-
-    try:
-        result = subprocess.run(cmd, cwd=REPO_ROOT)
-        return result.returncode
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        return 130
+    return run_sweep(script, [model, chip, repo])
 
 
 def cmd_batch(args):
     """Run batch test (bert + qwen3)."""
     chip = validate_chip(args.chip)
-    device = validate_device(args.device)
     repo = args.repo or "flagos-ai/Torch-FL"
 
     print("▶ Running batch transformers test:")
     print("  Models: bert, qwen3")
-    print(f"  Device: {device}")
     print(f"  Chip:   {chip}")
     print(f"  Repo:   {repo}")
     print()
@@ -157,17 +152,7 @@ def cmd_batch(args):
         print(f"ERROR: Script not found: {script}", file=sys.stderr)
         sys.exit(1)
 
-    cmd = ["bash", str(script), device, chip, repo]
-
-    print(f"Command: {' '.join(cmd)}")
-    print()
-
-    try:
-        result = subprocess.run(cmd, cwd=REPO_ROOT)
-        return result.returncode
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        return 130
+    return run_sweep(script, [chip, repo])
 
 
 def cmd_list_models(args):
@@ -202,18 +187,12 @@ def build_parser():
     test_parser.add_argument(
         "chip", help="chip name for issue titles (e.g., GCU, MUSA)"
     )
-    test_parser.add_argument(
-        "--device", default="gcu", help="device name for torch (default: gcu)"
-    )
     test_parser.add_argument("--repo", help="GitHub repo (default: flagos-ai/Torch-FL)")
 
     # batch command
     batch_parser = subparsers.add_parser("batch", help="batch test (bert + qwen3)")
     batch_parser.add_argument(
         "chip", help="chip name for issue titles (e.g., GCU, MUSA)"
-    )
-    batch_parser.add_argument(
-        "--device", default="gcu", help="device name for torch (default: gcu)"
     )
     batch_parser.add_argument(
         "--repo", help="GitHub repo (default: flagos-ai/Torch-FL)"

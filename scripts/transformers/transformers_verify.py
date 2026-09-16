@@ -2,6 +2,7 @@
 """Verify Transformers findings in fresh pytest subprocesses."""
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -13,6 +14,36 @@ from typing import Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = REPO_ROOT / "tests" / "manual" / "hf_device_spec.py"
+SOURCE_HELPER = REPO_ROOT / "tests" / "manual" / "transformers_hf_source.py"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from transformers_triage import generate_fingerprint  # noqa: E402 - sibling tool
+
+
+def load_source_helper():
+    """Load the runner's cache helper by path.
+
+    The manual test tree is not an importable package, and its cache root is
+    the only place a version-matched source tree is guaranteed to exist.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "transformers_hf_source", SOURCE_HELPER
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def recorded_version(findings_json: Dict) -> Optional[str]:
+    """The transformers version the findings were measured against.
+
+    Read from the run's own environment instead of from the cache directory
+    listing: a cache holding several versions must not verify a finding
+    against a source tree that did not produce it.
+    """
+    environment = findings_json.get("environment") or {}
+    return environment.get("source_version") or environment.get("transformers")
 
 
 def isolated_env(test_source_dir: Path, workdir: Path) -> dict[str, str]:
@@ -113,13 +144,45 @@ def run_isolated_test(
 
 
 def determine_verdict(isolation_status: str, original_class: str) -> str:
-    """Map an isolation outcome to a filing verdict."""
+    """Map an isolation outcome to a filing verdict.
+
+    ``original_class`` is not used to decide the verdict, but it is part of the
+    signature because the verdict only means something for the class it was
+    measured on: :func:`apply_isolation` owns the class refinement.
+    """
     del original_class
     if isolation_status in ("FAIL", "TIMEOUT"):
         return "CONFIRMED"
     if isolation_status in ("PASS", "SKIP"):
         return "COLLATERAL"
     return "INCONCLUSIVE"
+
+
+def apply_isolation(finding: Dict, isolation_result: Dict) -> None:
+    """Record what an isolated re-run showed about one finding.
+
+    A test that hangs alone is a crash-shaped defect. The batch classification
+    saw it alongside hundreds of other failures of the same run, so isolation is
+    the better evidence for the class, and the fingerprint is recomputed to stay
+    the hash of the class it now carries.
+    """
+    status = isolation_result["status"]
+    finding["isolation_status"] = status
+    finding["isolation_detail"] = isolation_result["detail"]
+    finding["isolation_duration_s"] = isolation_result["duration_s"]
+    finding["isolation_command"] = isolation_result["command"]
+    if status == "TIMEOUT" and finding["class"] != "CRASH":
+        finding["isolation_note"] = (
+            f"the isolated run timed out; reclassified from {finding['class']} to CRASH"
+        )
+        finding["class"] = "CRASH"
+        finding["fingerprint"] = generate_fingerprint(
+            "CRASH",
+            finding.get("component", "unknown"),
+            finding["subject"],
+            finding["mechanism"],
+        )
+    finding["verdict"] = determine_verdict(status, finding["class"])
 
 
 def verify_findings(
@@ -162,13 +225,7 @@ def verify_findings(
         isolation_result = run_isolated_test(
             finding["representative_nodeid"], test_source_dir, timeout
         )
-        finding["isolation_status"] = isolation_result["status"]
-        finding["isolation_detail"] = isolation_result["detail"]
-        finding["isolation_duration_s"] = isolation_result["duration_s"]
-        finding["isolation_command"] = isolation_result["command"]
-        finding["verdict"] = determine_verdict(
-            isolation_result["status"], finding["class"]
-        )
+        apply_isolation(finding, isolation_result)
         print(
             f"  [{index}/{len(pending)}] {finding['class']} {finding['subject']}: "
             f"{isolation_result['status']} → {finding['verdict']}"
@@ -218,12 +275,14 @@ def main() -> int:
     parser.add_argument(
         "--test-source-dir",
         type=Path,
-        default=Path("/root/.cache/torch_fl/hf-tests"),
-        help="Exact Transformers source tree or its versioned cache root",
+        help="Exact Transformers source tree or its versioned cache root "
+        "(default: the cache the official runner writes to, honouring "
+        "HF_COVERAGE_CACHE)",
     )
     parser.add_argument(
         "--transformers-version",
-        help="Select an exact transformers-X.Y.Z cache directory",
+        help="Select an exact transformers-X.Y.Z cache directory "
+        "(default: the version recorded in the findings JSON)",
     )
     parser.add_argument(
         "--timeout", type=int, default=120, help="Per-test timeout in seconds"
@@ -238,19 +297,32 @@ def main() -> int:
 
     if not args.input.exists():
         raise FileNotFoundError(f"Input JSON not found: {args.input}")
-    if not args.test_source_dir.exists():
-        raise FileNotFoundError(
-            f"Test source directory not found: {args.test_source_dir}\n"
-            "Run transformers_hf_tests.py first to cache the official source."
-        )
-
-    test_source_dir = resolve_test_source(
-        args.test_source_dir, args.transformers_version
-    )
-    print(f"Using test source: {test_source_dir}")
 
     with open(args.input) as file:
         findings_json = json.load(file)
+
+    test_source_root = args.test_source_dir
+    if test_source_root is None:
+        # ``cache_root()`` rather than the module constant, so that the
+        # documented HF_COVERAGE_CACHE override resolves here exactly as it does
+        # in the runner that wrote the cache.
+        test_source_root = Path(load_source_helper().cache_root()).expanduser()
+    if not test_source_root.exists():
+        raise FileNotFoundError(
+            f"Test source directory not found: {test_source_root}\n"
+            "Run transformers_hf_tests.py first to cache the official source, or "
+            "pass --test-source-dir."
+        )
+    version = args.transformers_version or recorded_version(findings_json)
+    if version is None:
+        print(
+            "Warning: the findings JSON records no transformers version; falling "
+            "back to the newest cached source tree"
+        )
+
+    test_source_dir = resolve_test_source(test_source_root, version)
+    print(f"Using test source: {test_source_dir}")
+
     result = verify_findings(findings_json, test_source_dir, args.timeout, args.workers)
 
     print("\nVerification summary:")
