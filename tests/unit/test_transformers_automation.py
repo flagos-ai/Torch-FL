@@ -880,6 +880,111 @@ def test_sweep_probe_runs_outside_the_repository(tmp_path):
         assert not path.is_relative_to(REPO_ROOT)
 
 
+# --- what the sweep tells its caller -------------------------------------------
+#
+# The sweep's exit code is how the batch driver learns what the model measured:
+# ``transformers_batch_sweep.sh`` maps 0 to "nothing to file", 1 to "findings
+# awaiting review", and anything else to "nothing was measured". The sweep used
+# to fall off the end of step 6, so a run that had just written a preview of new
+# findings exited 0 and the batch summary counted it as clean --- the measurement
+# reached the preview and stopped there, and the driver's one signal that
+# something was measured was gone.
+
+STAGE_INTERPRETER = '''#!/usr/bin/env python3
+"""A stand-in for the tools the sweep drives.
+
+It answers the probe, records a measurement, and writes each stage's output, so
+the sweep's own control flow --- and the exit code it hands its caller --- is
+exercised without an accelerator, an architecture suite, or a tracker.
+"""
+import json
+import sys
+
+argv = sys.argv[1:]
+if argv and argv[0] == "-c":
+    if "importlib.import_module" in argv[1]:
+        # The step-zero probe: this interpreter is healthy, so it prints no
+        # missing module. Every other snippet is a count the sweep reads back
+        # from a file, so it runs for real.
+        raise SystemExit(0)
+    exec(compile(argv[1], "<script>", "exec"), {})
+    raise SystemExit(0)
+
+script = argv[0]
+out = argv[argv.index("--out") + 1]
+
+
+def write(payload):
+    with open(out, "w") as handle:
+        json.dump(payload, handle)
+
+
+def write_text():
+    with open(out, "w") as handle:
+        handle.write("# Issue Preview\\n")
+
+
+if script.endswith("transformers_hf_tests.py"):
+    write(
+        {
+            "run": {"status": "COMPLETED_RESILIENT"},
+            "tests": [
+                {
+                    "nodeid": "tests/models/bert/test_modeling_bert.py"
+                    "::BertModelTest::test_x",
+                    "status": "__TEST_STATUS__",
+                }
+            ],
+        }
+    )
+    raise SystemExit(__RUNNER_EXIT__)
+if script.endswith("transformers_triage.py"):
+    findings = [] if "__OUTCOME__" == "clean" else [{"actionable": True}]
+    write({"findings": findings, "summary": {"environment_error": 0}})
+elif script.endswith("transformers_verify.py"):
+    write({"findings": [{"fingerprint": "aa11bb22cc33"}]})
+elif script.endswith("transformers_deduplicate.py"):
+    write(
+        {
+            "findings": [],
+            "summary": {"dedup": {"NEW": 0 if "__OUTCOME__" == "clean" else 1}},
+        }
+    )
+elif script.endswith("transformers_preview_issues.py"):
+    write_text()
+raise SystemExit(0)
+'''
+
+
+def stage_interpreter(tmp_path, outcome):
+    """The interpreter above, set up to report ``outcome``."""
+    clean = outcome == "clean"
+    source = (
+        STAGE_INTERPRETER.replace("__OUTCOME__", outcome)
+        .replace("__RUNNER_EXIT__", "0" if clean else "1")
+        .replace("__TEST_STATUS__", "PASS" if clean else "FAIL")
+    )
+    path = tmp_path / "stage-interpreter"
+    path.write_text(source)
+    path.chmod(0o755)
+    return path
+
+
+def test_a_sweep_that_produced_findings_exits_one(tmp_path):
+    """Measured-with-findings has to reach the driver as its own outcome."""
+    proc = run_sweep(stage_interpreter(tmp_path, "findings"), tmp_path)
+    assert "Issue Preview (1 issues)" in proc.stdout
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Exit code 1" in proc.stdout
+
+
+def test_a_sweep_with_nothing_to_file_exits_zero(tmp_path):
+    """The clean outcome stays distinguishable from the findings one."""
+    proc = run_sweep(stage_interpreter(tmp_path, "clean"), tmp_path)
+    assert "No failures to triage. All tests passed!" in proc.stdout
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 # ``--chip`` is the hardware label that reaches the report title and the issue
 # preview. Vendors name boards "vendor + part number", and the allowlist is a
 # list of vendors, so the safe wrapper rejected every real board name --- the

@@ -42,7 +42,10 @@ Both commands stop after preview generation.
 
 The sweep's exit code states what it measured: `0` measured and clean, `1`
 measured with findings awaiting review, `2` nothing measured. Only `2` means the
-run is not a coverage result.
+run is not a coverage result. The code is the sweep's only channel to its caller
+once the preview is written: every stage having succeeded is not the same
+outcome as having nothing to report, so a sweep that produced drafts exits `1`
+and the batch driver counts it under `Findings` rather than `Nothing to file`.
 
 ## Stage 1: Official Test Run
 

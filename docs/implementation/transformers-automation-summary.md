@@ -374,6 +374,12 @@ hand-written and had drifted from what the runner emits.
     installed. A child that cannot import the device build dies before it
     collects a test, and that kind of failure must not sit beside genuine
     per-test evidence as one more `ERROR`.
+18. A stage's outcome survives the hand-off to the stage that acts on it. The
+    sweep exits `1` once it has written drafts for review, because the batch
+    driver reads that code and nothing else: reaching the end of the preview
+    successfully is not the same measurement as having nothing to report, and a
+    sweep that fell off the end of step 6 was counted as `Nothing to file`
+    while its preview sat in the work directory.
 
 ## Usage
 
