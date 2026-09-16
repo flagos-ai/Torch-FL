@@ -184,7 +184,11 @@ skips. Per-test JSON evidence includes the
 pytest node ID, status, duration, failure detail, and captured output; collection
 errors, missing optional dependencies, timeouts, and accelerator crashes are
 kept distinct. `--offline` requires a previously cached source tree and also
-sets the HuggingFace offline environment variables.
+sets the HuggingFace offline environment variables. Before the first batch the
+runner runs a preflight in a child process and records it under
+`environment.preflight`; a failure there means nothing was measured, the run
+exits `2`, and its report names the check that failed. Exit `0` means measured
+and clean, `1` measured with failures to review, `2` not measured at all.
 
 This runner is an execution and evidence tool only. It does not create GitHub
 issues. Baseline promotion, failure fingerprinting, duplicate search, and issue
