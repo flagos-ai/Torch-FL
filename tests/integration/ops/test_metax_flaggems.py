@@ -16,7 +16,7 @@
 Real MetaX coverage for the MetaX FlagGems hybrid path.
 
 ``backends_metax.conf`` is FlagGems-first: 12 of the ops torch_fl can route go
-to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 592 go to
+to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 591 go to
 ``flaggems`` (the FlagGems Python/Triton path, ``Backend::kFlagGems``), and only
 the ops measured not to work there fall back to the cuda boxing kernel (maca
 ``libtorch_cuda``). This file pins both halves of that decision on hardware, the
@@ -87,6 +87,16 @@ ops the survey flagged are **not** withdrawn -- they fail on both routes
 compiling PyTorch" while the gems eigenvalues match the host), so holding them
 would not have fixed anything.
 
+A seventeenth withdrawal, ``slice.Tensor``, came from a model rather than from
+the survey. Qwen-Image-2512's transformer slices complex rotary frequencies
+(diffusers' ``_compute_video_freqs``, ``freqs_pos[0][idx : idx + frame]``), and
+``flag_gems/ops/slice.py`` asserts against ``complex64`` and ``complex128``
+although its body is a ``torch.as_strided`` view that never reads the dtype. It
+is the fourth failure mode -- the gems op refuses a dtype its own implementation
+does not need -- and, unlike the sixteen, it is not MetaX-specific: the
+assertion rejects complex on every device, so it is held here only to keep the
+change local. Reported upstream as FlagGems issue #6356.
+
 Usage:
     pytest tests/integration/ops/test_metax_flaggems.py -v
 """
@@ -131,9 +141,9 @@ _PRELUDE = (
 # The expected backend is per entry because "on FlagGems" is two different log
 # names: `flagos_python` is the Python/Triton path (``flag_gems.<fn>``, conf key
 # `flaggems`) and `flagos` is the C++ path (conf key `flaggems_cpp`). Embedding
-# is in `_ROUTED_TO_FLAGGEMS` on the C++ slot; the other 31 are on the Python
-# one, which is the path whose 592 routes this file exists to guard. Seven of
-# the 31 -- the ones below the tensor-factory group -- come from
+# is in `_ROUTED_TO_FLAGGEMS` on the C++ slot; the other 30 are on the Python
+# one, which is the path whose 591 routes this file exists to guard. Seven of
+# the 30 -- the ones below the tensor-factory group -- come from
 # METAX_FLAGGEMS_MEASURED rather than the shared coverage set; see the module
 # docstring.
 #
@@ -164,7 +174,10 @@ _ROUTED_TO_FLAGGEMS = {
     # (`masked_fill_ only supports a 0-dimensional value tensor`), and passing a
     # Python float instead selects `masked_fill.Scalar`, a different conf key.
     "masked_fill.Tensor": ("a.masked_fill(a > 0, zero)", "flagos_python"),
-    "slice.Tensor": ("a[:, :2]", "flagos_python"),
+    # `slice.Tensor` used to be here. It moved to `cuda` when the widened cohort
+    # put it on the FlagGems path and Qwen-Image-2512's complex rotary-frequency
+    # slice hit `flag_gems/ops/slice.py`'s complex64 assertion; see
+    # `_FORCED_OFF_FLAGGEMS` group 4 and `_FORCED_OFF_DISPATCH`.
     "embedding": ("torch.nn.functional.embedding(idx, w)", "flagos"),
     "index_add_": ("x = a.clone()\nx.index_add_(0, idx, src)", "flagos_python"),
     "linspace": ("torch.linspace(0.0, 1.0, 8, device=DEVICE)", "flagos_python"),
@@ -270,6 +283,17 @@ _FORCED_OFF_FLAGGEMS = (
     "igamma_",
     "logit_backward",
     "special_shifted_chebyshev_polynomial_t",
+    # Group 4 -- the gems op refuses a dtype its own implementation does not
+    # need. flag_gems' `slice` asserts against complex64/complex128, but it
+    # builds the result with `torch.as_strided` from the input's shape, strides
+    # and storage offset and never consults the dtype, so the assertion is
+    # vestigial. Qwen-Image-2512's transformer slices complex rotary
+    # frequencies (diffusers' `_compute_video_freqs`), which is what surfaced
+    # it; the assertion rejects complex on every device, so this is not
+    # MetaX-specific and is held in MetaX only to keep the change local. Filed
+    # upstream as FlagGems issue #6356 (the remainder of #6049 / #6061, which
+    # trimmed the same assertion for `bool`).
+    "slice.Tensor",
 )
 
 # The five of those whose dispatch is checked on hardware, one per failure mode:
@@ -280,7 +304,9 @@ _FORCED_OFF_FLAGGEMS = (
 # rather than to compute anything. `igammac_` is a fifth: a wrong *value* rather
 # than a wrong shape or an abort, checkable only by routing, since its in-place
 # call is the one whose flagos result disagrees with the host. Three more, at the
-# end, cover the sixteen-op survey withdrawal -- one per cause group.
+# end, cover the sixteen-op survey withdrawal -- one per cause group -- and a
+# fourth covers the seventeenth withdrawal, `slice.Tensor`, whose failure mode is
+# a dtype refusal rather than a kernel fault.
 _FORCED_OFF_DISPATCH = {
     "binary_cross_entropy": "torch.nn.functional.binary_cross_entropy(p, q)",
     "mul_.Tensor": "x = a.clone()\nx.mul_(b)",
@@ -316,12 +342,22 @@ _FORCED_OFF_DISPATCH = {
     "special_i1e": "torch.ops.aten.special_i1e(a)",
     "sum.out": ("torch.ops.aten.sum.out(a, dtype=None, out=torch.empty_like(a))"),
     "_cdist_forward": "torch.ops.aten._cdist_forward(a, b, 2.0, None)",
+    # Group 4's only member, and the call is the one that failed: a complex
+    # tensor sliced along its last axis, which is how diffusers' Qwen-Image
+    # rotary embedding reaches `aten::slice.Tensor`. The `[0]` select keeps the
+    # slice on a 1-D input, matching `freqs_pos[0][idx:idx + frame]`; slicing a
+    # 2-D complex tensor would take the same route.
+    "slice.Tensor": (
+        "z = torch.complex(torch.randn(8, 16, device=DEVICE),\n"
+        "                   torch.randn(8, 16, device=DEVICE))\n"
+        "z[0][2:6]"
+    ),
 }
 
 # Measured number of `flaggems` routes in backends_metax.conf. A regression guard
 # rather than an exact contract: the count only moves when an op is added,
 # removed, or re-measured, and each of those is a deliberate change.
-_MEASURED_FLAGGEMS_ROUTES = 592
+_MEASURED_FLAGGEMS_ROUTES = 591
 
 _DISPATCH_LINE = re.compile(r"\[flagos dispatch\] (\S+) -> (\S+)")
 
@@ -627,10 +663,13 @@ class TestMetaXFlaggemsExclusions:
         fail with an ``AssertionError`` / ``ValueError`` naming CUDA on any
         PrivateUse1 tensor. Two of the withdrawn sixteen fail the other way: they
         raise from inside the FlagGems wrapper, or, for ``sum.out``, return a
-        wrong result without raising. The assertion below is therefore the one
-        that holds for all of them -- the call completes on this route, and the
-        dispatch log names this route -- and the per-op failure mode of the gems
-        arm is recorded in ``docs/reference/operator-support.md``.
+        wrong result without raising. ``slice.Tensor`` is the exception to the
+        wording rather than to the guard: its ``AssertionError`` names a dtype,
+        not a device, so the call completes here only because the boxing kernel
+        is the route. The assertion below is therefore the one that holds for all
+        of them -- the call completes on this route, and the dispatch log names
+        this route -- and the per-op failure mode of the gems arm is recorded in
+        ``docs/reference/operator-support.md``.
 
         On MetaX the boxing kernel is ``cuda``, reached through maca's
         ``libtorch_cuda.so``.

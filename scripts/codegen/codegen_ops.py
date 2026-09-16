@@ -3094,6 +3094,22 @@ def main():
             # mcErrorIllegalAddress), poisoning every subsequent op -- unrecoverable
             # in-process. Route to the cuda boxing kernel, which is bounds-safe.
             "slice_backward",
+            # slice.Tensor: flag_gems' slice op asserts against complex64 and
+            # complex128 (`flag_gems/ops/slice.py`, "slice: unsupported dtype"),
+            # but the assertion is vestigial -- the implementation is a pure
+            # `torch.as_strided` view built from the input's shape, strides and
+            # storage offset, and never consults a dtype.
+            # diffusers' QwenImageTransformer2DModel slices complex rotary
+            # frequencies (`freqs_pos[0][idx : idx + frame]` in
+            # _compute_video_freqs), so Qwen-Image-2512's transformer step dies
+            # on the FlagGems route with that assertion and passes on boxing.
+            # Not MetaX-specific -- the assertion rejects complex on every
+            # device -- but held here rather than in flaggems_runtime_broken so
+            # the change stays inside MetaX, the way the special_bessel_j0 group
+            # below is. Reported upstream as FlagGems issue #6356 (the remaining
+            # half of #6049/#6061, which trimmed the same assertion for bool);
+            # when the fix lands this entry can come out.
+            "slice.Tensor",
             # Route regressions found by the differential survey of the 166 ops
             # MetaX gained when FLAGGEMS_PYTHON_OPS was widened to the FlagGems
             # master @ 5a58df410 cohort (flag_gems 5.4.0rc2.post1+g5a58df410,
