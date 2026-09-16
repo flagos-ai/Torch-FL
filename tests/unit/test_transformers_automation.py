@@ -878,3 +878,32 @@ def test_sweep_probe_runs_outside_the_repository(tmp_path):
     for path in probed:
         assert path != REPO_ROOT
         assert not path.is_relative_to(REPO_ROOT)
+
+
+# ``--chip`` is the hardware label that reaches the report title and the issue
+# preview. Vendors name boards "vendor + part number", and the allowlist is a
+# list of vendors, so the safe wrapper rejected every real board name --- the
+# mixed-case vendors in its own allowlist included --- while accepting only an
+# all-uppercase vendor word.
+
+CHIP_LABELS = [
+    "MetaX",
+    "MetaX C550",
+    "MUSA MTT S5000",
+    "Enflame GCU S60",
+    "ASCEND 910B",
+    "GCU",
+]
+
+
+@pytest.mark.parametrize("label", CHIP_LABELS)
+def test_chip_label_accepts_a_board_name_and_keeps_the_caller_spelling(label):
+    wrapper = load("safe_transformers_wrapper")
+    assert wrapper.validate_chip(label) == label
+
+
+@pytest.mark.parametrize("label", ["nosuchchip", "MetaX-adjacent", ""])
+def test_chip_label_rejects_a_label_that_names_no_known_vendor(label):
+    wrapper = load("safe_transformers_wrapper")
+    with pytest.raises(SystemExit):
+        wrapper.validate_chip(label)

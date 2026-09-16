@@ -342,6 +342,11 @@ edit source files, change the parent shell environment, or publish issues. It
 has no device parameter: the device name comes from
 `tests/manual/hf_device_spec.py`.
 
+`--chip` is a hardware label, not a routing parameter, so it is validated by the
+vendor it names and passed on exactly as written: `MetaX`, `MetaX C550`, and
+`MUSA MTT S5000` are all accepted, and the label reaches the issue title in the
+spelling the caller used.
+
 If preflight dependencies are missing, stop and report the environment problem
 rather than modifying the torch installation during the measurement.
 

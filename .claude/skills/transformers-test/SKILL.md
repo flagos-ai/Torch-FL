@@ -35,6 +35,23 @@ runner derives the name from that file. A second copy on the command line could
 only ever disagree with the spec and would be recorded as provenance without
 being enforced.
 
+### An unrecognized argument is answered, not absorbed
+
+The flags above are the whole interface. When the user passes something else,
+say so and name the closest supported flag, then stop — before probing the
+environment, before running anything, and without reaching for another tool.
+`--device` is the common case, because other scripts in this tree do take one:
+`tests/manual/transformers_model_probe.py` has a `--device`, so an agent handed
+`--device flagos` can spend its whole budget hunting a device to run under and
+end the run having measured nothing the user asked for. Dropping an unknown flag
+silently loses the parameter the user cared about; substituting a different tool
+measures a different question. Answering it costs one sentence.
+
+`--chip` is a hardware label, not a routing parameter: any label naming a known
+vendor is accepted as written, so `--chip "MetaX C550"` and
+`--chip "MUSA MTT S5000"` are both valid and both reach the issue title
+unchanged.
+
 **Default behavior** (no --safe, no --manual):
 - **Strong models (Opus)**: Run automated pipeline
 - **Weak models (Qwen-27B, Sonnet)**: Automatically use safe mode
@@ -147,7 +164,7 @@ When invoked as `/transformers-test [args]`, parse these flags:
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--model` | string | required* | Model name (bert, qwen3, etc.) |
-| `--chip` | string | GCU | Chip name for issue titles |
+| `--chip` | string | GCU | Hardware label for issue titles. A vendor name or a board name naming one, such as `MetaX` or `MetaX C550` |
 | `--batch` | boolean | false | Run batch mode (bert+qwen3) |
 | `--safe` | boolean | auto** | Force safe mode for weak models |
 | `--manual` | boolean | false | Manual mode (no auto issue filing) |
@@ -212,7 +229,8 @@ The safe wrapper validates all parameters and prevents mistakes.
 
 **Parameters validated**:
 - Model name (against allowlist)
-- Chip name (against allowlist)
+- Chip label (must name a vendor in the allowlist; returned as written, so a
+  board name such as `MetaX C550` survives into the issue title)
 
 There is no device parameter to validate: the device name comes from
 `tests/manual/hf_device_spec.py`, which the wrapper does not let the caller

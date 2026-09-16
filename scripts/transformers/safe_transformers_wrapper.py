@@ -105,14 +105,30 @@ def validate_model(model: str) -> str:
 
 
 def validate_chip(chip: str) -> str:
-    """Validate chip name against allowlist."""
-    chip_upper = chip.upper()
+    """Validate the vendor named by a chip label and keep the caller's spelling.
 
-    if chip_upper in ALLOWED_CHIPS:
-        return chip_upper
+    ``--chip`` reaches the report title and the issue preview, and vendors name
+    boards with the vendor plus a part number --- ``MetaX C550``,
+    ``MUSA MTT S5000``, ``Enflame GCU S60``. Comparing the whole label against a
+    vendor list rejected every one of those, and comparing it uppercased
+    rejected the mixed-case vendors in the list itself. So the label is accepted
+    when any of its words names an allowed vendor, and it is returned as the
+    caller wrote it: uppercasing it would put a string in the issue title that
+    no vendor uses.
+    """
+    words = chip.split()
+    for word in words:
+        for allowed in ALLOWED_CHIPS:
+            if word.casefold() == allowed.casefold():
+                return chip
 
     print(f"ERROR: Chip '{chip}' not in allowlist", file=sys.stderr)
     print(f"Allowed chips: {', '.join(ALLOWED_CHIPS)}", file=sys.stderr)
+    print(
+        "A board name is accepted too, as long as it names a vendor: "
+        "'MetaX C550' and 'MUSA MTT S5000' are both valid.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
