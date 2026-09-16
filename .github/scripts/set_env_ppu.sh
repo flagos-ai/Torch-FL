@@ -67,13 +67,13 @@ PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2+ppu3.6}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
 
-# FlagGems master, installed into the venv instead of imported from the
-# /workspace/FlagGems bind mount this script used to require: that mount was not
-# present on every runner pod, and its absence aborted the job in environment
-# setup (see the install below). `master` by request; override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
+# FlagGems master from the flagos-ai fork, installed into the venv instead of
+# imported from the /workspace/FlagGems bind mount this script used to require:
+# that mount was not present on every runner pod, and its absence aborted the
+# job in environment setup (see the install below). `master` by request;
+# override with TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
 FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
 # CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image

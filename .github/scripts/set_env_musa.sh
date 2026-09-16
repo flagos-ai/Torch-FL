@@ -285,12 +285,11 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERS
 # again to ensure isolation.
 "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
 
-# Pinned rather than tracking master: FlagGems moves faster than the vendor
-# Triton it needs, and an unpinned install is one upstream commit away from
-# requiring a Triton the flagtree pin above does not provide. e7b4a865f is the
-# revision validated against flagtree 0.6.2a3+mthreads3.6 on the MTT S5000.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-e7b4a865fce6d85861ee91a6aca56564ef9acf7d}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
+# measures the current master, not a pinned snapshot. Override with
+# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead

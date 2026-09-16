@@ -293,13 +293,12 @@ done
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a1+ascend3.5}"
 pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
 
-# FlagGems from master. Pinned to the master commit this environment was
-# validated against -- an unpinned install is one upstream commit away from
-# requiring a Triton API the flagtree pin above does not provide -- but still a
-# master revision, not a release, so a newer one is one env var away:
-#   TORCH_FL_FLAGGEMS_REVISION=$(git ls-remote https://github.com/FlagOpen/FlagGems.git HEAD | cut -f1)
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-d45285ba6423a3400019aa330daa6877908bf3cf}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
+# measures the current master, not a pinned snapshot. Override with
+# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run, e.g.:
+#   TORCH_FL_FLAGGEMS_REVISION=$(git ls-remote https://github.com/flagos-ai/FlagGems.git HEAD | cut -f1)
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
 
 # FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead

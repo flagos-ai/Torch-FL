@@ -257,14 +257,13 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERS
 # Uninstall it again to keep the isolated venv free of the vendor ABI.
 "$VENV_PYTHON" -m pip uninstall -y torch_gcu 2>/dev/null || true
 
-# Pinned rather than tracking master: FlagGems moves faster than the vendor
-# Triton it needs, and an unpinned install is one upstream commit away from
-# requiring a Triton the flagtree pin above does not provide. 3c6f7537d is the
-# FlagGems master tip that was validated against flagtree 0.6.1+enflame3.6 on
-# the S60; see docs/vendors/gcu/flaggems-test-results.md for the measured
-# routing that pin produced.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
+# measures the current master, not a pinned snapshot. Override with
+# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run. The routing
+# measured against the old 3c6f7537d pin is recorded in
+# docs/vendors/gcu/flaggems-test-results.md.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead

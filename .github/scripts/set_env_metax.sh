@@ -242,23 +242,18 @@ PY
 
   # --- FlagGems --------------------------------------------------------------
   #
-  # The ref is not free-floating. A generated kernel calls its operator by the
-  # package-level name (`flag_gems.<name>`, see
-  # scripts/codegen_ops.py:_normalize_flaggems_qualname), which is exactly the
-  # name the active backend rebound at import -- that is what makes one
-  # generated file correct on every platform. The other side of that is a
-  # cohort dependency: a name only resolves if the installed FlagGems defines
-  # it. So the pin has to be the cohort the checked-in kernels were generated
-  # from, which is the one every routing decision in backends_metax.conf was
-  # measured against:
+  # FlagGems from the flagos-ai fork, tracking master by policy: every CI run
+  # measures the current master, not a pinned snapshot. Override with
+  # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
   #
-  #   5.4.0rc2.post1+g5a58df410, master @ 5a58df410 (2026-09-15)
-  #
-  # The previous pin (@7fb49bad) predates that cohort in both directions: 10
-  # names the artifact no longer carries were still configured against it, and
-  # names the artifact does carry are absent from it.
-  FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-5a58df410c551c4f4eb41d31887cd75fd596804a}"
-  FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+  # A generated kernel calls its operator by the package-level name
+  # (`flag_gems.<name>`, see scripts/codegen/codegen_ops.py) so a name only
+  # resolves if the installed FlagGems defines it. The cohort-gap probe below
+  # (gems_cohort_gap) enforces that against master on every run: if master drops
+  # a name the checked-in kernels call, this fails naming the gap instead of
+  # erroring per op at dispatch.
+  FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+  FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 
   # Discover flag_gems via interpreter query, not directory probe. FlagGems is
   # normally an editable install, so there is no site-packages/flag_gems directory
