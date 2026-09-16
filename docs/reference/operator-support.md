@@ -2027,6 +2027,77 @@ FlagGems grew the generated kernels while the ceiling stayed put — and since
 `gen_vendor_confs.py` intersects every platform conf with that set, the new ops
 could never reach a conf.
 
+### MUSA: the FlagGems RNG bridge reaches the vendor op modules (2026-09-16, MUSA MTT S5000)
+
+The package-level qualname change above applies to every FlagGems platform, and
+on MUSA it moved the generated kernels onto a different *module* than the one
+torch_fl's RNG bridge was patching.
+
+`flag_gems` namespaces each vendor backend by putting the backend directory on
+`sys.path` and importing `_<vendor>.ops` from it, so the MUSA op modules are
+`_mthreads.ops.<op>` — not `flag_gems.ops.<op>`. `SpecOpRegistrar` then
+republishes their entries as package-level attributes, which is why
+`flag_gems.randn` is `_mthreads.ops.randn.randn`. Before the qualname change the
+generated kernel named `flag_gems.ops.randn.randn`, the generic module;
+afterwards it names `flag_gems.randn`, the vendor override.
+
+`_patch_flaggems_philox()` in [`torch_fl/__init__.py`](../../torch_fl/__init__.py)
+rebinds `philox_backend_seed_offset` on every module that imported it with
+`from ... import`, and selected those modules with
+`mod.__name__.startswith("flag_gems")`. `_mthreads.ops.randn` does not match, so
+it kept the unpatched function. That function reads the generator through
+`state_copy.view(torch.int64)` and unpacks it into exactly two values — the CUDA
+seed/offset layout. torch_fl's flagos generators are CPU Mersenne-Twister
+generators whose state views to 632 int64s, so every dispatched MUSA `randn`
+raised `ValueError: too many values to unpack (expected 2)`.
+
+**Measured failure.** Pipeline run [35048300960](https://github.com/flagos-ai/PyTorch-Plugin-FL/actions/runs/35048300960)
+(the push of `5e4b78e` to `main`), job `104643022596` — `Platform pipeline (musa)
+/ Build and test (MUSA)`: **14 failed, 99 passed, 28 warnings in 193.65s**. The
+two preceding runs on `main` (35047336702, 35041546614) both had the MUSA job
+green, so the regression is attributable to `5e4b78e`. Both signatures resolve to
+the same call: four tests failed in-process on a literal
+`torch.randn(2, 1, device="flagos:0")`, and ten `test_musa_dispatch.py`
+subprocesses — `test_dispatch_log_musa[add.Tensor|mm|mul.Tensor|relu|softmax]`,
+`test_dispatch_log_musa_override`, `test_dispatch_log_mm_out_musa`,
+`test_flaggems_only_ops_route_and_stay_correct[asin|cosh|sinh]` — each begin with
+`torch.randn(8, 8, device='flagos:0')` as their first statement, so the child
+died before reaching the op under test. The traceback:
+
+```text
+torch_fl/__init__.py:1262: in __torch_function__
+    return func(*args, **kwargs)
+flag_gems/runtime/backend/_mthreads/ops/randn.py:96: in randn
+    philox_seed, philox_offset = philox_backend_seed_offset(increment)
+flag_gems/utils/random_utils.py:75: in philox_backend_seed_offset
+    c0, c1 = state_copy.view(torch.int64)
+E   ValueError: too many values to unpack (expected 2)
+```
+
+**Fix.** The rebinding loop now selects modules by the identity of the bound
+object (`getattr(mod, "philox_backend_seed_offset", None) is _orig`) instead of
+by module name. Every module that imported the FlagGems function by value holds
+that exact object and is rebound, whatever it is called; a module that does not
+is left alone. `flag_gems/ops/*` and `flag_gems/runtime/backend/_<vendor>/ops/*`
+are covered by the same rule, and so is any backend added later. Only
+`flag_gems/utils/random_utils.py` defines the function — every other reference in
+the tree is a `from flag_gems.utils.random_utils import philox_backend_seed_offset`
+— so the identity set is exactly the set that needs rebinding.
+
+**No route changed.** `randn`, `randn_like`, `rand`, `rand_like`, `randperm` and
+`native_dropout` stay `flaggems  # musa` in
+[`torch_fl/configs/backends_musa.conf`](../../torch_fl/configs/backends_musa.conf).
+The affected MUSA FlagGems row (`randn`, `randn_like` -> `flaggems # musa`, finite
+and seed-reproducible over 65536 samples, 4/4) is unchanged and is what the fix
+restores; no operator was added, enabled, removed, disabled or rerouted.
+
+**Evidence gap.** The fix is validated by unit coverage of the rebinding
+(`tests/unit/test_musa_rng_bridge.py::test_flaggems_philox_reaches_vendor_backend_modules`),
+which fails against the pre-fix selector, and by the MUSA pipeline on this
+change. The broader MUSA FlagGems cohort table below was **not revalidated**:
+MTT S5000 hardware is not available to this change, and no
+`tests/manual/flaggems_overload_survey.py` re-survey was run.
+
 ### MetaX: FlagGems cohort widened to FlagGems master, sixteen ops withdrawn (2026-09-15, MetaX C550)
 
 The shared Python coverage set `FLAGGEMS_PYTHON_OPS` in
@@ -2396,6 +2467,7 @@ MetaX kernel mode or for additional MACA releases and devices.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-16 | MUSA MTT S5000 | MUSA FlagGems RNG bridge | `5e4b78e` (the qualname change above) moved MUSA's generated kernels from `flag_gems.ops.randn.randn` to `flag_gems.randn`, which `SpecOpRegistrar` has rebound to the vendor override `_mthreads.ops.randn.randn`. `_patch_flaggems_philox()` selected the modules to rebind with `mod.__name__.startswith("flag_gems")`, which that module does not match, so the vendor kernel reached the unpatched `philox_backend_seed_offset` and raised `ValueError: too many values to unpack (expected 2)` unpacking the flagos MT19937 state. The loop now matches the bound object's identity instead of the module name. No route changed: `randn`, `randn_like`, `rand`, `rand_like`, `randperm`, `native_dropout` stay `flaggems  # musa`. | `Platform pipeline (musa) / Build and test (MUSA)` on run `35048300960` (push of `5e4b78e`) failed with **14 failed, 99 passed, 28 warnings in 193.65s**; the preceding `main` runs on `35047336702` and `35041546614` were green on MUSA. Both signatures are the same `torch.randn(..., device="flagos:0")` call: 4 in-process failures on `ValueError` at `flag_gems/utils/random_utils.py:75`, and 10 `test_musa_dispatch.py` subprocesses whose first statement is that call. Regression coverage: `tests/unit/test_musa_rng_bridge.py::test_flaggems_philox_reaches_vendor_backend_modules` fails against the pre-fix selector (`999 != -9223372036854775803`) and passes after; `tests/integration/ops/test_musa_flaggems.py::test_flaggems_randn_shares_native_generator_reservations` now drives `flag_gems.randn` rather than the generic module, which the MUSA dispatch never reached. Full detail: "MUSA: the FlagGems RNG bridge reaches the vendor op modules" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | FlagGems entry-point resolution (`5a58df410`) | `_normalize_flaggems_qualname` in `scripts/codegen/codegen_ops.py` now emits `flag_gems.<fn>` instead of `flag_gems.ops.<module>.<fn>`, so a generated kernel reaches the entry point the active backend has rebound rather than the generic module the alias rewrite pinned. 72 of the 666 qualnames in the checked-in kernels resolve to a `_metax.ops.*` override and were running the generic kernel before this. `codegen_ops.py` also becomes the writer of the `FLAGGEMS_PYTHON_OPS` ceiling in `scripts/codegen/backend_coverage.py` (`render_flaggems_coverage`, minus the override-only ops), which was previously a hand-carried literal that capped every conf built from it. Both apply to every FlagGems platform; no route changed on Ascend, GCU, MUSA, DCU or PPU. | Counted over `csrc/aten/generated/flaggems_python_kernels.cc` with `flag_gems 5.4.0rc2.post1+g5a58df410` on the C550 host: 688 call sites, 666 distinct qualnames, 0 that are not two-component `flag_gems.<op>`, 0 unresolvable on the package, 594 resolving inside `flag_gems` and 72 to a `_metax.ops.*` module. `tests/integration/ops/test_flaggems_conf_consistency.py` requires the two-component form and now compares the conf, the override-only routes and the generated kernels as sets (7 passed); `tests/integration/ops/test_metax_flaggems.py` on C550 reports **90 passed in 756.07s**, 0 failed. Full detail: "MetaX: generated FlagGems calls name the package-level entry point" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | FlagGems master coverage cohort (`5a58df410`) | Rebuilt `FLAGGEMS_PYTHON_OPS` on the FlagGems master cohort pinned at `5a58df410c551c4f4eb41d31887cd75fd596804a`: 482 -> 639 overloads, 158 added and `mul_.Tensor` removed because that cohort does not cover it. The newly covered overloads are withheld from the Ascend, GCU and MUSA configurations by `FLAGGEMS_PENDING_NATIVE_VENDORS` / `FLAGGEMS_PENDING_NATIVE_OPS` so their shipped counts do not move without hardware; DCU loses `mul_.Tensor` to `cuda` (three lines) for the same reason as MetaX. MetaX was re-measured against the raised ceiling and **sixteen overloads were withdrawn back to the CUDA boxing kernel** after a differential A/B probe showed each one passing on `cuda` and failing on `flaggems`: `special_bessel_j0`, `special_i1e`, `special_i1e.out`, `special_chebyshev_polynomial_w.out` (kernel asserts its input is a real CUDA tensor), `nansum.out`, `lu_unpack.out`, `linalg_matrix_exp.out`, `sum.out`, `_cdist_forward` (the gems wrapper cannot serve the caller's call form), and `_compute_linear_combination`, `_compute_linear_combination.out`, `_fused_rms_norm`, `igamma`, `igamma_`, `logit_backward`, `special_shifted_chebyshev_polynomial_t` (wrong result). `backends_metax.conf`: 443 `flaggems` / 11 `flaggems_cpp` / 1582 `cuda` (committed) -> 592 / 12 / 1432, via the widened intermediate 608 / 12 / 1416. Ascend, GCU, MUSA, DCU and PPU are **not revalidated** against the raised ceiling; only DCU's `mul_.Tensor` line moves and no MetaX measurement is transferred to them. | Screening survey over the 166 overloads whose route changed in `backends_metax.conf`, `2d-f32` profile, harness v5: `{"registered": 166, "tested": 97, "STRICT": 76, "FAILED": 21, "UNTESTED": 69}`, `basic_executable` 76. The 21 `FAILED` overloads re-run with `FLAGOS_OP_<op>=cuda` (one host-built input pair moved with `.to("flagos")`, both arms identical values): 16 `cuda` PASS with the `flaggems` verdicts in the table above, 5 fail on both routes so they keep their route. Replaying the 16 through the shipped configuration with no override reproduces 16 PASS. `gen_vendor_confs.py` idempotent (two runs, empty diff; `--check` exits 0 for the MetaX file), and running the two generators over this tree leaves `backends_metax.conf`, every generated artifact and `backend_coverage.py` byte-identical — the out-of-scope configurations do move on that first pass, which the ordering note above records. Full detail: "MetaX: FlagGems cohort widened to FlagGems master, sixteen ops withdrawn" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | MetaX FlagGems hybrid path | Promoted 8 overloads to the Python FlagGems path on MetaX only, through `METAX_FLAGGEMS_MEASURED` in `scripts/codegen/gen_vendor_confs.py`, because their `flag_gems.<name>` entry points exist in the pinned cohort while the shared hold was written against an older one: `_embedding_bag_per_sample_weights_backward`, `_native_batch_norm_legit_functional`, `binary_cross_entropy_with_logits`, `linalg_ldl_solve`, `special_bessel_j1`, `unsqueeze`, `unsqueeze_`. Two of them were failing outright on the cuda boxing route before this, so the promotion is a fix and not a preference: `special_bessel_j1` raises `cudaErrorMemoryValueTooLarge` through maca, and `linalg_ldl_solve` needs a `cusolverDnXsytrs_bufferSize` symbol maca does not provide. The eighth, `igammac_`, was promoted and then withdrawn the same day (see "`igammac_` rerouted to CUDA boxing" above). No other platform's routes changed. | `tests/integration/ops/test_metax_flaggems.py` on C550 with `flagtree 0.6.1+metax3.6` / `flag_gems 5.4.0rc2.post1+g5a58df410`: **90 passed in 756.07s**, 0 failed — the routing cases, the execution cases, and the exclusion cases including the three representative withdrawals added by the cohort widening recorded above. `gen_vendor_confs.py` idempotent for the MetaX configuration. Ascend, GCU, MUSA, DCU and PPU are **not revalidated** by this change -- `METAX_FLAGGEMS_MEASURED` is consulted only for `backends_metax.conf`. |

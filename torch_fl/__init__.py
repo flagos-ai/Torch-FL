@@ -818,11 +818,15 @@ def _patch_flaggems_philox():
 
         # RNG modules bind this function with ``from ... import`` at import time,
         # so update every already-loaded copy as well as the canonical module.
+        # Match on the bound object rather than on the module name: FlagGems
+        # republishes each vendor backend's op tree under the package-level names
+        # (`flag_gems.randn` is `_mthreads.ops.randn.randn` on MUSA), and those
+        # modules are named `_mthreads.ops.*`, not `flag_gems.*`. A name filter
+        # silently skips them and the vendor kernel reaches the unpatched
+        # function, whose `state_copy.view(torch.int64)` unpacks the flagos
+        # generator's MT19937 state into two variables and raises ValueError.
         for mod in list(sys.modules.values()):
-            name = getattr(mod, "__name__", "")
-            if name.startswith("flag_gems") and hasattr(
-                mod, "philox_backend_seed_offset"
-            ):
+            if getattr(mod, "philox_backend_seed_offset", None) is _orig:
                 mod.philox_backend_seed_offset = _patched
         random_utils.philox_backend_seed_offset = _patched
     except Exception:

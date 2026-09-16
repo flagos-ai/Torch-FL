@@ -98,7 +98,13 @@ def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
 
 def test_flaggems_randn_shares_native_generator_reservations():
     _require_flaggems_mthreads()
-    from flag_gems.ops.randn import randn as flaggems_randn
+    import flag_gems
+
+    # The package-level name, not ``flag_gems.ops.randn``: that is what the
+    # generated kernel resolves to, and on MUSA ``SpecOpRegistrar`` has rebound
+    # it to the vendor override ``_mthreads.ops.randn``. Driving the generic
+    # module here would exercise a callable the dispatch never reaches.
+    flaggems_randn = flag_gems.randn
 
     def run(seed):
         torch.flagos.manual_seed(seed)
