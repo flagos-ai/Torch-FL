@@ -612,6 +612,19 @@ export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 export FLAGTREE_VERSION
 export GEMS_VENDOR="${GEMS_VENDOR:-nvidia}"
+# TEMPORARY -- remove once the CUDA FlagTree wheel bundles the FlagTune
+# manifest machinery (triton.flagtune.runtime.errors + hosted manifest
+# defaults; both landed upstream 2026-09-16, after flagtree===0.6.2a2 was
+# cut). Without it, every FlagGems-routed kernel whose autotuner takes the
+# Cost Model path dies loading the model bundle: the old wheel has no
+# FLAGTUNE_MANIFEST_URL default and the runner provides none, so
+# model_sources raises ManifestFetchError (TestAutograd goes red on it).
+# USE_FLAGTUNE=0 forces TuningMode.DEFAULT in flag_gems.runtime.resolve_
+# tuning_mode, restoring the legacy default autotune policy -- the behavior
+# this CI was green with before FlagTune. Must read exactly 0/1.
+# CUDA-only exception: the other six wheels resolve the probe (their jobs are
+# green), so they keep tuning coverage; do NOT copy this export elsewhere.
+export USE_FLAGTUNE=0
 
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
 CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
@@ -691,6 +704,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
     FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGTREE_VERSION GEMS_VENDOR \
+    USE_FLAGTUNE \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
