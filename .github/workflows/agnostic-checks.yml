@@ -1,0 +1,82 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Platform-agnostic repository checks.
+#
+# This job runs the checks that need no accelerator, no vendor image, and no
+# built wheel, so they fail in seconds on ubuntu-latest instead of after a
+# multi-minute hardware job. ci.yml gates every platform pipeline on this job
+# (through discover-platforms), which is what stops a repository-wide breakage
+# -- a stale generated conf, a shell syntax error in a setup script -- from
+# surfacing as a red hardware job on an unrelated platform (e.g. a PPU conf
+# drift failing the DCU pipeline's trailing unit group).
+#
+# The test list below is the subset of tests/unit verified to pass with only
+# pytest installed (no torch, no device). Everything else in tests/unit needs
+# torch, a built torch_fl, or hardware, and stays on the hardware runners --
+# today that means the DCU manifest's per-file group, which keeps running the
+# whole directory including these files. tests/unit/bpu/ is excluded too: it
+# imports torch and is collected nowhere today (run_unit_tests.py globs
+# non-recursively), so wiring it in needs a CPU-torch install first.
+
+name: Platform-agnostic checks
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  agnostic-checks:
+    name: Platform-agnostic checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Check setup-script syntax
+        run: |
+          set -euo pipefail
+          for script in .github/scripts/set_env_*.sh; do
+            bash -n "$script"
+            echo "OK $script"
+          done
+
+      - name: Run platform-agnostic unit tests
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/unit/test_dcu_core_decoupling.py \
+            tests/unit/test_dcu_env_script.py \
+            tests/unit/test_gen_vendor_confs.py \
+            tests/unit/test_integration_workdir.py \
+            tests/unit/test_patch_triton_ascend.py \
+            tests/unit/test_platform_support_detect.py \
+            tests/unit/test_run_integration_tests.py \
+            tests/unit/test_run_unit_tests.py \
+            tests/unit/test_transformers_automation.py \
+            tests/unit/test_transformers_hf_tests.py \
+            tests/unit/test_transformers_model_probe.py \
+            -v --tb=short -p no:cacheprovider

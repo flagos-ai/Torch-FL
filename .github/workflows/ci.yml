@@ -57,9 +57,19 @@ jobs:
   lint:
     uses: ./.github/workflows/lint.yml
 
+  # Repository-wide checks that need no accelerator, no vendor image, and no
+  # built wheel (generated-conf freshness, setup-script syntax, hardware-free
+  # unit tests). Runs on ubuntu-latest in seconds; discover-platforms gates on
+  # it so every hardware pipeline below fails fast instead of burning a
+  # vendor job on a breakage no platform owns.
+  agnostic-checks:
+    name: Platform-agnostic checks
+    needs: lint
+    uses: ./.github/workflows/agnostic-checks.yml
+
   discover-platforms:
     name: Discover platforms
-    needs: lint
+    needs: [lint, agnostic-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
