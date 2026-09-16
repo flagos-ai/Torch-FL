@@ -207,7 +207,7 @@ An isolation result is valid only when pytest collected exactly one test.
 ## Output Files
 
 The automatic sweep writes a timestamped directory under
-`/tmp/transformers-auto-sweep-<model>-*` containing:
+`${TMPDIR:-/tmp}/transformers-auto-sweep-<model>-*` containing:
 
 ```text
 test-results.json  raw official-runner results

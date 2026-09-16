@@ -522,18 +522,26 @@ def child_env(source: Path, report: Path | None = None, offline: bool = False) -
     env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
     if report is not None:
         env["HF_TEST_REPORT"] = str(report)
-    # This repository also has a top-level ``tests`` package. If it stays
-    # importable, HF's ``tests.models...`` imports resolve into the wrong tree
-    # and every model test errors on import.
-    path_entries = [
-        entry
+    # This repository also has a top-level ``tests`` package. If it stays ahead
+    # of the source tree, HF's ``tests.models...`` imports resolve into the wrong
+    # tree and every model test errors on import. The source tree therefore comes
+    # first, and a caller-supplied repository root is moved to the end instead of
+    # being dropped: ``hf_device_spec.py`` imports ``torch_fl``, which a checkout
+    # that was never installed cannot provide from a private work directory, and
+    # discarding the caller's own PYTHONPATH turned a configured interpreter into
+    # "the child died while starting up".  A caller that wants the installed
+    # build simply leaves the repository off PYTHONPATH.
+    entries = [
+        str(Path(entry).resolve())
         for entry in env.get("PYTHONPATH", "").split(os.pathsep)
-        if entry and Path(entry).resolve() != REPO_ROOT
+        if entry
     ]
+    repo_entries = [entry for entry in entries if entry == str(REPO_ROOT)]
+    path_entries = [entry for entry in entries if entry != str(REPO_ROOT)]
     # HF's ``tests`` package must be importable by name: its model tests use
     # relative imports such as ``from ...causal_lm_tester import ...``.
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(source), str(source / "utils"), *path_entries]
+        [str(source), str(source / "utils"), *path_entries, *repo_entries]
     )
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
@@ -594,42 +602,51 @@ except Exception as exc:
     problems.append(f"the device spec did not import: {exc!r}")
 
 report["expected_device"] = expected_device
-if module is not None and report.get("spec_device") != expected_device:
-    problems.append(
-        f"the device spec names {report['spec_device']!r}, not {expected_device!r}"
-    )
-registered = report.get("registered_device")
-if registered is not None and registered != expected_device:
-    problems.append(
-        f"torch_fl registers {registered!r} but the tests run on {expected_device!r}"
-    )
-
-if callable(count_fn):
-    try:
-        report["device_count"] = count_fn()
-    except Exception as exc:
-        report["device_count"] = None
-        problems.append(f"enumerating accelerator devices failed: {exc!r}")
-    else:
-        count = report["device_count"]
-        if not isinstance(count, int) or count < 1:
-            problems.append(
-                "no accelerator is visible: device_count() reported "
-                f"{count!r}"
-            )
-
+# Every comparison below decides whether a run is declared invalid, so what it
+# learns is the caller's only diagnosis of one that is.  None of it may abort
+# this child: a check that raised here --- reading a key the spec never
+# published, say --- used to end the process before it wrote anything, and the
+# caller was left with "the preflight published no verdict" and no reason for it.
 try:
-    import transformers
+    if module is not None and report.get("spec_device") != expected_device:
+        problems.append(
+            f"the device spec names {report.get('spec_device')!r},"
+            f" not {expected_device!r}"
+        )
+    registered = report.get("registered_device")
+    if registered is not None and registered != expected_device:
+        problems.append(
+            f"torch_fl registers {registered!r} but the tests run on {expected_device!r}"
+        )
 
-    report["transformers"] = transformers.__version__
+    if callable(count_fn):
+        try:
+            report["device_count"] = count_fn()
+        except Exception as exc:
+            report["device_count"] = None
+            problems.append(f"enumerating accelerator devices failed: {exc!r}")
+        else:
+            count = report["device_count"]
+            if not isinstance(count, int) or count < 1:
+                problems.append(
+                    "no accelerator is visible: device_count() reported "
+                    f"{count!r}"
+                )
+
+    try:
+        import transformers
+
+        report["transformers"] = transformers.__version__
+    except Exception as exc:
+        report["transformers"] = None
+        problems.append(f"transformers did not import: {exc!r}")
+    if report.get("transformers") not in (None, expected_version):
+        problems.append(
+            f"transformers {report['transformers']} is installed but the source tree "
+            f"is {expected_version}"
+        )
 except Exception as exc:
-    report["transformers"] = None
-    problems.append(f"transformers did not import: {exc!r}")
-if report.get("transformers") not in (None, expected_version):
-    problems.append(
-        f"transformers {report['transformers']} is installed but the source tree "
-        f"is {expected_version}"
-    )
+    problems.append(f"the environment checks could not run: {exc!r}")
 
 with open(report_path, "w") as file:
     json.dump(report, file, indent=1, sort_keys=True)

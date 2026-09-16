@@ -367,6 +367,23 @@ passed". `transformers_auto_sweep.sh` and `transformers_batch_sweep.sh` map the
 three codes to `clean` / `findings` / `not measured` and exit `2` themselves when
 any model measured nothing.
 
+Every preflight check runs under one guard, so the child always publishes a
+report. A verdict of `the preflight published no verdict` therefore means the
+child died before it could write one — treat it as a defect in the harness, not
+as evidence about the device, and do not summarize the run at all.
+
+Pick the interpreter and the build before running anything. Tests execute from a
+private work directory, so `torch_fl` must be importable without the repository
+as the working directory: `PYTHONPATH="$PWD"` measures the working tree, and
+leaving it unset measures an installed build. `transformers_auto_sweep.sh`
+checks exactly that pair before it starts, from an empty directory, and exits `2`
+naming the module it could not import:
+
+```bash
+PYTHON=/opt/conda/bin/python3 PYTHONPATH="$PWD" \
+    bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
+```
+
 ### The device name has exactly one source
 
 The test device is the `DEVICE_NAME` in `tests/manual/hf_device_spec.py`. The

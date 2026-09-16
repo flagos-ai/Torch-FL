@@ -32,7 +32,7 @@ if [ -z "$MODEL" ]; then
     exit 1
 fi
 
-WORK_DIR=/tmp/transformers-auto-sweep-${MODEL}-$(date +%Y%m%d-%H%M%S)
+WORK_DIR=${TMPDIR:-/tmp}/transformers-auto-sweep-${MODEL}-$(date +%Y%m%d-%H%M%S)
 mkdir -p "${WORK_DIR}"
 
 echo "======================================================================="
@@ -48,8 +48,30 @@ echo ""
 
 # Step 0: the interpreter. A box whose ``python`` has no torch, transformers or
 # torch_fl otherwise fails much later, as "the model name must be wrong".
+#
+# The probe runs from an empty directory, and separates the verdict from the
+# interpreter's own chatter, because either mistake makes this check disagree
+# with the run it is supposed to predict:
+#
+#   * ``python -c`` puts the working directory on ``sys.path``. Probing from the
+#     repository root therefore imports this checkout's ``torch_fl`` and reports
+#     a healthy interpreter for a box where no test child --- every one of them
+#     runs from a private work directory --- can import it.
+#   * The verdict is printed on stdout. Merging stderr into it turns any warning
+#     the device build emits while importing into a "cannot import" verdict, so a
+#     correctly configured interpreter is rejected as a broken one.
+#
+# PYTHONPATH is read the same way the children read it, so exporting the
+# repository root is what makes a checkout usable, and leaving it unset is what
+# selects an installed build.
 echo "[0/6] Checking ${PYTHON} for torch, transformers and torch_fl..."
-if ! MISSING=$(${PYTHON} -c '
+PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/transformers-probe-XXXXXX")
+PROBE_ERR="${PROBE_DIR}/stderr.txt"
+trap 'rm -rf "${PROBE_DIR}"' EXIT
+
+MISSING=$(
+    cd "${PROBE_DIR}" || exit 1
+    ${PYTHON} -c '
 import importlib
 
 missing = []
@@ -59,16 +81,22 @@ for name in ("torch", "transformers", "torch_fl"):
     except Exception as exc:
         missing.append(f"{name} ({exc})")
 print("; ".join(missing))
-' 2>&1); then
-    echo "environment error: ${PYTHON} could not run the import check:" >&2
-    echo "  ${MISSING}" >&2
+' 2>"${PROBE_ERR}"
+)
+PROBE_STATUS=$?
+
+if [ "${PROBE_STATUS}" -ne 0 ]; then
+    echo "environment error: ${PYTHON} could not run the import check (exit ${PROBE_STATUS}):" >&2
+    sed 's/^/  /' "${PROBE_ERR}" >&2
     echo "  Set PYTHON to an interpreter that has the accelerator build installed." >&2
     exit 2
 fi
 if [ -n "${MISSING}" ]; then
     echo "environment error: ${PYTHON} cannot import the test environment:" >&2
     echo "  ${MISSING}" >&2
-    echo "  Set PYTHON to an interpreter that has the accelerator build installed." >&2
+    echo "  The interpreter is probed from an empty directory, because that is where" >&2
+    echo "  every test child runs. Install the build into ${PYTHON}, or export" >&2
+    echo "  PYTHONPATH pointing at an already installed torch_fl." >&2
     exit 2
 fi
 echo "✓ ${PYTHON} has torch, transformers and torch_fl"

@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import types
@@ -176,10 +177,32 @@ def test_child_env_sets_hf_device_contract(monkeypatch, tmp_path):
     assert env["TRANSFORMERS_TEST_DEVICE_SPEC"] == "hf_device_spec.py"
     assert env["_HF_TESTS_SOURCE"] == str(tmp_path)
     assert env["HF_HUB_OFFLINE"] == "1"
-    # HF's own ``tests`` package must win over this repository's.
+    # HF's own ``tests`` package must win over this repository's, so the source
+    # tree comes first and the caller-supplied repository root is kept --- the
+    # device spec imports ``torch_fl``, which a checkout provides from nowhere
+    # else --- but only after it.
     entries = env["PYTHONPATH"].split(os.pathsep)
     assert entries[0] == str(tmp_path)
-    assert str(REPO_ROOT) not in entries
+    assert entries[1] == str(tmp_path / "utils")
+    assert entries[-1] == str(REPO_ROOT)
+    assert entries.count(str(REPO_ROOT)) == 1
+
+
+def test_child_env_leaves_the_repository_off_the_path_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    env = runner.child_env(tmp_path, tmp_path / "report.jsonl", False)
+    assert str(REPO_ROOT) not in env["PYTHONPATH"].split(os.pathsep)
+
+
+def test_child_env_resolves_relative_path_entries_against_the_caller(
+    monkeypatch, tmp_path
+):
+    """A relative entry means the caller's directory, not the child's work directory."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", "relative-elsewhere"]))
+    env = runner.child_env(tmp_path / "source", tmp_path / "report.jsonl", False)
+    entries = env["PYTHONPATH"].split(os.pathsep)
+    assert entries[-2:] == [str(tmp_path), str(tmp_path / "relative-elsewhere")]
 
 
 def test_child_env_does_not_override_test_behaviour(monkeypatch, tmp_path):
@@ -627,3 +650,49 @@ def test_all_mode_refuses_a_broken_environment_before_running_tests(
     assert written["verdict"] == "ENVIRONMENT_ERROR"
     assert "no accelerator is visible" in written["error"]
     assert written["environment"]["preflight"]["problems"]
+
+
+# --- preflight ----------------------------------------------------------------
+#
+# The stub above replaces the preflight, so the script the child actually runs is
+# only exercised here. Its contract is that it always publishes a verdict: a
+# check that raises while reporting a problem must not take the diagnosis down
+# with it, because "the preflight published no verdict" is indistinguishable from
+# a child that never started.
+
+
+def test_preflight_publishes_its_diagnosis_instead_of_dying(tmp_path):
+    """A spec that cannot be imported is still reported as the reason.
+
+    Loading the spec is what publishes ``spec_device``. When the load raises, the
+    comparison that reads it used to raise ``KeyError`` in the child, which ended
+    the process before it wrote the report: the caller saw a bare "no verdict".
+    """
+    spec = tmp_path / "hf_device_spec.py"
+    spec.write_text("import this_module_does_not_exist_anywhere\n")
+    script = tmp_path / "hf_preflight.py"
+    script.write_text(runner.PREFLIGHT)
+    report = tmp_path / "preflight.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(spec),
+            runner.spec_device(),
+            "5.16.1",
+            str(report),
+        ],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert report.exists(), "the child died before publishing a verdict"
+    published = json.loads(report.read_text())
+    diagnosis = " ".join(published["problems"])
+    assert "the device spec did not import" in diagnosis
+    assert "this_module_does_not_exist_anywhere" in diagnosis
+    assert published["expected_device"] == runner.spec_device()

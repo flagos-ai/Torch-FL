@@ -22,6 +22,7 @@ the runner actually emits.
 """
 
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 
@@ -789,3 +790,91 @@ def test_device_name_rejects_a_spec_without_the_assignment(tmp_path):
     spec.write_text("MANUAL_SEED_FN = None\n")
     with pytest.raises(source.SourceError, match="no DEVICE_NAME"):
         source.device_name(spec)
+
+
+# --- the sweep's interpreter probe --------------------------------------------
+#
+# The probe decides whether a run is worth starting, so it has to answer the
+# question the test children will ask. Two ways of getting that wrong both
+# shipped, and neither is visible from the Python side: the interpreter's own
+# warnings were read as a missing-module verdict, and the repository root was
+# allowed to answer for a checkout that was never installed. These tests drive
+# the real script with a stand-in interpreter.
+
+AUTO_SWEEP = REPO_ROOT / "scripts" / "transformers" / "transformers_auto_sweep.sh"
+
+
+def fake_interpreter(tmp_path, stdout="", stderr="", status=0, cwd_log=None):
+    """A stand-in for the accelerator interpreter.
+
+    It answers the step-zero probe and fails every other invocation, so a test
+    never starts the real suite.
+    """
+    lines = ["#!/bin/bash", 'if [ "${1:-}" = "-c" ]; then']
+    if cwd_log is not None:
+        lines.append(f'  pwd >> "{cwd_log}"')
+    if stderr:
+        lines.append(f'  echo "{stderr}" >&2')
+    if stdout:
+        lines.append(f'  echo "{stdout}"')
+    lines.append(f"  exit {status}")
+    lines.append("fi")
+    lines.append('echo "fake interpreter: cannot run the suite" >&2')
+    lines.append("exit 2")
+    path = tmp_path / "fake-interpreter"
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o755)
+    return path
+
+
+def run_sweep(interpreter, tmp_path, model="bert"):
+    return subprocess.run(
+        ["bash", str(AUTO_SWEEP), model, "MetaX"],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHON": str(interpreter), "TMPDIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def test_sweep_probe_does_not_read_interpreter_chatter_as_a_verdict(tmp_path):
+    interpreter = fake_interpreter(
+        tmp_path,
+        stderr="UserWarning: Could not find flash_attn package installed",
+        stdout="",
+    )
+    proc = run_sweep(interpreter, tmp_path)
+    assert "cannot import the test environment" not in proc.stderr
+    assert "has torch, transformers and torch_fl" in proc.stdout
+    # The probe passed, so the sweep moved on to the measurement.
+    assert "[1/6]" in proc.stdout
+
+
+def test_sweep_probe_reports_the_missing_module_it_was_told_about(tmp_path):
+    interpreter = fake_interpreter(
+        tmp_path, stdout="torch_fl (No module named 'torch_fl')"
+    )
+    proc = run_sweep(interpreter, tmp_path)
+    assert proc.returncode == 2
+    assert "cannot import the test environment" in proc.stderr
+    assert "torch_fl (No module named 'torch_fl')" in proc.stderr
+    assert "[1/6]" not in proc.stdout
+
+
+def test_sweep_probe_runs_outside_the_repository(tmp_path):
+    """The working directory is on ``sys.path`` for ``python -c``.
+
+    Probing from the repository root would import a checkout's ``torch_fl`` and
+    call an interpreter healthy while every test child, which runs from a private
+    work directory, cannot import it.
+    """
+    cwd_log = tmp_path / "probe-cwd"
+    interpreter = fake_interpreter(tmp_path, cwd_log=cwd_log)
+    run_sweep(interpreter, tmp_path)
+
+    probed = [Path(line) for line in cwd_log.read_text().splitlines() if line]
+    assert probed, "the probe never ran"
+    for path in probed:
+        assert path != REPO_ROOT
+        assert not path.is_relative_to(REPO_ROOT)

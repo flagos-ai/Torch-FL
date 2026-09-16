@@ -245,7 +245,17 @@ pipeline, then prints the command shape for a later explicitly authorized filing
 action. It does not invoke the filer. It resolves one interpreter
 (`${PYTHON:-python3}`) and checks that it can import `torch`, `transformers`, and
 `torch_fl` before the first measurement, so a box without them fails loudly
-rather than surfacing as a model-name error. It does not hardcode a cache path.
+rather than surfacing as a model-name error. The probe runs from an empty
+directory, because that is where every test child runs and because `python -c`
+puts the working directory on `sys.path`: probing from the repository root would
+import the checkout's own `torch_fl` and call an interpreter healthy that no
+child can use. The verdict is the probe's stdout and the interpreter's warnings
+go to a file, because merging the two turns a working device build's import
+warnings into a "cannot import" verdict. `PYTHONPATH` is therefore what selects
+the build — export the repository root to measure the working tree, leave it
+unset to measure an installed one — and the runner keeps that entry on the
+children's path for the same reason. The sweep does not hardcode a cache path,
+and its work directory honours `TMPDIR`.
 
 Both sweeps consume the runner's three exit codes — `0` measured and clean, `1`
 measured with findings, `2` nothing measured — and the batch driver reports
@@ -321,17 +331,33 @@ hand-written and had drifted from what the runner emits.
     recorded provenance can disagree with the spec the tests actually read.
 13. A dedup check that could not run is not a new finding. `DEDUP_UNAVAILABLE`
     and `NOT_CHECKED` both mean `should_file = false`.
+14. The environment gate asks the question the test children will ask. The
+    interpreter probe runs from an empty directory — never the repository root,
+    which `python -c` puts on `sys.path` but the children never see — and reads
+    its verdict from stdout alone, so the device build's import warnings cannot
+    be mistaken for missing modules. A preflight always publishes a named
+    diagnosis; a check that raises while reporting a problem adds "the
+    environment checks could not run" rather than killing the child, because "no
+    verdict" is indistinguishable from a child that never started.
 
 ## Usage
 
 Run one architecture through the report-only path:
 
 ```bash
-bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
+# The working tree, when the repository is not installed:
+PYTHON=/opt/conda/bin/python3 PYTHONPATH="$PWD" \
+    bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
+
+# An installed build, with no repository on the path:
+PYTHON=/opt/conda/bin/python3 \
+    bash scripts/transformers/transformers_auto_sweep.sh qwen3 "MUSA MTT S5000"
 ```
 
-The sweep's exit code is the contract: `0` measured and clean, `1` measured with
-findings to review, `2` nothing measured.
+`PYTHON` selects the interpreter and `PYTHONPATH` selects the build, and step 0
+refuses to start if that pair cannot import `torch`, `transformers` and
+`torch_fl` from an empty directory. The sweep's exit code is the contract: `0`
+measured and clean, `1` measured with findings to review, `2` nothing measured.
 
 Or run the stages individually:
 

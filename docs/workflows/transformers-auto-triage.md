@@ -75,7 +75,10 @@ The preflight checks that `torch_fl` imports, that the registered PrivateUse1
 name equals the spec's `DEVICE_NAME`, that `torch.flagos.device_count()` is
 positive, that the three HF hooks are callable, and that the installed
 `transformers` version is the requested one. A run that fails it measured
-nothing and exits `2`.
+nothing and exits `2`. Every check runs under one guard, so the child always
+writes its report: a check that raises is recorded as `the environment checks
+could not run` alongside whatever else it learned, rather than ending the
+process with nothing to read.
 
 A `BATCH_CRASHED` record means that nodeid did not report before its batch
 stopped. It is not a confirmed per-test defect.
@@ -352,6 +355,28 @@ Nothing was measured. The runner exits `2` for this. Read
 `DEVICE_NAME`, a device count of zero, a missing HF hook, or a `transformers`
 version that is not the requested one. Fix the environment and re-run; do not
 treat the run as coverage, and do not file an issue from it.
+
+A verdict of `the preflight published no verdict` means the check died before it
+could report anything. That is itself a defect worth reporting, but the common
+cause is a child that never started: the tests run from a private work
+directory, so `torch_fl` has to be importable without the repository as the
+working directory. `PYTHONPATH="$PWD"` selects a working tree, and leaving it
+unset selects an installed build. Run the sweep's own gate to see the same check
+the preflight performs:
+
+```bash
+PYTHON=/opt/conda/bin/python3 PYTHONPATH="$PWD" \
+    bash scripts/transformers/transformers_auto_sweep.sh bert MetaX
+```
+
+### The sweep refuses to start with `cannot import the test environment`
+
+Step 0 probes the interpreter from an empty directory, deliberately: that is
+where every test child runs, and `python -c` would otherwise import the
+repository's own `torch_fl` merely because the sweep was launched from the
+repository root. The message names the module that could not be imported. Install
+the accelerator build into `PYTHON`, or export `PYTHONPATH` pointing at the
+checkout or the installed package that provides `torch_fl`.
 
 ### All findings are `UNKNOWN`
 
