@@ -28,7 +28,12 @@ be overridden from the command line.
 
 ``torch`` is a parameter, never a module-scope import. On the flagos path
 ``import torch_fl`` has to precede ``import torch``, and importing torch here
-would take that decision away from the caller.
+would take that decision away from the caller. That import is also where the
+one vendor workaround lives: the MetaX libtorch cannot cat onto the empty
+tensor transformers seeds its KV cache with, so :func:`import_torch` installs
+the seed transformers 4.x used instead. It is installed on every backend --
+a workaround that ran on one half of a paired run only would make the two
+halves incomparable.
 """
 
 DEFAULT_DEVICE = "flagos"
@@ -52,7 +57,50 @@ def import_torch(device_kind):
         import torch_fl  # noqa: F401  - must precede `import torch`
     import torch
 
+    _seed_dynamic_cache_directly(torch)
+
     return torch
+
+
+def _seed_dynamic_cache_directly(torch):
+    """Make transformers' KV cache seed itself without an empty ``cat``.
+
+    ``DynamicLayer.lazy_initialization`` seeds the cache with
+    ``torch.tensor([])`` -- a 1-D tensor -- and ``update`` then cats the 4-D key
+    states onto it along ``dim=-2``. PyTorch wraps that dim against the first
+    *non-empty* operand, so on a stock build the seed drops out of the cat and
+    the result is just the key states. The MetaX libtorch wraps it against the
+    first operand whatever its shape, and the Qwen2.5-VL text encoder then dies
+    on its first forward with "Dimension out of range (expected to be in range
+    of [-1, 0], but got 2)".
+
+    Seeding with the key states themselves is what transformers 4.x did, and it
+    yields the same cache on every backend, so this is not a correctness fix --
+    it is what keeps the vendor and flagos halves of a paired run comparable.
+    Tolerates transformers being absent: only the stages that encode a prompt
+    reach this code.
+    """
+    try:
+        from transformers.cache_utils import DynamicLayer
+    except ImportError:
+        return
+
+    if getattr(DynamicLayer, "flagos_direct_seed", False):
+        return
+
+    def update(self, key_states, value_states, *args, **kwargs):
+        if not self.is_initialized:
+            self.lazy_initialization(key_states, value_states)
+            self.keys = key_states.clone()
+            self.values = value_states.clone()
+            return self.keys, self.values
+
+        self.keys = torch.cat([self.keys, key_states], dim=-2)
+        self.values = torch.cat([self.values, value_states], dim=-2)
+        return self.keys, self.values
+
+    DynamicLayer.update = update
+    DynamicLayer.flagos_direct_seed = True
 
 
 def add_placement_args(parser):
