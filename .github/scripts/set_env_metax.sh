@@ -246,13 +246,21 @@ PY
   # measures the current master, not a pinned snapshot. Override with
   # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
   #
+  # TEMPORARY PIN -- revert the default to `master` once upstream fixes
+  # flagos-ai/FlagGems: d312aa02 (2026-09-16) added
+  # ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
+  # flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
+  # backend package, so `import flag_gems` raises
+  # NameError: name 'argsort_stable' is not defined on every other vendor.
+  # 437ba393 is the last good master (d312aa02's parent).
+  #
   # A generated kernel calls its operator by the package-level name
   # (`flag_gems.<name>`, see scripts/codegen/codegen_ops.py) so a name only
   # resolves if the installed FlagGems defines it. The cohort-gap probe below
-  # (gems_cohort_gap) enforces that against master on every run: if master drops
-  # a name the checked-in kernels call, this fails naming the gap instead of
-  # erroring per op at dispatch.
-  FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+  # (gems_cohort_gap) enforces that against the installed revision on every
+  # run: if it drops a name the checked-in kernels call, this fails naming the
+  # gap instead of erroring per op at dispatch.
+  FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
   FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 
   # Discover flag_gems via interpreter query, not directory probe. FlagGems is

@@ -288,7 +288,15 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERS
 # FlagGems from the flagos-ai fork, tracking master by policy: every CI run
 # measures the current master, not a pinned snapshot. Override with
 # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+#
+# TEMPORARY PIN -- revert the default to `master` once upstream fixes
+# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
+# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
+# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
+# backend package, so `import flag_gems` raises
+# NameError: name 'argsort_stable' is not defined on every other vendor.
+# 437ba393 is the last good master (d312aa02's parent).
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
 FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
 

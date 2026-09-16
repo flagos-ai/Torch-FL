@@ -72,7 +72,15 @@ FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/r
 # that mount was not present on every runner pod, and its absence aborted the
 # job in environment setup (see the install below). `master` by request;
 # override with TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+#
+# TEMPORARY PIN -- revert the default to `master` once upstream fixes
+# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
+# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
+# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
+# backend package, so `import flag_gems` raises
+# NameError: name 'argsort_stable' is not defined on every other vendor.
+# 437ba393 is the last good master (d312aa02's parent).
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
 FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the

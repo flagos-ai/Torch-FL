@@ -38,7 +38,14 @@ FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-2.38}"
 # FlagGems currently uses master as its default branch; the repository has no
 # main branch. Keep this overrideable so a tested revision can be pinned by CI.
 FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-https://github.com/flagos-ai/FlagGems.git}"
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-master}"
+# TEMPORARY PIN -- revert the default to `master` once upstream fixes
+# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
+# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
+# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
+# backend package, so `import flag_gems` raises
+# NameError: name 'argsort_stable' is not defined on every other vendor.
+# 437ba393 is the last good master (d312aa02's parent).
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
 # Ninja parallelism for the in-job FlagGems C++ build. The CUDA translation
 # units are the bulk of it, so it is worth leaving headroom on a shared runner.
 FLAGGEMS_CPP_JOBS="${TORCH_FL_FLAGGEMS_CPP_JOBS:-$(nproc 2>/dev/null || echo 4)}"
@@ -475,8 +482,15 @@ fi
 pip_retry "$VENV_PYTHON" packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
 FLAGGEMS_SOURCE_ROOT="${RUNNER_TEMP:-/tmp}/flag-gems-${CI_STAGE}"
 rm -rf "$FLAGGEMS_SOURCE_ROOT"
-git clone --depth 1 --branch "$FLAGGEMS_REVISION" \
+git clone --depth 1 --branch master \
   "$FLAGGEMS_REPOSITORY" "$FLAGGEMS_SOURCE_ROOT"
+if [[ "$FLAGGEMS_REVISION" != "master" ]]; then
+  # A raw SHA cannot be passed to `git clone --branch`; fetch it explicitly.
+  # (Only the temporary pin above takes this path -- `master` stays a plain
+  # shallow clone.)
+  git -C "$FLAGGEMS_SOURCE_ROOT" fetch --depth 1 origin "$FLAGGEMS_REVISION"
+  git -C "$FLAGGEMS_SOURCE_ROOT" checkout --detach "$FLAGGEMS_REVISION"
+fi
 FLAGGEMS_COMMIT="$(git -C "$FLAGGEMS_SOURCE_ROOT" rev-parse HEAD)"
 echo "FlagGems source: ${FLAGGEMS_REPOSITORY}@${FLAGGEMS_REVISION} (${FLAGGEMS_COMMIT})"
 pip_retry "$VENV_PYTHON" --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
