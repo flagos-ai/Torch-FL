@@ -1861,6 +1861,32 @@ leaves every conf byte-identical. None of that work moves PPU: the conf
 regenerates to the same SHA-256 on either base, which is the property the
 op-list decoupling above was for.
 
+### PPU conf regenerated against the widened FlagGems cohort (2026-09-16, not hardware-revalidated)
+
+`backends_ppu.conf` was stale: `gen_vendor_confs.py --check` (and
+`tests/unit/test_gen_vendor_confs.py::test_shipped_confs_are_up_to_date`, which
+runs as the last group of the DCU pipeline) reported it after the
+shared-coverage widening. Regenerating with the unmodified generator moves
+**158** overloads `cuda` -> `flaggems` and nothing in the other direction:
+`flaggems` 435 -> 593, `cuda` 1601 -> 1443, `none` 0 unchanged, over the same
+2036-op list. New SHA-256
+`d4906256972fbd7204ea703873b40c8e730886e9fea88c8dde2bcba90b1195c0`,
+reproduced byte-for-byte by a second generator run.
+
+No survey pin was dropped to get there: `BOXING_TRITON_GAPS["ppu"]` is identical
+to the 47-entry set that shipped the 435-route conf, all 47 still route `cuda`
+in the regenerated file (checked entry by entry, including the mm/bmm family,
+the five `addmm` overloads, `_conj`, and the four reflection-padding routes),
+and the 158 flips are exactly the newly FlagGems-covered overloads. The
+widening comes from the shared cohort side, not from a PPU re-measurement.
+
+**Not revalidated on hardware.** No PPU runner was available for this change,
+so the 158 newly FlagGems-routed overloads have no device evidence here; the
+PPU CI FlagGems group (`-m "flaggems and main_ops"`) is the measurement vehicle
+that will confirm or roll back individual routes on the next run. Until then
+the PPU survey rows above remain the 435-route evidence, and this subsection is
+the recorded evidence gap for the 593-route file.
+
 ### Full-coverage vendor configurations (2026-09-10)
 
 The MUSA, GCU and Ascend configurations became **full-coverage**: all 2036 ops
