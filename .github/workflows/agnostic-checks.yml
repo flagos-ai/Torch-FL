@@ -23,12 +23,23 @@
 # drift failing the DCU pipeline's trailing unit group).
 #
 # The test list below is the subset of tests/unit verified to pass with only
-# pytest installed (no torch, no device). Everything else in tests/unit needs
-# torch, a built torch_fl, or hardware, and stays on the hardware runners --
-# today that means the DCU manifest's per-file group, which keeps running the
-# whole directory including these files. tests/unit/bpu/ is excluded too: it
-# imports torch and is collected nowhere today (run_unit_tests.py globs
-# non-recursively), so wiring it in needs a CPU-torch install first.
+# pytest and transformers installed (no torch, no device). Everything else in
+# tests/unit needs torch, a built torch_fl, or hardware, and stays on the
+# hardware runners -- today that means the DCU manifest's per-file group, which
+# keeps running the whole directory including these files. tests/unit/bpu/ is
+# excluded too: it imports torch and is collected nowhere today
+# (run_unit_tests.py globs non-recursively), so wiring it in needs a CPU-torch
+# install first.
+#
+# transformers is a deliberate second dependency, not scope creep:
+# tests/manual/transformers_hf_tests.py resolves architecture keys through
+# transformers' own registry (model_type_to_module_name), and the automation
+# unit tests build their fixtures through that helper, so they cannot run
+# without it. The floor (>=4.51) is where Qwen3 model_type support landed --
+# the same lower bound the hardware venvs use; there is no upper bound, matching
+# the DCU job that already runs these files. No numpy pin is needed here: the
+# numpy<2 constraint elsewhere protects the stock torch C extensions, and this
+# job installs no torch.
 
 name: Platform-agnostic checks
 
@@ -53,8 +64,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install pytest and transformers
+        run: pip install pytest "transformers>=4.51"
 
       - name: Check setup-script syntax
         run: |
