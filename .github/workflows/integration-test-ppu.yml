@@ -17,8 +17,9 @@
 # the PPU environment, builds + installs the wheel, and runs the manifest via
 # run_integration_tests.py. PPU is a CUDA-ABI boxing backend on an Aliyun DSW
 # runner, so container_options uses --device= (authZ denies --privileged /
-# --ipc=host) and mounts the AliXPU device nodes explicitly. See
-# .github/configs/ppu.yml for the documented manifest this inlines.
+# --ipc=host) and mounts the AliXPU device nodes explicitly. The test list
+# lives in .github/configs/ppu.yml, not inline here. See
+# load-platform-tests.yml for why.
 
 name: Integration Tests (PPU)
 
@@ -39,8 +40,16 @@ on:
         default: 60
 
 jobs:
+  # The test list lives in .github/configs/ppu.yml, not inline here. See
+  # load-platform-tests.yml for why.
+  load-tests:
+    uses: ./.github/workflows/load-platform-tests.yml
+    with:
+      platform: ppu
+
   integration-tests:
     name: Build and test (PPU)
+    needs: load-tests
     runs-on:
       - flagcicd-810e
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
@@ -94,14 +103,6 @@ jobs:
 
       - name: Run PPU integration tests
         env:
-          INTEGRATION_ENVIRONMENT: '{"MODEL_PATH":"/models/Qwen3-0.6B"}'
-          INTEGRATION_TESTS: >-
-            [{"name":"Check model availability","command":"test -d \"$MODEL_PATH\""},
-            {"name":"Check device availability","command":"python - <<'PY'\nfrom pathlib import Path\n\nimport torch_fl\nimport torch\n\ntorch_fl_path = Path(torch_fl.__file__).resolve()\ntorch_path = Path(torch.__file__).resolve()\nppu_bundle = torch_fl_path.parent / \"lib_ppu\"\n\nassert torch.__version__.startswith(\"2.10.0+cpu\"), torch.__version__\nassert torch.version.cuda is None, torch.version.cuda\nassert \"/opt/conda/\" not in str(torch_path), torch_path\nassert (ppu_bundle / \"libtorch_cuda.so\").is_file(), ppu_bundle\nassert torch.cuda.is_available(), \"PPU devices are unavailable\"\nassert torch.cuda.device_count() > 0, torch.cuda.device_count()\nassert torch_fl.flagos.is_available(), \"flagos device is unavailable\"\nassert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()\n\nprint(f\"PyTorch: {torch.__version__}\")\nprint(f\"torch: {torch_path}\")\nprint(f\"torch_fl: {torch_fl_path}\")\nprint(f\"PPU bundle: {ppu_bundle}\")\nprint(f\"PPU devices: {torch.cuda.device_count()}\")\nprint(f\"flagos devices: {torch_fl.flagos.device_count()}\")\nPY\n"},
-            {"name":"Run operator tests (vendor backend, main ops)","command":"python -m pytest tests/integration/ops/ -m \"main_ops and not flaggems_python and not flaggems_cpp\" -v -s --tb=short"},
-            {"name":"Run operator tests (FlagGems runtime path, main ops)","command":"FLAGOS_USE_FLAGGEMS=1 python -m pytest tests/integration/ops/ -m \"flaggems and main_ops\" --deselect tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_runtime --deselect tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_runtime -v -s --tb=short"},
-            {"name":"Run general tests","command":"python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"},
-            {"name":"Unified math-bits contract","command":"python -m pytest tests/integration/test_math_bits_contract.py -v -m math_bits --tb=short"},
-            {"name":"Run inference tests","command":"python -m pytest tests/integration/test_qwen3_infer.py --model \"$MODEL_PATH\" -v -s --tb=short"},
-            {"name":"Run training tests","command":"python -m pytest tests/integration/test_qwen3_train.py --model \"$MODEL_PATH\" -v -s --tb=short"}]
+          INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
+          INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
         run: python .github/scripts/run_integration_tests.py
