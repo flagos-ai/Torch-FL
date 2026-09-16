@@ -29,7 +29,10 @@ The following are explicitly out of scope for this change:
   `diffusers` there; that is a separate decision with its own cost.
 - Quantization (bitsandbytes, torchao, GGUF). The memory problem is solved by
   layer splitting, not by reduced precision.
-- Other accelerator vendors. This work targets CUDA-compatible hardware only.
+- Other accelerator vendors. The scripts are backend-generic — `--device` names
+  a torch device module — so bring-up on another chip is the same procedure, and
+  §8's readings are what to compare against. But only CUDA-compatible hardware is
+  measured here; no other vendor's numbers are claimed.
 - Performance tuning. The pipeline is expected to be correct and reproducible,
   not fast. Step timing is recorded, not optimized.
 - Patching `diffusers` or `transformers`. See section 5.
@@ -212,8 +215,14 @@ concrete follow-up list for future operator work.
 
 | Artifact | Location | Purpose |
 | --- | --- | --- |
-| Inference script | `tests/manual/qwen_image_2512_infer.py` | Runs the pipeline; flags for prompt, seed, steps, device placement, output path |
-| Access guide | `docs/vendors/cuda/qwen-image-2512.md` | Component placement, measured commands, step timing, known limitations, operator coverage summary |
+| Staged runner | `tests/manual/qwen_image_2512/infer.py` | Runs the pipeline; flags for prompt, seed, steps, device placement, output path |
+| Cohort sweep | `tests/manual/qwen_image_2512/sweep.py` | Every prompt on the model card, in the card's own settings, one PNG per prompt plus a manifest |
+| Comparison sheets | `tests/manual/qwen_image_2512/side_by_side.py` | Pairs a vendor cohort with a flagos cohort for the eyeball comparison |
+| Numeric comparison | `tests/manual/qwen_image_2512/compare.py` | PSNR and MAE between two images |
+| Shared plumbing | `tests/manual/qwen_image_2512/common.py` | Import order, placement, split, memory reporting |
+| Runner | `tests/manual/qwen_image_2512/run.sh` | Environment, one mode, and the log census |
+| Access guide | `tests/manual/qwen_image_2512/README.md` | The procedure below, the per-stage expectations, and the readings to record per chip |
+| Access guide (CUDA) | `docs/vendors/cuda/qwen-image-2512.md` | Component placement, measured commands, step timing, known limitations, operator coverage summary |
 | torch-fl fixes | wherever the gaps in section 7 land | Unknown in number until the pipeline runs |
 
 `tests/manual/` is the correct home for the script: the CUDA manifest in
