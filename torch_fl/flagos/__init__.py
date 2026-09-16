@@ -35,6 +35,38 @@ def _platform() -> str:
         return ""
 
 
+def _has_cuda_runtime() -> bool:
+    """Whether torch.cuda is backed by a real CUDA runtime on this build.
+
+    Every vendor branch below (Ascend ACL, Enflame tops, MUSA) exists for
+    accelerators that have no CUDA runtime at all. The obvious test for "no CUDA
+    runtime" -- ``torch._C._cuda_getCurrentStream`` -- is really a test for "torch
+    was compiled with CUDA", and the CPU torch wheel that torch_fl drives against
+    an external libtorch_cuda.so fails it while the runtime underneath is
+    perfectly real. Reading it as a vendor signal sends NVIDIA runs down the
+    Ascend path, where constructing a stream raises "libascendcl.so not found"
+    and every autotuned Triton kernel is misreported as failing to compile.
+    """
+    if hasattr(torch._C, "_cuda_getCurrentStream"):
+        return True
+    try:
+        from torch_fl.accelerator.cuda._cuda_compat import cuda_shim_active
+    except Exception:
+        return False
+    return cuda_shim_active()
+
+
+def _cuda_stream_shim(device):
+    """A CUDA stream stand-in for a build whose torch has no CUDA stream class.
+
+    Same object ``torch.cuda.current_stream`` returns on such a build, so both
+    spellings denote the same (null) stream the boxing kernels submit to.
+    """
+    from torch_fl.accelerator.cuda._cuda_compat import _StreamShim, _device_index
+
+    return _StreamShim(_device_index(device))
+
+
 class device:
     r"""Context-manager that changes the selected device.
 
@@ -319,9 +351,10 @@ class Stream(torch.cuda.Stream):
             raise
 
     def __init__(self, device=None, priority=0, **kwargs):
-        # On Ascend with no CUDA, __new__ returns object.__new__(cls) and we need
-        # a full native implementation. Import ACL late to avoid crashing on CUDA.
-        if not hasattr(torch._C, "_cuda_getCurrentStream"):
+        # On a vendor backend with no CUDA runtime, __new__ returns
+        # object.__new__(cls) and we need a full native implementation. Import the
+        # vendor module late to avoid touching it on CUDA runs.
+        if not _has_cuda_runtime():
             if _platform() == "gcu":
                 from torch_fl.accelerator.gcu.tops_stream import TopsStream
 
@@ -332,9 +365,13 @@ class Stream(torch.cuda.Stream):
                 self._stream = AclStream(device, priority)
             # Set device attribute for __repr__ compatibility with torch.cuda.Stream
             self.device = self._stream.device
-        else:
-            # Real torch.cuda.Stream path: __new__ constructed it, do nothing.
-            pass
+        elif not hasattr(torch._C, "_cuda_getCurrentStream"):
+            # CUDA runtime present, but torch.cuda.Stream is the wheel's dummy base
+            # class rather than a real stream. Delegate to the same shim
+            # torch.cuda.current_stream hands out.
+            self._stream = _cuda_stream_shim(device)
+            self.device = self._stream.device
+        # else: real torch.cuda.Stream path -- __new__ constructed it, do nothing.
 
     def __repr__(self):
         if hasattr(self, "_stream"):
@@ -377,6 +414,24 @@ class Stream(torch.cuda.Stream):
         if hasattr(self, "_stream"):
             return self._stream.handle
         return self.cuda_stream
+
+    @property
+    def device_index(self):
+        if hasattr(self, "_stream"):
+            return self._stream.device_index
+        return super().device_index
+
+    @property
+    def stream_id(self):
+        if hasattr(self, "_stream"):
+            return self._stream.stream_id
+        return super().stream_id
+
+    @property
+    def device_type(self):
+        if hasattr(self, "_stream"):
+            return self._stream.device_type
+        return super().device_type
 
 
 class _DefaultStreamHandle:
@@ -433,11 +488,15 @@ def _real_current_stream(device=None):
     stream to describe, so return a stand-in carrying the vendor's default stream
     handle: callers such as FlagGems' Triton launcher only read ``.cuda_stream``
     off the result, and those backends submit to their default stream.
+
+    A CUDA runtime with no ``_cuda_getCurrentStream`` is the CPU torch wheel case
+    instead; there the stream to describe is whatever ``torch.cuda.current_stream``
+    reports, which is the shim ``_StreamShim``.
     """
     idx = current_device() if device is None else int(device)
     if hasattr(_C, "_get_musa_current_raw_stream"):
         return _DefaultStreamHandle(idx)
-    if not hasattr(torch._C, "_cuda_getCurrentStream"):
+    if not _has_cuda_runtime():
         if _platform() == "gcu":
             from torch_fl.accelerator.gcu.tops_stream import current_tops_stream
 
@@ -448,6 +507,8 @@ def _real_current_stream(device=None):
             return current_acl_stream(idx)
         except RuntimeError:
             return _DefaultStreamHandle(idx)
+    if not hasattr(torch._C, "_cuda_getCurrentStream"):
+        return _cuda_stream_shim(idx)
     stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(idx)
     return torch.cuda.Stream(
         stream_id=stream_id, device_index=device_index, device_type=device_type
@@ -502,7 +563,7 @@ class Event(torch.cuda.Event):
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
-        if not hasattr(torch._C, "_cuda_getCurrentStream"):
+        if not _has_cuda_runtime():
             try:
                 obj = object.__new__(cls)
                 if _platform() == "gcu":
@@ -530,6 +591,16 @@ class Event(torch.cuda.Event):
                     interprocess=interprocess,
                     external=external,
                 )
+        if not hasattr(torch._C, "_cuda_getCurrentStream"):
+            # CPU torch wheel over a real CUDA runtime: torch.cuda.Event is the
+            # wheel's dummy base class and no C++ CUDA event is reachable, so the
+            # host-clock event is the only thing left to time with.
+            return _HostTimedEvent(
+                enable_timing=enable_timing,
+                blocking=blocking,
+                interprocess=interprocess,
+                external=external,
+            )
         return super().__new__(
             cls,
             enable_timing=enable_timing,

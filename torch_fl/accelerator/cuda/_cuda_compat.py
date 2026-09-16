@@ -196,6 +196,42 @@ def is_nvidia_cuda_available() -> bool:
     return count.value > 0
 
 
+def cuda_shim_active() -> bool:
+    """True once ``patch_torch_cuda_for_flagos`` has wired torch.cuda to the driver.
+
+    Callers that need to know whether a real CUDA runtime backs this build cannot
+    test ``torch._C._cuda_getCurrentStream`` for it: that symbol exists only when
+    torch itself was compiled with CUDA, and the CPU torch wheel this shim exists
+    for does not have it. The shim's own state is the accurate signal.
+    """
+    return _patched
+
+
+def cuda_graph_supported() -> bool:
+    """True when torch can capture and replay CUDA graphs on this build.
+
+    ``torch.cuda.graphs`` binds ``_CUDAGraph`` as a dummy base class when the
+    wheel has no CUDA graph binding, and the dummy raises ``RuntimeError: Tried to
+    instantiate dummy base class CUDAGraph`` on construction. A CPU torch wheel
+    driving an external libtorch_cuda.so is that case: the CUDA runtime underneath
+    is real, but no C++ graph object is reachable from Python.
+
+    ``hasattr`` cannot be the test. torch injects the placeholders into
+    ``torch._C.__dict__`` as soon as ``torch.cuda.streams`` is imported -- ``cuda``
+    is not part of any real API surface -- so the attribute exists on the CPU wheel
+    too. What separates them is where the class came from: ``_dummy_type`` builds
+    its placeholders with a bare ``type()`` call inside ``torch._utils``, while a
+    real binding is a built-in type whose ``__module__`` is ``torch._C``.
+    """
+    try:
+        # Importing the module is what defines torch._C._CUDAGraph.
+        import torch.cuda.graphs  # noqa: F401
+    except Exception:
+        return False
+    graph_cls = getattr(torch._C, "_CUDAGraph", None)
+    return graph_cls is not None and graph_cls.__module__ == "torch._C"
+
+
 def _device_index(device: Union[torch.device, int, str, None]) -> int:
     if device is None:
         return 0
@@ -331,6 +367,16 @@ class _StreamShim:
     @property
     def stream_id(self):
         return 0 if self._real is None else self._real.stream_id
+
+    @property
+    def handle(self):
+        """Raw stream handle, under the name the vendor stream classes use.
+
+        ``torch_fl.flagos.Stream`` reads ``.handle`` off whatever it wraps, so
+        accepting this shim as a delegate needs the alias to exist. It is the
+        same value as ``cuda_stream``.
+        """
+        return self.cuda_stream
 
     @property
     def device_type(self):
@@ -480,6 +526,16 @@ def patch_torch_cuda_for_flagos():
     torch.cuda.current_stream = lambda device=None: _StreamShim(_device_index(device))
     torch.cuda.default_stream = lambda device=None: _StreamShim(_device_index(device))
 
+    # torch.cuda.set_stream -- and therefore StreamContext, i.e. every
+    # ``with torch.cuda.stream(...)`` block -- writes through
+    # torch._C._cuda_setStream, absent from the CPU wheel. The shims above always
+    # denote stream 0, so "switch to the shim's stream" is switching to the stream
+    # already selected; dropping the call is not an approximation of the switch,
+    # it is the switch. Triton's do_bench_cudagraph enters a torch.cuda.stream
+    # block before benchmarking any candidate config.
+    if not hasattr(torch._C, "_cuda_setStream"):
+        torch.cuda.set_stream = lambda stream: None
+
     # torch.cuda.Event/Stream are dummy base classes in the CPU wheel and raise
     # on construction. flagos ships working ones over the same physical GPU
     # (its Event does real elapsed_time), so hand those out instead. inductor's
@@ -529,6 +585,21 @@ def patch_torch_cuda_for_flagos():
         torch.cuda.max_memory_reserved = lambda device=None: _memory_stats(device).get(
             "peak_reserved_bytes", 0
         )
+
+        # Emptying and resetting go through the same C++ module as the stats
+        # above, for the same reason: the CPU wheel builds neither
+        # torch._C._cuda_emptyCache nor torch._C._cuda_resetPeakMemoryStats, so
+        # every diffusers call site (``empty_device_cache`` at the end of each
+        # ``from_pretrained``) and every ``torch.cuda.reset_peak_memory_stats``
+        # raised AttributeError. flagos has a single reset that clears both
+        # peaks; torch.cuda splits it into reset_peak_memory_stats (both) and
+        # reset_max_memory_allocated (allocation peak only), so the narrower name
+        # is mapped to the same call rather than left undefined.
+        torch.cuda.empty_cache = _flagos.empty_cache
+        torch.cuda.reset_peak_memory_stats = lambda device=None: (
+            _flagos.reset_peak_memory_stats(_device_index(device))
+        )
+        torch.cuda.reset_max_memory_allocated = torch.cuda.reset_peak_memory_stats
 
     # triton reads torch._C._cuda_getCurrentRawStream(idx) -> raw handle.
     try:
@@ -783,3 +854,24 @@ def _patch_triton_do_bench():
         triton.runtime.driver.active.get_benchmarker = lambda: _do_bench
     except Exception:
         pass
+
+    # FlagGems' autotuner benchmarks each candidate config through a second
+    # triton entry point, ``triton.testing.do_bench_cudagraph``, which is the
+    # default for the replay protocol -- see
+    # flag_gems/utils/libentry.py's ``_select_benchmark_mode`` and the protocol
+    # resolver it calls, which picks replay because the active triton driver is
+    # the nvidia one. That helper captures a ``torch.cuda.CUDAGraph``, which this
+    # wheel cannot construct (see ``cuda_graph_supported``), so every candidate
+    # raises:
+    #
+    #     RuntimeError: Tried to instantiate dummy base class CUDAGraph
+    #
+    # ``LibEntry`` catches that per config, prints "[libentry] config ... failed to
+    # compile" and records an ``inf`` timing, so the noise is the visible half and
+    # the silent half is that no config is ever selected from measurement. Timing
+    # it with the same wall clock instead keeps autotuning doing what it is for --
+    # picking a config by comparing kernels -- which needs a stable relative
+    # number, not graph replay. Only on a build without the graph binding: where
+    # torch can capture, replay measures better and stays.
+    if not cuda_graph_supported():
+        triton.testing.do_bench_cudagraph = _do_bench
