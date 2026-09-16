@@ -372,10 +372,12 @@ def build_deps():
         # C++ kernels reach the device via the same DeviceBoxingGuard as the
         # boxing path, so they need boxing mode.
     elif ACCELERATOR == "ascend":
-        # Ascend uses ACLNN as the native fallback, with the patched FlagGems /
-        # triton-ascend Python path enabled by default. The generated Ascend
-        # conf is FlagGems-first for measured routes, while unsupported or
-        # unregistered operators remain on ACLNN/CPU fallback.
+        # Ascend uses ACLNN as the native fallback, with the FlagGems Python path
+        # enabled by default. FlagGems runs on FlagTree (the vendor's Triton 3.5
+        # build), not on triton-ascend: torch_fl imports before triton and carries
+        # a torch_npu-free backend policy for it, so nothing here links torch_npu.
+        # The generated Ascend conf is FlagGems-first for measured routes, while
+        # unsupported or unregistered operators remain on ACLNN/CPU fallback.
         cmake_args.extend(
             [
                 "-DCUDA_KERNEL=OFF",
@@ -847,9 +849,9 @@ def _vendor_supplies_triton() -> bool:
     NVIDIA-targeted wheel must not be pulled in as a dependency.
 
     - ACCELERATOR=dcu: DTK ships its own Triton (and builds pure-boxing).
-    - ACCELERATOR=ascend: `triton` is provided by triton-ascend, installed out
-      of band (it has no PyPI release satisfying `triton>=3.5.1`). Declaring the
-      dep makes pip install stock triton over triton-ascend, after which any
+    - ACCELERATOR=ascend: `triton` is provided by FlagTree, installed out of
+      band (it has no PyPI release satisfying `triton>=3.5.1`). Declaring the
+      dep makes pip install stock triton over FlagTree, after which any
       Triton entry point dies with "0 active drivers".
     - PPU (PPU_SDK present): the vendor Triton lives on a private index and is
       versioned 3.x+<sdk> (e.g. 3.5.0+v0.2.0.ppu2.1.0), which does not satisfy

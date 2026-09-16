@@ -206,26 +206,26 @@ The focused FlagTree test must compare compiled output with eager output and
 assert that outputs and gradients remain on `flagos`; CPU-only tests can cover
 registration and vendor target selection but do not establish MUSA compiler
 support.
-### Ascend (triton-ascend)
+### Ascend (FlagTree, formerly triton-ascend)
 
-Ascend compiles through `triton-ascend`, which installs itself as the `triton`
-package and registers an `AscendBackend`; it is not a FlagTree build, so
-`FLAGOS_USE_FLAGTREE=1` does not apply and `test_flagtree_compiles_correct_results`
-skips here.
+Ascend's FlagGems route now runs on **FlagTree** (`0.6.2a1+ascend3.5`, Triton
+3.5), which installs itself as the `triton` package and registers an
+`AscendBackend`. `FLAGOS_USE_FLAGTREE=1` asserts that the active `triton` really
+is FlagTree — it cannot switch anything on, because the wheel replaces `triton`
+at install time — so on a FlagTree environment
+`test_flagtree_compiles_correct_results` runs rather than skipping.
 
-**FlagTree is not a drop-in option on Ascend yet**, which is why this route
-exists. The blocker is not the Triton version — torch declares no `triton` pin
-and inductor's only version gate above 3.5 is a ROCm-only `fast_tanhf` path
-(`_inductor/codegen/triton.py:1687`), so a 3.5-based build would be fine on torch
-2.10; `triton-ascend` here is 3.2.0. Two things actually block it:
+The **compile** path described below was measured against `triton-ascend 3.2.0`,
+the toolchain Ascend used before this move, and has not been re-measured on
+FlagTree; no CI step exercises it either way. Treat the numbers and the three
+workarounds as unvalidated on the current toolchain. The rest of this section
+explains why a torch_npu-free policy is needed at all, and that part is
+toolchain-independent.
 
-- FlagTree's Ascend backend exists only on the 3.5 line (`triton_v3.5.x`,
-  `v0.6.0-rc2-triton3.5`); `main`, `v0.6.0-rc2-triton3.6` and `triton_v3.7.x`
-  carry no `third_party/ascend` at all.
-- That backend routes its host runtime through `torch_npu`, which claims
-  PrivateUse1 on import, after which `torch_fl` cannot register `flagos` — the
-  same conflict documented under vendor setup. This is a genuine incompatibility
-  with the plugin model, not a packaging detail.
+FlagTree's Ascend backend routes its host runtime through `torch_npu`, which
+claims PrivateUse1 on import, after which `torch_fl` cannot register `flagos` —
+the same conflict documented under vendor setup. This is a genuine
+incompatibility with the plugin model, not a packaging detail.
 
   The coupling is deeper than the `import torch_npu` lines suggest
   (`driver.py:231`, `utils.py:48`, `backend_register.py:87`). FlagTree dispatches
@@ -251,12 +251,16 @@ and inductor's only version gate above 3.5 is a ROCm-only `fast_tanhf` path
 
   Verified against a real FlagTree build (`triton_v3.5.x` @ `d2063b06`,
   `flagtree-0.6.0+ascend`, built with the prebuilt LLVM `7d5de303` and
-  `TRITON_CODEGEN_BACKENDS=nvidia;amd;ascend` on aarch64/Python 3.10): after
+  `TRITON_CODEGEN_BACKENDS=nvidia;amd;ascend` on aarch64/Python 3.10, and again
+  against the `flagtree-0.6.2a1+ascend3.5` wheel the Ascend FlagGems route now
+  runs on): after
   `install_policy()`, the registry reports `['flagos', 'mindspore', 'torch_npu']`,
   `flagos` covers all 15 required strategies with no parity gap against
   `torch_npu`, and each signature matches upstream's. The generated output is
   clean: `header_file` emits `<ATen/ATen.h>` with no `torch_npu`/`at_npu`
-  reference, and `get_cc_cmd` does not link `-ltorch_npu`.
+  reference, and `get_cc_cmd` does not link `-ltorch_npu`. `torch_fl.flagos`
+  calls `install_policy()` during device init, ahead of the first FlagGems
+  kernel, so eagerly launched kernels take the `flagos` policy too.
 
   The build also exposed a second, import-order-dependent coupling, separate from
   the policy: `backends/ascend/__init__.py:24` imports `do_bench_npu`, and
@@ -287,7 +291,11 @@ picks the Ascend profile from `ACCELERATOR=ascend`.
 
 Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0,
 torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and
-matmul+normalization graphs all compile and match eager. Support is
+matmul+normalization graphs all compile and match eager. **This measurement is
+stale**: it was taken on triton-ascend, and the toolchain Ascend ships is now
+FlagTree. Nothing has re-run the compile suite on FlagTree, so whether these
+numbers, and whether the three workarounds below, still hold is unmeasured.
+Support is
 **experimental** — three vendor-toolchain defects had to be worked around, and
 each workaround is a place where a toolchain upgrade should let us delete code:
 
@@ -520,7 +528,10 @@ tests live alongside it:
    backends remain untested here
 6. **Ascend is experimental**: compiles serially by default, has no C++ wrapper
    codegen (`CppWrapperGpu` emits CUDA-runtime C++), and carries three
-   toolchain workarounds — see [Ascend](#ascend-triton-ascend) above. Only the
+   toolchain workarounds — see [Ascend](#ascend-flagtree-formerly-triton-ascend)
+   above. Those workarounds were measured against `triton-ascend 3.2.0` and have
+   not been re-tested on FlagTree, the toolchain the FlagGems route now runs on.
+   Only the
    graphs in `tests/integration/test_compile.py` are validated; whole-model
    compilation is not yet exercised there
 
@@ -534,23 +545,27 @@ tests live alongside it:
       backward compile and match eager on NVIDIA and MetaX, with outputs and
       gradients remaining on `flagos`. The complete compile suite passes on both
       targets (the MetaX-specific event regression adds one case there).
-- [x] Ascend via triton-ascend — experimental, and **not** through FlagTree.
-      Forward, backward, fused elementwise and matmul+normalization compile and
-      match eager on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend
-      3.2.0, torch 2.10.0+cpu); `test_compile.py` passes 30/32 with a cold cache,
-      the two skips being the FlagTree-only and MetaX-only cases
-- [ ] FlagTree on Ascend — partially unblocked. Not blocked by the Triton
-      version: that backend exists only on the 3.5 line and routes its host
-      runtime through `torch_npu`, which claims PrivateUse1 and locks `torch_fl`
-      out of `flagos`. `flagtree_ascend_policy.py` registers a torch_npu-free
-      backend policy for it; the emitted C++ compiles against ATen and every
-      strategy resolves through FlagTree's real registry, but end-to-end
-      execution is unverified because no FlagTree build with the Ascend backend
-      is installed. Needs a source build to finish
+- [x] Ascend via triton-ascend — experimental. Forward, backward, fused
+      elementwise and matmul+normalization compile and match eager on a real 910
+      (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0, torch 2.10.0+cpu);
+      `test_compile.py` passes 30/32 with a cold cache, the two skips being the
+      FlagTree-only and MetaX-only cases. Superseded for the FlagGems route by
+      FlagTree, and not re-measured there
+- [x] FlagTree on Ascend, for the FlagGems eager route — `flagtree_ascend_policy.py`
+      gives FlagTree's Ascend backend a torch_npu-free policy and `torch_fl.flagos`
+      installs it during device init, so eagerly launched FlagGems kernels run on
+      FlagTree `0.6.2a1+ascend3.5`; the route table was re-measured op by op on
+      that stack (see
+      [`docs/reference/operator-support.md`](../reference/operator-support.md))
+- [ ] FlagTree on Ascend, for the `torch.compile` path — the policy is in place
+      and the emitted C++ compiles against ATen with every strategy resolving
+      through FlagTree's real registry, but the compile suite itself has not been
+      run on FlagTree, so the three workarounds above are unverified there
       ([#1046](https://github.com/flagos-ai/FlagTree/issues/1046))
 - [ ] Benchmark fusion gains vs. stock inductor+triton on cuda
 - [ ] Benchmark Ascend compile vs. the aclnn eager path
-- [ ] Retire the Ascend workarounds as triton-ascend fixes land
+- [ ] Re-run the Ascend compile suite on FlagTree and retire the workarounds once
+      its replacements land
 - [ ] Phase 3: FlagGems-aware fusion (recognize pre-optimized patterns)
 - [ ] Phase 4: Custom fusion patterns for flagos-specific ops
 

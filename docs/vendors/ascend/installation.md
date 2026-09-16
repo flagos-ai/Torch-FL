@@ -1,12 +1,12 @@
 # Ascend Installation Guide
 
-Ascend NPU uses native CANN ACLNN operator kernels, not CUDA boxing. The platform supports two operator execution paths: a default pure ACLNN backend and an optional FlagGems route via triton-ascend.
+Ascend NPU uses native CANN ACLNN operator kernels, not CUDA boxing. The platform supports two operator execution paths: the FlagGems Python path (Triton kernels compiled by FlagTree) and the native ACLNN backend, which stays as the default fallback for every operator FlagGems does not cover.
 
 ## Prerequisites
 
 - **CPU PyTorch 2.10.x**: `torch==2.10.0` from the upstream CPU index
 - **CANN toolkit**: Ascend 910 with CANN 9.0.0 or compatible version
-- **Python**: 3.8 or later
+- **Python**: 3.11 (the FlagTree Ascend 3.5 wheel is cp311-only; Python 3.8+ works for an ACLNN-only build)
 - **Operating System**: Linux (aarch64 verified in CI; x86_64 on real hardware)
 - **Device node**: `/dev/davinci_manager` and `/dev/davinci*` devices must be accessible
 
@@ -107,37 +107,70 @@ pytest tests/integration/test_factory_ops.py -v -s --tb=short
 
 All three test groups are exercised in CI (see `.github/configs/ascend.yml` lines 78-97).
 
-## FlagGems via triton-ascend
+## FlagGems via FlagTree
 
 FlagGems provides Triton-compiled kernels for the measured Ascend routes, with ACLNN remaining the native fallback. Ascend installations and CI enable this path by default; operators that FlagGems does not cover continue through ACLNN or CPU fallback.
 
-### Why FlagGems requires a fork
+The Triton build underneath is **FlagTree** — the FlagOS Triton fork — on its
+Ascend 3.5 line (`flagtree 0.6.2a1+ascend3.5`, Triton 3.5). This replaced
+`triton-ascend 3.2.x`, which lagged the Triton APIs current FlagGems uses, whose
+task-queue launch path calls `at_npu::native::OpCommand` (a `torch_npu` symbol
+this backend must not link), and whose removal from the environment is the whole
+reason the route was re-measured. Nothing in this path imports or links
+`torch_npu`.
 
-The upstream FlagGems package links against `libtorch_npu.so` (from the `torch_npu` vendor package), which occupies the same `PrivateUse1` dispatch key as `torch_fl` and cannot coexist. Our fork replaces that dependency with a `FLAGOS` backend that obtains the ACL stream via `torch_fl`'s `GetCurrentStream` C API.
+### No torch_npu
 
-See [`docs/vendors/ascend/external-libtorch-npu.md`](external-libtorch-npu.md) for the technical analysis proving why `torch_npu` cannot act as a compatibility fallback.
+The upstream FlagGems routing layer obtains the ACL stream through the device's
+own interface, and FlagTree's Ascend backend resolves its host-side
+implementation by importing `torch_npu` at discovery time. `torch_fl` handles
+that without the real extension:
 
-### Install FlagGems (torch_fl branch)
+- It installs a lightweight stub under the `torch_npu` name, so the import
+  succeeds instead of raising.
+- It registers a third backend policy, `flagos`, on FlagTree's strategy registry
+  (`torch_fl/compile/flagtree_ascend_policy.py`). That policy answers the same
+  strategy names from torch_fl's own runtime: device and stream come from
+  `torch.flagos` and the ACL stream registry, and the generated C++ uses plain
+  ATen against PrivateUse1 (which under `torch_fl` *is* flagos) rather than
+  `at_npu::`. It also forces `TRITON_ENABLE_TASKQUEUE=false`, because the task
+  queue is torch_npu-only.
 
-The FlagGems package must be installed before building `torch_fl`, so the Python
-operator wrappers and runtime discovery are available in the same environment.
+The real `torch_npu` extension cannot be used even as a fallback: it claims the
+`PrivateUse1` dispatch key on import, the same key `flagos` needs, and the
+coupling is at the C++ and link level rather than a Python import. See
+[`docs/vendors/ascend/external-libtorch-npu.md`](external-libtorch-npu.md).
+
+### Install FlagTree and FlagGems
+
+Both come from the FlagOS index. FlagTree installs the module named `triton`, so
+remove any stock or vendor Triton first — otherwise it is shadowed rather than
+replaced. The FlagTree Ascend 3.5 wheel is published for cp311 only.
 
 ```bash
-git clone https://github.com/flagos-ai/FlagGems.git
-cd FlagGems
-
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-pip install --no-build-isolation -e . \
-  --config-settings=cmake.define.FLAGGEMS_BACKEND=FLAGOS \
-  --config-settings=cmake.define.FLAGGEMS_BUILD_C_EXTENSIONS=OFF
+pip uninstall -y triton
+pip install --no-deps --index-url \
+  https://resource.flagos.net/repository/flagos-pypi-hosted/simple \
+  'flagtree===0.6.2a1+ascend3.5'
 
-cd ..
+pip install --no-deps \
+  'git+https://github.com/FlagOpen/FlagGems.git@d45285ba6423a3400019aa330daa6877908bf3cf'
+
+pip install pybind11 packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy<2'
 ```
 
-The `FLAGOS` backend skips the C++ extension build (`liboperators.so`) and provides only the Python dispatch path.
+FlagGems is pinned to a master commit validated against the FlagTree wheel above,
+not to a release: an unpinned install is one upstream commit away from requiring
+a Triton API the pin does not provide. `.github/scripts/set_env_ascend.sh` sets
+both pins and is the authoritative recipe; `TORCH_FL_FLAGTREE_VERSION` and
+`TORCH_FL_FLAGGEMS_REVISION` override them.
 
-### Rebuild torch_fl with FlagGems Python wrappers
+`numpy` stays below 2.x: 2.x breaks the stock `+cpu` torch C extensions at
+import, and the Ascend test groups import both.
+
+### Rebuild torch_fl
 
 ```bash
 ACCELERATOR=ascend FLAGGEMS_KERNEL=0 FLAGGEMS_PYTHON=1 \
@@ -146,22 +179,32 @@ ACCELERATOR=ascend FLAGGEMS_KERNEL=0 FLAGGEMS_PYTHON=1 \
 ```
 
 Build flags:
-- `FLAGGEMS_PYTHON=1`: enables Python-dispatch wrappers for FlagGems Triton kernels
-- `FLAGGEMS_KERNEL=0`: disables C++ kernel wrappers (the FLAGOS backend does not build `liboperators.so`)
-- `ASCEND_KERNEL=1`: keeps the native ACLNN backend for ops FlagGems cannot compile
+- `FLAGGEMS_PYTHON=1` (the `ACCELERATOR=ascend` default): enables Python-dispatch wrappers for FlagGems Triton kernels
+- `FLAGGEMS_KERNEL=0`: no C++ FlagGems kernels — nothing builds `liboperators.so` for this backend
+- `ASCEND_KERNEL=1`: keeps the native ACLNN backend for ops FlagGems cannot compile or run
 
-### Patch triton-ascend
+### Import order
 
-The stock `triton-ascend` package depends on `torch_npu`. Patch it to use the `flagos` device interface instead:
+`torch_fl` must be imported **before** `triton` or `flag_gems`. FlagTree's Ascend
+backend picks its host-side implementation at discovery time, and only
+torch_fl's stub plus backend policy make that import resolve without the real
+`torch_npu`. Importing `flag_gems` first gets the torch_npu policy and the first
+kernel dies on the stub.
 
-```bash
-python scripts/vendor/patch_triton_ascend.py
+```python
+import torch_fl  # must precede triton / flag_gems
+import torch
+import flag_gems
 ```
 
-The script is idempotent. After patching, clear stale kernel cache:
+To confirm the stack is correctly installed:
 
 ```bash
-rm -rf ~/.triton/cache/
+python -c "
+import torch_fl, torch, triton, flag_gems
+assert 'ascend' in triton.backends.backends
+print(triton.__version__, flag_gems.__version__, flag_gems.vendor_name)
+"
 ```
 
 ### Runtime libstdc++ compatibility
@@ -189,7 +232,7 @@ print('abs matches CPU:', torch.allclose(torch.abs(x).cpu(), x.cpu().abs()))
 There is no separate `*_flagos_py.conf`. An Ascend build is identified by its
 `lib/flagos_platform` marker and always loads `backends_ascend.conf`, which is
 generated FlagGems-first: every routable op is listed exactly once with its
-resolved backend, ops triton-ascend cannot compile sit on `ascend` (the ACLNN
+resolved backend, ops FlagTree cannot compile or run sit on `ascend` (the ACLNN
 kernel), and ops Ascend does not register at all are written `none` so they reach
 `cpu_fallback`. Reading the file tells you the whole routing. `FLAGOS_USE_FLAGGEMS`
 remains accepted for compatibility but is not required to activate the default
@@ -200,47 +243,36 @@ To measure the two backends against each other, collapse the table with
 an op when the target actually implements it; ops that cannot move are listed on
 stderr and stay put, so `ALL_USE_VENDOR` is partial by nature.
 
+### Runtime dtype fallback
+
+A conf is a per-op routing table, so it cannot express "FlagGems, except for
+float64". That exception is real on this compiler — BiShengHIR rejects the
+float64 instantiation of nearly every pointwise kernel FlagGems emits — so it is
+applied at runtime instead, by `FlagGemsRejectsDtype` in `csrc/aten/common.cc`
+through `Dispatcher::ResolveFn`. A float64 call the conf routes to FlagGems, on an
+op that also has an ACLNN kernel, lands on the native backend. Set
+`FLAGOS_LOG_DISPATCH=1` to see which backend each call actually resolved to.
+`tests/integration/ops/test_dtype_route_fallback.py` is the regression test.
+
 ## Optional: torch.compile via triton-ascend
 
 `torch.compile(backend="flagos")` compiles inductor's fused Triton kernels with
-`triton-ascend`. It needs the same environment as the FlagGems route above — the
-patched `triton-ascend` and its `libstdc++` preload — but not `FLAGOS_USE_FLAGGEMS`
-and not `FLAGOS_USE_FLAGTREE`; the profile is picked from the `ACCELERATOR=ascend`
-build. Eager ACLNN keeps working unchanged if `triton-ascend` is absent.
+the installed Triton build. The Ascend profile is picked from the
+`ACCELERATOR=ascend` build and eager ACLNN keeps working unchanged.
 
-FlagTree is not the recommended route here, and is not required. Its Ascend
-backend exists only on the 3.5-line branches (`triton_v3.5.x` /
-`v0.6.0-rc2-triton3.5`; it is absent from `main` and the 3.6/3.7 branches), there
-is no `flagtree` wheel on PyPI so it must be built from source, and installing it
-*replaces* the `triton` package — taking `triton-ascend` and the FlagGems path
-down with it. Use a separate environment if you want to try it.
+**Status: not revalidated on FlagTree.** The measured result quoted below was
+taken on `triton-ascend 3.2.0`; since Ascend's FlagGems route moved to FlagTree
+`0.6.2a1+ascend3.5` no CI step or hand run has re-measured the compile path, so
+treat it as unvalidated on the current toolchain. The path is also not covered by
+CI at all — `tests/integration/test_compile.py` has no Ascend step in
+`.github/configs/ascend.yml` — so these are point measurements either way.
 
-That backend is also coupled to `torch_npu`, which claims PrivateUse1 and would
-leave `torch_fl` unable to register `flagos`. The coupling is at the C++ and link
-level, not just a Python import: upstream's `torch_npu` backend policy emits
-`-ltorch_npu`, includes `<torch_npu/csrc/core/npu/NPUWorkspaceAllocator.h>`, and
-generates `at_npu::native::` calls. A stub `torch_npu` module therefore cannot
-work — the launcher would fail to compile.
-
-`torch_fl/compile/flagtree_ascend_policy.py` works around this by registering a
-third backend policy, `flagos`, on FlagTree's strategy registry. It answers the
-same strategy names from torch_fl's own runtime: device and stream come from
-`torch.flagos` and the ACL stream registry, and the generated C++ uses plain ATen
-against PrivateUse1 (which under `torch_fl` *is* flagos) instead of `at_npu::`.
-It installs automatically when `FLAGOS_USE_FLAGTREE=1` on an Ascend build, and
-also forces `TRITON_ENABLE_TASKQUEUE=false`, because the task queue is
-torch_npu-only (`at_npu::native::OpCommand`) and defaults to on upstream.
-
-Status: the policy is verified only up to the boundary that can be checked
-without a FlagTree build — the emitted C++ compiles against real ATen headers
-using just the flags the policy emits, and every strategy FlagTree's driver
-dispatches resolves through FlagTree's real registry class with `flagos` owning
-PrivateUse1. End-to-end kernel compilation and execution through FlagTree has not
-been run, because no FlagTree build carrying the Ascend backend is installed in
-this environment. Treat it as unvalidated until that exists.
-
-Upstream request to remove the need for this shim:
-https://github.com/flagos-ai/FlagTree/issues/1046
+The sections below still describe the triton-ascend environment, because that is
+the toolchain the numbers came from. A hand-built `triton-ascend 3.2.x` is
+installed the same way but from PyPI, and needs
+`python scripts/vendor/patch_triton_ascend.py` to strip its `libtorch_npu`
+linkage (see [`scripts/README.md`](../../../scripts/README.md)); the script is
+kept for that path and is not used by the FlagTree route above.
 
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c "
@@ -254,11 +286,12 @@ print('compile matches eager:', torch.allclose(torch.compile(f, backend='flagos'
 "
 ```
 
-`TORCH_DEVICE_BACKEND_AUTOLOAD=0` matters if `torch_npu` is installed in the same
-environment: `import torch` autoloads it, it claims PrivateUse1, and `torch_fl`
-then refuses to register `flagos`.
+`TORCH_DEVICE_BACKEND_AUTOLOAD=0` is unnecessary in the FlagTree environment —
+no `torch_npu` exists there — but matters if the real `torch_npu` is installed
+alongside: `import torch` autoloads it, it claims PrivateUse1, and `torch_fl` then
+refuses to register `flagos`.
 
-Support is **experimental**. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
+Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
 triton-ascend 3.2.0, torch 2.10.0+cpu, Python 3.10):
 `tests/integration/test_compile.py` passes 30 of 32 with a cold inductor cache,
 the two remaining cases being FlagTree-only and MetaX-only. Run it with the cache
@@ -279,7 +312,8 @@ a masked 2-D byte load that silently reads wrong data (this produced incorrect
 resource limit, and a segfault when the parent process launches a kernel built in
 an inductor compile worker. The last one makes Ascend default to
 `compile_threads=1`; an explicit `compile_threads` option or
-`TORCHINDUCTOR_COMPILE_THREADS` still wins.
+`TORCHINDUCTOR_COMPILE_THREADS` still wins. Whether any of the three still apply
+to FlagTree is unmeasured.
 
 ## Limitations
 
@@ -293,9 +327,9 @@ The Ascend profiler path does not yet emit device-side event categories (kernel,
 
 ### torch.compile is not covered in CI
 
-The Ascend CI runner image does not carry `triton-ascend`, so
+The Ascend CI runner image does not carry the Triton toolchain, so
 `tests/integration/test_compile.py` has no CI step and the compile path is
-validated only by hand on hardware that has the toolchain installed. The results
+validated only by hand on hardware that has it installed. The results
 quoted above are point measurements, not a continuously enforced gate.
 
 ### Distributed support is architectural only

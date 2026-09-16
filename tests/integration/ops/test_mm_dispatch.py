@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -202,19 +202,22 @@ class TestMmDispatchLog:
         """With the FlagGems runtime path available, mm keeps the route its conf selects.
 
         ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so on a platform whose
-        conf keeps mm on the vendor kernel (GCU and PPU route it there, because
-        FlagGems' mm passes a matmul kwarg the vendor Triton rejects) the
-        FlagGems route this case is named for does not exist and there is
-        nothing to assert. Skips instead of failing, so the case stays honest on
-        the platforms where the conf does route mm to FlagGems.
+        conf keeps mm on the vendor kernel (DCU and PPU route it there -- DCU's
+        FlagGems mm kernel hangs on the HCU backend, FlagGems issue #6227, and
+        FlagGems' mm passes a matmul kwarg the PPU Triton rejects -- and GCU,
+        whose matmul overloads are in its gap set) the FlagGems route this case
+        is named for does not exist and there is nothing to assert. Skips
+        instead of failing, so the case stays honest on the platforms where the
+        conf does route mm to FlagGems.
         """
         if routed_backend_or_none("mm") != "flagos_python":
             pytest.skip("mm does not route through FlagGems on this platform")
         result = _run_mm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] mm -> flagos_python" in result.stderr, (
-            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
+        expected = routed_backend("mm")
+        assert f"[flagos dispatch] mm -> {expected}" in result.stderr, (
+            f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
@@ -244,8 +247,9 @@ class TestMmDispatchLog:
 
         FlagGems has no Triton kernel for mm.out, so the confs that route mm to
         FlagGems still send mm.out to a vendor kernel, and GCU sends both there.
-        What the case pins is that the route survives with the FlagGems runtime
-        path compiled in, so it asserts the conf's own value rather than one
+        DCU pins both to its cuda boxing kernel for the same reason. What the
+        case pins is that the route survives with the FlagGems runtime path
+        compiled in, so it asserts the conf's own value rather than one
         platform's backend name.
         """
         expected = routed_backend_or_none("mm.out")

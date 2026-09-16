@@ -21,6 +21,15 @@ Original triton-ascend is designed to work with torch_npu. This script
 patches it to use the torch_fl (flagos) device interface instead,
 removing all hard dependencies on libtorch_npu.so.
 
+**Legacy toolchain.** Ascend's FlagGems route now runs on FlagTree
+(0.6.2a1+ascend3.5, Triton 3.5), which needs no patching: torch_fl installs a
+torch_npu-free backend policy for it (``torch_fl/compile/flagtree_ascend_policy.py``)
+and absorbs the backend's torch_npu import with a stub. Nothing in
+``.github/scripts/set_env_ascend.sh`` calls this script any more. It is kept for
+the hand-built triton-ascend 3.2.x environment described under "Optional:
+torch.compile via triton-ascend" in docs/vendors/ascend/installation.md, and is
+not exercised by CI.
+
 Usage:
     python scripts/vendor/patch_triton_ascend.py [--triton-path /path/to/triton]
 
@@ -378,8 +387,8 @@ def strip_torch_npu_build_flags(triton_path):
     replacement. USE_TORCH_NPU is what compiles the at_npu::native::OpCommand
     body in npu_utils.cpp; with it defined and torch_npu absent, the JIT compile
     dies with "'at_npu' has not been declared" no matter what the headers look
-    like. The empty stub headers from setup_torch_npu_stubs.sh satisfy the
-    #include and nothing more.
+    like. Empty stub torch_npu headers satisfy the #include and nothing more; the
+    script that wrote them was removed along with the triton-ascend CI route.
 
     Every flag-list entry in this file is a short literal on its own line, so
     matching the flag itself -- with or without an f-prefix, either quote style,

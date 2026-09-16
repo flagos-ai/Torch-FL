@@ -16,12 +16,14 @@ display_name: Ascend
 
 setup_script: .github/scripts/set_env_ascend.sh
 
-# The CI image is the canonical CANN 9.0.0 aarch64 base (the same one used for
-# hand-staged acceptance), retagged into the BAAI harbor flagos-dev project.
-# set_env_ascend.sh is self-contained: it installs standard CPU torch + build
-# deps into a fresh venv, so the image only needs python3.12 + CANN + a compiler
-# -- no vendor torch is baked in (torch_npu is explicitly forbidden).
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-ascend-ci
+# The official FlagTree Ascend image: CANN 9.0.0, Python 3.11, aarch64. It is the
+# supported base for flagtree 0.6.2a1+ascend3.5, whose wheel is cp311-only, and it
+# already carries the FlagTree `triton`. set_env_ascend.sh is still self-contained
+# -- it installs stock CPU torch + build deps into a fresh venv and re-pins
+# flagtree/FlagGems from the FlagOS index -- so the image only has to supply
+# python3.11 + CANN + a compiler. No vendor torch is baked in and torch_npu is
+# explicitly forbidden. Keep in sync with integration-test-ascend.yml.
+ci_image: harbor.baai.ac.cn/flagtree/flagtree-ascend3.5-910c-py311-cann9.0.0-ubuntu22.04-aarch64:202608-torch2.10.0-vllm0.20.2
 
 # Self-hosted Huawei (Ascend) runner registered by the teacher. The job is
 # dispatched only to a runner carrying this label.

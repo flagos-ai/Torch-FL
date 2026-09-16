@@ -19,6 +19,16 @@
 # boxing layer, and unlike MetaX it does not shim a CUDA runtime. The wheel is
 # built against a stock CPU PyTorch (2.10.0+cpu); the ACLNN shared libraries
 # from the CANN toolkit are linked at runtime via LD_LIBRARY_PATH.
+#
+# FlagGems runs here on FlagTree, not on triton-ascend. triton-ascend 3.2.x was
+# the previous provider and is gone: it lags the Triton APIs current FlagGems
+# uses, its task-queue launch path calls at_npu::native::OpCommand (a torch_npu
+# symbol torch_fl must not link), and the exact-string patch that used to strip
+# those calls stopped matching on 3.2.2 and silently no-opped, which broke 11
+# operator tests in run 34786387238. FlagTree 0.6.2a1+ascend3.5 is the Triton
+# 3.5 build for this backend, and torch_fl carries a torch_npu-free backend
+# policy for it (torch_fl/compile/flagtree_ascend_policy.py), so no torch_npu
+# appears anywhere in this environment. See docs/vendors/ascend/installation.md.
 set -euo pipefail
 
 case "${CI_STAGE:-}" in
@@ -31,11 +41,14 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
 # CPU torch is installed from CPU_TORCH_INDEX_URL, not this generic PyPI mirror.
 export PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://repo.huaweicloud.com/repository/pypi/simple}"
 export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-300}"
 export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-20}"
+# FlagTree and FlagGems both come from the FlagOS index.
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
 
 # --- CANN toolkit root -------------------------------------------------------
 # CANN images ship several layouts; pick the first candidate that actually has
@@ -86,22 +99,18 @@ fi
 export ACCELERATOR=ascend
 export ASCEND_HOME
 # Ascend has no CUDA assets or CUDA runtime. Keep the ACLNN backend as the
-# native fallback and enable the patched FlagGems Python path by default.
+# native fallback and enable the FlagGems Python path by default.
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGGEMS_KERNEL=0
 export FLAGGEMS_PYTHON=1
-# triton-ascend's taskqueue launch path calls at_npu::native::OpCommand, a
-# torch_npu symbol torch_fl does not provide. Turn it off through the env var
-# triton-ascend already reads rather than relying on patch_triton_ascend.py to
-# rewrite the default: that rewrite is an exact-string replace written against
-# triton-ascend 3.2.0 and silently stopped matching on the 3.2.2 wheel pinned
-# below, which left taskqueue on. The empty OpCommand.h stub written by
-# scripts/vendor/setup_torch_npu_stubs.sh is only sufficient while taskqueue is off --
-# with it on, the generated launcher references the symbol and the JIT compile
-# fails with "'at_npu' has not been declared", which is what broke 11 Ascend
-# operator tests in run 34786387238. An env var cannot version-rot.
+# FlagTree's task queue launches through at_npu::native::OpCommand, a torch_npu
+# symbol this environment does not have (and must not have). torch_fl's FlagTree
+# backend policy turns the task queue off itself when it is installed; setting it
+# here as well keeps the environment correct before the first torch_fl import,
+# which matters because FlagTree's launcher __init__ is reached from the first
+# FlagGems kernel rather than from a hook the policy could wrap.
 export TRITON_ENABLE_TASKQUEUE=false
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
@@ -172,9 +181,14 @@ fi
 # below: ascend needs no accelerator-linked torch, only the CPU dispatcher plus
 # the ACLNN runtime libraries exported above. (The cuda script requires the
 # build python to import a vendor torch; that contract does not apply here.)
+#
+# 3.11 specifically: the FlagTree Ascend 3.5 wheel is published for cp311 only
+# (see the FlagTree user manual's install table), so a 3.12 venv would simply
+# fail to resolve flagtree. Prefer the interpreter the wheel needs instead of
+# discovering that at pip time.
 VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-}"
 if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
-  for _pyc in python python3 python3.12 python3.11; do
+  for _pyc in python3.11 python3 python; do
     if command -v "$_pyc" >/dev/null 2>&1; then
       VENDOR_PYTHON="$(command -v "$_pyc")"
       break
@@ -183,6 +197,10 @@ if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
 fi
 if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
   echo "::error::Unable to find a Python interpreter to bootstrap the venv"
+  exit 1
+fi
+if ! "$VENDOR_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)'; then
+  echo "::error::Ascend needs Python 3.11: the FlagTree ascend3.5 wheel is cp311-only, and $VENDOR_PYTHON is $("$VENDOR_PYTHON" -V 2>&1)"
   exit 1
 fi
 
@@ -207,12 +225,23 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade pip setuptools wheel cmake
+  # `build` is explicit rather than assumed: the job runs `python -m build
+  # --wheel --no-isolation`, and the FlagTree image does not ship it. A missing
+  # `build` does not fail cleanly -- the repo's own CMake `build/` directory is
+  # found first as a namespace package and the step dies with the misleading
+  # "No module named build.__main__; 'build' is a package and cannot be directly
+  # executed".
+  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade \
+    pip setuptools wheel cmake build
   "$VENV_PYTHON" -m pip install --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
-  if [[ "$CI_STAGE" == "integration" ]]; then
-    "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
-  fi
+    "torch==$CPU_TORCH_VERSION"
+  # Unconditional, unlike the other vendors: Ascend's job builds the wheel and
+  # runs the tests under one CI_STAGE=build invocation, so gating pytest on
+  # CI_STAGE=integration installs it in no job at all. The previous CI image hid
+  # this by shipping a prebuilt /opt/torch-fl-ascend-venv that already had it;
+  # the FlagTree image does not, and the flagtree wheel is cp311-only anyway, so
+  # that Python 3.12 venv could not have been reused here.
+  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
@@ -227,17 +256,15 @@ export PYTHONPATH=""
 # as the FlagGems-first Ascend conf dispatches an operator.
 #
 # Use --no-deps for the source packages so pip cannot replace the pinned CPU
-# torch. Triton-Ascend is supplied by its vendor index and also installs
-# without dependency resolution; the venv already contains the compatible
-# Python/Torch base. Individual retries are intentional: the shared mirror can
-# close a large-wheel response early, producing IncompleteRead even though the
-# package is available. Retrying the failed package avoids restarting all setup.
+# torch. Individual retries are intentional: the shared mirror can close a
+# large-wheel response early, producing IncompleteRead even though the package
+# is available. Retrying the failed package avoids restarting all setup.
 pip_retry() {
   local attempt=1
   while true; do
-    # Increase pip's own retry limit and timeout for large wheels on unstable networks.
-    # triton-ascend 3.2.2 is 270 MB; the default timeout (15s) and retries (5) are
-    # insufficient when the mirror link drops mid-download.
+    # Raise pip's own retry limit and timeout for large wheels on unstable
+    # networks: the flagtree wheel is ~200 MB, and the default timeout (15s) and
+    # retries (5) are not enough when the mirror link drops mid-download.
     if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
       return 0
     fi
@@ -251,51 +278,87 @@ pip_retry() {
   done
 }
 
-# FlagGems commit 8e1fce4 adds triton.knobs, and 4ff8a0f adds tl.map_elementwise,
-# both unavailable in triton-ascend 3.2.x. Pin to 82b4b0c, the last commit before
-# those Triton APIs were used.
-FLAGGEMS_REVISION="82b4b0c10e6bb628ba9d0d4054913f3bdb6f87a2"
-pip_retry --no-deps "git+https://github.com/flagos-ai/FlagGems.git@${FLAGGEMS_REVISION}"
-# Install dependencies one by one to avoid IncompleteRead causing full batch retry
+# FlagTree installs the module named `triton`, so any stock or vendor Triton
+# already present would be shadowed rather than replaced, and the user manual
+# asks for it to be removed first. The venv is fresh and has none, but the
+# prebuilt-venv path may, and `pip uninstall triton` is a no-op when it does not.
+for _ in 1 2 3; do
+  "$VENV_PYTHON" -m pip uninstall -y triton >/dev/null 2>&1 || true
+done
+
+# FlagTree, the Triton build carrying the Ascend backend. Pinned, not tracking a
+# moving tag: the FlagGems revision below is validated against this exact wheel,
+# and the Triton minor (3.5) has to match the backend the wheel was built for.
+# From the FlagTree user manual ("ascend", Triton 3.5 row).
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a1+ascend3.5}"
+pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
+
+# FlagGems from master. Pinned to the master commit this environment was
+# validated against -- an unpinned install is one upstream commit away from
+# requiring a Triton API the flagtree pin above does not provide -- but still a
+# master revision, not a release, so a newer one is one env var away:
+#   TORCH_FL_FLAGGEMS_REVISION=$(git ls-remote https://github.com/FlagOpen/FlagGems.git HEAD | cut -f1)
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-d45285ba6423a3400019aa330daa6877908bf3cf}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
+
+# FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead
+# failing the whole batch. numpy stays <2: 2.x breaks the stock +cpu torch C
+# extensions at import, and the Ascend test groups import both.
 pip_retry --index-url "$PIP_INDEX_URL" pybind11
 pip_retry --index-url "$PIP_INDEX_URL" packaging
 pip_retry --index-url "$PIP_INDEX_URL" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL" 'sqlalchemy==2.0.48'
-pip_retry --index-url "$PIP_INDEX_URL" 'numpy>=1.20,<2.0'
-# Install the latest published triton-ascend wheel (3.2.2). Source builds from
-# the 3.5 branch require unreliable gitcode.com submodules and exceed the CI
-# timeout; the 3.2.x wheel is stable and fast.
-pip_retry --no-deps --extra-index-url 'https://triton-ascend.osinfra.cn/pypi/simple' 'triton-ascend==3.2.2'
-"$VENV_PYTHON" "$REPO_ROOT/scripts/vendor/patch_triton_ascend.py"
+pip_retry --index-url "$PIP_INDEX_URL" 'numpy<2'
 
-# Fail early in the wheel-only stage if the pinned FlagGems/Triton pair
-# can be imported together. The build stage cannot run this check because
-# torch_fl._C does not exist until the wheel has been built and installed.
-if [[ "$CI_STAGE" == "integration" ]]; then
-  # torch_fl must be imported first so its PrivateUse1 shim owns the device key.
-  "$VENV_PYTHON" - <<'PY'
-import torch_fl
-import flag_gems
-
-print(f"FlagGems import: {flag_gems.__file__}")
-PY
-fi
-
-# Sanity: the isolated torch must be the CPU wheel, not a CUDA vendor build.
+# --- Verify the isolation held ----------------------------------------------
+# torch_fl does not depend on torch_npu -- that is a hard requirement of this
+# backend, not a preference: the real extension claims PrivateUse1 on import and
+# would lock `flagos` out of the device key. Checked before torch_fl is imported,
+# because importing torch_fl installs a stub under that name for FlagGems' sake.
 "$VENV_PYTHON" - <<'PY'
+import importlib.util
 from pathlib import Path
-import sys
+
 import torch
 
 torch_path = Path(torch.__file__).resolve()
-assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
-print(f"Isolated Python: {sys.executable}")
-print(f"CPU PyTorch: {torch.__version__}")
+assert importlib.util.find_spec("torch_npu") is None, (
+    "torch_npu is importable in the isolated venv; it claims PrivateUse1 on "
+    "import and would make the flagos device unregisterable"
+)
 print(f"CPU torch path: {torch_path}")
 PY
+
+# --- Verify the FlagTree + FlagGems stack imports ----------------------------
+# Integration only: torch_fl._C does not exist until the wheel has been built,
+# and the import order below needs it. CI calls this script before building.
+#
+# torch_fl must be imported before flag_gems. FlagTree's Ascend backend picks
+# its host-side implementation by importing torch_npu at discovery time (and
+# again from the launcher on the first kernel launch); torch_fl's stub absorbs
+# that import, and torch_fl installs its own torch_npu-free backend policy in
+# the same step. Importing flag_gems first, or importing triton first, gets the
+# torch_npu policy instead and the first FlagGems kernel dies on the stub.
+if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl  # noqa: F401  -- must precede triton/flag_gems; installs the backend policy
+
+import torch
+import triton
+import flag_gems
+
+assert "ascend" in triton.backends.backends, sorted(triton.backends.backends)
+assert torch.version.cuda is None, torch.version.cuda
+# FlagGems resolves its operator set against this name; a mismatch means the
+# Ascend vendor package is missing from the install.
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+PY
+fi
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
@@ -304,7 +367,8 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ASCEND_HOME \
     FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_USE_FLAGGEMS FLAGOS_USE_FLAGGEMS_CPP \
-    FLAGGEMS_KERNEL FLAGGEMS_PYTHON PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
+    FLAGGEMS_KERNEL FLAGGEMS_PYTHON TRITON_ENABLE_TASKQUEUE \
+    PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
     CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

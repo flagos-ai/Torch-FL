@@ -374,15 +374,17 @@ inline void GetRebindFuncs(void*& set_repeatable, void*& set_in_addr,
 struct CachedExecKey {
   const char* api = nullptr;   // static per-call-site string ptr (unique id)
   uint64_t sig = 0;            // 64-bit hash of tensor sigs + scalar bytes
+  int device = -1;             // device the executor was built on
   bool operator==(const CachedExecKey& o) const {
-    return api == o.api && sig == o.sig;
+    return api == o.api && sig == o.sig && device == o.device;
   }
 };
 
 struct CachedExecKeyHash {
   size_t operator()(const CachedExecKey& k) const {
     return std::hash<const void*>()(static_cast<const void*>(k.api)) ^
-           (static_cast<size_t>(k.sig) * 0x9E3779B97F4A7C15ULL);
+           (static_cast<size_t>(k.sig) * 0x9E3779B97F4A7C15ULL) ^
+           (static_cast<size_t>(k.device) * 0xC2B2AE3D27D4EB4FULL);
   }
 };
 
@@ -498,9 +500,16 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
   auto setInAddr = reinterpret_cast<SetAddrFunc>(setInAddrAddr);
   auto setOutAddr = reinterpret_cast<SetAddrFunc>(setOutAddrAddr);
 
-  auto acl_stream = GetCurrentAclStream();
+  // The executor and the cached workspace below are both device-bound: an
+  // aclOpExecutor is built against the device current at GetWorkspaceSize time
+  // and its workspace is allocated on that device. Keying the cache without the
+  // device let a call on device 1 reuse an executor (and workspace) built on
+  // device 0, which either failed outright or produced garbage.
+  int device_index = 0;
+  ::GetDevice(&device_index);
+  auto acl_stream = GetCurrentAclStreamForDevice(device_index);
   auto& cache = GetExecCache();
-  CachedExecKey key{api_name, sig};
+  CachedExecKey key{api_name, sig, device_index};
 
   auto it = cache.find(key);
   // Optional hit/miss instrumentation (FLAGOS_CACHE_STATS=1): prints per-op

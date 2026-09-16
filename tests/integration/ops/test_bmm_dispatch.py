@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -271,18 +271,21 @@ class TestBmmDispatchLog:
         """With the FlagGems runtime path available, bmm keeps the route its conf selects.
 
         ``FLAGOS_USE_FLAGGEMS`` no longer selects a conf, so on a platform whose
-        conf keeps bmm on the vendor kernel (GCU and PPU route it to their
-        native matmul) the FlagGems route this case is named for does not exist
-        and there is nothing to assert. Skips instead of failing, so the case
-        stays honest on the platforms where the conf does route bmm to FlagGems.
+        conf keeps bmm on the vendor kernel (DCU and PPU route it to their
+        native matmul -- DCU's FlagGems bmm kernel hangs on the HCU backend,
+        FlagGems issue #6227 -- and GCU, whose matmul overloads are in its gap
+        set) the FlagGems route this case is named for does not exist and there
+        is nothing to assert. Skips instead of failing, so the case stays honest
+        on the platforms where the conf does route bmm to FlagGems.
         """
         if routed_backend_or_none("bmm") != "flagos_python":
             pytest.skip("bmm does not route through FlagGems on this platform")
         result = _run_bmm_subprocess(
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
         )
-        assert "[flagos dispatch] bmm -> flagos_python" in result.stderr, (
-            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
+        expected = routed_backend("bmm")
+        assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
+            f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda
@@ -309,8 +312,9 @@ class TestBmmDispatchLog:
             {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"},
             use_out=True,
         )
-        assert "[flagos dispatch] bmm.out -> flagos_python" in result.stderr, (
-            f"Expected flagos_python dispatch log, got:\n{result.stderr}"
+        expected = routed_backend("bmm.out")
+        assert f"[flagos dispatch] bmm.out -> {expected}" in result.stderr, (
+            f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.cuda

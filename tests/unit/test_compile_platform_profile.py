@@ -251,7 +251,13 @@ def test_benchmarker_patch_translates_triton_device_name(as_ascend, monkeypatch)
         lambda **kwargs: calls.append(kwargs) or 1.0,
         raising=False,
     )
-    monkeypatch.setattr(benchmarking.benchmarker, "_flagos_patched", False)
+    # raising=False: the marker only exists once _patch_benchmarker has run on a
+    # non-CUDA-like build, and on a CUDA-like one the real import-time call
+    # returns before setting it. Without this the test fails on exactly the
+    # platform where the patch is a no-op.
+    monkeypatch.setattr(
+        benchmarking.benchmarker, "_flagos_patched", False, raising=False
+    )
 
     di._patch_benchmarker()
     benchmarking.benchmarker.benchmark(fn=lambda: None, device="npu")
@@ -501,14 +507,27 @@ def test_cuda_device_op_overrides_use_flagos_device_state(as_cuda):
 
 
 @pytest.mark.anyplatform
-def test_publish_on_device_module_is_a_noop_without_cpp_wrapper(as_ascend):
+def test_publish_on_device_module_is_a_noop_without_cpp_wrapper(as_ascend, monkeypatch):
     """Inductor's PrivateUse1 hook needs all four classes; Ascend has three.
 
     Publishing a partial set would make init_backend_registration fail on the
     missing name, so this path stays quiet and register_flagos_codegen is the
     only registration route on Ascend.
+
+    The names are deleted first because a CUDA-like build publishes them at
+    import time (torch_fl/__init__.py), and that write is a plain setattr that
+    monkeypatch cannot roll back on its own. Deleting them makes the assertion
+    test what this function does rather than what the process already did.
     """
     from torch_fl.compile import inductor_codegen as ic
+
+    for name in (
+        "Scheduling",
+        "PythonWrapperCodegen",
+        "CppWrapperCodegen",
+        "WrapperFxCodegen",
+    ):
+        monkeypatch.delattr(torch.flagos, name, raising=False)
 
     ic.publish_codegen_on_device_module()
     assert not hasattr(torch.flagos, "Scheduling")

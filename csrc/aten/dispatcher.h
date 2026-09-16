@@ -6,7 +6,9 @@
 #include <c10/util/Exception.h>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace at::native::flagos {
 
@@ -33,6 +35,68 @@ namespace at::native::flagos {
 //
 //   // call with op name override (uses "mm.out" for config lookup):
 //   mm_dispatcher.DispatchAs("mm.out", self, mat2, out);
+
+namespace detail {
+
+// Does this argument alone force the call off the FlagGems route?
+//
+// Overloads cover only the argument types that carry a dtype -- a Tensor, an
+// optional Tensor, the Tensor-list forms, and an explicit ScalarType. Anything
+// else (Scalar, bool, IntArrayRef, Generator, ...) cannot answer the question
+// on its own, so the catch-all reports "no". A Scalar is deliberately not
+// included: it is not a tensor dtype, and the MUSA case where a Python-float
+// operand decides the outcome is a per-op gap the conf generator records.
+//
+// Overload resolution rather than SFINAE: a Tensor argument matches the
+// non-template overload exactly, which wins over the catch-all template.
+inline bool FlagGemsRejectsArg(const at::Tensor& t) {
+  return FlagGemsRejectsDtype(t.scalar_type());
+}
+
+inline bool FlagGemsRejectsArg(const ::std::optional<at::Tensor>& t) {
+  return t.has_value() && FlagGemsRejectsDtype(t->scalar_type());
+}
+
+inline bool FlagGemsRejectsArg(const at::ArrayRef<at::Tensor>& l) {
+  for (const auto& t : l) {
+    if (FlagGemsRejectsDtype(t.scalar_type())) return true;
+  }
+  return false;
+}
+
+inline bool FlagGemsRejectsArg(const at::ITensorListRef& l) {
+  for (const auto& t : l) {
+    if (FlagGemsRejectsDtype(t.scalar_type())) return true;
+  }
+  return false;
+}
+
+// `c10::List<optional<Tensor>>` (the foreach_* schema shape) is deliberately
+// absent: its ListElementReference has neither has_value() nor ->, so the
+// overload would need an IValue unwrap for a case no Ascend op reaches.
+
+inline bool FlagGemsRejectsArg(const ::std::optional<at::ScalarType>& d) {
+  return d.has_value() && FlagGemsRejectsDtype(*d);
+}
+
+// Covers the factory ops, whose dtype arrives as a bare argument rather than
+// through a tensor: torch.ones(4, dtype=torch.float64) has no operand to
+// inspect.
+inline bool FlagGemsRejectsArg(at::ScalarType d) {
+  return FlagGemsRejectsDtype(d);
+}
+
+template <typename T>
+inline bool FlagGemsRejectsArg(const T&) {
+  return false;
+}
+
+template <typename... Args>
+inline bool FlagGemsRejectsArgs(const Args&... args) {
+  return (... || FlagGemsRejectsArg(args));
+}
+
+} // namespace detail
 
 template <typename FnPtr>
 class Dispatcher {
@@ -78,8 +142,8 @@ class Dispatcher {
       backend = GetBackendForOp(op_name_);
       cached_backend_ = backend;
     }
+    auto fn = ResolveFn(backend, args...);
     LogDispatch(op_name_, backend);
-    auto fn = GetFn(backend);
 
     // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
     if (!fn) {
@@ -119,8 +183,8 @@ class Dispatcher {
   template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
     auto backend = GetBackendForOp(op_name);
+    auto fn = ResolveFn(backend, args...);
     LogDispatch(op_name, backend);
-    auto fn = GetFn(backend);
 
     // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
     if (!fn) {
@@ -151,6 +215,52 @@ class Dispatcher {
   }
 
  private:
+  // The build's own native kernel slot, with the backend name that selects it.
+  // Exactly one is ever populated: a build registers its native kernels into
+  // its own slot (kAscend on Ascend, kMusa on MUSA, ...) and, on the
+  // CUDA-compatible platforms, boxing kernels into kCuda. Ordered
+  // most-specific-first so a build that somehow populated two still prefers
+  // the vendor's own kernels.
+  std::pair<FnPtr, Backend> VendorSlot() const {
+    if (ascend_fn_)      return {ascend_fn_,      Backend::kAscend};
+    if (musa_fn_)        return {musa_fn_,        Backend::kMusa};
+    if (metax_fn_)       return {metax_fn_,       Backend::kMetax};
+    if (gcu_fn_)         return {gcu_fn_,         Backend::kGcu};
+    if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
+    if (cuda_fn_)        return {cuda_fn_,        Backend::kCuda};
+    return {nullptr, Backend::kNone};
+  }
+
+  // GetFn, plus the dtype escape from the FlagGems route.
+  //
+  // A conf routes per op, so it cannot say "FlagGems, except for float64" --
+  // but on Ascend FlagGems' pointwise codegen simply does not compile for
+  // float64, and the vendor kernels do (see FlagGemsRejectsDtype). The
+  // substitution has to happen where the arguments are visible, which is here.
+  // `backend` is rewritten alongside, so the dispatch log and the
+  // "backend not registered" message name what actually ran rather than what
+  // the conf asked for.
+  //
+  // Only the Python route is guarded: the C++ one (kFlagGemsCpp) exists only
+  // on the vendors that measured it, so its conf entries are already a per-op
+  // decision made from a measurement.
+  template <typename... Args>
+  FnPtr ResolveFn(Backend& backend, const Args&... args) const {
+    FnPtr fn = GetFn(backend);
+    if (backend != Backend::kFlagGems || fn == nullptr) return fn;
+    if (!detail::FlagGemsRejectsArgs(args...)) return fn;
+
+    auto [vendor_fn, vendor_backend] = VendorSlot();
+    if (vendor_fn == nullptr) {
+      // FlagGems is the only implementation this build has for the op, so
+      // there is nothing to fall back to. Let the call fail where it would
+      // have failed anyway, rather than reporting a routing problem.
+      return fn;
+    }
+    backend = vendor_backend;
+    return vendor_fn;
+  }
+
   FnPtr GetFn(Backend device) const {
     switch (device) {
       case Backend::kCuda:          return cuda_fn_;

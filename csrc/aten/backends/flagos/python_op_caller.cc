@@ -150,11 +150,27 @@ std::optional<c10::Device> DeviceOfFirst(const at::Tensor& t, const Ts&... rest)
   return std::nullopt;
 }
 
+py::object ScalarToPython(const at::Scalar& s);
+
 // Convert at::Tensor to Python THPVariable.
 // CPU scalar tensors are moved to the flagos device since FlagGems kernels
 // cannot access CPU memory.
 py::object TensorToPython(const at::Tensor& t) {
   if (!t.defined()) return py::none();
+  // A number written in Python for an op ATen only declares with a Tensor
+  // parameter -- `tensor + 0.1` is the common case -- reaches this caller as a
+  // *wrapped-number* 0-dim CPU tensor, because ATen boxes the scalar that way
+  // before dispatching onto the .Tensor overload. is_wrapped_number() is what
+  // tells ATen's type promotion to keep the operand at its category instead of
+  // promoting with the full tensor dtype (ATen/native/TypeProperties.h), and
+  // FlagGems does not implement that flag: it sees a plain 0-dim tensor and
+  // promotes fp32 + fp64 -> fp64, which the Ascend backend cannot compile
+  // ("[fp8, fp64] is unsupported on Ascend for now"). Hand the number over as
+  // the Python scalar it came from instead; FlagGems' scalar overloads then
+  // follow ATen's rule and the kernel stays in the tensor operand's dtype.
+  if (t.unsafeGetTensorImpl()->is_wrapped_number()) {
+    return ScalarToPython(t.item());
+  }
   if (t.device().is_cpu() && t.dim() == 0) {
     // Current device, not index 0: a scalar operand feeding a computation on
     // device N must not drag that computation back to device 0.

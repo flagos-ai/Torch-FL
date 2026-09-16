@@ -25,6 +25,7 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
 
 # Locate the DTK install root. The image may ship DTK under /opt/dtk,
 # /opt/dtk-26.04, or a versioned directory; honor an explicit DTK_ROOT or
@@ -213,18 +214,94 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   fi
 fi
 
-# Carry the vendor FlagGems/FlagCX Python packages into the venv so the DTK
-# triton (hcu backend) and flag_gems runtime path work under the CPU torch.
+# FlagCX is carried over by copy rather than installed: it is not published on
+# any index and the vendor image builds it against DTK's HIP. Triton is
+# deliberately *not* copied any more -- the DTK image's triton is replaced by the
+# flagtree pin below, which is the build that ships the hcu backend together with
+# its entry-point metadata.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-for package in flag_gems triton triton_kernels flagcx sqlalchemy; do
-  if [[ -d "$VENDOR_SITE/$package" ]]; then
-    cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
-  fi
-  for metadata in "$VENDOR_SITE"/"$package"-*.dist-info; do
-    [[ -e "$metadata" ]] || continue
-    cp -a "$metadata" "$VENV_SITE/"
-  done
+if [[ -d "$VENDOR_SITE/flagcx" ]]; then
+  cp -a "$VENDOR_SITE/flagcx" "$VENV_SITE/"
+fi
+for metadata in "$VENDOR_SITE"/flagcx-*.dist-info; do
+  [[ -e "$metadata" ]] || continue
+  cp -a "$metadata" "$VENV_SITE/"
 done
+
+# --- Hygon Triton (flagtree) + FlagGems --------------------------------------
+# Installed for both stages, not just integration: build and integration share
+# one platform job, and restricting this to CI_STAGE=integration would leave the
+# build job's venv without flag_gems -- the wheel then fails as soon as a
+# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+#
+# --no-deps on both source packages so pip cannot replace the pinned CPU torch
+# with something a transitive requirement prefers.
+#
+# Retries are deliberate: the flagtree wheel is ~350 MB and the shared mirror can
+# close a large-wheel response early (IncompleteRead) even though the package is
+# there. Retrying just the failed package beats restarting all of setup.
+pip_retry() {
+  local attempt=1
+  while true; do
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+      return 0
+    fi
+    if (( attempt >= 5 )); then
+      echo "::error::pip install failed after $attempt attempts: $*"
+      return 1
+    fi
+    echo "::warning::pip install attempt $attempt failed; retrying: $*"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
+# The venv must not end up with two Tritons. A prebuilt /opt/torch-fl-dcu-venv
+# baked by an older setup carried the vendor's triton by copy; pip cannot remove
+# that tree (it ships no dist-info), so it is deleted by path before the flagtree
+# install. What is left for pip is dist-info metadata from an earlier install, so
+# the uninstall loop is bounded by that metadata being present.
+#
+# `pip uninstall -y` exits 0 even when it skips every named package ("WARNING:
+# Skipping triton as it is not installed"), so a loop keyed on the pip command
+# itself never terminates. It did exactly that on the first run of this
+# manifest: the DCU job sat in this line with all output redirected to
+# /dev/null for the remainder of its 60-minute budget and was cancelled before
+# reaching a single test.
+if [[ -d "$VENV_SITE/triton" || -d "$VENV_SITE/triton_kernels" ]]; then
+  echo "Removing pre-existing triton from the venv before installing flagtree"
+fi
+rm -rf "$VENV_SITE/triton" "$VENV_SITE/triton_kernels"
+while compgen -G "$VENV_SITE/triton-*.dist-info" >/dev/null ||
+      compgen -G "$VENV_SITE/triton_kernels-*.dist-info" >/dev/null; do
+  "$VENV_PYTHON" -m pip uninstall -y triton triton_kernels >/dev/null 2>&1 || break
+done
+
+# flagtree is the Triton build carrying the "hcu" (Hygon) backend. 3.6 is not a
+# preference but a requirement: current FlagGems uses tl.map_elementwise and
+# triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
+# fails at import, so the two pins move together.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a1+hcu3.6}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+
+# Pinned rather than tracking master: FlagGems moves faster than the vendor
+# Triton it needs, and an unpinned install is one upstream commit away from
+# requiring a Triton the flagtree pin above does not provide. e7b4a865 is the
+# revision validated against flagtree 0.6.2a1+hcu3.6 (and, on MUSA, against
+# flagtree 0.6.2a3+mthreads3.6) -- the two platforms share the Triton 3.6 pin,
+# so they share the FlagGems pin.
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-e7b4a865fce6d85861ee91a6aca56564ef9acf7d}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/FlagOpen/FlagGems.git}"
+pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
+
+# FlagGems' own runtime deps, installed one at a time for the IncompleteRead
+# reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
+# the stock +cpu torch C extensions at import.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
 
 CPU_TORCH_ROOT="$(CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import os
@@ -262,12 +339,16 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export ACCELERATOR=dcu
-# DTK's Triton (hcu backend) is copied into the venv without its dist-info
-# (the vendor image ships none), so Triton's entry-point backend discovery
-# finds nothing and the hcu backend never loads. Force in-tree loading so the
-# backend under triton/backends is used -- required for the FlagGems runtime
-# path (integration [3/5]). See README "Enabling FlagGems on DCU".
-export TRITON_BACKENDS_IN_TREE=1
+# FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
+# one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
+# exactly the CUDA-compatible path a kernel library needs here. Mirrors the
+# backend selection set_env_musa.sh performs -- FLAGGEMS_KERNEL is the legacy
+# vendor-kernel switch and stays off so nothing tries to rebuild flag_gems
+# against the DCU toolchain.
+export FLAGGEMS_KERNEL=0
+export FLAGGEMS_PYTHON=1
+export FLAGOS_USE_FLAGGEMS=1
+export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 
@@ -464,6 +545,36 @@ PY
   fi
 fi
 
+# --- Verify the FlagGems stack imports ---------------------------------------
+# Integration only: torch_fl._C does not exist until the wheel is built, and the
+# import below needs it. set_env_dcu.sh runs before the wheel build, so torch_fl
+# is not importable at that stage.
+#
+# torch_fl is imported before flag_gems on purpose. It installs the torch.cuda
+# shim that makes this box look like the CUDA-compatible device FlagGems expects;
+# importing flag_gems first would resolve the vendor against a stock torch and
+# pick the wrong backend.
+#
+# The assertions cover the three ways this provisioning can silently regress:
+# the flagtree wheel failing to replace the deleted vendor triton, the hcu
+# backend not being discoverable, and FlagGems falling back to a non-Hygon
+# vendor. Each of those would otherwise surface as a confusing per-op failure
+# deep inside the FlagGems test group.
+if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl  # noqa: F401  -- must precede flag_gems; installs the torch.cuda shim
+
+import triton
+import triton.backends
+import flag_gems
+
+assert "hcu" in triton.backends.backends, sorted(triton.backends.backends)
+assert flag_gems.vendor_name == "hygon", flag_gems.vendor_name
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+PY
+fi
+
 if ! command -v rocm-smi >/dev/null 2>&1; then
   echo "::error::rocm-smi is unavailable"
   exit 1
@@ -493,7 +604,8 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR DTK_ROOT ROCM_PATH \
-    FLAGOS_DCU_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH TRITON_BACKENDS_IN_TREE \
+    FLAGOS_DCU_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH \
+    FLAGGEMS_KERNEL FLAGGEMS_PYTHON FLAGOS_USE_FLAGGEMS FLAGOS_USE_FLAGGEMS_CPP \
     CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

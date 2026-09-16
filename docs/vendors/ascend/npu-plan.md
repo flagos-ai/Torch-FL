@@ -3,7 +3,7 @@
 > Drafted: 2026-07-20
 > Machine: Ascend 910 (8×, CANN 9.0.0, aarch64)
 > Target: **both inference and training**
-> Primary approach: **aclnn codegen first**, with FlagGems/triton-ascend and a CPU fallback as backup
+> Primary approach: **aclnn codegen first**, with FlagGems (on FlagTree) and a CPU fallback as backup
 
 ## 0. Conclusions up front
 
@@ -66,9 +66,11 @@ uncovered falls back to CPU automatically:
 
 1. **aclnn codegen (primary)** — covers the regular operators (elementwise, unary math,
    reductions, the matmul family). Goal: grow the hand-written 33 into the hundreds.
-2. **FlagGems / triton-ascend (secondary)** — fused operators and hot spots where Triton both
-   compiles and runs faster (the `_patch_flaggems_codegen_config` and `patch_triton_ascend.py`
-   infrastructure already exists).
+2. **FlagGems on FlagTree (secondary)** — fused operators and hot spots where Triton both
+   compiles and runs faster. The Triton build is FlagTree's Ascend 3.5 line, wired up by the
+   in-repo `torch_fl/compile/flagtree_ascend_policy.py`; ops the compiler rejects stay on
+   tier 1, and a float64 call escaping to FlagGems is caught at runtime by
+   `FlagGemsRejectsDtype` (`csrc/aten/common.cc`).
 3. **CPU fallback** — the long tail and rarely used operators, explicitly flagged as known
    performance costs.
 

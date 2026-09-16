@@ -77,7 +77,7 @@ Capability availability and validation status vary by platform. A feature existi
 |---|---|---|---|---|
 | NVIDIA CUDA | CUDA boxing over external `libtorch_cuda.so` | Eager, autograd, distributed (FlagCX/NCCL), profiler (CUPTI), FlagGems (Python + C++) | **Stable** | [CUDA](docs/vendors/cuda/installation.md) |
 | MetaX | CUDA boxing via cu-bridge, or native MetaX kernels | Eager, autograd | **Stable** | [MetaX](docs/vendors/metax/installation.md) |
-| Ascend | Native ACLNN backend, optional FlagGems via triton-ascend | Eager, autograd, RNG suite | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
+| Ascend | Native ACLNN backend, FlagGems via FlagTree (Triton 3.5) | Eager, autograd, RNG suite | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
 | PPU | CUDA boxing against PPU's CUDA-13-compatible SDK | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
 | Hygon DCU | CUDA boxing over hipified DTK torch | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |

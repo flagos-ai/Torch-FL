@@ -75,6 +75,13 @@ jobs:
       - name: Prepare wheel-only test workspace
         run: |
           TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-dcu.XXXXXX")
+          # The runner executes each configured command with this directory as
+          # its cwd, so what it holds is what those commands can reach. Keep it
+          # wheel-only: `Run unit tests (per file)` is a source-tree suite and
+          # changes back to the checkout itself, and every group that stays here
+          # runs against the installed wheel rather than the checkout it was
+          # built from. tests/unit/test_integration_workdir.py holds both ends of
+          # that arrangement.
           cp -a tests pyproject.toml "$TEST_ROOT/"
           printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
 
