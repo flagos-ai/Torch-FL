@@ -96,7 +96,7 @@ def parse_args(argv=None):
 def load_pipeline(torch, args):
     from diffusers import QwenImagePipeline
 
-    return QwenImagePipeline.from_pretrained(args.model, dtype=torch.bfloat16)
+    return QwenImagePipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16)
 
 
 def pipeline_timestep_helpers():

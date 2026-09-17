@@ -13,6 +13,8 @@
 
 #include "aten/backends/musa/mudnn_common.h"
 
+#include <ATen/ops/view_as_real_native.h>
+
 #ifdef USE_MUSA
 
 namespace at::native::flagos::musa_ops {
@@ -89,6 +91,20 @@ void MudnnCopy(const at::Tensor& src, at::Tensor& dst) {
   if (dst.numel() == 0) {
     return;
   }
+
+  // mudnn has no complex element type, but a same-dtype complex copy is still
+  // a plain byte-preserving strided copy. Reinterpret both tensors as their
+  // native real views and let the existing float/double path perform it on
+  // device. This is needed before the dtype check: non-contiguous complex
+  // inputs otherwise cannot even be materialized for the generic CPU fallback.
+  if (src.scalar_type() == dst.scalar_type() &&
+      at::isComplexType(src.scalar_type())) {
+    at::Tensor src_real = at::native::view_as_real(src);
+    at::Tensor dst_real = at::native::view_as_real(dst);
+    MudnnCopy(src_real, dst_real);
+    return;
+  }
+
   TORCH_CHECK(
       MudnnSupportsDtype(src.scalar_type()) &&
           MudnnSupportsDtype(dst.scalar_type()),

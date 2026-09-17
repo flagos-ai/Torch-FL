@@ -181,6 +181,15 @@ def test_vendor_registered_ops_includes_the_flaggems_inc():
     assert native < registered
 
 
+def test_musa_complex_views_use_native_metadata_kernels():
+    """Complex rotary views cannot fall through to CPU because they alias storage."""
+    routes = g.build_all(CONF_DIR)["musa"][1]
+    native = g.vendor_native_ops("musa")
+    for op in ("view_as_complex", "view_as_real"):
+        assert op in native
+        assert routes[op] == "musa"
+
+
 def test_musa_registers_all_flaggems_ops_except_known_failures():
     """MUSA registers every FlagGems Python op, then routes it to flaggems except
     for the ops in NATIVE_TRITON_GAPS['musa'].

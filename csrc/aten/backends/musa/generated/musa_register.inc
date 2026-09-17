@@ -169,5 +169,7 @@
   m.impl("trunc", WrapperTrunc);
   m.impl("uniform_", WrapperUniformInplace);
   m.impl("var.correction", WrapperVarCorrection);
+  m.impl("view_as_complex", WrapperViewAsComplex);
+  m.impl("view_as_real", WrapperViewAsReal);
   m.impl("where.self", WrapperWhereSelf);
   m.impl("zero_", WrapperZeroInplace);

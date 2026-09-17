@@ -85,6 +85,9 @@ CONF = REPO / "torch_fl/configs/backends_musa.conf"
 # reverse -- so no scalar overload silently computes backwards.
 # --------------------------------------------------------------------------
 OPS = {
+    # ---- metadata-only complex views; no mudnn launch required ----
+    "view_as_complex": ("metadata_view", "view_as_complex"),
+    "view_as_real": ("metadata_view", "view_as_real"),
     # ---- unary: Unary::Mode::<M>, Run(out, self) ----
     "abs": ("unary", "ABS"),
     "sqrt": ("unary", "SQRT"),
@@ -2603,7 +2606,16 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 """
 
+T_METADATA_VIEW = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  return at::native::{mode}(self);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+"""
+
 CATEGORIES = {
+    "metadata_view": T_METADATA_VIEW,
     "unary": T_UNARY,
     "unary_alpha_const": T_UNARY_ALPHA_CONST,
     "unary_two_pass": T_UNARY_TWO_PASS,
@@ -2715,6 +2727,7 @@ ARITHMETIC_CATEGORIES = {
 
 # The mudnn class each category configures, for symbol validation.
 CATEGORY_CLASS = {
+    "metadata_view": None,  # pure ATen metadata; no mudnn symbol to validate
     "unary": "Unary",
     "unary_alpha_const": "Unary",
     "unary_two_pass": "Unary",
@@ -2793,6 +2806,8 @@ FILE_HEADER = """\
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/view_as_complex_native.h>
+#include <ATen/ops/view_as_real_native.h>
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/ScalarType.h>
@@ -2938,7 +2953,7 @@ def main():
         else:
             mode_name, extra = mode, ()
         cls = CATEGORY_CLASS[cat] or mode_name
-        if syms is not None and cls not in syms:
+        if cat != "metadata_view" and syms is not None and cls not in syms:
             skipped.append((op, f"musa::dnn::{cls} not in {libmudnn_path().name}"))
             continue
         if op not in wrappers:

@@ -371,6 +371,42 @@ class TestMusaCorrectness:
             fn(a_cpu.to(DEVICE)).cpu(), fn(a_cpu), rtol=1e-3, atol=1e-3
         )
 
+    @pytest.mark.musa
+    @pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
+    def test_strided_complex_copy(self, dtype):
+        """Complex views materialize on device through their real storage."""
+        torch.manual_seed(42)
+        a_cpu = torch.randn(8, 6, dtype=dtype)
+        a = a_cpu.to(DEVICE)
+        torch.testing.assert_close(a.t().contiguous().cpu(), a_cpu.t().contiguous())
+        torch.testing.assert_close(a[:, ::2].clone().cpu(), a_cpu[:, ::2].clone())
+
+    @pytest.mark.musa
+    def test_complex_view_ops_are_aliases(self):
+        """view_as_complex/real keep ATen's metadata-only alias contract."""
+        real_cpu = torch.arange(24, dtype=torch.float32).reshape(3, 4, 2)
+        real = real_cpu.to(DEVICE)
+
+        complex_view = torch.view_as_complex(real)
+        torch.testing.assert_close(complex_view.cpu(), torch.view_as_complex(real_cpu))
+        assert (
+            complex_view.untyped_storage().data_ptr()
+            == real.untyped_storage().data_ptr()
+        )
+
+        real_view = torch.view_as_real(complex_view)
+        torch.testing.assert_close(real_view.cpu(), real_cpu)
+        assert (
+            real_view.untyped_storage().data_ptr() == real.untyped_storage().data_ptr()
+        )
+
+    @pytest.mark.musa
+    def test_view_as_complex_rejects_invalid_last_dimension(self):
+        """The metadata kernel preserves ATen's shape validation."""
+        invalid = torch.zeros(3, 4, 3, device=DEVICE)
+        with pytest.raises(RuntimeError, match="last dimension of size 2"):
+            torch.view_as_complex(invalid)
+
 
 # Each entry is (name, body, expected device, expected dtype) for
 # _run_cross_device_probe. `body` must leave the copy in `r` and a CPU

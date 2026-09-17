@@ -16,6 +16,8 @@
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/view_as_complex_native.h>
+#include <ATen/ops/view_as_real_native.h>
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/ScalarType.h>
@@ -28,6 +30,18 @@
 namespace at::native::flagos {
 
 namespace musa_ops = at::native::flagos::musa_ops;
+
+at::Tensor ViewAsComplexKernelMusa(const at::Tensor& self) {
+  return at::native::view_as_complex(self);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ViewAsComplexFn, view_as_complex_dispatcher, Backend::kMusa, ViewAsComplexKernelMusa)
+
+at::Tensor ViewAsRealKernelMusa(const at::Tensor& self) {
+  return at::native::view_as_real(self);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ViewAsRealFn, view_as_real_dispatcher, Backend::kMusa, ViewAsRealKernelMusa)
 
 at::Tensor AbsKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
