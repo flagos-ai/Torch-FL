@@ -133,6 +133,38 @@ The GCU compatibility layer prepares the vendor Triton runtime but does not call
 keeps one wrapper per overload and allows native and FlagGems RNG paths to share
 the same per-device seed/offset stream.
 
+### One stream, two producers
+
+`topsaten` and FlagGems submit to the **same** tops stream, so a run mixes two
+producers on one queue. `EXEC_TOPSATEN_CMD` submits to `GetCurrentTopsStream()`
+and Triton's enflame driver reads the handle back from
+`torch.gcu.current_stream(idx).gcu_stream`; measured on an S60 the two were equal
+process after process.
+
+Sharing a stream is not by itself enough to order them. A `topsaten` op that is
+merely *submitted* behind an already-queued Triton kernel does not read that
+kernel's output on this hardware, so a FlagGems producer followed by a `topsaten`
+consumer races unless the stream is drained in between:
+
+- `EXEC_TOPSATEN_CMD` (`csrc/aten/backends/gcu/topsaten_common.h`) synchronises
+  the stream **before** issuing its op as well as after it.
+- `BlockingCopyGuard::DrainCurrentQueue` (`csrc/aten/copy_ops.cc`) drains the
+  same stream on GCU, so a blocking device-to-host copy waits for a FlagGems
+  kernel rather than reading the buffer ahead of it.
+
+Only the consumer side needs this. The trailing synchronise in
+`EXEC_TOPSATEN_CMD` has already emptied the stream when the next FlagGems kernel
+is launched, so a FlagGems op that follows a `topsaten` op is ordered without
+help. The cost is close to free in the steady state for the same reason: only
+work issued since the last `topsaten` op can be in flight, which is exactly the
+FlagGems work the barrier exists to wait for.
+
+The failure mode this prevents is not a stale read that looks like a small
+numerical difference. Measured at `transformer_blocks.0.attn.norm_q`, the
+Qwen-Image transformer's attention RMSNorm, an unordered consumer of a FlagGems
+`mean` produced NaN in 131072 places (1024 rows of 128 lanes) and finite values
+up to 5.66e7, and the pipeline decoded a black image.
+
 Installation, routing, and operator-specific failure modes are documented in
 [flaggems-setup.md](flaggems-setup.md); the measured per-operator results are in
 [flaggems-test-results.md](flaggems-test-results.md).

@@ -27,6 +27,8 @@
 #include "backends/musa/mudnn_common.h"
 #elif defined(USE_MUSA)
 #include "runtime/accelerator/musa/musa_stream.h"
+#elif defined(USE_GCU)
+#include "runtime/accelerator/gcu/tops_stream.h"
 #endif
 
 // On the CUDA-family backends (including MetaX boxing) the flagos device shares
@@ -126,6 +128,22 @@ class BlockingCopyGuard {
     // above is what makes GetDefaultMusaStream() resolve to *this tensor's*
     // device; it keys off the current device, like the mudnn handle.
     musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
+#elif defined(USE_GCU)
+    // Same shape as the MUSA arm, and added for the same reason: the tops
+    // stream is shared by both producers -- topsaten submits to
+    // GetCurrentTopsStream() (see EXEC_TOPSATEN_CMD) and FlagGems submits to the
+    // handle triton's enflame driver reads back from
+    // `torch.gcu.current_stream(idx).gcu_stream`, and on an S60 the two were
+    // measured equal, process after process. With no arm here the function
+    // compiles to nothing on GCU, so a blocking copy issued after a FlagGems
+    // kernel could read the buffer before the kernel producing it had run.
+    // Measured with the allocator poisoned and the first host read taken
+    // immediately after the op: 19 of 20 rounds of
+    // `sq.mean(-1, keepdim=True)` came back holding the poison, and 0 of 20 once
+    // this stream was drained first. The result was not merely misreported --
+    // `rsqrt(mean + eps)`, the next step of the RMSNorm it feeds, is a topsaten
+    // op and was wrong in 40 of 40 rounds without the barrier.
+    topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
 #endif
   }
 

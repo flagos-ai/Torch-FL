@@ -464,12 +464,43 @@ inline at::Scalar DtypeHighest(at::ScalarType type) {
 
 // Issues a topsaten op on the shared stream of `guard_tensor`'s device and
 // waits for it, mirroring EXEC_ASCEND_CMD's synchronous contract.
+//
+// "Synchronous" has to mean both directions. The trailing synchronise waits for
+// the op just issued; it does not wait for work another producer already queued,
+// and on this backend there is another producer. `mean.dim`, `pow.Scalar` and
+// the other reduction/pointwise ops that carry `= flaggems` in
+// configs/backends_gcu.conf run through triton, and topsaten submits to the same
+// tops stream triton launches on -- but an op that is merely *submitted* behind
+// a queued kernel does not read that kernel's output on this hardware. Measured
+// on an S60 at `transformer_blocks.0.attn.norm_q` -- the RMSNorm every attention
+// block of the Qwen-Image transformer runs -- with the producer
+// `variance = hidden_states.to(float32).pow(2).mean(-1, keepdim=True)`
+// (FlagGems) and the consumer `rsqrt(variance + eps)` (topsaten), compared
+// against a float64 reference on the real 1024x1024 activation: 40 of 40 rounds
+// wrong at 2.371e-02 with no barrier, 0 of 40 wrong at 6.941e-09 when the stream
+// was drained before the consumer was issued. A stale `variance` is not a
+// small numerical difference: `variance + eps` can come out negative, `rsqrt`
+// then returns NaN, and the instrumented run recorded this module's output NaN
+// in exactly 131072 places -- 1024 rows of 128 lanes -- with finite values as
+// large as 5.66e7 beside them. That is one poisoned row per attention head, in
+// every block, on every step, and the image the pipeline decoded after 50 such
+// steps was black (mean=0.0000 std=0.0000, against mean=0.3334 std=0.2581 for
+// the vendor leg from the same initial latents).
+//
+// The pre-op drain is close to free in the steady state, because the post-op
+// drain below has already emptied the stream: only work issued since the last
+// topsaten op can be in flight, which is exactly the FlagGems work that needs
+// waiting for.
 #define EXEC_TOPSATEN_CMD(op, guard_tensor, ...)                              \
   do {                                                                        \
     at::native::flagos::gcu::EnsureTopsatenInit();                            \
     at::native::flagos::gcu::TopsDeviceGuard _tops_guard((guard_tensor));     \
     topsStream_t _tops_stream =                                               \
         at::native::flagos::gcu::GetCurrentTopsStream();                      \
+    topsError_t _tops_pre = topsStreamSynchronize(_tops_stream);              \
+    TORCH_CHECK(                                                              \
+        _tops_pre == topsSuccess,                                             \
+        #op, " pre-stream sync failed: ", topsGetErrorString(_tops_pre));     \
     topsatenStatus_t _tops_status = topsaten::op(__VA_ARGS__, _tops_stream);   \
     TORCH_CHECK(                                                              \
         _tops_status == TOPSATEN_STATUS_SUCCESS,                              \
