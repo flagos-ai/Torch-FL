@@ -2581,10 +2581,82 @@ The generic FlagGems route cohort is unchanged and was **not revalidated** by
 this work. The AMP result does not establish support for the legacy handwritten
 MetaX kernel mode or for additional MACA releases and devices.
 
+### CUDA: four metadata ops off the FlagGems route, one of them for cause (2026-09-17, NVIDIA A100)
+
+`_unsafe_view`, `unsqueeze`, `unsqueeze_` and `transpose.int` moved from
+`flaggems` to `cuda` in `torch_fl/configs/backends_cuda.conf` — 416 `flaggems` /
+1618 `cuda` -> **412 / 1622** (SHA-256
+`9218ecf7ef05db63c92c4e3e4aee44b560afcb4204703109f96f5edc39dedbf1`, from
+`ab2522b7fec9363699452249900b28188ce78ba3ca16b481be34927dbe933ede`). Measured
+torch-fl `5219b18`, FlagGems `8ce7662f`, survey harness v6.
+
+**Three of the four are a cost exception, and a small one.** These ops do no
+computation on either route: ATen implements them as metadata (stride)
+manipulation, and `flag_gems`' implementation is a Python function that calls the
+same operation back, so the route adds a Python hop and no kernel. Host cost per
+call on A100, at Qwen-Image-2.1's shapes:
+
+| op | flaggems | cuda boxing | native torch |
+| --- | --- | --- | --- |
+| `unsqueeze` | 5.40 us | 2.09 us | 1.86 us |
+| `_unsafe_view` | 7.07 us | 4.08 us | 3.70 us |
+| `transpose.int` | 5.14 us | 2.25 us | 1.98 us |
+
+The boxing route is within 0.3 us of native, so what the change recovers is the
+Python hop. At 2.1's ~560 such calls per denoising step that is about 1.8 ms/step,
+**0.35% of a 40-step run** — below the run-to-run noise of the harness, and an
+end-to-end A/B of the whole pipeline (default 20.868 s, view-ops-to-cuda 20.784 s,
+default 20.678 s on the repeat) could not resolve it. The change is taken because
+the route costs something and gains nothing, not because a measurement demanded
+it. These three ops are held in a new `metadata_route_overrides` set in
+`scripts/codegen/codegen_ops.py`, separate from `cuda_route_exceptions`, so that a
+cost decision is not filed as a contract one.
+
+**`_unsafe_view` is there for a contract divergence.** `flag_gems` implements it
+as `self.reshape(size)`, and `reshape` returns a materialised copy when the input
+cannot be viewed as the requested shape; ATen's `_unsafe_view` returns a strided
+view or raises. The two are indistinguishable on values alone, which is why no
+numerics comparison sees it. Reproduced on A100 with a non-contiguous input:
+
+```python
+x = torch.arange(32, device="cuda", dtype=torch.float32).reshape(8, 4).t()
+torch.ops.aten._unsafe_view(x, [1, 32])
+# CUDA (and flagos with _unsafe_view on the cuda route):
+#   RuntimeError: view size is not compatible with input tensor's size and stride
+# flagos with _unsafe_view on the FlagGems route (before this change):
+#   returns a tensor, aliases=False -- a copy
+```
+
+A copy where a view was expected also doubles the memory of that tensor.
+
+**The survey did not catch it, and that is worth recording.** Running the harness
+over just these four overloads against the pre-change conf gives
+`STRICT: 4` (raw evidence: `--ops
+"_unsafe_view,unsqueeze,unsqueeze_,transpose.int" --conf <pre-change conf> --out
+flagos-viewop-survey.json`, harness SHA-256
+`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`). The
+`2d-f32-strided` profile is present but its `_unsafe_view` case reshapes to a
+shape the strided input can still express as a view, so the copy path is never
+entered. **The profile set has no case that forces `reshape` to copy**, which is
+the one shape family where the FlagGems implementation and ATen disagree. The
+verdicts above are therefore not evidence that the removed route was correct, and
+a future op implemented as `reshape` will pass the survey for the same reason.
+
+**Scope.** `backends_cuda.conf` is read only by CUDA builds
+(`_select_backend_config`), and `metadata_route_overrides` is consulted only by
+the CUDA conf generator — `gen_vendor_confs.py` does not import it and derives
+each vendor's FlagGems set from its own measured inputs. No row in the
+four-platform summary tables above moves, and no other platform's routes changed:
+MetaX keeps `unsqueeze`/`unsqueeze_` on `flagos_python` deliberately
+(`METAX_FLAGGEMS_MEASURED`, 2026-09-15 — the cuda boxing route was raising
+`cudaErrorMemoryValueTooLarge` there), and that is unaffected. mc550, 810e and
+bw1000 are **not revalidated** by this change because their confs did not change.
+
 ## Update History
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-17 | NVIDIA A100 (8 devices) | CUDA conf `backends_cuda.conf`, harness v6 | `_unsafe_view`, `unsqueeze`, `unsqueeze_`, `transpose.int` moved from `flaggems` to `cuda`: 416 `flaggems` / 1618 `cuda` -> **412 / 1622** (SHA-256 `9218ecf7ef05db63c92c4e3e4aee44b560afcb4204703109f96f5edc39dedbf1`). Three are held in a new `metadata_route_overrides` set (cost only); `_unsafe_view` is in `cuda_route_exceptions` for a contract divergence. Source of truth is `scripts/codegen/codegen_ops.py`; the conf line was written by hand because `FLAGOS_CODEGEN_ALL=1` is not reproducible on this host — its FlagGems (`8ce7662f`) is newer than the one the committed artifacts were generated against, so a full run flips 186 more ops to FlagGems and rewrites the DCU and MetaX confs. `tests/unit/test_conf_matches_codegen_routes.py` pins the set/conf agreement that the generator would otherwise have to be re-run to check. mc550, 810e, bw1000, Ascend, GCU, MUSA, DCU and PPU are **not revalidated**: no conf of theirs was touched. | `_unsafe_view` on flag_gems is `self.reshape(size)`, which copies where ATen views or raises; on A100 a non-contiguous input (`torch.arange(32).reshape(8,4).t()`) raises `RuntimeError: view size is not compatible with input tensor's size and stride` on CUDA and on the cuda route, and silently returned a copy (`aliases=False`) on the FlagGems route before this change. Per-call host cost at Qwen-Image-2.1 shapes, flaggems vs cuda boxing vs native: `unsqueeze` 5.40 / 2.09 / 1.86 us, `_unsafe_view` 7.07 / 4.08 / 3.70 us, `transpose.int` 5.14 / 2.25 / 1.98 us — ~1.8 ms/step at 2.1's call counts, which is below harness noise end to end (whole-pipeline A/B: 20.868 s default, 20.784 s with the view ops on cuda, 20.678 s repeat). Survey over the four overloads against the pre-change conf: **STRICT 4** (harness SHA-256 `7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`) — the harness does **not** catch the `_unsafe_view` divergence, because none of its seven profiles forces `reshape` to copy. `tests/integration/ops/ -m "main_ops and not flaggems_python and not flaggems_cpp"`: **130 passed, 15 skipped, 1 xpassed**; `tests/unit/`: 436 passed, 94 skipped, 1 pre-existing failure (`test_stage_b_chrome_trace_has_gpu_kernels`, fails at `5219b18` without this change). |
 | 2026-09-16 | MetaX C550 (8 devices) | FlagGems `slice` dtype assertion, found by Qwen-Image-2512 | `slice.Tensor` moved from `flaggems` to `cuda` in `backends_metax.conf`: 592 `flaggems` / 12 `flaggems_cpp` / 1432 `cuda` -> **591 / 12 / 1433** (SHA-256 `0d6be6d0fb3aff0aa26293ddf8719bb0f811ea50acbba8a62d02a833b8b154a3`), so the measured Python cohort moves 585 -> 584 and the cuda boxing hold 42 -> 43. The entry is held in `metax_triton_fallback` in `scripts/codegen/codegen_ops.py` rather than in the shared `flaggems_runtime_broken` set, the way the `special_bessel_j0` group is, so no other platform moves; it sits next to `slice_backward`, which is already there for an unrelated MetaX fault. At the base commit `slice.Tensor` was already `cuda` in `backends_cuda.conf`, `backends_ppu.conf` and `backends_dcu.conf`, `none` in `backends_musa.conf` and `backends_gcu.conf` and `ascend` in `backends_ascend.conf` (the last three through `FLAGGEMS_PENDING_NATIVE_OPS`), and does not appear at all in `backends_bpu.conf` (intentionally empty) or `backends_tsingmicro.conf`, so MetaX is the one platform whose conf carried it on FlagGems and this is a convergence, not a new exception. Ascend, GCU, MUSA, DCU and PPU are **not revalidated**. | `flag_gems/ops/slice.py::slice` asserts against `complex64`/`complex128` at line 199 while its body is `torch.as_strided(input, size, strides, storage_offset)` and reads no dtype. Qwen-Image-2512 reproduces it at model level: diffusers' `QwenImageTransformer2DModel._compute_video_freqs` (`/diffusers/models/transformers/transformer_qwenimage.py:347`, `freqs_pos[0][idx : idx + frame]`) reaches `flag_gems/ops/slice.py:199` through `torch_fl/flagos/__init__.py:201` and raises `AssertionError: slice: unsupported dtype torch.complex64`, which aborts the transformer step. Per-op A/B on C550 with `flagtree 0.6.1+metax3.6` / `flag_gems 5.4.0rc2.post1+g5a58df410`, one host-built complex `(8, 16)` operand moved with `.to("flagos")`: shipped conf (no override) `ok (4,) torch.complex64`; `FLAGOS_OP_slice__Tensor=flaggems` `AssertionError: slice: unsupported dtype torch.complex64`; float32 the same shape `ok` with storage shared on both routes, so the dtype check inside the route is the failure and not the route. The assertion is not a kernel limit: an in-process probe that deletes only that statement from `inspect.getsource(...)` and compiles the rest of FlagGems' own function returns a `complex64` result equal to `torch.Tensor` slicing with storage shared, and agrees with the shipped function exactly on float32. Regression coverage in `tests/integration/ops/test_metax_flaggems.py`: `slice.Tensor` added to `_FORCED_OFF_FLAGGEMS` and to `_FORCED_OFF_DISPATCH` (complex operand), `_MEASURED_FLAGGEMS_ROUTES` 592 -> 591. `gen_vendor_confs.py` idempotent for MetaX (two runs, byte-identical), `--check` clean for the MetaX file; the out-of-scope configurations were left at their committed state. `tests/integration/ops/test_metax_flaggems.py` on the C550 host reports **91 passed in 751.82s, 0 failed** (the 90-test cohort plus the new dispatch case), including both `slice.Tensor` guards. Filed upstream as FlagGems issue #6356. |
 | 2026-09-16 | MUSA MTT S5000 | MUSA FlagGems RNG bridge | `5e4b78e` (the qualname change above) moved MUSA's generated kernels from `flag_gems.ops.randn.randn` to `flag_gems.randn`, which `SpecOpRegistrar` has rebound to the vendor override `_mthreads.ops.randn.randn`. `_patch_flaggems_philox()` selected the modules to rebind with `mod.__name__.startswith("flag_gems")`, which that module does not match, so the vendor kernel reached the unpatched `philox_backend_seed_offset` and raised `ValueError: too many values to unpack (expected 2)` unpacking the flagos MT19937 state. The loop now matches the bound object's identity instead of the module name. No route changed: `randn`, `randn_like`, `rand`, `rand_like`, `randperm`, `native_dropout` stay `flaggems  # musa`. | `Platform pipeline (musa) / Build and test (MUSA)` on run `35048300960` (push of `5e4b78e`) failed with **14 failed, 99 passed, 28 warnings in 193.65s**; the preceding `main` runs on `35047336702` and `35041546614` were green on MUSA. Both signatures are the same `torch.randn(..., device="flagos:0")` call: 4 in-process failures on `ValueError` at `flag_gems/utils/random_utils.py:75`, and 10 `test_musa_dispatch.py` subprocesses whose first statement is that call. Regression coverage: `tests/unit/test_musa_rng_bridge.py::test_flaggems_philox_reaches_vendor_backend_modules` fails against the pre-fix selector (`999 != -9223372036854775803`) and passes after; `tests/integration/ops/test_musa_flaggems.py::test_flaggems_randn_shares_native_generator_reservations` now drives `flag_gems.randn` rather than the generic module, which the MUSA dispatch never reached. Full detail: "MUSA: the FlagGems RNG bridge reaches the vendor op modules" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | FlagGems entry-point resolution (`5a58df410`) | `_normalize_flaggems_qualname` in `scripts/codegen/codegen_ops.py` now emits `flag_gems.<fn>` instead of `flag_gems.ops.<module>.<fn>`, so a generated kernel reaches the entry point the active backend has rebound rather than the generic module the alias rewrite pinned. 72 of the 666 qualnames in the checked-in kernels resolve to a `_metax.ops.*` override and were running the generic kernel before this. `codegen_ops.py` also becomes the writer of the `FLAGGEMS_PYTHON_OPS` ceiling in `scripts/codegen/backend_coverage.py` (`render_flaggems_coverage`, minus the override-only ops), which was previously a hand-carried literal that capped every conf built from it. Both apply to every FlagGems platform; no route changed on Ascend, GCU, MUSA, DCU or PPU. | Counted over `csrc/aten/generated/flaggems_python_kernels.cc` with `flag_gems 5.4.0rc2.post1+g5a58df410` on the C550 host: 688 call sites, 666 distinct qualnames, 0 that are not two-component `flag_gems.<op>`, 0 unresolvable on the package, 594 resolving inside `flag_gems` and 72 to a `_metax.ops.*` module. `tests/integration/ops/test_flaggems_conf_consistency.py` requires the two-component form and now compares the conf, the override-only routes and the generated kernels as sets (7 passed); `tests/integration/ops/test_metax_flaggems.py` on C550 reports **90 passed in 756.07s**, 0 failed. Full detail: "MetaX: generated FlagGems calls name the package-level entry point" above. |

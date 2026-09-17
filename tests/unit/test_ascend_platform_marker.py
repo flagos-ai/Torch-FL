@@ -91,9 +91,54 @@ def test_ascend_marker_selects_conf_that_is_the_only_one_shipped(monkeypatch, tm
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
 
 
-def test_explicit_backend_config_overrides_the_marker(monkeypatch, fake_ascend_install):
+def test_explicit_backend_config_overrides_the_marker(
+    monkeypatch, fake_ascend_install, tmp_path
+):
     """FLAGOS_BACKEND_CONFIG is documented as always winning (advanced/testing
-    use); the marker must not override an explicit choice."""
-    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", "/tmp/explicit.conf")
+    use); the marker must not override an explicit choice.
+
+    The override names a real file because an unreadable one is now an error
+    rather than an override -- see
+    test_explicit_backend_config_must_be_readable.
+    """
+    explicit = tmp_path / "explicit.conf"
+    explicit.write_text("mm = cuda\n")
+    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", str(explicit))
     torch_fl._select_backend_config()
-    assert os.environ["FLAGOS_BACKEND_CONFIG"] == "/tmp/explicit.conf"
+    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(explicit)
+
+
+def test_explicit_backend_config_must_be_readable(
+    monkeypatch, fake_ascend_install, tmp_path
+):
+    """An override that will not open is fatal, not a silent fallback.
+
+    csrc/aten/common.cc leaves its routing table empty when the conf file will
+    not open, and an empty table resolves every op to Backend::kFlagGems -- so
+    a typo used to send the entire workload down the slowest route behind a
+    single stderr line, and to switch off the FlagGems process-level setup that
+    reads the same file. The marker branch must not quietly fall through to
+    backends_ascend.conf either.
+    """
+    missing = tmp_path / "does-not-exist.conf"
+    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", str(missing))
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        torch_fl._select_backend_config()
+    # Nothing may have been selected behind the failure.
+    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(missing)
+
+
+def test_explicit_relative_backend_config_is_resolved_to_an_absolute_path(
+    monkeypatch, tmp_path
+):
+    """A relative override is resolved at import, not at first dispatch.
+
+    The C++ loader reads the variable lazily, on the first op dispatch, so a
+    relative path would otherwise be resolved against whatever the cwd happens
+    to be at that moment rather than against the one the caller had.
+    """
+    (tmp_path / "custom.conf").write_text("mm = cuda\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", "custom.conf")
+    torch_fl._select_backend_config()
+    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(tmp_path / "custom.conf")

@@ -336,6 +336,27 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
   const char* env = std::getenv("FLAGOS_BACKEND_CONFIG");
   std::string path = env ? env : DefaultConfigPath();
 
+  // A conf that will not open is fatal, because the failure is otherwise
+  // indistinguishable from a working configuration. ParseConfigInto leaves the
+  // table empty, and an empty table makes GetBackendForOp answer
+  // Backend::kFlagGems for every op -- so one stderr line is all that separates
+  // a typo from a run where the whole workload takes the slowest route. Measured
+  // on A100: FLAGOS_BACKEND_CONFIG=/nonexistent/nope.conf sends every dispatch
+  // to flagos_python, including the ~1600 ops the conf routes to CUDA boxing,
+  // and it also silences the Python-side FlagGems setup that reads this same
+  // file (_conf_routes_to_flaggems in torch_fl/__init__.py).
+  //
+  // Only the top-level file is fatal. A missing `include` inside a conf still
+  // warns and continues: the generated confs state every op directly and need
+  // no include, so that path is legacy, and a failed include drops fewer routes
+  // than the file the caller named.
+  {
+    std::ifstream probe(path);
+    TORCH_CHECK(probe.good(), "flagos: cannot open backend config '", path,
+                "'. Unset FLAGOS_BACKEND_CONFIG to let torch_fl select the conf "
+                "for this build, or point it at a file that exists.");
+  }
+
   std::unordered_map<std::string, Backend> alt;
   ParseConfigInto(path, table, alt);
   ApplyAllUseOverride(table, alt);
@@ -377,6 +398,16 @@ const std::unordered_map<std::string, Backend>& BackendTable() {
 Backend GetBackendForOp(const std::string& op_name) {
   const auto& table = BackendTable();
   auto it = table.find(op_name);
+  // kFlagGems is the answer for an op the conf does not mention. In a healthy
+  // process that never happens: registration and routing are both generated from
+  // the same conf, so an op absent from the table has no m.impl either and the
+  // call reaches cpu_fallback without ever arriving here. Reaching this line
+  // therefore means the running conf and the compiled registration disagree --
+  // most often because FLAGOS_BACKEND_CONFIG named a file other than the one the
+  // build was generated from. FlagGems is the deliberate choice for that case
+  // (it is the broadest route, so the op usually still runs), and
+  // LoadBackendConfig above makes the one disagreement it can detect -- an
+  // unreadable file -- fatal instead of silent.
   return it != table.end() ? it->second : Backend::kFlagGems;
 }
 
