@@ -45,19 +45,19 @@ cd PyTorch-Plugin-FL
 # Build the boxing artifacts (no native kernels)
 FLAGOS_ACCELERATOR=metax \
   FLAGOS_BUILD_VENDOR=OFF \
-  FLAGOS_MACA_TORCH_LIB=<path-to-torch+metax>/torch/lib \
+  FLAGOS_VENDOR_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   FLAGOS_WHEEL_LOCAL=metax3.8.1 \
   python setup.py bdist_wheel
 ```
 
 **Parameters:**
-- `FLAGOS_MACA_TORCH_LIB`: Path to the `torch+metax` wheel's `torch/lib` directory (source of forked libtorch)
+- `FLAGOS_VENDOR_TORCH_LIB`: Path to the `torch+metax` wheel's `torch/lib` directory (source of forked libtorch)
 - `FLAGOS_WHEEL_LOCAL`: Local version tag (e.g., `metax3.8.1` → wheel version `0.1.0+metax3.8.1`), identifying the target MACA/driver version
 
 #### Step 2: Bundle the Forked Libtorch
 
 ```bash
-FLAGOS_MACA_TORCH_LIB=<path-to-torch+metax>/torch/lib \
+FLAGOS_VENDOR_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   MACA_PATH=/opt/maca \
   bash scripts/vendor/bundle_maca_libtorch.sh
 ```
@@ -290,7 +290,7 @@ first, or the device surface is not there yet.
 ### FlagGems Verification
 
 ```bash
-FLAGOS_LOG_DISPATCH=1 python -c "
+FLAGOS_LOG=dispatch python -c "
 import torch_fl, torch
 x = torch.randn(1024, device='flagos:0')
 result = torch.nn.functional.silu(x).sum()
@@ -331,7 +331,7 @@ shim) did not run.
 
 **Fix:** confirm the wheel was built for MetaX (`FLAGOS_ACCELERATOR=metax`, recorded at
 build time) and that the vendor torch is reachable through
-`FLAGOS_MACA_TORCH_LIB` or the bundled `lib_maca/`. No mode environment variable
+`FLAGOS_VENDOR_TORCH_LIB` or the bundled `lib_maca/`. No mode environment variable
 is involved any more.
 
 ### Wheel Too Large for PyPI

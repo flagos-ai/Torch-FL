@@ -94,7 +94,7 @@ class TestSiluDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_silu_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_silu": "flaggems_python",
             },
             check=False,
@@ -105,7 +105,7 @@ class TestSiluDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
         """With the FlagGems runtime path on, silu routes to flagos_python."""
-        result = _run_silu_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_silu_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] silu -> flagos_python" in result.stderr
 
@@ -113,7 +113,7 @@ class TestSiluDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_silu_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_silu": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] silu -> cuda" in result.stderr
@@ -121,7 +121,7 @@ class TestSiluDispatch:
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):
         result = _run_silu_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_silu": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu": "ascend"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] silu -> ascend" in result.stderr

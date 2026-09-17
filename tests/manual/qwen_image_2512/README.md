@@ -253,7 +253,7 @@ live output also lists which operators went where.
 
 | Reading | Meaning |
 | --- | --- |
-| `cpu_fallback ops` | Operator calls that left the accelerator for the CPU (`FLAGOS_LOG_FALLBACK=1`). Every one is a route to fix; the op names are in the log. |
+| `cpu_fallback ops` | Operator calls that left the accelerator for the CPU (`FLAGOS_LOG=fallback`). Every one is a route to fix; the op names are in the log. |
 | `distinct ATen ops` | How many different operators the workload reached, i.e. the size of the cohort the routing has to cover. |
 | `operator calls by backend` | Which backend each call took. `cuda` is the boxing path to the vendor kernel; `flagos_python` and `flagos` are FlagGems, the first being the Python dispatch and the second the C++ one. |
 | `distinct operators by backend` | The same split counted as operators rather than calls — the number to quote as "this workload uses N FlagGems operators". |
@@ -268,7 +268,7 @@ tests/manual/qwen_image_2512/run.sh census /path/to/run.log
 ```
 
 The per-op census is a measurement of one run, not a property of the routing
-tables: `FLAGOS_LOG_DISPATCH=1` logs the backend actually chosen for every
+tables: `FLAGOS_LOG=dispatch` logs the backend actually chosen for every
 dispatch, and only ops the workload reaches appear. Record it with the log path
 and the hardware, and re-measure rather than reusing the numbers on another chip.
 
@@ -318,7 +318,7 @@ what it takes to reproduce the layout, and `native_layer_norm` at 24,100 calls
 per image and `addmm` at 84,768 are the two that dominate the dispatch traffic.
 
 The raw log is machine-local and was 508 MB; it is not committed. Regenerate it
-by running §4's flagos sweep with `FLAGOS_LOG_DISPATCH=1`, which `run.sh` exports
+by running §4's flagos sweep with `FLAGOS_LOG=dispatch`, which `run.sh` exports
 by default.
 
 ## 7. Where the extra memory went

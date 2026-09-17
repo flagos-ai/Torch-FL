@@ -189,7 +189,7 @@ class TestMmDispatchLog:
     def test_dispatch_log_flaggems_python(self):
         """FLAGOS_OP_mm=flaggems_python routes mm to flagos_python backend."""
         result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm": "flaggems_python"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "flaggems_python"},
             check=False,
         )
         assert "[flagos dispatch] mm -> flagos_python" in result.stderr, (
@@ -212,9 +212,7 @@ class TestMmDispatchLog:
         """
         if routed_backend_or_none("mm") != "flagos_python":
             pytest.skip("mm does not route through FlagGems on this platform")
-        result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_mm_subprocess({"FLAGOS_LOG": "dispatch"})
         expected = routed_backend("mm")
         assert f"[flagos dispatch] mm -> {expected}" in result.stderr, (
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
@@ -224,9 +222,7 @@ class TestMmDispatchLog:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         """FLAGOS_OP_mm=cuda overrides to cuda backend."""
-        result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm": "cuda"}
-        )
+        result = _run_mm_subprocess({"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "cuda"})
         assert "[flagos dispatch] mm -> cuda" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
@@ -235,7 +231,7 @@ class TestMmDispatchLog:
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_mm=ascend overrides to ascend backend."""
         result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "ascend"}
         )
         assert "[flagos dispatch] mm -> ascend" in result.stderr, (
             f"Expected ascend dispatch log, got:\n{result.stderr}"
@@ -256,7 +252,7 @@ class TestMmDispatchLog:
         if expected is None:
             pytest.skip("mm.out is routed to 'none' on this platform")
         result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"},
+            {"FLAGOS_LOG": "dispatch"},
             use_out=True,
         )
         assert f"[flagos dispatch] mm.out -> {expected}" in result.stderr, (
@@ -267,7 +263,7 @@ class TestMmDispatchLog:
     def test_dispatch_log_mm_out_cuda_override(self):
         """FLAGOS_OP_mm__out=cuda overrides mm.out to cuda."""
         result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm__out": "cuda"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm__out": "cuda"},
             use_out=True,
         )
         assert "[flagos dispatch] mm.out -> cuda" in result.stderr, (
@@ -278,7 +274,7 @@ class TestMmDispatchLog:
     def test_dispatch_log_mm_out_ascend_override(self):
         """FLAGOS_OP_mm__out=ascend overrides mm.out to ascend."""
         result = _run_mm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm__out": "ascend"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm__out": "ascend"},
             use_out=True,
         )
         assert "[flagos dispatch] mm.out -> ascend" in result.stderr, (

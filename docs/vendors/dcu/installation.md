@@ -381,7 +381,7 @@ environment resolve by import order.
 
 **Cause:** `hcu` Triton backend limitation or MIOpen interaction bug.
 
-**Expected behavior.** `backends_dcu.conf` already routes these ops to the cuda boxing kernel. If you see crashes, verify the config is being selected (e.g. `FLAGOS_LOG_DISPATCH=1` and check the `[flagos dispatch]` lines).
+**Expected behavior.** `backends_dcu.conf` already routes these ops to the cuda boxing kernel. If you see crashes, verify the config is being selected (e.g. `FLAGOS_LOG=dispatch` and check the `[flagos dispatch]` lines).
 
 ### Multi-card: GPU VMFault or device-side hang
 

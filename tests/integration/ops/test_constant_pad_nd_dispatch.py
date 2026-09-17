@@ -112,7 +112,7 @@ class TestConstantPadNdDispatch:
             pytest.skip("constant_pad_nd is routed to 'none' on this platform")
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_constant_pad_nd": "flaggems_python",
             },
             check=False,
@@ -122,7 +122,7 @@ class TestConstantPadNdDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_constant_pad_nd": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_constant_pad_nd": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] constant_pad_nd -> cuda" in result.stderr

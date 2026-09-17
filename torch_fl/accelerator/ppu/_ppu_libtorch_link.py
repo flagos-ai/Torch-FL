@@ -87,13 +87,13 @@ def _bundled_ppu_lib():
 def _discover_ppu_torch_lib():
     """Locate the PPU libtorch .so dir.
 
-    Priority: bundled lib_ppu/, then FLAGOS_PPU_TORCH_LIB, then sibling conda
+    Priority: bundled lib_ppu/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a PPU build.
     """
     return discover_vendor_torch_lib(
         _BUNDLE_DIR,
         "libtorch_cuda.so",
-        env_override="FLAGOS_PPU_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
     )
 
@@ -108,7 +108,7 @@ def ensure_ppu_libtorch_links():
         _BUNDLE_DIR,
         _CORE_SO,
         extra_so=_CUDA_SO,
-        env_override="FLAGOS_PPU_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
         probe_so="libtorch_cuda.so",
         vendor="PPU",

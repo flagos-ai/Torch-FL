@@ -102,7 +102,7 @@ Can you profile and optimize?
 ```
 
 **Claude will:**
-1. Set up profiling (torch.profiler, FLAGOS_LOG_DISPATCH)
+1. Set up profiling (torch.profiler, FLAGOS_LOG=dispatch)
 2. Identify bottleneck operators
 3. Check backend routing (are FlagGems kernels being used?)
 4. Propose optimizations with benchmarks

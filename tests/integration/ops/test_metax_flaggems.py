@@ -402,7 +402,7 @@ def _run_logged(body: str, timeout: int = 300) -> subprocess.CompletedProcess:
         f"{body}\n"
     )
     env = os.environ.copy()
-    env["FLAGOS_LOG_DISPATCH"] = "1"
+    env["FLAGOS_LOG"] = "dispatch"
     return subprocess.run(
         [sys.executable, "-c", code],
         env=env,

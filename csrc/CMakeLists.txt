@@ -430,7 +430,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.
-  set(_metax_torch_lib "$ENV{FLAGOS_MACA_TORCH_LIB}")
+  set(_metax_torch_lib "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
   if(IS_DIRECTORY "${_metax_torch_lib}")
     if(EXISTS "${_metax_torch_lib}/libtorch_cuda.so")
       list(APPEND _torch_fl_link_libs

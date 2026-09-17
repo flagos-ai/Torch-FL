@@ -390,6 +390,46 @@ const std::string& ForcedBackendMode() {
   return mode;
 }
 
+// The items FLAGOS_LOG honors. Kept beside the reader rather than in
+// flagos_env.h because this is the only translation unit that reads the
+// variable, and EnvListed/ListedIn there stay generic.
+constexpr const char* kLogItems[] = {"dispatch", "fallback", "op_cache"};
+
+bool LogEnabled(const char* item) {
+  // The list is parsed once per process, on the first lookup, which is also
+  // where it is validated: every item the list names must be one we honor.
+  // Anything else would turn its diagnostic off with no sign that the setting
+  // was wrong, so it is reported instead. The three booleans this replaced each
+  // warned about a bad value; FLAGOS_LOG must not be the one that does not.
+  static const std::string list = [] {
+    const std::string raw = flagos_env::EnvValue("FLAGOS_LOG");
+    size_t pos = 0;
+    while (pos <= raw.size()) {
+      const size_t comma = raw.find(',', pos);
+      const size_t end = comma == std::string::npos ? raw.size() : comma;
+      const std::string word = TrimStr(raw.substr(pos, end - pos));
+
+      bool known = word.empty();
+      for (const char* candidate : kLogItems) {
+        if (flagos_env::EnvIs(word.c_str(), candidate)) {
+          known = true;
+          break;
+        }
+      }
+      if (!known) {
+        flagos_env::EnvWarn("FLAGOS_LOG=\"" + raw + "\": \"" + word +
+                            "\" is not one of dispatch, fallback, op_cache");
+      }
+
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+    return raw;
+  }();
+
+  return flagos_env::ListedIn(list.c_str(), item);
+}
+
 Backend GetBackendForOp(const std::string& op_name) {
   const auto& table = BackendTable();
   auto it = table.find(op_name);

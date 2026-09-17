@@ -96,7 +96,7 @@ class TestLeDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_le__Tensor": "flaggems_python",
             },
             check=False,
@@ -106,7 +106,7 @@ class TestLeDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_le__Tensor": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_le__Tensor": "cuda"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] le.Tensor -> cuda" in result.stderr

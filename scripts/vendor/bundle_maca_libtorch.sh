@@ -18,7 +18,7 @@
 # cards installed must have the /opt/maca driver.
 #
 # Usage:
-#   FLAGOS_MACA_TORCH_LIB=<maca torch/lib> bash scripts/vendor/bundle_maca_libtorch.sh
+#   FLAGOS_VENDOR_TORCH_LIB=<maca torch/lib> bash scripts/vendor/bundle_maca_libtorch.sh
 #   MACA_PATH=/opt/maca bash scripts/vendor/bundle_maca_libtorch.sh   # override maca path
 #
 # Should run after `python setup.py bdist_wheel` (FLAGOS_ACCELERATOR=metax) and before
@@ -36,13 +36,13 @@ TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
 MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 
 # MetaX torch/lib source: explicit env, or find +metax torch from conda.
-SRC="${FLAGOS_MACA_TORCH_LIB:-}"
+SRC="${FLAGOS_VENDOR_TORCH_LIB:-}"
 if [ -z "${SRC}" ]; then
   SRC="$(bundle_find_vendor_torch_lib libtorch_cuda.so metax maca || true)"
 fi
 
 if [ -z "${SRC}" ] || [ ! -d "${SRC}" ]; then
-  echo "error: MetaX torch/lib not found. Set FLAGOS_MACA_TORCH_LIB=<maca torch/lib>" >&2
+  echo "error: MetaX torch/lib not found. Set FLAGOS_VENDOR_TORCH_LIB=<maca torch/lib>" >&2
   exit 1
 fi
 if [ ! -f "${SRC}/libtorch_cuda.so" ]; then

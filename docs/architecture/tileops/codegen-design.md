@@ -199,14 +199,14 @@ still means fallback, which is what a build with `FLAGOS_BUILD_TILEOPS=OFF` (eve
 non-CUDA accelerator, since TileOPs is SM90 NVIDIA-only) produces.
 
 Because the decision is made in `dispatcher.h` rather than in Python,
-`FLAGOS_LOG_DISPATCH=1` and `FLAGOS_OP_<op>=cuda` work for TileOPs with no extra
+`FLAGOS_LOG=dispatch` and `FLAGOS_OP_<op>=cuda` work for TileOPs with no extra
 code -- the same machinery that serves cuda and flaggems. Verified on H800:
 
 ```console
-$ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG_DISPATCH=1 python -c "..."
+$ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG=dispatch python -c "..."
 [flagos dispatch] relu -> tileops
 
-$ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG_DISPATCH=1 FLAGOS_OP_relu=cuda python -c "..."
+$ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG=dispatch FLAGOS_OP_relu=cuda python -c "..."
 [flagos dispatch] relu -> cuda
 ```
 
@@ -215,7 +215,7 @@ $ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG_DISPATCH=1 FLAGOS_OP_relu=cuda python 
 > **intercepts before the C++ dispatcher** -- a bound operator never reached
 > `relu_dispatcher` at all. `common.cc` parsed `FLAGOS_OP_relu=cuda` and printed
 > `[flagos] env override: relu -> cuda`, yet `torch.relu` still built a TileOPs
-> instance; `FLAGOS_LOG_DISPATCH=1` showed only the operators that fell through
+> instance; `FLAGOS_LOG=dispatch` showed only the operators that fell through
 > to cuda, reading as if TileOPs were not wired up at all. Both features had to
 > be re-implemented in Python (`enable_tileops_for_flagos()` consulted an
 > `_env_override_backend()` helper and skipped binding overridden ops;
@@ -713,7 +713,7 @@ inferred from the upstream timeline, not verified on this machine**.
 entry:
 
 1. **Dispatch hit**: confirm the tileops path is taken under
-   `FLAGOS_LOG_DISPATCH=1`.
+   `FLAGOS_LOG=dispatch`.
 2. **Numerical agreement**: compare against aten on CPU/cuda, with tolerances
    graded by dtype (relative tolerance for fp16/bf16, bit-exact for integer
    types). Shapes are the first entry from the manifest's `workloads`, plus one

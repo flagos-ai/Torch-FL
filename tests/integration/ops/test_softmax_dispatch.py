@@ -109,7 +109,7 @@ class TestSoftmaxDispatch:
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
         result = _run_softmax_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP__softmax": "flaggems_python"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP__softmax": "flaggems_python"},
             check=False,
         )
         assert "[flagos dispatch] _softmax -> flagos_python" in result.stderr
@@ -125,9 +125,7 @@ class TestSoftmaxDispatch:
         routed_backend() owns that mapping, so this asserts the platform's real
         route instead of the one the test was written on.
         """
-        result = _run_softmax_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_softmax_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("_softmax")
         assert f"[flagos dispatch] _softmax -> {expected}" in result.stderr
@@ -136,7 +134,7 @@ class TestSoftmaxDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda(self):
         result = _run_softmax_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP__softmax": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP__softmax": "cuda"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] _softmax -> cuda" in result.stderr

@@ -257,7 +257,7 @@ class TestBmmDispatchLog:
     def test_dispatch_log_flaggems_python(self):
         """FLAGOS_OP_bmm=flaggems_python routes bmm to flagos_python backend."""
         result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_bmm": "flaggems_python"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "flaggems_python"},
             check=False,
             stub_python_op=True,
         )
@@ -280,9 +280,7 @@ class TestBmmDispatchLog:
         """
         if routed_backend_or_none("bmm") != "flagos_python":
             pytest.skip("bmm does not route through FlagGems on this platform")
-        result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"})
         expected = routed_backend("bmm")
         assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
@@ -293,7 +291,7 @@ class TestBmmDispatchLog:
     def test_dispatch_log_cuda_override(self):
         """FLAGOS_OP_bmm=cuda overrides to cuda backend."""
         result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_bmm": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "cuda"}
         )
         assert "[flagos dispatch] bmm -> cuda" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
@@ -309,7 +307,7 @@ class TestBmmDispatchLog:
         if routed_backend_or_none("bmm.out") != "flagos_python":
             pytest.skip("bmm.out does not route through FlagGems on this platform")
         result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"},
+            {"FLAGOS_LOG": "dispatch"},
             use_out=True,
         )
         expected = routed_backend("bmm.out")
@@ -321,7 +319,7 @@ class TestBmmDispatchLog:
     def test_dispatch_log_bmm_out_cuda_override(self):
         """FLAGOS_OP_bmm__out=cuda overrides bmm.out to cuda."""
         result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_bmm__out": "cuda"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm__out": "cuda"},
             use_out=True,
         )
         assert "[flagos dispatch] bmm.out -> cuda" in result.stderr, (
@@ -332,7 +330,7 @@ class TestBmmDispatchLog:
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_bmm=ascend overrides to ascend backend."""
         result = _run_bmm_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_bmm": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "ascend"}
         )
         assert "[flagos dispatch] bmm -> ascend" in result.stderr, (
             f"Expected ascend dispatch log, got:\n{result.stderr}"

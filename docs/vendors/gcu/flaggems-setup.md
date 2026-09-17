@@ -119,7 +119,7 @@ export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):
 | `FLAGOS_BUILD_VENDOR` / `FLAGOS_BUILD_FLAGGEMS` / `FLAGOS_BUILD_FLAGGEMS_CPP` | yes | Select the kernel paths the wheel was built with |
 | `GEMS_VENDOR=enflame` | **no** | Set automatically by `torch_fl` at import (`torch_fl/__init__.py`) when a GCU Triton backend is importable and the selected conf routes anything to FlagGems |
 | `FLAGOS_BACKEND_CONFIG` | **no** | `torch_fl` selects `configs/backends_gcu.conf` itself; set this only to force a different conf for testing |
-| `FLAGOS_LOG_DISPATCH=1` | no | Logs `[flagos dispatch] <op> -> <backend>` for every dispatch |
+| `FLAGOS_LOG=dispatch` | no | Logs `[flagos dispatch] <op> -> <backend>` for every dispatch |
 | `FLAGOS_OP_<op>=<backend>` | no | Per-operator override; dots in an op name become double underscores (`FLAGOS_OP_add__Tensor=flaggems`) |
 
 ## Verifying the installation

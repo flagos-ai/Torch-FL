@@ -49,7 +49,7 @@ Run (from repo root):
     python tests/manual/metax/test_flaggems_cpp_metax.py
 
 Each op is checked twice:
-  * routing -- with FLAGOS_LOG_DISPATCH=1 the dispatcher logs "-> flagos" for
+  * routing -- with FLAGOS_LOG=dispatch the dispatcher logs "-> flagos" for
     the C++ backend (vs "-> flagos_python" / "-> cuda"). Correct numerics alone
     would not prove the C++ path ran, since the boxing fallback is also correct.
   * numerics -- compared against the CPU result.
@@ -74,7 +74,7 @@ def check(name, ok, detail=""):
 def _run_snippet(code):
     """Run code in a fresh interpreter, with the dispatch log on."""
     env = os.environ.copy()
-    env["FLAGOS_LOG_DISPATCH"] = "1"
+    env["FLAGOS_LOG"] = "dispatch"
 
     env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     # The dispatch log is what proves the C++ path ran; keep stderr separate.

@@ -251,7 +251,7 @@ float64 instantiation of nearly every pointwise kernel FlagGems emits — so it 
 applied at runtime instead, by `FlagGemsRejectsDtype` in `csrc/aten/common.cc`
 through `Dispatcher::ResolveFn`. A float64 call the conf routes to FlagGems, on an
 op that also has an ACLNN kernel, lands on the native backend. Set
-`FLAGOS_LOG_DISPATCH=1` to see which backend each call actually resolved to.
+`FLAGOS_LOG=dispatch` to see which backend each call actually resolved to.
 `tests/integration/ops/test_dtype_route_fallback.py` is the regression test.
 
 ## Optional: torch.compile via triton-ascend

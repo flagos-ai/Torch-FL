@@ -57,10 +57,10 @@
 #include <cstdio>
 #include <optional>
 
-// Diagnostic logging gated behind FLAGOS_ROCTRACER_DEBUG=1
+// Diagnostic logging gated behind FLAGOS_TRACE=1
 namespace {
 inline bool flagos_roctracer_debug() {
-  static const bool on = flagos_env::EnvFlag("FLAGOS_ROCTRACER_DEBUG");
+  static const bool on = flagos_env::EnvFlag("FLAGOS_TRACE");
   return on;
 }
 }  // namespace

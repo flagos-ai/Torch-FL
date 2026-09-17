@@ -1,7 +1,6 @@
 """Real MTT S5000 coverage for the MThreads FlagGems hybrid path."""
 
 import importlib
-import os
 
 import pytest
 import torch
@@ -15,8 +14,17 @@ DEVICE = torch.device("flagos:0")
 def _require_flaggems_mthreads():
     if torch_fl.flagos.device_count() < 1:
         pytest.skip("MUSA device is unavailable")
-    if os.environ.get("FLAGOS_USE_FLAGGEMS", "0") not in ("1", "true", "TRUE"):
-        pytest.skip("set FLAGOS_USE_FLAGGEMS=1 to validate the hybrid path")
+    # The wheel decides whether the hybrid path exists, not the shell it runs
+    # in: this used to be an exported FLAGOS_USE_FLAGGEMS, which nothing read
+    # once that switch was retired -- so the gate never opened and the file
+    # silently measured nothing. The build record cannot disagree with the
+    # wheel it is inside.
+    from torch_fl import _env
+
+    if "flaggems" not in _env.build_kernels():
+        pytest.skip(
+            "this wheel was not built with the FlagGems kernels (FLAGOS_BUILD_FLAGGEMS=ON)"
+        )
     try:
         import triton
         import flag_gems

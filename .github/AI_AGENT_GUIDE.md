@@ -265,7 +265,7 @@ git commit -m "add cholesky"  # Contains backend + tests + docs + refactor
 ### When Tests Fail
 
 1. **Read the full traceback** (don't just look at the last line)
-2. **Check test log output** (FLAGOS_LOG_DISPATCH=1)
+2. **Check test log output** (FLAGOS_LOG=dispatch)
 3. **Isolate the failure**: Run just one test at a time
 4. **Compare with CPU**: Does the CPU version work?
 5. **Check backend config**: Is the right backend being used?

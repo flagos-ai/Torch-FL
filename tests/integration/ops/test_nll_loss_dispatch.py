@@ -183,7 +183,7 @@ class TestNllLossDispatch:
             pytest.skip("nll_loss_forward is routed to 'none' on this platform")
         result = _run_subprocess_forward(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_nll_loss_forward": "flaggems_python",
             },
             check=False,
@@ -202,7 +202,7 @@ class TestNllLossDispatch:
             pytest.skip("nll_loss_backward is routed to 'none' on this platform")
         result = _run_subprocess_backward(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_nll_loss_backward": "flaggems_python",
             },
             check=False,
@@ -212,7 +212,7 @@ class TestNllLossDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_forward_cuda(self):
         result = _run_subprocess_forward(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_nll_loss_forward": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_forward": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] nll_loss_forward -> cuda" in result.stderr
@@ -220,7 +220,7 @@ class TestNllLossDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_backward_cuda(self):
         result = _run_subprocess_backward(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_nll_loss_backward": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_backward": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] nll_loss_backward -> cuda" in result.stderr

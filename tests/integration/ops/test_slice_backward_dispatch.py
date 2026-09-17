@@ -110,7 +110,7 @@ class TestSliceBackwardDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_slice_backward": "flaggems_python",
             },
             check=False,
@@ -120,7 +120,7 @@ class TestSliceBackwardDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_slice_backward": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_slice_backward": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] slice_backward -> cuda" in result.stderr

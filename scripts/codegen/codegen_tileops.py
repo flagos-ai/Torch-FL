@@ -31,7 +31,7 @@ in Python -- TileOPs ships no C++ API -- so each generated stub calls back into
 ``torch_fl.tileops.generated.shims`` via ``CallPythonOp_Generic``.
 
 Going through the dispatcher rather than binding on PrivateUse1 directly is what
-makes ``FLAGOS_OP_<op>=<backend>``, ``FLAGOS_LOG_DISPATCH=1`` and
+makes ``FLAGOS_OP_<op>=<backend>``, ``FLAGOS_LOG=dispatch`` and
 ``FLAGOS_FORCE_BACKEND=tileops`` work without reimplementing any of them in
 Python: a torch.library PrivateUse1 binding intercepts *before* the dispatcher,
 so an op bound there never sees its own routing config.
@@ -599,7 +599,7 @@ def render_cpp_kernels(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
         "// so these stubs bridge back into the interpreter through the same",
         "// CallPythonOp_Generic path FlagGems' Python ops use. Routing them through",
         "// the dispatcher rather than binding them on PrivateUse1 in Python is what",
-        "// makes FLAGOS_OP_<op>, FLAGOS_LOG_DISPATCH and the conf files apply: a",
+        "// makes FLAGOS_OP_<op>, FLAGOS_LOG=dispatch and the conf files apply: a",
         "// torch.library PrivateUse1 binding intercepts before the dispatcher runs,",
         "// so an op bound there never reaches its own routing config.",
         "//",
@@ -957,7 +957,7 @@ def render_test(routes: List[Route]) -> str:
         "    base = dict(",
         "        os.environ,",
         "        FLAGOS_FORCE_BACKEND='tileops',",
-        "        FLAGOS_LOG_DISPATCH='1',",
+        "        FLAGOS_LOG='dispatch',",
         "        PYTHONPATH=os.pathsep.join(p for p in sys.path if p),",
         "    )",
         "    # importing torch_fl (which this module does at collection time) writes",

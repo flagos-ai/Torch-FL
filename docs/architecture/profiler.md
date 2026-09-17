@@ -273,23 +273,33 @@ byte-for-byte, which emits `8e-05` at small magnitudes.
 
 ## 4. Debug environment variables
 
-Both default to off. Note that they test for **being set**, not for a value, so
-`FLAGOS_KINETO_SHIM_DEBUG=0` still enables logging; unset it to turn it off.
+One switch, `FLAGOS_TRACE`, off by default. A build compiles exactly one device
+tracer (see `csrc/CMakeLists.txt`), so a per-tracer name would never have had
+more than one member — the tracer that exists is the one it turns on. It takes a
+boolean (`1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitive); an
+unrecognized value warns and reads as off, so `FLAGOS_TRACE=0` means what it
+says. Diagnostics it enables, by component:
 
-- **`FLAGOS_KINETO_SHIM_DEBUG`** — diagnostics for the kineto adaptor
-  (`flagos_kineto_profiler.cc`): how many events were drained at session stop; the window
-  `processTrace` received, linked/candidate counts, and how many entries the window
-  discarded; profiler registration and `configure()` calls.
+- **The kineto adaptor** (`flagos_kineto_profiler.cc`): how many events were drained at
+  session stop; the window `processTrace` received, linked/candidate counts, and how many
+  entries the window discarded; profiler registration and `configure()` calls.
 
-- **`FLAGOS_CUPTI_SHIM_DEBUG`** — diagnostics for the CUPTI tracer
-  (`cupti_device_tracer.cc`) and the dlopen shim (`cupti_shim.h`): which `libcupti` was bound
-  and its API version; callback registration and the `ActivityEnable` return value for each
-  kind; buffer requests and completions, and per-record decoding.
+- **The CUPTI tracer** (`cupti_device_tracer.cc`) and the dlopen shim (`cupti_shim.h`):
+  which `libcupti` was bound and its API version; callback registration and the
+  `ActivityEnable` return value for each kind; buffer requests and completions, and
+  per-record decoding.
 
-**Two warnings are deliberately not gated** by either switch: an empty `getLinkedActivity`
-callback, and an activity-record layout mismatch in the tracer. Both are rare but severe (the
-first silently zeroes device time), and silence is precisely what makes them hard to find, so
-they print unconditionally.
+- **The other vendor tracers** (`cann_device_tracer.cc`, `musa_mupti_device_tracer.cc`,
+  `gcu_topspti_device_tracer.cc`, `roctracer_device_tracer.cc`): setup and session
+  lifecycle logging, the same shape as the CUPTI tracer's.
+
+**Two warnings are deliberately not gated** by the switch: an empty
+`getLinkedActivity` callback, and an activity-record layout mismatch in the tracer.
+Both are rare but severe (the first silently zeroes device time), and silence is
+precisely what makes them hard to find, so they print unconditionally.
+
+To point a tracer at a non-default library, `FLAGOS_TRACER_LIBRARY` overrides the
+`dlopen` path; the shims that honor it are named per vendor below.
 
 ---
 
@@ -464,8 +474,8 @@ MUPTI and Kineto use different timestamp clock domains on the validated host, so
 `muptiGetTimestamp()` against `CLOCK_REALTIME` at session start and stop and maps activity times
 with an affine conversion. The two correlation schemes remain independent: the MUPTI correlation
 ID pairs runtime and device records for `ac2g` flows, while `CUSTOM0` external records map to the
-Torch profiler ID used by `getLinkedActivity()`. `FLAGOS_MUPTI_LIBRARY` overrides library lookup,
-and `FLAGOS_MUPTI_DEBUG=1` enables setup diagnostics. The MTT S5000 validation captured real
+Torch profiler ID used by `getLinkedActivity()`. `FLAGOS_TRACER_LIBRARY` overrides library lookup, and
+`FLAGOS_TRACE` enables setup diagnostics. The MTT S5000 validation captured real
 positive-duration kernel, runtime, and memcpy records and valid Chrome JSON; CPU-only Kineto
 resolver behavior remains environment-dependent, so full profiler parity is not claimed.
 
@@ -485,8 +495,8 @@ callback-name, and correlation metadata are copied before the buffer is released
 
 TOPSPTI reports its own device clock, so the tracer samples `topsptiGetTimestamp()` against
 `CLOCK_REALTIME` at session start and stop and maps activity times with the same affine
-conversion the MUPTI path uses. `FLAGOS_TOPSPTI_LIBRARY` overrides library lookup and
-`FLAGOS_TOPSPTI_DEBUG=1` enables setup diagnostics. When the SDK headers are missing at build
+conversion the MUPTI path uses. `FLAGOS_TRACER_LIBRARY` overrides library lookup and
+`FLAGOS_TRACE` enables setup diagnostics. When the SDK headers are missing at build
 time or the runtime library cannot be resolved, the GCU tracer compiles and reports as an
 unavailable stub and CPU-only profiling continues normally.
 

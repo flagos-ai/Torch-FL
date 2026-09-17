@@ -41,8 +41,8 @@
 #   OUT_DIR   where images and logs land (default: ./qwen-image-out)
 #   LOG       log path override (default: $OUT_DIR/<mode>-<timestamp>.log)
 #
-#   FLAGOS_LOG_FALLBACK=1 and FLAGOS_LOG_DISPATCH=1 are exported for the run:
-#   the first is the cpu_fallback census, the second the per-op backend census.
+#   FLAGOS_LOG=fallback,dispatch is exported for the run: `fallback` is the
+#   cpu_fallback census, `dispatch` the per-op backend census.
 #   HF_HUB_OFFLINE is left alone -- set it to 1 yourself once the cache is
 #   complete and the box has no proxy.
 #
@@ -56,8 +56,9 @@ SUBDIR=tests/manual/qwen_image_2512
 PYTHON=${PYTHON:-python3}
 OUT_DIR=${OUT_DIR:-$PWD/qwen-image-out}
 
-export FLAGOS_LOG_FALLBACK=${FLAGOS_LOG_FALLBACK:-1}
-export FLAGOS_LOG_DISPATCH=${FLAGOS_LOG_DISPATCH:-1}
+# Both diagnostics are named in the one list. An inherited FLAGOS_LOG wins, so
+# a narrower run (FLAGOS_LOG=dispatch) is not widened back to both.
+export FLAGOS_LOG=${FLAGOS_LOG:-fallback,dispatch}
 
 usage() {
     echo "usage: $(basename "${BASH_SOURCE[0]}") <infer|sweep|memprobe|side-by-side|compare|census> [args...]" >&2

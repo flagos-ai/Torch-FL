@@ -114,7 +114,7 @@ class TestSiluBackwardDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_silu_backward": "flaggems_python",
             },
             check=False,
@@ -124,7 +124,7 @@ class TestSiluBackwardDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_silu_backward": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu_backward": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] silu_backward -> cuda" in result.stderr

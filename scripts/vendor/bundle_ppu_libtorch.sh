@@ -18,7 +18,7 @@
 # Not bundled: PPU SDK runtime stays on the target machine at /usr/local/PPU_SDK.
 #
 # Usage:
-#   FLAGOS_PPU_TORCH_LIB=<ppu torch/lib> bash scripts/vendor/bundle_ppu_libtorch.sh
+#   FLAGOS_VENDOR_TORCH_LIB=<ppu torch/lib> bash scripts/vendor/bundle_ppu_libtorch.sh
 #   PPU_SDK=/usr/local/PPU_SDK bash scripts/vendor/bundle_ppu_libtorch.sh
 #   FLAGOS_PPU_MKL_DIR=/usr/local/lib bash scripts/vendor/bundle_ppu_libtorch.sh
 #
@@ -36,7 +36,7 @@ TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
 PPU_SDK="${PPU_SDK:-/usr/local/PPU_SDK}"
 MKL_DIR="${FLAGOS_PPU_MKL_DIR:-/usr/local/lib}"
 
-SRC="${FLAGOS_PPU_TORCH_LIB:-}"
+SRC="${FLAGOS_VENDOR_TORCH_LIB:-}"
 if [ -z "${SRC}" ]; then
   # PPU torch is locally built; version.py may not contain the "ppu" marker,
   # so first try finding it by marker, fall back to "any torch with
@@ -48,7 +48,7 @@ if [ -z "${SRC}" ]; then
 fi
 
 if [ -z "${SRC}" ] || [ ! -d "${SRC}" ]; then
-  echo "error: PPU torch/lib not found. Set FLAGOS_PPU_TORCH_LIB=<ppu torch/lib>" >&2
+  echo "error: PPU torch/lib not found. Set FLAGOS_VENDOR_TORCH_LIB=<ppu torch/lib>" >&2
   exit 1
 fi
 if [ ! -f "${SRC}/libtorch_cuda.so" ]; then

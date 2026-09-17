@@ -57,6 +57,17 @@ Backend GetBackendForOp(const std::string& op_name);
 // dispatch-miss path without re-reading the environment per op.
 const std::string& ForcedBackendMode();
 
+// True when FLAGOS_LOG -- a comma-separated list -- names `item`, one of
+// "dispatch", "fallback" or "op_cache". Three separate booleans used to gate
+// these, and none could be discovered by reading the environment: you had to
+// know the name first. One list puts the whole menu in one place, in the
+// variable's own value.
+//
+// An item that names nothing is reported once per process, because a typo would
+// otherwise turn a diagnostic off silently -- which is exactly what those
+// booleans did not do.
+bool LogEnabled(const char* item);
+
 // Dtypes this build's FlagGems (Triton) route cannot serve, whatever op is
 // asking. Consulted by Dispatcher so a `flaggems` route falls back to the
 // vendor kernel for those dtypes instead of failing inside the compiler.

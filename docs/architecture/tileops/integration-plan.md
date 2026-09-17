@@ -313,7 +313,7 @@ The plan is to **reuse that machinery**, adding:
 - A `FLAGOS_USE_TILEOPS=1` branch in
   `torch_fl/__init__.py::_select_backend_config()` selecting that conf.
 
-The benefit: routing granularity, env overrides, `FLAGOS_LOG_DISPATCH=1` logging
+The benefit: routing granularity, env overrides, `FLAGOS_LOG=dispatch` logging
 and the existing dispatch test conventions (`tests/integration/ops/test_*_dispatch.py`
 has mature templates) all come for free, without introducing a second mechanism.
 
@@ -348,7 +348,7 @@ wrong**, on both halves:
 With the cost neutral, the dispatcher path wins on everything else. Registering
 on PrivateUse1 in Python intercepts *before* the C++ dispatcher runs, so a route
 bound that way never reaches its own routing config -- which meant
-`FLAGOS_OP_<op>=<backend>` and `FLAGOS_LOG_DISPATCH` had to be reimplemented in
+`FLAGOS_OP_<op>=<backend>` and `FLAGOS_LOG=dispatch` had to be reimplemented in
 Python to work at all, and `FLAGOS_USE_TILEOPS=1` selected a conf file that
 nothing consulted (it needed a separate `enable_tileops_for_flagos()` call).
 Going through the dispatcher makes all three work by construction and deletes

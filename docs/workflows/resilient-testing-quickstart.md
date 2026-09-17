@@ -162,7 +162,7 @@ support a crash finding.
 
 ### CPU fallback
 
-The runner enables `FLAGOS_LOG_FALLBACK=1`. Any operator listed under
+The runner enables `FLAGOS_LOG=fallback`. Any operator listed under
 `cpu_fallback_ops` is an accelerator coverage gap even if the model assertion
 passed. Triage emits a confirmed `OP_CPU_FALLBACK` finding for each measured
 operator.

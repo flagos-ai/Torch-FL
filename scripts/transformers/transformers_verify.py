@@ -58,7 +58,7 @@ def isolated_env(test_source_dir: Path, workdir: Path) -> dict[str, str]:
     """Build the same PrivateUse1 test environment as the official runner."""
     env = dict(os.environ)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-    env["FLAGOS_LOG_FALLBACK"] = "1"
+    env["FLAGOS_LOG"] = "fallback"
     env.pop("TRANSFORMERS_TEST_DEVICE", None)
     env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
     # This mirrors the runner's ``child_env``. This repository also has a

@@ -161,13 +161,13 @@ def _bundled_dcu_lib():
 def _discover_dcu_torch_lib():
     """Locate the DTK libtorch .so dir.
 
-    Priority: bundled lib_dcu/, then FLAGOS_DCU_TORCH_LIB, then sibling conda
+    Priority: bundled lib_dcu/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a DTK build.
     """
     return discover_vendor_torch_lib(
         _BUNDLE_DIR,
         "libtorch_hip.so",
-        env_override="FLAGOS_DCU_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
     )
 
@@ -177,7 +177,7 @@ def _compat_shim_path(lib_dir):
     for cand in (
         os.path.join(lib_dir, _COMPAT_SO),
         # Non-bundled in-place build: cmake installs into torch_fl/lib_dcu, but a
-        # dev may point FLAGOS_DCU_TORCH_LIB straight at the DTK wheel.
+        # dev may point FLAGOS_VENDOR_TORCH_LIB straight at the DTK wheel.
         os.path.join(
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -244,7 +244,7 @@ def preload_dcu_device_libs():
                 raise FileNotFoundError(
                     f"DCU/DTK device library missing: {os.path.join(lib_dir, name)}. "
                     "Run scripts/vendor/bundle_dcu_libtorch.sh, or point "
-                    "FLAGOS_DCU_TORCH_LIB at a DTK torch/lib."
+                    "FLAGOS_VENDOR_TORCH_LIB at a DTK torch/lib."
                 )
         try:
             _device_handles.append(ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL))
@@ -286,7 +286,7 @@ def ensure_dcu_libtorch_links():
         _BUNDLE_DIR,
         _CORE_SO,
         extra_so=_HIP_SO,
-        env_override="FLAGOS_DCU_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
         probe_so="libtorch_hip.so",
         vendor="DCU/DTK",

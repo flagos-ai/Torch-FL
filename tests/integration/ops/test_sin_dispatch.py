@@ -99,7 +99,7 @@ class TestSinDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_sin_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_sin": "flaggems_python",
             },
             check=False,
@@ -109,7 +109,7 @@ class TestSinDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_sin_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_sin": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_sin": "cuda"}
         )
         if result.returncode != 0 and "backend not registered" in result.stderr:
             pytest.skip("cuda backend not available in this build")
@@ -119,7 +119,7 @@ class TestSinDispatch:
     @pytest.mark.metax
     def test_dispatch_log_metax(self):
         result = _run_sin_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_sin": "metax"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_sin": "metax"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] sin -> metax" in result.stderr

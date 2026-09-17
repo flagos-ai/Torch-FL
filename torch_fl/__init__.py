@@ -243,7 +243,7 @@ def _relink_vendor_libtorch() -> None:
     already IS the vendor wheel), so this is safe to call unconditionally.
 
     MetaX is a boxing-only build: accel=="metax" relinks unconditionally (an
-    in-place build reaches the vendor torch through FLAGOS_MACA_TORCH_LIB, a
+    in-place build reaches the vendor torch through FLAGOS_VENDOR_TORCH_LIB, a
     self-contained wheel through lib_maca/).  DCU and PPU have no native-kernel
     mode, so bundle-dir presence alone decides.  The CUDA backend is not here:
     the official +cpu wheel's core .so ARE the upstream ones, so only the extra

@@ -99,7 +99,7 @@ class TestCosDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_cos_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_cos": "flaggems_python",
             },
             check=False,
@@ -109,7 +109,7 @@ class TestCosDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_cos_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_cos": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cos": "cuda"}
         )
         if result.returncode != 0 and "backend not registered" in result.stderr:
             pytest.skip("cuda backend not available in this build")
@@ -119,7 +119,7 @@ class TestCosDispatch:
     @pytest.mark.metax
     def test_dispatch_log_metax(self):
         result = _run_cos_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_cos": "metax"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cos": "metax"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] cos -> metax" in result.stderr

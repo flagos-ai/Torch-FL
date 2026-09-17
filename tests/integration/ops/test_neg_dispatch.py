@@ -116,7 +116,7 @@ class TestNegDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_neg_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_neg": "flaggems_python",
             },
             check=False,
@@ -135,9 +135,7 @@ class TestNegDispatch:
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """
-        result = _run_neg_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_neg_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("neg")
         assert f"[flagos dispatch] neg -> {expected}" in result.stderr
@@ -146,7 +144,7 @@ class TestNegDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_neg_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_neg": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_neg": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] neg -> cuda" in result.stderr
@@ -154,7 +152,7 @@ class TestNegDispatch:
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):
         result = _run_neg_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_neg": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_neg": "ascend"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] neg -> ascend" in result.stderr

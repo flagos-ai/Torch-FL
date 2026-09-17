@@ -22,9 +22,9 @@
 //
 // Before this header each translation unit parsed booleans its own way. Three
 // different truth tables were in use: anything-not-"0", literal '"1"' only, and
-// existence (getenv != nullptr, which made FLAGOS_CUPTI_SHIM_DEBUG=0 turn the
-// logging *on*). The table below is stated once and matches the Python side
-// line for line.
+// existence (getenv != nullptr, which made a per-tracer debug switch set to 0
+// turn that tracer's logging *on*). The table below is stated once and matches
+// the Python side line for line.
 //
 // Deliberate carve-out: csrc/runtime/accelerator/metax/cudart_shim.c. setup.py
 // builds it standalone into libcudart_shim.so for LD_PRELOAD, so it cannot link

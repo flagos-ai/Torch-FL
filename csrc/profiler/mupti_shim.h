@@ -84,9 +84,9 @@ struct MuptiShim {
       return ok;
     }
     loaded = true;
-    // An explicitly set but empty FLAGOS_MUPTI_LIBRARY means "unset", so the
+    // An explicitly set but empty FLAGOS_TRACER_LIBRARY means "unset", so the
     // built-in names below still get their turn.
-    const std::string override_library = flagos_env::EnvValue("FLAGOS_MUPTI_LIBRARY");
+    const std::string override_library = flagos_env::EnvValue("FLAGOS_TRACER_LIBRARY");
     const char* candidates[] = {
         override_library.c_str(),
         "libmupti.so",

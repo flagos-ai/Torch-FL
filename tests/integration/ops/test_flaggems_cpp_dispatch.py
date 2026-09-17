@@ -39,7 +39,7 @@ import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
-_CPP_ENV = {"FLAGOS_LOG_DISPATCH": "1"}
+_CPP_ENV = {"FLAGOS_LOG": "dispatch"}
 
 
 def _run_subprocess(

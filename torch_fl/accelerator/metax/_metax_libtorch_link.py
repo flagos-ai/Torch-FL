@@ -25,7 +25,7 @@ and why a pure ctypes preload cannot do this on its own -- lives in
 ``torch_fl.accelerator._vendor_libtorch``.  This module is just the MetaX .so
 lists; whether to relink at all is decided by
 ``torch_fl.__init__._relink_vendor_libtorch`` (unconditional on a MetaX build --
-it is boxing-only, reaching the vendor torch through FLAGOS_MACA_TORCH_LIB or a
+it is boxing-only, reaching the vendor torch through FLAGOS_VENDOR_TORCH_LIB or a
 self-contained lib_maca/ bundle).
 """
 
@@ -94,13 +94,13 @@ def _bundled_maca_lib():
 def _discover_maca_torch_lib():
     """Locate the MetaX libtorch .so dir.
 
-    Priority: bundled lib_maca/, then FLAGOS_MACA_TORCH_LIB, then sibling conda
+    Priority: bundled lib_maca/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a ``+metax``/``+maca`` build.
     """
     return discover_vendor_torch_lib(
         _BUNDLE_DIR,
         "libtorch_cuda.so",
-        env_override="FLAGOS_MACA_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
     )
 
@@ -115,7 +115,7 @@ def ensure_maca_libtorch_links():
     Deciding *whether* to relink is the caller's job -- see
     ``torch_fl.__init__._relink_vendor_libtorch``, which relinks on every MetaX
     build (a self-contained wheel finds lib_maca/, an in-place build finds the
-    vendor torch through FLAGOS_MACA_TORCH_LIB).  This used to self-gate on a
+    vendor torch through FLAGOS_VENDOR_TORCH_LIB).  This used to self-gate on a
     mode variable, which made the self-contained path a silent no-op:
     the stock libtorch_cpu.so stayed in place and libtorch_cuda.so then failed
     to resolve at::maca symbols that only the forked CPU runtime defines.
@@ -124,7 +124,7 @@ def ensure_maca_libtorch_links():
         _BUNDLE_DIR,
         _CORE_SO,
         extra_so=_CUDA_SO,
-        env_override="FLAGOS_MACA_TORCH_LIB",
+        env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
         probe_so="libtorch_cuda.so",
         vendor="MetaX",

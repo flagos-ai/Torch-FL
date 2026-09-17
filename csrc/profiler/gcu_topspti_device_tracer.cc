@@ -51,9 +51,9 @@ constexpr size_t kBufferSize = 8 * 1024 * 1024;
 constexpr uint64_t kMaxPlausibleDurationNs = 3600ull * 1000 * 1000 * 1000;
 
 bool debug_enabled() {
-  // Was "the variable exists", which made FLAGOS_TOPSPTI_DEBUG=0 turn the
+  // Was "the variable exists", which made the debug switch's =0 turn the
   // logging ON. The shared truth table reads 1/true/on/yes as on.
-  static const bool enabled = flagos_env::EnvFlag("FLAGOS_TOPSPTI_DEBUG");
+  static const bool enabled = flagos_env::EnvFlag("FLAGOS_TRACE");
   return enabled;
 }
 

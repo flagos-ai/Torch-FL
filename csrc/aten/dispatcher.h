@@ -348,7 +348,7 @@ class Dispatcher {
   }
 
   static void LogDispatch(const std::string& op_name, Backend backend) {
-    static const bool enabled = flagos_env::EnvFlag("FLAGOS_LOG_DISPATCH");
+    static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
     const char* name;
     switch (backend) {

@@ -472,7 +472,7 @@ class TestCatDispatchLog:
     def test_dispatch_log_flaggems_python(self):
         """FLAGOS_OP_cat=flaggems_python routes cat to flagos_python backend."""
         result = _run_cat_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_cat": "flaggems_python"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cat": "flaggems_python"},
             check=False,
         )
         assert "[flagos dispatch] cat -> flagos_python" in result.stderr, (
@@ -489,9 +489,7 @@ class TestCatDispatchLog:
         MUSA. Reading the conf keeps the assertion true on all of them and still
         checks the real property: the runtime honours the table it was given.
         """
-        result = _run_cat_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_cat_subprocess({"FLAGOS_LOG": "dispatch"})
         expected = routed_backend("cat")
         assert f"[flagos dispatch] cat -> {expected}" in result.stderr, (
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
@@ -502,7 +500,7 @@ class TestCatDispatchLog:
     def test_dispatch_log_cuda_override(self):
         """FLAGOS_OP_cat=cuda overrides to cuda backend."""
         result = _run_cat_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_cat": "cuda"},
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cat": "cuda"},
         )
         assert "[flagos dispatch] cat -> cuda" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
@@ -512,7 +510,7 @@ class TestCatDispatchLog:
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_cat=ascend overrides to ascend backend."""
         result = _run_cat_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_cat": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cat": "ascend"}
         )
         assert "[flagos dispatch] cat -> ascend" in result.stderr, (
             f"Expected ascend dispatch log, got:\n{result.stderr}"

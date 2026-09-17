@@ -110,7 +110,7 @@ class TestAddTensorDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_add_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_add__Tensor": "flaggems_python",
             },
             check=False,
@@ -129,9 +129,7 @@ class TestAddTensorDispatch:
         keeps this test meaningful on every platform rather than pinning it to
         the one it was written on.
         """
-        result = _run_add_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_add_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("add.Tensor")
         assert f"[flagos dispatch] add.Tensor -> {expected}" in result.stderr
@@ -140,7 +138,7 @@ class TestAddTensorDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_add_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_add__Tensor": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_add__Tensor": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] add.Tensor -> cuda" in result.stderr
@@ -148,7 +146,7 @@ class TestAddTensorDispatch:
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):
         result = _run_add_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_add__Tensor": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_add__Tensor": "ascend"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] add.Tensor -> ascend" in result.stderr

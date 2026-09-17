@@ -124,7 +124,7 @@ class TestAbsDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_abs_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_abs": "flaggems_python",
             },
             check=False,
@@ -143,7 +143,7 @@ class TestAbsDispatch:
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """
-        result = _run_abs_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_abs_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("abs")
         assert f"[flagos dispatch] abs -> {expected}" in result.stderr
@@ -153,7 +153,7 @@ class TestAbsDispatch:
     def test_dispatch_log_cuda_override(self):
         result = _run_abs_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_abs": "cuda",
             },
             check=False,

@@ -362,7 +362,7 @@ FLAGOS_FORCE_BACKEND=flaggems python script.py
 
 Enable dispatch logging:
 ```bash
-FLAGOS_LOG_DISPATCH=1 python script.py
+FLAGOS_LOG=dispatch python script.py
 ```
 
 ## Full CI manifest reproduction (local)

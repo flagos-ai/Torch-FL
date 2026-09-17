@@ -102,7 +102,7 @@ class TestMulTensorDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_mul_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_mul__Tensor": "flaggems_python",
             },
             check=False,
@@ -119,7 +119,7 @@ class TestMulTensorDispatch:
         keeps it on its own vendor kernel. Reading the conf keeps the assertion
         true on all of them.
         """
-        result = _run_mul_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_mul_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("mul.Tensor")
         assert f"[flagos dispatch] mul.Tensor -> {expected}" in result.stderr
@@ -128,7 +128,7 @@ class TestMulTensorDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_mul_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mul__Tensor": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mul__Tensor": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] mul.Tensor -> cuda" in result.stderr

@@ -12,7 +12,7 @@
 namespace at::native::flagos {
 
 void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  static const bool log_enabled = flagos_env::EnvFlag("FLAGOS_LOG_FALLBACK");
+  static const bool log_enabled = LogEnabled("fallback");
   if (log_enabled) {
     fprintf(stderr, "[flagos cpu_fallback] %s\n",
             op.schema().name().c_str());

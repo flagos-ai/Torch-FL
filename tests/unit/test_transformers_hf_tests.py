@@ -228,7 +228,7 @@ def test_pytest_command_does_not_union_directory_with_selected_nodeids(tmp_path)
 
 def test_child_env_enables_cpu_fallback_measurement(tmp_path):
     env = runner.child_env(tmp_path, tmp_path / "report.jsonl", False)
-    assert env["FLAGOS_LOG_FALLBACK"] == "1"
+    assert "fallback" in env["FLAGOS_LOG"].split(",")
 
 
 def test_reduce_records_aggregates_cpu_fallback_operators():

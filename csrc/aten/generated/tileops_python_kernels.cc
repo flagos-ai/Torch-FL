@@ -20,7 +20,7 @@
 // so these stubs bridge back into the interpreter through the same
 // CallPythonOp_Generic path FlagGems' Python ops use. Routing them through
 // the dispatcher rather than binding them on PrivateUse1 in Python is what
-// makes FLAGOS_OP_<op>, FLAGOS_LOG_DISPATCH and the conf files apply: a
+// makes FLAGOS_OP_<op>, FLAGOS_LOG=dispatch and the conf files apply: a
 // torch.library PrivateUse1 binding intercepts before the dispatcher runs,
 // so an op bound there never reaches its own routing config.
 //

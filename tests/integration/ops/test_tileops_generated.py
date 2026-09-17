@@ -146,7 +146,7 @@ def test_dispatches_through_cpp():
     base = dict(
         os.environ,
         FLAGOS_FORCE_BACKEND="tileops",
-        FLAGOS_LOG_DISPATCH="1",
+        FLAGOS_LOG="dispatch",
         PYTHONPATH=os.pathsep.join(p for p in sys.path if p),
     )
     # importing torch_fl (which this module does at collection time) writes

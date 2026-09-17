@@ -76,7 +76,7 @@ _VENDOR_OPS = ("mul.Tensor",)
 
 def _run(extra_env: dict) -> subprocess.CompletedProcess:
     env = os.environ.copy()
-    env.update({"FLAGOS_LOG_DISPATCH": "1", **extra_env})
+    env.update({"FLAGOS_LOG": "dispatch", **extra_env})
     return subprocess.run(
         [sys.executable, "-c", _PROBE],
         env=env,
@@ -224,7 +224,7 @@ class TestFloat64ResultsAreCorrect:
             [sys.executable, "-c", code],
             env={
                 **os.environ,
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
             },
             capture_output=True,
             text=True,

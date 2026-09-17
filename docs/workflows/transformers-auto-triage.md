@@ -69,7 +69,7 @@ The runner:
 - runs a preflight in a child process before the first batch and records it
   under `environment.preflight`;
 - disables optional backend autoloading that can break collection;
-- enables `FLAGOS_LOG_FALLBACK=1`;
+- enables `FLAGOS_LOG=fallback`;
 - executes selected nodeids in isolated batches;
 - preserves completed records when a batch crashes or times out;
 - atomically rewrites the aggregate report after each batch.

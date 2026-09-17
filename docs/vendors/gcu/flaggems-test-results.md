@@ -160,7 +160,7 @@ registered-but-empty dispatcher slot.
 ### Runtime overrides
 
 ```bash
-FLAGOS_LOG_DISPATCH=1                 # print "[flagos dispatch] <op> -> <backend>"
+FLAGOS_LOG=dispatch                 # print "[flagos dispatch] <op> -> <backend>"
 FLAGOS_OP_abs=flaggems                # force one op onto a backend (dots -> __)
 FLAGOS_BACKEND_CONFIG=/path/to.conf   # force a different conf (testing only)
 ```
@@ -235,7 +235,7 @@ this measurement; the remaining 108 are the pre-existing entries.
 ### Routing
 
 ```bash
-FLAGOS_LOG_DISPATCH=1 python -c "
+FLAGOS_LOG=dispatch python -c "
 import torch, torch.nn.functional as F, torch_fl
 x = torch.randn(32, 32, device='flagos:0')
 y = F.silu(x); y = torch.abs(x); y = torch.relu_(x)
@@ -271,7 +271,7 @@ Every entry added to `NATIVE_TRITON_GAPS["gcu"]` came from one of the families
 below. Reproduce any of them by forcing the op back onto FlagGems:
 
 ```bash
-FLAGOS_OP_asin=flaggems FLAGOS_LOG_DISPATCH=1 python -c "
+FLAGOS_OP_asin=flaggems FLAGOS_LOG=dispatch python -c "
 import torch, torch_fl
 torch.asin(torch.randn(32, 32, device='flagos:0'))
 "

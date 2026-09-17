@@ -88,7 +88,7 @@ Important properties are:
 - only unreported nodeids become `BATCH_CRASHED`;
 - aggregate output is written incrementally;
 - long tracebacks preserve both their beginning and exception tail;
-- `FLAGOS_LOG_FALLBACK=1` is enabled and fallback operators are recorded;
+- `FLAGOS_LOG=fallback` is enabled and fallback operators are recorded;
 - a preflight runs in a child process before the first batch and is recorded
   under `environment.preflight`;
 - the device name is read from the spec with `ast`, so the parent process never
@@ -471,7 +471,7 @@ invariants matter:
   softmax restrictions, ProcessGroupGloo's device gap, a CUDA-only
   TorchInductor/Triton dependency, and mudnn INT64 true division;
 - a complete CPU-fallback inventory still requires a hardware rerun with the new
-  `FLAGOS_LOG_FALLBACK=1` instrumentation.
+  `FLAGOS_LOG=fallback` instrumentation.
 
 The corrected evidence and associated issue references are recorded in
 `docs/reference/hf-coverage.md`.

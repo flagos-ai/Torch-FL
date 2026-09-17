@@ -47,11 +47,12 @@
 #include <utility>
 #include <vector>
 
-// Diagnostic logging is gated behind FLAGOS_KINETO_SHIM_DEBUG=1 so that normal
-// profiling runs stay quiet.
+// Diagnostic logging is gated behind FLAGOS_TRACE=1 so that normal profiling
+// runs stay quiet. One switch covers every tracer: the build compiles exactly
+// one device tracer (csrc/CMakeLists.txt), so the name is unambiguous.
 namespace {
 inline bool flagos_kineto_debug() {
-  static const bool on = flagos_env::EnvFlag("FLAGOS_KINETO_SHIM_DEBUG");
+  static const bool on = flagos_env::EnvFlag("FLAGOS_TRACE");
   return on;
 }
 }  // namespace
@@ -336,7 +337,7 @@ void FlagosKinetoProfilerSession::processTrace(
   // self_device_time_total to 0. That degradation is otherwise completely
   // silent, so warn once, unconditionally -- this is the breadcrumb a
   // "device time is mysteriously 0" report needs, and it must not be gated
-  // behind FLAGOS_CUPTI_SHIM_DEBUG for exactly that reason. Same rationale and
+  // behind FLAGOS_TRACE for exactly that reason. Same rationale and
   // shape as the tracer's reportLayoutMismatch: rare by construction, and
   // catastrophic when it happens.
   const bool have_resolver = static_cast<bool>(getLinkedActivity);

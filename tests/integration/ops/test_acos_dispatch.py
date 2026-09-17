@@ -116,7 +116,7 @@ class TestAcosDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_acos_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_acos": "flaggems_python",
             },
             check=False,
@@ -127,7 +127,7 @@ class TestAcosDispatch:
     def test_dispatch_log_cuda_override(self):
         result = _run_acos_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_acos": "cuda",
             },
             check=False,

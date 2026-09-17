@@ -16,7 +16,7 @@
 
 TileOPs is registered on ``Backend::kTileOps`` from C++
 (``csrc/aten/generated/tileops_python_kernels.cc``), so routing, per-op
-``FLAGOS_OP_<op>`` overrides and ``FLAGOS_LOG_DISPATCH`` are all handled by the
+``FLAGOS_OP_<op>`` overrides and ``FLAGOS_LOG=dispatch`` are all handled by the
 dispatcher. What lives here is only what cannot: TileOPs ships no C++ API, so
 the kernels themselves are Python, and the generated stubs call back into
 :mod:`torch_fl.tileops.generated.shims` to reach them.

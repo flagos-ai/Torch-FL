@@ -222,7 +222,7 @@ This finding was:
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0
 TRANSFORMERS_TEST_DEVICE_SPEC=hf_device_spec.py
-FLAGOS_LOG_FALLBACK=1
+FLAGOS_LOG=fallback
 ```
 </details>
 

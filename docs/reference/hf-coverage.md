@@ -108,5 +108,5 @@ The inventory above records the original suite grouping. The corrected
 single-nodeid reruns supersede its provisional labels; in particular, the eight
 SDPA-named tests reproduced the same non-contiguous softmax failure rather than a
 pure tolerance mismatch. Future measurements must also run with
-`FLAGOS_LOG_FALLBACK=1` and report any passing operation that used CPU fallback
+`FLAGOS_LOG=fallback` and report any passing operation that used CPU fallback
 as an accelerator coverage gap.

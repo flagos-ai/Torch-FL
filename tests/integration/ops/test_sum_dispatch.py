@@ -129,7 +129,7 @@ class TestSumDimDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_sum__dim_IntList": "flaggems_python",
             },
             check=False,
@@ -157,7 +157,7 @@ class TestSumDimDispatch:
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """
-        result = _run_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("sum.dim_IntList")
         assert f"[flagos dispatch] sum.dim_IntList -> {expected}" in result.stderr
@@ -166,7 +166,7 @@ class TestSumDimDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_sum__dim_IntList": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_sum__dim_IntList": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] sum.dim_IntList -> cuda" in result.stderr

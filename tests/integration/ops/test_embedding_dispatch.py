@@ -170,7 +170,7 @@ class TestEmbeddingDispatchLog:
             pytest.skip("embedding is routed to 'none' on this platform")
         result = _run_embedding_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_embedding": "flaggems_python",
             },
             check=False,
@@ -196,9 +196,7 @@ class TestEmbeddingDispatchLog:
         """
         if routed_backend_or_none("embedding") != "flagos_python":
             pytest.skip("embedding does not route through FlagGems on this platform")
-        result = _run_embedding_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_embedding_subprocess({"FLAGOS_LOG": "dispatch"})
         expected = routed_backend("embedding")
         assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
             f"Expected embedding -> {expected}, got:\n{result.stderr}"
@@ -209,7 +207,7 @@ class TestEmbeddingDispatchLog:
     def test_dispatch_log_cuda_override(self):
         result = _run_embedding_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_embedding": "cuda",
             }
         )
@@ -221,7 +219,7 @@ class TestEmbeddingDispatchLog:
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_embedding=ascend overrides to ascend backend."""
         result = _run_embedding_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_embedding": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_embedding": "ascend"}
         )
         assert "[flagos dispatch] embedding -> ascend" in result.stderr, (
             f"Expected ascend dispatch log, got:\n{result.stderr}"

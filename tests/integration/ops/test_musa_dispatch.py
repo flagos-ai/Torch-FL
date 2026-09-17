@@ -99,7 +99,7 @@ class TestMusaDispatch:
     def test_dispatch_log_musa(self, op, expr_backend):
         """Every covered op routes to its configured backend (FlagGems or mudnn)."""
         expr, expected_backend = expr_backend
-        result = _run_dispatch_subprocess(expr, {"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_dispatch_subprocess(expr, {"FLAGOS_LOG": "dispatch"})
         assert f"[flagos dispatch] {op} -> {expected_backend}" in result.stderr, (
             f"Expected {expected_backend} dispatch for {op}, got:\n{result.stderr}"
         )
@@ -108,7 +108,7 @@ class TestMusaDispatch:
     def test_dispatch_log_musa_override(self):
         """FLAGOS_OP_mm=musa pins mm to the musa backend explicitly."""
         result = _run_dispatch_subprocess(
-            "a @ b", {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mm": "musa"}
+            "a @ b", {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "musa"}
         )
         assert "[flagos dispatch] mm -> musa" in result.stderr, (
             f"Expected musa dispatch log, got:\n{result.stderr}"
@@ -118,7 +118,7 @@ class TestMusaDispatch:
     def test_dispatch_log_mm_out_musa(self):
         """mm.out routes to FlagGems (mudnn MatMul fallback available but FlagGems preferred)."""
         env = os.environ.copy()
-        env["FLAGOS_LOG_DISPATCH"] = "1"
+        env["FLAGOS_LOG"] = "dispatch"
         code = (
             "import torch_fl, torch; "
             f"a = torch.randn(8, 8, device='{DEVICE}'); "
@@ -311,7 +311,7 @@ class TestMusaCorrectness:
     def test_flaggems_only_ops_route_and_stay_correct(self, op, expr_fn):
         """The ops with no mudnn mode land on FlagGems and stay numerically right."""
         expr, fn = expr_fn
-        result = _run_dispatch_subprocess(expr, {"FLAGOS_LOG_DISPATCH": "1"})
+        result = _run_dispatch_subprocess(expr, {"FLAGOS_LOG": "dispatch"})
         assert f"[flagos dispatch] {op} -> flagos_python" in result.stderr, (
             f"Expected flagos_python dispatch for {op}, got:\n{result.stderr}"
         )

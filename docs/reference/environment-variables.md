@@ -81,11 +81,9 @@ Logging and tracing switches. All are off unless set, and none changes routing.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `FLAGOS_LOG_DISPATCH` | Runtime | `0` (off) | Print backend selection to stderr for each operator dispatch |
-| `FLAGOS_LOG_FALLBACK` | Runtime | `0` (off) | Print each `cpu_fallback` dispatch to stderr |
-| `FLAGOS_CACHE_STATS` | Runtime | `0` (off) | Print the Ascend operator-cache hit/miss statistics |
-| `FLAGOS_CUPTI_SHIM_DEBUG`, `FLAGOS_MUPTI_DEBUG`, `FLAGOS_MSPTI_DEBUG`, `FLAGOS_TOPSPTI_DEBUG`, `FLAGOS_ROCTRACER_DEBUG`, `FLAGOS_KINETO_SHIM_DEBUG` | Runtime | unset (off) | Per-tracer verbose logging for the device profiler shims; set to any non-empty value to enable |
-| `FLAGOS_CUPTI_LIBRARY`, `FLAGOS_MUPTI_LIBRARY`, `FLAGOS_TOPSPTI_LIBRARY` | Runtime | Auto-discovered | Override the tracer library the profiler shim `dlopen`s, when the default path does not match the installed driver |
+| `FLAGOS_LOG` | Runtime | unset (off) | Comma-separated stderr diagnostics, none of which changes routing: `dispatch` (the backend chosen for each operator), `fallback` (each `cpu_fallback` dispatch), `op_cache` (Ascend operator-cache hit/miss statistics). An entry that names none of the three is reported once per process rather than silently ignored |
+| `FLAGOS_TRACE` | Runtime | `0` (off) | Verbose logging in the device profiler shim this wheel builds. One switch covers every accelerator: exactly one device tracer is compiled per build, so the name is never ambiguous |
+| `FLAGOS_TRACER_LIBRARY` | Runtime | Auto-discovered | Override the tracer library the profiler shim `dlopen`s, when the default path does not match the installed driver |
 
 ## Vendor Compatibility
 
@@ -118,7 +116,7 @@ import time.
 | `FLAGOS_DISABLE_CUDA_ASSETS` | Runtime | `0` (off) | Skip preloading the bundled `libtorch_cuda.so` and CUDA libraries (for builds that use system libtorch) |
 | `FLAGOS_SKIP_CUDA_ASSETS` | Build | `0` (off) | Do not bundle an external `libtorch_cuda.so` into the wheel (for in-tree builds). The build-time counterpart of `FLAGOS_DISABLE_CUDA_ASSETS` |
 | `FLAGOS_CUDA_ASSETS_DIR` | Build | `.libtorch_cuda_assets` | Directory the external `libtorch_cuda.so` is copied from when bundling. A missing directory downgrades to a warning: the wheel then needs a runtime-supplied `libtorch_cuda.so` |
-| `FLAGOS_MACA_TORCH_LIB`, `FLAGOS_DCU_TORCH_LIB`, `FLAGOS_PPU_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_maca/`/`lib_dcu/`/`lib_ppu/` is present. Each is the vendor's own libtorch; there is no shared name because the three SDK layouts differ |
+| `FLAGOS_VENDOR_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_maca/`/`lib_dcu/`/`lib_ppu/` is present. One name for MetaX, DCU and PPU, whose SDK layouts differ but whose `libtorch` role does not |
 | `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Caching device allocator. Set `0` to hand every allocation straight to the vendor runtime |
 | `FLAGOS_WHEEL_LOCAL` | Build | SDK-derived | Local version label for the wheel (e.g., `FLAGOS_WHEEL_LOCAL=metax3.8.1`), for dev builds that must pin the exact SDK |
 | `FLAGCX_TORCH_BACKEND` | Build & Runtime | `flagos` | Select the Enflame FlagCX torch integration. `flagos` links `libflagos.so` and avoids the vendor `torch-gcu` package; an explicit value is preserved |

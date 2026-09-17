@@ -540,7 +540,7 @@ def child_env(source: Path, report: Path | None = None, offline: bool = False) -
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-    env["FLAGOS_LOG_FALLBACK"] = "1"
+    env["FLAGOS_LOG"] = "fallback"
     # Custom PrivateUse1 names are registered by the spec. Transformers validates
     # TRANSFORMERS_TEST_DEVICE before importing that spec, so setting it to
     # ``flagos`` would fail at torch.device() validation.

@@ -135,7 +135,7 @@ class TestAllDispatch:
             pytest.skip("all is routed to 'none' on this platform")
         result = _run_all_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_all": "flaggems_python",
             },
             check=False,
@@ -145,7 +145,7 @@ class TestAllDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_all_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_all": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_all": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] all -> cuda" in result.stderr

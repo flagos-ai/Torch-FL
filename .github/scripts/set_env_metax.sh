@@ -129,7 +129,7 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
 export FLAGOS_WHEEL_LOCAL=metax3.8.0
-export FLAGOS_MACA_TORCH_LIB=/opt/vendor-libtorch/lib
+export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
 
 export LD_LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib:/opt/maca/mxgpu_llvm/lib:/opt/maca/mxshmem/lib:/opt/maca/ompi/lib:/opt/maca/ucx/lib:/opt/mxdriver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
@@ -371,7 +371,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM \
     FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL \
-    FLAGOS_MACA_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
+    FLAGOS_VENDOR_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
 fi
@@ -424,7 +424,7 @@ bash scripts/vendor/bundle_maca_libtorch.sh
 #
 #     Importing torch_fl is what removes that condition: it points the stock
 #     wheel's torch/lib at the MetaX libtorch (the bundle
-#     bundle_maca_libtorch.sh just wrote, or FLAGOS_MACA_TORCH_LIB), and it has
+#     bundle_maca_libtorch.sh just wrote, or FLAGOS_VENDOR_TORCH_LIB), and it has
 #     to happen before `import torch` -- which is exactly the order the probe
 #     uses. The relink is on disk, so it holds for every later process, the
 #     tests included.

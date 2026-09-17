@@ -3,6 +3,7 @@
 #pragma once
 
 #include <flagos.h>
+#include "aten/common.h"
 #include "runtime/accelerator/ascend/acl_stream.h"
 #include "runtime/allocator/caching_device_allocator.h"
 
@@ -438,9 +439,9 @@ GetExecCache() {
   return cache;
 }
 
-// --- optional hit/miss stats (FLAGOS_CACHE_STATS=1) --------------------------
+// --- optional hit/miss stats (FLAGOS_LOG=op_cache) --------------------------
 inline bool CacheStatsEnabled() {
-  static const bool on = flagos_env::EnvFlag("FLAGOS_CACHE_STATS");
+  static const bool on = LogEnabled("op_cache");
   return on;
 }
 
@@ -510,7 +511,7 @@ void ExecAscendCached(const char* api_name, const char* ws_name,
   CachedExecKey key{api_name, sig, device_index};
 
   auto it = cache.find(key);
-  // Optional hit/miss instrumentation (FLAGOS_CACHE_STATS=1): prints per-op
+  // Optional hit/miss instrumentation (FLAGOS_LOG=op_cache): prints per-op
   // hit/miss counts at process exit. Zero cost when the env var is unset.
   if (CacheStatsEnabled()) RecordCacheStat(api_name, it != cache.end());
   // Cap resident executors: eager decode uses a bounded shape set, but a long

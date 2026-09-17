@@ -79,9 +79,7 @@ class TestZerosDispatch:
 
     @pytest.mark.cuda
     def test_dispatch_log_cuda(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_zeros": "cuda"}
-        )
+        result = _run_subprocess({"FLAGOS_LOG": "dispatch", "FLAGOS_OP_zeros": "cuda"})
         assert result.returncode == 0
         assert "[flagos dispatch] zeros -> cuda" in result.stderr
 

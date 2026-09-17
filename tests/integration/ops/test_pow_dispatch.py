@@ -185,7 +185,7 @@ class TestPowTensorScalarDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_pow_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_pow__Tensor_Scalar": "flaggems_python",
             },
             check=False,
@@ -195,7 +195,7 @@ class TestPowTensorScalarDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_pow_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_pow__Tensor_Scalar": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_pow__Tensor_Scalar": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] pow.Tensor_Scalar -> cuda" in result.stderr
@@ -208,6 +208,6 @@ class TestPowTensorScalarAscendDispatch:
     def test_ascend_correctness(self):
         """Verify pow.Tensor_Scalar on ascend backend matches CPU reference."""
         result = _run_pow_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_pow__Tensor_Scalar": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_pow__Tensor_Scalar": "ascend"}
         )
         assert result.returncode == 0

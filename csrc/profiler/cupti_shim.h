@@ -227,12 +227,12 @@ struct CuptiShim {
     // override that only applied when nothing was loaded would be dead in the
     // one case it is advertised for (see reportLayoutMismatch's diagnostic).
     void* handle = nullptr;
-    const std::string override_path = flagos_env::EnvValue("FLAGOS_CUPTI_LIBRARY");
+    const std::string override_path = flagos_env::EnvValue("FLAGOS_TRACER_LIBRARY");
     if (!override_path.empty()) {
       handle = dlopen(override_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
       if (!handle) {
         fprintf(stderr,
-                "[flagos-cupti-shim] FLAGOS_CUPTI_LIBRARY=%s could not be "
+                "[flagos-cupti-shim] FLAGOS_TRACER_LIBRARY=%s could not be "
                 "loaded: %s\n",
                 override_path.c_str(), dlerror());
       }
@@ -316,7 +316,7 @@ struct CuptiShim {
       }
     }
 
-    if (flagos_env::EnvFlag("FLAGOS_CUPTI_SHIM_DEBUG")) {
+    if (flagos_env::EnvFlag("FLAGOS_TRACE")) {
       if (ActivityRegisterCallbacks) {
         fprintf(stderr,
                 "[flagos-cupti-shim] bound cuptiActivityRegisterCallbacks -> %s "

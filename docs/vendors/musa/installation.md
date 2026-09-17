@@ -291,8 +291,8 @@ metadata, and a valid Chrome trace JSON document. The same run exposed torch ext
 captured device events. CPU-only Kineto builds may not invoke the PrivateUse1 resolver, so this is
 an MUPTI device-timeline validation rather than a claim of full torch-cuda profiler parity.
 
-Useful diagnostics are `FLAGOS_MUPTI_DEBUG=1` for activity setup and session lifecycle logging and
-`FLAGOS_MUPTI_LIBRARY=/path/to/libmupti.so` to select a specific MUPTI library. MUPTI subscriber
+Useful diagnostics are `FLAGOS_TRACE=1` for activity setup and session lifecycle logging and
+`FLAGOS_TRACER_LIBRARY=/path/to/libmupti.so` to select a specific MUPTI library. MUPTI subscriber
 ownership remains process-global; an external MUSA profiling tool may therefore reject a concurrent
 `torch.profiler` session. `torch.compile` with the vendor FlagTree runtime is
 validated separately below; a stock Triton wheel remains insufficient for MUSA.

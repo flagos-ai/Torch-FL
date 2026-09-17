@@ -111,7 +111,7 @@ class TestMeanDimDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_mean_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_mean__dim": "flaggems_python",
             },
             check=False,
@@ -129,9 +129,7 @@ class TestMeanDimDispatch:
         value keeps this test meaningful on every platform rather than pinning it
         to the one it was written on.
         """
-        result = _run_mean_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_mean_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("mean.dim")
         assert f"[flagos dispatch] mean.dim -> {expected}" in result.stderr
@@ -140,7 +138,7 @@ class TestMeanDimDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_mean_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_mean__dim": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mean__dim": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] mean.dim -> cuda" in result.stderr

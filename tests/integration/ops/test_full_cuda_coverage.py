@@ -322,7 +322,7 @@ class TestNewOpDispatchRouting:
     @pytest.mark.cuda
     def test_dispatches_to_configured_backend(self, op, snippet):
         env = os.environ.copy()
-        env["FLAGOS_LOG_DISPATCH"] = "1"
+        env["FLAGOS_LOG"] = "dispatch"
         # Pin the generated CUDA conf so the subprocess uses the same route that
         # _configured_backend() reads, regardless of ambient opt-in variables.
         env["FLAGOS_BACKEND_CONFIG"] = str(_CUDA_CONF)

@@ -111,7 +111,7 @@ class TestWhereDispatch:
             pytest.skip("where.self is routed to 'none' on this platform")
         result = _run_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_where__self": "flaggems_python",
             },
             check=False,
@@ -131,9 +131,7 @@ class TestWhereDispatch:
         """
         if routed_backend_or_none("where.self") != "flagos_python":
             pytest.skip("where.self does not route through FlagGems on this platform")
-        result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] where.self -> flagos_python" in result.stderr
 
@@ -141,7 +139,7 @@ class TestWhereDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_where__self": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_where__self": "cuda"}
         )
         if result.returncode != 0 and "backend not registered" in result.stderr:
             pytest.skip("cuda backend not available in this build")
@@ -151,7 +149,7 @@ class TestWhereDispatch:
     @pytest.mark.metax
     def test_dispatch_log_metax(self):
         result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_where__self": "metax"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_where__self": "metax"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] where.self -> metax" in result.stderr

@@ -93,7 +93,7 @@ class TestRsqrtDispatch:
     def test_dispatch_log_flaggems_python(self):
         result = _run_rsqrt_subprocess(
             {
-                "FLAGOS_LOG_DISPATCH": "1",
+                "FLAGOS_LOG": "dispatch",
                 "FLAGOS_OP_rsqrt": "flaggems_python",
             },
             check=False,
@@ -103,7 +103,7 @@ class TestRsqrtDispatch:
     @pytest.mark.cuda
     def test_dispatch_log_cuda_override(self):
         result = _run_rsqrt_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_rsqrt": "cuda"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_rsqrt": "cuda"}
         )
         assert result.returncode == 0
         assert "[flagos dispatch] rsqrt -> cuda" in result.stderr
@@ -116,6 +116,6 @@ class TestRsqrtAscendDispatch:
     def test_ascend_correctness(self):
         """Verify rsqrt on ascend backend matches CPU reference."""
         result = _run_rsqrt_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_OP_rsqrt": "ascend"}
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_rsqrt": "ascend"}
         )
         assert result.returncode == 0
