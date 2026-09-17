@@ -329,6 +329,398 @@ gained one line, `scaled_dot_product_attention` as `none` on ascend/gcu/musa and
 conf is written one line per generated wrapper and this op has none, TsingMicro's
 is a copy of CUDA's, and BPU's is intentionally empty.
 
+### Enflame GCU S60 native kernels for the six measured CPU fallbacks (2026-09-17)
+
+The GCU configuration was regenerated again to claim topsaten kernels or
+metadata registrations for the six operators that still reached ATen's
+`cpu_fallback` on a real workload. The set was not chosen by inspection. The
+flagos leg of the paired Qwen-Image-2512 run below logs every fallback, and over
+the whole 50-step pipeline at 1024x1024 it issued **80,536 `cpu_fallback` calls
+across exactly six operators** — `fill_` 23,570, `zero_` 19,221,
+`view_as_complex` 18,794, `view_as_real` 18,794, `arange` 79 and
+`linalg_vector_norm` 78 — against 468,227 device dispatches (331,263 `gcu`,
+136,964 `flaggems`). That is 14.7% of all dispatches, and the six are the whole
+of the host traffic: no seventh operator appears in the log. Five of the six were
+worth a kernel for their own call count; `fill_` and `zero_` were worth much more
+than that, because a device-side `torch.zeros`, `torch.ones` or `torch.full`
+decomposes into them, so a host `fill_` turns every factory call in a model into
+a round trip.
+
+**`arange`, all three overloads** (`arange`, `arange.start`,
+`arange.start_step`). This is the one operator in the group whose vendor entry
+point takes no size: `topsatenArange` fills an output the caller has already
+allocated, so the kernel computes the length host-side with ATen's own rule,
+`at::native::compute_arange_size` from `<ATen/native/RangeUtils.h>`, which is
+also what carries ATen's two bound errors (`step must be nonzero`, `upper bound
+and lower bound inconsistent with step sign`) onto this route. Which dtypes go to
+the vendor is a new predicate, `TopsatenArangeDtype` in `topsaten_common.h`,
+deliberately narrower than `TopsatenSupportsDtype`: it is measured on the S60
+(`float32`, `int32`, `int16`, `int8`, `uint8`, `float16`, `bfloat16`) rather than
+inferred from `ToTopsatenDataType`, which only says a dtype is representable, and
+a dtype it declines is built on the CPU and copied back. `int64` — what
+`torch.arange(n)` infers with no dtype, and what Qwen-Image's text-position path
+asks for — and `float64` therefore always take that host path, because topsaten
+has no kernel for either. Bool is absent on purpose: ATen has no arange kernel
+for Bool either (`arange_cpu not implemented for 'Bool'`), so declining here
+preserves that error instead of inventing a result CPU and CUDA both refuse to
+produce. Because a wrong length would look like a correct arange of the wrong
+size rather than like a crash, the length is the first thing the probe checks.
+
+**The values.** The vendor evaluates `out[i] = (T)(double((T)start) + i *
+double((T)step))` — both operands cast to the output dtype `T` first, then one
+rounding to `T` — which is not the CPU kernel's formulation. Every
+integer-valued step is consequently bit-exact (measured `max|diff|` 0.000e+00 for
+`arange(1.5, 4.0)`, `arange(10., 0., -2.)`, `arange(0., 100., 7.)`,
+`arange(0, 128, 2)`, `arange(4096)`, and all seven vendor dtypes), and a
+fractional step agrees to **1 ULP and no better**, which is not a defect to fix:
+the CPU kernel is not length-invariant, so there are no bits to match.
+`torch.arange(0., 1., 0.1)[9]` is `0.8999999761581421` while
+`torch.arange(0., 1000., 0.1)[9]` is `0.9000000357627869` for the same
+mathematical element. The measured bound is 1.000 ULP on both a 10,000-element
+(`arange(0., 1000., 0.1)`, `max|diff|` 6.104e-05) and a 1,000,000-element
+(`arange(0., 1., 1e-6)`, `max|diff|` 5.960e-08) range, so the error does not
+grow with length: casting the step to `T` perturbs it by at most 2\*\*-24
+relative, which over `i` elements is about one ULP of the largest value in the
+range. Every arange Qwen-Image issues is integer-valued — `arange(0, dim, 2)`
+for the block frequencies and `arange(4096)` for the position table — so the
+pipeline is on the exact side of that line.
+
+**The five in-place writes.** `zero_` to `topsatenZero`; `fill_.Scalar` and
+`fill_.Tensor` to `topsatenFill_`, the scalar staged through
+`ToTopsatenScalar`; `masked_fill_.Scalar` and `masked_fill_.Tensor` to
+`topsatenMasked_fill`, called with `out` aliasing `self` as the vendor expects
+for an in-place form. Measured on the S60 at both the transformer's
+`(1, 4096, 24, 128)` and `(16, 128, 128)`, including the empty `(0,)` case, all
+three float dtypes, the int64 host path for `zero_`, and a transposed input for
+`masked_fill_.Scalar`; every one reports its `-> gcu` dispatch line and matches
+the CPU reference. `torch.zeros`, `torch.ones`, `torch.full`, `torch.zeros_like`
+and `torch.ones_like` were then re-run and each reaches the device with the right
+values through this path; `zeros_like`/`ones_like` do not decompose at all, since
+`zeros_like` and `ones_like` are themselves claimed. The three gap entries for
+`zero_`, `fill_.Scalar` and `fill_.Tensor` **stay** in
+`NATIVE_TRITON_GAPS["gcu"]`, and `arange`'s with them: a gap entry only takes an
+op off FlagGems, and where it goes next is the native side's decision, so
+deleting the entry would put `arange` back on the FlagGems path that fails to
+compile. For the factory family the gap is what *selects* the vendor.
+
+**The two complex views** (`view_as_real`, `view_as_complex`). These are
+metadata-only — sizes, strides and dtype are recomputed in `at::native`'s
+`ComplexHelper.h` over the input's own storage — and they are therefore the one
+place in this change where a handwritten kernel is legitimate: every category
+template in `scripts/codegen/codegen_gcu.py` ends in a `topsaten::` call, so the
+generator cannot express an op that moves no data, and it lists both in
+`METADATA_OPS` to get them into `gcu_register.inc`. That is the concrete codegen
+limitation CLAUDE.md requires for a handwritten kernel, and the registration in
+`csrc/aten/strided_ops.cc` carries the human approval recorded in the PR. The
+consequence of leaving them on the host path was not latency but correctness: a
+view op that reaches `cpu_fallback` is *copied*, so the result silently stops
+aliasing the input. Measured on the S60: `view_as_complex` returns
+`torch.complex64` with a matching shape, stride and `data_ptr` against both the
+source and the CPU result, a write through the real view is visible through the
+complex one, `view_as_real` keeps its 3-D strides and its non-contiguous layout,
+the whole RoPE sequence (`randn`, `view_as_complex`, `mul.Tensor` against a
+complex frequency table, `view_as_real`) logs `-> gcu` at every step and stays on
+`flagos:7` with `max|diff|` 0.000e+00 against a CPU round trip, and the two error
+contracts (`odd stride`, bad last dimension) raise the same message ATen does.
+
+**`linalg_vector_norm`** is served by `topsatenLinalgVectorNorm`, which takes the
+dim list and the order directly. The vendor writes the `keepdim=True` shape, so
+the shape ATen promises is reached with a metadata `reshape`. This supersedes the
+claim two entries below that "there is no topsaten kernel behind
+`linalg_vector_norm`, so that gap lands on `none`": the vendor API was there and
+the missing piece was the codegen. Measured on the S60, with a CPU reference:
+the VAE decode call site `(1, 128, 1, 1024, 1024)` ord=2 dim=[1] now reports
+`linalg_vector_norm -> gcu` at `max|rel diff|` 5.048e-07 where it previously
+reported `cpu_fallback`, `F.normalize(x, dim=1)` and `(dim=-1)` each match the
+CPU result at 1.192e-07 while logging `-> gcu`, and the sweep covers
+`ord ∈ {1, 1.5, 2, 3, inf, -inf, 0}`, `dim` as a list, a negative index and
+`None` (rank-0 output, exactly matching), keepdim and no-keepdim, a
+non-contiguous input, and the empty case. `float16`, `bfloat16` and `float64`
+operands take the host path and are exact.
+
+**`_softmax` is not part of this change**; the launch-grid entry below moved it
+to native `gcu` in the same branch. It is named here only because the counts
+that follow include it.
+
+**Route delta.** Measured against the committed conf at `082afa8`, because both
+this change and the launch-grid entry below are uncommitted in the same tree and
+no commit contains the state between them: GCU `flaggems` 257 -> **255**, `gcu`
+144 -> **156**, `none` 1635 -> **1625** over 2036 routable ops, so accelerated
+routes go **401 -> 411** (19.7% -> **20.2%**). The `gcu` gain of 12 decomposes as
+`_softmax` from the launch-grid work plus the 11 overloads claimed here, and the
+`flaggems` loss of 2 is `_softmax` **and** `linalg_vector_norm`, the latter of
+which left FlagGems for `none` in the launch-grid entry and is now on `gcu`
+instead. `gcu_register.inc` grows by 11 `m.impl` lines (152 -> 163) — `arange`,
+`arange.start`, `arange.start_step`, `fill_.Scalar`, `fill_.Tensor`,
+`linalg_vector_norm`, `masked_fill_.Scalar`, `masked_fill_.Tensor`,
+`view_as_complex`, `view_as_real` and `zero_` — and `gcu_flaggems_register.inc`
+shrinks from 249 to 248 lines by exactly one entry: `linalg_vector_norm` was
+registered in the generated FlagGems file and is now registered natively, so it
+moves from that file's first list to its second, the FlagGems ops
+`gcu_register.inc` already claims. Both are checked by diffing the sorted
+`m.impl` op-name lists, not by reading the file's banner. The `flaggems` route
+count is unchanged because nothing moved *from* `flaggems`: `linalg_vector_norm`
+was on `none` after the launch-grid entry. These are this change's own counts;
+the `out=` entry below moves three more overloads and leaves `gcu` 159,
+`none` 1622 and accelerated 414 (20.3%). Four artifact hashes, before -> after,
+all taken from this worktree. The third column is the same four files as the
+`out=` entry below leaves them: that entry is uncommitted in this same tree, so
+it is the column a reader of the tree sees, while the middle one is what this
+change alone produced. The two agree on `gcu_flaggems_register.inc`, which the
+`out=` entry does not touch.
+
+| Artifact | At `082afa8` | After this change | In the final tree |
+|---|---|---|---|
+| `torch_fl/configs/backends_gcu.conf` | `4c5082d60295b3134b084c349aedbb9d9c2e449afcd834143d79e9496b09b8f1` | `7b87541ebfd2fcc159ffff60edc213c3d4ce135215fdb40a9acbcd0dc850fdb3` | `74aab449194a7495b6a93725bb66a2ccd3f53c2d3a2505d7ab46e1f171e7aefc` |
+| `gcu_kernels.cc` | `01437b68764987bb64a01e1f608cf45197f79e47e3cc7081d113984b6365237e` | `947c1b113f9656abe67ab19eb49bf23097b2be12fc0dd23ba321114c706beffe` | `35c8a37e80f82f377ab671e32b11a2c488b246c200a37b16a462dcd181f6b4d0` |
+| `gcu_register.inc` | `756f6134ea148f7450886cf9b3dba87930728eba9a7359e13b3a639d8f76eb5b` | `c6526ed3cf885d8209970a20913fd4b82352d6c55b537faf3e89eab9afa3f12a` | `f961aff0c9c1db8dbbc1166f8be58a43329c2917e833de0c618d7c32584ae99f` |
+| `gcu_flaggems_register.inc` | `a02b46d91c507eac2fee34ef3105046a6ad7ed2d37bf9c509d3f668a6671f9ee` | `9c9c99d0d2eab6ba158090ef16fff3566422d688b850a50e6bcc97568d2e0b71` | `9c9c99d0d2eab6ba158090ef16fff3566422d688b850a50e6bcc97568d2e0b71` |
+
+**Scope boundary.** The `out=` forms of these operators (`arange.out`,
+`arange.start_out`, `linalg_vector_norm.out`, `_softmax.out`,
+`view_as_real_copy.out`, `view_as_complex_copy.out`) stay on `none`. The
+pipeline does not call them, and each would need its own kernel signature, so
+they are deliberately left rather than implied to be covered by the
+non-`out` claims above.
+
+**Generator idempotency.** All three generators run twice produce byte-identical
+output, and both `--check` modes exit 0. The edit to `codegen_gcu.py` in the
+second pass was comment-only, which the hashes above confirm: they were taken
+after the regeneration that followed it.
+
+**Evidence gaps.**
+
+- Two of the six operators — `fill_` and `linalg_vector_norm` — are the only ones
+  whose routing was re-measured at a *call site the pipeline actually uses*
+  rather than at a probe's own shapes. `zero_`, the two complex views and
+  `arange` are measured at their own shapes, at the same sizes
+  (`(1, 4096, 24, 128)` for the transformer, `(16, 128, 128)` for the VAE) and
+  the same dtypes, but through the probe rather than through the model.
+- `arange`'s fractional-step agreement is a bound, 1 ULP, and is measured at the
+  two lengths above plus the five fractional cases in the probe. It is not a
+  proof over all lengths; it is a proof that the error does not grow with length
+  over the three lengths that were measured (10, 10k, 1M).
+- The probe that isolated card 5 was run against `flagos:0`, `flagos:3` and
+  `flagos:6` only. Device 5 on this host hangs any topsaten op, including
+  `sum` and other kernels that predate this change, so nothing here was measured
+  on it and a defect specific to that device is not ruled out for the new
+  kernels either — it is simply indistinguishable from the pre-existing one.
+- No S60-wide survey was re-run, and none was needed for the FlagGems half:
+  no `flaggems` route was added, removed or changed by this change, and
+  `flaggems_overload_survey.py` measures FlagGems routes only. The 255 remaining
+  `flaggems` routes are exactly the ones the launch-grid entry measured.
+- The Qwen-Image census is one pipeline at one shape, one seed and one prompt.
+  It is the strongest evidence in this entry that the six operators are the whole
+  of the host traffic, and it is still one workload.
+- Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no
+  route changed for them. Ascend has the identical `view_as_real` /
+  `view_as_complex` gap in its own conf (both route to `none` there) and was left
+  as it stands rather than widened from a measurement taken on the S60.
+
+### Enflame GCU S60 native kernels for the `out=` forms of the arithmetic operators (2026-09-17)
+
+The entry above claims a kernel for every operator a *Qwen-Image-2512 inference*
+census saw reach `cpu_fallback`. This entry is the same kind of census run
+against a *training* step, and it found a second, disjoint set: the optimizer's
+in-place arithmetic. Two Adam steps over a five-parameter model, run once with
+`foreach=True` and once with `foreach=False`, log **25 `aten::add` and 10
+`aten::mul` `cpu_fallback` calls** — the state updates (`exp_avg.lerp_`,
+`exp_avg_sq.mul_(beta2)`, `denom.add_(eps)`) — a device -> host -> device round
+trip per parameter per step, and the whole of the fallback traffic the optimizer
+itself produces.
+
+**Why they were invisible as `add` and `mul`.** ATen gives `add_.Tensor`,
+`sub_.Tensor` and `mul_.Tensor` no `PrivateUse1` registration of their own: they
+are structured in-place ops whose composite redispatches onto `add.out` /
+`sub.out` / `mul.out` with `out=self`. `csrc/aten/fallback.cc` logs
+`op.schema().name()`, which is the schema and not the overload, so every one of
+them — in-place, scalar, explicit `out=`, every overload — prints as
+`aten::add`. The census therefore reads as "the out-of-place `add`, which is
+already native" unless the conf is consulted, and in that conf `add_.Tensor` and
+`add_.Scalar` are `none` for a different reason: the dispatcher never sees the
+in-place spelling, so those two lines are inert for the arithmetic path. The
+route that decides is `add.out`. One kernel per operator consequently serves
+both spellings and every explicit `out=` caller in the stack.
+
+**The three new kernels.** `mul.out` takes a new `binary_out` category template
+(`topsatenMul(out, self, other)`), and `add.out` and `sub.out` a new
+`binary_alpha_out` one (`topsatenAdd` / `topsatenSub` with the alpha staged
+through `ToTopsatenScalar`). Measured on the S60 at 4096x4096 float32, an
+in-place `add_` costs **0.507 ms/call** on the device path against **114.185
+ms/call** for an int64 operand, which takes the host round trip by construction
+— **225x**, and that int64 case is the in-run control: it is what says the fast
+branch is the device one rather than a short-circuited one.
+
+**The `out=` contract.** An `out=` kernel sizes the output: a caller may legally
+pass a zero-sized (`torch.empty(0)`) or differently-shaped tensor and expects
+the result's shape back, which is what an `out=` caller in this stack does after
+a `resize_`. Both branches therefore resize `out` to the result shape before
+writing, and both do it after the `out` argument has been checked, so a rejected
+call leaves `out` untouched.
+
+**Correctness on the S60.** All nine in-place spellings (`add_` / `sub_` / `mul_`
+with a tensor, with alpha, with a scalar, and the self-aliasing `add_(t)`),
+both broadcast directions, fp16, bf16, int32, an int64 operand on the host path,
+a strided non-contiguous `out`, and the explicit `out=` forms — from a zero-size
+`out`, to a different shape, widened to `float64`, and broadcast — match a CPU
+reference exactly, each reporting its `-> gcu` dispatch line and no
+`cpu_fallback`. `mm.out` and `addmm.out` measure 9.537e-06 and 7.629e-06 against
+the CPU at float32, which is reduction order and not route: their `float64`
+siblings, which cannot take the device path and are computed the same way as the
+reference, are exact 0.0.
+
+**The cast guard.** ATen refuses an `out` it cannot be cast into rather than
+truncating into it, and the in-place spellings inherit that rule through
+`add.out`: `int32_tensor.add_(float_tensor)` raises on the CPU with `result type
+Float can't be cast to the desired output type Int`. Each `*_out` kernel runs
+`c10::canCast(result_dtype, out.scalar_type())` first — ahead of the
+unsupported-dtype branch, so that path is covered too, and ahead of the resize —
+and raises the same message. It is load-bearing rather than defensive: the host
+branch ends in an ordinary `copy_`, which casts, so before the check
+`torch.mul(f32, f32, out=int32)` measured `max|diff|` 1.19e9 instead of raising.
+Measured after it, `torch.mul(a, b, out=int32)` is rejected on the device with
+the CPU's own message.
+
+**The device guard.** Every `*_out` kernel opens with `gcu::TopsDeviceGuard
+out_guard(self)` — including the three that predate this change (`bmm.out`,
+`mm.out`, `addmm.out`), which also gain the cast guard and a
+`out.scalar_type() != result_dtype || !out.is_contiguous() || out.device() !=
+self.device()` check before their topsaten call. Those three previously handed
+topsaten a descriptor built from `out` without consulting its dtype, contiguity
+or device, and built one without any guard on the current device. The guard is
+needed because `resize_` takes no device argument and installs no guard of its
+own: it allocates through the block pool, which resolves the device from the
+*current* one at call time, so a multi-device process sitting on device 0 that
+grows a `flagos:6` `out` takes the block out of device 0's pool and topsaten then
+refuses the descriptor — `FindMemObj DeviceId[0] of memory VA[...] is not match
+for DeviceId[6] of stream`. Measured: `torch.add(a, a,
+out=torch.empty(0, device="flagos:6"))` failed with the current device at 0 and
+passed once device 6 was current. The guard is a no-op when the current device
+already matches.
+
+**The `resize_` crash, reached from this path and fixed here.** `out.resize_(...)`
+is the first thing the new kernels do when the caller's `out` is the wrong
+shape, and growing a flagos tensor that already had content crashed with
+SIGSEGV. The defect is neither new nor specific to `out=`: any `Tensor.resize_`
+on a non-empty flagos tensor did it, but nothing in the pipeline had grown one
+before. `at::native::flagos::resize_` delegated to `at::native::resize_`, the
+**CPU** implementation, and its growth helper `maybe_resize_storage_cpu` ->
+`resize_bytes_cpu` allocates the new block through the storage's own allocator
+(correct here — a flagos storage carries the PrivateUse1 allocator) and then
+moves the existing bytes with a **host** `memcpy`: `libtorch_cpu.so+0x2164723:
+call memcpy@plt`, called from `resize_bytes_cpu+0x168`, against bytes that live
+in HBM. That is why growing from empty never crashed — with an empty new shape
+the helper returns before it allocates or copies anything — and why neither a
+shrink nor an unchanged shape reached it. CUDA does not have this problem because
+it has its own `ATen/native/cuda/Resize.h` with `maybe_resize_storage_cuda` /
+`resize_bytes_cuda`, which performs that copy with `cudaMemcpy`. The fix is those
+same two steps written for this backend: `maybe_resize_storage_flagos` in
+`csrc/aten/strided_ops.cc` computes the new byte count with ATen's own
+`computeStorageNbytesContiguous`, allocates through the storage's allocator under
+a `c10::DeviceGuard`, moves the old bytes with `Allocator::copy_data` — the
+device memcpy, `CachingDeviceAllocator::copy_data` -> `MemcpyDeviceToDevice` —
+and installs the block with `set_data_ptr_noswap` / `set_nbytes`.
+`at::native::resize_` then runs as before and finds the storage already large
+enough, so `resize_bytes_cpu` is never entered.
+
+**Correctness of the growth, measured on the S60** at `flagos:0` and `flagos:6`,
+one fresh process each, eight case groups per device, all pass. Growing a filled
+`(4, 16)` to `(32, 64)` went from `rc=-11` (SIGSEGV) to `rc=0`, with the first 64
+elements `torch.equal` to the pre-growth contents, the storage at 8192 or more
+bytes, the tensor still on `flagos` and usable afterwards. The same holds for a
+growth from empty, a shrink, an unchanged shape, `float16` / `bfloat16` /
+`int32` / `int64`, and a slice with a non-zero `storage_offset` — which keeps its
+prefix and leaves its base tensor untouched. A live neighbour tensor's contents
+survive the reallocation. The `out=` growth cases are among them: `out=` from
+empty, `out=` to a wider shape, and `out=` widening a dtype.
+
+**The `copy_` cross-dtype defect, also reached from this path and fixed here.**
+The host branches of the new kernels end in `out.copy_(...)`, and the widening
+`out=` case makes that copy cross dtypes. `_copy_from` in `csrc/aten/copy_ops.cc`
+issued every `Memcpy` with the byte count taken from the **source**, so a
+differing dtype gave the driver a count that did not match the destination's
+element width. Measured before the fix on the S60: `torch.empty(6,
+dtype=torch.float64, device="flagos:6").copy_(torch.arange(6) + 0.5)` returned
+`[0.125, 128.0, 4096.0, ...]` — two float32 values reinterpreted as one float64,
+`max|diff|` 4.094e+03 — the `dev f32 <- cpu f64` direction gave `max|diff|`
+4.500e+00 and `dev i32 <- cpu f32` 1.085e+09, while the same-dtype control was
+exact. The device -> host direction took its byte count from the source by the
+same rule. The fix converts a CPU source to the destination's dtype on the host
+before the memcpy, and lands a cross-dtype device -> host copy in a CPU tensor of
+the *source's* dtype before letting the host `copy_` cast into `dst`. All eleven
+cases of the probe now read `max|diff|` 0.000e+00: host -> device widening and
+narrowing, device -> host in both directions, a strided host destination,
+same-device `dev f16 <- dev f32`, and the `.to(device, dtype)` spelling, which
+was already correct and is the control.
+
+**Route delta.** Measured against the state after the six-fallback change above,
+because both are uncommitted in the same tree: GCU `flaggems` stays **255**,
+`gcu` 156 -> **159**, `none` 1625 -> **1622**, so accelerated routes go
+**411 -> 414** (20.2% -> **20.3%**). The three are `add.out`, `mul.out` and
+`sub.out`. `gcu_register.inc` grows by three `m.impl` lines (163 -> 166) and
+`gcu_flaggems_register.inc` is unchanged at 248 — no `flaggems` route was
+touched — so the reconciliations above still hold as `255 = 248 + 7` and
+`159 = 166 - 7`. Three hashes move and the fourth does not. The full hashes are
+in the table in the entry above; the before column here is that table's middle
+column.
+
+| Artifact | After the six-fallback change | In this change |
+|---|---|---|
+| `torch_fl/configs/backends_gcu.conf` | `7b87541ebfd2fcc159ffff60edc213c3d4ce135215fdb40a9acbcd0dc850fdb3` | `74aab449194a7495b6a93725bb66a2ccd3f53c2d3a2505d7ab46e1f171e7aefc` |
+| `gcu_kernels.cc` | `947c1b113f9656abe67ab19eb49bf23097b2be12fc0dd23ba321114c706beffe` | `35c8a37e80f82f377ab671e32b11a2c488b246c200a37b16a462dcd181f6b4d0` |
+| `gcu_register.inc` | `c6526ed3cf885d8209970a20913fd4b82352d6c55b537faf3e89eab9afa3f12a` | `f961aff0c9c1db8dbbc1166f8be58a43329c2917e833de0c618d7c32584ae99f` |
+| `gcu_flaggems_register.inc` | `9c9c99d0d2eab6ba158090ef16fff3566422d688b850a50e6bcc97568d2e0b71` | unchanged |
+
+**The census, re-run against this change.** The same training probe, post-fix,
+logs **11 `cpu_fallback` calls instead of 45**, with no `aten::add` and no
+`aten::mul` at all: the 25 and the 10 are now 25 `add.out -> gcu` and 10
+`mul.out -> gcu` dispatch lines. The two losses are unchanged to the printed
+digits against the pre-fix run (-32.7952 and -51.3676), so the rerouted optimizer
+updates produce the same numbers the host path did rather than merely stopping
+being slow. The eleven that remain are the training path's next set and are
+**not** part of this change: `index_select` 4, `embedding_dense_backward` 4,
+`index_fill_` 2 and `nonzero_static` 1.
+
+**Scope boundary.** The remaining `out=` forms stay on `none` — among them
+`arange.out`, `arange.start_out`, `linalg_vector_norm.out`, `_softmax.out`,
+`fill.Scalar_out`, `fill.Tensor_out`, `masked_fill.Scalar_out`,
+`masked_fill.Tensor_out`, `view_as_real_copy.out` and
+`view_as_complex_copy.out`. Nothing in the two censuses calls them, and each
+would need its own kernel signature. The conf's `add_.Tensor`, `add_.Scalar`,
+`mul_.*`, `sub_.*` lines also remain `none` and are inert for the arithmetic
+path, for the dispatch reason in the second paragraph; they are not evidence that
+the in-place ops are uncovered.
+
+**Evidence gaps.**
+
+- The probes are ad-hoc scripts run out of a scratch directory and are not
+  committed to the repository, the same practice as the six-fallback entry
+  above. The route counts and the artifact hashes they are read against are
+  reproducible from the tree; the per-case readings are not.
+- The device -> host half of the `copy_` dtype fix is measured after the fix
+  only. The host -> device half was measured both before and after. The device
+  -> host defect is read off the same source-derived byte count in the same
+  function rather than from a pre-fix run of that direction.
+- The pre-fix and post-fix readings of the `resize_` crash and of the `copy_`
+  values are single-shot: what is reported is the change between two builds of
+  this tree, not a sweep over configurations.
+- Device 5 on this host hangs any topsaten op that touches a tensor resident
+  there, `resize` and `sum` included, and that predates this change. Every
+  reading above is from cards 0 and 6, so a defect specific to card 5 is not
+  ruled out for the new kernels — only indistinguishable from the pre-existing
+  one.
+- The optimizer census is one model, one optimizer, two steps and one seed. It
+  establishes that the chosen set is a real training-step cost and that the new
+  kernels remove it; it does not enumerate every in-place op a larger training
+  stack would use.
+- Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no
+  route changed for them. The `resize_` bug, the `copy_` defect and the
+  device-guard requirement are in shared flagos code rather than in a
+  GCU-specific file, so every platform whose PrivateUse1 backend reaches
+  `at::native::flagos::resize_` had the same crash and this fix applies to it,
+  but no other platform's hardware was available to confirm that and no platform
+  is claimed here.
+
 ### Enflame GCU S60 FlagGems routing (2026-09-15)
 
 The GCU configuration is now FlagGems-first. Before this change
@@ -348,22 +740,26 @@ regenerating. FlagGems is reached through a new generated registration file,
 [`scripts/codegen/codegen_gcu_flaggems.py`](../../scripts/codegen/codegen_gcu_flaggems.py) and
 included by `csrc/aten/register.cc` directly after `gcu_register.inc`. The two
 lists together are what GCU claims on PrivateUse1: `gcu_register.inc` (152
-`m.impl` lines) takes the ops topsaten has a kernel for, the new file (249
+`m.impl` lines) takes the ops topsaten has a kernel for, the new file (248
 `m.impl` lines) takes the rest of the shared FlagGems coverage. An op routed to
 `flaggems` that neither file claims would reach the dispatcher with an empty
 `kFlagGems` slot and raise `backend not registered` instead of falling back, so
 generation gates every accelerated route on the registration set.
 
-**Route delta.** GCU `flaggems` 0 -> **257**, `gcu` 152 -> 144, `none`
-1884 -> 1635 (2036 routable ops), so accelerated routes go from **152 to 401**
-(7% -> 19.7%). Eight of the 257 `flaggems` routes (`_softmax`, `clamp`,
-`fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor`, `silu`) are
-bridged by the existing handwritten wrappers in `csrc/aten/register.cc` rather
-than by the new `.inc`; that is why the file has 249 lines rather than 257.
+**Route delta.** GCU `flaggems` 0 -> **255**, `gcu` 152 -> 145, `none`
+1884 -> 1636 (2036 routable ops), so accelerated routes go from **152 to 400**
+(7% -> 19.6%). Seven of the 255 `flaggems` routes (`clamp`, `fmod.Tensor`,
+`gelu`, `mean`, `mean.dim`, `remainder.Tensor`, `silu`) are claimed natively by
+`gcu_register.inc` rather than by the new `.inc`: `codegen_gcu_flaggems.py`
+computes its list as `(FLAGGEMS_PYTHON_OPS - gaps) - native - pending` and omits
+them deliberately, because a second `m.impl()` for the same op and dispatch key
+would only override the first and warn at import. That is why the file has 248
+lines rather than 255, and why those seven are routed `flaggems` in the conf
+while the native kernel serves them.
 
-**Why 225 ops are gapped.** `NATIVE_TRITON_GAPS["gcu"]` grew from 108 to 225
+**Why 227 ops are gapped.** `NATIVE_TRITON_GAPS["gcu"]` grew from 108 to 227
 entries. Every addition is a measured failure on the S60, not an inference, and
-they fall into four families:
+they fall into five families:
 
 - **The GCU300 front end rejects 64-bit types in kernel IR** — `error: 64-bit
   data type not supported on GCU300!`, surfaced as `RuntimeError: Pipeline run
@@ -392,6 +788,40 @@ they fall into four families:
   `_log_softmax_backward_data` (return `int8` where `float32` is required),
   `sum.out` (returns `(32, 32)` where the scalar shape `()` is required),
   `addmm.*`, `silu_backward`, `tril.*`, `triu.*`.
+- **Launch-grid axis limits, correct at every dtype and broken at scale** (2 ops,
+  `_softmax` and `linalg_vector_norm`). This family was *added after* the
+  seven-profile sweep and is invisible to it: every profile that harness
+  constructs is at most 32 rows wide, and the defect is in the grid the enflame
+  backend derives from a data dimension. GCU's limits are far below CUDA's --
+  `grid.x` 65535 against `2**31-1`, `grid.y` 255 against 65535 -- so a kernel
+  launched once per row (or per 8-row tile) works in the sweep and raises on a
+  real workload. `_softmax`'s `softmax_kernel_inner` launches with
+  `grid = (M, 1, 1)`, which passes at `M = 65496` (`(1, 24, 2729, 2729)`) and
+  fails at `M = 65544` (`grid.x Required 65544`) and `M = 98736`
+  (`grid.x Required 98736`); its non-inner kernel has the same defect on the
+  other axis (`grid = (M, cdiv(K, TILE_K), 1)`, so `(24, 4114, 4114)` over dim 0
+  fails with `grid.y Required 2067`). `linalg_vector_norm`'s `l2_norm_kernel`
+  launches with `grid = (cdiv(M, BLOCK_M),)` and the enflame tune config for it
+  offers only `BLOCK_M` in {1, 2, 4, 8}, so no config fits `M` above
+  65535 * 8 = 524280. Both were reached from Qwen-Image-2512 on the S60:
+  `_softmax` on `(1, 24, 4114, 4114)` from `F.scaled_dot_product_attention` in
+  every one of the 60 transformer blocks, and `linalg_vector_norm` via
+  `F.normalize(x, dim=1)` in diffusers' `QwenImageRMS_norm` on the VAE decode at
+  `(1, 128, 1, 1024, 1024)`, `M = 1048576`, failing with
+  `grid.x Required 131072`. `topsatenSoftmaxForward` has no grid to size and
+  serves every shape above, so `_softmax` goes back to the vendor kernel. There
+  is no topsaten kernel behind `linalg_vector_norm`, so that gap lands on `none`
+  and the call reaches `cpu_fallback`; topsaten does carry `topsteL2Norm`, but
+  `topste` is not wired into this generator, so the missing piece is the codegen,
+  not the vendor API.
+
+  **Superseded for `linalg_vector_norm`** by the entry above, written later in the
+  same branch: the generator now emits a kernel for it against
+  `topsatenLinalgVectorNorm`, so the op routes to `gcu` rather than `none` and the
+  host round trip described here no longer happens. The `_softmax` half of this
+  family is unchanged. The paragraph is kept as written because the measurement
+  it records — the grid limits, the failing shapes, the call sites — is what
+  identified the defect; only its routing conclusion is out of date.
 
 The gap decision was not the survey verdict. A route that is wrong only for
 `int64` still carries a working `float16`/`float32` path, so the classifier was
@@ -434,14 +864,45 @@ the survey ran against a transient draft of `backends_gcu.conf` taken before the
 measured gap set was applied. The draft is not byte-recoverable -- the survey
 recorded `meta.conf` as this repository's `backends_gcu.conf` with
 `meta.conf_sha256` `82f801778c…`, which matches neither the base commit's conf
-(`039fb323…`) nor the one this change ships (`4c5082d6…`) -- but it reconciles
-with the shipped conf exactly: 374 - 117 = 257, where 117 = 81 + 36 is the number
-of ops the measurement returned to the vendor. Per-op results survive in the
-survey JSON. The environment was
+(`039fb323…`) nor the one this change ships (`10a85c9e…`) -- but it reconciles
+with the shipped conf: 374 - 117 - 2 = 255, where 117 = 81 + 36 is the number of
+ops the measurement returned to the vendor and the further 2 are the launch-grid
+family above, added after the survey and outside its profile range by
+construction. Per-op results survive in the survey JSON. The environment was
 Python 3.12.13, CPU PyTorch 2.10.0,
 flagtree `0.6.1+enflame3.6` (Triton 3.6, backend `enflame`) and FlagGems master
 `3c6f7537d`. Full per-op evidence and the raw failure families are in
 [docs/vendors/gcu/flaggems-test-results.md](../vendors/gcu/flaggems-test-results.md).
+
+**The two launch-grid reroutes were re-measured on the S60 after regeneration**
+(`bash /tmp/group_c_probe.sh`, `FLAGOS_LOG_DISPATCH=1 FLAGOS_LOG_FALLBACK=1`),
+against the conf this change ships, at the shapes that broke FlagGems:
+
+| Call | Shape | `M` | Route taken | Result |
+|---|---|---:|---|---|
+| `torch._softmax(x, -1, False)` | `(1, 24, 2729, 2729)` bf16 | 65496 | `_softmax -> gcu` | `max|diff|` 6.10e-05 |
+| `torch._softmax(x, -1, False)` | `(1, 24, 2731, 2731)` bf16 | 65544 | `_softmax -> gcu` | `max|diff|` 6.10e-05 |
+| `torch._softmax(x, -1, False)` | `(1, 24, 4114, 4114)` bf16 | 98736 | `_softmax -> gcu` | `max|diff|` 3.05e-05 |
+| `F.normalize(x, dim=1)` | `(1, 128, 1, 1024, 1024)` bf16 | 1048576 | `linalg_vector_norm -> cpu_fallback`, `clamp_min -> flagos_python`, `div.Tensor -> gcu` | `max|diff|` 0.00e+00 |
+
+The three `_softmax` cases are the ones that previously raised
+`RuntimeError: grid.x Required 65544` / `98736`; the `F.normalize` case is the
+one that previously raised `grid.x Required 131072` inside the VAE decode. The
+`linalg_vector_norm` step now reaches the boxed `cpu_fallback`, which is the
+documented cost of having no topsaten kernel wired into the generator.
+
+**The fourth row's `linalg_vector_norm` route is superseded** by the entry above,
+which was written later in the same branch: the same call site now reports
+`linalg_vector_norm -> gcu` at `max|rel diff|` 5.048e-07 against a CPU reference,
+because the generator gained a kernel for it. The `F.normalize` result and the
+VAE statistics below are unaffected; they were measured through the
+`cpu_fallback` route, and the same call is now served on the device.
+
+The third row is also the current Qwen-Image-2512 VAE evidence on the flagos
+route: the whole decode stage runs at `mean=0.3475 std=0.2618` against the
+vendor stage's `mean=0.3505 std=0.2635`, and a paired run that shares one latent
+tensor between the two backends matches at **MAE 0.1646, PSNR 55.90 dB, max 6.0**
+(8-bit).
 
 **CI.** Every pytest group of the GCU manifest was run locally on the S60 against
 this tree, in one uninterrupted pass, all exiting 0: vendor operator cohort **595
@@ -465,13 +926,15 @@ numbers alone.
 
 **Generator idempotency.** `codegen_gcu_flaggems.py` and `gen_vendor_confs.py`
 each run twice produce byte-identical output
-(`gcu_flaggems_register.inc` `a02b46d9…`, `backends_gcu.conf` `4c5082d6…`) and
+(`gcu_flaggems_register.inc` `f8b73835…`, `backends_gcu.conf` `10a85c9e…`) and
 both `--check` modes exit 0. The banner line naming the generator's own path is
 the only thing the merge with `flagos/main` moved in either file, so the hashes
 recorded before that merge (`39cd03e3…` and `10b8ab4b…`) differ without any route
-or registration changing.
+or registration changing. The two hashes above were taken after the launch-grid
+gap was added; the pair recorded before it (`a02b46d9…`, `4c5082d6…`) differs
+from these by exactly the two reroutes that gap describes.
 
-**Evidence gaps.** Four, all recorded rather than papered over:
+**Evidence gaps.** Five, all recorded rather than papered over:
 
 - 60 of the 374 FlagGems routes are `UNTESTED` on every profile — the generic
   harness cannot construct a valid call for them (shape- and metadata-driven ops:
@@ -491,6 +954,17 @@ or registration changing.
   never-committed retarget of one glibc-2.38 symbol in `libtriton.so` because
   the measurement host is Ubuntu 22.04. Nothing in this change has been executed
   by CI yet.
+- The launch-grid family is measured through its two Qwen-Image callers and the
+  shapes above, not through the seven-profile survey, which cannot reach it. The
+  boundary on `grid.x` is bracketed for `_softmax` at 65496 / 65544 and for
+  `linalg_vector_norm` derived from the tune config rather than measured at
+  524280. The 254 remaining `flaggems` routes carry no equivalent boundary test,
+  so a kernel with the same defect and no Qwen-Image caller would not have been
+  found. One reading during the re-measurement reported `nan` for the
+  `F.normalize` case and has not been reproduced: eight consecutive repetitions
+  of that exact sequence (three large `_softmax` calls, then `F.normalize` at
+  `M = 1048576`) came back bit-identical to the CPU reference, so the single
+  `nan` is recorded here as unattributed rather than explained.
 
 ### Hygon DCU FlagGems path enabled by default in CI (2026-09-15)
 
@@ -2083,8 +2557,8 @@ compiler sees — and every accelerated route is required to be in it.
 | MTT S5000 (MUSA) | 122 | 36 | 1878 | 158 / 2036 (7%) |
 
 **The Enflame GCU S60 row was superseded on 2026-09-15** — a generated FlagGems
-registration for GCU took the platform to 257 `flaggems` / 144 `gcu` / 1635
-`none` and 401 registered ops. See "Enflame GCU S60 FlagGems routing
+registration for GCU took the platform to 255 `flaggems` / 145 `gcu` / 1636
+`none` and 400 registered ops. See "Enflame GCU S60 FlagGems routing
 (2026-09-15)" above.
 
 **The MUSA row was superseded on 2026-09-14** — the MUSA FlagGems registration
@@ -2165,8 +2639,8 @@ mechanically:
   `--check` exits 0, so no measured fact is lost across the round trip.
 - Routing equals registration exactly on all three generated vendors
   (Ascend 374/374, GCU 152/152, MUSA 158/158, with no op routed outside its
-  registration set and none registered-but-left-`none`). GCU is 401/401 as of
-  2026-09-15.
+  registration set and none registered-but-left-`none`). GCU is 400/400 as of
+  2026-09-17.
 - `tests/unit/test_gen_vendor_confs.py`: 27 passed, pinning the four-key
   priority, the registration gate, the annotation round trip, the `flaggems_cpp`
   build gate, and that MetaX/Tsingmicro stay hand-written.
@@ -2768,6 +3242,9 @@ the recorded result is unchanged.
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
 | 2026-09-18 | MetaX C550 (8 devices) | MetaX composite SDPA routed to FlagGems (hand-written whole-op override, outside the 639-overload ceiling) | `aten::scaled_dot_product_attention` became a `flaggems` route in `backends_metax.conf`, taking the file to **592 `flaggems` / 12 `flaggems_cpp` / 1433 `cuda`** over a **2037**-op list (SHA-256 `bb1dc5c4550339dcd44ac438b2981e703c882025e477221e86cac37d833f58f2`), superseding 591 / 12 / 1433 over 2036. The op cannot be routed leaf by leaf: it is a composite whose fused-backend selection runs *inside* it and then branches on `query.device().type()`, so on PrivateUse1 the generated leaves are never consulted and no per-op route can reach a fused kernel. The override is hand-written — `csrc/aten/sdp_choice_stub.cc` registers the composite itself on PrivateUse1 and decides inside it — and it is registered only on the CUDA-boxing builds, which is why `gen_vendor_confs.py` gains `EXTRA_ROUTED` (an op that appears in no `.inc` is invisible to every coverage scan, so the op list has to be widened by hand) and `METAX_COMPOSITE_FLAGGEMS` to hold it from every other platform's conf the way `METAX_FLAGGEMS_MEASURED` holds the measured leaf routes. It is gated on a new `HasBackendForOp()` in `csrc/aten/common.h`, which tells a conf that names the op from one that is silent about it: without it the op would read `kFlagGems` from `GetBackendForOp`'s table-miss default, and a conf written before this change — including a third party's wheel — would take the route silently. The envelope is bf16, 4-D, head_dim 128 exactly, query seq >= 1024, no mask, no causal, no explicit scale, no dropout, no gqa; every shape outside it falls through to the pre-existing boxing path. Ascend, GCU, MUSA, DCU and PPU are **not revalidated** — each gained exactly one line, `none` on ascend/gcu/musa and `cuda` on dcu/ppu, and no measurement transfers to them. | Qwen-Image-2512, 1024x1024, 50-step denoise, one seed, on the 8-device C550 host with `flagtree 0.6.1+metax3.6`, MACA 3.8.0 in CUDA-boxing mode, `flag_gems 5.4.0rc2.post1+g5a58df410` and Triton 3.6.0 (`metax`). Pipeline, `build_pipeline` and placement held constant: steady **78.49 s against 184.02 s**, first step 90.26 s against 189.34 s (**2.34x**, 57.3% off the loop), `pipeline_load_s` 134.74 in both arms; the same window re-run as three arms that also write latents and pixels gives 84.46 s with the route active against 183.68 s and 182.39 s with it off. Op level at the shape the route serves, `(1, 24, 4114, 128)` bf16, min of five calls after warm-up: FlagGems `5.908 ms/call` against the boxing route's `23.313 ms/call` (**3.95x**). A 19-clause envelope probe reports `route hits: 6` — the joint shape and its seq-4096/2048/1024/non-contiguous variants — while head_dim 64/256/512, seq 1023, fp16, fp32, 2-D, 3-D, mask, `is_causal`, scale, dropout and gqa all box. Head_dim is measured in both directions: at 512 the kernel has no configuration that compiles on this part (`triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 294912, Hardware limit: 65536`, against an autotune set `attention.py:173` caps at `BLOCK_N <= 32`), while 128 and 64 both complete and match the unfused fp32 math path (`max 2.189e-05 mean 2.365e-06` and `max 2.153e-05 mean 2.421e-06`), so 128 is where the route was measured and not the kernel's outer boundary. Numerics over the same seeded operands (digest `37efe866eb24ada5` in all three arms): route against boxing `max 9.766e-04 mean 3.274e-05`, and the two boxing arms — `FLAGOS_OP_scaled_dot_product_attention=cuda` on the shipped conf and a conf that never names the op — agree exactly (`max 0.000e+00 mean 0.000e+00`), which is the measurement of the `HasBackendForOp()` rule. Image cost with its own control in the same window: the two route-off arms differ by `max 0.0000 mean 0.00000`, and route-on against them by `max 170.3320 mean 2.04607 (/255)`, 1150098 of 3145728 pixels over 1/255 and 312147 over 4/255, against the prototype arms' `1.39572` route effect and `1.25745` flagos-vs-vendor. Survey: `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22c…`) scoped to the changed route reports `registered 1`, `tested 1`, verdict **`FAILED`**, `basic_executable 0`, `strict_support 0`; the cause is measured as the harness's `default_for()` catch-all `return 0.5` synthesizing `dropout_p = 0.5` (the argument's name is `dropout_p` but the branch ends on `return 0.5`, which names `p`), and the same seven profiles at `dropout_p = 0.0` turn all four `WRONG` verdicts into `PASS` with the three `INVALID_CASE` profiles unchanged — and none of the four is inside the route's envelope, so the verdict is the harness's and not the route's. Regression coverage: `tests/integration/ops/test_metax_flaggems.py` gains `TestMetaXFlaggemsSdpaRoute` and `_MEASURED_FLAGGEMS_ROUTES` moves 591 -> 592. On the C550 host with the route active the whole file reports **101 passed in 854.53s, 0 failed** (exit 0), the class subset **10 passed in 43.28s**, against 90- and 91-test cohorts on the two entries below. `gen_vendor_confs.py` idempotent (two runs, all nine confs byte-identical; `--check` reports `all vendor confs up to date`). Full detail: "MetaX: `scaled_dot_product_attention` routed to FlagGems" above. |
+| 2026-09-17 | Enflame GCU S60 (8 `flagos` devices) | The `out=` forms of the arithmetic operators, and the training-step fallback census | Gave the three in-place arithmetic operators a kernel on the device -- the whole of the fallback traffic a training step produces -- and fixed the two defects that path reaches on the way. A census over two Adam steps on a five-parameter model, run once with `foreach=True` and once with `foreach=False`, found **25 `aten::add` and 10 `aten::mul` `cpu_fallback` calls against 45 in total**, all of them from the optimizer's own state updates (`exp_avg.lerp_`, `exp_avg_sq.mul_(beta2)`, `denom.add_(eps)`), so every one was a device->host->device round trip per parameter per step. They were invisible as `add` and `mul` for two reasons that compound: `csrc/aten/fallback.cc:21` logs `op.schema().name()`, the schema name and not the overload, so `add_.Tensor`, `add.out` and `add.Tensor` all print as `aten::add`; and ATen gives `add_.Tensor` / `sub_.Tensor` / `mul_.Tensor` **no PrivateUse1 registration of their own** -- they are structured in-place ops whose composite redispatches onto `add.out` / `sub.out` / `mul.out` with `out=self` -- so the conf's `add_.Tensor = none`, `add_.Scalar = none` and the `mul_.*` / `sub_.*` lines are **inert** and the dispatcher never sees those spellings. `scripts/codegen/codegen_gcu.py` gains an `out=` category: `mul.out` -> `binary_out` -> `topsatenMul(out, self, other)` and `add.out` / `sub.out` -> `binary_alpha_out` -> `topsatenAdd` / `topsatenSub`, one template serving both the explicit `out=` spelling and the in-place one, since `topsaten` accepts an `out` that aliases an input -- which the `zero_`, `fill_` and `masked_fill_` kernels above already rely on. A new `_out_cast_check` emits the `c10::canCast(result_dtype, out.scalar_type())` guard the ATen `out=` contract requires before any element is touched, and a new `_OUT_DEVICE_GUARD` emits `gcu::TopsDeviceGuard out_guard(self)` because the `topsaten` output pointer is resolved under the current device. The three pre-existing `out=` kernels -- `bmm.out`, `mm.out` and `addmm.out` -- gain both, plus a `out.scalar_type() != result_dtype || !out.is_contiguous() || out.device() != self.device()` check before the `topsaten` call, which they had none of. The kernel sizes the output, which is the `out=` contract: a caller may legally pass a zero-size or differently-shaped `out`, and `torch.add(a, b, out=torch.empty(0, device="flagos:6"))` has to come back shaped like `a`. Route delta against the conf this tree carried before the change: `backends_gcu.conf` `7b87541e…` -> `74aab449…`, `flaggems` 255 unchanged, `gcu` 156 -> **159**, `none` 1625 -> **1622** over the same 2036 routable ops, accelerated 411 -> **414** (20.2% -> **20.3%**). `gcu_register.inc` 163 -> **166** `m.impl` lines (`c6526ed3…` -> `f961aff0…`), the three-name `gcu` gain being `add.out`, `sub.out` and `mul.out`; `gcu_kernels.cc` `947c1b11…` -> `35c8a37e…`; `gcu_flaggems_register.inc` unchanged at 248 (`9c9c99d0…`), so the reconciliation moves from `156 = 163 - 7` to `159 = 166 - 7` and no route moved *from* `flaggems`. Two defects are fixed here because this path is what reaches them. (1) `at::native::flagos::resize_` delegated straight to the **CPU** `at::native::resize_`, whose `maybe_resize_storage_cpu` -> `resize_bytes_cpu` allocates the larger block through the storage's allocator -- correct -- but then copies the old bytes with a plain host `memcpy`, so on a flagos storage the source is HBM and the load faults. Every `out=` call with a zero-size or too-small `out` grows a storage, so `torch.add(a, b, out=torch.empty(4, 16, device=...))` segfaulted. A new `maybe_resize_storage_flagos` in `csrc/aten/strided_ops.cc` computes the needed contiguous nbytes, bails out below the current allocation, otherwise allocates through `storage.allocator()->allocate` and copies with `Allocator::copy_data`, and only then delegates to `at::native::resize_` for the size/stride metadata -- the device-correct shape of `ATen/native/cuda/Resize.h`'s `maybe_resize_storage_cuda`, which this backend never used. (2) `at::native::flagos::_copy_from` took its byte count from the source while writing into the destination's dtype in both directions, so `torch.add(a, b, out=double)` and a `dev f32 <- cpu f64` transfer copied `nbytes(f64)` bytes into an `f32` destination. Both directions now stage through a dtype-matched buffer when the two dtypes differ. Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no route changed for them; both fixes are in shared code, so they inherit them unmeasured, and the `out=` category is GCU-only. | The census re-run against this change, same model, optimizer and seed on `flagos:6`: `EXIT=0`, **11 `cpu_fallback` calls instead of 45** -- `index_select` 4, `embedding_dense_backward` 4, `index_fill_` 2, `nonzero_static` 1 -- with **zero** `aten::add` and **zero** `aten::mul`, against **25 `add.out -> gcu` and 10 `mul.out -> gcu`** dispatch lines. Both losses are byte-identical to the pre-fix run (`-32.7952`, `-51.3676`), so the rerouted optimizer produces the same numbers rather than merely the same shapes. `_OUT_ROUTE` probe (`/tmp/out_route_probe.py`), one process, `FLAGOS_LOG_DISPATCH=1` / `FLAGOS_LOG_FALLBACK=1`, every case against a CPU reference: **`FAILURES: none`**, exit 0. The nine in-place spellings (`add_`/`sub_`/`mul_` with a tensor, an alpha and a scalar, plus `add_(self)` with `out` aliasing both operands) are all `max|diff|` 0.000e+00, as are both broadcasts, float16, bfloat16, int32, int64 and a strided-view write; the explicit `out=` forms match for a zero-size `out`, a wrong-shaped `out`, a widening `out=double` and a broadcasting call; the narrowing rejections (`torch.mul(f32, f32, out=int32)`, `torch.mm(..., out=int32)`, `torch.addmm(..., out=int32)`) raise, and raise for the CPU's reason -- `result type Float can't be cast to the desired output type Int` -- which is what the cast guard exists for, since the host path ends in a casting `copy_` and would otherwise narrow silently. `mm.out` (9.537e-06) and `addmm.out` (7.629e-06) on f32 are compared with a tolerance for reduction order while their `out=double` siblings are **exact** (`0.000e+00`): an f64 out takes the host path by construction and is computed the way the reference is, so the pair of readings is itself evidence of which branch each case took. Branch evidence by timing at 4096x4096 in-place `add_`: **0.507 ms/call** on the device path against **114.185 ms/call** for an int64 operand, which takes the host path by construction and is the in-run control -- **225.3x**. The `resize_` fix is measured by `RESIZE_GROW_FAILURES=0` on `flagos:0` and `flagos:6` across grow-into-live-storage, grow-from-empty, shrink, same-numel reshape, four dtypes, a nonzero-`storage_offset` slice, neighbouring allocations and the `out=` growth cases; the sentinel-filled ones check the old bytes actually moved rather than garbage being left behind, and the standalone diagnostic that crashed with `rc=-11` on `grow 4x16 -> 32x64` now reports `rc=0` on every case. The `copy_` fix is measured by eleven cases in both directions -- host->device widening and narrowing, device->host in both directions, a strided host destination, and same-device `dev f16 <- dev f32` -- all `max|diff|` 0.000e+00 against the pre-fix readings of 4.094e+03, 4.500e+00 and 1.085e+09, with the `.to(device, dtype)` spelling as a control. Both generators are idempotent: `--check` exits 0 for each, and `codegen_gcu.py` re-run three times is byte-identical. `ruff check .` -- "All checks passed!"; `ruff format --check .` -- 263 files already formatted. `tests/unit/test_gen_vendor_confs.py`: 35 passed; the rest of `tests/unit/`: 418 passed, 100 skipped. **Evidence gaps:** the probes are uncommitted; card 5 is defective and hangs any `topsaten` op on a tensor resident there, so the probes used cards 0 and 6 and the session as a whole used 0, 3, 6 and 7; the census is one model, one optimizer and one seed, so 45 is not a per-op total for the stack; the 225.3x ratio is one shape, one dtype pair and one run; no probe copies between two devices, so the D2D arm of the device guard -- which derives its device from `src` in both `csrc/runtime/accelerator/gcu/memory.cc:71` and the `memcpy` override in `csrc/runtime/allocator/backends/gcu_memory.h` -- is reasoned from the source rather than measured, and a cross-device `copy_` is the case that would exercise it; and the `resize_` and `copy_` fixes sit in shared code, so the other six platforms inherit them without revalidation. |
+| 2026-09-17 | Enflame GCU S60 (8 `flagos` devices) | The six measured CPU fallbacks in the Qwen-Image-2512 denoise loop | Gave every operator in the measured fallback census a route to a kernel on the device, so nothing in the pipeline reaches ATen's `cpu_fallback` any more. The census that selected the set, over the whole 50-step 1024x1024 pipeline, found **80,536 `cpu_fallback` calls in exactly six operators and no seventh anywhere in the log** -- `fill_` 23,570, `zero_` 19,221, `view_as_complex` 18,794, `view_as_real` 18,794, `arange` 79, `linalg_vector_norm` 78 -- against 468,227 device dispatches (331,263 `gcu`, 136,964 `flaggems`), 14.7% of all dispatches. `fill_` and `zero_` are worth far more than their own call count because a device-side `torch.zeros` / `ones` / `full` decomposes into them. `scripts/codegen/codegen_gcu.py` gains an `arange` category and a fill/in-place category: `arange` (all three overloads) computes its length on the host through `at::native::compute_arange_size` -- `topsatenArange` takes no size and the caller pre-sizes `output` -- and calls `topsatenArange`; `zero_` -> `topsatenZero`; `fill_.Scalar` / `fill_.Tensor` -> `topsatenFill_` (the scalar through `ToTopsatenScalar`); `masked_fill_.Scalar` / `masked_fill_.Tensor` -> `topsatenMasked_fill` with `out` aliasing `self`; `linalg_vector_norm` -> `topsatenLinalgVectorNorm`, which takes the dim list and the order and whose output is pre-sized to the keepdim shape and then metadata-`reshape`d, superseding the older "no `topsaten` kernel, so `none`" claim for that op. The factory family resolves an absent or index-less `device` to the **current** device (`c10::flagos::CurrentDevice()`), never to index 0, because resolving to 0 would be a silent cross-device write on GCU. `view_as_real` and `view_as_complex` are metadata-only aliases and are the two handwritten kernels this change adds, in `csrc/aten/strided_ops.cc` under `Backend::kGcu`: every category template in the generator ends in a `topsaten::` call, so `codegen_gcu.py` cannot express an alias and lists both in `METADATA_OPS`, and that concrete limitation plus explicit human approval is what the project rule requires for a handwritten kernel. It matters because a *view* op on the `cpu_fallback` path is **copied**, so the result silently stops aliasing its input, and the Qwen-Image RoPE path calls each of them 488 times per denoise step (19.3 ms and 18.5 ms per call at `(1, 4096, 24, 128)`). A new `TopsatenArangeDtype` accepts Float / Int / Short / Char / Byte / Half / BFloat16 only: int64 and float64 stay on the host path because `topsaten` has no kernel for them, and Bool is declined deliberately because ATen has no Bool arange kernel either. Measured against the committed conf at `082afa8`: `backends_gcu.conf` `4c5082d6…` -> `7b87541e…`, `flaggems` 257 -> 255, `gcu` 144 -> 156, `none` 1635 -> 1625 over the same 2036 routable ops, accelerated 401 -> 411 (19.7% -> 20.2%). The launch-grid entry below is uncommitted in this tree and its two route moves are in the same diff, so the split is: that entry takes `_softmax` from `flaggems` to `gcu` and `linalg_vector_norm` from `flaggems` to `none` (257 / 144 / 1635 -> 255 / 145 / 1636), and this entry then takes `linalg_vector_norm` and the nine other `none` overloads to `gcu` (255 / 145 / 1636 -> 255 / 156 / 1625), leaving the `flaggems` count untouched here. `gcu_register.inc` 152 -> 163 `m.impl` lines (`756f6134…` -> `c6526ed3…`), the twelve-name `gcu` gain being `_softmax` plus `arange`, `arange.start`, `arange.start_step`, `fill_.Scalar`, `fill_.Tensor`, `masked_fill_.Scalar`, `masked_fill_.Tensor`, `zero_`, `view_as_real`, `view_as_complex` and `linalg_vector_norm`. `gcu_flaggems_register.inc` 249 -> 248 (`a02b46d9…` -> `9c9c99d0…`) and `gcu_kernels.cc` `01437b68…` -> `947c1b11…`: the single `m.impl` removal there is `linalg_vector_norm` and belongs to the launch-grid entry, since it is that entry's gap addition which takes the op off FlagGems, while this change adds nothing to that file's registrations and moves its "further FlagGems ops already claimed by `gcu_register.inc`" banner 88 -> 97, which is exactly these nine (`arange` x3, `fill_` x2, `masked_fill_` x2, `zero_`, `linalg_vector_norm`) -- `view_as_real` is not in FlagGems' coverage and `view_as_complex` is held in `FLAGGEMS_PENDING_NATIVE_OPS`. The `NATIVE_TRITON_GAPS["gcu"]` entries for `arange`, `zero_`, `fill_.Scalar` and `fill_.Tensor` **stay**: a gap entry only takes the op off FlagGems, and for the factory family it is what *selects* the vendor, so deleting one would put the op back on the FlagGems path that cannot compile it. Out of scope and still `none`: the `out=` forms (`arange.out`, `arange.start_out`, `linalg_vector_norm.out`, `view_as_real_copy.out`, `view_as_complex_copy.out`). Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no route moved for them; Ascend carries the identical `view_as_real` / `view_as_complex` gap and it is left as it stands. | Per-op probes on the S60 with `torch_fl` + diffusers, flagtree `0.6.1+enflame3.6`, `FLAGOS_LOG_DISPATCH=1` / `FLAGOS_LOG_FALLBACK=1`, one fresh process per probe, every case against a CPU reference. `arange`: **48 PASS / 0 FAIL** over the three overloads, three dtypes, integer-valued and fractional steps, the empty length and the single-element length. The vendor formula was identified exactly -- `out[i] = (T)(double((T)start) + i * double((T)step))`, operands cast to the output dtype first and rounded once -- and it reproduces all five measured GCU points bit for bit. Integer-valued steps are bit-exact against the CPU kernel on both routes (`1.5, 4.0, 0.5`, `10., 0., -2.`, `0., 100., 7.`, `arange(0, 128, 2)`, `arange(4096)`). A fractional step agrees to **1 ULP and no better**, and bit-exactness with the host path is unreachable for it by construction: the ATen CPU kernel is not length-invariant -- `torch.arange(0., 1., 0.1)[9] = 0.8999999761581421` while `torch.arange(0., 1000., 0.1)[9] = 0.9000000357627869` -- and the measured bound is 1.000 ULP at 10,000 elements (`max|diff|` 6.104e-05) and at 1,000,000 elements (5.960e-08). `zero_` / `fill_` / `masked_fill_` (`INPLACE_ROUTE_PASS`): all 20 case comparisons match CPU, re-measured at `(1, 4096, 24, 128)` and `(16, 128, 128)`, on the empty `(0,)`, on three float dtypes, on the int64 host path and on a transposed input -- and the five `cpu_fallback` lines that probe logs are its own `_unique2` verification step, not an op under test. Device-side `torch.zeros` / `ones` / `full` / `zeros_like` / `ones_like` re-run and reach the device with the right values. `view_as_real` / `view_as_complex` (`COMPLEX_VIEW_PASS`, 23 PASS / 0 FAIL): the metadata-alias claim is checked by `data_ptr` rather than inferred from the dispatch table -- the complex tensor shares storage with its real source, shape and stride and 3-D strides all agree, a write through the real view is visible through the complex one, and the full RoPE sequence runs `-> gcu` at every step on `flagos:7` with `max|diff|` 0.000e+00; both error contracts raise the same message as the host path. `linalg_vector_norm` (`LINALG_NORM_PASS`, 42 PASS / 0 FAIL, 0 `cpu_fallback`): the VAE call site `(1, 128, 1, 1024, 1024)` ord=2 dim=[1] gives `max|rel diff|` 5.048e-07 and `F.normalize(dim=1)` / `(dim=-1)` 1.192e-07, the ord / dim / keepdim / non-contiguous / empty sweep stays on `flagos` throughout, and fp16, bf16 and fp64 are bit-exact on the host path. The view and decomposition probes both exit 0 with 0 `cpu_fallback` lines. Both generators are idempotent (second run byte-identical, `--check` exit 0). **Evidence gaps:** the probes use their own shapes except where a model call site is named above; the 1-ULP `arange` bound is measured at three lengths rather than proved; cards 0, 3, 6 and 7 were probed because card 5 is defective and hangs any `topsaten` op on a tensor resident there, so nothing was measured on card 5; the census is one pipeline, one seed and one prompt; and no S60-wide FlagGems survey was re-run, which is the right call rather than a gap, because no route moved *from* `flaggems` in this change. |
+| 2026-09-17 | Enflame GCU S60 (8 `flagos` devices) | GCU launch-grid routing (`_softmax`, `linalg_vector_norm`) | Added two measured exceptions to `NATIVE_TRITON_GAPS["gcu"]` (225 -> 227) and regenerated the GCU configuration. Both are launch-grid axis limits rather than dtype or numerics faults: they are correct at every dtype and on every profile `flaggems_overload_survey.py` can construct, and fail only at the scale Qwen-Image-2512 drives them to. FlagGems' `_softmax` launches one program per leading-dimension product and takes that product in `grid.x`, which the GCU caps at 65535 against CUDA's 2\*\*31-1; `linalg_vector_norm` meets the same cap, and its non-inner reduction puts 2067 on `grid.y`, capped at 255 against CUDA's 65535. GCU `flaggems` 257 -> 255, `gcu` 144 -> 145, `none` 1635 -> 1636; accelerated routes 401 -> 400 (19.7% -> 19.6%). `_softmax` moves to native `gcu` because `topsaten` serves the full shape; `linalg_vector_norm` has no `topsaten` kernel, so it moves to `none` and the boxed fallback serves it on the host. `gcu_flaggems_register.inc` 249 -> 248 `m.impl` lines, and the reconciliation moves from 257 = 249 + 8 to 255 = 248 + 7, because one of the two ops was registered in the generated file and the other was already among the native-claimed ops `codegen_gcu_flaggems.py` omits on purpose. `backends_gcu.conf` SHA-256 `4c5082d6…` -> `10a85c9e48a0a34a1b8c3796db91f5ae3660b0dfbda54d2f94611d01b4e39e8f`; `gcu_flaggems_register.inc` `a02b46d9…` -> `f8b73835a99cc97856a622a0ebb5037eae07b1dde81f80fedf5a32847e3846dd`. FlagGems is not patched, and `topste` is not wired into the GCU generator, so the L2-norm route stays on the host rather than being retargeted by hand. Ascend, MUSA, DCU, MetaX, PPU and Tsingmicro are **not revalidated** and no route changed for them. | `tests/manual/qwen_image_2512/` on the S60 with `torch_fl` + diffusers, flagtree `0.6.1+enflame3.6` / Triton 3.6 backend `enflame`. Both reroutes re-measured at the shapes that broke FlagGems, one process, `FLAGOS_LOG_DISPATCH=1` / `FLAGOS_LOG_FALLBACK=1`, each against a CPU reference: `torch._softmax(x, -1, False)` bf16 at M = 65496 (`max|diff|` 6.10e-05), 65544 (6.10e-05) and 98736 (3.05e-05) each report `_softmax -> gcu`; `F.normalize(x, dim=1)` bf16 at `(1, 128, 1, 1024, 1024)` (M = 1048576) reports `linalg_vector_norm -> cpu_fallback`, `clamp_min -> flagos_python`, `div.Tensor -> gcu`, and is bit-exact (`max|diff|` 0.00e+00). The boundary is bracketed rather than assumed: M = 65496 passes on FlagGems and M = 65544 raises `grid.x Required 65544`, so the 65535 cap is the failure and not a shape-specific one. Qwen-Image-2512 reaches both, at two call sites -- `_softmax` on the 60-block MMDiT joint attention and `linalg_vector_norm` on the VAE's `F.normalize`. Paired VAE decode, seed 42, shared latents: vendor `mean=0.3505 std=0.2635` against flagos `mean=0.3475 std=0.2618`, **MAE 0.1646, PSNR 55.90 dB, max 6.0**. Both generators idempotent (second run byte-identical; `--check` exit 0). Evidence gaps: `_softmax` is bracketed only at its two ends, so nothing is measured between 65496 and 98736; `linalg_vector_norm`'s 524280 ceiling is derived from the `BLOCK_M <= 8` schedule rather than measured at that size; the remaining 255 `flaggems` routes were exercised only at the survey's profiles, whose leading-dimension products stay far below the caps, so none of them is ruled out for the same defect and this family is a lower bound; and one probe run reported `normalize(1,128,1,1024,1024) max|diff|=nan`, which did not reproduce in eight further attempts over the same sequence with NaN attribution on both operands (`nan(out)=0 nan(ref)=0`), so it is recorded as unattributed rather than explained. |
 | 2026-09-16 | MetaX C550 (8 devices) | FlagGems `slice` dtype assertion, found by Qwen-Image-2512 | `slice.Tensor` moved from `flaggems` to `cuda` in `backends_metax.conf`: 592 `flaggems` / 12 `flaggems_cpp` / 1432 `cuda` -> **591 / 12 / 1433** (SHA-256 `0d6be6d0fb3aff0aa26293ddf8719bb0f811ea50acbba8a62d02a833b8b154a3`), so the measured Python cohort moves 585 -> 584 and the cuda boxing hold 42 -> 43. The entry is held in `metax_triton_fallback` in `scripts/codegen/codegen_ops.py` rather than in the shared `flaggems_runtime_broken` set, the way the `special_bessel_j0` group is, so no other platform moves; it sits next to `slice_backward`, which is already there for an unrelated MetaX fault. At the base commit `slice.Tensor` was already `cuda` in `backends_cuda.conf`, `backends_ppu.conf` and `backends_dcu.conf`, `none` in `backends_musa.conf` and `backends_gcu.conf` and `ascend` in `backends_ascend.conf` (the last three through `FLAGGEMS_PENDING_NATIVE_OPS`), and does not appear at all in `backends_bpu.conf` (intentionally empty) or `backends_tsingmicro.conf`, so MetaX is the one platform whose conf carried it on FlagGems and this is a convergence, not a new exception. Ascend, GCU, MUSA, DCU and PPU are **not revalidated**. | `flag_gems/ops/slice.py::slice` asserts against `complex64`/`complex128` at line 199 while its body is `torch.as_strided(input, size, strides, storage_offset)` and reads no dtype. Qwen-Image-2512 reproduces it at model level: diffusers' `QwenImageTransformer2DModel._compute_video_freqs` (`/diffusers/models/transformers/transformer_qwenimage.py:347`, `freqs_pos[0][idx : idx + frame]`) reaches `flag_gems/ops/slice.py:199` through `torch_fl/flagos/__init__.py:201` and raises `AssertionError: slice: unsupported dtype torch.complex64`, which aborts the transformer step. Per-op A/B on C550 with `flagtree 0.6.1+metax3.6` / `flag_gems 5.4.0rc2.post1+g5a58df410`, one host-built complex `(8, 16)` operand moved with `.to("flagos")`: shipped conf (no override) `ok (4,) torch.complex64`; `FLAGOS_OP_slice__Tensor=flaggems` `AssertionError: slice: unsupported dtype torch.complex64`; float32 the same shape `ok` with storage shared on both routes, so the dtype check inside the route is the failure and not the route. The assertion is not a kernel limit: an in-process probe that deletes only that statement from `inspect.getsource(...)` and compiles the rest of FlagGems' own function returns a `complex64` result equal to `torch.Tensor` slicing with storage shared, and agrees with the shipped function exactly on float32. Regression coverage in `tests/integration/ops/test_metax_flaggems.py`: `slice.Tensor` added to `_FORCED_OFF_FLAGGEMS` and to `_FORCED_OFF_DISPATCH` (complex operand), `_MEASURED_FLAGGEMS_ROUTES` 592 -> 591. `gen_vendor_confs.py` idempotent for MetaX (two runs, byte-identical), `--check` clean for the MetaX file; the out-of-scope configurations were left at their committed state. `tests/integration/ops/test_metax_flaggems.py` on the C550 host reports **91 passed in 751.82s, 0 failed** (the 90-test cohort plus the new dispatch case), including both `slice.Tensor` guards. Filed upstream as FlagGems issue #6356. |
 | 2026-09-16 | MUSA MTT S5000 | MUSA FlagGems RNG bridge | `5e4b78e` (the qualname change above) moved MUSA's generated kernels from `flag_gems.ops.randn.randn` to `flag_gems.randn`, which `SpecOpRegistrar` has rebound to the vendor override `_mthreads.ops.randn.randn`. `_patch_flaggems_philox()` selected the modules to rebind with `mod.__name__.startswith("flag_gems")`, which that module does not match, so the vendor kernel reached the unpatched `philox_backend_seed_offset` and raised `ValueError: too many values to unpack (expected 2)` unpacking the flagos MT19937 state. The loop now matches the bound object's identity instead of the module name. No route changed: `randn`, `randn_like`, `rand`, `rand_like`, `randperm`, `native_dropout` stay `flaggems  # musa`. | `Platform pipeline (musa) / Build and test (MUSA)` on run `35048300960` (push of `5e4b78e`) failed with **14 failed, 99 passed, 28 warnings in 193.65s**; the preceding `main` runs on `35047336702` and `35041546614` were green on MUSA. Both signatures are the same `torch.randn(..., device="flagos:0")` call: 4 in-process failures on `ValueError` at `flag_gems/utils/random_utils.py:75`, and 10 `test_musa_dispatch.py` subprocesses whose first statement is that call. Regression coverage: `tests/unit/test_musa_rng_bridge.py::test_flaggems_philox_reaches_vendor_backend_modules` fails against the pre-fix selector (`999 != -9223372036854775803`) and passes after; `tests/integration/ops/test_musa_flaggems.py::test_flaggems_randn_shares_native_generator_reservations` now drives `flag_gems.randn` rather than the generic module, which the MUSA dispatch never reached. Full detail: "MUSA: the FlagGems RNG bridge reaches the vendor op modules" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | FlagGems entry-point resolution (`5a58df410`) | `_normalize_flaggems_qualname` in `scripts/codegen/codegen_ops.py` now emits `flag_gems.<fn>` instead of `flag_gems.ops.<module>.<fn>`, so a generated kernel reaches the entry point the active backend has rebound rather than the generic module the alias rewrite pinned. 72 of the 666 qualnames in the checked-in kernels resolve to a `_metax.ops.*` override and were running the generic kernel before this. `codegen_ops.py` also becomes the writer of the `FLAGGEMS_PYTHON_OPS` ceiling in `scripts/codegen/backend_coverage.py` (`render_flaggems_coverage`, minus the override-only ops), which was previously a hand-carried literal that capped every conf built from it. Both apply to every FlagGems platform; no route changed on Ascend, GCU, MUSA, DCU or PPU. | Counted over `csrc/aten/generated/flaggems_python_kernels.cc` with `flag_gems 5.4.0rc2.post1+g5a58df410` on the C550 host: 688 call sites, 666 distinct qualnames, 0 that are not two-component `flag_gems.<op>`, 0 unresolvable on the package, 594 resolving inside `flag_gems` and 72 to a `_metax.ops.*` module. `tests/integration/ops/test_flaggems_conf_consistency.py` requires the two-component form and now compares the conf, the override-only routes and the generated kernels as sets (7 passed); `tests/integration/ops/test_metax_flaggems.py` on C550 reports **90 passed in 756.07s**, 0 failed. Full detail: "MetaX: generated FlagGems calls name the package-level entry point" above. |

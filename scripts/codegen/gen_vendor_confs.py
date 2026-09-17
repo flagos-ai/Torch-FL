@@ -728,6 +728,11 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 # a partially written (64,64,64) result, so the family moves back together
 # rather than per-dtype.
 #
+# A gap entry only takes the op off FlagGems; where it goes instead is the native
+# side's decision, so the entry stays useful after codegen_gcu.py learns the op.
+# `arange` and `zero_` are the two here that have since been claimed by
+# codegen_gcu.py, and they route to `gcu` rather than `none` because of it.
+#
 # The gather/loss/sort entries -- `embedding`, `floor_divide`, `index_add`,
 # `nll_loss_forward`, `nll_loss_backward`, `sort`, `sort.stable` -- all fail on
 # index/offset arithmetic that legalizes to a 64-bit extension (`arith.extsi` /
@@ -744,14 +749,18 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 # 0.501, `uniform_(-1, 1)` with mean 2.497, a dropout keep-rate off by 5x, and
 # `bernoulli` returning values outside {0, 1}.
 #
-# Several entries have no topsaten kernel claimed by codegen_gcu.py (`arange`,
-# `linspace`, `full`, `full_like`, `scalar_tensor`, `zero_`, `constant_pad_nd`,
-# `embedding`, `nll_loss_*`, `floor_divide*`, `index_add*`, `sort*`). There the
-# gap drops them from both the conf's FlagGems route and the generated
-# registration, so route() falls through to `none` and the call reaches ATen's
-# cpu_fallback. That is the route these ops already took before GCU had a
-# FlagGems path, so nothing regresses; it is not a vendor kernel because no
-# vendor kernel is claimed for them yet.
+# Several entries have no topsaten kernel claimed by codegen_gcu.py (`linspace`,
+# `full`, `full_like`, `scalar_tensor`, `constant_pad_nd`, `embedding`,
+# `nll_loss_*`, `floor_divide*`, `index_add*`, `sort*`). There the gap drops them
+# from both the conf's FlagGems route and the generated registration, so route()
+# falls through to `none` and the call reaches ATen's cpu_fallback. That is the
+# route these ops already took before GCU had a FlagGems path, so nothing
+# regresses; it is not a vendor kernel because no vendor kernel is claimed for
+# them yet. `arange` (all three overloads) and `zero_` used to be on that list
+# and are not any more: codegen_gcu.py claims a topsaten kernel for both, so the
+# gap now hands them to `gcu`. The entry still has to stay, because deleting it
+# would put `arange` back on the FlagGems path that fails to compile -- for the
+# factory family the gap is what selects the vendor, not what excludes it.
 #
 # Measured on S60 with FlagGems master 3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85
 # (5.4.0.dev0) + flagtree 0.6.1+enflame3.6.
@@ -854,9 +863,16 @@ NATIVE_TRITON_GAPS = {
         #
         # Comparisons have topsaten kernels for every dtype, so gapping them
         # routes back to `gcu` with its TopsatenSupportsDtype CPU round-trip for
-        # the int64 case; the bitwise/fill/mask group has no topsaten kernel, so
-        # it lands on `none` and the call reaches cpu_fallback -- the same route
-        # these ops already took before GCU had a FlagGems path.
+        # the int64 case. The in-place writes do too -- `fill_.Scalar`,
+        # `fill_.Tensor`, `masked_fill_.Scalar`, `masked_fill_.Tensor` are all
+        # claimed by codegen_gcu.py now, which matters more here than for the
+        # comparisons: they are what `torch.zeros` / `torch.full` decompose into
+        # on a device, so routing them to `gcu` is what keeps the int64 raise
+        # from turning every factory call in a model into a host round trip. The
+        # rest of the group -- the out-of-place `fill.*`, `masked_select`,
+        # `where.self`, `all`/`any` and the bitwise family -- has no topsaten
+        # kernel, so it lands on `none` and the call reaches cpu_fallback, the
+        # same route these ops already took before GCU had a FlagGems path.
         "eq.Scalar",
         "eq.Tensor",
         "ne.Scalar",
@@ -1040,6 +1056,49 @@ NATIVE_TRITON_GAPS = {
         "var.correction",
         "var_mean.correction",
         "vdot",
+        # Group C -- correct at every dtype, broken at scale, so the dtype sweep
+        # above cannot see it: every one of its profiles is at most 32 rows wide.
+        # The enflame backend sizes a grid axis from a data dimension, and GCU's
+        # limits are far below CUDA's -- grid.x 65535 against 2**31-1, grid.y 255
+        # against 65535 -- so a kernel that is launched once per row (or per
+        # 8-row tile) works in the sweep and raises on a real workload.
+        #
+        # _softmax
+        # `softmax_kernel_inner` is launched with `grid = (M, 1, 1)` for a
+        # last-dim softmax (flag_gems/runtime/backend/_enflame/gcu300/ops/
+        # softmax.py:325), M being the product of the leading dimensions.
+        # Measured on the S60 with `torch._softmax(x, -1, False)` on bf16:
+        #
+        #   (1, 24, 2729, 2729)  M = 65496  PASS
+        #   (1, 24, 2731, 2731)  M = 65544  FAIL grid.x Required 65544
+        #   (1, 24, 4114, 4114)  M = 98736  FAIL grid.x Required 98736
+        #
+        # The non-inner kernel has the same defect on the other axis: a softmax
+        # that is not over the last dimension launches with
+        # `grid = (M, cdiv(K, TILE_K), 1)`, so (24, 4114, 4114) over dim 0 fails
+        # with `grid.y Required 2067`. First caller is Qwen-Image-2512's joint
+        # attention, `_softmax` on (1, 24, 4114, 4114) reached from
+        # `F.scaled_dot_product_attention` in every one of the 60 transformer
+        # blocks. topsatenSoftmaxForward serves every shape above -- it has no
+        # grid to size -- so gapping routes it back to the vendor kernel.
+        #
+        # linalg_vector_norm
+        # `l2_norm_kernel` is launched with `grid = (cdiv(M, BLOCK_M),)`, and the
+        # enflame tune config for it offers only BLOCK_M in {1, 2, 4, 8}
+        # (runtime/backend/_enflame/gcu300/tune_configs.yaml:762) -- 8 is the
+        # widest, so no tuned config fits M above 65535 * 8 = 524280.
+        # Measured on the VAE decode: `F.normalize(x, dim=1)` from
+        # diffusers' QwenImageRMS_norm on (1, 128, 1, 1024, 1024), M = 1048576,
+        # fails with `grid.x Required 131072` at every candidate.
+        #
+        # For a while the gap landed on `none` and the op reached cpu_fallback,
+        # because no topsaten kernel was claimed for it: correct results at the
+        # cost of a host round trip per call. That is no longer the state --
+        # codegen_gcu.py now claims `topsatenLinalgVectorNorm`, which takes the
+        # dim list and the order directly and has no grid to size, so the gap
+        # routes to `gcu` and the 1M-element VAE call above stays on the device.
+        "_softmax",
+        "linalg_vector_norm",
         # Group B -- correct at float16/float32 and at bool, and broken only for
         # an int64 operand (the 64-bit kernel-type rejection again; a few also
         # return the input dtype where ATen promotes, which only an integral or

@@ -25,6 +25,7 @@
 //   - _linalg_eigvals
 //   - _log_softmax_backward_data
 //   - _pdist_backward
+//   - _softmax
 //   - _softmax_backward_data
 //   - _unique2
 //   - _weight_norm_interface
@@ -135,6 +136,7 @@
 //   - le.Tensor
 //   - lgamma
 //   - lgamma_
+//   - linalg_vector_norm
 //   - linspace
 //   - log
 //   - log10
@@ -244,7 +246,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 249 ops registered here, 88 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 248 ops registered here, 97 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
@@ -369,7 +371,6 @@
   m.impl("lift", WrapperLift);
   m.impl("lift.out", WrapperLiftOut);
   m.impl("linalg_ldl_factor_ex", WrapperLinalgLdlFactorEx);
-  m.impl("linalg_vector_norm", WrapperLinalgVectorNorm);
   m.impl("log10.out", WrapperLog10Out);
   m.impl("log10_", WrapperLog10Inplace);
   m.impl("log1p.out", WrapperLog1pOut);

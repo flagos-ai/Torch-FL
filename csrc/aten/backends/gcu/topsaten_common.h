@@ -79,15 +79,51 @@ inline topsatenDataType_t ToTopsatenDataType(at::ScalarType type) {
   }
 }
 
-// topsaten has no int64 or float64 kernels: every op returns NOT_SUPPORT for an
-// I64 operand (verified across add/mul/eq/abs/sum), and an F64 operand fails the
-// same way (measured on S60 across add/abs/reciprocal, vendor log "datatype not
-// support yet"). Callers check this and run the op on CPU instead, which keeps
-// int64 tensors (indices, masks, counters) and float64 tensors working instead
-// of raising. GradScaler depends on the float64 path: it computes the inverse
-// scale as `scale.double().reciprocal().float()`.
+// topsaten has no int64, float64 or complex kernels: every op returns NOT_SUPPORT
+// for an I64 operand (verified across add/mul/eq/abs/sum), and an F64 operand
+// fails the same way (measured on S60 across add/abs/reciprocal, vendor log
+// "datatype not support yet"). Complex is the same story one layer earlier --
+// `ToTopsatenDataType` has no mapping for it at all, so an op on a complex
+// operand raises before it reaches the vendor. The first caller is the complex
+// rotary embedding of Qwen-Image: the freqs live on the device, `cat` on them
+// raised `Unsupported dtype for topsaten: ComplexFloat`, and the transformer
+// step could not start.
+//
+// Callers check this and run the op on CPU instead, which keeps int64 tensors
+// (indices, masks, counters), float64 tensors and complex tensors working
+// instead of raising. GradScaler depends on the float64 path: it computes the
+// inverse scale as `scale.double().reciprocal().float()`.
 inline bool TopsatenSupportsDtype(at::ScalarType type) {
-  return type != at::kLong && type != at::kDouble;
+  return type != at::kLong && type != at::kDouble && !c10::isComplexType(type);
+}
+
+// Which dtypes topsatenArange may be handed.
+//
+// Narrower than TopsatenSupportsDtype on purpose. `arange` is the one op whose
+// vendor entry point takes no size: it fills an output the caller has already
+// sized, so a dtype the kernel declines leaves the buffer unwritten instead of
+// raising, and the whole point of the op is the values in that buffer. The set
+// is measured on S60 rather than inferred from ToTopsatenDataType, which only
+// says the dtype is *representable*.
+//
+// Bool is deliberately absent even though the vendor takes PRED: ATen has no
+// arange kernel for it at all (`arange_cpu not implemented for 'Bool'`, and a
+// GCU caller gets the same on a hosted tensor), so declining here is what keeps
+// the host path's NotImplementedError instead of inventing a result CPU and
+// CUDA both refuse to produce.
+inline bool TopsatenArangeDtype(at::ScalarType type) {
+  switch (type) {
+    case at::kFloat:
+    case at::kInt:
+    case at::kShort:
+    case at::kChar:
+    case at::kByte:
+    case at::kHalf:
+    case at::kBFloat16:
+      return true;
+    default:
+      return false;
+  }
 }
 
 // A tops device pointer resolves only against the *current* device, so an op

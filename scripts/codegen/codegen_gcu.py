@@ -108,6 +108,10 @@ OPS = {
     # ---- binary_alpha: topsaten<Name>(out, self, other, alpha) ----
     "add.Tensor": ("binary_alpha", None),
     "sub.Tensor": ("binary_alpha", None),
+    # ---- the out= forms, which are also what the in-place ops box onto ----
+    "mul.out": ("binary_out", None),
+    "add.out": ("binary_alpha_out", None),
+    "sub.out": ("binary_alpha_out", None),
     # ---- binary_cmp: bool out ----
     "eq.Tensor": ("binary_cmp", None),
     "ne.Tensor": ("binary_cmp", None),
@@ -147,6 +151,8 @@ OPS = {
     # ---- reduce over a required dim list (no dtype arg) ----
     "amax": ("reduce_dims_plain", None),
     "amin": ("reduce_dims_plain", None),
+    # ---- ordered reduction over an optional dim list ----
+    "linalg_vector_norm": ("linalg_vector_norm", None),
     # ---- shape-preserving with one int64 arg ----
     "tril": ("unary_int", None),
     "triu": ("unary_int", None),
@@ -161,6 +167,19 @@ OPS = {
     "cat": ("cat", None),
     "zeros_like": ("full_like", "ZerosLike"),
     "ones_like": ("full_like", "OnesLike"),
+    # arange: all three overloads share one template; the per-overload scalars,
+    # the locals the shared body reads and ATen's dtype-inference predicate for
+    # that overload live in ARANGE_OVERLOADS.
+    "arange": ("arange", None),
+    "arange.start": ("arange", None),
+    "arange.start_step": ("arange", None),
+    # The in-place half of the factories (zeros/ones/full) plus the masked write
+    # every attention path builds its mask out of.
+    "zero_": ("zero_inplace", "Zero"),
+    "fill_.Scalar": ("fill_inplace_scalar", "Fill_"),
+    "fill_.Tensor": ("fill_inplace_tensor", "Fill_"),
+    "masked_fill_.Scalar": ("masked_fill_inplace_scalar", "Masked_fill"),
+    "masked_fill_.Tensor": ("masked_fill_inplace_tensor", "Masked_fill"),
     "native_layer_norm": ("layer_norm", None),
     # native_layer_norm_backward is deliberately absent: topsaten's kernel
     # rejects every output_mask ("LNB Output mask is not supported now!") and,
@@ -223,6 +242,26 @@ OPS = {
 # Ops handwritten elsewhere for GCU would double-register the kGcu slot (which
 # crashes at import), so they must be excluded here. None yet.
 SKIP: set = set()
+
+# Pure-metadata view ops. There is no topsaten entry point for either (there
+# cannot be one: they reinterpret size/stride/dtype over the *same* storage, so
+# there is nothing for a device kernel to compute), and every category template
+# below ends in a `topsaten::` call, so the generator cannot express them. They
+# are implemented next to the other stride ops in csrc/aten/strided_ops.cc --
+# the same file that already carries alias/detach/t/permute/_conj for Ascend --
+# and listed here only so this generator still emits their m.impl() into
+# gcu_register.inc and their `= gcu` route into the conf.
+#
+# The registration is not optional even though the ops need no compute:
+# gen_vendor_confs.route() gates on the PrivateUse1 registration, so an op left
+# out of gcu_register.inc routes to `none` and reaches ATen's cpu_fallback. A
+# view op cannot survive that -- the fallback copies, so the result stops
+# aliasing the input's storage -- and, in the Qwen-Image RoPE path, view_as_real
+# and view_as_complex are called 488 times each per denoise step.
+METADATA_OPS = {
+    "view_as_complex",
+    "view_as_real",
+}
 
 # Handwritten kernels live in a separate translation unit when the vendor API
 # does not fit one of the category templates. They still belong in the generated
@@ -342,6 +381,63 @@ _BINARY_PROLOGUE = """\
   auto other_b = other_c.expand(out_shape).contiguous();
 """
 
+# Every `*_out` kernel below may grow a caller-supplied `out`, and that resize
+# has to happen with the right device selected. `resize_` takes no device
+# argument: `TensorImpl::resize_` allocates through the allocator, which
+# resolves the pool from the *current* device
+# (`caching_device_allocator.cc` calls `backend_->get_device_index()`), and it
+# installs no guard of its own. The factories do (`at::empty(..., device=...)`
+# guards for its own duration), which is why an ordinary device tensor is fine,
+# but a multi-device process sitting on device 0 will grow `out` out of device
+# 0's pool while the tensor still reports flagos:N, and topsaten then refuses the
+# descriptor:
+#
+#   FindMemObj DeviceId[0] of memory VA[0x...] is not match for DeviceId[6] of
+#   stream
+#
+# Measured: `torch.add(a, a, out=torch.empty(0, device="flagos:6"))` failed with
+# the current device at 0 and passed once device 6 was current. The guard is a
+# no-op when the current device already matches, so it costs nothing on the path
+# that was already working.
+_OUT_DEVICE_GUARD = """\
+  gcu::TopsDeviceGuard out_guard(self);
+"""
+
+
+# ATen refuses an `out` it cannot be cast into rather than truncating into it, and
+# the in-place spellings inherit that rule: `add_.Tensor` is a composite that
+# redispatches onto `add.out` with out=self, so `int32_t.add_(fp32_tensor)` raises
+# on the CPU with
+#
+#   RuntimeError: result type Float can't be cast to the desired output type Int
+#
+# (`TensorIterator` makes the same `canCast` check, and ATen's out= parsing
+# applies it before any element is touched). The host path below ends in an
+# ordinary `copy_`, which casts, so without this check a device call would
+# silently narrow where the CPU raises -- `torch.mul(fp32_a, fp32_b,
+# out=int32_tensor)` measured `max|diff| 1.19e9` instead of an error.
+#
+# The check sits ahead of the unsupported-dtype branch so that path is covered
+# too, and ahead of the resize so a rejected call leaves `out` untouched.
+def _out_cast_check(result_expr: str, define: bool = False) -> str:
+    """The `canCast` guard every `*_out` template runs before it writes.
+
+    `define` emits the `result_dtype` local the caller's later dtype comparisons
+    need; without it the expression is used only for the check, because the
+    prologue that follows already defines that local.
+    """
+    check = "result_dtype" if define else result_expr
+    body = (
+        "  TORCH_CHECK(\n"
+        f"      c10::canCast({check}, out.scalar_type()),\n"
+        '      "result type ",\n'
+        f"      {check},\n"
+        '      " can\'t be cast to the desired output type ",\n'
+        "      out.scalar_type());\n"
+    )
+    return f"  auto result_dtype = {result_expr};\n" + body if define else body
+
+
 T_BINARY = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
@@ -382,6 +478,119 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
   gcu::TopsatenTensorWrapper t_other(other_b);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+)
+
+# topsaten<Name>(out, self, other [, alpha]) with the output supplied by the
+# caller. ATen gives the in-place arithmetic ops no PrivateUse1 registration of
+# their own: `add_.Tensor`, `sub_.Tensor` and `mul_.Tensor` are structured
+# in-place ops whose composite redispatches onto `add.out` / `sub.out` /
+# `mul.out` with out=self. The fallback log prints the *schema* name, not the
+# overload, so every one of them reads as `aten::add` -- which is why the census
+# below had to be read as "the in-place arithmetic", not as "the out-of-place
+# op that is already native".
+#
+# Measured on a two-step Adam run over a five-parameter model, run once with
+# `foreach=True` and once with `foreach=False`: 25 `aten::add` and 10 `aten::mul`
+# cpu_fallback calls in total, all of them from the in-place state updates
+# (`exp_avg.lerp_`, `exp_avg_sq.mul_(beta2)`, `denom.add_(eps)`) -- a
+# device->host->device round trip per parameter per step, and the whole of the
+# fallback traffic the optimizer itself produces. topsatenAdd/Mul/Sub write into
+# an out that may alias an input; `zero_`, `fill_` and `masked_fill_` above
+# already rely on that, so one template serves both the explicit `out=` spelling
+# and the in-place one.
+#
+# Unlike the out-of-place categories the host path has to land in `out`, so it
+# resizes `out` to the result shape first and then copies: the ATen contract for
+# an out= op is that the kernel sizes the output, and a caller that passes a
+# zero-size or differently-shaped `out` (which is legal, and is what `out=`
+# callers in this stack do after `.resize_()`) would otherwise get the shape it
+# passed rather than the result's. `out` is the write target, so a dtype it
+# cannot hold, a non-contiguous it, or a device that disagrees with self all
+# take the host path rather than handing topsaten a descriptor it would write
+# through with the wrong width.
+T_BINARY_OUT = (
+    """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {{
+"""
+    + _OUT_DEVICE_GUARD
+    + _out_cast_check("at::result_type(self, other)")
+    + """\
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
+    auto host = at::{at_op}(self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {{
+      out.resize_(host.sizes());
+    }}
+    out.copy_(host);
+    return out;
+  }}
+"""
+    + _BINARY_PROLOGUE
+    + """\
+  if (!out.sizes().equals(out_shape)) {{
+    out.resize_(out_shape);
+  }}
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {{
+    out.copy_(at::{at_op}(self.cpu(), other.cpu()));
+    return out;
+  }}
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, out, t_out.get(), t_self.get(), t_other.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+)
+
+T_BINARY_ALPHA_OUT = (
+    """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {{
+"""
+    + _OUT_DEVICE_GUARD
+    + _out_cast_check("at::result_type(self, other)")
+    + """\
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
+    auto host = at::{at_op}(self.cpu(), other.cpu(), alpha);
+    if (!out.sizes().equals(host.sizes())) {{
+      out.resize_(host.sizes());
+    }}
+    out.copy_(host);
+    return out;
+  }}
+"""
+    + _BINARY_PROLOGUE
+    + """\
+  if (!out.sizes().equals(out_shape)) {{
+    out.resize_(out_shape);
+  }}
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {{
+    out.copy_(at::{at_op}(self.cpu(), other.cpu(), alpha));
+    return out;
+  }}
+  auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, out, t_out.get(), t_self.get(), t_other.get(), t_alpha);
   return out;
 }}
 
@@ -559,8 +768,13 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
 
-T_MATMUL_OUT = """\
+T_MATMUL_OUT = (
+    """\
 at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {{
+"""
+    + _OUT_DEVICE_GUARD
+    + _out_cast_check("at::result_type(self, mat2)", define=True)
+    + """\
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat2.scalar_type())) {{
     out.copy_(at::{at_op}(self.cpu(), mat2.cpu()));
@@ -570,6 +784,11 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {{
     out.resize_(out_shape);
+  }}
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {{
+    out.copy_(at::{at_op}(self.cpu(), mat2.cpu()));
+    return out;
   }}
 
   gcu::TopsatenTensorWrapper t_self(self);
@@ -581,6 +800,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
+)
 
 # sum/mean over an optional dim list. An absent or empty list reduces every
 # dim; negative dims are wrapped. Dims are erased high-to-low so an earlier
@@ -627,6 +847,74 @@ at::Tensor {kernel}(
   EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_self.get(), t_dims.get(),
       keepdim, gcu::ToTopsatenDataType(out_dtype));
   return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# linalg_vector_norm is the kernel under tensor.norm and F.normalize, which
+# diffusers' QwenImageRMS_norm calls on the VAE decode as
+# F.normalize(x, dim=1) over (1, 128, 1, 1024, 1024). FlagGems cannot serve it
+# (its Triton grid.x overflows at that size -- see NATIVE_TRITON_GAPS), so this
+# is the route that keeps the op off cpu_fallback.
+#
+# Two details shape the body. topsaten rejects a rank-0 tensor, which is exactly
+# what dim=None with keepdim=False produces, so the vendor call always runs with
+# keepdim=true and the result is reshaped afterwards -- a metadata view over a
+# buffer this kernel just allocated, not a copy. And the accumulation dtype:
+# ATen's reduction widens half/bfloat16 to float through acc_type and casts the
+# result back, which is a contract the vendor kernel makes no promise about, so
+# only float32 takes the vendor path and every other dtype goes to the host,
+# where that widening is guaranteed. The pipeline calls this at float32 only --
+# F.normalize in diffusers' QwenImageRMS_norm gets x.float() first.
+#
+# An absent or empty dim list means "every dim" on both sides, but the dims are
+# enumerated anyway so the two cannot disagree about reduce_dim's empty form.
+T_LINALG_VECTOR_NORM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Scalar& ord,
+    at::OptionalIntArrayRef dim,
+    bool keepdim,
+    ::std::optional<at::ScalarType> dtype) {{
+  auto out_dtype = dtype.value_or(self.scalar_type());
+  if (self.scalar_type() != at::kFloat ||
+      !gcu::TopsatenSupportsDtype(out_dtype) ||
+      !self.is_contiguous() || self.numel() == 0) {{
+    return at::{at_op}(self.cpu(), ord, dim, keepdim, dtype).to(self.device());
+  }}
+  int64_t ndim = self.dim();
+  std::vector<int64_t> reduce_dims;
+  if (dim.has_value() && !dim.value().empty()) {{
+    for (int64_t d : dim.value()) reduce_dims.push_back(d < 0 ? d + ndim : d);
+  }} else {{
+    for (int64_t d = 0; d < ndim; ++d) reduce_dims.push_back(d);
+  }}
+
+  auto out_shape = self.sizes().vec();
+  std::vector<int64_t> sorted_dims(reduce_dims);
+  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
+  for (int64_t d : sorted_dims) {{
+    if (keepdim) out_shape[d] = 1;
+    else out_shape.erase(out_shape.begin() + d);
+  }}
+  // The buffer the vendor writes is the keepdim=true shape; out_shape is what
+  // ATen promises and is reached by a (metadata-only) reshape.
+  auto kept_shape = self.sizes().vec();
+  for (int64_t d : reduce_dims) kept_shape[d] = 1;
+
+  auto self_c = self.scalar_type() == out_dtype ? self : self.to(out_dtype);
+  auto out = at::empty(kept_shape, self.options().dtype(out_dtype));
+  gcu::TopsatenSizeWrapper t_dims(reduce_dims);
+  // `ord` is a real order (2 for F.normalize, +/-inf for max/min norms), so it
+  // is staged as a float whatever integral form the Python caller passed.
+  auto t_ord = gcu::ToTopsatenScalar(ord, at::kFloat);
+
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_self.get(), t_ord, t_dims.get(),
+      true, gcu::ToTopsatenDataType(out_dtype));
+  return out.reshape(out_shape);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
@@ -854,6 +1142,13 @@ at::Tensor& {kernel}(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {{
+"""
+    + _OUT_DEVICE_GUARD
+    + _out_cast_check(
+        "c10::promoteTypes(at::result_type(self, mat1), mat2.scalar_type())",
+        define=True,
+    )
+    + """\
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat1.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat2.scalar_type())) {{
@@ -865,6 +1160,11 @@ at::Tensor& {kernel}(
     + """\
   if (!out.sizes().equals(out_shape)) {{
     out.resize_(out_shape);
+  }}
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {{
+    out.copy_(at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha));
+    return out;
   }}
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -975,6 +1275,249 @@ at::Tensor {kernel}(
       gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED,
       TOPSATEN_MEMORY_CONTIGUOUS);
   return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# arange is the one creation op that takes scalars instead of a shape, and
+# topsaten's entry point takes no size at all: it fills an output tensor that the
+# caller has already sized. So the length has to be computed here, and it has to
+# be ATen's rule or the two disagree on the tail of a non-divisible range --
+# at::native::compute_arange_size is that rule, shared with the CPU and CUDA
+# kernels, and it also carries ATen's bound checks (zero step, sign mismatch,
+# non-finite bounds), so a caller sees the same errors on both devices.
+#
+# The three overloads differ only in how many scalars they take, so the template
+# is parameterised per overload ({params}, {bind}, {dtype_infer}) rather than
+# triplicated; the body always works with locals start/end/step.
+#
+# dtype inference mirrors the generated FlagGems Python kernels (see
+# ArangeKernelPython in csrc/aten/generated/flaggems_python_kernels.cc): an
+# explicitly requested dtype wins, otherwise any floating-point scalar makes the
+# result the default float type and all-integral scalars make it int64.
+#
+# On the vendor path a fractional step does not land on the CPU kernel's bits:
+# measured on S60, the vendor evaluates `(T)start + i * (T)step` with one
+# rounding to the output dtype T, where the CPU kernel's formulation is not
+# length-invariant at all -- `torch.arange(0., 1., 0.1)` and
+# `torch.arange(0., 1000., 0.1)` give different values for the *same*
+# mathematical element (0.8999999761581421 against 0.9000000357627869 at index
+# 9), so there is no single set of bits to match. The vendor's own error is
+# bounded: casting the step to T perturbs it by at most 2**-24 relative, so over
+# i elements the result is off by at most about one ULP of the largest value in
+# the range. Integer-valued steps -- which is every arange the Qwen-Image graph
+# issues, `arange(0, dim, 2)` and `arange(4096)` included -- are bit-exact,
+# because nothing rounds.
+#
+# int64 -- which is what `torch.arange(n)` infers and what the Qwen-Image text
+# path asks for explicitly -- cannot use the vendor kernel at all
+# (TopsatenSupportsDtype rejects kLong), so it keeps a host round trip. That is
+# measured at 0.075 ms/call over a few hundred elements, against the full
+# activation a cpu_fallback of a compute op would copy.
+T_ARANGE = """\
+at::Tensor {kernel}(
+    {params},
+    ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
+    ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {{
+  {bind}
+  auto out_dtype = dtype.value_or({dtype_infer}
+      ? at::typeMetaToScalarType(at::get_default_dtype())
+      : at::kLong);
+  // An absent (or index-less) device means the current one, exactly as
+  // csrc/aten/backends/flagos/python_op_caller.cc resolves it for the other
+  // factories: naming index 0 here would allocate on device 0 while the op runs
+  // on the current device, which on GCU is a silent cross-device write.
+  auto target = (device.has_value() && device->has_index())
+      ? *device
+      : at::Device(at::kPrivateUse1, static_cast<int>(c10::flagos::CurrentDevice()));
+  TORCH_CHECK(
+      target.is_privateuseone(), "arange on GCU requires a flagos device, got ", target);
+  // Same contract as at::empty on a device (csrc/aten/empty.cc).
+  TORCH_CHECK(
+      !pin_memory.value_or(false), "Pin memory can only be on CPU");
+
+  auto length = out_dtype == at::kLong
+      ? at::native::compute_arange_size<int64_t>(start, end, step)
+      : at::native::compute_arange_size<double>(start, end, step);
+
+  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+      layout.value_or(at::kStrided) != at::kStrided || length == 0) {{
+    // Built with at::kCPU and the caller's layout, so the call lands on the CPU
+    // kernel (which re-raises for a non-strided layout the same way ATen does)
+    // instead of re-entering this one.
+    auto host = at::arange(start, end, step, out_dtype, layout, at::kCPU, false);
+    return host.to(target);
+  }}
+
+  auto out = at::empty(
+      {{length}},
+      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      {tops}, out, t_out.get(), t_start, t_end, t_step,
+      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# The three arange overloads, as T_ARANGE's per-overload parameters: the scalar
+# parameters they declare, the locals that bind the ones they do not take, and
+# ATen's dtype-inference predicate for that overload (mirrored from the FlagGems
+# Python kernels -- see T_ARANGE).
+ARANGE_OVERLOADS = {
+    "arange": (
+        "const at::Scalar& end",
+        "at::Scalar start(0), step(1);",
+        "end.isFloatingPoint()",
+    ),
+    "arange.start": (
+        "const at::Scalar& start, const at::Scalar& end",
+        "at::Scalar step(1);",
+        "start.isFloatingPoint() || end.isFloatingPoint()",
+    ),
+    "arange.start_step": (
+        "const at::Scalar& start, const at::Scalar& end, const at::Scalar& step",
+        "",
+        "start.isFloatingPoint() || end.isFloatingPoint() || step.isFloatingPoint()",
+    ),
+}
+
+# zero_ / fill_ / masked_fill_ are the in-place writes the rest of the stack is
+# built out of, and the two ATen factories decompose straight into them: on a
+# non-CPU device torch.zeros / torch.ones / torch.full are empty(...) followed by
+# zero_() or fill_(...), so a cpu_fallback here turns every factory call in a
+# model into a device->host->device round trip -- and it copies a tensor that is
+# still uninitialized at that point. A Qwen-Image denoise step issues ~1150 of
+# them. topsatenZero / topsatenFill_ / topsatenMasked_fill write through the
+# existing buffer, so the cost collapses to one launch.
+#
+# These are in-place, so unlike the out-of-place categories there is no output
+# tensor to allocate, and the unsupported-dtype path has nowhere to put a host
+# result except back into self. self.cpu() is a plain CPU tensor, so the method
+# call on it runs the CPU kernel instead of re-entering this one.
+#
+# numel() == 0 short-circuits: topsaten rejects rank-0 and empty shapes, and the
+# host path would round-trip nothing.
+T_ZERO_INPLACE = """\
+at::Tensor& {kernel}(at::Tensor& self) {{
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous()) {{
+    auto host = self.cpu();
+    host.zero_();
+    self.copy_(host);
+    return self;
+  }}
+  gcu::TopsatenTensorWrapper t_self(self);
+  EXEC_TOPSATEN_CMD({tops}, self, t_self.get());
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+T_FILL_INPLACE_SCALAR = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& value) {{
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous()) {{
+    auto host = self.cpu();
+    host.fill_(value);
+    self.copy_(host);
+    return self;
+  }}
+  auto t_value = gcu::ToTopsatenScalar(value, self.scalar_type());
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  EXEC_TOPSATEN_CMD({tops}, self, t_self.get(), t_value);
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# The Tensor overload is how a Python number reaches the op (PyTorch wraps the
+# operand into a 0-dim CPU tensor), so `value` may be a host tensor and is moved
+# onto self's device and dtype first. topsaten has no rank-0 support, which is
+# also why the 1-element reshape is not optional.
+T_FILL_INPLACE_TENSOR = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& value) {{
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || value.numel() != 1) {{
+    auto host = self.cpu();
+    host.fill_(value.cpu());
+    self.copy_(host);
+    return self;
+  }}
+  auto value_c = value.to(self.device(), self.scalar_type()).reshape({{1}});
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_value(value_c);
+  EXEC_TOPSATEN_CMD({tops}, self, t_self.get(), t_value.get());
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+T_MASKED_FILL_INPLACE_SCALAR = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& mask, const at::Scalar& value) {{
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || mask.scalar_type() != at::kBool) {{
+    auto host = self.cpu();
+    host.masked_fill_(mask.cpu(), value);
+    self.copy_(host);
+    return self;
+  }}
+  auto mask_c = mask.to(self.device()).contiguous();
+  auto t_value = gcu::ToTopsatenScalar(value, self.scalar_type());
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_mask(mask_c);
+  EXEC_TOPSATEN_CMD({tops}, self, t_self.get(), t_self.get(), t_mask.get(), t_value);
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+T_MASKED_FILL_INPLACE_TENSOR = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& mask, const at::Tensor& value) {{
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || mask.scalar_type() != at::kBool ||
+      value.numel() != 1) {{
+    auto host = self.cpu();
+    host.masked_fill_(mask.cpu(), value.cpu());
+    self.copy_(host);
+    return self;
+  }}
+  auto mask_c = mask.to(self.device()).contiguous();
+  auto value_c = value.to(self.device(), self.scalar_type()).reshape({{1}});
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_mask(mask_c);
+  gcu::TopsatenTensorWrapper t_value(value_c);
+  EXEC_TOPSATEN_CMD({tops}, self, t_self.get(), t_self.get(), t_mask.get(), t_value.get());
+  return self;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
@@ -1603,6 +2146,8 @@ CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
     "binary_alpha": T_BINARY_ALPHA,
+    "binary_out": T_BINARY_OUT,
+    "binary_alpha_out": T_BINARY_ALPHA_OUT,
     "binary_cmp": T_BINARY_CMP,
     "binary_scalar": T_BINARY_SCALAR,
     "binary_scalar_alpha": T_BINARY_SCALAR_ALPHA,
@@ -1614,6 +2159,7 @@ CATEGORIES = {
     "reduce_dims_dtype": T_REDUCE_DIMS_DTYPE,
     "reduce_all_dtype": T_REDUCE_ALL_DTYPE,
     "reduce_dims_plain": T_REDUCE_DIMS_PLAIN,
+    "linalg_vector_norm": T_LINALG_VECTOR_NORM,
     "unary_int": T_UNARY_INT,
     "unary_dims": T_UNARY_DIMS,
     "clamp": T_CLAMP,
@@ -1621,6 +2167,12 @@ CATEGORIES = {
     "addmm_out": T_ADDMM_OUT,
     "cat": T_CAT,
     "full_like": T_FULL_LIKE,
+    "arange": T_ARANGE,
+    "zero_inplace": T_ZERO_INPLACE,
+    "fill_inplace_scalar": T_FILL_INPLACE_SCALAR,
+    "fill_inplace_tensor": T_FILL_INPLACE_TENSOR,
+    "masked_fill_inplace_scalar": T_MASKED_FILL_INPLACE_SCALAR,
+    "masked_fill_inplace_tensor": T_MASKED_FILL_INPLACE_TENSOR,
     "layer_norm": T_LAYER_NORM,
     "softmax_bwd": T_SOFTMAX_BWD,
     "binary_grad": T_BINARY_GRAD,
@@ -1659,10 +2211,13 @@ FILE_HEADER = """\
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/native/RangeUtils.h>
+#include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/linalg_vector_norm.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/native/ConvUtils.h>
@@ -1671,6 +2226,7 @@ FILE_HEADER = """\
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"
+#include "runtime/functions.h"
 
 namespace at::native::flagos {
 
@@ -1776,6 +2332,12 @@ def main():
                 continue
             covered.append((op, "handwritten", "handwritten"))
             continue
+        if op in METADATA_OPS:
+            if op not in wrappers:
+                skipped.append((op, "no wrapper in generated/register.inc"))
+                continue
+            covered.append((op, "metadata", "metadata"))
+            continue
         base = op.split(".")[0]
         tops = topsaten_name(base, override)
         if syms is not None and tops not in syms:
@@ -1786,6 +2348,9 @@ def main():
             continue
         fn, disp = schema_to_cpp_name(op)
         kernel = fn[:-2] + "KernelGcu"  # SqrtFn -> SqrtKernelGcu
+        # Only T_ARANGE's three instantiations read these; every other template
+        # ignores the extra keywords.
+        params, bind, dtype_infer = ARANGE_OVERLOADS.get(op, ("", "", ""))
         bodies.append(
             CATEGORIES[cat].format(
                 kernel=kernel,
@@ -1794,6 +2359,9 @@ def main():
                 disp=disp,
                 at_op=AT_OP_OVERRIDES.get(op, base),
                 promote_integral="true" if base == "sum" else "false",
+                params=params,
+                bind=bind,
+                dtype_infer=dtype_infer,
             )
         )
         covered.append((op, tops, cat))
@@ -1801,6 +2369,12 @@ def main():
     for op in sorted(HANDWRITTEN_OPS):
         if op in wrappers and not any(item[0] == op for item in covered):
             covered.append((op, "handwritten", "handwritten"))
+
+    # No kernel body: these emit an m.impl() only, so that
+    # csrc/aten/strided_ops.cc's kGcu registrations are reachable.
+    for op in sorted(METADATA_OPS):
+        if op in wrappers and not any(item[0] == op for item in covered):
+            covered.append((op, "strided_ops.cc", "metadata"))
 
     OUT_CC.parent.mkdir(parents=True, exist_ok=True)
     OUT_CC.write_text(FILE_HEADER + "\n".join(bodies) + FILE_FOOTER)
@@ -1810,12 +2384,17 @@ def main():
     )
     OUT_INC.write_text(INC_HEADER + impls)
 
-    print(f"[gen] {OUT_CC.relative_to(REPO)}  ({len(covered)} kernels)")
+    # `covered` is the PrivateUse1 coverage set. Only the generated categories
+    # carry a body in OUT_CC (and a foreach category emits several bodies per op,
+    # so this is the op count, not a function count); metadata ops live in
+    # strided_ops.cc and handwritten ones in their own translation unit.
+    generated = sum(1 for _, _, cat in covered if cat in CATEGORIES)
+    print(f"[gen] {OUT_CC.relative_to(REPO)}  ({generated} ops)")
     print(f"[gen] {OUT_INC.relative_to(REPO)}  ({len(covered)} m.impl lines)")
     by_cat = {}
     for op, tops, cat in covered:
         by_cat.setdefault(cat, []).append((op, tops))
-    for cat in CATEGORIES:
+    for cat in list(CATEGORIES) + ["metadata", "handwritten"]:
         items = by_cat.get(cat, [])
         if items:
             print(f"    [{cat}] {len(items)}")

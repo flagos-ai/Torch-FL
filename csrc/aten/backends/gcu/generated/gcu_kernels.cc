@@ -11,10 +11,13 @@
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/native/RangeUtils.h>
+#include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/linalg_vector_norm.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/native/ConvUtils.h>
@@ -23,6 +26,7 @@
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"
+#include "runtime/functions.h"
 
 namespace at::native::flagos {
 
@@ -579,6 +583,140 @@ at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
 
 REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kGcu, SubTensorKernelGcu)
 
+at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(
+      c10::canCast(at::result_type(self, other), out.scalar_type()),
+      "result type ",
+      at::result_type(self, other),
+      " can't be cast to the desired output type ",
+      out.scalar_type());
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+    auto host = at::mul(self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {
+      out.resize_(host.sizes());
+    }
+    out.copy_(host);
+    return out;
+  }
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto self_b = self_c.expand(out_shape).contiguous();
+  auto other_b = other_c.expand(out_shape).contiguous();
+  if (!out.sizes().equals(out_shape)) {
+    out.resize_(out_shape);
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::mul(self.cpu(), other.cpu()));
+    return out;
+  }
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenMul, out, t_out.get(), t_self.get(), t_other.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kGcu, MulOutKernelGcu)
+
+at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(
+      c10::canCast(at::result_type(self, other), out.scalar_type()),
+      "result type ",
+      at::result_type(self, other),
+      " can't be cast to the desired output type ",
+      out.scalar_type());
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+    auto host = at::add(self.cpu(), other.cpu(), alpha);
+    if (!out.sizes().equals(host.sizes())) {
+      out.resize_(host.sizes());
+    }
+    out.copy_(host);
+    return out;
+  }
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto self_b = self_c.expand(out_shape).contiguous();
+  auto other_b = other_c.expand(out_shape).contiguous();
+  if (!out.sizes().equals(out_shape)) {
+    out.resize_(out_shape);
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::add(self.cpu(), other.cpu(), alpha));
+    return out;
+  }
+  auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenAdd, out, t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kGcu, AddOutKernelGcu)
+
+at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(
+      c10::canCast(at::result_type(self, other), out.scalar_type()),
+      "result type ",
+      at::result_type(self, other),
+      " can't be cast to the desired output type ",
+      out.scalar_type());
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+    auto host = at::sub(self.cpu(), other.cpu(), alpha);
+    if (!out.sizes().equals(host.sizes())) {
+      out.resize_(host.sizes());
+    }
+    out.copy_(host);
+    return out;
+  }
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto self_b = self_c.expand(out_shape).contiguous();
+  auto other_b = other_c.expand(out_shape).contiguous();
+  if (!out.sizes().equals(out_shape)) {
+    out.resize_(out_shape);
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::sub(self.cpu(), other.cpu(), alpha));
+    return out;
+  }
+  auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenSub, out, t_out.get(), t_self.get(), t_other.get(), t_alpha);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kGcu, SubOutKernelGcu)
+
 at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(other.scalar_type())) {
@@ -1026,6 +1164,14 @@ at::Tensor BmmKernelGcu(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kGcu, BmmKernelGcu)
 
 at::Tensor& MmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  auto result_dtype = at::result_type(self, mat2);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, out.scalar_type()),
+      "result type ",
+      result_dtype,
+      " can't be cast to the desired output type ",
+      out.scalar_type());
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat2.scalar_type())) {
     out.copy_(at::mm(self.cpu(), mat2.cpu()));
@@ -1035,6 +1181,11 @@ at::Tensor& MmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::T
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::mm(self.cpu(), mat2.cpu()));
+    return out;
   }
 
   gcu::TopsatenTensorWrapper t_self(self);
@@ -1047,6 +1198,14 @@ at::Tensor& MmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::T
 REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kGcu, MmOutKernelGcu)
 
 at::Tensor& BmmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  auto result_dtype = at::result_type(self, mat2);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, out.scalar_type()),
+      "result type ",
+      result_dtype,
+      " can't be cast to the desired output type ",
+      out.scalar_type());
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat2.scalar_type())) {
     out.copy_(at::bmm(self.cpu(), mat2.cpu()));
@@ -1056,6 +1215,11 @@ at::Tensor& BmmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::
   out_shape.back() = mat2.size(-1);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::bmm(self.cpu(), mat2.cpu()));
+    return out;
   }
 
   gcu::TopsatenTensorWrapper t_self(self);
@@ -1275,6 +1439,54 @@ at::Tensor AminKernelGcu(
 
 REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kGcu, AminKernelGcu)
 
+at::Tensor LinalgVectorNormKernelGcu(
+    const at::Tensor& self,
+    const at::Scalar& ord,
+    at::OptionalIntArrayRef dim,
+    bool keepdim,
+    ::std::optional<at::ScalarType> dtype) {
+  auto out_dtype = dtype.value_or(self.scalar_type());
+  if (self.scalar_type() != at::kFloat ||
+      !gcu::TopsatenSupportsDtype(out_dtype) ||
+      !self.is_contiguous() || self.numel() == 0) {
+    return at::linalg_vector_norm(self.cpu(), ord, dim, keepdim, dtype).to(self.device());
+  }
+  int64_t ndim = self.dim();
+  std::vector<int64_t> reduce_dims;
+  if (dim.has_value() && !dim.value().empty()) {
+    for (int64_t d : dim.value()) reduce_dims.push_back(d < 0 ? d + ndim : d);
+  } else {
+    for (int64_t d = 0; d < ndim; ++d) reduce_dims.push_back(d);
+  }
+
+  auto out_shape = self.sizes().vec();
+  std::vector<int64_t> sorted_dims(reduce_dims);
+  std::sort(sorted_dims.rbegin(), sorted_dims.rend());
+  for (int64_t d : sorted_dims) {
+    if (keepdim) out_shape[d] = 1;
+    else out_shape.erase(out_shape.begin() + d);
+  }
+  // The buffer the vendor writes is the keepdim=true shape; out_shape is what
+  // ATen promises and is reached by a (metadata-only) reshape.
+  auto kept_shape = self.sizes().vec();
+  for (int64_t d : reduce_dims) kept_shape[d] = 1;
+
+  auto self_c = self.scalar_type() == out_dtype ? self : self.to(out_dtype);
+  auto out = at::empty(kept_shape, self.options().dtype(out_dtype));
+  gcu::TopsatenSizeWrapper t_dims(reduce_dims);
+  // `ord` is a real order (2 for F.normalize, +/-inf for max/min norms), so it
+  // is staged as a float whatever integral form the Python caller passed.
+  auto t_ord = gcu::ToTopsatenScalar(ord, at::kFloat);
+
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenLinalgVectorNorm, self, t_out.get(), t_self.get(), t_ord, t_dims.get(),
+      true, gcu::ToTopsatenDataType(out_dtype));
+  return out.reshape(out_shape);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, Backend::kGcu, LinalgVectorNormKernelGcu)
+
 at::Tensor TrilKernelGcu(const at::Tensor& self, int64_t k) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
     return at::tril(self.cpu(), k).to(self.device());
@@ -1417,6 +1629,14 @@ at::Tensor& AddmmOutKernelGcu(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  auto result_dtype = c10::promoteTypes(at::result_type(self, mat1), mat2.scalar_type());
+  TORCH_CHECK(
+      c10::canCast(result_dtype, out.scalar_type()),
+      "result type ",
+      result_dtype,
+      " can't be cast to the desired output type ",
+      out.scalar_type());
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat1.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(mat2.scalar_type())) {
@@ -1431,6 +1651,11 @@ at::Tensor& AddmmOutKernelGcu(
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
+  }
+  if (out.scalar_type() != result_dtype || !out.is_contiguous() ||
+      out.device() != self.device()) {
+    out.copy_(at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha));
+    return out;
   }
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -1579,6 +1804,258 @@ at::Tensor OnesLikeKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(OnesLikeFn, ones_like_dispatcher, Backend::kGcu, OnesLikeKernelGcu)
+
+at::Tensor ArangeKernelGcu(
+    const at::Scalar& end,
+    ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
+    ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  at::Scalar start(0), step(1);
+  auto out_dtype = dtype.value_or(end.isFloatingPoint()
+      ? at::typeMetaToScalarType(at::get_default_dtype())
+      : at::kLong);
+  // An absent (or index-less) device means the current one, exactly as
+  // csrc/aten/backends/flagos/python_op_caller.cc resolves it for the other
+  // factories: naming index 0 here would allocate on device 0 while the op runs
+  // on the current device, which on GCU is a silent cross-device write.
+  auto target = (device.has_value() && device->has_index())
+      ? *device
+      : at::Device(at::kPrivateUse1, static_cast<int>(c10::flagos::CurrentDevice()));
+  TORCH_CHECK(
+      target.is_privateuseone(), "arange on GCU requires a flagos device, got ", target);
+  // Same contract as at::empty on a device (csrc/aten/empty.cc).
+  TORCH_CHECK(
+      !pin_memory.value_or(false), "Pin memory can only be on CPU");
+
+  auto length = out_dtype == at::kLong
+      ? at::native::compute_arange_size<int64_t>(start, end, step)
+      : at::native::compute_arange_size<double>(start, end, step);
+
+  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+      layout.value_or(at::kStrided) != at::kStrided || length == 0) {
+    // Built with at::kCPU and the caller's layout, so the call lands on the CPU
+    // kernel (which re-raises for a non-strided layout the same way ATen does)
+    // instead of re-entering this one.
+    auto host = at::arange(start, end, step, out_dtype, layout, at::kCPU, false);
+    return host.to(target);
+  }
+
+  auto out = at::empty(
+      {length},
+      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenArange, out, t_out.get(), t_start, t_end, t_step,
+      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kGcu, ArangeKernelGcu)
+
+at::Tensor ArangeStartKernelGcu(
+    const at::Scalar& start, const at::Scalar& end,
+    ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
+    ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  at::Scalar step(1);
+  auto out_dtype = dtype.value_or(start.isFloatingPoint() || end.isFloatingPoint()
+      ? at::typeMetaToScalarType(at::get_default_dtype())
+      : at::kLong);
+  // An absent (or index-less) device means the current one, exactly as
+  // csrc/aten/backends/flagos/python_op_caller.cc resolves it for the other
+  // factories: naming index 0 here would allocate on device 0 while the op runs
+  // on the current device, which on GCU is a silent cross-device write.
+  auto target = (device.has_value() && device->has_index())
+      ? *device
+      : at::Device(at::kPrivateUse1, static_cast<int>(c10::flagos::CurrentDevice()));
+  TORCH_CHECK(
+      target.is_privateuseone(), "arange on GCU requires a flagos device, got ", target);
+  // Same contract as at::empty on a device (csrc/aten/empty.cc).
+  TORCH_CHECK(
+      !pin_memory.value_or(false), "Pin memory can only be on CPU");
+
+  auto length = out_dtype == at::kLong
+      ? at::native::compute_arange_size<int64_t>(start, end, step)
+      : at::native::compute_arange_size<double>(start, end, step);
+
+  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+      layout.value_or(at::kStrided) != at::kStrided || length == 0) {
+    // Built with at::kCPU and the caller's layout, so the call lands on the CPU
+    // kernel (which re-raises for a non-strided layout the same way ATen does)
+    // instead of re-entering this one.
+    auto host = at::arange(start, end, step, out_dtype, layout, at::kCPU, false);
+    return host.to(target);
+  }
+
+  auto out = at::empty(
+      {length},
+      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenArange, out, t_out.get(), t_start, t_end, t_step,
+      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kGcu, ArangeStartKernelGcu)
+
+at::Tensor ArangeStartStepKernelGcu(
+    const at::Scalar& start, const at::Scalar& end, const at::Scalar& step,
+    ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
+    ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  
+  auto out_dtype = dtype.value_or(start.isFloatingPoint() || end.isFloatingPoint() || step.isFloatingPoint()
+      ? at::typeMetaToScalarType(at::get_default_dtype())
+      : at::kLong);
+  // An absent (or index-less) device means the current one, exactly as
+  // csrc/aten/backends/flagos/python_op_caller.cc resolves it for the other
+  // factories: naming index 0 here would allocate on device 0 while the op runs
+  // on the current device, which on GCU is a silent cross-device write.
+  auto target = (device.has_value() && device->has_index())
+      ? *device
+      : at::Device(at::kPrivateUse1, static_cast<int>(c10::flagos::CurrentDevice()));
+  TORCH_CHECK(
+      target.is_privateuseone(), "arange on GCU requires a flagos device, got ", target);
+  // Same contract as at::empty on a device (csrc/aten/empty.cc).
+  TORCH_CHECK(
+      !pin_memory.value_or(false), "Pin memory can only be on CPU");
+
+  auto length = out_dtype == at::kLong
+      ? at::native::compute_arange_size<int64_t>(start, end, step)
+      : at::native::compute_arange_size<double>(start, end, step);
+
+  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+      layout.value_or(at::kStrided) != at::kStrided || length == 0) {
+    // Built with at::kCPU and the caller's layout, so the call lands on the CPU
+    // kernel (which re-raises for a non-strided layout the same way ATen does)
+    // instead of re-entering this one.
+    auto host = at::arange(start, end, step, out_dtype, layout, at::kCPU, false);
+    return host.to(target);
+  }
+
+  auto out = at::empty(
+      {length},
+      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenArange, out, t_out.get(), t_start, t_end, t_step,
+      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kGcu, ArangeStartStepKernelGcu)
+
+at::Tensor& ZeroInplaceKernelGcu(at::Tensor& self) {
+  if (self.numel() == 0) {
+    return self;
+  }
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous()) {
+    auto host = self.cpu();
+    host.zero_();
+    self.copy_(host);
+    return self;
+  }
+  gcu::TopsatenTensorWrapper t_self(self);
+  EXEC_TOPSATEN_CMD(topsatenZero, self, t_self.get());
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kGcu, ZeroInplaceKernelGcu)
+
+at::Tensor& FillInplaceScalarKernelGcu(at::Tensor& self, const at::Scalar& value) {
+  if (self.numel() == 0) {
+    return self;
+  }
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous()) {
+    auto host = self.cpu();
+    host.fill_(value);
+    self.copy_(host);
+    return self;
+  }
+  auto t_value = gcu::ToTopsatenScalar(value, self.scalar_type());
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  EXEC_TOPSATEN_CMD(topsatenFill_, self, t_self.get(), t_value);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kGcu, FillInplaceScalarKernelGcu)
+
+at::Tensor& FillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor& value) {
+  if (self.numel() == 0) {
+    return self;
+  }
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || value.numel() != 1) {
+    auto host = self.cpu();
+    host.fill_(value.cpu());
+    self.copy_(host);
+    return self;
+  }
+  auto value_c = value.to(self.device(), self.scalar_type()).reshape({1});
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_value(value_c);
+  EXEC_TOPSATEN_CMD(topsatenFill_, self, t_self.get(), t_value.get());
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FillInplaceTensorFn, fill_inplace_tensor_dispatcher, Backend::kGcu, FillInplaceTensorKernelGcu)
+
+at::Tensor& MaskedFillInplaceScalarKernelGcu(at::Tensor& self, const at::Tensor& mask, const at::Scalar& value) {
+  if (self.numel() == 0) {
+    return self;
+  }
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || mask.scalar_type() != at::kBool) {
+    auto host = self.cpu();
+    host.masked_fill_(mask.cpu(), value);
+    self.copy_(host);
+    return self;
+  }
+  auto mask_c = mask.to(self.device()).contiguous();
+  auto t_value = gcu::ToTopsatenScalar(value, self.scalar_type());
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_mask(mask_c);
+  EXEC_TOPSATEN_CMD(topsatenMasked_fill, self, t_self.get(), t_self.get(), t_mask.get(), t_value);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceScalarFn, masked_fill_inplace_scalar_dispatcher, Backend::kGcu, MaskedFillInplaceScalarKernelGcu)
+
+at::Tensor& MaskedFillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor& mask, const at::Tensor& value) {
+  if (self.numel() == 0) {
+    return self;
+  }
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !self.is_contiguous() || mask.scalar_type() != at::kBool ||
+      value.numel() != 1) {
+    auto host = self.cpu();
+    host.masked_fill_(mask.cpu(), value.cpu());
+    self.copy_(host);
+    return self;
+  }
+  auto mask_c = mask.to(self.device()).contiguous();
+  auto value_c = value.to(self.device(), self.scalar_type()).reshape({1});
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_mask(mask_c);
+  gcu::TopsatenTensorWrapper t_value(value_c);
+  EXEC_TOPSATEN_CMD(topsatenMasked_fill, self, t_self.get(), t_self.get(), t_mask.get(), t_value.get());
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tensor_dispatcher, Backend::kGcu, MaskedFillInplaceTensorKernelGcu)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelGcu(
     const at::Tensor& input,
