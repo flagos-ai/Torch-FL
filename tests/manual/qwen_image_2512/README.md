@@ -176,9 +176,13 @@ Enflame GCU is the measured case of a chip that cannot take it. `topsaten` has
 no complex kernel at all, so the vendor run reaches `topsatenMul`/`topsatenCos`
 with a `ComplexFloat` operand and the process dies on
 `TOPSATEN_STATUS_NOT_SUPPORT` — not a Python exception, which is why §7's table
-cannot catch it. On the flagos run the two `view_as_complex`/`view_as_real`
-calls survive only by leaving `cpu_fallback` to bridge them, which is 24,000 and
-120,000 host round trips per image at §6.1's layout.
+cannot catch it. The flagos leg used to survive the same rotation by leaving the
+two `view_as_complex`/`view_as_real` calls to `cpu_fallback`, which is 24,000 and
+120,000 host round trips per image at §6.1's layout; on this build they have
+native `gcu` kernels instead (the complex-view entry in
+`docs/reference/operator-support.md`), so the complex path is served on the
+accelerator and the switch is no longer the difference between a fast and a slow
+run.
 
 `QWEN_IMAGE_REAL_ROPE=1` turns on the workaround: `common.import_torch` registers
 the running device type in diffusers' own `ROPE_PER_DEVICE` table and points
@@ -187,9 +191,34 @@ provides for exactly this case. `apply_rotary_emb_qwen_neuron` is numerically th
 same rotation the complex path performs, so this is not a numerical shortcut.
 
 It is off by default, and should be reported both ways when it is on, because it
-changes what the run measures — with it off, the census shows the
-`view_as_complex`/`view_as_real` fallback traffic; with it on, the rotation is
-real-valued on the accelerator and those calls disappear.
+changes what the run measures — with it off, the census carries the
+`view_as_complex`/`view_as_real` traffic; with it on, the rotation is real-valued
+on the accelerator and those calls disappear.
+
+Measured on an S60 (2026-09-18), flagos transformer over `flagos:6,7`, encoder and
+VAE on `flagos:3`, 1024x1024, 3 steps, seed 42, and the same paired prompt embeds
+and initial latents on both sides:
+
+| | `QWEN_IMAGE_REAL_ROPE=0` | `QWEN_IMAGE_REAL_ROPE=1` |
+| --- | --- | --- |
+| dispatch records (3 steps) | 42,336 | 48,096 |
+| — native `gcu` | 31,774 | 37,534 |
+| — FlagGems (`flagos_python`) | 10,562 | 10,562 |
+| `view_as_complex` calls | 1,440 | **0** |
+| `view_as_real` calls | 1,440 | **0** |
+| `cpu_fallback` | 0 | 0 |
+
+So the switch does what the census claim above says: 2,880 view calls are replaced
+by 5,760 further `gcu` calls, which is the angle path's explicit `cos`/`sin` and
+the multiplies they need, and the FlagGems count is untouched. Both images were
+then compared (`run.sh compare`): `MAE 2.02/255`, `PSNR 33.86 dB` over the three
+steps. The two paths reorder the same rotation rather than computing different
+ones, so they are close but not bit-identical, and a diffusion loop amplifies the
+residue; at 50 steps that is the same order as the difference between two
+backends at all (§5). Neither side reached `cpu_fallback`: on this build
+`view_as_complex` and `view_as_real` have native `gcu` kernels of their own, so
+the complex path no longer costs host round trips either — the switch now buys
+call count, not a fallback.
 
 A vendor run takes the same switch, because the registration is keyed on
 `--device` rather than on the flagos backend: `torch_gcu` renames PrivateUse1 to
