@@ -8,6 +8,7 @@
 #include <torch/library.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/SDPBackend.h>
+#include <limits>
 
 // _fused_sdp_choice stub for PrivateUse1. PyTorch's scaled_dot_product_attention
 // queries _fused_sdp_choice_stub via is_device_supported(PrivateUse1) to pick a
@@ -104,8 +105,9 @@ PrivScaledDotProductEfficientAttentionKernelAscend(
     next_tokens = 65536;
     // Generate causal mask on CPU then move to device
     // (ones/triu not registered for Ascend backend)
-    auto mask_2d = at::triu(at::ones({S, S}, at::TensorOptions().dtype(at::kBool)), 1);
-    atten_mask = mask_2d.unsqueeze(0).unsqueeze(0).to(query.device());  // [1,1,S,S]
+    auto mask_2d = at::triu(
+        at::ones({S, S_kv}, at::TensorOptions().dtype(at::kBool)), 1);
+    atten_mask = mask_2d.unsqueeze(0).unsqueeze(0).to(query.device());
   } else {
     sparse_mode = 0;  // full bidirectional
     pre_tokens = 65536;
@@ -113,9 +115,35 @@ PrivScaledDotProductEfficientAttentionKernelAscend(
     atten_mask = at::Tensor();  // null
   }
 
-  // Handle attn_bias (additive bias to attention scores)
+  // PyTorch boolean masks use True for allowed positions, while ACLNN consumes
+  // an exclusion mask. Additive attention bias is not a mask; keep rejecting it
+  // until the CANN realShift contract can be supported without semantic loss.
   if (attn_bias.has_value() && attn_bias->defined()) {
-    TORCH_CHECK(false, "SDPA Ascend: attn_bias not yet supported (TODO: merge with atten_mask)");
+    if (attn_bias->scalar_type() == at::kBool) {
+      auto bias_mask = at::logical_not(*attn_bias);
+      if (atten_mask.defined()) {
+        atten_mask = at::logical_or(atten_mask, bias_mask);
+      } else {
+        atten_mask = bias_mask;
+      }
+    } else {
+      // PyTorch lowers a public boolean allow-mask to an additive 0/-inf bias
+      // before calling this efficient-attention overload. Accept that exact
+      // representation, but do not reinterpret finite additive values as a
+      // mask because doing so changes softmax semantics.
+      auto is_zero = at::eq(*attn_bias, 0);
+      auto is_neg_inf = at::eq(
+          *attn_bias, -std::numeric_limits<double>::infinity());
+      auto is_mask_value = at::logical_or(is_zero, is_neg_inf);
+      TORCH_CHECK(is_mask_value.all().item<bool>(),
+                  "SDPA Ascend: finite additive attention bias is not yet "
+                  "supported");
+      if (atten_mask.defined()) {
+        atten_mask = at::logical_or(atten_mask, is_neg_inf);
+      } else {
+        atten_mask = is_neg_inf;
+      }
+    }
   }
 
   // Allocate output tensors
@@ -132,7 +160,7 @@ PrivScaledDotProductEfficientAttentionKernelAscend(
   AclTensorWrapper q_wrap(query);
   AclTensorWrapper k_wrap(key_eff);
   AclTensorWrapper v_wrap(value_eff);
-  AclTensorWrapper mask_wrap(is_causal ? atten_mask : at::Tensor());
+  AclTensorWrapper mask_wrap(atten_mask);
   AclTensorWrapper drop_mask_wrap(drop_mask);
   AclTensorWrapper softmax_max_wrap(softmax_max);
   AclTensorWrapper softmax_sum_wrap(softmax_sum);
