@@ -168,7 +168,7 @@ python -c "import torch_fl" 2>&1 | head -20   # names one op
 Build with the CUDA operator path on, since that is what codegen produces:
 
 ```bash
-FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON pip install -e . --no-build-isolation
+FLAGGEMS_CPP=OFF FLAGGEMS_KERNEL=OFF pip install -e . --no-build-isolation
 ```
 
 The generated C++ sources link against the CPU torch libraries, while CUDA

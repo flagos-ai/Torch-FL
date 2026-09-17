@@ -160,7 +160,7 @@ wanting nvcc, something has pulled in a real CUDA dependency and the scheme's ma
 benefit is gone.
 
 ```bash
-ACCELERATOR=<vendor> CUDA_KERNEL=ON FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF \
+ACCELERATOR=<vendor> FLAGGEMS_KERNEL=OFF FLAGGEMS_CPP=OFF \
   pip install -e . --no-build-isolation
 ```
 

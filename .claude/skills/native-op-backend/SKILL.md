@@ -168,8 +168,10 @@ Three edits outside the generator:
    kernel with no conf line never executes. The generator should rewrite a
    `# --- generated ---` block at the end of this file idempotently.
 3. **CMake** — generated sources under `csrc/aten/backends/<vendor>/` must be
-   excluded from other platforms' builds. Follow the Ascend pattern in
-   `csrc/CMakeLists.txt`: `if(NOT <VENDOR>_KERNEL) EXCLUDE ".*/aten/backends/<vendor>/.*"`.
+   excluded from other platforms' builds. They are covered by the generic
+   `VENDOR_KERNEL` gate in `csrc/CMakeLists.txt` (which keeps only the
+   `ACCELERATOR` vendor's directory): add `<vendor>` to its directory list,
+   no per-vendor switch needed.
 
 Registration and routing are **two separate mechanisms**. A kernel that is
 registered but unrouted is the most common "my kernel does nothing" cause; check
@@ -181,7 +183,7 @@ Per-operator CPU comparison is the only trustworthy check — a native kernel th
 returns plausible-looking wrong numbers is the characteristic failure of this path.
 
 ```bash
-ACCELERATOR=<vendor> <VENDOR>_KERNEL=1 CUDA_KERNEL=0 FLAGGEMS_KERNEL=0 \
+ACCELERATOR=<vendor> VENDOR_KERNEL=1 FLAGGEMS_CPP=0 \
   pip install -e . --no-build-isolation
 
 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_<vendor>.conf \
