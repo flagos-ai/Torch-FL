@@ -27,11 +27,9 @@ fake install tree (no real ACL device needed), and pin the regression this fix
 must not reintroduce: the marker branch runs *before* the /dev/davinci* branch,
 so whatever conf the /dev probe would have chosen, the marker must choose too.
 
-The per-platform FlagGems opt-in the marker originally had to replicate
-(FLAGOS_USE_FLAGGEMS=1 -> backends_ascend_flagos_py.conf) is gone: the generated
-backends_ascend.conf is now itself FlagGems-first, stating flaggems /
-flaggems_cpp / ascend / none per op, so there is one conf per platform and
-nothing left to opt into. The shadowing hazard remains worth pinning because the
+Retired opt-in variables must not divert the selection to a second conf:
+backends_ascend.conf is now the only Ascend conf and already states the
+FlagGems-first routing. The shadowing hazard remains worth pinning because the
 branch order that caused it is unchanged.
 """
 
@@ -54,7 +52,6 @@ def fake_ascend_install(tmp_path, monkeypatch):
 
     monkeypatch.setattr(torch_fl, "__file__", str(tmp_path / "__init__.py"))
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
-    monkeypatch.delenv("FLAGOS_USE_FLAGGEMS", raising=False)
     monkeypatch.delenv("FLAGOS_USE_FLAGGEMS_CPP", raising=False)
     monkeypatch.delenv("FLAGOS_USE_TILEOPS", raising=False)
     monkeypatch.delenv("FLAGOS_METAX_BOXING", raising=False)
@@ -67,16 +64,13 @@ def test_ascend_marker_selects_native_conf_by_default(fake_ascend_install):
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
 
 
-@pytest.mark.parametrize("env", ["FLAGOS_USE_FLAGGEMS", "FLAGOS_USE_VENDOR_OPS"])
-def test_ascend_marker_ignores_retired_opt_in_vars(
-    monkeypatch, fake_ascend_install, env
-):
-    """The old per-platform opt-in vars are retained as no-ops for backward
-    compat. Setting one must not divert the selection to a second conf, since
+def test_ascend_marker_ignores_retired_opt_in_var(monkeypatch, fake_ascend_install):
+    """The old per-platform opt-in var is retained as a no-op for backward
+    compat. Setting it must not divert the selection to a second conf, since
     backends_ascend.conf is now the only Ascend conf and already states the
-    FlagGems-first routing those vars used to switch between."""
+    FlagGems-first routing it used to switch between."""
     conf_dir = fake_ascend_install
-    monkeypatch.setenv(env, "1")
+    monkeypatch.setenv("FLAGOS_USE_VENDOR_OPS", "1")
     torch_fl._select_backend_config()
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
 
