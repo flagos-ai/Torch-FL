@@ -9,6 +9,85 @@
 
 namespace at::native::flagos {
 
+namespace {
+
+at::Tensor IndexBoolMaskAscend(const at::Tensor& self,
+                               const at::Tensor& mask,
+                               int64_t indexed_dim) {
+  namespace ascend = at::native::flagos::ascend;
+
+  TORCH_CHECK(mask.scalar_type() == at::kBool,
+              "index: boolean mask must have dtype bool");
+  TORCH_CHECK(mask.dim() > 0,
+              "index: boolean mask must have at least one dimension");
+  TORCH_CHECK(indexed_dim + mask.dim() <= self.dim(),
+              "too many indices for tensor of dimension ", self.dim());
+  for (int64_t i = 0; i < mask.dim(); ++i) {
+    TORCH_CHECK(
+        mask.size(i) == self.size(indexed_dim + i),
+        "The shape of the mask ", mask.sizes(), " at index ", i,
+        " does not match the shape of the indexed tensor ", self.sizes(),
+        " at index ", indexed_dim + i);
+  }
+
+  auto contiguous_mask = mask.contiguous();
+  int64_t selected = contiguous_mask.to(at::kLong).sum().item<int64_t>();
+
+  // aclnnIndex consumes indexed dimensions from the front. Move the dimensions
+  // covered by the boolean mask there, followed by the untouched leading and
+  // trailing dimensions.
+  std::vector<int64_t> perm;
+  perm.reserve(self.dim());
+  for (int64_t i = 0; i < mask.dim(); ++i) {
+    perm.push_back(indexed_dim + i);
+  }
+  for (int64_t i = 0; i < indexed_dim; ++i) {
+    perm.push_back(i);
+  }
+  for (int64_t i = indexed_dim + mask.dim(); i < self.dim(); ++i) {
+    perm.push_back(i);
+  }
+
+  auto src = indexed_dim == 0 ? self : self.permute(perm).contiguous();
+  std::vector<int64_t> acl_out_sizes{selected};
+  for (int64_t i = mask.dim(); i < src.dim(); ++i) {
+    acl_out_sizes.push_back(src.size(i));
+  }
+  auto acl_out = ascend::OpPreparation::apply_tensor_without_format(
+      acl_out_sizes, self.options());
+
+  std::vector<ascend::AclTensorWrapper> acl_indices_storage;
+  acl_indices_storage.emplace_back(contiguous_mask);
+  std::vector<const aclTensor*> acl_indices_ptrs{
+      acl_indices_storage.front().get()};
+  ascend::AclTensorListWrapper acl_indices(acl_indices_ptrs);
+  ascend::AclTensorWrapper acl_src(src);
+  ascend::AclTensorWrapper acl_result(acl_out);
+
+  EXEC_ASCEND_CMD(
+      aclnnIndex, acl_src.get(), acl_indices.get(), acl_result.get());
+  acl_indices.release();
+
+  if (indexed_dim == 0) {
+    return acl_out;
+  }
+
+  // aclnnIndex returns [selected, leading..., trailing...]. Restore the
+  // PyTorch order [leading..., selected, trailing...].
+  std::vector<int64_t> out_perm;
+  out_perm.reserve(acl_out.dim());
+  for (int64_t i = 1; i <= indexed_dim; ++i) {
+    out_perm.push_back(i);
+  }
+  out_perm.push_back(0);
+  for (int64_t i = indexed_dim + 1; i < acl_out.dim(); ++i) {
+    out_perm.push_back(i);
+  }
+  return acl_out.permute(out_perm).contiguous();
+}
+
+} // namespace
+
 at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
                                    const c10::List<::std::optional<at::Tensor>>& indices) {
   namespace ascend = at::native::flagos::ascend;
@@ -25,6 +104,24 @@ at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
   }
 
   TORCH_CHECK(!defined_indices.empty(), "index: expected at least one index tensor");
+
+  size_t bool_index_count = 0;
+  size_t bool_index_offset = 0;
+  for (size_t i = 0; i < defined_indices.size(); ++i) {
+    if (defined_indices[i].scalar_type() == at::kBool) {
+      ++bool_index_count;
+      bool_index_offset = i;
+    }
+  }
+  if (bool_index_count > 0) {
+    TORCH_CHECK(
+        defined_indices.size() == 1 && bool_index_count == 1,
+        "index: mixing a boolean mask with other advanced indices is not yet "
+        "supported by the Ascend kernel");
+    return IndexBoolMaskAscend(
+        self, defined_indices[bool_index_offset],
+        defined_positions[bool_index_offset]);
+  }
 
   // Compute broadcast shape of all index tensors
   std::vector<int64_t> broadcast_shape = defined_indices[0].sizes().vec();

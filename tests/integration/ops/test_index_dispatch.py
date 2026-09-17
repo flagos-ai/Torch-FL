@@ -16,13 +16,52 @@
 
 import pytest
 import torch
-import torch_fl  # noqa: F401
 
+import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
 
 class TestIndexTensor:
+    @pytest.mark.ascend
+    @pytest.mark.parametrize(
+        "mask",
+        (
+            torch.tensor([True, False, True, False]),
+            torch.tensor([False, False, False, False]),
+        ),
+    )
+    def test_bool_mask(self, mask):
+        q_cpu = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+        q = q_cpu.to(DEVICE)
+
+        actual = q[mask.to(DEVICE)].cpu()
+        expected = q_cpu[mask]
+
+        torch.testing.assert_close(actual, expected)
+
+    @pytest.mark.ascend
+    def test_multidimensional_bool_mask(self):
+        q_cpu = torch.arange(15, dtype=torch.float32).reshape(1, 5, 3)
+        mask_cpu = torch.tensor([[True, False, True, False, True]])
+        q = q_cpu.to(DEVICE)
+
+        actual = q[mask_cpu.to(DEVICE)].cpu()
+        expected = q_cpu[mask_cpu]
+
+        torch.testing.assert_close(actual, expected)
+
+    @pytest.mark.ascend
+    def test_nonleading_bool_mask(self):
+        q_cpu = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+        mask_cpu = torch.tensor([True, False, True, False])
+        q = q_cpu.to(DEVICE)
+
+        actual = q[:, mask_cpu.to(DEVICE)].cpu()
+        expected = q_cpu[:, mask_cpu]
+
+        torch.testing.assert_close(actual, expected)
+
     @pytest.mark.anyplatform
     def test_cpu_index(self):
         q_cpu = torch.arange(24, dtype=torch.float32).reshape(4, 6)
