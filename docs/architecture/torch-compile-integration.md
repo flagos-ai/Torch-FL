@@ -430,7 +430,7 @@ FLAGOS_USE_FLAGTREE=1 python tests/perf/bench_compile.py
 | `FLAGOS_USE_FLAGTREE` | `0` | Require the active triton to be FlagTree (assert, not switch) |
 | `FLAGOS_COMPILE_FALLBACK_EAGER` | `0` | Fall back to eager on compile errors |
 
-Existing dispatch variables (`FLAGOS_USE_FLAGGEMS`, `FLAGOS_BACKEND_CONFIG`) still apply to compiled kernels.
+Existing dispatch variables (`FLAGOS_BACKEND_CONFIG`) still apply to compiled kernels.
 
 ## Troubleshooting
 

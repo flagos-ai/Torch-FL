@@ -100,20 +100,24 @@ integration_tests:
       print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
       print(f"torch_fl: {torch_fl.__file__}")
       PY
+  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
+  # cases are measured by the group below, not here (no switch exists any more
+  # to skip them -- see ops/conftest.py).
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops" -v -s --tb=short
+  # `and not flaggems` here for the same reason: the multinomial case is
+  # measured in the FlagGems group above, where it belongs.
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
   - name: Unified AMP contract

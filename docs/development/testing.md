@@ -28,7 +28,7 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped when `FLAGOS_METAX_BOXING=1` |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
-| `flaggems` | Requires FlagGems runtime path on (`FLAGOS_USE_FLAGGEMS=1`) | Tests asserting `-> flagos_python` or vendor-fallback routing |
+| `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
 | `flaggems_python` | Requires FlagGems Python wrapper backend | Tests checking Python-layer integration (dispatch overhead, GIL behavior) |
 | `flaggems_cpp` | Requires FlagGems C++ runtime (`FLAGOS_USE_FLAGGEMS_CPP=1` + wheel built with `FLAGGEMS_KERNEL=ON`) | Tests asserting `-> kFlagOs` (C++) dispatch |
 
@@ -79,10 +79,10 @@ Run only main operators (CI smoke subset):
 pytest tests/integration/ops/ -m main_ops -v
 ```
 
-Run FlagGems-routed operators (requires `FLAGOS_USE_FLAGGEMS=1`):
+Run FlagGems-routed operators:
 
 ```bash
-FLAGOS_USE_FLAGGEMS=1 pytest tests/integration/ops/ -m "flaggems and main_ops" -v
+pytest tests/integration/ops/ -m "flaggems and main_ops" -v
 ```
 
 Run FlagGems C++ operators (requires `FLAGGEMS_KERNEL=ON` build + `FLAGOS_USE_FLAGGEMS_CPP=1`):

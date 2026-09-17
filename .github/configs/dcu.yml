@@ -61,11 +61,10 @@ integration_wheel_source: local-build
 # mount and the first CI run confirms the card count.
 #
 # FlagTree (the DTK triton build carrying the hcu backend) and FlagGems are
-# provisioned by set_env_dcu.sh and enabled by default: the script installs both,
-# exports FLAGOS_USE_FLAGGEMS=1 through $GITHUB_ENV, and refuses to continue if
-# the hcu backend or the hygon vendor is not what the process actually resolved.
-# No group below re-enables the path inline -- what runs here is what a stock DCU
-# install gets.
+# provisioned by set_env_dcu.sh, and FlagGems-first routing comes from
+# backends_dcu.conf itself -- no switch involved. What runs here is what a
+# stock DCU install gets: the script refuses to continue if the hcu backend
+# or the hygon vendor is not what the process actually resolved.
 integration_tests:
   - name: Check device availability
     command: |

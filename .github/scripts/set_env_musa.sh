@@ -90,7 +90,6 @@ export GCU_KERNEL=0
 # FLAGGEMS_KERNEL=ON at build time and are not yet available.
 export FLAGGEMS_KERNEL=0
 export FLAGGEMS_PYTHON=1
-export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 # MUSA bundles no libtorch_cuda.so and the toolkit exports no cuda symbols, so
 # the CUDA asset preload has nothing to open.
@@ -377,7 +376,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR MUSA_HOME \
     MUSA_KERNEL CUDA_KERNEL METAX_KERNEL ASCEND_KERNEL GCU_KERNEL \
-    FLAGGEMS_KERNEL FLAGGEMS_PYTHON FLAGOS_USE_FLAGGEMS \
+    FLAGGEMS_KERNEL FLAGGEMS_PYTHON \
     FLAGOS_USE_FLAGGEMS_CPP FLAGOS_DISABLE_CUDA_ASSETS \
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"

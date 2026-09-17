@@ -210,10 +210,9 @@ vendor declares `device_name="cuda"` — exactly what the boxing route expects. 
 kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
 `FLAGGEMS_KERNEL=0` and `FLAGGEMS_PYTHON=1` are the build switches.
 
-`.github/scripts/set_env_dcu.sh` performs all of the following and exports
-`FLAGOS_USE_FLAGGEMS=1` through `$GITHUB_ENV`, so a CI job runs the FlagGems path
-without re-enabling it inline. The steps below are what that script does, for a
-local install.
+`.github/scripts/set_env_dcu.sh` performs all of the following; routing comes from
+`backends_dcu.conf` itself, so a CI job runs the FlagGems path with no switch
+involved. The steps below are what that script does, for a local install.
 
 ### Step 1: Install FlagTree and FlagGems
 
@@ -249,13 +248,12 @@ ACCELERATOR=dcu \
 ### Step 3: Runtime Configuration
 
 ```bash
-export FLAGOS_USE_FLAGGEMS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 ```
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 
-A DCU build records `ACCELERATOR=dcu` in `torch_fl/_build_config.py`, so `FLAGOS_USE_FLAGGEMS=1` alone selects `backends_dcu.conf` — no need to re-export `ACCELERATOR` at runtime.
+A DCU build records `ACCELERATOR=dcu` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `ACCELERATOR` at runtime, and no opt-in variable exists any more.
 
 Confirm what the interpreter actually resolved before trusting the flags:
 
@@ -288,16 +286,12 @@ Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`.
 ### FlagGems Verification
 
 ```bash
-export FLAGOS_USE_FLAGGEMS=1
-
 pytest tests/integration/ops/ \
   -m "flaggems and main_ops" \
   -v --tb=short
 ```
 
-No marker deselection needed — `FLAGOS_USE_FLAGGEMS=1` is what makes
-`tests/integration/ops/conftest.py` collect the `flaggems`-marked items at all,
-so leaving it out silently deselects the whole group instead of failing it.
+No marker deselection needed — `tests/integration/ops/conftest.py` collects the `flaggems`-marked items unconditionally now, so leaving the mark out would silently deselect the whole group instead of failing it.
 
 ## Running the Unit Suite
 
@@ -387,7 +381,7 @@ environment resolve by import order.
 
 **Cause:** `hcu` Triton backend limitation or MIOpen interaction bug.
 
-**Expected behavior.** `backends_dcu.conf` already routes these ops to the cuda boxing kernel. If you see crashes, verify `FLAGOS_USE_FLAGGEMS=1` is set and the config is being selected.
+**Expected behavior.** `backends_dcu.conf` already routes these ops to the cuda boxing kernel. If you see crashes, verify the config is being selected (e.g. `FLAGOS_LOG_DISPATCH=1` and check the `[flagos dispatch]` lines).
 
 ### Multi-card: GPU VMFault or device-side hang
 

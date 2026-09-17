@@ -115,38 +115,32 @@ integration_tests:
   #
   # Measured on the eight-device C550 host on 2026-09-15: 113 passed, 28 skipped,
   # 1059 deselected, 1 xpassed.
+  #
+  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
+  # cases are measured by the group below, not here (no switch exists any more
+  # to skip them -- see ops/conftest.py).
   - name: Run operator tests (cuda boxing backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
-  # FLAGOS_USE_FLAGGEMS is set on this command line and deliberately nowhere else.
-  # It selects no conf on any platform any more -- routing is a property of the
-  # build (torch_fl/__init__.py:_select_backend_config) -- but it is still the
-  # gate tests/integration/ops/conftest.py:_flaggems_enabled reads, so without it
-  # every @pytest.mark.flaggems case records a skip instead of a result. The group
-  # above excludes those cases for exactly that reason; this is where they are
-  # measured, and the variable is scoped to this command so the rest of the suite
-  # does not turn into a second measurement of the switch.
-  #
-  # Each case asserts that a FlagGems-marked op dispatches to whatever the conf
-  # routes it to, through tests/integration/ops/backend_conf.py:routed_backend --
-  # never a hard-coded backend name, which would describe whichever platform the
-  # test was written on. That makes this group a routing measurement, not a
-  # FlagGems-only one: of the 13 cases, four are routed to the FlagGems Python
-  # path (abs, neg, silu, where.self), two to its C++ path (embedding, _softmax)
-  # and seven to the cuda boxing kernel (add.Tensor, bmm, cat, mean.dim, mm,
-  # mul.Tensor, sum.dim_IntList) because backends_metax.conf holds the
-  # triton-metax gaps off FlagGems. The C++ pair is also where the two
-  # vocabularies show: the conf spells that path `flaggems_cpp` and the dispatch
-  # log prints `flagos`.
+  # This group measures the @pytest.mark.flaggems cases: each one asserts that
+  # a FlagGems-marked op dispatches to whatever the conf routes it to, through
+  # tests/integration/ops/backend_conf.py:routed_backend -- never a hard-coded
+  # backend name, which would describe whichever platform the test was written
+  # on. That makes this group a routing measurement, not a FlagGems-only one:
+  # of the 13 cases, four are routed to the FlagGems Python path (abs, neg,
+  # silu, where.self), two to its C++ path (embedding, _softmax) and seven to
+  # the cuda boxing kernel (add.Tensor, bmm, cat, mean.dim, mm, mul.Tensor,
+  # sum.dim_IntList) because backends_metax.conf holds the triton-metax gaps
+  # off FlagGems. The group above excludes those cases for exactly that reason;
+  # this is where they are measured.
   #
   # Measured on the eight-device C550 host on 2026-09-15: 13 passed, 1206
   # deselected, 1 xpassed in 251s.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops" -v -s --tb=short
 
@@ -160,10 +154,9 @@ integration_tests:
   # tensor are held off the FlagGems path.
   #
   # It is marked flaggems_python rather than flaggems on purpose: the FlagGems
-  # route on MetaX is a property of the conf, not of a FLAGOS_USE_FLAGGEMS runtime
-  # switch (that variable no longer selects a conf on any platform), so this file
-  # is not gated by the switch and runs in every job. The @pytest.mark.flaggems
-  # cohort the switch does gate is measured by the group above.
+  # route on MetaX is a property of the conf, and this file runs in every job
+  # with no switch involved. The @pytest.mark.flaggems cohort is measured by
+  # the group above.
   #
   # Measured on the eight-device C550 host on 2026-09-15: 90 passed in 756s.
   - name: Run MetaX FlagGems hybrid path tests
@@ -179,10 +172,13 @@ integration_tests:
 
   # Measured on the eight-device C550 host on 2026-09-15: 113 passed, 2 skipped,
   # 1 deselected, 1 xpassed.
+  #
+  # `and not flaggems` here for the same reason as the vendor group: the
+  # multinomial case is measured in the FlagGems group, where it belongs.
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
 
   # Measured on the eight-device C550 host on 2026-09-15: 46 passed.
   - name: Run general factory and autograd tests

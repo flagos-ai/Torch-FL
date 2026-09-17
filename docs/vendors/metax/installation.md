@@ -293,7 +293,7 @@ That measurement has an import-order requirement of its own, because the setup v
 export FLAGOS_METAX_BOXING=1  # selects backends_metax.conf
 ```
 
-`FLAGOS_USE_FLAGGEMS` is not part of this. It no longer selects a conf on any platform; it survives as the gate `tests/integration/ops/conftest.py:_flaggems_enabled` reads to decide whether `@pytest.mark.flaggems` cases run or record a skip. Setting it does not change routing.
+`FLAGOS_USE_FLAGGEMS` is not part of this: the retired switch selected a conf on no platform, and nothing reads it any more. Setting it does not change routing; `@pytest.mark.flaggems` cases run wherever they are collected.
 
 ### FlagGems Verification
 

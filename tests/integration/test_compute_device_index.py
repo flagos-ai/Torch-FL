@@ -33,11 +33,12 @@ whole pytest process down rather than reporting a failure. That is intentional
 and still a clear signal; ``-x`` is not required to notice it.
 
 Only meaningful with 2+ devices, so it skips otherwise. Worth running both ways:
-with FLAGOS_USE_FLAGGEMS=1 for the path that broke, and unset so the boxing path
-stays covered too.
+the default conf routing for the path that broke, and ALL_USE_VENDOR=1 so the
+boxing path stays covered too.
 
 Usage:
-    FLAGOS_USE_FLAGGEMS=1 pytest tests/integration/test_compute_device_index.py -v
+    pytest tests/integration/test_compute_device_index.py -v
+    ALL_USE_VENDOR=1 pytest tests/integration/test_compute_device_index.py -v
 """
 
 import pytest

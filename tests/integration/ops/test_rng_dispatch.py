@@ -29,7 +29,7 @@ the two very different paths an op takes to get its randomness:
 
 Because both paths now converge on one generator, these tests run under *both*
 backend configs -- pure vendor (`-m main_ops`) and FlagGems
-(`FLAGOS_USE_FLAGGEMS=1 -m "flaggems and main_ops"`). The public device API is
+(`-m "flaggems and main_ops"`). The public device API is
 always `torch.flagos`; backend-specific generator representations are not part
 of the cross-backend test contract.
 
@@ -38,26 +38,12 @@ without that marker never runs in CI.
 
 Usage:
     pytest tests/integration/ops/test_rng_dispatch.py -v
-    FLAGOS_USE_FLAGGEMS=1 pytest tests/integration/ops/test_rng_dispatch.py -v
 """
-
-import os
 
 import pytest
 
 import torch
 import torch_fl  # noqa: F401
-
-
-def _flaggems_on() -> bool:
-    """Mirrors conftest._flaggems_enabled, for the one xfail whose *expected*
-    outcome (not merely whether it runs) depends on the active backend config."""
-    return os.environ.get("FLAGOS_USE_FLAGGEMS", "0").lower() not in (
-        "0",
-        "",
-        "off",
-        "false",
-    )
 
 
 def _is_musa() -> bool:
@@ -697,15 +683,11 @@ class TestRngDropout:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
-    @pytest.mark.xfail(
-        condition=not _flaggems_on(),
-        reason="native_dropout has no `Generator?` in its ATen schema, so there is "
-        "no argument for the generated kernel to inject into -- the vendor path "
-        "draws from ATen's own default CUDA generator, which torch.manual_seed "
-        "cannot reach on a CPU-torch wheel. The FlagGems path routes to its own "
-        "Triton kernel and is reproducible. Non-strict xfail so closing this gap "
-        "(e.g. decomposing dropout onto bernoulli_) shows up as an xpass.",
-        strict=False,
-    )
     def test_dropout_reproducible(self):
+        # No xfail: every platform's conf routes native_dropout to a
+        # reproducible kernel (flaggems on cuda/dcu/metax/musa/ppu, ascend/gcu
+        # native), so this holds wherever the test is collected. If it ever
+        # fails on a platform, that is a real routing or reproducibility
+        # regression -- do not re-add a conditional xfail without a measured
+        # reason.
         assert torch.equal(_draw(self._dropout, SEED), _draw(self._dropout, SEED))

@@ -308,9 +308,14 @@ def test_arg_key_supersets(profile_result, baseline):
 
 
 @pytest.mark.main_ops
+# Unconditional (not platform- or env-gated): FlagGems mm/bmm implementations
+# do not report profiler device time wherever they run. Written as a plain
+# xfail rather than a condition because the previous form --
+# condition=lambda: os.environ.get("FLAGOS_USE_FLAGGEMS") == "1" -- never
+# evaluated the lambda (a function object is always truthy), so it was already
+# unconditional in effect; the retired variable is gone, the forgiveness stays.
 @pytest.mark.xfail(
     reason="FlagGems mm/bmm implementations do not report profiler device time",
-    condition=lambda: __import__("os").environ.get("FLAGOS_USE_FLAGGEMS") == "1",
     strict=False,
 )
 def test_device_time_attribution(profile_result):

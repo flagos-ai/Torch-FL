@@ -116,10 +116,13 @@ integration_tests:
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
+  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
+  # cases are measured by the group below, not here (no switch exists any more
+  # to skip them -- see ops/conftest.py).
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # The venv triton is FlagTree's ppu build (triton 3.6.0, backends {'ppu'}),
@@ -135,7 +138,6 @@ integration_tests:
   # main_ops pass.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops"
       --deselect tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_runtime

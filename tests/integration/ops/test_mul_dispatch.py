@@ -119,9 +119,7 @@ class TestMulTensorDispatch:
         keeps it on its own vendor kernel. Reading the conf keeps the assertion
         true on all of them.
         """
-        result = _run_mul_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_mul_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("mul.Tensor")
         assert f"[flagos dispatch] mul.Tensor -> {expected}" in result.stderr

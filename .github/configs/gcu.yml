@@ -92,16 +92,12 @@ integration_tests:
       -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
-  # The FlagGems runtime path. FLAGOS_USE_FLAGGEMS gates the flaggems-marked
-  # cases in conftest.py; set_env_gcu.sh exports it, and it is repeated here so
-  # the group keeps its meaning if that default is ever flipped back.
-  #
-  # FlagGems is not an opt-in for routing on GCU -- backends_gcu.conf already
-  # routes by default -- so this group is a contract check on the ops that
-  # select a FlagGems route, not a switch that turns FlagGems on.
+  # This group is a contract check on the ops that select a FlagGems route
+  # through backends_gcu.conf (FlagGems-first by construction), not a switch
+  # that turns FlagGems on: routing is stated per op in the conf, so no
+  # environment variable is needed for these cases to run.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
-      FLAGOS_USE_FLAGGEMS=1
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops" -v -s --tb=short
 

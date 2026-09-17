@@ -43,7 +43,7 @@ These variables control which backend implementation (CUDA boxing, vendor C++, F
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_BACKEND_CONFIG` | Runtime | Auto-selected by `torch_fl.__init__` based on hardware and switches below | Absolute path to a `backends_*.conf` file; overrides all auto-detection |
-| `FLAGOS_USE_FLAGGEMS` | Runtime | `0` (off) | Enable FlagGems Triton operators via the Python backend (`flagos_python`); selects `backends_flaggems.conf` or platform-specific variant |
+| `FLAGOS_USE_FLAGGEMS` | Retired (no-op) | — | Removed: routing is stated per op in `backends_<platform>.conf` (FlagGems first, vendor fallback, CPU fallback). `ALL_USE_FLAGGEMS=1` / `ALL_USE_VENDOR=1` collapse the table onto one backend family for A/B measurement; the dispatcher raises instead of falling back when the resolved backend has no compiled implementation |
 | `FLAGOS_USE_FLAGGEMS_CPP` | Runtime | `0` (off) | Enable FlagGems C++ operators (kFlagOs dispatch, no GIL); selects `backends_flaggems_cpp.conf`; requires wheel built with `FLAGGEMS_KERNEL=ON` |
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
 | `FLAGOS_LOG_DISPATCH` | Runtime | `0` (off) | Print backend selection to stderr for each operator dispatch |
@@ -54,7 +54,7 @@ These variables control which backend implementation (CUDA boxing, vendor C++, F
 
 **Apex compatibility**: On CUDA-ABI boxing vendors, Torch-FL automatically patches Apex's common `MultiTensorApply` entry point when Apex is imported. The patch converts flagos tensors to zero-copy CUDA views for direct `amp_C` calls and converts CUDA results back to flagos views. It is optional and does not apply to native non-CUDA backends. Set `FLAGOS_DISABLE_APEX_COMPAT=1` to disable it.
 
-**Note on auto-detection**: `FLAGOS_BACKEND_CONFIG` is normally set by `torch_fl.__init__._select_backend_config()`, which detects the hardware platform (via `/dev/davinci*`, `/dev/mxcd`, or build-time `ACCELERATOR`) and applies the `FLAGOS_USE_FLAGGEMS` / `FLAGOS_USE_FLAGGEMS_CPP` / `FLAGOS_METAX_BOXING` switches to pick the correct config. Users should override `FLAGOS_BACKEND_CONFIG` only for testing or debugging.
+**Note on auto-detection**: `FLAGOS_BACKEND_CONFIG` is normally set by `torch_fl.__init__._select_backend_config()`, which detects the hardware platform (via `/dev/davinci*`, `/dev/mxcd`, the `flagos_platform` marker, or build-time `ACCELERATOR`) and applies the `FLAGOS_USE_FLAGGEMS_CPP` / `FLAGOS_METAX_BOXING` switches to pick the correct config. Users should override `FLAGOS_BACKEND_CONFIG` only for testing or debugging.
 
 ## Runtime and Packaging
 

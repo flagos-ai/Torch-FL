@@ -58,7 +58,6 @@ ACCELERATOR=cuda \
 
 The following environment variables control runtime behavior:
 
-- `FLAGOS_USE_FLAGGEMS=1`: Route eligible operations to FlagGems Triton kernels (default: CUDA boxing path)
 - `FLAGOS_USE_FLAGGEMS_CPP=1`: Prefer C++ dispatch over Python dispatch when both are available
 - `CUDA_VISIBLE_DEVICES`: Control which GPUs are visible to the process
 
@@ -94,13 +93,13 @@ pytest tests/integration/ops/ \
   -v --tb=short
 ```
 
-### FlagGems Validation (if enabled)
+### FlagGems Validation
 
-Test the FlagGems runtime path:
+Test the FlagGems runtime path (FlagGems-first routing comes from
+`torch_fl/configs/backends_cuda.conf`; no opt-in variable needed):
 
 ```bash
-FLAGOS_USE_FLAGGEMS=1 \
-  pytest tests/integration/ops/ \
+pytest tests/integration/ops/ \
   -m "flaggems and main_ops" \
   -v --tb=short
 ```

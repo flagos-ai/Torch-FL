@@ -172,3 +172,13 @@ def test_ppu_skip_set_matches_default():
         == ops_conftest._PLATFORM_SKIP_MARKERS["default"]
     )
     assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
+
+
+def test_no_platform_skips_the_plain_flaggems_mark():
+    """The retired FLAGOS_USE_FLAGGEMS switch used to gate `flaggems`-marked
+    tests; with routing stated per op in backends_<platform>.conf there is no
+    switch left, so no platform may skip the plain mark. (The suffixed
+    flaggems_python / flaggems_cpp marks are separate build-gated paths and
+    are unaffected by this invariant.)"""
+    for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
+        assert "flaggems" not in markers, platform

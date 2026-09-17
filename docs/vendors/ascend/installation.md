@@ -234,9 +234,9 @@ There is no separate `*_flagos_py.conf`. An Ascend build is identified by its
 generated FlagGems-first: every routable op is listed exactly once with its
 resolved backend, ops FlagTree cannot compile or run sit on `ascend` (the ACLNN
 kernel), and ops Ascend does not register at all are written `none` so they reach
-`cpu_fallback`. Reading the file tells you the whole routing. `FLAGOS_USE_FLAGGEMS`
-remains accepted for compatibility but is not required to activate the default
-routes.
+`cpu_fallback`. Reading the file tells you the whole routing; the retired
+`FLAGOS_USE_FLAGGEMS` switch is accepted nowhere any more, and the default
+routes need no opt-in.
 
 To measure the two backends against each other, collapse the table with
 `ALL_USE_FLAGGEMS=1` or `ALL_USE_VENDOR=1` (mutually exclusive). Each only moves

@@ -183,8 +183,7 @@ pytest tests/unit/test_gen_vendor_confs.py -v
 pytest tests/integration/ops/test_flaggems_conf_consistency.py -v
 ```
 
-`FLAGOS_USE_FLAGGEMS=1` must be exported for the `flaggems`-marked cases to be
-selected; see the note in `.github/configs/gcu.yml`.
+The `flaggems`-marked cases are collected unconditionally; routing comes from `backends_gcu.conf`, so no environment variable is needed. See the note in `.github/configs/gcu.yml`.
 
 ## Troubleshooting
 

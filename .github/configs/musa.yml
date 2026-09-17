@@ -198,10 +198,10 @@ integration_tests:
   #     installed wheel and cannot hold in a build-tree run). Add this group when
   #     the image bakes the vendor triton stack; it is an image gap, not a code
   #     one.
-  #   - tests/integration/ops/test_musa_flaggems.py (FLAGOS_USE_FLAGGEMS=1
-  #     hybrid route). Same vendor-triton prerequisite as compile: its two cases
-  #     skip without FlagGems installed, so adding the group to this image would
-  #     record a pass that measured nothing.
+  #   - tests/integration/ops/test_musa_flaggems.py (hybrid route). Same
+  #     vendor-triton prerequisite as compile: its two cases skip without
+  #     FlagGems installed, so adding the group to this image would record a
+  #     pass that measured nothing.
   #   - tests/integration/test_profiler_parity.py. Unlike the contract group
   #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
   #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,

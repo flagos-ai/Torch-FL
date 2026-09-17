@@ -36,7 +36,7 @@ ACCELERATOR=musa pip install --no-build-isolation -v -e .
 Build flags:
 - `ACCELERATOR=musa`: selects the MUSA build path and enables `MUSA_KERNEL=ON`
 - `MUSA_KERNEL=ON`: compiles generated `mudnn` operator kernels (automatic when `ACCELERATOR=musa`)
-- `FLAGGEMS_PYTHON=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing stays native unless `FLAGOS_USE_FLAGGEMS=1`
+- `FLAGGEMS_PYTHON=ON`: compiles the optional Python dispatcher callers into the same wheel; per-op routing comes from `backends_musa.conf` (FlagGems-first), no runtime switch involved
 - `CUDA_KERNEL=OFF`: automatically disabled (the MUSA toolkit exports no CUDA symbols)
 - `FLAGGEMS_KERNEL=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
@@ -311,10 +311,9 @@ the vendor MThreads driver normally reads device availability, current device,
 capability, and the raw stream from `torch_musa`, and
 `torch_fl.compile.flagtree_shim` rebinds those lookups onto its own runtime
 before the first Triton driver is created. The plugin may remain installed on
-disk — `torch_fl` never imports its `__init__`, and with
-`FLAGOS_USE_FLAGGEMS=1` it publishes a small compatibility surface under that
-module name for FlagGems backend discovery, which is `torch_fl`'s own code
-rather than the vendor plugin. See
+disk — `torch_fl` never imports its `__init__`, and `torch_fl` publishes a small
+compatibility surface under that module name for FlagGems backend discovery,
+which is `torch_fl`'s own code rather than the vendor plugin. See
 [torch-compile-integration.md](../../architecture/torch-compile-integration.md)
 for why the plugin cannot coexist with `torch_fl`.
 

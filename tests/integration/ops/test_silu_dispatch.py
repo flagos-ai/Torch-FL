@@ -105,9 +105,7 @@ class TestSiluDispatch:
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
         """With the FlagGems runtime path on, silu routes to flagos_python."""
-        result = _run_silu_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_silu_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] silu -> flagos_python" in result.stderr
 

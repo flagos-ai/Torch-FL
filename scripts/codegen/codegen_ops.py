@@ -3182,7 +3182,7 @@ def main():
             "# FlagGems-first, but ops triton-metax cannot run",
             "# (mm/bmm/mean.dim) fall back to the cuda boxing kernel (maca",
             "# libtorch_cuda), NOT metax (mxcc backend is off in boxing mode).",
-            "# Selected at runtime by FLAGOS_METAX_BOXING=1 + FLAGOS_USE_FLAGGEMS=1.",
+            "# Selected at runtime by FLAGOS_METAX_BOXING=1.",
             "#",
             "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
             "",
@@ -3205,7 +3205,7 @@ def main():
         # backends_dcu.conf: FlagGems-first like every generated conf, but the
         # ops DTK's triton (the `hcu` backend) cannot run are forced back to the
         # cuda boxing kernel (which on DCU is libtorch_hip via the CUDA dispatch
-        # key). Selected at runtime by ACCELERATOR=dcu + FLAGOS_USE_FLAGGEMS=1.
+        # key). Selected at runtime by ACCELERATOR=dcu.
         #   - slice_backward: the flag_gems kernel triggers a hardware VMFault
         #     ("Invalid address access") on hcu. It only manifests once the
         #     grad it produces is consumed by MIOpen's convolution_backward
@@ -3234,7 +3234,7 @@ def main():
             "# FlagGems-first, but ops DTK's triton (hcu backend)",
             "# cannot run fall back to the cuda boxing kernel -- which on DCU is",
             "# libtorch_hip, reached via the CUDA dispatch key.",
-            "# Selected at runtime by ACCELERATOR=dcu + FLAGOS_USE_FLAGGEMS=1.",
+            "# Selected at runtime by ACCELERATOR=dcu.",
             "#",
             "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
             "",

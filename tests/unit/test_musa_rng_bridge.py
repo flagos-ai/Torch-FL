@@ -32,7 +32,6 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
     monkeypatch.setitem(sys.modules, "flag_gems.utils", utils)
     monkeypatch.setitem(sys.modules, "flag_gems.utils.random_utils", random_utils)
     monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "musa")
-    monkeypatch.setenv("FLAGOS_USE_FLAGGEMS", "1")
     return random_utils
 
 

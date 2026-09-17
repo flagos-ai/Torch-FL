@@ -154,7 +154,7 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ## Optional: FlagGems on PPU
 
-Set `FLAGGEMS_PYTHON=ON` at build time (the default) and `FLAGOS_USE_FLAGGEMS=1` at runtime; `import torch_fl` then selects `backends_flaggems.conf` and routes discovered ops to FlagGems' Triton kernels.
+Set `FLAGGEMS_PYTHON=ON` at build time (the default); `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first, falling back to the vendor kernel and then CPU. No runtime opt-in variable is needed.
 
 PPU needs no compatibility shim beyond the generic CUDA one: `libcuda.so` is a real driver, so `is_nvidia_cuda_available()` succeeds, `GEMS_VENDOR=nvidia` is set automatically, and `triton.language.extra.cuda.libdevice` resolves.
 
@@ -189,7 +189,6 @@ ACCELERATOR=cuda \
 
 ```bash
 FLAGOS_DISABLE_CUDA_ASSETS=1 \
-  FLAGOS_USE_FLAGGEMS=1 \
   python -c "
 import torch_fl, torch
 x = torch.randn(256, 256, device='flagos')
@@ -203,7 +202,6 @@ print(f'Row sum (expect 1.0): {result[0].sum().cpu().item():.6f}')
 
 ```bash
 FLAGOS_DISABLE_CUDA_ASSETS=1 \
-  FLAGOS_USE_FLAGGEMS=1 \
   pytest tests/integration/ops -q
 ```
 
@@ -259,7 +257,6 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ```bash
 FLAGOS_DISABLE_CUDA_ASSETS=1 \
-  FLAGOS_USE_FLAGGEMS=1 \
   pytest tests/integration/ops -q
 ```
 

@@ -20,8 +20,6 @@ hardware. Only genuine route differences select or skip individual cases,
 through the capabilities in `amp_support`.
 """
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -234,7 +232,7 @@ def test_amp_unscale_out_variant(amp_capabilities, amp_device):
 @pytest.mark.amp_device
 @pytest.mark.amp_grad_scaler
 @pytest.mark.xfail(
-    detect_platform() == "dcu" and os.getenv("FLAGOS_USE_FLAGGEMS") == "1",
+    detect_platform() == "dcu",
     reason="FlagGems missing mse_loss_backward operator on DCU",
     strict=False,
 )

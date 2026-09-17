@@ -119,14 +119,10 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 # Which op takes which backend is stated in backends_metax.conf, not here: that
 # file is full-coverage and lists all five keys per op
 # (flaggems_cpp > flaggems > tileops > cuda), and _select_backend_config() picks
-# it from FLAGOS_METAX_BOXING alone. FLAGOS_USE_FLAGGEMS used to select a
-# separate backends_flaggems.conf and no longer selects anything, so setting it
-# here would misdescribe the build -- the FlagGems Python path is on for the 592
-# ops the conf routes to it either way. It is still a test gate
-# (tests/integration/ops/conftest.py:_flaggems_enabled), which is why the
-# @pytest.mark.flaggems group in .github/configs/metax.yml sets it on its own
-# command line rather than globally: that group is the measurement, and the
-# rest of the suite is not about the runtime switch.
+# it from FLAGOS_METAX_BOXING alone. The retired FLAGOS_USE_FLAGGEMS switch
+# used to select a separate backends_flaggems.conf; nothing reads it any more,
+# so setting it here would misdescribe the build -- the FlagGems Python path is
+# on for the 592 ops the conf routes to it either way.
 export FLAGGEMS_KERNEL=0
 export FLAGGEMS_PYTHON=1
 export FLAGOS_WHEEL_LOCAL=metax3.8.0
