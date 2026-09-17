@@ -21,6 +21,7 @@
 # Usage:
 #   tests/manual/qwen_image_2512/run.sh infer  [--stage ... --device ...]
 #   tests/manual/qwen_image_2512/run.sh sweep  [--device ... --only ...]
+#   tests/manual/qwen_image_2512/run.sh memprobe [--device ... --stage vae|full]
 #   tests/manual/qwen_image_2512/run.sh side-by-side --left cuda --right flagos
 #   tests/manual/qwen_image_2512/run.sh compare --a REF.png --b OUT.png
 #   tests/manual/qwen_image_2512/run.sh census [LOG]     re-read a saved log
@@ -59,7 +60,7 @@ export FLAGOS_LOG_FALLBACK=${FLAGOS_LOG_FALLBACK:-1}
 export FLAGOS_LOG_DISPATCH=${FLAGOS_LOG_DISPATCH:-1}
 
 usage() {
-    echo "usage: $(basename "${BASH_SOURCE[0]}") <infer|sweep|compare|census> [args...]" >&2
+    echo "usage: $(basename "${BASH_SOURCE[0]}") <infer|sweep|memprobe|side-by-side|compare|census> [args...]" >&2
     echo "see the header of this file for the modes and the environment" >&2
     exit 2
 }
@@ -141,6 +142,7 @@ shift || true
 case "$MODE" in
 infer) SCRIPT=$SUBDIR/infer.py ;;
 sweep) SCRIPT=$SUBDIR/sweep.py ;;
+memprobe) SCRIPT=$SUBDIR/memprobe.py ;;
 compare) SCRIPT=$SUBDIR/compare.py ;;
 side-by-side) SCRIPT=$SUBDIR/side_by_side.py ;;
 census)
@@ -178,7 +180,9 @@ fi
 LOG=${LOG:-$OUT_DIR/$MODE-$(date +%Y%m%d-%H%M%S).log}
 echo "python : $PYTHON"
 echo "script : $ROOT/$SCRIPT"
-[ "$MODE" = "side-by-side" ] || echo "output : $DEVICE_DIR"
+case "$MODE" in
+infer | sweep | memprobe) echo "output : $DEVICE_DIR" ;;
+esac
 echo "log    : $LOG"
 echo
 

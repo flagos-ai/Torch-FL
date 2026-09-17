@@ -21,6 +21,7 @@ chip should produce are stated so a result can be judged rather than guessed at.
 | `sweep.py` | Every prompt on the model card, in the card's own settings. The cohort run. |
 | `side_by_side.py` | Pairs two cohort directories into per-prompt sheets plus one contact sheet. |
 | `compare.py` | PSNR and MAE between two PNGs. Imports no torch, so it runs anywhere. |
+| `memprobe.py` | Per-phase allocator accounting, and what FlagGems is holding. §7. |
 | `common.py` | Import order, placement, split, memory reporting. Both runners use it. |
 | `run.sh` | Wrapper: sets the environment, runs one mode, summarises the log. |
 
@@ -320,7 +321,91 @@ The raw log is machine-local and was 508 MB; it is not committed. Regenerate it
 by running §4's flagos sweep with `FLAGOS_LOG_DISPATCH=1`, which `run.sh` exports
 by default.
 
-## 7. Failure triage
+## 7. Where the extra memory went
+
+A chip that runs this flow and reports more reserved memory than the CUDA
+reference should be measured before it is explained. `memprobe.py` does that: it
+runs the same pipeline and placement as `infer.py`, resets the allocator's peak
+counters around each phase so every row is that phase's own peak, and prints one
+table per card.
+
+```bash
+PYTHON=/path/to/the/torch_fl/env/bin/python \
+    python tests/manual/qwen_image_2512/memprobe.py --device flagos --stage vae
+PYTHON=/path/to/the/cuda/env/bin/python \
+    python tests/manual/qwen_image_2512/memprobe.py --device cuda   --stage vae
+```
+
+Both sides read the same counters — flagos delegates its allocations to the CUDA
+caching allocator, so `torch.flagos.memory_stats` and `torch.cuda.memory_stats`
+are two views of one pool. `nvidia-smi` is not a substitute: it folds the CUDA
+context and the cuBLAS/cuDNN workspaces into one of the two numbers and makes
+them incomparable.
+
+### 7.1 The measurement, on the A100 cohort
+
+Peak allocated during each phase, 1024x1024, encoder and VAE on the third card:
+
+| Phase | stock CUDA torch | torch-fl, before | torch-fl, after |
+| --- | --- | --- | --- |
+| load weights | 15.736 GiB | 15.736 | 15.736 |
+| text encoder forward | 15.771 | 15.778 | 15.771 |
+| denoise loop | 15.748 | 15.770 | 15.748 |
+| **VAE decode (peak)** | **19.877** | **20.460** | **19.877** |
+| **VAE decode (reserved)** | **20.482** | **21.686** | **20.482** |
+| device mallocs during decode | 20 | 25 | 20 |
+
+Everything the transformer touches agreed to within 0.001 GiB, so the allocator,
+the boxing path and the routing were all fine. The whole difference was in the
+VAE decode, and the "after" column is what the allocator reports once FlagGems
+stops holding those tensors — it agrees with CUDA byte for byte, malloc count
+included.
+
+### 7.2 The cause
+
+`flag_gems.utils.libentry.LibTuner.run` kept the argument tuple of the call it
+had just run, so that a later `benchmark_config` could replay it without the
+caller passing `args` again. The store was unconditional and strong, which meant
+**every `@libtuner`-decorated kernel pinned the tensors of its most recent call
+for the life of the process**, whether or not anyone ever asked for a replay. The
+pinned size is the largest activation that kernel ever saw, nothing in user code
+can reach it, `empty_cache()` does not touch it, and each additional tuned
+operator adds its own set.
+
+On this workload it cost 1.38 GiB across three cards, of which 334 MiB was the
+VAE decoder's own activations — the two `(1, 96, 1, 1024, 1024)` buffers
+`mul_generic_nd_kernel` holds. It does not grow with the number of steps: each
+kernel holds exactly one set, so it is a fixed overhead, and it scales with
+resolution rather than time. At the cohort's 1664x928 it is 2.4 GiB on the
+encoder card.
+
+Two things made it findable, and both are worth repeating on another chip:
+
+- A `TorchDispatchMode` that samples live bytes after every ATen op shows the gap
+  opening in exact doublings at the VAE decoder's upsampling levels
+  (`+24`, `+48`, `+96`, `+192` MiB on `add.Tensor`, each followed by a doubled
+  step on `silu`).
+- Walking `gc.get_objects()` for a tensor that should have been freed names its
+  holder directly — it came back as
+  `LibEntry.__dict__['fn'].<LibTuner>.__dict__['_last_benchmark_args'][1]`.
+
+`memprobe.py` does the first of those only for its own phase boundaries, but it
+prints the second up front: the `memory pinned by the FlagGems autotuner` section
+counts what is held, releases it, and reads the allocator again. On a FlagGems
+carrying the fix it prints `nothing pinned`.
+
+### 7.3 The fix
+
+Fixed upstream in [flagos-ai/FlagGems#6386](https://github.com/flagos-ai/FlagGems/pull/6386):
+tensor arguments and Triton TMA descriptors are now retained as `weakref`s, and
+`benchmark_config` dereferences them when it falls back to the stored context. If
+the tensors have been freed by then, the context resolves to `None` and the call
+raises the error it already had for a missing prior context.
+
+Until that lands in the FlagGems a chip is using, the section above is the check:
+a non-zero total means the installed FlagGems still retains the arguments.
+
+## 8. Failure triage
 
 | Symptom | Cause | Where the fix belongs |
 | --- | --- | --- |
@@ -337,7 +422,7 @@ Attribution is the point of the stages: a failure in `text-encoder` is the
 encoder's operator surface, a failure in `vae` is `Conv3d`, and only a failure
 in `full` that survives both is a problem with the loop itself.
 
-## 8. Known limits
+## 9. Known limits
 
 - The text encoder stays resident for the whole run. It is the pipeline's
   execution device, so it cannot be moved off the card between encoding and
@@ -346,6 +431,8 @@ in `full` that survives both is a problem with the loop itself.
   roughly the encoder plus a shard: 16.6 GB + 20.4 GB of weights before any
   activation. Prefer three cards.
 - Timing is recorded, not optimised. Nothing here is a performance claim.
+- Reserved memory is not comparable across backends unless both numbers come from
+  the allocator. §7 is how to take that measurement, and what it cost here.
 - Image quality is judged by eye. The paired PSNR is a backend-agreement
   measure, and it says nothing about whether the pictures are any good.
 - Nothing under `tests/manual/` is in `.github/configs/*.yml`, so none of this
