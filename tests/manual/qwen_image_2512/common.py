@@ -36,6 +36,8 @@ a workaround that ran on one half of a paired run only would make the two
 halves incomparable.
 """
 
+import os
+
 DEFAULT_DEVICE = "flagos"
 
 # A run uses at most this many cards. Three is the most that buys anything:
@@ -58,8 +60,71 @@ def import_torch(device_kind):
     import torch
 
     _seed_dynamic_cache_directly(torch)
+    _select_real_valued_rope(torch, device_kind)
 
     return torch
+
+
+def _select_real_valued_rope(torch, device_kind):
+    """Point diffusers' Qwen-Image rotary embedding at its real-valued kernel.
+
+    ``diffusers.models.transformers.transformer_qwenimage`` keys its RoPE on
+    ``device.type`` and knows only two devices: ``cuda``, which multiplies by a
+    complex exponential built with ``torch.polar``, and ``neuron``, which has no
+    complex dtype and so is handed rotation *angles* instead. A device type it
+    does not list falls back to the complex path. ``ROPE_PER_DEVICE`` selects the
+    consumer, and ``QwenEmbedRope._get_device_freqs`` / the same method on
+    ``QwenEmbedLayer3DRope`` produce the operands.
+
+    A chip without a complex dtype cannot take that path. Enflame GCU is the
+    measured case: ``topsaten`` has no complex kernel at all, so the vendor run
+    reaches ``topsatenMul``/``topsatenCos`` with a ``ComplexFloat`` operand and
+    the process aborts on ``TOPSATEN_STATUS_NOT_SUPPORT`` -- not a Python
+    exception. The flagos run survives it only by leaving ``view_as_complex`` and
+    ``view_as_real`` to ``cpu_fallback``, which is 24,000 + 120,000 host round
+    trips per image on the A100 census layout.
+
+    ``apply_rotary_emb_qwen_neuron`` is numerically the same rotation the complex
+    path performs, so this is not a numerical shortcut -- it is the extension
+    point upstream provides for exactly this case, reached by registering the
+    running device type.
+
+    Off by default, and reported both ways when it is on, because it changes what
+    the run measures: with it off, a chip without complex RoPE exercises the
+    ``view_as_complex``/``view_as_real`` fallback and the census shows it; with it
+    on, the rotation is real-valued on the accelerator and those calls disappear.
+    Set ``QWEN_IMAGE_REAL_ROPE=1`` to turn it on.
+    """
+    if os.environ.get("QWEN_IMAGE_REAL_ROPE", "0") in ("", "0"):
+        return
+
+    try:
+        from diffusers.models.transformers import transformer_qwenimage as qwenimage
+    except ImportError:
+        return
+
+    if getattr(qwenimage, "flagos_real_rope_installed", False):
+        return
+
+    def _get_device_freqs(original):
+        def wrapped(self, device):
+            if device is not None and device.type == device_kind:
+                return (
+                    torch.angle(self.pos_freqs).to(device),
+                    torch.angle(self.neg_freqs).to(device),
+                )
+            return original(self, device)
+
+        return wrapped
+
+    qwenimage.QwenEmbedRope._get_device_freqs = _get_device_freqs(
+        qwenimage.QwenEmbedRope._get_device_freqs
+    )
+    qwenimage.QwenEmbedLayer3DRope._get_device_freqs = _get_device_freqs(
+        qwenimage.QwenEmbedLayer3DRope._get_device_freqs
+    )
+    qwenimage.ROPE_PER_DEVICE[device_kind] = qwenimage.apply_rotary_emb_qwen_neuron
+    qwenimage.flagos_real_rope_installed = True
 
 
 def _seed_dynamic_cache_directly(torch):

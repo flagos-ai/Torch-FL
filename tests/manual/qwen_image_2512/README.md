@@ -164,6 +164,47 @@ sit side by side instead of overwriting each other, which is what makes the
 comparison in §4 possible. Pass `--output-dir` explicitly to name a directory
 anything else.
 
+### 3.3 Chips without a complex dtype
+
+`diffusers.models.transformers.transformer_qwenimage` builds its rotary
+embedding by multiplying a complex exponential, and it keys that choice on
+`device.type`. It knows two devices: `cuda`, which takes the complex path, and
+`neuron`, which has no complex dtype and is handed rotation *angles* instead. A
+device type it does not list falls back to the complex path.
+
+Enflame GCU is the measured case of a chip that cannot take it. `topsaten` has
+no complex kernel at all, so the vendor run reaches `topsatenMul`/`topsatenCos`
+with a `ComplexFloat` operand and the process dies on
+`TOPSATEN_STATUS_NOT_SUPPORT` — not a Python exception, which is why §7's table
+cannot catch it. On the flagos run the two `view_as_complex`/`view_as_real`
+calls survive only by leaving `cpu_fallback` to bridge them, which is 24,000 and
+120,000 host round trips per image at §6.1's layout.
+
+`QWEN_IMAGE_REAL_ROPE=1` turns on the workaround: `common.import_torch` registers
+the running device type in diffusers' own `ROPE_PER_DEVICE` table and points
+`_get_device_freqs` at rotation angles, reaching the extension point upstream
+provides for exactly this case. `apply_rotary_emb_qwen_neuron` is numerically the
+same rotation the complex path performs, so this is not a numerical shortcut.
+
+It is off by default, and should be reported both ways when it is on, because it
+changes what the run measures — with it off, the census shows the
+`view_as_complex`/`view_as_real` fallback traffic; with it on, the rotation is
+real-valued on the accelerator and those calls disappear.
+
+A vendor run takes the same switch, because the registration is keyed on
+`--device` rather than on the flagos backend: `torch_gcu` renames PrivateUse1 to
+`gcu`, so a vendor run registers `gcu` and the rotation becomes real-valued
+there too. `test_rope_hook.py` covers both interpreters — it checks the
+registration on either one, and where the interpreter can construct the device
+(the vendor build can; a CPU-only torch refuses `gcu` at the device-string parse)
+it also checks that the wrapped method returns `torch.angle` of the frequencies
+placed on that device.
+
+```bash
+QWEN_IMAGE_REAL_ROPE=1 tests/manual/qwen_image_2512/run.sh infer --stage transformer-step
+QWEN_IMAGE_REAL_ROPE=1 tests/manual/qwen_image_2512/run.sh infer --stage transformer-step --device gcu
+```
+
 ## 4. Vendor against flagos, side by side
 
 The check that needs no interpretation is two directories of the same prompts,
