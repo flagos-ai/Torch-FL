@@ -16,16 +16,17 @@
 FlagGems C++ dispatch (kFlagGemsCpp) integration tests.
 
 Verifies that torch_fl built with FLAGGEMS_CPP=ON routes ops to the C++
-FlagGems path (backend label "flagos") when FLAGOS_USE_FLAGGEMS_CPP=1, and
-that results are numerically correct.
+FlagGems path (backend label "flagos") and that results are numerically correct.
 
 These tests require a torch_fl wheel built with FLAGGEMS_CPP=ON (i.e.
-liboperators.so linked in).  They are gated by @pytest.mark.flaggems_cpp and
-are not included in the default CI matrix (which uses FLAGGEMS_CPP=OFF
+liboperators.so linked in).  They are gated by @pytest.mark.flaggems_cpp, which
+tests/integration/ops/conftest.py resolves by reading the compiled kernel set
+out of the wheel's build record -- there is no environment variable to export.
+They are not included in the default CI matrix (which uses FLAGGEMS_CPP=OFF
 wheels); add them once FlagGems C++ runtime is in the CI build image.
 
 Usage (on a C++ wheel):
-    FLAGOS_USE_FLAGGEMS_CPP=1 pytest tests/integration/ops/test_flaggems_cpp_dispatch.py -v -s
+    pytest tests/integration/ops/test_flaggems_cpp_dispatch.py -v -s
 """
 
 import os
@@ -38,7 +39,7 @@ import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
-_CPP_ENV = {"FLAGOS_USE_FLAGGEMS_CPP": "1", "FLAGOS_LOG_DISPATCH": "1"}
+_CPP_ENV = {"FLAGOS_LOG_DISPATCH": "1"}
 
 
 def _run_subprocess(
@@ -71,8 +72,8 @@ def _assert_routes_cpp(result: subprocess.CompletedProcess, op_name: str) -> Non
 
 
 class TestFlaggemsCppDispatchLog:
-    """Each test verifies that FLAGOS_USE_FLAGGEMS_CPP=1 routes the op to
-    the C++ FlagGems backend (kFlagGemsCpp, logged as '-> flagos')."""
+    """Each test verifies that the conf routes the op to the C++ FlagGems
+    backend (kFlagGemsCpp, logged as '-> flagos')."""
 
     @pytest.mark.flaggems_cpp
     def test_mm_routes_cpp(self):

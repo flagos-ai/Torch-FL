@@ -113,7 +113,6 @@ export VENDOR_KERNEL=1
 # whose conf routes ops to dispatcher slots that were never compiled in.
 export FLAGGEMS_CPP=0
 export FLAGGEMS_KERNEL=1
-export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
@@ -306,7 +305,7 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR VENDOR_KERNEL \
-    FLAGGEMS_CPP FLAGGEMS_KERNEL FLAGOS_USE_FLAGGEMS_CPP \
+    FLAGGEMS_CPP FLAGGEMS_KERNEL \
     FLAGOS_DISABLE_CUDA_ASSETS TOPS_HOME TOPSATEN_LIB CPATH LIBRARY_PATH \
     LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"

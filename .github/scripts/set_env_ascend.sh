@@ -101,7 +101,6 @@ export ASCEND_HOME
 # Ascend has no CUDA assets or CUDA runtime. Keep the ACLNN backend as the
 # native fallback and enable the FlagGems Python path by default.
 export FLAGOS_DISABLE_CUDA_ASSETS=1
-export FLAGOS_USE_FLAGGEMS_CPP=0
 export FLAGGEMS_CPP=0
 export FLAGGEMS_KERNEL=1
 # FlagTree's task queue launches through at_npu::native::OpCommand, a torch_npu
@@ -372,7 +371,7 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ASCEND_HOME \
-    FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_USE_FLAGGEMS_CPP \
+    FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGGEMS_CPP FLAGGEMS_KERNEL TRITON_ENABLE_TASKQUEUE \
     PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
     CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD; do

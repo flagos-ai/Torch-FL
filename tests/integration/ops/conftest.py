@@ -98,18 +98,18 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
 
 
 def _flaggems_cpp_enabled() -> bool:
-    """True when the FlagGems C++ runtime path is switched on (FLAGOS_USE_FLAGGEMS_CPP=1).
+    """True when this wheel has the FlagGems C++ runtime compiled in.
 
-    Tests marked ``flaggems_cpp`` require a wheel built with FLAGGEMS_CPP=ON
-    (liboperators.so linked in) and FLAGOS_USE_FLAGGEMS_CPP=1 at runtime; they
-    are skipped when the env var is off (default).
+    Read from the build record (setup.py writes ``KERNELS`` into
+    ``torch_fl/_build_config.py``), not from an environment variable. It used to
+    be ``FLAGOS_USE_FLAGGEMS_CPP``, which had to be exported by hand and kept in
+    step with the ``FLAGGEMS_CPP`` build switch; the record cannot disagree with
+    the wheel it is inside, so tests marked ``flaggems_cpp`` are now collected
+    exactly when the feature exists.
     """
-    return os.environ.get("FLAGOS_USE_FLAGGEMS_CPP", "0").lower() not in (
-        "0",
-        "",
-        "off",
-        "false",
-    )
+    from torch_fl import _env
+
+    return "flaggems_cpp" in _env.build_kernels()
 
 
 def pytest_collection_modifyitems(
@@ -133,13 +133,14 @@ def pytest_collection_modifyitems(
                 )
             )
             continue
-        # The FlagGems C++ path requires a FLAGGEMS_CPP=ON wheel and runtime env.
+        # The FlagGems C++ path requires a wheel built with the flaggems_cpp
+        # kernel set linked in (liboperators.so).
         if item.get_closest_marker("flaggems_cpp") and not flaggems_cpp_on:
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
-                        "FlagGems C++ path is off "
-                        "(set FLAGOS_USE_FLAGGEMS_CPP=1 with a FLAGGEMS_CPP=ON wheel)"
+                        "FlagGems C++ kernels are not compiled into this wheel "
+                        "(rebuild with FLAGGEMS_CPP=ON)"
                     )
                 )
             )
@@ -181,8 +182,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "flaggems_cpp: requires torch_fl built with FLAGGEMS_CPP=ON and "
-        "FLAGOS_USE_FLAGGEMS_CPP=1 at runtime",
+        "flaggems_cpp: requires torch_fl built with FLAGGEMS_CPP=ON",
     )
     config.addinivalue_line(
         "markers", "flaggems_python: requires FlagGems Python wrapper backend"

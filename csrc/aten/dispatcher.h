@@ -302,13 +302,53 @@ class Dispatcher {
   // Distinguishes "conf says none but the op was registered anyway" from a
   // genuinely missing kernel. The first is a codegen/conf mismatch and the
   // operator-support docs are the place to fix it; the second is a build gap.
+  //
+  // Every message keeps the phrase "backend not registered": it is what callers
+  // and tests match on to tell "this wheel cannot do that" from "the op is
+  // broken". The build set, when the wheel records one, is appended as the
+  // reason rather than replacing it.
   static std::string DispatchFailureMessage(Backend backend) {
     if (backend == Backend::kNone) {
       return ": routed to 'none' (no accelerated impl on this platform) but the "
              "op is registered on PrivateUse1 -- regenerate the vendor conf so "
              "registration and routing agree";
     }
-    return ": backend not registered";
+    std::string message = ": backend not registered";
+#if defined(FLAGOS_BUILTIN_KERNELS)
+    // The compile definition setup.py derives from the same kernel switches as
+    // the build record, so the wheel can name the missing set instead of
+    // leaving the user to guess whether it is a build gap or a broken install.
+    const char* kernel_set = KernelSetOf(backend);
+    if (kernel_set != nullptr &&
+        !flagos_env::ListedIn(FLAGOS_BUILTIN_KERNELS, kernel_set)) {
+      message += std::string(" (the '") + kernel_set +
+                 "' kernel set was not compiled into this wheel)";
+    }
+#endif
+    return message;
+  }
+
+  // Which kernel set provides a backend, named the way setup.py::KERNEL_SET_NAME
+  // and the KERNELS tuple in torch_fl/_build_config.py name it. nullptr for a
+  // backend that no kernel set owns.
+  static const char* KernelSetOf(Backend backend) {
+    switch (backend) {
+      case Backend::kCuda:        return "boxing";
+      case Backend::kFlagGemsCpp: return "flaggems_cpp";
+      case Backend::kFlagGems:    return "flaggems";
+      case Backend::kTileOps:     return "tileops";
+      // Every remaining backend is the accelerator's own native kernel library
+      // (ACLNN, mudnn, topsaten, ...), which the single VENDOR_KERNEL switch
+      // compiles. There is one such library per build, never two.
+      case Backend::kAscend:
+      case Backend::kMusa:
+      case Backend::kMetax:
+      case Backend::kTsingMicro:
+      case Backend::kGcu:         return "vendor";
+      case Backend::kNone:
+      case Backend::kUncached:    return nullptr;
+    }
+    return nullptr;
   }
 
   static void LogDispatch(const std::string& op_name, Backend backend) {

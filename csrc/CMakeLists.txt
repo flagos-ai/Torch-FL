@@ -369,6 +369,33 @@ if(TILEOPS_KERNEL)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
 endif()
 
+# The kernel sets this wheel actually contains, as one comma-separated list, so
+# a dispatch failure can say whether the backend is missing because this build
+# never compiled it rather than leaving the user to guess. Names match
+# setup.py::KERNEL_SET_NAME, which writes the same set into the generated
+# torch_fl/_build_config.py; the two must not diverge, so the -D and the record
+# are both derived from these very options.
+set(FLAGOS_BUILTIN_KERNELS "")
+if(VENDOR_KERNEL)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "vendor,")
+endif()
+if(FLAGGEMS_KERNEL)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems,")
+endif()
+if(BOXING_KERNEL)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "boxing,")
+endif()
+if(FLAGGEMS_CPP)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems_cpp,")
+endif()
+if(TILEOPS_KERNEL)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "tileops,")
+endif()
+message(STATUS "torch_fl kernel sets: ${FLAGOS_BUILTIN_KERNELS}")
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_BUILTIN_KERNELS="${FLAGOS_BUILTIN_KERNELS}"
+)
+
 # The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
 # c10/cuda/impl/cuda_cmake_macros.h. cuda_memory.h includes CUDACachingAllocator.h
 # to delegate flagos allocation to the CUDA caching allocator; this macro tells

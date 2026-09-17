@@ -132,28 +132,41 @@ inline bool EnvChoice(const char* name,
   return true;
 }
 
-// True when the comma-separated list in `name` contains `item`
-// (FLAGOS_LOG=dispatch,fallback). Whitespace around entries is ignored, so a
-// trailing comma is harmless.
-inline bool EnvListed(const char* name, const char* item) {
-  std::string haystack;
-  if (!EnvRaw(name, &haystack)) return false;
+// True when the comma-separated list `haystack` contains `item`. Both are
+// trimmed and compared case-insensitively, so a trailing comma is harmless.
+// Split out of EnvListed() because the dispatcher also matches against
+// FLAGOS_BUILTIN_KERNELS, which is a -D value rather than an environment
+// variable and so has no name to look up.
+inline bool ListedIn(const char* haystack, const char* item) {
+  if (haystack == nullptr) return false;
   const size_t item_len = std::strlen(item);
+  const size_t size = std::strlen(haystack);
   size_t pos = 0;
-  while (pos <= haystack.size()) {
-    const size_t comma = haystack.find(',', pos);
-    const size_t end = comma == std::string::npos ? haystack.size() : comma;
+  while (pos <= size) {
+    const char* comma = std::strchr(haystack + pos, ',');
+    const size_t end = comma == nullptr
+                           ? size
+                           : static_cast<size_t>(comma - haystack);
     size_t begin = pos;
     size_t stop = end;
     while (begin < stop && std::isspace(static_cast<unsigned char>(haystack[begin]))) ++begin;
     while (stop > begin && std::isspace(static_cast<unsigned char>(haystack[stop - 1]))) --stop;
-    if (stop - begin == item_len && EnvIs(haystack.substr(begin, stop - begin).c_str(), item)) {
+    if (stop - begin == item_len &&
+        EnvIs(std::string(haystack + begin, stop - begin).c_str(), item)) {
       return true;
     }
-    if (comma == std::string::npos) break;
-    pos = comma + 1;
+    if (comma == nullptr) break;
+    pos = end + 1;
   }
   return false;
+}
+
+// True when the comma-separated list in `name` contains `item`
+// (FLAGOS_LOG=dispatch,fallback).
+inline bool EnvListed(const char* name, const char* item) {
+  std::string haystack;
+  if (!EnvRaw(name, &haystack)) return false;
+  return ListedIn(haystack.c_str(), item);
 }
 
 }  // namespace flagos_env

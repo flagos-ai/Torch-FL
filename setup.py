@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import glob
+import importlib.machinery
+import importlib.util
 import multiprocessing
 import os
 import platform
@@ -44,7 +46,12 @@ _BUNDLE_LIBDIR = {"metax": "lib_maca", "dcu": "lib_dcu", "ppu": "lib_ppu"}.get(
     ACCELERATOR, "lib"
 )
 
-BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+# Where the sources live. Distinct from BASE_DIR, which is repointed at a
+# scratch tree when the generated files are redirected somewhere else -- the
+# files this build reads back (torch_fl/_env.py) do not move with them.
+SOURCE_DIR = os.path.dirname(os.path.realpath(__file__))
+
+BASE_DIR = SOURCE_DIR
 
 # Only run cmake build for actual build commands, not metadata collection
 BUILD_COMMANDS = {
@@ -299,6 +306,248 @@ def _dtk_root() -> str:
     return default
 
 
+# The kernel sets a build can compile in. Each name is simultaneously an
+# environment variable, a CMake option() and one entry of the generated
+# build_config.KERNELS, so no env-name -> -D-name -> record-name translation
+# exists to fall out of sync. csrc/CMakeLists.txt declares the same five.
+KERNEL_SWITCHES = (
+    "VENDOR_KERNEL",
+    "FLAGGEMS_KERNEL",
+    "BOXING_KERNEL",
+    "FLAGGEMS_CPP",
+    "TILEOPS_KERNEL",
+)
+
+# What the build record calls the same five sets. The accelerator alone cannot
+# answer "was the FlagGems C++ wrapper compiled into this wheel?" -- two MetaX
+# wheels built with different kernel-set flags share an ACCELERATOR and are not
+# the same wheel.
+KERNEL_SET_NAME = {
+    "VENDOR_KERNEL": "vendor",
+    "FLAGGEMS_KERNEL": "flaggems",
+    "BOXING_KERNEL": "boxing",
+    "FLAGGEMS_CPP": "flaggems_cpp",
+    "TILEOPS_KERNEL": "tileops",
+}
+
+# The values an explicit environment variable may not contradict, because the
+# platform cannot produce the other answer at all. Each entry mirrors a
+# set(... CACHE BOOL ... FORCE) in CMakeLists.txt: the FORCE would win over the
+# -D silently, so a build record derived from the requested value would describe
+# a wheel that was never built. Asking for one is an error rather than a silent
+# override, on both sides (here and in CMakeLists.txt).
+#
+# Only genuinely impossible combinations are listed. metax, gcu, ppu and
+# tsingmicro are absent because FLAGGEMS_CPP=OFF there is a default that an
+# explicit FLAGGEMS_CPP=1 (with a vendor-built liboperators.so) may replace --
+# MetaX's MACA build is the documented case. DCU and BPU pin it off for the
+# opposite reason: no FlagGems C++ build exists for DTK or for the BPU at all,
+# so there is nothing an explicit 1 could link against. Ascend/musa
+# VENDOR_KERNEL is pinned because their whole kernel story is the vendor
+# library: Ascend has no CUDA boxing runtime to fall back to, and MUSA's toolbox
+# ships no CUDA runtime.
+_PINNED_KERNEL_SWITCHES: dict[str, dict[str, bool]] = {
+    "ascend": {"VENDOR_KERNEL": True},
+    "musa": {"VENDOR_KERNEL": True, "FLAGGEMS_CPP": False},
+    "dcu": {"FLAGGEMS_CPP": False},
+    "bpu": {"FLAGGEMS_CPP": False},
+}
+
+_ENV_MODULE = None
+
+
+def _env_module():
+    """torch_fl/_env.py, loaded by path so the build side shares its truth table.
+
+    setup.py cannot ``import torch_fl._env``: that would execute
+    torch_fl/__init__.py, which imports torch. Loading the file directly costs
+    nothing (the module is stdlib-only by design) and means a build with
+    VENDOR_KERNEL=2 rejects it exactly the way the run time would, instead of
+    the build keeping a second, more permissive copy of the parser.
+    """
+    global _ENV_MODULE
+    if _ENV_MODULE is None:
+        path = os.path.join(SOURCE_DIR, "torch_fl", "_env.py")
+        loader = importlib.machinery.SourceFileLoader("torch_fl._env", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _ENV_MODULE = module
+    return _ENV_MODULE
+
+
+def _vendor_kernel_switches(accelerator: str) -> dict[str, bool]:
+    """What one accelerator builds by default, before any explicit environment value.
+
+    The middle of the three layers in _kernel_switches, and the only one that
+    differs per vendor. The comments here are the whole build-side policy: there
+    is no mode variable, because what a wheel can run follows from what it
+    compiled in.
+    """
+    vendor: dict[str, bool] = {}
+
+    if accelerator != "cuda":
+        # TileOPs is TileLang on SM90 (Hopper) NVIDIA parts only. Its stubs are
+        # harmless on other vendors -- the shims fall back to aten -- but there
+        # is nothing for them to reach, so keep them out of vendor wheels. An
+        # explicit TILEOPS_KERNEL=1 still wins.
+        vendor["TILEOPS_KERNEL"] = False
+
+    if accelerator not in ("cuda", "tsingmicro"):
+        # The FlagGems C++ wrappers link a liboperators.so built for the vendor;
+        # upstream's CUDA/ROCm build is the only one that exists by default, so
+        # every other platform keeps them off and links cleanly without it. An
+        # explicit FLAGGEMS_CPP=1 with FLAGGEMS_DIR=<vendor build> still wins --
+        # MetaX's MACA build is the documented case. TsingMicro is exempt
+        # because it has no vendor branch at all and has always taken the CUDA
+        # default here.
+        vendor["FLAGGEMS_CPP"] = False
+
+    if accelerator == "metax":
+        # MetaX is a CUDA-boxing build: no native mxcc kernels compile in, the
+        # generated boxing kernels provide acceleration, and the FlagGems C++
+        # wrappers stay off (no MACA-built liboperators). The hand-written
+        # kernels under backends/metax/ are not built -- the dead native path is
+        # retired.
+        #
+        # FLAGGEMS_KERNEL stays at the CUDA default: the boxing wheel also
+        # compiles the FlagGems Python-path kernels (flagos_python backend) so
+        # the conf can route to them. python_op_caller links torch_python_library
+        # (already in the metax link set) and adds nothing to the bundled wheel
+        # size. FLAGGEMS_KERNEL=0 gives a slim pure-boxing build.
+        #
+        # FLAGGEMS_CPP needs a FlagGems built for MACA, which is a separate
+        # build:
+        #     cd FlagGems/cpp && cmake -B build-maca -DFLAGGEMS_BUILD_C_EXTENSIONS=ON \
+        #         -DFLAGGEMS_BACKEND=MACA -DMACA_PATH=/opt/maca
+        # Opt in with FLAGGEMS_CPP=1 FLAGGEMS_DIR=<that build dir>. The C++
+        # kernels reach the device via the same DeviceBoxingGuard as the boxing
+        # path, so they need the boxing kernels.
+        vendor["VENDOR_KERNEL"] = False
+    elif accelerator == "ascend":
+        # Ascend uses ACLNN as the native fallback, with the FlagGems Python path
+        # enabled by default. FlagGems runs on FlagTree (the vendor's Triton 3.5
+        # build), not on triton-ascend: torch_fl imports before triton and carries
+        # a torch_npu-free backend policy for it, so nothing here links torch_npu.
+        # The generated Ascend conf is FlagGems-first for measured routes, while
+        # unsupported or unregistered operators remain on ACLNN/CPU fallback.
+        #
+        # BOXING_KERNEL=OFF: Ascend is not a CUDA-compatible vendor, and its conf
+        # routes nothing to the boxing kernel (0 `= cuda` entries), so compiling
+        # the generated CUDA wrappers was pure dead weight -- the same reason
+        # gcu/musa exclude them.
+        vendor.update(
+            {
+                "BOXING_KERNEL": False,
+                "FLAGGEMS_KERNEL": True,
+                "VENDOR_KERNEL": True,
+            }
+        )
+    # tsingmicro needs no branch: no vendor backend directory exists, so
+    # VENDOR_KERNEL is a no-op, and boxing plus FlagGems Python stay on by
+    # default.
+    elif accelerator == "dcu":
+        # Boxing build. The DCU torch wheel is a hipified build whose HIP kernels
+        # are registered under the CUDA dispatch key, so the generated
+        # PrivateUse1 -> CUDA boxing kernels reach them with no hand-written
+        # kernels of our own.
+        #
+        # FLAGGEMS_KERNEL stays on, same as metax/cuda: DTK ships a working
+        # triton (hcu backend) that flag_gems runs on, so the choice becomes a
+        # runtime one (backends_dcu.conf). python_op_caller links
+        # torch_python_library, already in the link set, so this adds nothing to
+        # the wheel size. FLAGGEMS_KERNEL=0 gives a slim pure-boxing build.
+        pass
+    elif accelerator == "ppu":
+        # PPU (T-Head) builds against PPU_SDK/CUDA_SDK and reuses the CUDA
+        # boxing kernels, but its libtorch is a local PPU build bundled into
+        # lib_ppu/. TILEOPS_KERNEL is already off by the non-cuda rule above
+        # (TileOps is SM90).
+        pass
+    elif accelerator == "bpu":
+        # D-Robotics RDK BPU. The BPU's unit of execution is a whole compiled
+        # graph (a .hbm produced by hbdk4), not an individual operator, so there
+        # are no FlagGems kernels to build: eager ops reach cpu_fallback, and
+        # acceleration comes from the torch.compile backend in
+        # torch_fl/accelerator/bpu/. Only the runtime layer (UCP allocator,
+        # device/stream stubs) is native.
+        #
+        # VENDOR_KERNEL stays at the ON default, as it always has for this
+        # platform, but compiles nothing: csrc/aten/backends/bpu/ does not
+        # exist, so the vendor block at the top of csrc/CMakeLists.txt finds no
+        # directory to add. The resulting "vendor" entry in the build record is
+        # therefore a switch that is on, not a kernel set that is present.
+        vendor["FLAGGEMS_KERNEL"] = False
+    elif accelerator == "gcu":
+        # Enflame GCU has no CUDA runtime: the tops runtime provides the device
+        # layer and libtopsaten the operators, so CUDA/vendor kernel sets stay
+        # off and VENDOR_KERNEL (topsaten) provides the native compute ops. Ops
+        # without a topsaten kernel fall back to CPU.
+        #
+        # Keep the FlagGems Python kernels in the same C++ dispatcher as the
+        # topsaten kernels. This mirrors the CUDA unified-RNG design: one
+        # PrivateUse1 wrapper owns an exact ATen overload, while the backend
+        # config chooses kGcu or kFlagOsPython at runtime. GCU initialization
+        # prepares triton_gcu but does not call flag_gems.enable(), so the
+        # Python layer cannot register a second PrivateUse1 implementation.
+        vendor.update(
+            {
+                "BOXING_KERNEL": False,
+                "FLAGGEMS_KERNEL": True,
+                "VENDOR_KERNEL": True,
+            }
+        )
+    elif accelerator == "musa":
+        # Moore Threads MUSA has no CUDA runtime: the musa* API provides the
+        # device layer, and mudnn provides the native operators (VENDOR_KERNEL).
+        # Compile the FlagGems Python callers into the same wheel so the conf
+        # can route the hybrid path at runtime. Kernel execution still requires a
+        # compatible MUSA Triton backend; without one, native routing remains the
+        # default and unaffected.
+        vendor.update(
+            {
+                "BOXING_KERNEL": False,
+                "FLAGGEMS_KERNEL": True,
+                "VENDOR_KERNEL": True,
+            }
+        )
+
+    return vendor
+
+
+def _kernel_switches(accelerator: str) -> dict[str, bool]:
+    """Resolve the five kernel-set switches for one accelerator.
+
+    The single place that decides what a build compiles in. Both the -D list
+    handed to CMake and the KERNELS tuple written into the build record come
+    from here, so the wheel cannot be described as something it is not.
+
+    Order: the CMake option() default, then what this accelerator builds by
+    default, then an explicit environment value, then a pin. An explicit value
+    that contradicts a pin raises rather than being dropped, because CMake would
+    ignore it and the resulting record would be wrong.
+    """
+    resolved = dict.fromkeys(KERNEL_SWITCHES, True)
+    resolved.update(_vendor_kernel_switches(accelerator))
+
+    # The runtime's own accessor, not a second copy of its truth table: an
+    # unparseable value (VENDOR_KERNEL=2) warns and keeps the vendor default
+    # here for the same reason it does at run time, instead of the build
+    # reading it as "on" and compiling a set the user never asked for.
+    env = _env_module()
+    pinned = _PINNED_KERNEL_SWITCHES.get(accelerator, {})
+    for name in KERNEL_SWITCHES:
+        requested = env.flag(name, resolved[name])
+        if name in pinned and requested != pinned[name]:
+            raise ValueError(
+                f"{name}={os.environ.get(name)} is not possible with "
+                f"ACCELERATOR={accelerator}: this platform always builds with "
+                f"{name}={'ON' if pinned[name] else 'OFF'}"
+            )
+        resolved[name] = requested
+    return resolved
+
+
 def _cmake_build_jobs() -> int:
     """Parallel compile jobs for cmake/ninja. Set FLAGOS_BUILD_JOBS=1 for serial logs."""
     for key in ("FLAGOS_BUILD_JOBS", "MAX_JOBS", "CMAKE_BUILD_PARALLEL_LEVEL"):
@@ -328,154 +577,16 @@ def build_deps():
     ]
 
     cmake_args.append(f"-DACCELERATOR={ACCELERATOR}")
-    if ACCELERATOR != "cuda":
-        # TileOPs is TileLang on SM90 (Hopper) NVIDIA parts only. Its stubs are
-        # harmless on other vendors -- the shims fall back to aten -- but there
-        # is nothing for them to reach, so keep them out of vendor wheels. The
-        # generic pass-through below still honors an explicit TILEOPS_KERNEL=1.
-        cmake_args.append("-DTILEOPS_KERNEL=OFF")
-    if ACCELERATOR == "metax":
-        # MetaX is a CUDA-boxing build: no native mxcc kernels compile in
-        # (VENDOR_KERNEL=OFF), the generated boxing kernels provide acceleration,
-        # and the FlagGems C++ wrappers stay off (no MACA-built liboperators).
-        # There is no mode variable: build is what gets compiled in, and the
-        # routing that follows is derived at runtime from the accelerator record.
-        cmake_args.extend(
-            [
-                "-DVENDOR_KERNEL=OFF",
-                "-DFLAGGEMS_CPP=OFF",
-            ]
-        )
-        # FLAGGEMS_KERNEL defaults ON, same as CUDA: the boxing wheel also compiles
-        # the FlagGems Python-path kernels (flagos_python backend) so the conf can
-        # route to them. python_op_caller links torch_python_library (already in
-        # the metax link set) and adds nothing to the bundled wheel size. Set
-        # FLAGGEMS_KERNEL=0 for a slim pure-boxing build; the generic
-        # pass-through below honors an explicit value.
-        #
-        # FLAGGEMS_CPP (the C++ kFlagOs path, liboperators.so) defaults OFF
-        # because it needs a FlagGems built for MACA, which is a separate build:
-        #     cd FlagGems/cpp && cmake -B build-maca -DFLAGGEMS_BUILD_C_EXTENSIONS=ON \
-        #         -DFLAGGEMS_BACKEND=MACA -DMACA_PATH=/opt/maca
-        # Opt in with FLAGGEMS_CPP=1 FLAGGEMS_DIR=<that build dir> (the generic
-        # pass-through below emits a later -D that overrides the OFF above). The
-        # C++ kernels reach the device via the same DeviceBoxingGuard as the
-        # boxing path, so they need boxing mode.
-    elif ACCELERATOR == "ascend":
-        # Ascend uses ACLNN as the native fallback, with the FlagGems Python path
-        # enabled by default. FlagGems runs on FlagTree (the vendor's Triton 3.5
-        # build), not on triton-ascend: torch_fl imports before triton and carries
-        # a torch_npu-free backend policy for it, so nothing here links torch_npu.
-        # The generated Ascend conf is FlagGems-first for measured routes, while
-        # unsupported or unregistered operators remain on ACLNN/CPU fallback.
-        #
-        # BOXING_KERNEL=OFF: Ascend is not a CUDA-compatible vendor, and its conf
-        # routes nothing to the boxing kernel (0 `= cuda` entries), so compiling
-        # the generated CUDA wrappers was pure dead weight -- the same reason
-        # gcu/musa exclude them.
-        cmake_args.extend(
-            [
-                "-DBOXING_KERNEL=OFF",
-                "-DFLAGGEMS_CPP=OFF",
-                "-DFLAGGEMS_KERNEL=ON",
-                "-DVENDOR_KERNEL=ON",
-            ]
-        )
-    # tsingmicro needs no branch: no vendor backend directory exists, so
-    # VENDOR_KERNEL is a no-op, and boxing plus FlagGems Python stay on by
-    # default.
-    elif ACCELERATOR == "dcu":
-        # Boxing build. The DCU torch wheel is a hipified build whose HIP kernels
-        # are registered under the CUDA dispatch key, so the generated
-        # PrivateUse1 -> CUDA boxing kernels reach them with no hand-written
-        # kernels of our own. FLAGGEMS_CPP needs liboperators.so, which is not
-        # built for DTK, and stays off.
-        #
-        # FLAGGEMS_KERNEL defaults ON, same as metax/cuda: DTK ships a working
-        # triton (hcu backend) that flag_gems runs on, so the wheel compiles the
-        # FlagGems Python-path kernels too and the choice becomes a runtime one
-        # (backends_dcu.conf). python_op_caller
-        # links torch_python_library, already in the link set, so this adds
-        # nothing to the wheel size. Set FLAGGEMS_KERNEL=0 for a slim pure-boxing
-        # build; the generic pass-through below honors that.
-        cmake_args.extend(
-            [
-                "-DFLAGGEMS_CPP=OFF",
-            ]
-        )
-    elif ACCELERATOR == "ppu":
-        # PPU (T-Head) builds against PPU_SDK/CUDA_SDK and reuses the CUDA
-        # boxing kernels, but its libtorch is a local PPU build bundled into
-        # lib_ppu/, and no FlagGems C++ runtime exists for it. TILEOPS_KERNEL is
-        # already forced off by the non-cuda rule above (TileOps is SM90).
-        cmake_args.extend(
-            [
-                "-DFLAGGEMS_CPP=OFF",
-            ]
-        )
-    elif ACCELERATOR == "bpu":
-        # D-Robotics RDK BPU. The BPU's unit of execution is a whole compiled
-        # graph (a .hbm produced by hbdk4), not an individual operator, so there
-        # are no per-op kernels to build: every kernel set stays off, eager ops
-        # reach cpu_fallback, and acceleration comes from the torch.compile
-        # backend in torch_fl/accelerator/bpu/. Only the runtime layer (UCP
-        # allocator, device/stream stubs) is native.
-        cmake_args.extend(
-            [
-                "-DFLAGGEMS_CPP=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-            ]
-        )
-    elif ACCELERATOR == "gcu":
-        # Enflame GCU has no CUDA runtime: the tops runtime provides the device
-        # layer and libtopsaten the operators, so CUDA/vendor kernel sets stay
-        # off and VENDOR_KERNEL (topsaten) provides the native compute ops. Ops
-        # without a topsaten kernel fall back to CPU.
-        #
-        # Keep the FlagGems Python kernels in the same C++ dispatcher as the
-        # topsaten kernels. This mirrors the CUDA unified-RNG design: one
-        # PrivateUse1 wrapper owns an exact ATen overload, while the backend
-        # config chooses kGcu or kFlagOsPython at runtime. GCU initialization
-        # prepares triton_gcu but does not call flag_gems.enable(), so the
-        # Python layer cannot register a second PrivateUse1 implementation.
-        cmake_args.extend(
-            [
-                "-DBOXING_KERNEL=OFF",
-                "-DFLAGGEMS_CPP=OFF",
-                "-DFLAGGEMS_KERNEL=ON",
-                "-DVENDOR_KERNEL=ON",
-            ]
-        )
-    elif ACCELERATOR == "musa":
-        # Moore Threads MUSA has no CUDA runtime: the musa* API provides the
-        # device layer, and mudnn provides the native operators (VENDOR_KERNEL).
-        # Compile the FlagGems Python callers into the same wheel so the conf
-        # can route the hybrid path at runtime. Kernel
-        # execution still requires a compatible MUSA Triton backend; without
-        # one, native routing remains the default and unaffected.
-        cmake_args.extend(
-            [
-                "-DBOXING_KERNEL=OFF",
-                "-DFLAGGEMS_CPP=OFF",
-                "-DFLAGGEMS_KERNEL=ON",
-                "-DVENDOR_KERNEL=ON",
-            ]
-        )
 
-    # Kernel build options from environment
-    for kernel_opt in (
-        "VENDOR_KERNEL",
-        "FLAGGEMS_KERNEL",
-        "BOXING_KERNEL",
-        "FLAGGEMS_CPP",
-        "TILEOPS_KERNEL",
-    ):
-        val = os.environ.get(kernel_opt)
-        if val is not None:
-            cmake_val = (
-                "ON" if val not in ("0", "OFF", "off", "false", "FALSE") else "OFF"
-            )
-            cmake_args.append(f"-D{kernel_opt}={cmake_val}")
+    # What gets compiled in, resolved in one place so the wheel can describe
+    # itself accurately. _kernel_switches() is also what _write_build_config()
+    # reads, so the -D list and the KERNELS record cannot disagree.
+    #
+    # The per-vendor rationale (why MetaX has no native kernels, why Ascend
+    # turns boxing off, ...) lives in _vendor_kernel_switches().
+    kernels = _kernel_switches(ACCELERATOR)
+    for switch in KERNEL_SWITCHES:
+        cmake_args.append(f"-D{switch}={'ON' if kernels[switch] else 'OFF'}")
 
     build_env = os.environ.copy()
     build_jobs = _cmake_build_jobs()
@@ -529,18 +640,33 @@ def build_deps():
 
 
 def _write_build_config() -> None:
-    """Record the accelerator this wheel was built for.
+    """Record what this wheel was built for.
 
     torch_fl._select_backend_config() runs at import time, before `import torch`,
     so it cannot sniff torch.version.hip to tell a DCU build apart. Persisting
-    ACCELERATOR here lets it pick backends_dcu.conf without the user
-    having to re-export ACCELERATOR at runtime. The env var still wins, so an
-    explicit override keeps working.
+    ACCELERATOR here lets it pick backends_dcu.conf without the user having to
+    re-export ACCELERATOR at runtime.
+
+    KERNELS records the compiled kernel sets, because the accelerator alone does
+    not describe a wheel: two MetaX wheels built with different kernel-set flags
+    share an ACCELERATOR and are not the same wheel. Run-time code that used to
+    infer the kernel set from an environment variable reads this instead, so
+    there is nothing left to keep in sync by hand.
+
+    Both values come from _kernel_switches(), the same function whose output
+    becomes the -D list handed to CMake, so this file cannot describe a build
+    other than the one that produced it.
     """
+    kernels = _kernel_switches(ACCELERATOR)
+    compiled = tuple(sorted(KERNEL_SET_NAME[s] for s in KERNEL_SWITCHES if kernels[s]))
+    body = ", ".join(f'"{name}"' for name in compiled)
+    if len(compiled) == 1:
+        body += ","
     path = os.path.join(BASE_DIR, "torch_fl", "_build_config.py")
     content = (
         "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
         f'ACCELERATOR = "{ACCELERATOR}"\n'
+        f"KERNELS = ({body})\n"
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)

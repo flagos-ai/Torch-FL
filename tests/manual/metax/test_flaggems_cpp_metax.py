@@ -72,9 +72,8 @@ def check(name, ok, detail=""):
 
 
 def _run_snippet(code):
-    """Run code in a fresh interpreter with the C++ FlagGems path enabled."""
+    """Run code in a fresh interpreter, with the dispatch log on."""
     env = os.environ.copy()
-    env["FLAGOS_USE_FLAGGEMS_CPP"] = "1"
     env["FLAGOS_LOG_DISPATCH"] = "1"
 
     env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")

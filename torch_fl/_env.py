@@ -32,8 +32,12 @@ The C++ mirror is ``csrc/include/flagos_env.h``; the two must stay in step.
 
 from __future__ import annotations
 
+import functools
+import importlib.machinery
+import importlib.util
 import os
 import sys
+from typing import Any
 
 __all__ = [
     "RETIRED",
@@ -43,6 +47,8 @@ __all__ = [
     "SCOPE_RUNTIME",
     "SCOPE_TEST",
     "VARIABLES",
+    "build_accelerator",
+    "build_kernels",
     "choice",
     "flag",
     "listed",
@@ -155,6 +161,55 @@ def listed(name: str) -> frozenset[str]:
     if raw is None:
         return frozenset()
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+# ---------------------------------------------------------------------------
+# The build record
+# ---------------------------------------------------------------------------
+#
+# setup.py writes torch_fl/_build_config.py next to this file at build time, and
+# it is the authoritative answer to "what is this wheel?". The environment
+# describes what a user is asking for; the record describes what was compiled.
+# Run-time code that would otherwise infer the build from an environment
+# variable reads these instead, so there is nothing for a stale export to
+# contradict.
+#
+# Loaded by path rather than by import: torch_fl/__init__.py is still executing
+# when these are read, and a package import here would recurse into it.
+
+
+@functools.lru_cache(maxsize=1)
+def _build_record() -> dict[str, Any]:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build_config.py")
+    try:
+        loader = importlib.machinery.SourceFileLoader("torch_fl._build_config", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError):
+        # A source checkout with no build yet. Callers treat "" / () as
+        # "unknown", never as a platform.
+        return {"accelerator": "", "kernels": ()}
+    return {
+        "accelerator": str(getattr(module, "ACCELERATOR", "")).strip().lower(),
+        "kernels": tuple(
+            str(k).strip().lower() for k in getattr(module, "KERNELS", ())
+        ),
+    }
+
+
+def build_accelerator() -> str:
+    """The accelerator this wheel was built for, lowercased ("" if unknown)."""
+    return str(_build_record()["accelerator"])
+
+
+def build_kernels() -> frozenset[str]:
+    """The kernel sets compiled into this wheel, lowercased.
+
+    Names are the ones setup.py::KERNEL_SET_NAME declares: "vendor", "flaggems",
+    "boxing", "flaggems_cpp", "tileops". Empty for an unbuilt source checkout.
+    """
+    return frozenset(_build_record()["kernels"])
 
 
 # ---------------------------------------------------------------------------
