@@ -463,7 +463,9 @@ def test_conf_route_counts_are_stable():
         # wheel -- the default -- GetFn(kCuda) degrades to the FlagGems Python
         # path, so this is a no-op there; on a FLAGOS_BUILD_BOXING=ON wheel the
         # ops now reach their boxing kernel instead of the FlagGems route.
-        "cuda": {"flaggems": 392, "cuda": 1642},
+        # `_unsafe_view`, `unsqueeze`, `unsqueeze_` and `transpose.int` were
+        # separately kept off the FlagGems route for view semantics and cost.
+        "cuda": {"flaggems": 412, "cuda": 1622},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see

@@ -173,6 +173,37 @@ def _select_backend_config() -> None:
     _BACKEND_CONFIG_PATH = ""
 
     if _env.value("FLAGOS_BACKEND_CONFIG"):
+        # An override that cannot be read is fatal, not a fallback. The C++
+        # loader leaves its table empty when the file will not open, and an empty
+        # table resolves every op to Dispatcher::GetFn's default
+        # (Backend::kFlagGems) -- so a typo here silently routes the whole
+        # workload down the slowest path behind a single stderr line, and it also
+        # switches off the FlagGems process-level setup that reads this same file
+        # (see _conf_routes_to_flaggems below). Measured on A100: a nonexistent
+        # path sends every dispatch to flagos_python.
+        #
+        # Resolved to an absolute path because the C++ side reads the variable
+        # lazily, at the first op dispatch, which a caller may reach after a
+        # chdir -- and a relative path is resolved against the cwd at that
+        # moment, not at import.
+        #
+        # Recorded through _BACKEND_CONFIG_PATH (which _set_backend_config_path
+        # hands to the C++ reader), not written back to os.environ: an
+        # environment write makes the wheel's own selection indistinguishable
+        # from the user's for the rest of the process -- see backend_config_path().
+        override = _env.value("FLAGOS_BACKEND_CONFIG")
+        resolved = os.path.abspath(override)
+        try:
+            with open(resolved):
+                pass
+        except OSError as err:
+            raise RuntimeError(
+                f"FLAGOS_BACKEND_CONFIG={override!r} cannot be read "
+                f"(resolved to {resolved!r}): {err}. Unset it to let torch_fl "
+                f"select the conf matching this build, or point it at an "
+                f"existing conf file."
+            ) from err
+        _BACKEND_CONFIG_PATH = resolved
         return
 
     # A vendor build whose kernels are native (no CUDA boxing) records its
