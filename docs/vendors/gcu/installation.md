@@ -109,6 +109,8 @@ Ops without a `topsaten` kernel are **not registered** on `PrivateUse1` at all, 
 
 GCU device pointers are device-scoped (no unified addressing): a pointer only resolves against the **current** device. The allocator and every kernel select the device first, and the default stream is per-device.
 
+A copy between two cards is a separate case that selecting the device does not fix. `topsMemcpy` with a device-to-device kind returns an error and leaves the destination byte-for-byte unchanged when the two pointers live on different cards, under every candidate current device, so a copy routed through it moves nothing while reporting a failure that callers commonly ignore — the visible symptom is a tensor that keeps its previous contents, not an exception. `topsMemcpyPeer` is the entry point that transfers the bytes, and it requires the current device to be one of the two cards. Both copy paths in the runtime (`csrc/runtime/accelerator/gcu/memory.cc` and `csrc/runtime/allocator/backends/gcu_memory.h`) resolve both pointers and take the peer route when their devices differ. The asynchronous peer entry point is stricter still: it also needs the caller's stream to belong to the source's device, and stalls the caller rather than returning an error when it does not.
+
 ### Contiguous input requirement
 
 Unlike `mudnn` (MUSA), `topsaten` does not honor strides on non-contiguous inputs. Generated kernels call `.contiguous()` where necessary to materialize a contiguous copy before passing to `topsaten`.

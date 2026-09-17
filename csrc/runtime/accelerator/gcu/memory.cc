@@ -66,8 +66,10 @@ class PointerDeviceGuard {
 };
 
 // Returns the device-side pointer involved in a transfer, or nullptr when the
-// copy stays on the host. For device-to-device the source device is used; the
-// tops runtime handles the peer side of such a copy itself.
+// copy stays on the host. For device-to-device the source device is used, which
+// is the right one to be current both for a copy inside a single card and for
+// the peer copy of a cross-card one; `CrossDeviceEnds` decides which of the two
+// a given pair of pointers is.
 const void* DevicePointerFor(
     MemcpyKind kind,
     const void* dst,
@@ -81,6 +83,51 @@ const void* DevicePointerFor(
     default:
       return nullptr;
   }
+}
+
+// Reports the two cards involved when this is a copy between different cards,
+// and returns false for everything else: a host-side copy, a copy inside one
+// card, or a pointer the runtime does not recognise.
+//
+// A cross-card copy cannot go through `topsMemcpy`. The API reference calls a
+// device-to-device copy "performed by the current device", recommends setting
+// the current device to the source's, and says that without peer access enabled
+// "the topsMemcpy will still work, but will perform the copy using a staging
+// buffer on the host". Measured on TopsRider 3.6 (`libtopsrt.so.1.7`) that last
+// clause does not hold: every cross-card `topsMemcpy` with
+// `topsMemcpyDeviceToDevice` returns an error and leaves the destination
+// untouched, under each of the three candidate current devices (the source, the
+// destination, and an uninvolved third card), and `topsMemcpyDtoD` behaves the
+// same way. The destination keeps whatever it held before, so the failure is
+// invisible to a caller that ignores the status -- which is how a three-card
+// Qwen-Image run painted a black 1024x1024 image while the driver logged
+// "Can't find a valid memobj for dst VA(...) in current device[N]".
+//
+// `topsMemcpyPeer` is the entry point that moves bytes between cards. It names
+// both devices explicitly and needs the current device to be one of the two
+// ends: measured working with the current device set to either the source's or
+// the destination's, and failing from a third card. The callers below therefore
+// leave the current device on the source -- which is where `DevicePointerFor`
+// would have put it for a device-to-device copy anyway -- and pass both device
+// ids explicitly.
+bool CrossDeviceEnds(
+    const void* dst,
+    const void* src,
+    int* dst_device,
+    int* src_device) {
+  topsPointerAttribute_t dst_attr{};
+  topsPointerAttribute_t src_attr{};
+  if (topsPointerGetAttributes(&dst_attr, dst) != topsSuccess)
+    return false;
+  if (topsPointerGetAttributes(&src_attr, src) != topsSuccess)
+    return false;
+  if (dst_attr.device < 0 || src_attr.device < 0)
+    return false;
+  if (dst_attr.device == src_attr.device)
+    return false;
+  *dst_device = dst_attr.device;
+  *src_device = src_attr.device;
+  return true;
 }
 
 // tops enum values line up with MemcpyKind (0=H2H, 1=H2D, 2=D2H, 3=D2D), but
@@ -174,6 +221,16 @@ class MemoryManager {
     if (!dst || !src || count == 0)
       return ErrorUnknown;
 
+    int dst_device = -1;
+    int src_device = -1;
+    if (kind == MemcpyDeviceToDevice &&
+        CrossDeviceEnds(dst, src, &dst_device, &src_device)) {
+      PointerDeviceGuard guard(src);
+      topsError_t err =
+          topsMemcpyPeer(dst, dst_device, src, src_device, count);
+      return (err == topsSuccess) ? Success : ErrorUnknown;
+    }
+
     topsMemcpyKind tops_kind;
     if (!toTopsMemcpyKind(kind, &tops_kind))
       return ErrorUnknown;
@@ -191,6 +248,31 @@ class MemoryManager {
       Stream_t stream) {
     if (!dst || !src || count == 0)
       return ErrorUnknown;
+
+    int dst_device = -1;
+    int src_device = -1;
+    if (kind == MemcpyDeviceToDevice &&
+        CrossDeviceEnds(dst, src, &dst_device, &src_device)) {
+      // The asynchronous peer entry point is pickier than the synchronous one
+      // about the current device. Measured with a stream attached to the
+      // source's device: the copy lands when the source is current, and when
+      // the destination is current the stream never signals at all -- the
+      // caller stalls inside the runtime rather than getting an error back, so
+      // this is not a failure that can be recovered from by checking a status.
+      // `PointerDeviceGuard(src)` puts the current device where the copy needs
+      // it, which is also what the header asks for: it wants "a stream which is
+      // attached to the device where the src data is physically located". A
+      // stream attached to some third device has not been measured.
+      PointerDeviceGuard guard(src);
+      topsError_t err = topsMemcpyPeerAsync(
+          dst,
+          dst_device,
+          src,
+          src_device,
+          count,
+          reinterpret_cast<topsStream_t>(stream));
+      return (err == topsSuccess) ? Success : ErrorUnknown;
+    }
 
     topsMemcpyKind tops_kind;
     if (!toTopsMemcpyKind(kind, &tops_kind))

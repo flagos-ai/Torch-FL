@@ -44,6 +44,36 @@ class TopsPointerDeviceGuard {
   int prev_device_ = -1;
 };
 
+// Reports the two cards involved when this is a copy between different cards,
+// and returns false for a host-side copy, a copy inside one card, or a pointer
+// the runtime does not recognise.
+//
+// A cross-card copy has to go through `topsMemcpyPeer`. `topsMemcpy` with
+// `topsMemcpyDeviceToDevice` returns an error and leaves the destination
+// untouched for every candidate current device, so routing one through it moves
+// no bytes and reports nothing to a caller that ignores the status.
+// csrc/runtime/accelerator/gcu/memory.cc carries the measurement and the
+// reasoning; this is the same fix on the DeviceMemoryInterface path.
+bool TopsCrossDeviceEnds(
+    const void* dst,
+    const void* src,
+    int* dst_device,
+    int* src_device) {
+  topsPointerAttribute_t dst_attr{};
+  topsPointerAttribute_t src_attr{};
+  if (topsPointerGetAttributes(&dst_attr, dst) != topsSuccess)
+    return false;
+  if (topsPointerGetAttributes(&src_attr, src) != topsSuccess)
+    return false;
+  if (dst_attr.device < 0 || src_attr.device < 0)
+    return false;
+  if (dst_attr.device == src_attr.device)
+    return false;
+  *dst_device = dst_attr.device;
+  *src_device = src_attr.device;
+  return true;
+}
+
 } // namespace
 
 // Enflame GCU (tops runtime) implementation of DeviceMemoryInterface.
@@ -119,6 +149,15 @@ class GcuDeviceMemory final : public DeviceMemoryInterface {
       const void* src,
       size_t count,
       MemcpyKind kind) override {
+    int dst_device = -1;
+    int src_device = -1;
+    if (kind == MemcpyDeviceToDevice &&
+        TopsCrossDeviceEnds(dst, src, &dst_device, &src_device)) {
+      TopsPointerDeviceGuard guard(src);
+      topsError_t err = topsMemcpyPeer(dst, dst_device, src, src_device, count);
+      return (err == topsSuccess) ? Success : ErrorUnknown;
+    }
+
     topsMemcpyKind tops_kind;
     const void* dev_ptr = nullptr;
     switch (kind) {
