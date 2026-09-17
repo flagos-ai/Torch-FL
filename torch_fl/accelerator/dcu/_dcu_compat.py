@@ -43,6 +43,7 @@ Two entry points:
 """
 
 import ctypes
+import os
 from dataclasses import dataclass, field
 
 _patched = False
@@ -463,6 +464,75 @@ def patch_torch_cuda_for_dcu() -> bool:
         torch._C._cuda_getCurrentRawStream = lambda idx=0: 0
     except Exception:
         pass
+
+    # Memory queries. Every torch.cuda.memory_* entry point, plus empty_cache and
+    # the peak resets, reaches torch._C._cuda_*/_cuda_memoryStats, none of which
+    # the CPU wheel builds -- they live in libtorch_cuda. flagos owns a caching
+    # allocator over the same DTK pool, so route the CUDA names there. Without
+    # this, diffusers' empty_device_cache() -- called at the end of every
+    # _load_pretrained_model -- raises AttributeError on the first
+    # from_pretrained, before any model work happens.
+    flagos_mod = getattr(torch, "flagos", None)
+    if flagos_mod is not None and hasattr(flagos_mod, "memory_stats"):
+        torch.cuda.memory_allocated = lambda device=None: flagos_mod.memory_allocated(
+            _device_index(device)
+        )
+        torch.cuda.memory_reserved = lambda device=None: flagos_mod.memory_reserved(
+            _device_index(device)
+        )
+
+        def _memory_stats(device=None):
+            """flagos stats under the nested keys torch.cuda callers expect.
+
+            flagos reports flat names (``peak_allocated_bytes``); torch.cuda's
+            schema is ``allocated_bytes.all.peak``. Emit both so either style of
+            lookup resolves.
+            """
+            stats = dict(flagos_mod.memory_stats(_device_index(device)))
+            for flat, nested in (
+                ("allocated_bytes", "allocated_bytes.all.current"),
+                ("peak_allocated_bytes", "allocated_bytes.all.peak"),
+                ("reserved_bytes", "reserved_bytes.all.current"),
+                ("peak_reserved_bytes", "reserved_bytes.all.peak"),
+            ):
+                if flat in stats:
+                    stats[nested] = stats[flat]
+            return stats
+
+        torch.cuda.memory_stats = _memory_stats
+        torch.cuda.max_memory_allocated = lambda device=None: _memory_stats(device).get(
+            "peak_allocated_bytes", 0
+        )
+        torch.cuda.max_memory_reserved = lambda device=None: _memory_stats(device).get(
+            "peak_reserved_bytes", 0
+        )
+        torch.cuda.empty_cache = flagos_mod.empty_cache
+        torch.cuda.reset_peak_memory_stats = lambda device=None: (
+            flagos_mod.reset_peak_memory_stats(_device_index(device))
+        )
+        torch.cuda.reset_max_memory_allocated = torch.cuda.reset_peak_memory_stats
+
+    # SDPA fused backends. aten's composite scaled_dot_product_attention picks a
+    # fused backend, then routes to that backend's leaf. On this stack the only
+    # leaf DTK could serve for these shapes is its CUTLASS flash adapter, and the
+    # adapter is unreachable from a decoupled wheel: DTK's own support probe
+    # (at::native::can_use_flash_attention) resolves out of the *CPU* libtorch_cpu
+    # here and answers False, so pytorch_flash::mha_fwd skips the adapter and
+    # falls into its un-compiled aotriton branch --
+    #   RuntimeError: Non't compile aotrition fa, please compile aotriton fa
+    # -- rather than declining the backend cleanly. Memory-efficient attention is
+    # not compiled at all ("Torch was not compiled with memory efficient
+    # attention"). The math decomposition is therefore the only SDPA path this
+    # stack both selects and can execute, so state that up front and let the
+    # composite's choice agree with it. FLAGOS_DCU_SDPA_FLASH=1 keeps the fused
+    # backends enabled for a stack where DTK's adapter does resolve.
+    if os.environ.get("FLAGOS_DCU_SDPA_FLASH", "0") != "1":
+        try:
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+        except Exception:
+            pass
 
     # Seeding. With is_available()=True, torch.manual_seed() now calls
     # torch.cuda.manual_seed_all(), which walks torch.cuda.default_generators --

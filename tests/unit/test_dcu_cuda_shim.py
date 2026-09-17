@@ -51,6 +51,14 @@ _PATCHED_ATTRS = (
     "manual_seed_all",
     "default_generators",
     "Event",
+    "memory_allocated",
+    "memory_reserved",
+    "memory_stats",
+    "max_memory_allocated",
+    "max_memory_reserved",
+    "empty_cache",
+    "reset_peak_memory_stats",
+    "reset_max_memory_allocated",
 )
 
 _SENTINEL = object()
@@ -76,12 +84,74 @@ class _FakeGenerator:
         return torch.tensor([self.index, 0], dtype=torch.int64).view(torch.uint8)
 
 
+class _FakeFlagosAllocator:
+    """The flagos caching allocator's query surface, as torch.cuda callers see it.
+
+    Values are distinguishable so a test can tell which one an accessor read, and
+    the flat names are flagos's own -- ``peak_allocated_bytes``, not torch's
+    nested ``allocated_bytes.all.peak``.
+    """
+
+    def __init__(self):
+        self.allocated = 5 * 1024**3
+        self.reserved = 6 * 1024**3
+        self.peak_allocated = 7 * 1024**3
+        self.peak_reserved = 8 * 1024**3
+        self.calls = []
+
+    def memory_stats(self, index):
+        self.calls.append(("memory_stats", index))
+        return {
+            "allocated_bytes": self.allocated,
+            "reserved_bytes": self.reserved,
+            "peak_allocated_bytes": self.peak_allocated,
+            "peak_reserved_bytes": self.peak_reserved,
+        }
+
+    def memory_allocated(self, index):
+        self.calls.append(("memory_allocated", index))
+        return self.allocated
+
+    def memory_reserved(self, index):
+        self.calls.append(("memory_reserved", index))
+        return self.reserved
+
+    def empty_cache(self):
+        self.calls.append(("empty_cache", None))
+
+    def reset_peak_memory_stats(self, index):
+        self.calls.append(("reset_peak_memory_stats", index))
+
+
+def _sdpa_state():
+    return (
+        torch.backends.cuda.flash_sdp_enabled(),
+        torch.backends.cuda.mem_efficient_sdp_enabled(),
+        torch.backends.cuda.math_sdp_enabled(),
+    )
+
+
+def _restore_sdpa_state(state):
+    # Tolerant on purpose: monkeypatch undoes a delattr only after this fixture
+    # has torn down, so a test that removed one of the setters still gets here.
+    for setter, enabled in zip(
+        ("enable_flash_sdp", "enable_mem_efficient_sdp", "enable_math_sdp"), state
+    ):
+        setter = getattr(torch.backends.cuda, setter, None)
+        if setter is not None:
+            setter(enabled)
+
+
 @pytest.fixture
 def shim(monkeypatch):
     """Reset shim state and restore everything ``torch.cuda`` it overwrites."""
     saved = {name: getattr(torch.cuda, name, _SENTINEL) for name in _PATCHED_ATTRS}
     saved_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", _SENTINEL)
     saved_queued = list(getattr(torch.cuda, "_queued_calls", []))
+    saved_sdpa = _sdpa_state()
+    # The SDPA switch is opt-out by environment variable, so an ambient value
+    # would decide these tests instead of the fixture.
+    monkeypatch.delenv("FLAGOS_DCU_SDPA_FLASH", raising=False)
 
     monkeypatch.setattr(_dcu_compat, "_cuda_patched", False)
     monkeypatch.setattr(_dcu_compat, "_props_cache", {})
@@ -91,12 +161,18 @@ def shim(monkeypatch):
     monkeypatch.setattr(_dcu_compat, "_cuda_generators", generators)
 
     calls = []
+    allocator = _FakeFlagosAllocator()
     flagos = types.SimpleNamespace(
         device_count=lambda: 4,
         current_device=lambda: calls[-1][1] if calls else 0,
         set_device=lambda idx: calls.append(("set_device", idx)),
         synchronize=lambda device=None: calls.append(("synchronize", device)),
         Event=_FakeEvent,
+        memory_stats=allocator.memory_stats,
+        memory_allocated=allocator.memory_allocated,
+        memory_reserved=allocator.memory_reserved,
+        empty_cache=allocator.empty_cache,
+        reset_peak_memory_stats=allocator.reset_peak_memory_stats,
     )
     monkeypatch.setattr(torch, "flagos", flagos, raising=False)
     # The stock +cpu wheel answers False here; that is the case the shim exists for.
@@ -104,8 +180,11 @@ def shim(monkeypatch):
     monkeypatch.setattr(_dcu_compat, "_load_hip", lambda: None)
 
     try:
-        yield types.SimpleNamespace(calls=calls, generators=generators, flagos=flagos)
+        yield types.SimpleNamespace(
+            calls=calls, generators=generators, flagos=flagos, allocator=allocator
+        )
     finally:
+        _restore_sdpa_state(saved_sdpa)
         for name, value in saved.items():
             if value is _SENTINEL:
                 if hasattr(torch.cuda, name):
@@ -353,6 +432,108 @@ def test_torch_manual_seed_no_longer_raises(shim):
     _dcu_compat.patch_torch_cuda_for_dcu()
     torch.manual_seed(7)
     assert [g.seed for g in shim.generators.values()] == [7] * 4
+
+
+# ---------------------------------------------------------------------------
+# Memory queries
+# ---------------------------------------------------------------------------
+
+
+def test_memory_queries_route_to_the_flagos_allocator(shim):
+    """Every torch.cuda.memory_* name must land on flagos, never on torch._C.
+
+    The shim has to set torch.cuda._initialized = True for triton; torch's own
+    memory_* wrappers gate on is_initialized() and fall through to
+    torch._C._cuda_memoryStats once it is true. That half of libtorch is not in
+    the +cpu wheel, so routing is the difference between a number and an
+    AttributeError -- and diffusers calls empty_device_cache() at the end of
+    every _load_pretrained_model, before any of the model work.
+    """
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.cuda.memory_allocated() == shim.allocator.allocated
+    assert torch.cuda.memory_reserved() == shim.allocator.reserved
+    assert torch.cuda.memory_allocated("cuda:3") == shim.allocator.allocated
+    assert (
+        torch.cuda.memory_reserved(torch.device("cuda", 1)) == shim.allocator.reserved
+    )
+    assert ("memory_allocated", 3) in shim.allocator.calls
+    assert ("memory_reserved", 1) in shim.allocator.calls
+
+
+def test_memory_stats_carry_the_names_torch_callers_look_up(shim):
+    """flagos reports flat names; torch.cuda's schema is nested."""
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    stats = torch.cuda.memory_stats(1)
+    assert stats["allocated_bytes.all.current"] == shim.allocator.allocated
+    assert stats["reserved_bytes.all.current"] == shim.allocator.reserved
+    assert stats["allocated_bytes.all.peak"] == shim.allocator.peak_allocated
+    assert stats["reserved_bytes.all.peak"] == shim.allocator.peak_reserved
+    # The flat originals stay readable for callers that speak flagos's schema.
+    assert stats["peak_allocated_bytes"] == shim.allocator.peak_allocated
+
+
+def test_peak_accessors_read_the_peak_keys(shim):
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.cuda.max_memory_allocated() == shim.allocator.peak_allocated
+    assert torch.cuda.max_memory_reserved() == shim.allocator.peak_reserved
+
+
+def test_empty_cache_and_peak_reset_reach_the_allocator(shim):
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(2)
+    torch.cuda.reset_max_memory_allocated(2)
+    assert ("empty_cache", None) in shim.allocator.calls
+    assert ("reset_peak_memory_stats", 2) in shim.allocator.calls
+
+
+def test_memory_shim_is_skipped_without_a_flagos_allocator(shim, monkeypatch):
+    """A flagos runtime with no allocator surface must not half-install it."""
+    monkeypatch.delattr(shim.flagos, "memory_stats")
+    before_allocated = torch.cuda.memory_allocated
+    before_empty = torch.cuda.empty_cache
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.cuda.memory_allocated is before_allocated
+    assert torch.cuda.empty_cache is before_empty
+
+
+# ---------------------------------------------------------------------------
+# SDPA backend selection
+# ---------------------------------------------------------------------------
+
+
+def test_sdpa_selects_the_one_backend_this_stack_can_execute(shim):
+    """The decoupled wheel can only run the math decomposition.
+
+    DTK's CUTLASS flash adapter is unreachable: its support probe
+    (at::native::can_use_flash_attention) resolves out of the *CPU* libtorch_cpu
+    and answers False, so pytorch_flash::mha_fwd skips the adapter and falls into
+    its un-compiled aotriton branch -- RuntimeError, not a clean decline.
+    Memory-efficient attention is not compiled at all. Leaving the fused flags
+    on lets aten's composite pick a leaf that then raises, which is what killed
+    every attention call in the Qwen-Image transformer.
+    """
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.backends.cuda.flash_sdp_enabled() is False
+    assert torch.backends.cuda.mem_efficient_sdp_enabled() is False
+    assert torch.backends.cuda.math_sdp_enabled() is True
+
+
+def test_sdpa_keeps_the_fused_backends_when_flagged(shim, monkeypatch):
+    """FLAGOS_DCU_SDPA_FLASH=1 is the escape hatch for a stack where they work."""
+    monkeypatch.setenv("FLAGOS_DCU_SDPA_FLASH", "1")
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.backends.cuda.flash_sdp_enabled() is True
+    assert torch.backends.cuda.mem_efficient_sdp_enabled() is True
+
+
+def test_sdpa_switch_does_not_take_the_whole_shim_down(shim, monkeypatch):
+    """A torch build without the backend flags must still get the rest."""
+    monkeypatch.delattr(torch.backends.cuda, "enable_flash_sdp")
+    assert _dcu_compat.patch_torch_cuda_for_dcu() is True
+    assert torch.cuda.is_available() is True
 
 
 # install_dcu_rng_bridge() is covered by tests/unit/test_dcu_rng_bridge.py, which

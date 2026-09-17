@@ -122,6 +122,44 @@ def model_card_prompts(model):
     return prompts, negative.group(1)
 
 
+def release(torch, device_kind):
+    """Hand the card back between prompts.
+
+    The weights are 57.9 GiB of a 64 GiB card -- transformer, text encoder and
+    VAE together -- so there is no page to spare and the sweep is a memory test
+    as much as a quality one. Without this the second prompt of a sweep can die
+    in the transformer's attention having run at a resolution the first prompt
+    cleared, with the card reporting 0 bytes free and only 276 MiB of the
+    allocator's own pool unallocated. Collecting and emptying the cache costs a
+    few hundred milliseconds against a prompt that takes minutes, and it keeps
+    the per-prompt footprints in the log comparable.
+    """
+    import gc
+
+    gc.collect()
+    module = common.device_module(torch, device_kind)
+    if hasattr(module, "empty_cache"):
+        module.empty_cache()
+
+
+def footprint(torch, device):
+    """Reserved and allocated on the card the prompt actually ran on.
+
+    ``device`` is the resolved placement -- ``flagos:6``, not ``flagos``. The
+    counters are per card, and an index-less query answers for the backend's
+    current device rather than the one the placement named: the first sweep
+    recorded 0.00 GiB for a prompt that had just allocated 57.9 GiB, because
+    the pipeline was placed on card 6 while the query landed on card 0.
+    """
+    resolved = torch.device(device)
+    module = common.device_module(torch, resolved.type)
+    if not hasattr(module, "memory_reserved"):
+        return None
+    reserved = module.memory_reserved(resolved.index) / (1024**3)
+    allocated = module.memory_allocated(resolved.index) / (1024**3)
+    return {"reserved_gib": round(reserved, 2), "allocated_gib": round(allocated, 2)}
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -188,7 +226,13 @@ def main(argv=None):
         ).images[0]
         elapsed = time.perf_counter() - started
         image.save(path)
+        memory = footprint(torch, encoder)
         print(f"  -> {path}  {image.size}  {elapsed:.1f}s")
+        if memory is not None:
+            print(
+                f"     {encoder} reserved {memory['reserved_gib']:.2f} GiB "
+                f"allocated {memory['allocated_gib']:.2f} GiB"
+            )
 
         manifest.append(
             {
@@ -196,6 +240,7 @@ def main(argv=None):
                 "prompt": item["prompt"],
                 "file": path.name,
                 "seconds": round(elapsed, 1),
+                "memory": memory,
             }
         )
         (out_dir / "manifest.json").write_text(
@@ -226,6 +271,8 @@ def main(argv=None):
             ),
             encoding="utf-8",
         )
+
+        release(torch, args.device)
 
     total = sum(entry["seconds"] for entry in manifest)
     print(
