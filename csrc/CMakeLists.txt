@@ -183,7 +183,7 @@ set(_needs_python_op_caller OFF)
 if(FLAGGEMS_CPP OR FLAGGEMS_KERNEL OR TILEOPS_KERNEL)
   set(_needs_python_op_caller ON)
 endif()
-if(ACCELERATOR STREQUAL "metax" AND VENDOR_USE_BOXING)
+if(ACCELERATOR STREQUAL "metax" AND NOT VENDOR_KERNEL)
   set(_needs_python_op_caller ON)
 endif()
 if(ACCELERATOR STREQUAL "gcu")
@@ -399,7 +399,7 @@ if(FLAGGEMS_CPP)
   endif()
 endif()
 
-if(ACCELERATOR STREQUAL "metax" AND VENDOR_USE_BOXING)
+if(ACCELERATOR STREQUAL "metax" AND NOT VENDOR_KERNEL)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.

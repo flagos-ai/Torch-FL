@@ -339,19 +339,14 @@ def build_deps():
         # generic pass-through below still honors an explicit TILEOPS_KERNEL=1.
         cmake_args.append("-DTILEOPS_KERNEL=OFF")
     if ACCELERATOR == "metax":
-        # Boxing mode reuses the generated CUDA boxing kernels (host g++) instead
-        # of hand-written mxcc .cu kernels; leave VENDOR_KERNEL off so CMake picks
-        # it up from the VENDOR_USE_BOXING env branch in CMakeLists.txt.
-        metax_boxing = os.environ.get("VENDOR_USE_BOXING", "0") not in (
-            "0",
-            "OFF",
-            "off",
-            "false",
-            "FALSE",
-        )
+        # MetaX is a CUDA-boxing build: no native mxcc kernels compile in
+        # (VENDOR_KERNEL=OFF), the generated boxing kernels provide acceleration,
+        # and the FlagGems C++ wrappers stay off (no MACA-built liboperators).
+        # There is no mode variable: build is what gets compiled in, and the
+        # routing that follows is derived at runtime from the accelerator record.
         cmake_args.extend(
             [
-                "-DVENDOR_KERNEL=" + ("OFF" if metax_boxing else "ON"),
+                "-DVENDOR_KERNEL=OFF",
                 "-DFLAGGEMS_CPP=OFF",
             ]
         )
@@ -377,8 +372,14 @@ def build_deps():
         # a torch_npu-free backend policy for it, so nothing here links torch_npu.
         # The generated Ascend conf is FlagGems-first for measured routes, while
         # unsupported or unregistered operators remain on ACLNN/CPU fallback.
+        #
+        # BOXING_KERNEL=OFF: Ascend is not a CUDA-compatible vendor, and its conf
+        # routes nothing to the boxing kernel (0 `= cuda` entries), so compiling
+        # the generated CUDA wrappers was pure dead weight -- the same reason
+        # gcu/musa exclude them.
         cmake_args.extend(
             [
+                "-DBOXING_KERNEL=OFF",
                 "-DFLAGGEMS_CPP=OFF",
                 "-DFLAGGEMS_KERNEL=ON",
                 "-DVENDOR_KERNEL=ON",

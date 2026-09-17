@@ -15,7 +15,7 @@
 """Verify flagos Event (real device semantics) and pin_memory on MetaX.
 
 Run (from repo root):
-    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
+    ACCELERATOR=metax \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
@@ -30,8 +30,6 @@ Two areas:
      and non_blocking H2D from a pinned tensor must land correct data. Also
      checks tensor.to(device, pin_memory-side) round trips.
 """
-
-import os
 
 import torch_fl  # noqa: F401  MUST precede torch (boxing preload + GEMS_VENDOR)
 import torch
@@ -141,7 +139,6 @@ def test_to_pin_memory_flag():
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("VENDOR_USE_BOXING", "1")
     torch_fl.flagos._lazy_init()
 
     for fn in (

@@ -54,7 +54,6 @@ def fake_ascend_install(tmp_path, monkeypatch):
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("FLAGOS_USE_FLAGGEMS_CPP", raising=False)
     monkeypatch.delenv("FLAGOS_USE_TILEOPS", raising=False)
-    monkeypatch.delenv("VENDOR_USE_BOXING", raising=False)
     return conf_dir
 
 

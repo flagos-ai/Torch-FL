@@ -113,13 +113,17 @@ export METAX_PATH=/opt/maca
 export MACA_PATH=/opt/maca
 export MACA_HOME=/opt/maca
 
-export VENDOR_USE_BOXING=1
+# MetaX is a boxing-only build: no native mxcc kernels compile in, so
+# VENDOR_KERNEL=OFF is the one build-side statement. The runtime side derives
+# its conf from ACCELERATOR=metax (torch_fl._select_backend_config) -- there is
+# no mode variable to keep in agreement with the build any more.
+export VENDOR_KERNEL=OFF
 export FLAGOS_METAX_CUDART_SHIM=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 # Which op takes which backend is stated in backends_metax.conf, not here: that
 # file is full-coverage and lists all five keys per op
-# (flaggems_cpp > flaggems > tileops > cuda), and _select_backend_config() picks
-# it from VENDOR_USE_BOXING alone. The retired FLAGOS_USE_FLAGGEMS switch
+# (flaggems_cpp > flaggems > tileops > cuda), selected from the accelerator
+# record. The retired FLAGOS_USE_FLAGGEMS switch
 # used to select a separate backends_flaggems.conf; nothing reads it any more,
 # so setting it here would misdescribe the build -- the FlagGems Python path is
 # on for the 592 ops the conf routes to it either way.
@@ -365,7 +369,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
   for name in \
     VIRTUAL_ENV PYTHONNOUSERSITE ACCELERATOR METAX_PATH MACA_PATH MACA_HOME \
-    VENDOR_USE_BOXING FLAGOS_METAX_CUDART_SHIM \
+    VENDOR_KERNEL FLAGOS_METAX_CUDART_SHIM \
     FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGGEMS_CPP FLAGGEMS_KERNEL FLAGOS_WHEEL_LOCAL \
     FLAGOS_MACA_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do

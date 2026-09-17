@@ -3182,7 +3182,7 @@ def main():
             "# FlagGems-first, but ops triton-metax cannot run",
             "# (mm/bmm/mean.dim) fall back to the cuda boxing kernel (maca",
             "# libtorch_cuda), NOT metax (mxcc backend is off in boxing mode).",
-            "# Selected at runtime by VENDOR_USE_BOXING=1.",
+            "# Selected at runtime from the build record (ACCELERATOR=metax).",
             "#",
             "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
             "",

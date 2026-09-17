@@ -37,12 +37,12 @@ Build prerequisites:
      `cmake --install`. When running straight out of the build dir, link it:
        ln -sfn <FlagGems>/triton_src <FlagGems>/cpp/triton_src
   2. torch_fl against it:
-       ACCELERATOR=metax VENDOR_USE_BOXING=1 MACA_PATH=/opt/maca \
+       ACCELERATOR=metax VENDOR_KERNEL=OFF MACA_PATH=/opt/maca \
        FLAGGEMS_CPP=1 FLAGGEMS_DIR=<FlagGems>/cpp/build-maca \
        python setup.py build_ext --inplace
 
 Run (from repo root):
-    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
+    ACCELERATOR=metax \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
@@ -76,7 +76,7 @@ def _run_snippet(code):
     env = os.environ.copy()
     env["FLAGOS_USE_FLAGGEMS_CPP"] = "1"
     env["FLAGOS_LOG_DISPATCH"] = "1"
-    env["VENDOR_USE_BOXING"] = "1"
+
     env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     # The dispatch log is what proves the C++ path ran; keep stderr separate.
     proc = subprocess.run(

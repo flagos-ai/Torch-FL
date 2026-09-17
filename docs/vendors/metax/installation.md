@@ -42,9 +42,9 @@ On a machine with the MetaX SDK and `torch+metax` wheel available:
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-# Build the boxing artifacts (VENDOR_KERNEL forced OFF in boxing mode)
+# Build the boxing artifacts (no native kernels)
 ACCELERATOR=metax \
-  VENDOR_USE_BOXING=1 \
+  VENDOR_KERNEL=OFF \
   FLAGOS_MACA_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   FLAGOS_WHEEL_LOCAL=metax3.8.1 \
   python setup.py bdist_wheel
@@ -87,11 +87,9 @@ pip install torch_fl-0.1.0+metax3.8.1-cp312-cp312-linux_x86_64.whl
 
 #### Runtime Configuration
 
-Set the boxing mode environment variable:
-
-```bash
-export VENDOR_USE_BOXING=1
-```
+No environment variable is needed: a MetaX wheel records that it was built for
+MetaX, and `import torch_fl` selects `backends_metax.conf` from that record. The
+import-order rule below is what matters.
 
 **Import order:** On MetaX, you **must** import `torch_fl` before `import torch`:
 
@@ -107,7 +105,6 @@ import torch
 ### Basic Device Check
 
 ```bash
-export VENDOR_USE_BOXING=1
 python -c "
 import torch_fl  # Import first
 import torch
@@ -131,7 +128,6 @@ Expected output shows `torch.cuda devices: N` and `flagos devices: N` (MetaX car
 Run representative operator tests:
 
 ```bash
-export VENDOR_USE_BOXING=1
 pytest \
   tests/integration/ops/test_abs_dispatch.py \
   tests/integration/ops/test_add_dispatch.py \
@@ -145,7 +141,6 @@ pytest \
 ### Factory and Autograd
 
 ```bash
-export VENDOR_USE_BOXING=1
 pytest tests/integration/test_factory_ops.py -v --tb=short
 ```
 
@@ -177,7 +172,6 @@ scaler.update()
 Run the complete autocast and GradScaler contract on MetaX hardware:
 
 ```bash
-export VENDOR_USE_BOXING=1
 pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
 ```
 
@@ -203,7 +197,6 @@ software kernel is provided for their scale metadata contract. Validate the path
 a C550 target with:
 
 ```bash
-export VENDOR_USE_BOXING=1
 pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py -m soft_lowp -v -s --tb=short
 ```
 
@@ -252,7 +245,6 @@ normal MetaX Triton installation:
 ```bash
 PYTHONPATH=/path/to/flagtree-venv/lib/python3.12/site-packages \
   FLAGOS_USE_FLAGTREE=1 \
-  VENDOR_USE_BOXING=1 \
   pytest tests/integration/test_compile.py -v --tb=short
 ```
 
@@ -285,12 +277,12 @@ pip install "git+https://github.com/FlagOpen/FlagGems.git@5a58df410c551c4f4eb41d
 
 The FlagGems revision is load-bearing, not cosmetic. A generated kernel calls its operator by package-level name (`flag_gems.<name>`), resolved by `getattr` at dispatch time (`csrc/aten/backends/flagos/python_op_caller.cc:GetFunc`), so a cohort that does not define one of those names fails exactly the routes that use it. The revision above resolves all 666 names the checked-in `csrc/aten/generated/flaggems_python_kernels.cc` calls; `.github/scripts/set_env_metax.sh` measures that ratio before every integration job and refuses to run when it is not `0/666`.
 
-That measurement has an import-order requirement of its own, because the setup venv runs the stock `torch+cpu` wheel: its `torch/lib` carries no `libtorch_cuda.so`, so `torch.cuda.is_available()` is `False` until `torch_fl` has relinked that directory to the MetaX libtorch. In that state the MetaX Triton backend reports itself inactive (`triton/backends/metax/driver.py:is_active`), and `flag_gems` reaches `triton.runtime.driver.active` while it is being imported (`flag_gems.fused` -> `pointwise_dynamic` -> `triton.runtime.jit.parse` -> the Triton hint manager's backend lookup), so a bare `import flag_gems` in the venv fails with `RuntimeError: 0 active drivers ([]). There should only be one.` — the FlagGems install is fine, the probe is simply running too early. The ratio is therefore taken in a process that imports `torch_fl` first, at the end of the setup script rather than beside the FlagGems install, since `torch_fl` is not importable until `setup.py build_ext` has run. The same rule applies to any ad-hoc `VENDOR_USE_BOXING=1` check against the venv: `import torch_fl` first, or the device surface is not there yet.
+That measurement has an import-order requirement of its own, because the setup venv runs the stock `torch+cpu` wheel: its `torch/lib` carries no `libtorch_cuda.so`, so `torch.cuda.is_available()` is `False` until `torch_fl` has relinked that directory to the MetaX libtorch. In that state the MetaX Triton backend reports itself inactive (`triton/backends/metax/driver.py:is_active`), and `flag_gems` reaches `triton.runtime.driver.active` while it is being imported (`flag_gems.fused` -> `pointwise_dynamic` -> `triton.runtime.jit.parse` -> the Triton hint manager's backend lookup), so a bare `import flag_gems` in the venv fails with `RuntimeError: 0 active drivers ([]). There should only be one.` — the FlagGems install is fine, the probe is simply running too early. The ratio is therefore taken in a process that imports `torch_fl` first, at the end of the setup script rather than beside the FlagGems install, since `torch_fl` is not importable until `setup.py build_ext` has run. The same rule applies to any ad-hoc check against the venv: `import torch_fl`
+first, or the device surface is not there yet.
 
 ### Runtime Configuration
 
 ```bash
-export VENDOR_USE_BOXING=1  # selects backends_metax.conf
 ```
 
 `FLAGOS_USE_FLAGGEMS` is not part of this: the retired switch selected a conf on no platform, and nothing reads it any more. Setting it does not change routing; `@pytest.mark.flaggems` cases run wherever they are collected.
@@ -298,7 +290,6 @@ export VENDOR_USE_BOXING=1  # selects backends_metax.conf
 ### FlagGems Verification
 
 ```bash
-export VENDOR_USE_BOXING=1
 FLAGOS_LOG_DISPATCH=1 python -c "
 import torch_fl, torch
 x = torch.randn(1024, device='flagos:0')
@@ -333,11 +324,15 @@ MetaX carries FSDP2 and Qwen3 training parity work in repository history, but th
 
 **Fix:** Verify `/opt/maca` is present and accessible. Check `LD_LIBRARY_PATH` does not override MACA runtime paths.
 
-### `VENDOR_USE_BOXING=1` not set
+### `import torch_fl` fails with configuration errors or missing libraries
 
-**Symptom:** `import torch_fl` fails with configuration errors or missing libraries.
+**Cause:** the MetaX-specific import-time setup (libtorch relink, `torch.cuda`
+shim) did not run.
 
-**Fix:** Export `VENDOR_USE_BOXING=1` before running Python. This variable gates the MetaX-specific import-time setup.
+**Fix:** confirm the wheel was built for MetaX (`ACCELERATOR=metax`, recorded at
+build time) and that the vendor torch is reachable through
+`FLAGOS_MACA_TORCH_LIB` or the bundled `lib_maca/`. No mode environment variable
+is involved any more.
 
 ### Wheel Too Large for PyPI
 

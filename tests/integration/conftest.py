@@ -12,38 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from pathlib import Path
-
 import pytest
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytest_plugins = ("profiler_support", "amp_support")
 
 
-def _ensure_backend_config() -> None:
-    """Ensure MetaX backend config is set before importing torch_fl (if not already specified).
-
-    Only forces backends_metax.conf for the native mxcc source-build path. In
-    boxing mode (VENDOR_USE_BOXING=1) the mxcc backend is NOT compiled, so we
-    must leave the choice to torch_fl's own _select_backend_config(), which picks
-    backends_cuda.conf (pure boxing) or backends_metax.conf (any FlagGems opt-in).
-    Setting it here would route ops to the unregistered `metax` backend and raise.
-    """
-    if os.environ.get("FLAGOS_BACKEND_CONFIG"):
-        return
-    if os.environ.get("VENDOR_USE_BOXING", "0") == "1":
-        return
-    accel = os.environ.get("ACCELERATOR", "").lower()
-    use_metax = accel in ("metax", "maca") or Path("/dev/mxcd").exists()
-    if use_metax:
-        cfg = _REPO_ROOT / "torch_fl" / "configs" / "backends_metax.conf"
-        if cfg.is_file():
-            os.environ["FLAGOS_BACKEND_CONFIG"] = str(cfg)
-
-
-_ensure_backend_config()
+# Backend config selection moved fully into torch_fl._select_backend_config(),
+# which reads the build record (ACCELERATOR + the lib/flagos_platform marker)
+# and picks backends_<platform>.conf. conftest no longer pre-empts it: a MetaX
+# wheel is boxing-only, so torch_fl already resolves backends_metax.conf, and
+# hard-coding the file here only duplicated -- and could contradict -- that.
 
 
 def pytest_addoption(parser):

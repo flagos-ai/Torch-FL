@@ -36,28 +36,20 @@ if(ACCELERATOR STREQUAL "ascend")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "metax")
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/MetaxEnv.cmake)
-  # Boxing mode ($ENV{VENDOR_USE_BOXING}=1): reuse the generated CUDA boxing
-  # kernels (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) that
-  # dispatch PrivateUse1 -> CUDA into maca's libtorch_cuda.so, instead of the
-  # hand-written mxcc .cu kernels under backends/metax/. Keeps the MetaX SDK
-  # runtime + cu-bridge headers path (no nvcc / project(...CUDA)).
-  if(DEFINED ENV{VENDOR_USE_BOXING} AND NOT "$ENV{VENDOR_USE_BOXING}" STREQUAL "0")
-    set(VENDOR_USE_BOXING ON)
-  endif()
-  if(VENDOR_USE_BOXING)
-    set(VENDOR_KERNEL OFF CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
-  else()
-    set(VENDOR_KERNEL ON CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
-  endif()
-  # FlagGems C++ dispatch (kFlagOs) needs liboperators.so. FlagGems can be built
-  # for MetaX (cpp/ -DFLAGGEMS_BACKEND=MACA), and its kernels reach the device
-  # through the same DeviceBoxingGuard the boxing path uses, so the C++ path
-  # works here too -- but only in boxing mode, and only when the caller points
-  # FlagGems_DIR/FLAGGEMS_DIR at a MACA-built FlagGems. Default stays OFF so a
-  # plain metax build needs no FlagGems.
-  if(NOT VENDOR_USE_BOXING)
-    set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
-  elseif(NOT FLAGGEMS_CPP)
+  # MetaX is a CUDA-boxing build: the generated CUDA boxing kernels
+  # (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) re-dispatch
+  # PrivateUse1 -> CUDA into maca's libtorch_cuda.so. The hand-written mxcc
+  # kernels under backends/metax/ are not built -- the dead native path is
+  # retired, so there is no boxing/native mode variable at all.
+  #
+  # "Which kernel set compiles" is stated by the inclusion switches alone:
+  # setup.py passes VENDOR_KERNEL=OFF (no native kernels) plus FLAGGEMS_CPP=OFF.
+  # The routing that follows from that is a runtime concern -- torch_fl derives
+  # the conf from the accelerator record -- so no mode belongs to the build.
+  #
+  # No MACA-built liboperators by default: keep the C++ wrappers off unless
+  # explicitly requested, or a plain metax configure dies looking for them.
+  if(NOT FLAGGEMS_CPP)
     set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   endif()
   # Self-contained wheel: forked libtorch bundled by
@@ -581,11 +573,7 @@ if(FLAGGEMS_CPP)
   message(STATUS "FlagGems liboperators RPATH: ${_flaggems_libdir}")
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
 elseif(ACCELERATOR STREQUAL "metax")
-  if(VENDOR_USE_BOXING)
-    message(STATUS "MetaX build: native runtime + CUDA boxing kernels (host g++, no mxcc/FlagGems)")
-  else()
-    message(STATUS "MetaX build: native runtime + mxcc kernels (no FlagGems)")
-  endif()
+  message(STATUS "MetaX build: native runtime + CUDA boxing kernels (host g++, no mxcc/FlagGems)")
 endif()
 
 if(DEFINED PYTHON_INCLUDE_DIR)
