@@ -415,7 +415,12 @@ def test_conf_route_counts_are_stable():
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
         "ascend": {"flaggems": 222, "none": 1659, "ascend": 156},
         "bpu": {},
-        "cuda": {"flaggems": 416, "cuda": 1618},
+        # _unsafe_view, unsqueeze, unsqueeze_ and transpose.int moved from flaggems
+        # to cuda in backends_cuda.conf: 416/1618 -> 412/1622. Three are the
+        # metadata_route_overrides cost group; _unsafe_view is in
+        # cuda_route_exceptions for the view-vs-copy contract divergence. See
+        # scripts/codegen/codegen_ops.py.
+        "cuda": {"flaggems": 412, "cuda": 1622},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
