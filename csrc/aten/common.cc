@@ -403,7 +403,7 @@ const std::unordered_map<std::string, Backend>& BackendTable() {
 // the table. Called from Python rather than written to os.environ so the
 // wheel's own choice stays distinguishable from a user's -- see
 // ResolveBackendConfigPath() above.
-void SetBackendConfigPath(const std::string& path) {
+FLAGOS_EXPORT void SetBackendConfigPath(const std::string& path) {
   BackendConfigPathOverride() = path;
 }
 

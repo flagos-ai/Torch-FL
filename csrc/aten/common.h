@@ -59,7 +59,14 @@ Backend GetBackendForOp(const std::string& op_name);
 // os.environ: the wheel's own selection has to stay distinguishable from a
 // user's FLAGOS_BACKEND_CONFIG, and an environment write makes them identical
 // for the rest of the process.
-void SetBackendConfigPath(const std::string& path);
+//
+// FLAGOS_EXPORT because of who calls it: the binding is
+// torch_fl._C._set_backend_config_path, and torch_fl/csrc/module.cc is linked
+// into libtorch_bindings.so, not into libtorch_fl.so. CMakeLists.txt sets
+// CMAKE_CXX_VISIBILITY_PRESET hidden, so an unannotated definition here is
+// local to libtorch_fl.so and the import fails with an undefined symbol rather
+// than a link error -- shared-library linking leaves undefined symbols alone.
+FLAGOS_EXPORT void SetBackendConfigPath(const std::string& path);
 
 // The value of FLAGOS_FORCE_BACKEND -- "flaggems", "vendor" or "tileops" -- or an
 // empty string when it is unset (or was unparseable, which warns and reads as
