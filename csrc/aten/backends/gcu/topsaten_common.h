@@ -126,6 +126,141 @@ inline bool TopsatenArangeDtype(at::ScalarType type) {
   }
 }
 
+// Which dtypes topsatenIndexSelect accepts an *index* operand as.
+//
+// An index tensor is the one place an integer operand has to be braced for
+// specially rather than declined: the coordinate data is consumed as integers,
+// not as element data, so the "no int64 kernels" rule does not apply to it. Both
+// dtypes are measured, not inferred -- index_select at dim 0/1/2 and with a
+// 0-dim, empty or non-contiguous index returns the host result for an i32 index
+// and for an i64 one. index_fill is the opposite case: the vendor rejects an i64
+// index and only ever takes an i32 one, so it narrows its index through
+// `TopsatenIndexFillIndex` below instead of using this.
+inline bool TopsatenIndexDtype(at::ScalarType type) {
+  return type == at::kInt || type == at::kLong;
+}
+
+// The two operand limits topsatenIndexSelect documents that its dtype table
+// does not express: every dim of `in` and `out` must hold fewer than 2^24
+// elements, and every operand buffer must stay under 4.0 GB (topsaten_ops.h).
+// Neither is a performance threshold -- past either the kernel returns an
+// error -- so a call that trips one is served by the host path rather than
+// raising where ATen's own kernel would have produced a result.
+inline bool TopsatenIndexSelectFits(at::TensorList operands) {
+  constexpr int64_t kMaxDim = int64_t(1) << 24;
+  constexpr int64_t kMaxBufferBytes = int64_t(4) << 30;
+  for (const at::Tensor& t : operands) {
+    if (t.numel() * t.element_size() >= kMaxBufferBytes) {
+      return false;
+    }
+    for (const int64_t size : t.sizes()) {
+      if (size >= kMaxDim) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// The i32 index tensor topsatenIndexFill requires, built from ATen's own index.
+//
+// index_fill is the one index op whose operand types the two sides disagree on
+// outright: ATen takes an int64 index and nothing else (`index_fill_(): Expected
+// dtype int64 for index.`), and the vendor takes an int32 one and nothing else
+// (BAD_PARAM for an i64 index at every dim, rank, self dtype and scalar tag
+// measured on S60). The vendor's own bounds check is also not safe to lean on:
+// an index equal to the dim size satisfies it and writes one element past the
+// end of the tensor, and a larger index aborts the process outright
+// (`Index out-of-bounds! bound=2, index=5`). ATen, meanwhile, accepts a negative
+// index in this op and wraps it (measured: -1 in dim 0 of a (2,3,4) fills row 1,
+// while -3 raises). So the index is read back once and wrapped and narrowed in
+// the same pass. A value still out of range afterwards -- or one that cannot be
+// represented as int32, which a truncating cast would silently fold back into
+// range -- returns an undefined tensor, and the caller sends that call to the
+// host path, where ATen raises its own message for it.
+//
+// The transfer is O(num_indices) and `self` stays on the device, which is the
+// whole point: the host path this replaces copies the *tensor being filled* to
+// the host and back.
+inline at::Tensor TopsatenIndexFillIndex(const at::Tensor& index, int64_t size) {
+  auto host = index.to(at::kCPU).contiguous().reshape({-1});
+  auto narrowed = at::empty(host.sizes(), host.options().dtype(at::kInt));
+  const int64_t* src = host.const_data_ptr<int64_t>();
+  int32_t* dst = narrowed.data_ptr<int32_t>();
+  const int64_t numel = host.numel();
+  for (int64_t i = 0; i < numel; ++i) {
+    int64_t value = src[i];
+    if (value < 0) {
+      value += size;
+    }
+    if (value < 0 || value >= size) {
+      return at::Tensor();
+    }
+    dst[i] = static_cast<int32_t>(value);
+  }
+  return narrowed.to(index.device());
+}
+
+// The i32 index tensor topsatenEmbeddingDenseBackward requires, built from
+// ATen's own index.
+//
+// The vendor's parameter table says int64 and its runtime disagrees: every int64
+// index set comes back BAD_PARAM with `topsatenEmbeddingBackward error: index
+// tensor must be of int32 data type`, and the same call with an int32 index
+// succeeds and matches ATen's own kernel row for row -- measured on S60 through
+// the vendor symbol itself, with padding_idx set, with scale_grad_by_freq set,
+// and for a 1-D index as well as the [n, 1] the table asks for. ATen meanwhile
+// hands this op an int64 index and nothing else, so the narrowing is the op's
+// job.
+//
+// It cannot be a plain cast. ATen does not raise on an index outside
+// [0, num_weights): it *ignores* that element of grad (measured -- 9, -2 and
+// 2**32 + 1, each with num_weights 6, all leave the table holding only the
+// in-range contributions). A truncating cast folds 2**32 + 1 back to 1, and the
+// vendor then accumulates grad's row for it into row 1 where ATen accumulated
+// nothing -- measured, and a silently wrong gradient rather than an ignored
+// element. So the index is read back once and checked in the same pass: an entry
+// outside [0, num_weights) returns an undefined tensor and the caller sends that
+// call to the host path, where ATen's own kernel ignores it. A num_weights that
+// does not fit in int32 takes the host path for the same reason -- a table that
+// large cannot be addressed by the vendor at all.
+//
+// The transfer is O(num_indices) and `grad` -- num_indices * embed_dim
+// elements, larger by the embedding width -- stays on the device, which is the
+// whole point: the host path this replaces copies grad to the host and back.
+inline at::Tensor TopsatenEmbeddingIndex(const at::Tensor& indices,
+                                         int64_t num_weights,
+                                         const at::Device& device) {
+  if (num_weights <= 0 || num_weights > std::numeric_limits<int32_t>::max()) {
+    return at::Tensor();
+  }
+  // int32 indices are legal for ATen's own kernel, so they are widened rather
+  // than declined; both dtypes then take the same validation below.
+  auto host = indices.to(at::kCPU).to(at::kLong).contiguous().reshape({-1});
+  auto narrowed = at::empty(host.sizes(), host.options().dtype(at::kInt));
+  const int64_t* src = host.const_data_ptr<int64_t>();
+  int32_t* dst = narrowed.data_ptr<int32_t>();
+  const int64_t numel = host.numel();
+  for (int64_t i = 0; i < numel; ++i) {
+    const int64_t value = src[i];
+    if (value < 0 || value >= num_weights) {
+      return at::Tensor();
+    }
+    dst[i] = static_cast<int32_t>(value);
+  }
+  return narrowed.to(device);
+}
+
+// Which dtypes topsatenEmbeddingDenseBackward may be handed. Its parameter
+// table lists result/grad as float, fp16, bf16, i32, u32, i16, u16, i8, u8 --
+// everything TopsatenSupportsDtype allows except PRED, which the vendor omits
+// even though its arange and index kernels do take a bool. A bool embedding
+// weight is legal in ATen, so declining here is what keeps the host path's
+// result instead of a vendor status error.
+inline bool TopsatenEmbeddingDenseBackwardDtype(at::ScalarType type) {
+  return TopsatenSupportsDtype(type) && type != at::kBool;
+}
+
 // A tops device pointer resolves only against the *current* device, so an op
 // on flagos:1 must run with device 1 selected. Restores the previous device.
 class TopsDeviceGuard {

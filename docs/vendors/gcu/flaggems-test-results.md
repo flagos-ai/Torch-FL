@@ -108,12 +108,12 @@ reaches ATen's `cpu_fallback`.
 | Route | Overloads | Share |
 |---|---:|---:|
 | `flaggems` | 255 | 12.5% |
-| `gcu` (native topsaten) | 159 | 7.8% |
-| `none` (cpu_fallback) | 1622 | 79.7% |
-| **accelerated** | **414** | **20.3%** |
+| `gcu` (native topsaten) | 171 | 8.4% |
+| `none` (cpu_fallback) | 1610 | 79.1% |
+| **accelerated** | **426** | **20.9%** |
 
 `backends_gcu.conf`, sha256
-`74aab449194a7495b6a93725bb66a2ccd3f53c2d3a2505d7ab46e1f171e7aefc`.
+`cf26cea3e29002fa6459c426e71da5801ea3f1ce381d8e8d93c6c758c2a01b1d`.
 
 The banner line is the only part of either generated file that the merge with
 `flagos/main` changed: the generator paths inside them moved from `scripts/` to
@@ -150,8 +150,8 @@ The two counts reconcile with the generated registration:
   override the first and warn at import -- so the conf still names `flaggems`
   as their route while the native kernel serves them. The routing table and the
   two registration files reconcile at `255 = 248 + 7`.
-- `gcu_register.inc` registers 166 native ops; 7 of them are the ops just
-  listed, and the other 159 are the `gcu` routes.
+- `gcu_register.inc` registers 178 native ops; 7 of them are the ops just
+  listed, and the other 171 are the `gcu` routes.
 
 Every accelerated route is present in the registration its name implies: no op
 is routed to `gcu` without a `gcu_register.inc` entry, so no route reaches a
@@ -203,6 +203,51 @@ writing into the destination's dtype in both directions. Within this conf
 (`c6526ed3…` -> `f961aff0…`) and `gcu_flaggems_register.inc` keeps its 248 again,
 so the reconciliations above are what the tree now reads: `255 = 248 + 7` and
 `159 = 166 - 7`. No `flaggems` route was touched by any of the three changes.
+
+A fourth change to the same conf moved twelve more overloads from `none` to
+`gcu` -- `_upsample_nearest_exact2d[.out]`, `embedding_dense_backward[.out]`,
+`index_select[.out]`, `index_fill.int_Scalar[_out]`, `index_fill.int_Tensor[_out]`,
+`index_fill_.int_Scalar` and `index_fill_.int_Tensor` -- which is the whole of the
+`159 -> 171` in the `gcu` column and the `1622 -> 1610` in `none`. Two censuses
+picked them. A training step (two Adam steps over a five-parameter model with an
+embedding lookup and an `index_select` path) with `FLAGOS_LOG_FALLBACK=1` recorded
+**11 `cpu_fallback` calls in four operators** -- `aten::index_select` 4,
+`aten::embedding_dense_backward` 4, `aten::index_fill_` 2, `aten::nonzero_static`
+1. The first three names cover all eight `index_*` / `embedding_dense_backward`
+spellings above: `csrc/aten/fallback.cc:21` logs `op.schema().name()`, and an
+in-place `index_fill_` reports as `aten::index_fill_` whichever value form it
+took. A Qwen-Image-2512 VAE decode at 1024x1024 supplied the fourth name: it made
+three `_upsample_nearest_exact2d` calls, all of them `cpu_fallback` on the
+pre-change tree. After the change the same training step records **exactly one
+`cpu_fallback` call**, `aten::nonzero_static`, with both step losses unchanged
+(`-32.7952`, `-51.3676`), and the VAE decode reports `cpu_fallback ops: 0` and
+runs to completion.
+
+`aten::nonzero_static` is deliberately left on the fallback and is the only
+remaining one on either path. Its result is `int64`, which
+`TopsatenSupportsDtype` declines everywhere, so no `gcu` kernel can be written
+for it; `flag_gems` ships no `nonzero_static` module, so there is no `flaggems`
+kernel either; and the schema has no `out=` overload, so the FL layer's `out=`
+lane cannot serve it. There is nothing to route it to, and the conf says `none`
+because that is true rather than because the op was overlooked.
+
+The kernels were added to the generator rather than by hand --
+`scripts/codegen/codegen_gcu.py` gains the twelve overloads, twelve templates and
+five helpers in `csrc/aten/backends/gcu/topsaten_common.h` -- and running it a
+second time leaves all three generated artifacts byte-identical. Within this conf
+`gcu_register.inc` moves 166 -> 178 `m.impl` lines
+(`f961aff0…` -> `806d7ce7…`) and `gcu_kernels.cc` `35c8a37e…` -> `7f34288a…`,
+while `gcu_flaggems_register.inc` keeps its 248 (`9c9c99d0…`), so the
+reconciliations above are what the tree now reads: `255 = 248 + 7` and
+`171 = 178 - 7`. No `flaggems` route was touched by any of the four changes.
+
+Because registration and routing are checked against each other, the twelve ops
+cannot be measured against the pre-change conf: with the new `gcu_register.inc`
+in place and `none` still in the conf, the first `_upsample_nearest_exact2d` call
+raises `routed to 'none' (no accelerated impl on this platform) but the op is
+registered on PrivateUse1` instead of reaching `cpu_fallback`. The before-numbers
+above therefore come from a build that predates the registration, and the after
+numbers from a build that has both halves of the change.
 
 ### Backend priority
 
@@ -778,8 +823,8 @@ Both generators were run twice in a row and the second run produced no change:
 
 ## Summary
 
-- `backends_gcu.conf` went from 152 to **414 accelerated routes** out of 2036
-  (7.5% -> 20.3%): 255 `flaggems`, 159 `gcu`, 1622 `none`.
+- `backends_gcu.conf` went from 152 to **426 accelerated routes** out of 2036
+  (7.5% -> 20.9%): 255 `flaggems`, 171 `gcu`, 1610 `none`.
 - 374 FlagGems routes were measured across seven profiles each: 121 are clean on
   every exercised profile, 81 are wrong at float16/float32 and were reverted to
   the vendor route, and 112 are wrong only for int64/bool (36 of them reverted

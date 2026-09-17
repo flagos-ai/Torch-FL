@@ -33,6 +33,8 @@
   m.impl("_softmax", WrapperPrivSoftmax);
   m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
   m.impl("_standard_gamma", WrapperPrivStandardGamma);
+  m.impl("_upsample_nearest_exact2d", WrapperPrivUpsampleNearestExact2d);
+  m.impl("_upsample_nearest_exact2d.out", WrapperPrivUpsampleNearestExact2dOut);
   m.impl("abs", WrapperAbs);
   m.impl("acos", WrapperAcos);
   m.impl("add.Scalar", WrapperAddScalar);
@@ -62,6 +64,8 @@
   m.impl("cosh", WrapperCosh);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
+  m.impl("embedding_dense_backward.out", WrapperEmbeddingDenseBackwardOut);
   m.impl("eq.Scalar", WrapperEqScalar);
   m.impl("eq.Tensor", WrapperEqTensor);
   m.impl("erf", WrapperErf);
@@ -80,6 +84,14 @@
   m.impl("gelu", WrapperGelu);
   m.impl("gt.Scalar", WrapperGtScalar);
   m.impl("gt.Tensor", WrapperGtTensor);
+  m.impl("index_fill.int_Scalar", WrapperIndexFillIntScalar);
+  m.impl("index_fill.int_Scalar_out", WrapperIndexFillIntScalarOut);
+  m.impl("index_fill.int_Tensor", WrapperIndexFillIntTensor);
+  m.impl("index_fill.int_Tensor_out", WrapperIndexFillIntTensorOut);
+  m.impl("index_fill_.int_Scalar", WrapperIndexFillInplaceIntScalar);
+  m.impl("index_fill_.int_Tensor", WrapperIndexFillInplaceIntTensor);
+  m.impl("index_select", WrapperIndexSelect);
+  m.impl("index_select.out", WrapperIndexSelectOut);
   m.impl("le.Scalar", WrapperLeScalar);
   m.impl("le.Tensor", WrapperLeTensor);
   m.impl("linalg_vector_norm", WrapperLinalgVectorNorm);

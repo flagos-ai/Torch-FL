@@ -17,9 +17,12 @@
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/embedding_dense_backward.h>
+#include <ATen/ops/index_select.h>
 #include <ATen/ops/linalg_vector_norm.h>
 #include <ATen/ops/result_type.h>
 #include <ATen/ops/zeros.h>
+#include <ATen/ops/_upsample_nearest_exact2d.h>
 #include <ATen/native/ConvUtils.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
@@ -2371,6 +2374,293 @@ REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardOverrideableFn, convolution_backward_overrideable_dispatcher, Backend::kGcu, ConvolutionBackwardOverrideableKernelGcu)
+
+at::Tensor IndexSelectKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index) {
+  // ATen raises IndexError for an out-of-range dim and for an index that is not
+  // a vector or a scalar, and its messages are the useful ones, so both cases
+  // are the host path's job. A 0-dim index is a legal one-element vector
+  // (measured: shape (1, 4) for `index_select(t, 0, tensor(1))` on a (3, 4)),
+  // which is why the flatten below is a reshape and not a rank check.
+  const bool dim_ok =
+      self.dim() != 0 && dim >= -self.dim() && dim < self.dim();
+  if (!dim_ok || index.dim() > 1 ||
+      !gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenIndexDtype(index.scalar_type())) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  const int64_t dim_n = dim < 0 ? dim + self.dim() : dim;
+  auto self_c = self.contiguous();
+  auto index_c = index.to(self.device()).contiguous().reshape({-1});
+  std::vector<int64_t> out_shape(self_c.sizes().vec());
+  out_shape[dim_n] = index_c.size(0);
+  auto out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (!gcu::TopsatenIndexSelectFits({self_c, index_c, out})) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_index(index_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenIndexSelect, out, t_out.get(), t_self.get(), dim_n, t_index.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kGcu, IndexSelectKernelGcu)
+
+at::Tensor& IndexSelectOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(out.scalar_type() == self.scalar_type(),
+              "index_select(): self and result must have the same scalar type");
+  auto result = IndexSelectKernelGcu(self, dim, index);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectOutFn, index_select_out_dispatcher, Backend::kGcu, IndexSelectOutKernelGcu)
+
+at::Tensor& IndexFillInplaceIntScalarKernelGcu(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value) {
+  // Each way ATen rejects this call has a message worth keeping, and only the
+  // host path raises it, so the checks come first: an out-of-range dim, an
+  // index that is not a vector or a scalar, and an index that is not int64 --
+  // the last applied even to an empty index (measured), which is why it cannot
+  // be folded into the empty-index shortcut below.
+  const bool dim_ok =
+      self.dim() != 0 && dim >= -self.dim() && dim < self.dim();
+  const bool index_ok = index.dim() <= 1 && index.scalar_type() == at::kLong;
+  const bool self_ok =
+      self.numel() != 0 && gcu::TopsatenSupportsDtype(self.scalar_type()) &&
+      self.is_contiguous();
+  const int64_t dim_n = dim_ok ? (dim < 0 ? dim + self.dim() : dim) : 0;
+  at::Tensor index_c;
+  if (dim_ok && index_ok && self_ok) {
+    index_c = gcu::TopsatenIndexFillIndex(index, self.size(dim_n));
+  }
+  if (!index_c.defined()) {
+    auto host = self.cpu();
+    host.index_fill_(dim, index.cpu(), value);
+    self.copy_(host);
+    return self;
+  }
+  // Only reachable with dim and index both valid, so an empty index is the
+  // no-op ATen makes it, and costs nothing here.
+  if (index.numel() == 0) {
+    return self;
+  }
+  auto t_value = gcu::ToTopsatenScalar(value, self.scalar_type());
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_index(index_c);
+  EXEC_TOPSATEN_CMD(topsatenIndexFill, self, t_self.get(), t_self.get(), dim_n, t_index.get(), t_value);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntScalarFn, index_fill_inplace_int_scalar_dispatcher, Backend::kGcu, IndexFillInplaceIntScalarKernelGcu)
+
+at::Tensor& IndexFillInplaceIntTensorKernelGcu(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value) {
+  const bool dim_ok =
+      self.dim() != 0 && dim >= -self.dim() && dim < self.dim();
+  const bool index_ok = index.dim() <= 1 && index.scalar_type() == at::kLong;
+  const bool self_ok =
+      self.numel() != 0 && gcu::TopsatenSupportsDtype(self.scalar_type()) &&
+      self.is_contiguous();
+  const int64_t dim_n = dim_ok ? (dim < 0 ? dim + self.dim() : dim) : 0;
+  at::Tensor index_c;
+  if (dim_ok && index_ok && self_ok && value.dim() == 0) {
+    index_c = gcu::TopsatenIndexFillIndex(index, self.size(dim_n));
+  }
+  if (!index_c.defined()) {
+    auto host = self.cpu();
+    host.index_fill_(dim, index.cpu(), value.cpu());
+    self.copy_(host);
+    return self;
+  }
+  if (index.numel() == 0) {
+    return self;
+  }
+  auto value_c = value.to(self.device(), self.scalar_type()).reshape({1});
+
+  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_index(index_c);
+  gcu::TopsatenTensorWrapper t_value(value_c);
+  EXEC_TOPSATEN_CMD(topsatenIndexFill, self, t_self.get(), t_self.get(), dim_n, t_index.get(), t_value.get());
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntTensorFn, index_fill_inplace_int_tensor_dispatcher, Backend::kGcu, IndexFillInplaceIntTensorKernelGcu)
+
+at::Tensor IndexFillIntScalarKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value) {
+  auto result = self.clone();
+  IndexFillInplaceIntScalarKernelGcu(result, dim, index, value);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarFn, index_fill_int_scalar_dispatcher, Backend::kGcu, IndexFillIntScalarKernelGcu)
+
+at::Tensor& IndexFillIntScalarOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(out.scalar_type() == self.scalar_type(),
+              "Expected out tensor to have dtype ", self.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result = IndexFillIntScalarKernelGcu(self, dim, index, value);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarOutFn, index_fill_int_scalar_out_dispatcher, Backend::kGcu, IndexFillIntScalarOutKernelGcu)
+
+at::Tensor IndexFillIntTensorKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value) {
+  auto result = self.clone();
+  IndexFillInplaceIntTensorKernelGcu(result, dim, index, value);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorFn, index_fill_int_tensor_dispatcher, Backend::kGcu, IndexFillIntTensorKernelGcu)
+
+at::Tensor& IndexFillIntTensorOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(out.scalar_type() == self.scalar_type(),
+              "Expected out tensor to have dtype ", self.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result = IndexFillIntTensorKernelGcu(self, dim, index, value);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorOutFn, index_fill_int_tensor_out_dispatcher, Backend::kGcu, IndexFillIntTensorOutKernelGcu)
+
+at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Tensor& indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
+  // A padding_idx outside [-1, num_weights) has no vendor equivalent to lean
+  // on. ATen compares it against the *flat* index, which is never negative, so
+  // a value below -1 skips no row at all (measured: -4 and -1 both leave a
+  // 6-row table untouched) and a value at or above num_weights matches no row
+  // either, while topsaten's parameter names the row to skip. -1 is the "no
+  // padding" sentinel both sides share -- it is topsaten's documented default.
+  if (grad.dim() == 0 || num_weights <= 0 || padding_idx < -1 ||
+      padding_idx >= num_weights ||
+      !gcu::TopsatenEmbeddingDenseBackwardDtype(grad.scalar_type()) ||
+      (indices.scalar_type() != at::kLong && indices.scalar_type() != at::kInt)) {
+    return at::embedding_dense_backward(grad.cpu(), indices.cpu(), num_weights, padding_idx, scale_grad_by_freq)
+        .to(grad.device());
+  }
+  auto grad_c = grad.contiguous();
+  const int64_t embed_dim = grad_c.size(-1);
+  auto indices_i32 = gcu::TopsatenEmbeddingIndex(indices, num_weights, grad.device());
+  // topsaten rejects a mismatch with a status error, ATen raises its own
+  // message for it, and ATen's is the one a caller can act on.
+  const int64_t num_indices = indices_i32.defined() ? indices_i32.numel() : -1;
+  if (!indices_i32.defined() || grad_c.numel() != num_indices * embed_dim) {
+    return at::embedding_dense_backward(grad.cpu(), indices.cpu(), num_weights, padding_idx, scale_grad_by_freq)
+        .to(grad.device());
+  }
+  auto out = at::empty({num_weights, embed_dim}, grad_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (num_indices == 0) {
+    // topsatenEmbeddingDenseBackward zeroes its buffer as step 1 of its own
+    // flow, so this is the one case that has to be zeroed here: no index means
+    // no row is written, and ATen returns zeros.
+    out.zero_();
+    return out;
+  }
+  auto grad_2d = grad_c.reshape({-1, embed_dim});
+  auto indices_2d = indices_i32.reshape({-1, 1});
+
+  gcu::TopsatenTensorWrapper t_grad(grad_2d);
+  gcu::TopsatenTensorWrapper t_indices(indices_2d);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenEmbeddingDenseBackward, grad, t_out.get(), t_grad.get(), t_indices.get(), num_weights, padding_idx, scale_grad_by_freq);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kGcu, EmbeddingDenseBackwardKernelGcu)
+
+// The same guard _OUT_DEVICE_GUARD installs, spelled out because that snippet
+// names `self` and this kernel's first parameter is `grad`. See its comment for
+// why the resize below needs the device selected.
+at::Tensor& EmbeddingDenseBackwardOutKernelGcu(const at::Tensor& grad, const at::Tensor& indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(grad);
+  TORCH_CHECK(out.scalar_type() == grad.scalar_type(),
+              "Expected out tensor to have dtype ", grad.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result = EmbeddingDenseBackwardKernelGcu(
+      grad, indices, num_weights, padding_idx, scale_grad_by_freq);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardOutFn, embedding_dense_backward_out_dispatcher, Backend::kGcu, EmbeddingDenseBackwardOutKernelGcu)
+
+at::Tensor PrivUpsampleNearestExact2dKernelGcu(const at::Tensor& self, at::IntArrayRef output_size, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
+  if (self.dim() != 4 || output_size.size() != 2 || !scales_h.has_value() ||
+      !scales_w.has_value() ||
+      !gcu::TopsatenSupportsDtype(self.scalar_type())) {
+    return at::_upsample_nearest_exact2d(self.cpu(), output_size, scales_h, scales_w).to(self.device());
+  }
+  auto self_c = self.contiguous();
+  auto out = at::empty(
+      {self_c.size(0), self_c.size(1), output_size[0], output_size[1]},
+      self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  auto t_scale_h = gcu::ToTopsatenScalar(at::Scalar(*scales_h), at::kDouble);
+  auto t_scale_w = gcu::ToTopsatenScalar(at::Scalar(*scales_w), at::kDouble);
+  gcu::TopsatenSizeWrapper t_size(output_size);
+
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenUpsampleNearestExact2d, self, t_out.get(), t_self.get(), t_size.get(), t_scale_h, t_scale_w);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dFn, priv_upsample_nearest_exact2d_dispatcher, Backend::kGcu, PrivUpsampleNearestExact2dKernelGcu)
+
+at::Tensor& PrivUpsampleNearestExact2dOutKernelGcu(const at::Tensor& self, at::IntArrayRef output_size, ::std::optional<double> scales_h, ::std::optional<double> scales_w, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(self);
+  TORCH_CHECK(out.scalar_type() == self.scalar_type(),
+              "Expected out tensor to have dtype ", self.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result =
+      PrivUpsampleNearestExact2dKernelGcu(self, output_size, scales_h, scales_w);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dOutFn, priv_upsample_nearest_exact2d_out_dispatcher, Backend::kGcu, PrivUpsampleNearestExact2dOutKernelGcu)
 
 void ForeachAddInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {
