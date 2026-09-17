@@ -405,7 +405,7 @@ def test_every_platform_covers_the_same_op_set():
 def test_flaggems_cpp_only_appears_where_the_slot_is_compiled_in():
     """`flaggems_cpp` is Backend::kFlagGemsCpp, registered in flaggems_cpp_kernels.cc
     behind `#ifdef FLAGOS_FLAGGEMS_CPP` -- which csrc/CMakeLists.txt defines only
-    for FLAGGEMS_KERNEL=ON. CMakeLists.txt force-sets that OFF for ascend, dcu,
+    for FLAGGEMS_CPP=ON. CMakeLists.txt force-sets that OFF for ascend, dcu,
     musa, bpu, tsingmicro and a non-boxing metax build. For those, the slot is
     empty and Dispatcher::GetFn degrades to the boxing kernel instead of raising.
 

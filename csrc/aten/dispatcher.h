@@ -158,7 +158,7 @@ class Dispatcher {
 
       if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
         std::string msg = std::string(op_name_) +
-                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGGEMS_KERNEL=1 or FLAGGEMS_PYTHON=1)";
+                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGGEMS_CPP=1 or FLAGGEMS_KERNEL=1)";
         throw std::runtime_error(msg);
       }
       if (strict_vendor && backend != Backend::kFlagGemsCpp && backend != Backend::kFlagGems &&
@@ -199,7 +199,7 @@ class Dispatcher {
 
       if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
         std::string msg = op_name +
-                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGGEMS_KERNEL=1 or FLAGGEMS_PYTHON=1)";
+                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGGEMS_CPP=1 or FLAGGEMS_KERNEL=1)";
         throw std::runtime_error(msg);
       }
       if (strict_vendor && backend != Backend::kFlagGemsCpp && backend != Backend::kFlagGems &&
@@ -264,7 +264,7 @@ class Dispatcher {
   FnPtr GetFn(Backend device) const {
     switch (device) {
       case Backend::kCuda:          return cuda_fn_;
-      // FlagGems C++ runtime is only compiled in for a FLAGGEMS_KERNEL=ON
+      // FlagGems C++ runtime is only compiled in for a FLAGGEMS_CPP=ON
       // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
       // liboperators.so built for the vendor. A platform ships ONE conf, so the
       // conf cannot know whether that opt-in build is the one running: MetaX's
@@ -278,7 +278,7 @@ class Dispatcher {
       case Backend::kFlagGemsCpp:
         if (flaggems_cpp_fn_) return flaggems_cpp_fn_;
         return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
-      // FlagGems Python path is only compiled in for a FLAGGEMS_PYTHON=ON build
+      // FlagGems Python path is only compiled in for a FLAGGEMS_KERNEL=ON build
       // (flaggems_python_kernels.cc, behind FLAGOS_FLAGGEMS_PYTHON). When uncompiled,
       // degrade to the boxing kernel rather than raising "backend not registered".
       // This keeps one conf correct for both builds (Python FlagGems ON/OFF).

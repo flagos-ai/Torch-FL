@@ -340,9 +340,9 @@ def build_deps():
         cmake_args.append("-DTILEOPS_KERNEL=OFF")
     if ACCELERATOR == "metax":
         # Boxing mode reuses the generated CUDA boxing kernels (host g++) instead
-        # of hand-written mxcc .cu kernels; leave METAX_KERNEL off so CMake picks
-        # it up from the FLAGOS_METAX_BOXING env branch in CMakeLists.txt.
-        metax_boxing = os.environ.get("FLAGOS_METAX_BOXING", "0") not in (
+        # of hand-written mxcc .cu kernels; leave VENDOR_KERNEL off so CMake picks
+        # it up from the VENDOR_USE_BOXING env branch in CMakeLists.txt.
+        metax_boxing = os.environ.get("VENDOR_USE_BOXING", "0") not in (
             "0",
             "OFF",
             "off",
@@ -351,23 +351,22 @@ def build_deps():
         )
         cmake_args.extend(
             [
-                "-DMETAX_KERNEL=" + ("OFF" if metax_boxing else "ON"),
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
+                "-DVENDOR_KERNEL=" + ("OFF" if metax_boxing else "ON"),
+                "-DFLAGGEMS_CPP=OFF",
             ]
         )
-        # FLAGGEMS_PYTHON defaults ON, same as CUDA: the boxing wheel also compiles
-        # the FlagGems Python-path kernels (flagos_python backend) so FlagGems can
-        # be toggled at runtime via FLAGOS_USE_FLAGGEMS, exactly like CUDA. python_op_
-        # caller links torch_python_library (already in the metax link set) and adds
-        # nothing to the bundled wheel size. Set FLAGGEMS_PYTHON=0 for a slim
-        # pure-boxing build; the generic pass-through below honors an explicit value.
+        # FLAGGEMS_KERNEL defaults ON, same as CUDA: the boxing wheel also compiles
+        # the FlagGems Python-path kernels (flagos_python backend) so the conf can
+        # route to them. python_op_caller links torch_python_library (already in
+        # the metax link set) and adds nothing to the bundled wheel size. Set
+        # FLAGGEMS_KERNEL=0 for a slim pure-boxing build; the generic
+        # pass-through below honors an explicit value.
         #
-        # FLAGGEMS_KERNEL (the C++ kFlagOs path, liboperators.so) defaults OFF
+        # FLAGGEMS_CPP (the C++ kFlagOs path, liboperators.so) defaults OFF
         # because it needs a FlagGems built for MACA, which is a separate build:
         #     cd FlagGems/cpp && cmake -B build-maca -DFLAGGEMS_BUILD_C_EXTENSIONS=ON \
         #         -DFLAGGEMS_BACKEND=MACA -DMACA_PATH=/opt/maca
-        # Opt in with FLAGGEMS_KERNEL=1 FLAGGEMS_DIR=<that build dir> (the generic
+        # Opt in with FLAGGEMS_CPP=1 FLAGGEMS_DIR=<that build dir> (the generic
         # pass-through below emits a later -D that overrides the OFF above). The
         # C++ kernels reach the device via the same DeviceBoxingGuard as the
         # boxing path, so they need boxing mode.
@@ -380,42 +379,31 @@ def build_deps():
         # unsupported or unregistered operators remain on ACLNN/CPU fallback.
         cmake_args.extend(
             [
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-                "-DFLAGGEMS_PYTHON=ON",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=ON",
+                "-DFLAGGEMS_CPP=OFF",
+                "-DFLAGGEMS_KERNEL=ON",
+                "-DVENDOR_KERNEL=ON",
             ]
         )
-    elif ACCELERATOR == "tsingmicro":
-        cmake_args.extend(
-            [
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=OFF",
-            ]
-        )
+    # tsingmicro needs no branch: no vendor backend directory exists, so
+    # VENDOR_KERNEL is a no-op, and boxing plus FlagGems Python stay on by
+    # default.
     elif ACCELERATOR == "dcu":
         # Boxing build. The DCU torch wheel is a hipified build whose HIP kernels
         # are registered under the CUDA dispatch key, so the generated
         # PrivateUse1 -> CUDA boxing kernels reach them with no hand-written
-        # kernels of our own. FLAGGEMS_KERNEL needs liboperators.so, which is not
+        # kernels of our own. FLAGGEMS_CPP needs liboperators.so, which is not
         # built for DTK, and stays off.
         #
-        # FLAGGEMS_PYTHON defaults ON, same as metax/cuda: DTK ships a working
+        # FLAGGEMS_KERNEL defaults ON, same as metax/cuda: DTK ships a working
         # triton (hcu backend) that flag_gems runs on, so the wheel compiles the
         # FlagGems Python-path kernels too and the choice becomes a runtime one
-        # (FLAGOS_USE_FLAGGEMS -> backends_dcu.conf). python_op_caller
+        # (backends_dcu.conf). python_op_caller
         # links torch_python_library, already in the link set, so this adds
-        # nothing to the wheel size. Set FLAGGEMS_PYTHON=0 for a slim pure-boxing
+        # nothing to the wheel size. Set FLAGGEMS_KERNEL=0 for a slim pure-boxing
         # build; the generic pass-through below honors that.
         cmake_args.extend(
             [
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=OFF",
+                "-DFLAGGEMS_CPP=OFF",
             ]
         )
     elif ACCELERATOR == "bpu":
@@ -427,17 +415,14 @@ def build_deps():
         # allocator, device/stream stubs) is native.
         cmake_args.extend(
             [
-                "-DCUDA_KERNEL=OFF",
+                "-DFLAGGEMS_CPP=OFF",
                 "-DFLAGGEMS_KERNEL=OFF",
-                "-DFLAGGEMS_PYTHON=OFF",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=OFF",
             ]
         )
     elif ACCELERATOR == "gcu":
         # Enflame GCU has no CUDA runtime: the tops runtime provides the device
         # layer and libtopsaten the operators, so CUDA/vendor kernel sets stay
-        # off and GCU_KERNEL (topsaten) provides the native compute ops. Ops
+        # off and VENDOR_KERNEL (topsaten) provides the native compute ops. Ops
         # without a topsaten kernel fall back to CPU.
         #
         # Keep the FlagGems Python kernels in the same C++ dispatcher as the
@@ -448,42 +433,35 @@ def build_deps():
         # Python layer cannot register a second PrivateUse1 implementation.
         cmake_args.extend(
             [
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-                "-DFLAGGEMS_PYTHON=ON",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=OFF",
-                "-DGCU_KERNEL=ON",
+                "-DBOXING_KERNEL=OFF",
+                "-DFLAGGEMS_CPP=OFF",
+                "-DFLAGGEMS_KERNEL=ON",
+                "-DVENDOR_KERNEL=ON",
             ]
         )
     elif ACCELERATOR == "musa":
         # Moore Threads MUSA has no CUDA runtime: the musa* API provides the
-        # device layer, and mudnn provides the native operators (MUSA_KERNEL).
-        # Compile the FlagGems Python callers into the same wheel so
-        # FLAGOS_USE_FLAGGEMS can select the hybrid routing at runtime. Kernel
+        # device layer, and mudnn provides the native operators (VENDOR_KERNEL).
+        # Compile the FlagGems Python callers into the same wheel so the conf
+        # can route the hybrid path at runtime. Kernel
         # execution still requires a compatible MUSA Triton backend; without
         # one, native routing remains the default and unaffected.
         cmake_args.extend(
             [
-                "-DCUDA_KERNEL=OFF",
-                "-DFLAGGEMS_KERNEL=OFF",
-                "-DFLAGGEMS_PYTHON=ON",
-                "-DMETAX_KERNEL=OFF",
-                "-DASCEND_KERNEL=OFF",
-                "-DMUSA_KERNEL=ON",
+                "-DBOXING_KERNEL=OFF",
+                "-DFLAGGEMS_CPP=OFF",
+                "-DFLAGGEMS_KERNEL=ON",
+                "-DVENDOR_KERNEL=ON",
             ]
         )
 
     # Kernel build options from environment
     for kernel_opt in (
+        "VENDOR_KERNEL",
         "FLAGGEMS_KERNEL",
-        "FLAGGEMS_PYTHON",
+        "BOXING_KERNEL",
+        "FLAGGEMS_CPP",
         "TILEOPS_KERNEL",
-        "CUDA_KERNEL",
-        "METAX_KERNEL",
-        "ASCEND_KERNEL",
-        "GCU_KERNEL",
-        "MUSA_KERNEL",
     ):
         val = os.environ.get(kernel_opt)
         if val is not None:
@@ -772,10 +750,9 @@ def _get_setup_kwargs():
             # must export, shipped so an installed wheel can be re-audited with
             # scripts/vendor/check_dcu_core_abi.py against a different DTK release.
             "accelerator/dcu/dtk_core_compat_symbols.txt",
-            # All backend configs, not just the default: runtime op-routing
-            # configs selected via FLAGOS_USE_FLAGGEMS (backends_flaggems.conf)
-            # and boxing modes via FLAGOS_BACKEND_CONFIG (backends_cuda.conf /
-            # backends_metax.conf). Now consolidated under configs/.
+            # All backend configs, not just the default: per-op routing tables
+            # read by torch_fl at import (backends_cuda.conf /
+            # backends_metax.conf, ...). Now consolidated under configs/.
             "configs/backends*.conf",
             "codegen_skip_ops.txt",
         ]

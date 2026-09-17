@@ -99,7 +99,7 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
 def _flaggems_cpp_enabled() -> bool:
     """True when the FlagGems C++ runtime path is switched on (FLAGOS_USE_FLAGGEMS_CPP=1).
 
-    Tests marked ``flaggems_cpp`` require a wheel built with FLAGGEMS_KERNEL=ON
+    Tests marked ``flaggems_cpp`` require a wheel built with FLAGGEMS_CPP=ON
     (liboperators.so linked in) and FLAGOS_USE_FLAGGEMS_CPP=1 at runtime; they
     are skipped when the env var is off (default).
     """
@@ -119,7 +119,7 @@ def pytest_collection_modifyitems(
     # In MetaX boxing mode the hand-written mxcc backend is NOT compiled: ops run
     # through the CUDA boxing kernels (and optionally the FlagGems Python path).
     # Tests asserting a `-> metax` dispatch (mark.metax) cannot pass, so skip them.
-    if platform == "metax" and os.environ.get("FLAGOS_METAX_BOXING", "0") == "1":
+    if platform == "metax" and os.environ.get("VENDOR_USE_BOXING", "0") == "1":
         markers_to_skip.append("metax")
     flaggems_cpp_on = _flaggems_cpp_enabled()
     for item in items:
@@ -130,13 +130,13 @@ def pytest_collection_modifyitems(
                 )
             )
             continue
-        # The FlagGems C++ path requires a FLAGGEMS_KERNEL=ON wheel and runtime env.
+        # The FlagGems C++ path requires a FLAGGEMS_CPP=ON wheel and runtime env.
         if item.get_closest_marker("flaggems_cpp") and not flaggems_cpp_on:
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
                         "FlagGems C++ path is off "
-                        "(set FLAGOS_USE_FLAGGEMS_CPP=1 with a FLAGGEMS_KERNEL=ON wheel)"
+                        "(set FLAGOS_USE_FLAGGEMS_CPP=1 with a FLAGGEMS_CPP=ON wheel)"
                     )
                 )
             )
@@ -178,7 +178,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "flaggems_cpp: requires torch_fl built with FLAGGEMS_KERNEL=ON and "
+        "flaggems_cpp: requires torch_fl built with FLAGGEMS_CPP=ON and "
         "FLAGOS_USE_FLAGGEMS_CPP=1 at runtime",
     )
     config.addinivalue_line(

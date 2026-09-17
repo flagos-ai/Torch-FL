@@ -38,7 +38,7 @@ process, not against "it did not crash". Where a feature legitimately changes
 the numbers (bf16), the tolerance is loosened rather than the check dropped.
 
 Run (from repo root):
-    ACCELERATOR=metax FLAGOS_METAX_BOXING=1 \
+    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \

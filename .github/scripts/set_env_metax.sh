@@ -113,18 +113,18 @@ export METAX_PATH=/opt/maca
 export MACA_PATH=/opt/maca
 export MACA_HOME=/opt/maca
 
-export FLAGOS_METAX_BOXING=1
+export VENDOR_USE_BOXING=1
 export FLAGOS_METAX_CUDART_SHIM=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 # Which op takes which backend is stated in backends_metax.conf, not here: that
 # file is full-coverage and lists all five keys per op
 # (flaggems_cpp > flaggems > tileops > cuda), and _select_backend_config() picks
-# it from FLAGOS_METAX_BOXING alone. The retired FLAGOS_USE_FLAGGEMS switch
+# it from VENDOR_USE_BOXING alone. The retired FLAGOS_USE_FLAGGEMS switch
 # used to select a separate backends_flaggems.conf; nothing reads it any more,
 # so setting it here would misdescribe the build -- the FlagGems Python path is
 # on for the 592 ops the conf routes to it either way.
-export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON=1
+export FLAGGEMS_CPP=0
+export FLAGGEMS_KERNEL=1
 export FLAGOS_WHEEL_LOCAL=metax3.8.0
 export FLAGOS_MACA_TORCH_LIB=/opt/vendor-libtorch/lib
 
@@ -176,7 +176,7 @@ PY
 # generated kernels were measured on -- rather than the triton-metax the image
 # carries beside its own MetaX torch install. FlagGems is required because
 # backends_metax.conf routes 592 ops to the Python FlagGems path by default
-# (FLAGGEMS_PYTHON=1 above compiles the dispatcher slot).
+# (FLAGGEMS_KERNEL=1 above compiles the dispatcher slot).
 #
 # Both are installed into the venv rather than linked out of the image, so the
 # packages the tests import are the ones this script put there. Linking is what
@@ -365,9 +365,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
   for name in \
     VIRTUAL_ENV PYTHONNOUSERSITE ACCELERATOR METAX_PATH MACA_PATH MACA_HOME \
-    FLAGOS_METAX_BOXING FLAGOS_METAX_CUDART_SHIM \
+    VENDOR_USE_BOXING FLAGOS_METAX_CUDART_SHIM \
     FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGGEMS_KERNEL FLAGGEMS_PYTHON FLAGOS_WHEEL_LOCAL \
+    FLAGGEMS_CPP FLAGGEMS_KERNEL FLAGOS_WHEEL_LOCAL \
     FLAGOS_MACA_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

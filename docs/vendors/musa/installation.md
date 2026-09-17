@@ -34,11 +34,11 @@ ACCELERATOR=musa pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `ACCELERATOR=musa`: selects the MUSA build path and enables `MUSA_KERNEL=ON`
-- `MUSA_KERNEL=ON`: compiles generated `mudnn` operator kernels (automatic when `ACCELERATOR=musa`)
-- `FLAGGEMS_PYTHON=ON`: compiles the optional Python dispatcher callers into the same wheel; per-op routing comes from `backends_musa.conf` (FlagGems-first), no runtime switch involved
-- `CUDA_KERNEL=OFF`: automatically disabled (the MUSA toolkit exports no CUDA symbols)
-- `FLAGGEMS_KERNEL=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
+- `ACCELERATOR=musa`: selects the MUSA build path and enables `VENDOR_KERNEL=ON`
+- `VENDOR_KERNEL=ON`: compiles generated `mudnn` operator kernels (automatic when `ACCELERATOR=musa`)
+- `FLAGGEMS_KERNEL=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_musa.conf`
+- `BOXING_KERNEL=OFF`: forced (the MUSA toolkit exports no CUDA symbols)
+- `FLAGGEMS_CPP=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
 
 The build runs `scripts/codegen/codegen_mudnn.py` to generate kernels. Coverage is **64 generated ops** plus 2 handwritten convolution kernels; native RNG kernels add muRAND-backed `rand`/`randn`, `rand_like`/`randn_like`, `randint`, `normal_`, `uniform_`, `random_`, and mudnn dropout paths. Everything outside those sets reaches the `cpu_fallback`.
@@ -374,7 +374,7 @@ mudnn/muRAND plus CPU fallback remain usable for the ops it sends to `musa` or
 To build the runtime layer only (device/memory/stream support) with no native operator kernels:
 
 ```bash
-ACCELERATOR=musa MUSA_KERNEL=OFF pip install --no-build-isolation -v -e .
+ACCELERATOR=musa VENDOR_KERNEL=OFF pip install --no-build-isolation -v -e .
 ```
 
 All compute ops will fall back to CPU. This mode is useful for testing the runtime layer in isolation.

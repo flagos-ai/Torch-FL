@@ -7,7 +7,7 @@ Hygon DCU (DTK) reuses the **CUDA boxing route** with a dedicated `ACCELERATOR=d
 - The DCU `torch` wheel is a **hipified** build: it registers HIP kernels under the `CUDA` dispatch key and its tensors report `DeviceType::CUDA` (`torch.version.cuda is None`, `torch.version.hip == '6.3.x'`). Generated PrivateUse1 → CUDA boxing kernels dispatch into `libtorch_hip.so` unchanged.
 - DTK ships a **CUDA compatibility toolkit** at `$DTK_ROOT/cuda/cuda-*` whose `libcudart.so.12` is a thin shim over `libgalaxyhip.so` — the same runtime `libtorch_hip.so` uses. Runtime sources compile as-is with plain host `g++`; no `nvcc`, no `hipcc`, no hipify pass.
 
-The build is **pure boxing**: `CUDA_KERNEL`, `FLAGGEMS_KERNEL`, and `FLAGGEMS_PYTHON` are all forced off by default (DTK ships its own Triton, so the NVIDIA-targeted PyPI `triton` wheel is the wrong artifact).
+The build is **pure boxing**: no vendor kernels (`VENDOR_KERNEL` has no DCU backend directory to enable), the generated PrivateUse1 → CUDA boxing kernels compile by default, FlagGems Python is on by default and only the C++ path stays off (`FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so).
 
 **Status:** Beta. CI validates vendor-backend and FlagGems-runtime operator suites, general tests, and profiler parity on DCU runners. Inference and training smoke tests are deferred pending model mount and card-count confirmation.
 
@@ -41,7 +41,7 @@ ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
 
 ### Build Notes
 
-- **`ACCELERATOR=dcu` forces boxing mode:** `CUDA_KERNEL=OFF`, `FLAGGEMS_KERNEL=OFF`, `FLAGGEMS_PYTHON=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) are the only kernel set compiled.
+- **`ACCELERATOR=dcu` forces boxing mode:** `VENDOR_KERNEL` has no DCU backend directory and `FLAGGEMS_CPP=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) plus the FlagGems Python path are the kernel sets compiled.
 - **No `nvcc` or `hipcc` needed:** CUDA runtime sources compile with plain `g++` using DTK's CUDA compatibility toolkit headers.
 - **MIOpen CMake config fix:** DTK's exported MIOpen config bakes in `/usr/lib/x86_64-linux-gnu/librt.so`, which no longer exists on glibc ≥ 2.34 (librt was folded into libc). The `ACCELERATOR=dcu` branch rewrites that dangling path to `-lrt`.
 
@@ -208,7 +208,7 @@ See [Profiler Architecture](../../architecture/profiler.md) for details on devic
 FlagGems runs on the `hcu` backend of the FlagTree Triton build, whose `hygon`
 vendor declares `device_name="cuda"` — exactly what the boxing route expects. The
 kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
-`FLAGGEMS_KERNEL=0` and `FLAGGEMS_PYTHON=1` are the build switches.
+`FLAGGEMS_CPP=0` and `FLAGGEMS_KERNEL=1` are the build switches.
 
 `.github/scripts/set_env_dcu.sh` performs all of the following; routing comes from
 `backends_dcu.conf` itself, so a CI job runs the FlagGems path with no switch
@@ -240,8 +240,8 @@ against the NumPy 1.x ABI.
 source /opt/dtk/env.sh
 
 ACCELERATOR=dcu \
-  FLAGGEMS_KERNEL=0 \
-  FLAGGEMS_PYTHON=1 \
+  FLAGGEMS_CPP=0 \
+  FLAGGEMS_KERNEL=1 \
   pip install --no-build-isolation -e .
 ```
 

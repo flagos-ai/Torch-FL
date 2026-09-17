@@ -185,9 +185,9 @@ echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
 echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
 echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
-# PPU build_ext runs with FLAGGEMS_KERNEL=OFF (setup.py cuda-branch default), so
+# PPU build_ext runs with FLAGGEMS_CPP=OFF (setup.py cuda-branch default), so
 # the C++ FlagGems dispatch (which needs liboperators.so + FlagGemsConfig.cmake)
-# is never linked and find_package(FlagGems) is skipped. FLAGGEMS_PYTHON=ON
+# is never linked and find_package(FlagGems) is skipped. FLAGGEMS_KERNEL=ON
 # compiles the Python-path kernels without importing flag_gems at build time, so
 # the cuda-style FlagGems C++ asset discovery is omitted here. The runtime
 # flag_gems import for the FlagGems test step comes from the venv install further
@@ -509,15 +509,15 @@ export PPU_SDK="$PPU_SDK"
 export FLAGOS_PPU_TORCH_LIB="$VENDOR_TORCH_LIB"
 export FLAGOS_WHEEL_LOCAL="${FLAGOS_WHEEL_LOCAL:-ppu}"
 # PPU image ships FlagGems as source only (no built liboperators.so /
-# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGGEMS_KERNEL) must be
-# off. setup.py's cuda branch does not pass -DFLAGGEMS_KERNEL=OFF (it assumes a
-# real cuda image has FlagGems C++ installed); the generic env pass-through at
-# setup.py:459-468 reads this env and emits -DFLAGGEMS_KERNEL=OFF, skipping
-# CMakeLists.txt:502 if(FLAGGEMS_KERNEL) -> find_package(FlagGems). Mirrors
-# metax set_env which exports FLAGGEMS_KERNEL=0 for the same reason. The
-# Python-path kernels (FLAGGEMS_PYTHON) stay at the default ON -- they compile
+# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGGEMS_CPP) must be
+# off. setup.py's cuda branch does not pass -DFLAGGEMS_CPP=OFF (it assumes a
+# real cuda image has FlagGems C++ installed); the generic env pass-through
+# reads this env and emits -DFLAGGEMS_CPP=OFF, skipping
+# the find_package(FlagGems) gate. Mirrors
+# metax set_env which exports FLAGGEMS_CPP=0 for the same reason. The
+# Python-path kernels (FLAGGEMS_KERNEL) stay at the default ON -- they compile
 # without importing flag_gems, and the FlagGems runtime test step needs them.
-export FLAGGEMS_KERNEL=0
+export FLAGGEMS_CPP=0
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
@@ -609,7 +609,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
     PPU_SDK FLAGOS_PPU_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_WHEEL_LOCAL FLAGGEMS_KERNEL FLAGCX_PATH \
+    FLAGOS_WHEEL_LOCAL FLAGGEMS_CPP FLAGCX_PATH \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

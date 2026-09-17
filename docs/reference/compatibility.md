@@ -171,9 +171,8 @@ and FlagGems-runtime operator suites, general tests, and the profiler parity sui
 inference and training smoke are explicitly deferred pending a model mount and card-count
 confirmation on the runner (same file, lines 57-61). DCU is a CUDA-boxing build over the
 hipified DTK torch, so it reuses the generated CUDA boxing kernels with no hand-written kernels
-of its own (see [`setup.py`](../../setup.py), lines 376-397). FlagGems C++ dispatch is not built
-for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) line 81 and [`setup.py`](../../setup.py) lines
-376-393 force `FLAGGEMS_KERNEL=OFF` with the comment "FLAGGEMS_KERNEL needs liboperators.so,
+of its own (see [`setup.py`](../../setup.py), the `ACCELERATOR=dcu` branch). FlagGems C++ dispatch is not built
+for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) and [`setup.py`](../../setup.py) force `FLAGGEMS_CPP=OFF` with the comment "FLAGGEMS_CPP needs liboperators.so,
 which is not built for DTK," and [`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) line
 87 excludes C++ tests with `-m "not flaggems_cpp"`. Distributed collectives (all_reduce,
 broadcast, all_gather, all_gather_into_tensor, reduce_scatter_tensor) and DDP are measured

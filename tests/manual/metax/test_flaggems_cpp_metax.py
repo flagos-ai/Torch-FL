@@ -19,7 +19,7 @@ This is the MetaX counterpart of tests/integration/ops/test_flaggems_cpp_dispatc
 Background: the C++ FlagGems path calls flag_gems' C++ entry points in
 liboperators.so, which JIT-compile and launch Triton kernels without touching
 Python or the GIL. It was previously CUDA-only on the torch_fl side because
-CMakeLists forced FLAGGEMS_KERNEL=OFF for ACCELERATOR=metax. FlagGems itself
+CMakeLists forced FLAGGEMS_CPP=OFF for ACCELERATOR=metax. FlagGems itself
 does support MetaX (cpp/ -DFLAGGEMS_BACKEND=MACA), and its kernels reach the
 device through the same DeviceBoxingGuard the metax boxing path already uses,
 so the C++ path works here once liboperators.so is built for MACA.
@@ -37,12 +37,12 @@ Build prerequisites:
      `cmake --install`. When running straight out of the build dir, link it:
        ln -sfn <FlagGems>/triton_src <FlagGems>/cpp/triton_src
   2. torch_fl against it:
-       ACCELERATOR=metax FLAGOS_METAX_BOXING=1 MACA_PATH=/opt/maca \
-       FLAGGEMS_KERNEL=1 FLAGGEMS_DIR=<FlagGems>/cpp/build-maca \
+       ACCELERATOR=metax VENDOR_USE_BOXING=1 MACA_PATH=/opt/maca \
+       FLAGGEMS_CPP=1 FLAGGEMS_DIR=<FlagGems>/cpp/build-maca \
        python setup.py build_ext --inplace
 
 Run (from repo root):
-    ACCELERATOR=metax FLAGOS_METAX_BOXING=1 \
+    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
@@ -76,7 +76,7 @@ def _run_snippet(code):
     env = os.environ.copy()
     env["FLAGOS_USE_FLAGGEMS_CPP"] = "1"
     env["FLAGOS_LOG_DISPATCH"] = "1"
-    env["FLAGOS_METAX_BOXING"] = "1"
+    env["VENDOR_USE_BOXING"] = "1"
     env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     # The dispatch log is what proves the C++ path ran; keep stderr separate.
     proc = subprocess.run(

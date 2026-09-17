@@ -34,7 +34,7 @@ Which inner backend was chosen is printed by rank 0 so the run self-documents
 whether it went through FlagCX or the mccl(NCCL) fallback.
 
 Run (from repo root):
-    ACCELERATOR=metax FLAGOS_METAX_BOXING=1 \
+    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \

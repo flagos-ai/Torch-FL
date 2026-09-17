@@ -61,10 +61,10 @@ python3 -m pip uninstall -y torch_gcu triton_gcu
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-ACCELERATOR=gcu FLAGGEMS_PYTHON=1 pip install --no-build-isolation -v -e .
+ACCELERATOR=gcu FLAGGEMS_KERNEL=1 pip install --no-build-isolation -v -e .
 ```
 
-`FLAGGEMS_PYTHON=1` must be exported even though `setup.py` turns it on for
+`FLAGGEMS_KERNEL=1` must be exported even though `setup.py` turns it on for
 `ACCELERATOR=gcu`: environment variables are applied *after* the per-accelerator
 defaults, so exporting `0` switches it back off and produces a wheel whose conf
 routes operators to dispatcher slots that were never compiled in.
@@ -106,7 +106,7 @@ ACCELERATOR=gcu python setup.py build_ext --inplace
 ```bash
 export TOPS_HOME=/opt/tops
 export TOPSATEN_LIB=/usr/lib/libtopsaten.so
-export ACCELERATOR=gcu GCU_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGGEMS_KERNEL=0
+export ACCELERATOR=gcu VENDOR_KERNEL=1 FLAGGEMS_KERNEL=1 FLAGGEMS_CPP=0
 export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):$LD_LIBRARY_PATH
 ```
 
@@ -116,7 +116,7 @@ export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):
 | `TOPSATEN_LIB` | no | Overrides the `libtopsaten.so` path when it is outside `TOPS_HOME/lib` |
 | `ACCELERATOR=gcu` | build time | Selects the GCU backend when building |
 | `LD_LIBRARY_PATH` | yes | Must include `$TOPS_HOME/lib` and the `libtopsaten.so` directory |
-| `GCU_KERNEL` / `FLAGGEMS_PYTHON` / `FLAGGEMS_KERNEL` | yes | Select the kernel paths the wheel was built with |
+| `VENDOR_KERNEL` / `FLAGGEMS_KERNEL` / `FLAGGEMS_CPP` | yes | Select the kernel paths the wheel was built with |
 | `GEMS_VENDOR=enflame` | **no** | Set automatically by `torch_fl` at import (`torch_fl/__init__.py`) when a GCU Triton backend is importable and the selected conf routes anything to FlagGems |
 | `FLAGOS_BACKEND_CONFIG` | **no** | `torch_fl` selects `configs/backends_gcu.conf` itself; set this only to force a different conf for testing |
 | `FLAGOS_LOG_DISPATCH=1` | no | Logs `[flagos dispatch] <op> -> <backend>` for every dispatch |

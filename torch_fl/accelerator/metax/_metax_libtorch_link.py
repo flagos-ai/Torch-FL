@@ -14,7 +14,7 @@
 
 """Symlink MetaX libtorch .so into the active (official) torch wheel's lib dir.
 
-On MetaX we reuse PyTorch's CUDA boxing kernels (FLAGOS_METAX_BOXING) by running
+On MetaX we reuse PyTorch's CUDA boxing kernels (VENDOR_USE_BOXING) by running
 the *MetaX* C++ runtime (libtorch_cpu.so / libtorch_cuda.so / libc10.so ...),
 which is a hard fork exporting ``at::maca::*`` symbols.  With a stock
 ``torch==X.Y.Z+cpu`` front-end, the process must load that fork instead of the
@@ -24,7 +24,7 @@ The mechanism -- symlink replacement, ``_orig_backup/``, the RTLD_GLOBAL preload
 and why a pure ctypes preload cannot do this on its own -- lives in
 ``torch_fl.accelerator._vendor_libtorch``.  This module is just the MetaX .so
 lists; whether to relink at all is decided by
-``torch_fl.__init__._relink_vendor_libtorch`` (FLAGOS_METAX_BOXING=1 for an
+``torch_fl.__init__._relink_vendor_libtorch`` (VENDOR_USE_BOXING=1 for an
 in-place MetaX build, or lib_maca/ being present for a self-contained wheel).
 """
 
@@ -113,9 +113,9 @@ def ensure_maca_libtorch_links():
 
     Deciding *whether* to relink is the caller's job -- see
     ``torch_fl.__init__._relink_vendor_libtorch``, which gates on
-    FLAGOS_METAX_BOXING=1 for an in-place MetaX build and on lib_maca/ being
+    VENDOR_USE_BOXING=1 for an in-place MetaX build and on lib_maca/ being
     present for a self-contained wheel.  This used to self-gate on
-    FLAGOS_METAX_BOXING, which made the self-contained path a silent no-op:
+    VENDOR_USE_BOXING, which made the self-contained path a silent no-op:
     the stock libtorch_cpu.so stayed in place and libtorch_cuda.so then failed
     to resolve at::maca symbols that only the forked CPU runtime defines.
     """

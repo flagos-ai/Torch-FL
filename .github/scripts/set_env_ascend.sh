@@ -102,8 +102,8 @@ export ASCEND_HOME
 # native fallback and enable the FlagGems Python path by default.
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
-export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON=1
+export FLAGGEMS_CPP=0
+export FLAGGEMS_KERNEL=1
 # FlagTree's task queue launches through at_npu::native::OpCommand, a torch_npu
 # symbol this environment does not have (and must not have). torch_fl's FlagTree
 # backend policy turns the task queue off itself when it is installed; setting it
@@ -373,7 +373,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ASCEND_HOME \
     FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_USE_FLAGGEMS_CPP \
-    FLAGGEMS_KERNEL FLAGGEMS_PYTHON TRITON_ENABLE_TASKQUEUE \
+    FLAGGEMS_CPP FLAGGEMS_KERNEL TRITON_ENABLE_TASKQUEUE \
     PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
     CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"

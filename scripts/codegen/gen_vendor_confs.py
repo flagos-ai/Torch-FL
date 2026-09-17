@@ -410,12 +410,13 @@ CSRC_DIR = REPO_ROOT / "csrc/aten"
 # and not written here.)
 FLAGGEMS_CPP_PLATFORMS = {"metax"}
 
-# Native Ascend wheels deliberately disable FLAGGEMS_PYTHON: the CI image does
-# not ship Triton/FlagGems, and set_env_ascend.sh sets FLAGGEMS_PYTHON=0. Keep
-# the generated conf honest by not routing Ascend through a dispatcher slot that
-# is absent from the wheel. Boxing platforms compile the Python caller and may
-# use the measured FlagGems coverage -- including PPU, whose FlagTree install
-# (triton with the `ppu` backend) is what set_env_ppu.sh provisions.
+# Which platforms' confs may route the FlagGems Python path. Ascend is in the
+# set: backends_ascend.conf is FlagGems-first, so those routes must stay
+# resolvable -- keep the generated conf honest by never routing a platform
+# through a dispatcher slot its wheel does not compile. Boxing platforms
+# compile the Python caller and may use the measured FlagGems coverage --
+# including PPU, whose FlagTree install (triton with the `ppu` backend) is
+# what set_env_ppu.sh provisions.
 FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's

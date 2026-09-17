@@ -3014,7 +3014,7 @@ def main():
         # forced back to the cuda boxing kernel (maca libtorch_cuda via mcblas)
         # instead of flagos_python. In the MetaX boxing wheel the fallback MUST be
         # cuda, not metax: the hand-written mxcc backend is not registered
-        # (METAX_KERNEL=OFF).
+        # (VENDOR_KERNEL=OFF).
         #   - mm/bmm(.out): FlagGems uses a SPLIT_K kwarg triton-metax rejects.
         #   - mean.dim: FlagGems' non-inner-dim path uses a CUDA context that
         #     fails on triton-metax.
@@ -3182,7 +3182,7 @@ def main():
             "# FlagGems-first, but ops triton-metax cannot run",
             "# (mm/bmm/mean.dim) fall back to the cuda boxing kernel (maca",
             "# libtorch_cuda), NOT metax (mxcc backend is off in boxing mode).",
-            "# Selected at runtime by FLAGOS_METAX_BOXING=1.",
+            "# Selected at runtime by VENDOR_USE_BOXING=1.",
             "#",
             "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
             "",

@@ -26,14 +26,14 @@ def _ensure_backend_config() -> None:
     """Ensure MetaX backend config is set before importing torch_fl (if not already specified).
 
     Only forces backends_metax.conf for the native mxcc source-build path. In
-    boxing mode (FLAGOS_METAX_BOXING=1) the mxcc backend is NOT compiled, so we
+    boxing mode (VENDOR_USE_BOXING=1) the mxcc backend is NOT compiled, so we
     must leave the choice to torch_fl's own _select_backend_config(), which picks
     backends_cuda.conf (pure boxing) or backends_metax.conf (any FlagGems opt-in).
     Setting it here would route ops to the unregistered `metax` backend and raise.
     """
     if os.environ.get("FLAGOS_BACKEND_CONFIG"):
         return
-    if os.environ.get("FLAGOS_METAX_BOXING", "0") == "1":
+    if os.environ.get("VENDOR_USE_BOXING", "0") == "1":
         return
     accel = os.environ.get("ACCELERATOR", "").lower()
     use_metax = accel in ("metax", "maca") or Path("/dev/mxcd").exists()

@@ -48,12 +48,12 @@ if [[ ! -d "$MUSA_HOME" ]]; then
 fi
 echo "MUSA_HOME=$MUSA_HOME"
 
-# MUSA_KERNEL selects the native mudnn build. Default ON to match setup.py and
+# VENDOR_KERNEL selects the native mudnn build. Default ON to match setup.py and
 # the documented native-only contract, and fail loudly when the image lacks the
 # C++ assets rather than silently shipping a wheel that looks native but reaches
 # cpu_fallback for every compute op.
-export MUSA_KERNEL="${MUSA_KERNEL:-1}"
-if [[ "$MUSA_KERNEL" != "0" ]]; then
+export VENDOR_KERNEL="${VENDOR_KERNEL:-1}"
+if [[ "$VENDOR_KERNEL" != "0" ]]; then
   missing=()
   for asset in \
     "include/mudnncxx/mudnn.h" \
@@ -63,10 +63,10 @@ if [[ "$MUSA_KERNEL" != "0" ]]; then
     [[ -e "$MUSA_HOME/$asset" ]] || missing+=("$MUSA_HOME/$asset")
   done
   if (( ${#missing[@]} > 0 )); then
-    echo "::error::MUSA_KERNEL=$MUSA_KERNEL requires the mudnn/murand C++ assets, but this image is missing:" >&2
+    echo "::error::VENDOR_KERNEL=$VENDOR_KERNEL requires the mudnn/murand C++ assets, but this image is missing:" >&2
     printf '::error::  %s\n' "${missing[@]}" >&2
     echo "::error::Install the mudnn and murand components of the MUSA toolkit." >&2
-    echo "::error::Building with MUSA_KERNEL=0 is not a substitute: the MUSA path also excludes the CUDA backend and the generated CUDA boxing kernels, so the result is a fallback-only wheel, not a native MUSA wheel." >&2
+    echo "::error::Building with VENDOR_KERNEL=0 is not a substitute: the MUSA path also excludes the CUDA backend and the generated CUDA boxing kernels, so the result is a fallback-only wheel, not a native MUSA wheel." >&2
     exit 1
   fi
   echo "mudnn C++ assets: present"
@@ -80,16 +80,15 @@ if [[ "$CI_STAGE" == "integration" ]] && ! ls /dev/mtgpu* >/dev/null 2>&1; then
 fi
 
 # --- Backend selection -------------------------------------------------------
+# Chip selection is ACCELERATOR's job alone: VENDOR_KERNEL covers this
+# platform's native kernels and BOXING_KERNEL=OFF (set in setup.py) drops the
+# generated CUDA boxing kernels. No per-chip switches.
 export ACCELERATOR=musa
-export CUDA_KERNEL=0
-export METAX_KERNEL=0
-export ASCEND_KERNEL=0
-export GCU_KERNEL=0
 # FlagGems Python ops are provisioned and validated on MUSA via the MThreads
-# Triton build (flagtree). The C++ kernels (FLAGGEMS_KERNEL=1) require
-# FLAGGEMS_KERNEL=ON at build time and are not yet available.
-export FLAGGEMS_KERNEL=0
-export FLAGGEMS_PYTHON=1
+# Triton build (flagtree). The C++ kernels (FLAGGEMS_CPP=1) require
+# FLAGGEMS_CPP=ON at build time and are not yet available.
+export FLAGGEMS_CPP=0
+export FLAGGEMS_KERNEL=1
 export FLAGOS_USE_FLAGGEMS_CPP=0
 # MUSA bundles no libtorch_cuda.so and the toolkit exports no cuda symbols, so
 # the CUDA asset preload has nothing to open.
@@ -327,7 +326,7 @@ print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
 print(f"MUSA_HOME: {os.environ['MUSA_HOME']}")
-print(f"MUSA_KERNEL: {os.environ['MUSA_KERNEL']}")
+print(f"VENDOR_KERNEL: {os.environ['VENDOR_KERNEL']}")
 PY
 
 # --- Verify the FlagGems stack imports --------------------------------------
@@ -375,8 +374,8 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR MUSA_HOME \
-    MUSA_KERNEL CUDA_KERNEL METAX_KERNEL ASCEND_KERNEL GCU_KERNEL \
-    FLAGGEMS_KERNEL FLAGGEMS_PYTHON \
+    VENDOR_KERNEL \
+    FLAGGEMS_CPP FLAGGEMS_KERNEL \
     FLAGOS_USE_FLAGGEMS_CPP FLAGOS_DISABLE_CUDA_ASSETS \
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"

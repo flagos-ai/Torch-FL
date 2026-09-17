@@ -35,7 +35,7 @@ Two host-side deltas matter:
     cpp_save = gems_py_submit  - gems_cpp_submit
              = how much of that tax the C++ dispatch actually recovers.
 
-gems_cpp requires a wheel built with FLAGGEMS_KERNEL=ON and the three runtime
+gems_cpp requires a wheel built with FLAGGEMS_CPP=ON and the three runtime
 env vars (FLAGGEMS_SOURCE_DIR, LD_LIBRARY_PATH -> liboperators.so). If they are
 missing the driver skips that column instead of failing.
 

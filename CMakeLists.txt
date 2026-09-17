@@ -25,43 +25,40 @@ set(FLAGOS_BUNDLE_LIBDIR "lib")
 # (a machine with the card has the driver), mirroring MetaX's /opt/maca.
 set(FLAGOS_VENDOR_RPATH_DIRS "")
 
-# Kernel build options (can be overridden via -D flags from setup.py)
-option(CUDA_KERNEL "Build CUDA kernel implementations" ON)
-option(FLAGGEMS_KERNEL "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
-option(FLAGGEMS_PYTHON "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
-option(METAX_KERNEL "Build MetaX kernel implementations" OFF)
-option(ASCEND_KERNEL "Build Ascend kernel implementations" OFF)
-option(GCU_KERNEL "Build Enflame GCU (topsaten) kernel implementations" OFF)
-option(MUSA_KERNEL "Build Moore Threads MUSA kernel implementations (mudnn)" OFF)
+# Kernel build options (can be overridden via -D flags from setup.py).
+# Chip selection is ACCELERATOR's job alone -- there are no per-chip switches.
+option(VENDOR_KERNEL "Build the ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
+option(FLAGGEMS_KERNEL "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
+option(BOXING_KERNEL "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
+option(FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 
 if(ACCELERATOR STREQUAL "ascend")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "metax")
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/MetaxEnv.cmake)
-  # Boxing mode ($ENV{FLAGOS_METAX_BOXING}=1): reuse the generated CUDA boxing
+  # Boxing mode ($ENV{VENDOR_USE_BOXING}=1): reuse the generated CUDA boxing
   # kernels (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) that
   # dispatch PrivateUse1 -> CUDA into maca's libtorch_cuda.so, instead of the
   # hand-written mxcc .cu kernels under backends/metax/. Keeps the MetaX SDK
   # runtime + cu-bridge headers path (no nvcc / project(...CUDA)).
-  if(DEFINED ENV{FLAGOS_METAX_BOXING} AND NOT "$ENV{FLAGOS_METAX_BOXING}" STREQUAL "0")
-    set(FLAGOS_METAX_BOXING ON)
+  if(DEFINED ENV{VENDOR_USE_BOXING} AND NOT "$ENV{VENDOR_USE_BOXING}" STREQUAL "0")
+    set(VENDOR_USE_BOXING ON)
   endif()
-  if(FLAGOS_METAX_BOXING)
-    set(METAX_KERNEL OFF CACHE BOOL "Build MetaX kernel implementations" FORCE)
+  if(VENDOR_USE_BOXING)
+    set(VENDOR_KERNEL OFF CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
   else()
-    set(METAX_KERNEL ON CACHE BOOL "Build MetaX kernel implementations" FORCE)
+    set(VENDOR_KERNEL ON CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
   endif()
-  set(CUDA_KERNEL OFF CACHE BOOL "Build CUDA kernel implementations" FORCE)
   # FlagGems C++ dispatch (kFlagOs) needs liboperators.so. FlagGems can be built
   # for MetaX (cpp/ -DFLAGGEMS_BACKEND=MACA), and its kernels reach the device
   # through the same DeviceBoxingGuard the boxing path uses, so the C++ path
   # works here too -- but only in boxing mode, and only when the caller points
   # FlagGems_DIR/FLAGGEMS_DIR at a MACA-built FlagGems. Default stays OFF so a
   # plain metax build needs no FlagGems.
-  if(NOT FLAGOS_METAX_BOXING)
-    set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
-  elseif(NOT FLAGGEMS_KERNEL)
-    set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
+  if(NOT VENDOR_USE_BOXING)
+    set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
+  elseif(NOT FLAGGEMS_CPP)
+    set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   endif()
   # Self-contained wheel: forked libtorch bundled by
   # scripts/vendor/bundle_maca_libtorch.sh (the maca runtime stays on the target).
@@ -77,8 +74,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
   # libcudart.so.12 is a thin shim over libgalaxyhip.so, so the runtime sources
   # under csrc/runtime/accelerator/cuda/ compile as-is against host g++.
   # No nvcc and no CUDA language: nothing outside backends/metax/ is a .cu.
-  set(CUDA_KERNEL OFF CACHE BOOL "Build CUDA kernel implementations" FORCE)
-  set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
+  set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   # Self-contained wheel: DTK's forked libtorch (libtorch_cpu.so carries hip
   # symbols and needs libgalaxyhip.so.5) is bundled here by
   # scripts/vendor/bundle_dcu_libtorch.sh. The DTK driver itself stays on the target.
@@ -90,20 +86,18 @@ elseif(ACCELERATOR STREQUAL "musa")
   # Moore Threads MUSA takes the native operator route (like Ascend/GCU), not
   # CUDA boxing: the MUSA toolkit ships no CUDA runtime, so there is no vendor
   # dispatch key to box into. The generated kernels call mudnn -- the vendor's
-  # torch-independent kernel library -- directly. FLAGGEMS_PYTHON remains a
+  # torch-independent kernel library -- directly. FLAGGEMS_KERNEL remains a
   # caller-controlled option so the same build can include the optional hybrid
   # dispatchers without requiring the FlagGems C++ runtime.
-  set(MUSA_KERNEL ON CACHE BOOL "Build MUSA kernel implementations" FORCE)
-  set(CUDA_KERNEL OFF CACHE BOOL "Build CUDA kernel implementations" FORCE)
-  set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
+  set(VENDOR_KERNEL ON CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
+  set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "bpu")
   # D-Robotics RDK BPU. No CUDA runtime and no per-op kernels: the BPU executes
   # whole compiled graphs, so eager ops fall back to CPU and acceleration comes
   # from the torch.compile backend. Only the runtime layer (UCP allocator,
   # device/stream stubs) is native, all plain host C++.
-  set(CUDA_KERNEL OFF CACHE BOOL "Build CUDA kernel implementations" FORCE)
-  set(FLAGGEMS_KERNEL OFF CACHE BOOL "Build FlagGems kernel implementations" FORCE)
+  set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   project(TORCH_FLAGOS CXX C)
 else()
   # PPU rides this branch: it has no accelerator value of its own because it is
@@ -179,8 +173,7 @@ if(ACCELERATOR STREQUAL "ascend")
   endif()
   message(STATUS "Huawei CANN SDK path: ${ASCEND_HOME}")
 
-  set(ASCEND_KERNEL ON CACHE BOOL "Build Ascend kernel implementations" FORCE)
-  set(CUDA_KERNEL OFF CACHE BOOL "Build CUDA kernel implementations" FORCE)
+  set(VENDOR_KERNEL ON CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
 
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
   set_target_properties(cuda_runtime_compat PROPERTIES
@@ -302,21 +295,21 @@ elseif(ACCELERATOR STREQUAL "gcu")
 
   # topsaten (the aten-style op library) ships in the distro paths, not under
   # ${TOPS_ROOT}/lib; its headers live in ${TOPS_ROOT}/include/gcu.
-  if(GCU_KERNEL)
+  if(VENDOR_KERNEL)
     find_library(TOPSATEN_LIB topsaten
         PATHS "${TOPS_ROOT}/lib" /usr/lib /usr/lib64)
     if(NOT TOPSATEN_LIB)
       message(FATAL_ERROR
-        "GCU_KERNEL=ON but libtopsaten.so was not found (searched "
+        "VENDOR_KERNEL=ON but libtopsaten.so was not found (searched "
         "${TOPS_ROOT}/lib, /usr/lib, /usr/lib64). Install the TopsRider "
-        "topsaten package, or build with -DGCU_KERNEL=OFF to fall back to CPU "
+        "topsaten package, or build with -DVENDOR_KERNEL=OFF to fall back to CPU "
         "for all compute ops.")
     endif()
     find_path(TOPSATEN_INCLUDE_DIR topsaten/topsaten.h
         PATHS "${TOPS_ROOT}/include/gcu" /usr/include/gcu)
     if(NOT TOPSATEN_INCLUDE_DIR)
       message(FATAL_ERROR
-        "GCU_KERNEL=ON but topsaten/topsaten.h was not found (searched "
+        "VENDOR_KERNEL=ON but topsaten/topsaten.h was not found (searched "
         "${TOPS_ROOT}/include/gcu, /usr/include/gcu).")
     endif()
     set(TOPSATEN_INCLUDE_DIRS "${TOPSATEN_INCLUDE_DIR}" "${TOPS_ROOT}/include")
@@ -371,29 +364,29 @@ elseif(ACCELERATOR STREQUAL "musa")
   # object layout, which pinned the plugin to one exact torch build --
   # sizeof(c10::MessageLogger) changed 408 -> 400 between 2.9.1 and 2.10 and
   # corrupted the vendor .so's stack. mudnn has no such coupling.)
-  if(MUSA_KERNEL)
+  if(VENDOR_KERNEL)
     find_library(MUDNN_LIB mudnn PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
     if(NOT MUDNN_LIB)
       message(FATAL_ERROR
-          "MUSA_KERNEL=ON but libmudnn.so was not found under ${MUSA_HOME}/lib. "
+          "VENDOR_KERNEL=ON but libmudnn.so was not found under ${MUSA_HOME}/lib. "
           "Install the mudnn component of the MUSA toolkit, or build with "
-          "-DMUSA_KERNEL=OFF to fall back to CPU for compute ops.")
+          "-DVENDOR_KERNEL=OFF to fall back to CPU for compute ops.")
     endif()
     if(NOT EXISTS "${MUSA_HOME}/include/mudnncxx/mudnn.h")
       message(FATAL_ERROR
-          "MUSA_KERNEL=ON but the mudnn C++ headers were not found "
+          "VENDOR_KERNEL=ON but the mudnn C++ headers were not found "
           "(no ${MUSA_HOME}/include/mudnncxx/mudnn.h).")
     endif()
     message(STATUS "mudnn op library: ${MUDNN_LIB}")
     find_library(MURAND_LIB murand PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
     if(NOT MURAND_LIB)
       message(FATAL_ERROR
-          "MUSA_KERNEL=ON but libmurand.so was not found under ${MUSA_HOME}/lib. "
+          "VENDOR_KERNEL=ON but libmurand.so was not found under ${MUSA_HOME}/lib. "
           "Install the murand component of the MUSA toolkit.")
     endif()
     if(NOT EXISTS "${MUSA_HOME}/include/murand.h")
       message(FATAL_ERROR
-          "MUSA_KERNEL=ON but murand.h was not found under ${MUSA_HOME}/include.")
+          "VENDOR_KERNEL=ON but murand.h was not found under ${MUSA_HOME}/include.")
     endif()
     message(STATUS "murand RNG library: ${MURAND_LIB}")
   endif()
@@ -512,7 +505,7 @@ if(ACCELERATOR STREQUAL "dcu")
   endforeach()
 endif()
 
-if(FLAGGEMS_KERNEL)
+if(FLAGGEMS_CPP)
   # Allow override via cmake var or env var
   # setup.py passes -DFlagGems_DIR=..., CMakeLists uses FLAGGEMS_DIR internally
   if(FlagGems_DIR AND NOT FLAGGEMS_DIR)
@@ -588,7 +581,7 @@ if(FLAGGEMS_KERNEL)
   message(STATUS "FlagGems liboperators RPATH: ${_flaggems_libdir}")
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
 elseif(ACCELERATOR STREQUAL "metax")
-  if(FLAGOS_METAX_BOXING)
+  if(VENDOR_USE_BOXING)
     message(STATUS "MetaX build: native runtime + CUDA boxing kernels (host g++, no mxcc/FlagGems)")
   else()
     message(STATUS "MetaX build: native runtime + mxcc kernels (no FlagGems)")

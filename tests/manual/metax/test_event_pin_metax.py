@@ -15,7 +15,7 @@
 """Verify flagos Event (real device semantics) and pin_memory on MetaX.
 
 Run (from repo root):
-    ACCELERATOR=metax FLAGOS_METAX_BOXING=1 \
+    ACCELERATOR=metax VENDOR_USE_BOXING=1 \
     MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
@@ -141,7 +141,7 @@ def test_to_pin_memory_flag():
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("FLAGOS_METAX_BOXING", "1")
+    os.environ.setdefault("VENDOR_USE_BOXING", "1")
     torch_fl.flagos._lazy_init()
 
     for fn in (

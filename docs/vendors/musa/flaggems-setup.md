@@ -78,7 +78,7 @@ ACCELERATOR=musa python setup.py build_ext --inplace
 
 ```bash
 export MUSA_HOME=/usr/local/musa
-export ACCELERATOR=musa MUSA_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGGEMS_KERNEL=0
+export ACCELERATOR=musa VENDOR_KERNEL=1 FLAGGEMS_KERNEL=1 FLAGGEMS_CPP=0
 export LD_LIBRARY_PATH=/path/to/conda/envs/musa_test/lib:/usr/local/musa/lib:$LD_LIBRARY_PATH
 ```
 
@@ -87,7 +87,7 @@ export LD_LIBRARY_PATH=/path/to/conda/envs/musa_test/lib:/usr/local/musa/lib:$LD
 | `MUSA_HOME` | yes | Locates `libmudnn.so` / `libmurand.so` at build and run time |
 | `ACCELERATOR=musa` | build time | Selects the MUSA backend when building |
 | `LD_LIBRARY_PATH` | yes | Must include the conda env's `lib` and `/usr/local/musa/lib` |
-| `MUSA_KERNEL` / `FLAGGEMS_PYTHON` / `FLAGGEMS_KERNEL` | yes | Select the kernel paths the wheel was built with |
+| `VENDOR_KERNEL` / `FLAGGEMS_KERNEL` / `FLAGGEMS_CPP` | yes | Select the kernel paths the wheel was built with |
 | `GEMS_VENDOR=mthreads` | **no** | Set automatically by `torch_fl` at import (`torch_fl/__init__.py`) when the selected conf routes anything to FlagGems |
 | `FLAGOS_BACKEND_CONFIG` | **no** | `torch_fl` selects `configs/backends_musa.conf` itself; set this only to force a different conf for testing |
 | `FLAGOS_LOG_DISPATCH=1` | no | Logs `[flagos dispatch] <op> -> <backend>` for every dispatch |

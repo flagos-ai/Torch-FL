@@ -31,9 +31,8 @@ cd PyTorch-Plugin-FL
 # (PPU supplies CUDA 13 via PPU_SDK/CUDA_SDK).
 ACCELERATOR=cuda \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
-  CUDA_KERNEL=ON \
+  FLAGGEMS_CPP=OFF \
   FLAGGEMS_KERNEL=OFF \
-  FLAGGEMS_PYTHON=OFF \
   FLAGOS_SKIP_CUDA_ASSETS=1 \
   pip install --no-build-isolation -vvv -e .
 ```
@@ -154,7 +153,7 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ## Optional: FlagGems on PPU
 
-Set `FLAGGEMS_PYTHON=ON` at build time (the default); `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first, falling back to the vendor kernel and then CPU. No runtime opt-in variable is needed.
+Set `FLAGGEMS_KERNEL=ON` at build time (the default); `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first, falling back to the vendor kernel and then CPU. No runtime opt-in variable is needed.
 
 PPU needs no compatibility shim beyond the generic CUDA one: `libcuda.so` is a real driver, so `is_nvidia_cuda_available()` succeeds, `GEMS_VENDOR=nvidia` is set automatically, and `triton.language.extra.cuda.libdevice` resolves.
 
@@ -179,8 +178,7 @@ The vendor `triton` sdist is a downloader shim that fetches the real wheel and `
 ```bash
 ACCELERATOR=cuda \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
-  CUDA_KERNEL=ON \
-  FLAGGEMS_PYTHON=ON \
+  FLAGGEMS_KERNEL=ON \
   FLAGOS_SKIP_CUDA_ASSETS=1 \
   pip install --no-build-isolation -vvv -e .
 ```

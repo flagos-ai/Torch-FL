@@ -30,14 +30,13 @@ pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
 # Build torch_fl with CUDA boxing kernels and bundled CUDA assets
 ACCELERATOR=cuda \
-  CUDA_KERNEL=1 \
   pip install --no-build-isolation -vvv -e .
 ```
 
 This build:
 - Generates CUDA boxing kernels from PyTorch's ATen schema (`csrc/aten/generated/cuda_kernels.cc`)
 - Bundles `libtorch_cuda.so` and related CUDA dispatcher libraries into `torch_fl/lib/`
-- Compiles FlagGems Python-dispatch integration by default (runtime opt-in)
+- Compiles FlagGems Python-dispatch integration by default (routing comes from `backends_cuda.conf`)
 - Pins matching `nvidia-*-cu12` runtime dependencies for the bundled CUDA assets
 
 ### With FlagGems C++ Dispatch (Optional)
@@ -46,8 +45,7 @@ To enable the C++ fast path for FlagGems Triton kernels:
 
 ```bash
 ACCELERATOR=cuda \
-  CUDA_KERNEL=1 \
-  FLAGGEMS_KERNEL=1 \
+  FLAGGEMS_CPP=1 \
   FLAGGEMS_DIR=<path-to-FlagGems>/lib/cmake/FlagGems \
   pip install --no-build-isolation -vvv -e .
 ```

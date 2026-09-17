@@ -14,14 +14,11 @@
 
 set(LIBRARY_NAME torch_fl)
 
-option(CUDA_KERNEL "Build CUDA kernel implementations" ON)
-option(FLAGGEMS_KERNEL "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
-option(FLAGGEMS_PYTHON "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
+option(VENDOR_KERNEL "Build the ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
+option(FLAGGEMS_KERNEL "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
+option(BOXING_KERNEL "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
+option(FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(TILEOPS_KERNEL "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
-option(METAX_KERNEL "Build MetaX kernel implementations" OFF)
-option(ASCEND_KERNEL "Build Ascend kernel implementations" OFF)
-option(GCU_KERNEL "Build Enflame GCU (topsaten) kernel implementations" OFF)
-option(MUSA_KERNEL "Build Moore Threads MUSA kernel implementations (mudnn)" OFF)
 
 file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
@@ -125,58 +122,48 @@ elseif(ACCELERATOR STREQUAL "gcu")
   endif()
 endif()
 
-# Exclude backend kernel directories based on options
-if(NOT CUDA_KERNEL)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
-endif()
-# FLAGGEMS_PYTHON path: keep csrc/aten/backends/flagos/python_op_caller.cc and
-# build csrc/aten/generated/flaggems_python_kernels.cc with FLAGOS_FLAGGEMS_PYTHON
-# defined (below). The stale C++/python_wrapper files were removed; nothing to
-# exclude here.
-#
-# The flagos backend (python_op_caller.{h,cc}) is excluded further down, once the
-# per-accelerator rules have settled whether generated/cuda_kernels.cc is in the
-# build -- it calls GetFlagosDefaultCudaGenerator(), which python_op_caller.cc
-# defines.
-if(NOT METAX_KERNEL)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*")
-endif()
-if(NOT ASCEND_KERNEL)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/ascend/.*")
-endif()
-if(NOT GCU_KERNEL)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/gcu/.*")
-endif()
-if(NOT MUSA_KERNEL)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/musa/.*")
+# Vendor native kernels, gated by VENDOR_KERNEL and by ACCELERATOR: only the
+# current accelerator's backend directory is ever compiled in (cuda/dcu/
+# tsingmicro/bpu/ppu ship no backend directory, so the switch is a no-op
+# there). This replaces the old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
+# switches, which could never be meaningfully combined anyway -- exactly one
+# vendor is ever enabled per build.
+if(NOT VENDOR_KERNEL)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(metax|ascend|gcu|musa)/.*")
+  message(STATUS "VENDOR_KERNEL=OFF: no vendor native kernels")
+else()
+  foreach(_vendor_dir metax ascend gcu musa)
+    if(NOT ACCELERATOR STREQUAL _vendor_dir)
+      list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
+    endif()
+  endforeach()
+  message(STATUS "VENDOR_KERNEL=ON for accelerator: ${ACCELERATOR}")
 endif()
 
 if(ACCELERATOR STREQUAL "metax")
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*\\.cu$")
 endif()
 
-if(ACCELERATOR STREQUAL "gcu")
-  # The generated CUDA boxing kernels re-dispatch PrivateUse1 -> CUDA, which
-  # needs a CUDA-capable libtorch. GCU has no CUDA runtime at all (the tops
-  # stack exports no cuda symbols), so drop them along with the CUDA backend.
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
+# Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
+# vendor's libtorch_cuda.so and these wrappers re-dispatch PrivateUse1 ->
+# CUDA into it). Vendors with no CUDA runtime at all (gcu: the tops stack
+# exports no cuda symbols; musa: torch_musa registers under PrivateUse1,
+# never the CUDA key) build with BOXING_KERNEL=OFF, which drops them; the
+# musa wrappers under aten/backends/musa/generated/ replace them there.
+if(NOT BOXING_KERNEL)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
+  message(STATUS "BOXING_KERNEL=OFF: no generated CUDA boxing kernels")
 endif()
 
-if(ACCELERATOR STREQUAL "musa")
-  # Same reasoning as gcu: torch_musa registers under PrivateUse1, never the
-  # CUDA key, and the MUSA toolkit exports no cuda symbols -- so the generated
-  # CUDA boxing kernels have nothing to dispatch into. The musa wrappers under
-  # aten/backends/musa/generated/ replace them.
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/cuda/.*")
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
-endif()
+# FLAGGEMS_KERNEL path: keep csrc/aten/backends/flagos/python_op_caller.cc and
+# build csrc/aten/generated/flaggems_python_kernels.cc with FLAGOS_FLAGGEMS_PYTHON
+# defined (below). The stale C++/python_wrapper files were removed; nothing to
+# exclude here.
 
 # Drop the flagos backend (only python_op_caller.{h,cc} lives here) when nothing
 # left in SOURCE_FILES needs it. Three independent consumers:
 #
-#   * the FlagGems dispatch paths (FLAGGEMS_KERNEL / FLAGGEMS_PYTHON), which call
+#   * the FlagGems dispatch paths (FLAGGEMS_CPP / FLAGGEMS_KERNEL), which call
 #     into Python through it;
 #   * the TileOPs path (TILEOPS_KERNEL), which reaches its TileLang kernels the
 #     same way;
@@ -186,18 +173,17 @@ endif()
 #   * the MetaX boxing build, whose vendor runtime calls the same provider even
 #     with FlagGems off.
 #
-# The second consumer is why this test runs *here* and looks at the source list
-# instead of at CUDA_KERNEL: cuda_kernels.cc is generated code under
-# aten/generated/, so the CUDA_KERNEL option does not govern it -- the gcu/musa
-# blocks above do, by accelerator. Keying on CUDA_KERNEL instead left dcu
-# (CUDA_KERNEL=OFF, both FLAGGEMS_* OFF, cuda_kernels.cc still compiled, since
-# the DTK torch wheel is hipified and registers HIP kernels under the CUDA key)
-# linking with an undefined GetFlagosDefaultCudaGenerator.
+# The second consumer is why this test runs *here* and reads SOURCE_FILES
+# instead of options: cuda_kernels.cc is generated code under aten/generated/,
+# governed by BOXING_KERNEL -- not by any vendor switch (the gcu/musa builds
+# exclude it through BOXING_KERNEL=OFF). Keying on options instead once left
+# dcu linking with an undefined GetFlagosDefaultCudaGenerator (its boxing
+# kernels ride the hipified DTK torch, not any switch).
 set(_needs_python_op_caller OFF)
-if(FLAGGEMS_KERNEL OR FLAGGEMS_PYTHON OR TILEOPS_KERNEL)
+if(FLAGGEMS_CPP OR FLAGGEMS_KERNEL OR TILEOPS_KERNEL)
   set(_needs_python_op_caller ON)
 endif()
-if(ACCELERATOR STREQUAL "metax" AND FLAGOS_METAX_BOXING)
+if(ACCELERATOR STREQUAL "metax" AND VENDOR_USE_BOXING)
   set(_needs_python_op_caller ON)
 endif()
 if(ACCELERATOR STREQUAL "gcu")
@@ -214,7 +200,7 @@ endif()
 
 set(_torch_fl_sources ${SOURCE_FILES})
 
-if(ACCELERATOR STREQUAL "metax" AND METAX_KERNEL)
+if(ACCELERATOR STREQUAL "metax" AND VENDOR_KERNEL)
   include(${CMAKE_SOURCE_DIR}/cmake/MetaxKernels.cmake)
   flagos_add_metax_kernel_objects(_flagos_metax_kernel_objs)
   list(APPEND _torch_fl_sources ${_flagos_metax_kernel_objs})
@@ -342,7 +328,7 @@ if(ACCELERATOR STREQUAL "dcu")
 endif()
 
 # Build stream_api as a standalone shared lib so liboperators.so can resolve it at runtime
-if(FLAGGEMS_KERNEL AND ACCELERATOR STREQUAL "ascend")
+if(FLAGGEMS_CPP AND ACCELERATOR STREQUAL "ascend")
   add_library(stream_api SHARED "${CMAKE_CURRENT_SOURCE_DIR}/runtime/accelerator/ascend/stream_api.cc")
   target_compile_definitions(stream_api PRIVATE USE_ASCEND=1)
   target_include_directories(stream_api PRIVATE
@@ -363,13 +349,13 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 
 # Compile the generated FlagGems Python-path kernels (guarded by this macro) and
 # python_op_caller only when the Python FlagGems path is requested.
-if(FLAGGEMS_PYTHON)
+if(FLAGGEMS_KERNEL)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
 endif()
 
 # Compile the FlagGems C++ dispatch kernels (flaggems_cpp_kernels.cc, guarded by
 # this macro) only when linking against liboperators.so is requested.
-if(FLAGGEMS_KERNEL)
+if(FLAGGEMS_CPP)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_CPP)
 endif()
 
@@ -405,7 +391,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
-if(FLAGGEMS_KERNEL)
+if(FLAGGEMS_CPP)
   if(TARGET FlagGems::operators)
     list(APPEND _torch_fl_link_libs FlagGems::operators)
   elseif(TARGET operators)
@@ -413,7 +399,7 @@ if(FLAGGEMS_KERNEL)
   endif()
 endif()
 
-if(ACCELERATOR STREQUAL "metax" AND FLAGOS_METAX_BOXING)
+if(ACCELERATOR STREQUAL "metax" AND VENDOR_USE_BOXING)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.
@@ -457,7 +443,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
 elseif(ACCELERATOR STREQUAL "musa")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-  if(MUSA_KERNEL)
+  if(VENDOR_KERNEL)
     # FLAGOS_MUSA_KERNEL gates the m.impl subset in register.cc, mirroring
     # FLAGOS_GCU_KERNEL.
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_MUSA_KERNEL=1)
@@ -484,7 +470,7 @@ elseif(ACCELERATOR STREQUAL "bpu")
 elseif(ACCELERATOR STREQUAL "gcu")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_GCU=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-  if(GCU_KERNEL)
+  if(VENDOR_KERNEL)
     # FLAGOS_GCU_KERNEL gates the m.impl subset in register.cc: without the
     # topsaten kernels there is nothing to register on PrivateUse1.
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_GCU_KERNEL=1)
@@ -524,7 +510,7 @@ endif()
 # interpreter actually running. Resolve a bundled forked libtorch via $ORIGIN
 # instead. Everything else the backend put on CMAKE_INSTALL_RPATH is kept,
 # including FlagGems' liboperators.so dir, so the C++ FlagGems path
-# (FLAGGEMS_KERNEL, kFlagOs) still resolves without LD_LIBRARY_PATH. Mirrors the
+# (FLAGGEMS_CPP, kFlagOs) still resolves without LD_LIBRARY_PATH. Mirrors the
 # patchelf pass in scripts/vendor/bundle_*_libtorch.sh.
 flagos_set_portable_rpath(${LIBRARY_NAME})
 

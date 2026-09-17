@@ -45,8 +45,7 @@ ACCELERATOR=ascend pip install --no-build-isolation -v -e .
 
 Build flags:
 - `ACCELERATOR=ascend`: selects the Ascend build path and native ACLNN kernel backend
-- `ASCEND_KERNEL=1`: compiled automatically when `ACCELERATOR=ascend` (default ON)
-- `CUDA_KERNEL=0`: automatically disabled for Ascend (no CUDA runtime exists)
+- `VENDOR_KERNEL=1`: compiled automatically when `ACCELERATOR=ascend` (default ON)
 - `--no-build-isolation`: ensures the build uses your installed CPU torch, not pip's overlay
 
 The build runs `scripts/codegen/codegen_ascend.py` to generate operator kernels calling ACLNN APIs (`libopapi.so`) directly. Coverage is category-driven: unary, binary, reductions, and matmul families are generated; ops without an ACLNN mapping fall back to CPU.
@@ -173,15 +172,15 @@ import, and the Ascend test groups import both.
 ### Rebuild torch_fl
 
 ```bash
-ACCELERATOR=ascend FLAGGEMS_KERNEL=0 FLAGGEMS_PYTHON=1 \
-  CUDA_KERNEL=0 ASCEND_KERNEL=1 \
+ACCELERATOR=ascend FLAGGEMS_CPP=0 FLAGGEMS_KERNEL=1 \
+  VENDOR_KERNEL=1 \
   pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `FLAGGEMS_PYTHON=1` (the `ACCELERATOR=ascend` default): enables Python-dispatch wrappers for FlagGems Triton kernels
-- `FLAGGEMS_KERNEL=0`: no C++ FlagGems kernels — nothing builds `liboperators.so` for this backend
-- `ASCEND_KERNEL=1`: keeps the native ACLNN backend for ops FlagGems cannot compile or run
+- `FLAGGEMS_KERNEL=1` (the `ACCELERATOR=ascend` default): enables Python-dispatch wrappers for FlagGems Triton kernels
+- `FLAGGEMS_CPP=0`: no C++ FlagGems kernels — nothing builds `liboperators.so` for this backend
+- `VENDOR_KERNEL=1`: keeps the native ACLNN backend for ops FlagGems cannot compile or run
 
 ### Import order
 

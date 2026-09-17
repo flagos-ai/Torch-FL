@@ -31,10 +31,10 @@ ACCELERATOR=gcu pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `ACCELERATOR=gcu`: selects the GCU build path and enables `GCU_KERNEL=ON`
-- `GCU_KERNEL=ON`: compiles generated `topsaten` operator kernels (automatic when `ACCELERATOR=gcu`)
-- `CUDA_KERNEL=OFF`: automatically disabled (no CUDA runtime exists on GCU)
-- `FLAGGEMS_PYTHON=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration. It is on by default under `ACCELERATOR=gcu`, but the environment variable is applied afterwards, so export `FLAGGEMS_PYTHON=1` explicitly if you also set the other `*_KERNEL` flags in the same shell
+- `ACCELERATOR=gcu`: selects the GCU build path and enables `VENDOR_KERNEL=ON`
+- `VENDOR_KERNEL=ON`: compiles generated `topsaten` operator kernels (automatic when `ACCELERATOR=gcu`)
+- `BOXING_KERNEL=OFF`: automatically disabled (no CUDA runtime exists on GCU)
+- `FLAGGEMS_KERNEL=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration. It is on by default under `ACCELERATOR=gcu`, but the environment variable is applied afterwards, so export `FLAGGEMS_KERNEL=1` explicitly if you also set the other kernel flags in the same shell
 - `--no-build-isolation`: ensures the build uses your installed CPU torch
 
 The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning. `scripts/codegen/codegen_gcu_flaggems.py` separately writes the FlagGems wrapper registrations into `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`; both generators must be re-run when the routing sets change.
@@ -154,7 +154,7 @@ The TOPSPTI tracer collects activities on S60, but none surface as device events
 To build the runtime layer only (device/memory/stream support) with no native operator kernels:
 
 ```bash
-ACCELERATOR=gcu GCU_KERNEL=OFF pip install --no-build-isolation -v -e .
+ACCELERATOR=gcu VENDOR_KERNEL=OFF pip install --no-build-isolation -v -e .
 ```
 
 All compute ops will fall back to CPU. This mode is useful for testing the runtime layer in isolation.
