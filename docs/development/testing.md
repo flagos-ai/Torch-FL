@@ -30,7 +30,7 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
 | `flaggems_python` | Requires FlagGems Python wrapper backend | Tests checking Python-layer integration (dispatch overhead, GIL behavior) |
-| `flaggems_cpp` | Requires FlagGems C++ runtime (wheel built with `FLAGOS_BUILD_FLAGGEMS_CPP=ON` + `FLAGOS_USE_FLAGGEMS_CPP=1`) | Tests asserting `-> kFlagOs` (C++) dispatch |
+| `flaggems_cpp` | Requires FlagGems C++ runtime (wheel built with `FLAGOS_BUILD_FLAGGEMS_CPP=ON`, which the build record then reports) | Tests asserting `-> kFlagOs` (C++) dispatch |
 
 ### Cross-backend Contract Markers
 
@@ -85,16 +85,19 @@ Run FlagGems-routed operators:
 pytest tests/integration/ops/ -m "flaggems and main_ops" -v
 ```
 
-Run FlagGems C++ operators (requires a `FLAGOS_BUILD_FLAGGEMS_CPP=ON` wheel + `FLAGOS_USE_FLAGGEMS_CPP=1`):
+Run FlagGems C++ operators (requires a wheel built with
+`FLAGOS_BUILD_FLAGGEMS_CPP=ON`):
 
 ```bash
-FLAGOS_USE_FLAGGEMS_CPP=1 pytest tests/integration/ops/ -m "flaggems_cpp and main_ops" -v
+pytest tests/integration/ops/ -m "flaggems_cpp and main_ops" -v
 ```
 
-`FLAGOS_USE_FLAGGEMS_CPP` is a test gate only: it decides whether the
-`flaggems_cpp` tests are collected. Actual routing follows the conf's
-`flaggems_cpp` keys, so a wheel built with `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` skips these tests
-regardless of the variable.
+Whether these tests are collected is decided by the build record, not by the
+environment: `conftest.py` reads `KERNELS` from `torch_fl/_build_config.py` and
+skips the mark when `flaggems_cpp` is not in it. A wheel with the C++ runtime
+compiled in therefore runs them, and a wheel without it skips them, with no
+variable to keep in step by hand. Actual routing still follows the conf's
+`flaggems_cpp` keys.
 
 ### Manual FlagGems Overload Survey
 

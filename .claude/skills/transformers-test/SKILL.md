@@ -586,7 +586,7 @@ restarting, and keep raw stdout/stderr per model for auditing.
 
 ## Step 5 — classify the failure and name the root cause
 
-Enable `FLAGOS_LOG_FALLBACK=1` for the measurement subprocess. A passing test
+Enable `FLAGOS_LOG=fallback` for the measurement subprocess. A passing test
 that emits `[flagos cpu_fallback] aten::<op>` is not accelerator coverage: record
 one `OP_CPU_FALLBACK` finding per unique operator. Unless the user has explicitly
 allowed host fallback for the measured platform, treat each as a missing device

@@ -32,7 +32,7 @@ Routing is fixed at import, so this worker benchmarks ONE backend and prints a
 JSON blob. The driver (flaggems_dispatch_bench.py) runs it once per backend.
 
 Usage (normally invoked by the driver):
-    FLAGOS_USE_FLAGGEMS=1 python flaggems_dispatch_overhead.py --backend flaggems
+    FLAGOS_FORCE_BACKEND=flaggems python flaggems_dispatch_overhead.py --backend flaggems
     python flaggems_dispatch_overhead.py --backend cuda
 """
 

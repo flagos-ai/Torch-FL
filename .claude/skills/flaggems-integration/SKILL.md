@@ -153,11 +153,17 @@ FlagGems C++ backend. Check both sides of every route:
 python tests/integration/ops/test_flaggems_conf_consistency.py -v
 ```
 
-The runtime config is selected by `torch_fl/__init__.py`:
+The runtime config is selected by `torch_fl/__init__.py`, and the choice is
+driven by what the wheel was built with rather than by an environment variable:
 
-- `FLAGOS_USE_FLAGGEMS=1` selects the generic Python config.
-- `FLAGOS_USE_FLAGGEMS_CPP=1` selects the explicit C++ config.
-- Platform-specific combinations select the MetaX, DCU, or other vendor config.
+- `ACCELERATOR` in `torch_fl/_build_config.py` — written by `setup.py` at build
+  time — selects the platform conf (`backends_<platform>.conf`). `FLAGOS_BACKEND_CONFIG`
+  overrides the path, for testing a conf the wheel did not pick.
+- FlagGems Python vs FlagGems C++ is a per-op key inside that one conf
+  (`= flaggems` / `= flaggems_cpp`), not a separate conf file. `FLAGOS_OP_<op>`
+  overrides one op at runtime.
+- `FLAGOS_FORCE_BACKEND=flaggems` repins every op FlagGems implements onto the
+  FlagGems route, for A/B measurement against the conf's mixed routing.
 - A platform config must not claim a Python route that its compiler cannot run.
 
 For a new platform, follow the existing config pattern and keep the generated

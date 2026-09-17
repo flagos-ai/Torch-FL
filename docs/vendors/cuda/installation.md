@@ -56,8 +56,12 @@ FLAGOS_ACCELERATOR=cuda \
 
 The following environment variables control runtime behavior:
 
-- `FLAGOS_USE_FLAGGEMS_CPP=1`: Enable the `flaggems_cpp` test gate. Routing itself follows the conf's `flaggems_cpp` keys, so this variable only decides whether those tests are collected
 - `CUDA_VISIBLE_DEVICES`: Control which GPUs are visible to the process
+
+Whether the `flaggems_cpp`-marked tests are collected is not a variable: the
+wheel records its kernel sets in `torch_fl/_build_config.py`, and the
+integration conftest collects those tests exactly when `flaggems_cpp` is in that
+record — see [Testing](../../development/testing.md).
 
 ## Verification
 

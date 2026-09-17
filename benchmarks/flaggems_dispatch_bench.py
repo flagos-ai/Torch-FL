@@ -19,23 +19,23 @@ Runs the worker once per backend in its own subprocess (routing is fixed at
 import), then prints a side-by-side table comparing three dispatch paths for
 the SAME op on the SAME device (flagos:0, shared GPU memory):
 
-    cuda     : default vendor conf (backends_cuda.conf), pure C++ dispatch
-               into the vendor libtorch_cuda kernel.
-    gems_py  : FLAGOS_USE_FLAGGEMS=1 (backends_flaggems.conf), Python dispatch
-               -- kFlagOsPython crosses into CPython + pybind to launch the
-               FlagGems Triton kernel.
-    gems_cpp : FLAGOS_USE_FLAGGEMS_CPP=1 (backends_flaggems_cpp.conf), C++
-               dispatch -- kFlagOs boxes flagos->cuda metadata and calls the
+    cuda     : the platform conf as shipped (backends_cuda.conf), pure C++
+               dispatch into the vendor libtorch_cuda kernel.
+    gems_py  : FLAGOS_FORCE_BACKEND=flaggems, Python dispatch -- kFlagOsPython
+               crosses into CPython + pybind to launch the FlagGems Triton
+               kernel.
+    gems_cpp : same force, plus FLAGOS_OP_<op>=flaggems_cpp on the Stage-A ops.
+               C++ dispatch -- kFlagOs boxes flagos->cuda metadata and calls the
                FlagGems C++ runtime (liboperators.so, TritonJIT, no GIL).
-               Only the 18 Stage-A ops route here; the rest still hit gems_py,
-               so gems_cpp == gems_py for non-C++ ops (mul/abs/neg -- flagged).
+               Only those ops route here; the rest still hit gems_py, so
+               gems_cpp == gems_py for non-C++ ops (mul/abs/neg -- flagged).
 
 Two host-side deltas matter:
     py_tax   = gems_py_submit  - cuda_submit  (cost of the Python dispatch path)
     cpp_save = gems_py_submit  - gems_cpp_submit
              = how much of that tax the C++ dispatch actually recovers.
 
-gems_cpp requires a wheel built with FLAGOS_BUILD_FLAGGEMS_CPP=ON and the three runtime
+gems_cpp requires a wheel built with FLAGOS_BUILD_FLAGGEMS_CPP=ON and the two runtime
 env vars (FLAGGEMS_SOURCE_DIR, LD_LIBRARY_PATH -> liboperators.so). If they are
 missing the driver skips that column instead of failing.
 
@@ -57,7 +57,7 @@ from pathlib import Path
 
 _WORKER = Path(__file__).resolve().parent / "flaggems_dispatch_overhead.py"
 
-# Ops that actually route to the C++ kFlagOs backend under backends_flaggems_cpp.conf
+# Ops the driver pins to the C++ kFlagOs backend with FLAGOS_OP_<op>=flaggems_cpp
 # (Stage A). For every other op gems_cpp is identical to gems_py (still Python).
 _CPP_OPS = {
     "mm",
@@ -88,6 +88,13 @@ def _op_is_cpp(label):
     # bench uses sum.dim / softmax; conf uses sum.dim_IntList / _softmax
     alias = {"sum.dim": "sum.dim_IntList", "softmax": "_softmax"}
     return alias.get(stem, stem) in _CPP_OPS
+
+
+def _op_env(op):
+    """The FLAGOS_OP_<op> key for an aten op name. Dots become double
+    underscores, matching the lookup key built in csrc/aten/common.cc
+    (mm.out -> FLAGOS_OP_mm__out)."""
+    return "FLAGOS_OP_" + op.replace(".", "__")
 
 
 def _run(backend, env_extra, submit, e2e, warmup):
@@ -146,22 +153,22 @@ def main():
     cuda = _index(_run("cuda", {}, args.submit, args.e2e, args.warmup))
     gems = _index(
         _run(
-            "gems_py", {"FLAGOS_USE_FLAGGEMS": "1"}, args.submit, args.e2e, args.warmup
+            "gems_py",
+            {"FLAGOS_FORCE_BACKEND": "flaggems"},
+            args.submit,
+            args.e2e,
+            args.warmup,
         )
     )
 
     cpp_ok, cpp_why = _cpp_available()
     cpp = {}
     if cpp_ok:
-        cpp = _index(
-            _run(
-                "gems_cpp",
-                {"FLAGOS_USE_FLAGGEMS_CPP": "1"},
-                args.submit,
-                args.e2e,
-                args.warmup,
-            )
-        )
+        # Same force as gems_py, then the Stage-A ops pinned to the C++ slot one
+        # by one, so the two columns differ only in the dispatch path.
+        cpp_env = {"FLAGOS_FORCE_BACKEND": "flaggems"}
+        cpp_env.update({_op_env(op): "flaggems_cpp" for op in sorted(_CPP_OPS)})
+        cpp = _index(_run("gems_cpp", cpp_env, args.submit, args.e2e, args.warmup))
     else:
         sys.stderr.write(f"[skip gems_cpp] {cpp_why}\n")
 
@@ -169,7 +176,7 @@ def main():
     print("Per-op host submit time and end-to-end latency (microseconds).")
     print("submit = host dispatch cost (kernel time hidden by the async queue).")
     print("  cuda     : vendor C++ dispatch     gems_py : Python (kFlagOsPython)")
-    print("  gems_cpp : FlagGems C++ (kFlagOs)   * = op routes to C++ under cpp conf")
+    print("  gems_cpp : FlagGems C++ (kFlagOs)   * = op pinned to C++ (FLAGOS_OP_)")
     print("py_tax   = gems_py - cuda    (Python dispatch overhead vs vendor)")
     print("cpp_save = gems_py - gems_cpp (host cost the C++ dispatch recovers)\n")
     hdr = (

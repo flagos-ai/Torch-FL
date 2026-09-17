@@ -19,7 +19,7 @@ fixed at import time), driven three times by the operator:
 
   vendor   : system python, --device cuda   (vendor fork torch, baseline)
   boxing   : /opt/fl-envs/boxing python, --device flagos
-  flaggems : same venv + FLAGOS_USE_FLAGGEMS=1, --device flagos
+  flaggems : same venv + FLAGOS_FORCE_BACKEND=flaggems, --device flagos
 
 Modes:
   bench   : 3 prompts x (1 warmup + --iters measured rounds); per-step timing.

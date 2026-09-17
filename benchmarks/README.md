@@ -47,20 +47,24 @@ analysis in [docs/vendors/bpu/integration.md](../docs/vendors/bpu/integration.md
 Compares the **host-side dispatch cost** of three paths for the same op on the
 same device (`flagos:0`, shared GPU memory):
 
-- **cuda** — default vendor conf (`backends_cuda.conf`), pure C++ dispatch into
-  the vendor `libtorch_cuda` kernel.
-- **gems_py** — `FLAGOS_USE_FLAGGEMS=1` (`backends_flaggems.conf`), Python
-  dispatch: `kFlagOsPython` crosses into CPython + pybind to launch the FlagGems
-  Triton kernel.
-- **gems_cpp** — `FLAGOS_USE_FLAGGEMS_CPP=1` (`backends_flaggems_cpp.conf`), C++
-  dispatch: `kFlagOs` boxes flagos→cuda metadata and calls the FlagGems C++
-  runtime (`liboperators.so`, TritonJIT, **no GIL/pybind**). Only the 18 Stage-A
-  ops route here; the rest fall back to `gems_py`.
+- **cuda** — the platform conf as shipped (`backends_cuda.conf`), pure C++
+  dispatch into the vendor `libtorch_cuda` kernel.
+- **gems_py** — `FLAGOS_FORCE_BACKEND=flaggems`, Python dispatch: `kFlagOsPython`
+  crosses into CPython + pybind to launch the FlagGems Triton kernel.
+- **gems_cpp** — the same force plus `FLAGOS_OP_<op>=flaggems_cpp` on the 18
+  Stage-A ops, C++ dispatch: `kFlagOs` boxes flagos→cuda metadata and calls the
+  FlagGems C++ runtime (`liboperators.so`, TritonJIT, **no GIL/pybind**). Only
+  those ops route here; the rest fall back to `gems_py`.
+
+FlagGems Python and FlagGems C++ are per-op keys in the one platform conf
+(`= flaggems` / `= flaggems_cpp`), not separate conf files; the driver uses
+`FLAGOS_FORCE_BACKEND` and `FLAGOS_OP_<op>` so each column differs from the
+others in the dispatch path alone.
 
 ```bash
 python benchmarks/flaggems_dispatch_bench.py            # defaults: submit=300 e2e=100
 
-# gems_cpp column additionally needs a FLAGOS_BUILD_FLAGGEMS=ON wheel + (one line):
+# gems_cpp column additionally needs a FLAGOS_BUILD_FLAGGEMS_CPP=ON wheel + (one line):
 FLAGGEMS_SOURCE_DIR=/path/to/FlagGems-src/src/flag_gems \
 LD_LIBRARY_PATH=/path/to/FlagGems-src/cpp/build/lib:$LD_LIBRARY_PATH \
 python benchmarks/flaggems_dispatch_bench.py --submit 500 --e2e 200
@@ -85,7 +89,7 @@ CPU-torch build cannot create a CUDA generator directly).
 
 ### Measured (NVIDIA A100, torch 2.10.0+cpu + flagos PrivateUse1, µs/op, submit=500)
 
-`*` = op routes to the C++ `kFlagOs` backend under `backends_flaggems_cpp.conf`.
+`*` = op pinned to the C++ `kFlagOs` backend with `FLAGOS_OP_<op>=flaggems_cpp`.
 
 | op | cat | cuda | gems_py | gems_cpp | py_tax | cpp_save | gpy_e2e | gcpp_e2e |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -99,7 +103,7 @@ CPU-torch build cannot create a CUDA generator directly).
 | mm[512²] `*` | matmul | 27 | 65 | 110 | 38 | **−45** | 123 | 128 |
 | mm[4096²] `*` | matmul | 7219 | 8059 | 8176 | 840 | **−117** | 8140 | 8201 |
 
-(unmarked ops still use the Python path under the cpp conf, so their tiny
+(unmarked ops are still on the Python path in the cpp column, so their tiny
 cpp_save is measurement noise — shown as `—`.)
 
 ### Reading the numbers
@@ -128,6 +132,7 @@ cpp_save is measurement noise — shown as `—`.)
 **host-bound reductions/elementwise ops in eager per-op loops** (sum/softmax:
 ~3–4× lower submit, ~2.5× lower e2e). For matmul and large reductions the async
 pipeline already hides the Python cost, so `kFlagOs` should *not* be enabled for
-them — which is why `backends_flaggems_cpp.conf` is a hand-picked mixed conf, not
-a blanket switch. The negative `mm` result is a concrete argument for keeping the
-per-op routing table selective (Stage C) rather than C++-dispatching everything.
+them — which is why the C++ route is a per-op key in the conf, checked op by op,
+rather than a blanket switch. The negative `mm` result is a concrete argument for
+keeping the per-op routing table selective (Stage C) rather than
+C++-dispatching everything.

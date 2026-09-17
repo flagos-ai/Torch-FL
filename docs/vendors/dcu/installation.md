@@ -247,9 +247,10 @@ FLAGOS_ACCELERATOR=dcu \
 
 ### Step 3: Runtime Configuration
 
-```bash
-export FLAGOS_USE_FLAGGEMS_CPP=0
-```
+No runtime variable is needed. DCU pins `FLAGOS_BUILD_FLAGGEMS_CPP` off at build
+time (DTK has no FlagGems C++ build to link), so the build record already says
+the C++ FlagGems path is absent; the `flaggems_cpp`-marked tests skip on that
+record rather than on a variable.
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 

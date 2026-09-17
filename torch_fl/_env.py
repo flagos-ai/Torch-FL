@@ -472,6 +472,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "0 (off)",
         "In the manual MetaX distributed tests, skip FlagCX and use NCCL",
     ),
+    "FLAGOS_DCU_SKIP_LEGACY_SMOKE": (
+        SCOPE_TEST,
+        "0 (off)",
+        "In .github/scripts/set_env_dcu.sh, skip the legacy-mode smoke path "
+        "(FLAGOS_DCU_VENDOR_CORE=1) after the decoupled gates have run",
+    ),
     # --- Assets and libraries --------------------------------------------
     "FLAGOS_DISABLE_CUDA_ASSETS": (
         SCOPE_RUNTIME,
@@ -633,7 +639,6 @@ RETIRED: frozenset[str] = frozenset(
         "FLAGOS_USE_FLAGGEMS",
         "FLAGOS_USE_FLAGGEMS_CPP",
         "FLAGOS_USE_VENDOR_OPS",
-        "FLAGOS_DCU_SKIP_LEGACY_SMOKE",
     }
 )
 
