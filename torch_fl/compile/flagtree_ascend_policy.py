@@ -355,10 +355,9 @@ def install_policy() -> str:
     # defaults to ON upstream, so it has to be turned off explicitly. Respect an
     # explicit opt-in so the failure is the clear message in async_launch rather
     # than a silent override of what the user asked for.
-    import os
+    from torch_fl import _env
 
-    if "TRITON_ENABLE_TASKQUEUE" not in os.environ:
-        os.environ["TRITON_ENABLE_TASKQUEUE"] = "false"
+    _env.set_foreign("TRITON_ENABLE_TASKQUEUE", "false")
 
     # utils.get_backend_func only honours TRITON_BACKEND when it names
     # torch_npu or mindspore, so the env var cannot select this policy. Set the

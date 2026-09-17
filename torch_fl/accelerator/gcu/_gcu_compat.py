@@ -383,10 +383,12 @@ def _derive_compile_arch(get_arch) -> None:
     COMPILE_ARCH unset makes the driver resolve the arch from the live device,
     which works once the device shims above are in place.
     """
-    if "COMPILE_ARCH" in os.environ:
+    if os.environ.get("COMPILE_ARCH"):
         return
 
     import re
+
+    from torch_fl import _env
 
     try:
         arch = get_arch()
@@ -394,7 +396,7 @@ def _derive_compile_arch(get_arch) -> None:
         return
     match = re.search(r"gcu\d+", arch)
     if match:
-        os.environ["COMPILE_ARCH"] = match.group(0)
+        _env.set_foreign("COMPILE_ARCH", match.group(0))
 
 
 def patch_triton_gcu_for_flagos() -> bool:

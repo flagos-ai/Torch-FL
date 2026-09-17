@@ -151,7 +151,7 @@ def is_tileops_available() -> bool:
     # _disable_frontend_cache), kept for hosts where the targeted fix does not
     # apply. Must precede the tileops import -- TileLang reads it at import time.
     if _env.flag("FLAGOS_TILEOPS_DISABLE_ALL_CACHE"):
-        os.environ.setdefault("TILELANG_DISABLE_CACHE", "1")
+        _env.set_foreign("TILELANG_DISABLE_CACHE", "1")
 
     try:
         importlib.import_module("tileops")

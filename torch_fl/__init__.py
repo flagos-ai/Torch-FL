@@ -65,6 +65,12 @@ def _is_ppu_build() -> bool:
     return os.path.isdir(os.path.join(os.path.dirname(__file__), "lib_ppu"))
 
 
+# The conf _select_backend_config() resolved, or "" when the user named one
+# through FLAGOS_BACKEND_CONFIG (nothing to resolve) or none was found. Handed to
+# the C++ routing table right after _C loads; read through backend_config_path().
+_BACKEND_CONFIG_PATH = ""
+
+
 def _select_backend_config() -> None:
     """Pick the op-routing config file for this build.
 
@@ -135,7 +141,14 @@ def _select_backend_config() -> None:
     FLAGOS_OP_<name> overrides in common.cc still apply on top. This must run
     before the first op dispatch triggers BackendTable() init; setting it at
     import time (before any flagos tensor op) is well before that.
+
+    The choice is handed to the C++ reader through
+    _C._set_backend_config_path(), not written to os.environ. It used to be an
+    environment write, which made the wheel's own selection indistinguishable
+    from a user's for the rest of the process -- see backend_config_path().
     """
+    global _BACKEND_CONFIG_PATH
+
     if _env.value("FLAGOS_BACKEND_CONFIG"):
         return
 
@@ -153,7 +166,7 @@ def _select_backend_config() -> None:
             os.path.dirname(__file__), "configs", f"backends_{platform}.conf"
         )
         if os.path.exists(platform_conf):
-            os.environ["FLAGOS_BACKEND_CONFIG"] = platform_conf
+            _BACKEND_CONFIG_PATH = platform_conf
             return
 
     conf_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -174,7 +187,7 @@ def _select_backend_config() -> None:
         is_ascend_build = False
 
     if is_ascend_build:
-        os.environ["FLAGOS_BACKEND_CONFIG"] = ascend_default
+        _BACKEND_CONFIG_PATH = ascend_default
         return
 
     # The conf follows from the build itself, not from a runtime mode switch:
@@ -193,10 +206,27 @@ def _select_backend_config() -> None:
         conf_name = "backends_cuda.conf"
     conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)
     if os.path.exists(conf_path):
-        os.environ["FLAGOS_BACKEND_CONFIG"] = conf_path
+        _BACKEND_CONFIG_PATH = conf_path
 
 
 _select_backend_config()
+
+
+def backend_config_path() -> str:
+    """Path of the conf the op-routing table is read from ("" if none).
+
+    Answers in the same order the C++ reader resolves it
+    (csrc/aten/common.cc:ResolveBackendConfigPath): what _select_backend_config()
+    picked and handed over, then the user's FLAGOS_BACKEND_CONFIG, then nothing --
+    the last case being a path C++ derives from its own library location and
+    Python has no reason to duplicate.
+
+    It used to be answered by reading os.environ["FLAGOS_BACKEND_CONFIG"], which
+    torch_fl wrote at import time. That made "the user overrode the conf" and
+    "the wheel chose its own conf" the same observable state for the rest of the
+    process, and it leaked the path into every child process the wheel spawns.
+    """
+    return _BACKEND_CONFIG_PATH or _env.value("FLAGOS_BACKEND_CONFIG") or ""
 
 
 def _conf_routes_to_flaggems() -> bool:
@@ -210,7 +240,7 @@ def _conf_routes_to_flaggems() -> bool:
     flag_gems to fail its own backend discovery on the very ops the conf routes
     to it. Read the conf instead, which is the thing that actually decides.
     """
-    conf = _env.value("FLAGOS_BACKEND_CONFIG")
+    conf = backend_config_path()
     if not conf or not os.path.exists(conf):
         return False
     try:
@@ -405,7 +435,7 @@ def _disable_vendor_backend_autoload() -> None:
     """
     if _build_accelerator() != "musa":
         return
-    os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    _env.set_foreign("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 
 
 def _validate_dcu_decoupled_runtime() -> None:
@@ -507,6 +537,15 @@ if _os.path.exists(_stream_api_path):
 _check_privateuse1_unclaimed()
 
 import torch_fl._C  # type: ignore[misc]  # noqa: E402, F401
+
+# Hand the conf _select_backend_config() resolved to the C++ reader, which builds
+# the routing table on the first op dispatch -- still well after this point.
+# This is a call rather than an os.environ write so the wheel's own choice stays
+# distinguishable from the user's FLAGOS_BACKEND_CONFIG; see
+# backend_config_path(). Nothing to hand over when the user set the variable or
+# nothing was found, in which case the C++ reader resolves it itself.
+if _BACKEND_CONFIG_PATH:
+    torch_fl._C._set_backend_config_path(_BACKEND_CONFIG_PATH)
 
 
 from . import flagos  # noqa: E402
@@ -919,7 +958,7 @@ def _patch_flaggems_codegen_config():
 
     # --- Moore Threads MUSA branch ---
     if _build_accelerator() == "musa":
-        os.environ.setdefault("GEMS_VENDOR", "mthreads")
+        _env.set_foreign("GEMS_VENDOR", "mthreads")
         return
 
     # --- MetaX branch (boxing + FlagGems) ---
@@ -936,7 +975,7 @@ def _patch_flaggems_codegen_config():
         )
 
         if is_metax_available():
-            os.environ.setdefault("GEMS_VENDOR", "metax")
+            _env.set_foreign("GEMS_VENDOR", "metax")
             patch_torch_cuda_for_metax()
             return
 
@@ -947,7 +986,7 @@ def _patch_flaggems_codegen_config():
     # NVIDIA branch (which no-ops here anyway -- no libcuda.so) and the ascend
     # fallback. setdefault so an explicit GEMS_VENDOR still wins.
     if _build_accelerator() == "dcu" and os.environ.get("GEMS_VENDOR") != "ascend":
-        os.environ.setdefault("GEMS_VENDOR", "hygon")
+        _env.set_foreign("GEMS_VENDOR", "hygon")
         # torch.version is pure Python (torch/version.py), generated when the
         # wheel is built -- swapping the bundled DTK .so files cannot change it.
         # A self-contained DCU wheel therefore front-ends a stock torch+cpu whose
@@ -993,7 +1032,7 @@ def _patch_flaggems_codegen_config():
 
         install_gcu_rng_generators()
         if patch_gcu_triton_for_flagos():
-            os.environ.setdefault("GEMS_VENDOR", "enflame")
+            _env.set_foreign("GEMS_VENDOR", "enflame")
         return
 
     # --- Generic NVIDIA CUDA branch (default) ---
@@ -1009,7 +1048,7 @@ def _patch_flaggems_codegen_config():
         )
 
         if is_nvidia_cuda_available():
-            os.environ.setdefault("GEMS_VENDOR", "nvidia")
+            _env.set_foreign("GEMS_VENDOR", "nvidia")
             # patch_torch_cuda_for_flagos installs per-device CUDA generators as
             # torch.cuda.default_generators and routes cuda seeding to them, so
             # flag_gems' philox_backend_seed_offset finds a real, seedable
@@ -1019,8 +1058,7 @@ def _patch_flaggems_codegen_config():
 
     # --- Ascend fallback branch ---
     # Set vendor before FlagGems runtime initializes
-    if "GEMS_VENDOR" not in os.environ:
-        os.environ["GEMS_VENDOR"] = "ascend"
+    _env.set_foreign("GEMS_VENDOR", "ascend")
 
     # FlagGems' RNG ops (rand/randn/uniform_/exponential_/bernoulli_/
     # multinomial/native_dropout) unpack the generator state as a CUDA philox

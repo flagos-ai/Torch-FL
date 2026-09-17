@@ -33,9 +33,7 @@ the test files do not each restate it.
 
 from __future__ import annotations
 
-import os
-
-import torch_fl  # noqa: F401  -- importing resolves FLAGOS_BACKEND_CONFIG
+import torch_fl  # noqa: F401  -- importing resolves the conf torch_fl routes by
 
 
 # conf value -> the name LogDispatch prints for the same Backend enum value.
@@ -47,6 +45,16 @@ _LOG_NAME = {
 }
 
 
+def _conf_path() -> str:
+    """The conf the routing table is read from, as torch_fl resolved it.
+
+    Asked of torch_fl rather than read from the environment, because torch_fl no
+    longer writes FLAGOS_BACKEND_CONFIG: the variable now holds only what a user
+    set, and the wheel's own selection lives in torch_fl.backend_config_path().
+    """
+    return torch_fl.backend_config_path()
+
+
 def _conf_route(op: str) -> str:
     """Raw conf value for ``op`` -- ``none`` included, and ``none`` unmapped.
 
@@ -54,10 +62,8 @@ def _conf_route(op: str) -> str:
     decision, so it raises here for both public accessors instead of being
     folded into one of them.
     """
-    conf = os.environ.get("FLAGOS_BACKEND_CONFIG")
-    assert conf, (
-        "FLAGOS_BACKEND_CONFIG is unset; import torch_fl before asking for a route"
-    )
+    conf = _conf_path()
+    assert conf, "no backend conf resolved; import torch_fl before asking for a route"
     with open(conf) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
@@ -79,7 +85,7 @@ def routed_backend(op: str) -> str:
     values to assert against.
     """
     backend = _conf_route(op)
-    conf = os.environ["FLAGOS_BACKEND_CONFIG"]
+    conf = _conf_path()
     assert backend != "none", (
         f"{op} is routed to 'none' in {conf}: it reaches cpu_fallback "
         "and never logs a dispatch, so there is no route to assert"

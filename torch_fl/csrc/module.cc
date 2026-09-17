@@ -41,6 +41,8 @@
 #include <macros.h>
 #include <runtime/allocator/caching_device_allocator.h>
 
+#include <aten/common.h>
+
 namespace {
 
 // Forward declarations
@@ -466,6 +468,24 @@ PyObject* _reset_peak_memory_stats(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+// torch_fl._select_backend_config() resolves the conf path at import time and
+// hands it over here instead of writing os.environ["FLAGOS_BACKEND_CONFIG"].
+// The environment write is what made "the user overrode the conf" and "the
+// wheel chose its own conf" the same observable state for the rest of the
+// process. Called before the first dispatch builds the routing table.
+PyObject* _set_backend_config_path(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+  if (!PyUnicode_Check(arg)) {
+    PyErr_SetString(PyExc_TypeError, "_set_backend_config_path expects a str");
+    return nullptr;
+  }
+  const char* path = PyUnicode_AsUTF8(arg);
+  if (path == nullptr) return nullptr;
+  at::native::flagos::SetBackendConfigPath(path);
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
 static PyMethodDef methods[] = {
     {"_init", _initExtension, METH_NOARGS, nullptr},
     {"_get_default_generator", _getDefaultGenerator, METH_O, nullptr},
@@ -487,6 +507,7 @@ static PyMethodDef methods[] = {
     {"_memory_allocated", _memory_allocated, METH_O, nullptr},
     {"_memory_reserved", _memory_reserved, METH_O, nullptr},
     {"_reset_peak_memory_stats", _reset_peak_memory_stats, METH_O, nullptr},
+    {"_set_backend_config_path", _set_backend_config_path, METH_O, nullptr},
     {nullptr, nullptr, 0, nullptr}};
 
 extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {

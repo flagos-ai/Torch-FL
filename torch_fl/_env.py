@@ -42,6 +42,7 @@ import sys
 from typing import Any
 
 __all__ = [
+    "FOREIGN",
     "RETIRED",
     "SCOPE_BUILD",
     "SCOPE_BUILD_RUNTIME",
@@ -55,6 +56,7 @@ __all__ = [
     "flag",
     "listed",
     "path",
+    "set_foreign",
     "value",
     "warn",
 ]
@@ -163,6 +165,56 @@ def listed(name: str) -> frozenset[str]:
     if raw is None:
         return frozenset()
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+# ---------------------------------------------------------------------------
+# Variables owned by other projects
+# ---------------------------------------------------------------------------
+#
+# torch_fl both reads and writes these, but none of them is ours: each is a
+# contract with another package, and renaming one here would be renaming it
+# there. They are declared together so the set of foreign namespaces torch_fl
+# reaches into is visible at a glance -- and so a write is a named call rather
+# than a bare assignment, of which there were twelve across six modules in
+# three spellings of "only if the user has not set it" (setdefault; a
+# ``not in os.environ`` guard; an ``os.environ.get`` truthiness guard).
+#
+# The write must stay an environment write rather than a value passed down: the
+# consumer is another library that reads os.environ itself, and some of these
+# (TORCH_DEVICE_BACKEND_AUTOLOAD, GEMS_VENDOR) have to be in place before that
+# library is imported.
+
+FOREIGN: dict[str, str] = {
+    "GEMS_VENDOR": "vendor autodetection in FlagGems",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "torch's device-backend entry-point autoload",
+    "FLAGCX_TORCH_BACKEND": "FlagCX's torch plugin selector",
+    "TILELANG_DISABLE_CACHE": "tilelang's kernel cache",
+    "TRITON_ENABLE_TASKQUEUE": "the FlagTree Ascend Triton launch queue",
+    "COMPILE_ARCH": "Enflame's tops compiler architecture",
+    "HB_DNN_USER_DEFINED_L2M_SIZES": "the BPU hbdk runtime's L2M sizing",
+}
+
+
+def set_foreign(name: str, value: str) -> bool:
+    """Set one of the ``FOREIGN`` variables, and report whether it was written.
+
+    Always ``setdefault`` semantics, with an empty value counting as unset
+    (``FOO=$UNSET`` in a shell means the same as not exporting it): every one of
+    these is a hint torch_fl offers the other library, and an explicit export by
+    the user -- including an empty one, which is how a user says "not this
+    vendor" -- is the better answer. No site needs to win instead; a caller that
+    has to overwrite a value the user set is a caller that should be telling the
+    user, not silently outvoting them.
+
+    An undeclared name is refused: the point of the table is that the complete
+    set of foreign variables is knowable by reading one dict.
+    """
+    if name not in FOREIGN:
+        raise KeyError(f"{name} is not a declared foreign variable; add it to FOREIGN")
+    if _raw(name) is not None:
+        return False
+    os.environ[name] = value
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +373,11 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     # --- Operator routing ------------------------------------------------
     "FLAGOS_BACKEND_CONFIG": (
         SCOPE_RUNTIME,
-        "Derived from the build record",
-        "Absolute path to a backends_*.conf file; overrides auto-detection. For "
-        "testing and debugging only",
+        "No default",
+        "Absolute path to a backends_*.conf file; overrides the conf torch_fl "
+        "selects from the build record. For testing and debugging only -- the "
+        "wheel's own selection is not written here, and is reported by "
+        "torch_fl.backend_config_path()",
     ),
     "FLAGOS_OP_<name>": (
         SCOPE_RUNTIME,

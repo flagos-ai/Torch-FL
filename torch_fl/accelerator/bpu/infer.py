@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import os
 
 import numpy as np
 
@@ -114,8 +113,9 @@ def ensure_l2_config(value: str = L2M_DEFAULT) -> None:
     inference. Setting it after that has no effect, so callers construct
     `Package` only after this has run.
     """
-    if not os.environ.get(L2M_ENV):
-        os.environ[L2M_ENV] = value
+    from torch_fl import _env
+
+    if _env.set_foreign(L2M_ENV, value):
         log.debug("%s not set; using %s", L2M_ENV, value)
 
 

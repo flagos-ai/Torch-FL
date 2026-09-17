@@ -40,7 +40,10 @@ enum class Backend {
 };
 
 // Returns the backend for a given op name, loaded once from config file at startup.
-// Config file path: $FLAGOS_BACKEND_CONFIG or torch_fl/configs/backends.conf
+// Config file path, in order of precedence:
+//   1. SetBackendConfigPath(), called by torch_fl._select_backend_config()
+//   2. $FLAGOS_BACKEND_CONFIG
+//   3. torch_fl/configs/backends.conf, located from this library's own path
 // Format: "op_name = backend"
 //   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
 //            "flaggems"     -- FlagGems Python (Triton) path
@@ -50,6 +53,13 @@ enum class Backend {
 //            "none"         -- no accelerated impl; reaches cpu_fallback
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);
+
+// Record the conf path Python resolved at import time. Must be called before
+// the first op dispatch, which is when the table is built. It is not written to
+// os.environ: the wheel's own selection has to stay distinguishable from a
+// user's FLAGOS_BACKEND_CONFIG, and an environment write makes them identical
+// for the rest of the process.
+void SetBackendConfigPath(const std::string& path);
 
 // The value of FLAGOS_FORCE_BACKEND -- "flaggems", "vendor" or "tileops" -- or an
 // empty string when it is unset (or was unparseable, which warns and reads as

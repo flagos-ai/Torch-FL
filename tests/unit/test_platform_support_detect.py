@@ -18,12 +18,16 @@ detect_platform() is the shared platform-name resolver behind the profiler and
 AMP cross-backend contracts (tests/integration/profiler_support.py,
 tests/integration/amp_support.py). Its marker check
 (torch_fl/lib/flagos_platform) previously had no Ascend-writing counterpart in
-csrc/CMakeLists.txt, so it could only identify Ascend via the final
-FLAGOS_BACKEND_CONFIG substring match -- which itself depends on torch_fl's
-own /dev/davinci* runtime probe having succeeded. See issue #192: that probe
+csrc/CMakeLists.txt, so it could only identify Ascend via the final conf-name
+match -- which itself depends on torch_fl's own /dev/davinci* runtime probe
+having succeeded. See issue #192: that probe
 is not guaranteed (e.g. /dev is not enumerable), and its fallback path is
 "cuda". These tests confirm the marker now lets detect_platform() identify
 Ascend without depending on that runtime probe at all.
+
+The conf-name match reads torch_fl.backend_config_path(), not the environment:
+torch_fl no longer writes FLAGOS_BACKEND_CONFIG, which now holds only what a
+user set.
 
 Run: pytest tests/unit/test_platform_support_detect.py -v
 """

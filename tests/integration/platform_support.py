@@ -78,9 +78,13 @@ def detect_platform() -> str:
         if platform:
             return platform
     except (ImportError, OSError):
-        pass
+        config = os.environ.get("FLAGOS_BACKEND_CONFIG", "").lower()
+    else:
+        # Asked of torch_fl rather than read from the environment, which torch_fl
+        # no longer writes: the variable holds only what a user set, and the
+        # wheel's own choice lives in backend_config_path().
+        config = torch_fl.backend_config_path().lower()
 
-    config = os.environ.get("FLAGOS_BACKEND_CONFIG", "").lower()
     for platform in ("ascend", "metax", "musa", "gcu", "cuda"):
         if platform in config:
             return platform

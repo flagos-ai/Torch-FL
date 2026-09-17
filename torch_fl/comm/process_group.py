@@ -53,6 +53,8 @@ import torch
 import torch.distributed as dist
 from torch._C import _distributed_c10d as _c10d
 
+from torch_fl import _env
+
 
 # ---------------------------------------------------------------------------
 # Vendor profiles
@@ -186,7 +188,7 @@ def _configure_flagcx_torch_backend(vendor: str) -> None:
     if vendor == "enflame":
         # The torch-fl-compatible FlagCX build uses its C ABI and does not
         # import or link torch_gcu. Preserve an explicit user selection.
-        os.environ.setdefault("FLAGCX_TORCH_BACKEND", "flagos")
+        _env.set_foreign("FLAGCX_TORCH_BACKEND", "flagos")
 
 
 # ---------------------------------------------------------------------------

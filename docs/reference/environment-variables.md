@@ -54,7 +54,7 @@ override or widen that table.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `FLAGOS_BACKEND_CONFIG` | Runtime | Derived from the build record (`_build_config.py` + `lib/flagos_platform`) | Absolute path to a `backends_*.conf` file; overrides auto-detection |
+| `FLAGOS_BACKEND_CONFIG` | Runtime | No default | Absolute path to a `backends_*.conf` file; overrides the conf `torch_fl` selects from the build record. Only ever holds what you set — read it back with `torch_fl.backend_config_path()`, which also reports the conf the wheel chose |
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
 | `FLAGOS_FORCE_BACKEND` | Runtime | No default (off) | Collapse the routing table onto one backend family for A/B measurement: `flaggems`, `vendor`, or `tileops`. An op only moves if that family actually implements it (known from the routed value plus its `# <backend>` annotation); the rest are reported on stderr and left on their configured backend, and for `flaggems`/`vendor` the dispatcher raises rather than silently falling back when the family was named yet nothing is compiled in. The `tileops` mode repins the ops the conf annotates `# tileops` and additionally needs the `tileops` package, an SM90 device, and a `FLAGOS_BUILD_TILEOPS=ON` build |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Leave the FlagGems Python layer unregistered (C++ stub-only mode) |
@@ -73,7 +73,7 @@ The FlagGems C++ runtime (`kFlagOs`, no GIL) is chosen by the conf's
 `FLAGOS_USE_FLAGGEMS_CPP=1` as a *test gate* for the `flaggems_cpp` mark; see
 [Testing](../development/testing.md).
 
-**Note on auto-detection**: `FLAGOS_BACKEND_CONFIG` is normally set by `torch_fl.__init__._select_backend_config()`, which reads the build record: the accelerator the wheel was built for (from `_build_config.py`) plus the `lib/flagos_platform` marker a native-kernel build writes. There is no mode variable — a wheel's routing follows from what was compiled in. Users should override `FLAGOS_BACKEND_CONFIG` only for testing or debugging.
+**Note on auto-detection**: `torch_fl.__init__._select_backend_config()` resolves the conf from the build record — the accelerator the wheel was built for (from `_build_config.py`) plus the `lib/flagos_platform` marker a native-kernel build writes — and hands the result to the C++ routing table directly. It is *not* written to `FLAGOS_BACKEND_CONFIG`: that variable holds only what you export, and `torch_fl.backend_config_path()` reports both, in the order the routing table reads them. There is no mode variable — a wheel's routing follows from what was compiled in. Users should set `FLAGOS_BACKEND_CONFIG` only for testing or debugging.
 
 ## Runtime Diagnostics
 

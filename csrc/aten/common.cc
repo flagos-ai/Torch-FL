@@ -21,6 +21,11 @@ namespace at::native::flagos {
 
 namespace {
 
+std::string& BackendConfigPathOverride() {
+  static std::string path;
+  return path;
+}
+
 std::string DefaultConfigPath() {
 #ifndef _WIN32
   Dl_info info;
@@ -329,14 +334,32 @@ void ApplyForcedBackend(std::unordered_map<std::string, Backend>& table,
   }
 }
 
+// One decision point, three sources in order: the path Python resolved at
+// import time, then an explicitly set FLAGOS_BACKEND_CONFIG, then the path
+// derived from where this library was loaded from.
+//
+// The first used to be an environment write -- _select_backend_config() set
+// FLAGOS_BACKEND_CONFIG so this function would read it back. That made the
+// wheel's own choice indistinguishable from a user's: once written, a test
+// asking "is the user overriding the conf?" got the answer "yes" on every
+// install, and a stale export in the shell of a CI job could not be told apart
+// from the build's own selection. The setter keeps the value here, in the one
+// place that consumes it.
+//
+// An explicitly set but empty FLAGOS_BACKEND_CONFIG means "unset", so a shell
+// idiom like FLAGOS_BACKEND_CONFIG=$EXTRA_CONF falls back to auto-detection
+// rather than failing to open "".
+std::string ResolveBackendConfigPath() {
+  std::string path = BackendConfigPathOverride();
+  if (path.empty()) path = flagos_env::EnvValue("FLAGOS_BACKEND_CONFIG");
+  if (path.empty()) path = DefaultConfigPath();
+  return path;
+}
+
 std::unordered_map<std::string, Backend> LoadBackendConfig() {
   std::unordered_map<std::string, Backend> table;
 
-  // An explicitly set but empty FLAGOS_BACKEND_CONFIG means "unset", so a shell
-  // idiom like FLAGOS_BACKEND_CONFIG=$EXTRA_CONF falls back to auto-detection
-  // rather than failing to open "".
-  std::string path = flagos_env::EnvValue("FLAGOS_BACKEND_CONFIG");
-  if (path.empty()) path = DefaultConfigPath();
+  std::string path = ResolveBackendConfigPath();
 
   std::unordered_map<std::string, Backend> alt;
   ParseConfigInto(path, table, alt);
@@ -374,6 +397,15 @@ const std::unordered_map<std::string, Backend>& BackendTable() {
 }
 
 } // namespace
+
+// Set once by torch_fl._select_backend_config() through
+// torch_fl._C._set_backend_config_path(), before the first op dispatch builds
+// the table. Called from Python rather than written to os.environ so the
+// wheel's own choice stays distinguishable from a user's -- see
+// ResolveBackendConfigPath() above.
+void SetBackendConfigPath(const std::string& path) {
+  BackendConfigPathOverride() = path;
+}
 
 // Declared in common.h and read from dispatcher.h's inline dispatch path, so it
 // lives outside the anonymous namespace above.

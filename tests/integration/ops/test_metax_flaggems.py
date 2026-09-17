@@ -363,7 +363,7 @@ _DISPATCH_LINE = re.compile(r"\[flagos dispatch\] (\S+) -> (\S+)")
 
 
 def _active_conf() -> str:
-    return os.environ.get("FLAGOS_BACKEND_CONFIG", "")
+    return torch_fl.backend_config_path()
 
 
 def _require_metax_flaggems() -> None:

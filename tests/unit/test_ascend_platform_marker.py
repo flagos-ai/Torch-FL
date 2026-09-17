@@ -27,6 +27,14 @@ fake install tree (no real ACL device needed), and pin the regression this fix
 must not reintroduce: the marker branch runs *before* the /dev/davinci* branch,
 so whatever conf the /dev probe would have chosen, the marker must choose too.
 
+The selection is read back through torch_fl.backend_config_path(), not through
+os.environ. _select_backend_config() used to write FLAGOS_BACKEND_CONFIG so the
+C++ reader would find it, which made the wheel's own choice indistinguishable
+from a user's for the rest of the process; it now hands the path over through
+_C._set_backend_config_path() instead. These tests assert that directly: after a
+selection the variable is still absent from the environment, and the accessor
+reports the path.
+
 Retired opt-in variables must not divert the selection to a second conf:
 backends_ascend.conf is now the only Ascend conf and already states the
 FlagGems-first routing. The shadowing hazard remains worth pinning because the
@@ -59,7 +67,8 @@ def fake_ascend_install(tmp_path, monkeypatch):
 def test_ascend_marker_selects_native_conf_by_default(fake_ascend_install):
     conf_dir = fake_ascend_install
     torch_fl._select_backend_config()
-    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
+    assert torch_fl.backend_config_path() == str(conf_dir / "backends_ascend.conf")
+    assert "FLAGOS_BACKEND_CONFIG" not in os.environ
 
 
 def test_ascend_marker_ignores_retired_opt_in_var(monkeypatch, fake_ascend_install):
@@ -70,7 +79,7 @@ def test_ascend_marker_ignores_retired_opt_in_var(monkeypatch, fake_ascend_insta
     conf_dir = fake_ascend_install
     monkeypatch.setenv("FLAGOS_USE_VENDOR_OPS", "1")
     torch_fl._select_backend_config()
-    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
+    assert torch_fl.backend_config_path() == str(conf_dir / "backends_ascend.conf")
 
 
 def test_ascend_marker_selects_conf_that_is_the_only_one_shipped(monkeypatch, tmp_path):
@@ -87,12 +96,14 @@ def test_ascend_marker_selects_conf_that_is_the_only_one_shipped(monkeypatch, tm
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
 
     torch_fl._select_backend_config()
-    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
+    assert torch_fl.backend_config_path() == str(conf_dir / "backends_ascend.conf")
 
 
 def test_explicit_backend_config_overrides_the_marker(monkeypatch, fake_ascend_install):
     """FLAGOS_BACKEND_CONFIG is documented as always winning (advanced/testing
-    use); the marker must not override an explicit choice."""
+    use); the marker must not override an explicit choice, and the user's value
+    must be left exactly as they set it."""
     monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", "/tmp/explicit.conf")
     torch_fl._select_backend_config()
+    assert torch_fl.backend_config_path() == "/tmp/explicit.conf"
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == "/tmp/explicit.conf"

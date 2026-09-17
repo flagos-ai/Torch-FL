@@ -52,13 +52,30 @@ def _build_accelerator() -> str:
     return str(getattr(module, "ACCELERATOR", "")).strip().lower()
 
 
+def _resolved_conf() -> str:
+    """Path of the conf the routing table is read from, "" if none resolved.
+
+    Asked of torch_fl rather than read from the environment, which torch_fl no
+    longer writes: FLAGOS_BACKEND_CONFIG now holds only what a user set, and the
+    wheel's own choice lives in torch_fl.backend_config_path(). A stub package
+    with no accessor (the unit tests import one) falls back to the variable,
+    which is what that accessor itself falls back to.
+    """
+    try:
+        import torch_fl
+    except ImportError:
+        return os.environ.get("FLAGOS_BACKEND_CONFIG", "")
+    resolve = getattr(torch_fl, "backend_config_path", None)
+    return resolve() if resolve else os.environ.get("FLAGOS_BACKEND_CONFIG", "")
+
+
 def _detect_platform() -> str:
     """Infer the active hardware/backend platform.
 
     The accelerator is read from the wheel's build record, which is what
     torch_fl consults. The lib/flagos_platform marker that native-kernel builds
-    write is authoritative for those platforms, and the resolved
-    FLAGOS_BACKEND_CONFIG name is the last resort.
+    write is authoritative for those platforms, and the name of the conf torch_fl
+    resolved is the last resort.
 
     Every chip has its own record value, PPU included (it is a CUDA-ABI boxing
     vendor, not a cuda build). Wheels built before PPU had a value of its own
@@ -99,7 +116,7 @@ def _detect_platform() -> str:
     except ImportError:
         pass
 
-    backend_cfg = os.environ.get("FLAGOS_BACKEND_CONFIG", "").lower()
+    backend_cfg = _resolved_conf().lower()
     if "ascend" in backend_cfg:
         return "ascend"
     if "metax" in backend_cfg:

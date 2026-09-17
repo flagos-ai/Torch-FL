@@ -54,7 +54,7 @@ Each op is checked twice:
     would not prove the C++ path ran, since the boxing fallback is also correct.
   * numerics -- compared against the CPU result.
 Routing is checked in a subprocess because the backend table is read once, at
-the first dispatch, from FLAGOS_BACKEND_CONFIG.
+the first dispatch, from the conf torch_fl.backend_config_path() reports.
 """
 
 import os
@@ -103,8 +103,7 @@ def test_conf_selected():
     proc = _run_snippet(
         _PREAMBLE
         + """
-import os
-print("CONF=" + os.environ.get("FLAGOS_BACKEND_CONFIG", "<unset>"))
+print("CONF=" + (torch_fl.backend_config_path() or "<unset>"))
 """
     )
     conf = ""
