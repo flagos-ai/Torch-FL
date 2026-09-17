@@ -27,7 +27,7 @@ def _detect_platform() -> str:
 
     Every chip has its own ACCELERATOR value, PPU included (it is a CUDA-ABI
     boxing vendor, not a cuda build). Older PPU wheels reported ACCELERATOR=cuda,
-    so the PPU_SDK / PPU_HOME environment and the lib_ppu/ bundle directory stay
+    so the PPU_SDK environment and the lib_ppu/ bundle directory stay
     as fallbacks for them.
     """
     accelerator = os.environ.get("ACCELERATOR", "").lower()
@@ -41,7 +41,7 @@ def _detect_platform() -> str:
         return "dcu"
     if accelerator == "ppu":
         return "ppu"
-    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
+    if os.environ.get("PPU_SDK"):
         return "ppu"
 
     try:

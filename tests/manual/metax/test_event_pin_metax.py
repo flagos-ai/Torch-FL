@@ -16,7 +16,7 @@
 
 Run (from repo root):
     ACCELERATOR=metax \
-    MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
+    MACA_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
     python tests/manual/metax/test_event_pin_metax.py

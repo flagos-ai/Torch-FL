@@ -26,21 +26,18 @@ These variables locate platform SDKs and toolchains. Only the active
 `ACCELERATOR`'s entries apply; CMake falls back to a built-in default when the
 environment sets none.
 
-`FLAGOS_SDK_ROOT` is the one uniform override: it stands in for whichever SDK
-root the active accelerator uses, so a script that does not know which vendor is
-on the machine has a single knob. The vendor-native names below keep working
-underneath it, because that is what a vendor's own `set_env` script exports.
+Each name is the vendor's own — the one the vendor's `set_env` script writes.
+There are no `FLAGOS_`/`METAX_`-style aliases; one name per vendor.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `FLAGOS_SDK_ROOT` | Build | No default | Override the active accelerator's SDK/toolkit root (uniform across vendors) |
 | `CUDA_HOME` | Build & runtime | Auto (system CUDA, else `$CONDA_PREFIX/targets/x86_64-linux`) | CUDA toolkit root for `ACCELERATOR=cuda` and `ppu` |
 | `ASCEND_HOME` | Build | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit path for Ascend NPU builds |
 | `MUSA_HOME` | Build | `/usr/local/musa` | Moore Threads MUSA toolkit path |
 | `TOPS_HOME` | Build | `/opt/tops` | Enflame TopsRider SDK path for GCU builds |
-| `METAX_PATH` (`METAX_HOME`, `MACA_PATH`, `MACA_HOME` fallbacks) | Build | `/opt/maca` | MetaX SDK path |
-| `DTK_ROOT` (`ROCM_PATH` fallback) | Build | `/opt/dtk` | Hygon DTK path for DCU builds |
-| `PPU_SDK` (`PPU_HOME` fallback) | Build | No default | PPU SDK path; its CUDA toolkit is `$PPU_SDK/CUDA_SDK` |
+| `MACA_PATH` (`MACA_HOME` fallback) | Build | `/opt/maca` | MetaX SDK path |
+| `ROCM_PATH` | Build | `/opt/dtk` | Hygon DTK path for DCU builds |
+| `PPU_SDK` | Build | `/usr/local/PPU_SDK` | PPU SDK path; its CUDA toolkit is `$PPU_SDK/CUDA_SDK` |
 | `CONDA_PREFIX` | Build & runtime | Auto-detected | Conda environment prefix (CUDA discovery fallback) |
 | `TOPSATEN_LIB` | Build | Discovered under `$TOPS_HOME` | Enflame topsaten library override |
 | `MUDNN_LIB` / `MURAND_LIB` | Build | Discovered under `$MUSA_HOME/lib` | MUSA kernel-library overrides |

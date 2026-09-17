@@ -13,7 +13,7 @@ PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain
 ## Prerequisites
 
 - PPU hardware with driver installed
-- PPU SDK installed at `/usr/local/PPU_SDK` (or `$PPU_SDK`/`$PPU_HOME`)
+- PPU SDK installed at `/usr/local/PPU_SDK` (or `$PPU_SDK`)
 - PPU torch wheel (locally built or vendor-provided, CUDA-enabled)
 - Python 3.8 or later matching the PPU torch build
 - `cmake >= 3.18`, `ninja`
@@ -128,7 +128,8 @@ scaler.update()
 ```
 
 Run the PPU-only AMP contract after installing the PPU torch wheel and loading
-the driver. `PPU_SDK` or `PPU_HOME` is required so the test cannot be mistaken
+the driver. `ACCELERATOR=ppu` (with `PPU_SDK` present) is what the contract's
+platform check reads, so the test cannot be mistaken
 for validation on an ordinary NVIDIA CUDA build:
 
 ```bash

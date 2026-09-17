@@ -41,7 +41,7 @@
 #
 # Usage:
 #   FLAGOS_DCU_TORCH_LIB=<dtk torch/lib> bash scripts/vendor/bundle_dcu_libtorch.sh
-#   DTK_ROOT=/opt/dtk bash scripts/vendor/bundle_dcu_libtorch.sh
+#   ROCM_PATH=/opt/dtk bash scripts/vendor/bundle_dcu_libtorch.sh
 #   FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh   # legacy
 #
 # Should run after `python setup.py build_ext --inplace` (ACCELERATOR=dcu) and
@@ -55,7 +55,7 @@ source "${REPO_DIR}/scripts/vendor/bundle_common.sh"
 
 LIB_DCU="${REPO_DIR}/torch_fl/lib_dcu"
 TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
-DTK_ROOT="${DTK_ROOT:-${ROCM_PATH:-/opt/dtk}}"
+ROCM_PATH="${ROCM_PATH:-/opt/dtk}"
 COMPAT_SO="libflagos_dtk_core_compat.so"
 COMPAT_MANIFEST="${REPO_DIR}/torch_fl/accelerator/dcu/dtk_core_compat_symbols.txt"
 
@@ -98,9 +98,9 @@ CORE_SO=(libc10.so libtorch_cpu.so libtorch.so libtorch_global_deps.so libtorch_
 #   .hyhal/rocm_smi/lib/  librocm_smi64.so.2
 # All stay on the target machine (a box with DCU cards has /opt/dtk), but RPATH
 # must cover them, else not-found when LD_LIBRARY_PATH is unset.
-VENDOR_RPATH="${DTK_ROOT}/lib:${DTK_ROOT}/hip/lib:${DTK_ROOT}/lib64"
-VENDOR_RPATH="${VENDOR_RPATH}:${DTK_ROOT}/aillvm/lib:${DTK_ROOT}/.hyhal/rocm_smi/lib"
-VENDOR_RPATH="${VENDOR_RPATH}:${DTK_ROOT}/llvm/lib:/opt/hyhal/lib"
+VENDOR_RPATH="${ROCM_PATH}/lib:${ROCM_PATH}/hip/lib:${ROCM_PATH}/lib64"
+VENDOR_RPATH="${VENDOR_RPATH}:${ROCM_PATH}/aillvm/lib:${ROCM_PATH}/.hyhal/rocm_smi/lib"
+VENDOR_RPATH="${VENDOR_RPATH}:${ROCM_PATH}/llvm/lib:/opt/hyhal/lib"
 # DTK's auditwheel-mangled libmpi entry is a symlink into /opt/mpi. Legacy mode
 # dereferences it, and its DT_NEEDED uses the real MPI/HCoLL sonames. They are
 # part of the target's communication stack rather than torch assets, so keep
@@ -115,8 +115,7 @@ else
 fi
 echo "Source DTK torch/lib : ${SRC}"
 echo "Target lib_dcu       : ${LIB_DCU}"
-echo "DTK driver path      : ${DTK_ROOT}"
-
+echo "DTK driver path      : ${ROCM_PATH}"
 # Libs inside the bundle must be openable from two paths:
 #   1. Directly from lib_dcu/ (the runtime preload walks this one, see
 #      torch_fl/accelerator/dcu/_dcu_libtorch_link.py)
@@ -309,14 +308,14 @@ fi
 # cmake already wrote it into RUNPATH; cannot drop it when rewriting here --
 # else libcudart.so.12 becomes not-found in a clean environment.
 _DCU_CUDA_LIB64=""
-for _c in "${DTK_ROOT}"/cuda/cuda-*/lib64; do
+for _c in "${ROCM_PATH}"/cuda/cuda-*/lib64; do
   if [ -f "${_c}/libcudart.so.12" ]; then
     _DCU_CUDA_LIB64="${_c}"
     break
   fi
 done
 if [ -z "${_DCU_CUDA_LIB64}" ]; then
-  echo "warning: ${DTK_ROOT}/cuda/cuda-*/lib64 has no libcudart.so.12" >&2
+  echo "warning: ${ROCM_PATH}/cuda/cuda-*/lib64 has no libcudart.so.12" >&2
 fi
 PLUGIN_RPATH="\$ORIGIN:\$ORIGIN/../lib_dcu"
 [ -n "${_DCU_CUDA_LIB64}" ] && PLUGIN_RPATH="${PLUGIN_RPATH}:${_DCU_CUDA_LIB64}"
@@ -343,9 +342,9 @@ fi
 
 bundle_summary "${LIB_DCU}"
 bundle_check_needed "${LIB_DCU}" \
-    "${DTK_ROOT}/lib" "${DTK_ROOT}/hip/lib" "${DTK_ROOT}/lib64" \
-    "${DTK_ROOT}/aillvm/lib" "${DTK_ROOT}/llvm/lib" \
-    "${DTK_ROOT}/.hyhal/rocm_smi/lib" "${_DCU_CUDA_LIB64:-/nonexistent}" \
+    "${ROCM_PATH}/lib" "${ROCM_PATH}/hip/lib" "${ROCM_PATH}/lib64" \
+    "${ROCM_PATH}/aillvm/lib" "${ROCM_PATH}/llvm/lib" \
+    "${ROCM_PATH}/.hyhal/rocm_smi/lib" "${_DCU_CUDA_LIB64:-/nonexistent}" \
     "/opt/hyhal/lib" "/opt/mpi/lib" "/opt/mellanox/hcoll/lib" \
     "/usr/lib64" "/usr/lib" "/usr/lib/x86_64-linux-gnu" \
     "${OFFICIAL_TORCH_LIB:-/nonexistent}"

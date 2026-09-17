@@ -5,7 +5,7 @@
 Hygon DCU (DTK) reuses the **CUDA boxing route** with a dedicated `ACCELERATOR=dcu` branch. Two properties of the vendor stack enable this:
 
 - The DCU `torch` wheel is a **hipified** build: it registers HIP kernels under the `CUDA` dispatch key and its tensors report `DeviceType::CUDA` (`torch.version.cuda is None`, `torch.version.hip == '6.3.x'`). Generated PrivateUse1 → CUDA boxing kernels dispatch into `libtorch_hip.so` unchanged.
-- DTK ships a **CUDA compatibility toolkit** at `$DTK_ROOT/cuda/cuda-*` whose `libcudart.so.12` is a thin shim over `libgalaxyhip.so` — the same runtime `libtorch_hip.so` uses. Runtime sources compile as-is with plain host `g++`; no `nvcc`, no `hipcc`, no hipify pass.
+- DTK ships a **CUDA compatibility toolkit** at `$ROCM_PATH/cuda/cuda-*` whose `libcudart.so.12` is a thin shim over `libgalaxyhip.so` — the same runtime `libtorch_hip.so` uses. Runtime sources compile as-is with plain host `g++`; no `nvcc`, no `hipcc`, no hipify pass.
 
 The build is **pure boxing**: no vendor kernels (`VENDOR_KERNEL` has no DCU backend directory to enable), the generated PrivateUse1 → CUDA boxing kernels compile by default, FlagGems Python is on by default and only the C++ path stays off (`FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so).
 
@@ -14,7 +14,7 @@ The build is **pure boxing**: no vendor kernels (`VENDOR_KERNEL` has no DCU back
 ## Prerequisites
 
 - Hygon DCU hardware with driver installed
-- DTK (Hygon Deep Learning Toolkit) installed at `/opt/dtk` (or `$DTK_ROOT`/`$ROCM_PATH`)
+- DTK (Hygon Deep Learning Toolkit) installed at `/opt/dtk` (or `$ROCM_PATH`)
 - DTK torch wheel (hipified, registers kernels under CUDA dispatch key) — its
   device libraries are bundled at build time; see [Vendor core libraries](#vendor-core-libraries)
 - The **official** `torch` wheel of the same minor version installed in the build
@@ -37,7 +37,7 @@ source /opt/dtk/env.sh
 ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
 ```
 
-`DTK_ROOT` resolves from `DTK_ROOT` → `ROCM_PATH` → `/opt/dtk`. Pass it explicitly if DTK lives elsewhere.
+`ROCM_PATH` (what DTK's `env.sh` exports) selects the DTK root; the default is `/opt/dtk`. Pass it explicitly if DTK lives elsewhere.
 
 ### Build Notes
 

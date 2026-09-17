@@ -36,20 +36,15 @@ option(FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.s
 #
 #   flagos_resolve_sdk_root(<out_var> <default_path> <vendor_env_name>...)
 #
-# Order: an explicit -D<out_var> (already set) wins, then FLAGOS_SDK_ROOT, then
-# the accelerator's vendor-native environment variable(s), then the default.
+# Order: an explicit -D<out_var> (already set) wins, then the accelerator's
+# vendor-native environment variable(s), then the default.
 #
-# Vendors export their own name (CUDA_HOME, ASCEND_HOME, MUSA_HOME, TOPS_HOME,
-# METAX_PATH/MACA_PATH, ROCM_PATH, PPU_SDK, ...), so those must keep working --
-# that is what a vendor's own set_env script writes. FLAGOS_SDK_ROOT sits on top
-# as the one uniform override for a script that does not know which vendor is
-# active, so cross-platform automation has a single knob instead of nine.
+# The environment names are the vendor's own: CUDA_HOME, ASCEND_HOME, MUSA_HOME,
+# TOPS_HOME, MACA_PATH/MACA_HOME, ROCM_PATH, PPU_SDK. Those are what a vendor's
+# set_env script writes, so they are the contract. No FLAGOS_-prefixed alias is
+# accepted -- one name per vendor, the vendor's.
 function(flagos_resolve_sdk_root out_var default_path)
   if(DEFINED ${out_var} AND NOT "${${out_var}}" STREQUAL "")
-    return()
-  endif()
-  if(DEFINED ENV{FLAGOS_SDK_ROOT} AND NOT "$ENV{FLAGOS_SDK_ROOT}" STREQUAL "")
-    set(${out_var} "$ENV{FLAGOS_SDK_ROOT}" PARENT_SCOPE)
     return()
   endif()
   foreach(_flagos_sdk_candidate IN LISTS ARGN)
@@ -65,7 +60,7 @@ endfunction()
 if(ACCELERATOR STREQUAL "ascend")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "metax")
-  flagos_resolve_sdk_root(METAX_PATH "/opt/maca" METAX_PATH METAX_HOME MACA_PATH MACA_HOME)
+  flagos_resolve_sdk_root(MACA_PATH "/opt/maca" MACA_PATH MACA_HOME)
   # MetaX is a CUDA-boxing build: the generated CUDA boxing kernels
   # (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) re-dispatch
   # PrivateUse1 -> CUDA into maca's libtorch_cuda.so. The hand-written mxcc
@@ -134,16 +129,12 @@ elseif(ACCELERATOR STREQUAL "cuda" OR ACCELERATOR STREQUAL "ppu")
   # project(... CUDA) runs nvcc compiler-id before find_package(CUDAToolkit); conda
   # layouts need CUDAToolkit_ROOT (headers under targets/x86_64-linux/include).
   #
-  # FLAGOS_SDK_ROOT overrides the toolkit root here too: it is the CUDA toolkit
-  # itself for a cuda build, and PPU_SDK's CUDA_SDK for a ppu build. The
-  # existence check is what makes the candidate usable, so a value that does not
-  # actually hold cuda_runtime.h falls through to CUDA_HOME / conda.
+  # Only vendor names: CUDA_HOME for a cuda build, PPU_SDK's CUDA_SDK for a ppu
+  # build, CONDA_PREFIX for a conda toolkit. The existence check is what makes a
+  # candidate usable, so one that does not actually hold cuda_runtime.h falls
+  # through to the next.
   if(NOT CUDAToolkit_ROOT)
-    if(DEFINED ENV{FLAGOS_SDK_ROOT} AND EXISTS "$ENV{FLAGOS_SDK_ROOT}/include/cuda_runtime.h")
-      set(CUDAToolkit_ROOT "$ENV{FLAGOS_SDK_ROOT}" CACHE PATH "CUDA toolkit root")
-    elseif(DEFINED ENV{FLAGOS_SDK_ROOT} AND EXISTS "$ENV{FLAGOS_SDK_ROOT}/CUDA_SDK/include/cuda_runtime.h")
-      set(CUDAToolkit_ROOT "$ENV{FLAGOS_SDK_ROOT}/CUDA_SDK" CACHE PATH "CUDA toolkit root")
-    elseif(DEFINED ENV{CUDA_HOME} AND EXISTS "$ENV{CUDA_HOME}/include/cuda_runtime.h")
+    if(DEFINED ENV{CUDA_HOME} AND EXISTS "$ENV{CUDA_HOME}/include/cuda_runtime.h")
       set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}" CACHE PATH "CUDA toolkit root")
     elseif(DEFINED ENV{PPU_SDK} AND EXISTS "$ENV{PPU_SDK}/CUDA_SDK/include/cuda_runtime.h")
       set(CUDAToolkit_ROOT "$ENV{PPU_SDK}/CUDA_SDK" CACHE PATH "CUDA toolkit root")
@@ -243,13 +234,13 @@ elseif(ACCELERATOR STREQUAL "tsingmicro")
   endif()
 elseif(ACCELERATOR STREQUAL "dcu")
   # Hygon DTK. ROCM_PATH is what the DTK env.sh exports.
-  flagos_resolve_sdk_root(DTK_ROOT "/opt/dtk" DTK_ROOT ROCM_PATH)
-  message(STATUS "Hygon DTK path: ${DTK_ROOT}")
+  flagos_resolve_sdk_root(ROCM_PATH "/opt/dtk" ROCM_PATH)
+  message(STATUS "Hygon DTK path: ${ROCM_PATH}")
 
   # DTK's CUDA compatibility toolkit. Its libcudart.so.12 is a shim over
   # libgalaxyhip.so -- the same runtime libtorch_hip.so uses -- so there is one
   # driver state, not two.
-  file(GLOB _DCU_CUDA_CANDIDATES "${DTK_ROOT}/cuda/cuda-*")
+  file(GLOB _DCU_CUDA_CANDIDATES "${ROCM_PATH}/cuda/cuda-*")
   set(DCU_CUDA_ROOT "")
   foreach(_cand IN LISTS _DCU_CUDA_CANDIDATES)
     if(EXISTS "${_cand}/include/cuda_runtime.h")
@@ -260,7 +251,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
   if(NOT DCU_CUDA_ROOT)
     message(FATAL_ERROR
         "ACCELERATOR=dcu selected, but the DTK CUDA compatibility toolkit was "
-        "not found under ${DTK_ROOT}/cuda/. Set DTK_ROOT (or ROCM_PATH) to a "
+        "not found under ${ROCM_PATH}/cuda/. Set ROCM_PATH (or ROCM_PATH) to a "
         "DTK installation that provides cuda-*/include/cuda_runtime.h.")
   endif()
   message(STATUS "DTK CUDA compatibility toolkit: ${DCU_CUDA_ROOT}")
@@ -287,9 +278,9 @@ elseif(ACCELERATOR STREQUAL "dcu")
   #   .hyhal/rocm_smi/lib    librocm_smi64.so.2
   # Keep in sync with VENDOR_RPATH in scripts/vendor/bundle_dcu_libtorch.sh.
   set(_dcu_rpath_dirs
-      "${DCU_CUDA_ROOT}/lib64" "${DTK_ROOT}/lib" "${DTK_ROOT}/hip/lib"
-      "${DTK_ROOT}/lib64" "${DTK_ROOT}/aillvm/lib" "${DTK_ROOT}/llvm/lib"
-      "${DTK_ROOT}/.hyhal/rocm_smi/lib" "/opt/hyhal/lib")
+      "${DCU_CUDA_ROOT}/lib64" "${ROCM_PATH}/lib" "${ROCM_PATH}/hip/lib"
+      "${ROCM_PATH}/lib64" "${ROCM_PATH}/aillvm/lib" "${ROCM_PATH}/llvm/lib"
+      "${ROCM_PATH}/.hyhal/rocm_smi/lib" "/opt/hyhal/lib")
   list(APPEND CMAKE_INSTALL_RPATH ${_dcu_rpath_dirs})
   set(FLAGOS_VENDOR_RPATH_DIRS ${_dcu_rpath_dirs})
 
@@ -431,22 +422,21 @@ elseif(ACCELERATOR STREQUAL "bpu")
   endif()
 elseif(ACCELERATOR STREQUAL "metax")
   # MetaX SDK: use cu-bridge headers and runtime_cu library.
-  # METAX_PATH was resolved in the metax branch above (METAX_PATH ->
-  # METAX_HOME -> MACA_PATH -> MACA_HOME -> /opt/maca, with FLAGOS_SDK_ROOT on
-  # top), so it is reported here for the build log.
-  message(STATUS "MetaX SDK path: ${METAX_PATH}")
+  # MACA_PATH was resolved in the metax branch above (MACA_PATH -> MACA_HOME ->
+  # /opt/maca), and is reported here for the build log.
+  message(STATUS "MetaX SDK path: ${MACA_PATH}")
 
   # The maca runtime (mcblas/mcdnn/...) comes from the target's /opt/maca driver
   # install; it is never bundled. /opt/maca is kept as an explicit fallback in
-  # case the build machine's METAX_PATH is a non-default location.
+  # case the build machine's MACA_PATH is a non-default location.
   set(FLAGOS_VENDOR_RPATH_DIRS
-      "${METAX_PATH}/lib" "${METAX_PATH}/lib64" "/opt/maca/lib" "/opt/maca/lib64")
+      "${MACA_PATH}/lib" "${MACA_PATH}/lib64" "/opt/maca/lib" "/opt/maca/lib64")
 
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
   set_target_properties(cuda_runtime_compat PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${METAX_PATH}/tools/cu-bridge/include;${METAX_PATH}/include;${METAX_PATH}/include/mcr"
+    INTERFACE_INCLUDE_DIRECTORIES "${MACA_PATH}/tools/cu-bridge/include;${MACA_PATH}/include;${MACA_PATH}/include/mcr"
   )
-  target_link_directories(cuda_runtime_compat INTERFACE "${METAX_PATH}/lib")
+  target_link_directories(cuda_runtime_compat INTERFACE "${MACA_PATH}/lib")
   target_link_libraries(cuda_runtime_compat INTERFACE runtime_cu)
 
   set(CUDA_RUNTIME_LIB cuda_runtime_compat)

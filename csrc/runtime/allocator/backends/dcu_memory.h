@@ -13,7 +13,7 @@ namespace c10::flagos {
 
 // DCU (Hygon, DTK) implementation of DeviceMemoryInterface.
 //
-// DTK ships a CUDA compatibility toolkit ($DTK_ROOT/cuda/cuda-12) whose
+// DTK ships a CUDA compatibility toolkit ($ROCM_PATH/cuda/cuda-12) whose
 // libcudart.so.12 is a thin shim over libgalaxyhip.so -- the very same runtime
 // libtorch_hip.so is built against. So the plain CUDA runtime calls below reach
 // the same driver state the vendor's HIP kernels use, and no hipify is needed

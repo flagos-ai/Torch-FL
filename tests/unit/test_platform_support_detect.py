@@ -57,7 +57,6 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("ACCELERATOR", raising=False)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
-    monkeypatch.delenv("PPU_HOME", raising=False)
 
 
 def test_accelerator_env_wins_outright(monkeypatch):

@@ -263,7 +263,7 @@ set(CUDA_OCCUPANCY_SEARCH_PATHS
   /usr/local/cuda-13.0/targets/x86_64-linux/include)
 if(ACCELERATOR STREQUAL "metax")
   list(APPEND CUDA_OCCUPANCY_SEARCH_PATHS
-    "${METAX_PATH}/tools/cu-bridge/include")
+    "${MACA_PATH}/tools/cu-bridge/include")
 endif()
 find_path(CUDA_OCCUPANCY_INCLUDE_DIR cuda_occupancy.h
   PATHS ${CUDA_OCCUPANCY_SEARCH_PATHS})
@@ -286,7 +286,7 @@ if(ACCELERATOR STREQUAL "dcu")
     NAMES roctracer.h
     PATHS
       $ENV{ROCM_PATH}/roctracer/include
-      $ENV{DTK_ROOT}/roctracer/include
+      $ENV{ROCM_PATH}/roctracer/include
       /opt/dtk/roctracer/include
       /opt/rocm/roctracer/include
     NO_DEFAULT_PATH)
@@ -307,7 +307,7 @@ if(ACCELERATOR STREQUAL "dcu")
       NAMES roctracer64
       PATHS
         $ENV{ROCM_PATH}/lib
-        $ENV{DTK_ROOT}/lib
+        $ENV{ROCM_PATH}/lib
         /opt/dtk/lib
         /opt/rocm/lib
       NO_DEFAULT_PATH)
@@ -486,14 +486,14 @@ target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(ACCELERATOR STREQUAL "metax")
   target_include_directories(${LIBRARY_NAME} PRIVATE
-    "${METAX_PATH}/tools/cu-bridge/include"
-    "${METAX_PATH}/include"
-    "${METAX_PATH}/include/mcr"
+    "${MACA_PATH}/tools/cu-bridge/include"
+    "${MACA_PATH}/include"
+    "${MACA_PATH}/include/mcr"
     "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/metax")
 
   find_library(MCBLAS_LIB mcblas
-      PATHS "${METAX_PATH}/lib"
-            "${METAX_PATH}/lib64"
+      PATHS "${MACA_PATH}/lib"
+            "${MACA_PATH}/lib64"
             "/opt/maca/lib"
             "/opt/maca/lib64")
   if(MCBLAS_LIB)

@@ -35,7 +35,7 @@ growing gap, not as jitter in the last digits.
 Run (from repo root), sequentially so the two runs do not share GPUs:
 
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-    export MACA_PATH=/opt/maca METAX_PATH=/opt/maca
+    export MACA_PATH=/opt/maca
     export LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH
     export PYTHONPATH=$PWD
 

@@ -247,18 +247,11 @@ def _find_flaggems_dir() -> str | None:
 
 
 def _metax_path_from_env() -> str:
-    return (
-        os.environ.get("FLAGOS_SDK_ROOT")
-        or os.environ.get("METAX_PATH")
-        or os.environ.get("METAX_HOME")
-        or os.environ.get("MACA_PATH")
-        or os.environ.get("MACA_HOME")
-        or "/opt/maca"
-    )
+    return os.environ.get("MACA_PATH") or os.environ.get("MACA_HOME") or "/opt/maca"
 
 
 def _setup_metax_build_env(env: dict) -> str:
-    """PATH/LD_LIBRARY_PATH for the MetaX SDK. Returns METAX_PATH.
+    """PATH/LD_LIBRARY_PATH for the MetaX SDK. Returns MACA_PATH.
 
     MetaX is a CUDA-boxing build: host g++ compiles the generated boxing kernels
     against maca's cu-bridge headers, so the SDK's include/lib directories have
@@ -270,7 +263,7 @@ def _setup_metax_build_env(env: dict) -> str:
     if not os.path.isdir(os.path.join(cu_bridge, "include")):
         raise RuntimeError(f"MetaX cu-bridge headers not found: {cu_bridge}/include")
 
-    env.setdefault("METAX_PATH", metax_path)
+    env.setdefault("MACA_PATH", metax_path)
     env["PATH"] = os.pathsep.join(
         p
         for p in (
@@ -292,17 +285,16 @@ def _setup_metax_build_env(env: dict) -> str:
 
 
 def _dtk_root() -> str:
-    """Hygon DTK install root. Honors DTK_ROOT, then ROCM_PATH (what DTK's
-    env.sh exports), then the default install location."""
-    for key in ("DTK_ROOT", "ROCM_PATH"):
-        path = os.environ.get(key)
-        if path and os.path.isdir(path):
-            return path
+    """Hygon DTK install root, from ROCM_PATH (what DTK's env.sh exports), else
+    the default install location."""
+    path = os.environ.get("ROCM_PATH")
+    if path and os.path.isdir(path):
+        return path
     default = "/opt/dtk"
     if not os.path.isdir(default):
         raise RuntimeError(
             "ACCELERATOR=dcu selected, but no DTK installation was found. "
-            "Source DTK's env.sh or set DTK_ROOT to the install root."
+            "Source DTK's env.sh (which sets ROCM_PATH) or install DTK at /opt/dtk."
         )
     return default
 
@@ -500,7 +492,7 @@ def build_deps():
 
     if ACCELERATOR == "metax":
         metax_path = _setup_metax_build_env(build_env)
-        cmake_args.append(f"-DMETAX_PATH={metax_path}")
+        cmake_args.append(f"-DMACA_PATH={metax_path}")
         cmake_args.append("-G")
         cmake_args.append("Ninja")
     elif ACCELERATOR == "cuda":
@@ -511,7 +503,7 @@ def build_deps():
         if flaggems_dir:
             cmake_args.append(f"-DFLAGGEMS_DIR={flaggems_dir}")
     elif ACCELERATOR == "dcu":
-        cmake_args.append(f"-DDTK_ROOT={_dtk_root()}")
+        cmake_args.append(f"-DROCM_PATH={_dtk_root()}")
 
     subprocess.check_call([cmake, BASE_DIR] + cmake_args, cwd=build_dir, env=build_env)
 

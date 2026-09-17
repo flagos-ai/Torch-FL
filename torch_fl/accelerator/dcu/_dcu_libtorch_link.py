@@ -256,7 +256,7 @@ def preload_dcu_device_libs():
             raise RuntimeError(
                 f"Failed to load DCU/DTK device library {path}: {exc}\n"
                 "Common causes: the DTK driver stack is not installed under "
-                "/opt/dtk (set DTK_ROOT/ROCM_PATH and source its env.sh), or the "
+                "/opt/dtk (set ROCM_PATH and source its env.sh), or the "
                 "installed torch wheel is ABI-incompatible with this DTK build "
                 "(see docs/vendors/dcu/vendor-free-core-libs.md)."
             ) from exc

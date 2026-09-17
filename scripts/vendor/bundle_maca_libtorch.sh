@@ -32,7 +32,8 @@ source "${REPO_DIR}/scripts/vendor/bundle_common.sh"
 
 LIB_MACA="${REPO_DIR}/torch_fl/lib_maca"
 TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
-MACA_PATH="${MACA_PATH:-${METAX_HOME:-${MACA_HOME:-/opt/maca}}}"
+# Vendor name only, matching setup.py / the metax CMake branch.
+MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 
 # MetaX torch/lib source: explicit env, or find +metax torch from conda.
 SRC="${FLAGOS_MACA_TORCH_LIB:-}"

@@ -86,12 +86,11 @@ FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.g
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
 # CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image
-# on dev pods). A preset PPU_SDK / PPU_HOME env wins; otherwise scan candidates
+# on dev pods). A preset PPU_SDK wins; otherwise scan candidates
 # and pick the first with CUDA_SDK/lib64/libcudart.so. Mirrors
 # set_env_ascend.sh's CANN toolkit scan so layout changes do not break the env.
 _ppu_candidates=(
   "${PPU_SDK:-}"
-  "${PPU_HOME:-}"
   /usr/local/PPU-SDK
   /usr/local/PPU_SDK
   /opt/PPU-SDK

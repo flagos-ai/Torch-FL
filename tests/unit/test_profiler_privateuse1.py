@@ -138,7 +138,7 @@ def test_cupti_library_locatable():
     accelerator = os.environ.get("ACCELERATOR", "cuda").lower()
     if accelerator == "metax":
         candidates = ["libmcpti.so"]
-        metax_path = os.environ.get("METAX_PATH", "/opt/maca")
+        metax_path = os.environ.get("MACA_PATH", "/opt/maca")
         candidates += glob.glob(os.path.join(metax_path, "lib", "libmcpti.so*"))
         candidates += glob.glob(os.path.join(metax_path, "lib64", "libmcpti.so*"))
     else:

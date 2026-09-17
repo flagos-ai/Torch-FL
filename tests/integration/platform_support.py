@@ -30,7 +30,7 @@ def detect_platform() -> str:
     accelerator = os.environ.get("ACCELERATOR", "").lower()
     if accelerator in {"ascend", "dcu", "metax", "maca", "musa", "gcu", "ppu"}:
         return "metax" if accelerator == "maca" else accelerator
-    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
+    if os.environ.get("PPU_SDK"):
         return "ppu"
     if Path("/usr/local/PPU_SDK").is_dir():
         return "ppu"

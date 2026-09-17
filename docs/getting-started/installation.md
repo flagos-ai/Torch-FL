@@ -31,7 +31,7 @@ Platform-specific requirements (CUDA toolkit version, vendor SDK paths, addition
 Each platform installation guide defines:
 
 1. The required `ACCELERATOR` value for that platform
-2. SDK/compiler environment variables (e.g., `CUDA_HOME`, `METAX_PATH`, `ASCEND_TOOLKIT_HOME`)
+2. SDK/compiler environment variables (e.g., `CUDA_HOME`, `MACA_PATH`, `ASCEND_HOME`)
 3. Any platform-specific build flags or dependencies
 
 The general installation pattern is:

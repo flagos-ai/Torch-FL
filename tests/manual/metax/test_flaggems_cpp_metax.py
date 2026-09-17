@@ -43,7 +43,7 @@ Build prerequisites:
 
 Run (from repo root):
     ACCELERATOR=metax \
-    MACA_PATH=/opt/maca METAX_PATH=/opt/maca \
+    MACA_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \
     python tests/manual/metax/test_flaggems_cpp_metax.py

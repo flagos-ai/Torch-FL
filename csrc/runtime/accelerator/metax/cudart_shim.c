@@ -81,9 +81,9 @@ static void _ensure_metax_lib(void) {
     if (_metax_lib) return;
     _metax_lib = dlopen("libsymbol_cu.so", RTLD_LAZY | RTLD_GLOBAL);
     if (!_metax_lib) {
-        const char *sdk_path = getenv("METAX_PATH");
+        const char *sdk_path = getenv("MACA_PATH");
         if (!sdk_path)
-            sdk_path = getenv("MACA_PATH");
+            sdk_path = getenv("MACA_HOME");
         if (sdk_path) {
             char p[512];
             snprintf(p, sizeof(p), "%s/lib/libsymbol_cu.so", sdk_path);

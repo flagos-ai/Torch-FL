@@ -31,7 +31,7 @@ Usage:
 
 Environment:
     Requires LD_PRELOAD=/opt/maca/lib/libsymbol_cu.so and MetaX SDK installed.
-    Set METAX_PATH env var if MetaX is not at /opt/maca.
+    Set MACA_PATH env var if MetaX is not at /opt/maca.
 """
 
 import ctypes
@@ -44,8 +44,13 @@ import torch
 
 
 def _find_metax_path():
-    """Find the MetaX SDK root path."""
-    for env_var in ("METAX_PATH", "METAX_HOME", "MACA_PATH", "MACA_HOME"):
+    """Find the MetaX SDK root path.
+
+    Same candidate order as the rest of the tree (setup.py, the cudart shim,
+    bundle_maca_libtorch.sh): the vendor's MACA_PATH, then MACA_HOME, then the
+    default installs.
+    """
+    for env_var in ("MACA_PATH", "MACA_HOME"):
         path = os.environ.get(env_var)
         if path and os.path.isdir(path):
             return path

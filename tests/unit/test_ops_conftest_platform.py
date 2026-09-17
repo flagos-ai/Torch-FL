@@ -17,7 +17,7 @@
 The ops gate skips backend-specific tests per detected platform
 (_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend, but it has its own
 ACCELERATOR value like every other chip; older wheels reported
-ACCELERATOR=cuda and are still recognised through the PPU_SDK / PPU_HOME
+ACCELERATOR=cuda and are still recognised through the PPU_SDK
 environment or the lib_ppu/ bundle directory. These tests pin the ACCELERATOR
 mapping, the legacy PPU fallbacks, and the skip-set parity with "default" that
 keeps those changes behavior-neutral.
@@ -54,7 +54,6 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("ACCELERATOR", raising=False)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
-    monkeypatch.delenv("PPU_HOME", raising=False)
 
 
 @pytest.fixture
@@ -125,9 +124,10 @@ def test_legacy_ppu_sdk_env_identifies_ppu_under_cuda_accelerator(monkeypatch):
     assert ops_conftest._detect_platform() == "ppu"
 
 
-def test_ppu_home_env_identifies_ppu(monkeypatch):
+def test_ppu_home_env_does_not_identify_ppu(monkeypatch):
+    """PPU_HOME was an invented alias and is no longer read; only PPU_SDK is."""
     monkeypatch.setenv("PPU_HOME", "/opt/ppu")
-    assert ops_conftest._detect_platform() == "ppu"
+    assert ops_conftest._detect_platform() == "default"
 
 
 def test_cuda_without_ppu_signals_stays_default(
@@ -141,7 +141,7 @@ def test_cuda_without_ppu_signals_stays_default(
 def test_lib_ppu_bundle_dir_identifies_ppu_without_env(
     monkeypatch, isolated_torch_fl_import, tmp_path
 ):
-    """An installed PPU wheel with no PPU_SDK/PPU_HOME in the environment
+    """An installed PPU wheel with no PPU_SDK in the environment
     (dev pod with the baked SDK) is still recognized by its bundle dir."""
     monkeypatch.setenv("ACCELERATOR", "cuda")
     for _ in _fake_torch_fl(tmp_path, bundle_lib_ppu=True):

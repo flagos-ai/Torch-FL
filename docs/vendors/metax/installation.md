@@ -12,13 +12,13 @@ MetaX ships a **self-contained boxing wheel**: it reuses PyTorch's CUDA boxing k
 
 Requires the full MetaX SDK and a `torch+metax` wheel to extract the forked libtorch:
 
-- MetaX MACA SDK (driver + cu-bridge), installed to `/opt/maca` or `$METAX_PATH`
+- MetaX MACA SDK (driver + cu-bridge), installed to `/opt/maca` or `$MACA_PATH`
 - `torch+metax` wheel (`maca-pytorch`) from the MetaX developer portal (SoftNova)
 - Python 3.8 or later matching the target deployment environment
 - `patchelf` (`pip install patchelf`)
 
 **Getting the MetaX SDK and torch+metax wheel:**  
-Both are distributed through the MetaX developer portal: <https://developer.metax-tech.com/softnova>. Registration and login are required. Download the MACA SDK matching your card and driver version, and the `torch+metax` wheel built for the same MACA version and your Python version. Install the SDK to `/opt/maca` (or export `METAX_PATH` to the install location).
+Both are distributed through the MetaX developer portal: <https://developer.metax-tech.com/softnova>. Registration and login are required. Download the MACA SDK matching your card and driver version, and the `torch+metax` wheel built for the same MACA version and your Python version. Install the SDK to `/opt/maca` (or export `MACA_PATH` to the install location).
 
 ### Target Host (Deployment)
 

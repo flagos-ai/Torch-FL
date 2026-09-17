@@ -28,12 +28,11 @@ CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.or
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
 
 # Locate the DTK install root. The image may ship DTK under /opt/dtk,
-# /opt/dtk-26.04, or a versioned directory; honor an explicit DTK_ROOT or
-# ROCM_PATH, then probe common roots, then fall back to a filesystem search.
+# /opt/dtk-26.04, or a versioned directory; honor an explicit ROCM_PATH,
+# then probe common roots, then fall back to a filesystem search.
 discover_dtk_root() {
   local candidate
   local -a candidates=(
-    "${DTK_ROOT:-}"
     "${ROCM_PATH:-}"
     "/opt/dtk"
     "/opt/dtk-26.04"
@@ -58,17 +57,16 @@ discover_dtk_root() {
   return 1
 }
 
-if ! DTK_ROOT="$(discover_dtk_root)"; then
-  echo "::error::DTK env.sh not found under /opt or /usr/local; set DTK_ROOT explicitly"
+if ! ROCM_PATH="$(discover_dtk_root)"; then
+  echo "::error::DTK env.sh not found under /opt or /usr/local; set ROCM_PATH explicitly"
   exit 1
 fi
-echo "DTK_ROOT discovered: $DTK_ROOT"
+echo "ROCM_PATH discovered: $ROCM_PATH"
 set +u
 # shellcheck disable=SC1091
-source "$DTK_ROOT/env.sh"
+source "$ROCM_PATH/env.sh"
 set -u
-export DTK_ROOT
-export ROCM_PATH="${ROCM_PATH:-$DTK_ROOT}"
+export ROCM_PATH
 
 select_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -404,7 +402,7 @@ fi
 # DTK release ever needs more from the vendor core than the shim covers.
 # FLAGOS_DCU_VENDOR_CORE=1 selects the legacy full-core bundle + relink; CI
 # smoke-tests that path separately below.
-DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
+FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
   PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
 
 # Wheel invariants for the decoupled default. A vendor core .so in lib_dcu means
@@ -491,7 +489,7 @@ else:
 PY
 
     echo "Legacy-mode smoke: full-core bundle"
-    DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
+    FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
       PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
       bash scripts/vendor/bundle_dcu_libtorch.sh
     FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
@@ -529,7 +527,7 @@ print(f"Legacy smoke rolled back cleanly: no symlinks or backup in {lib}")
 PY
 
     echo "Restoring the decoupled bundle for the wheel"
-    DTK_ROOT="$DTK_ROOT" FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
+    FLAGOS_DCU_TORCH_LIB="$FLAGOS_DCU_TORCH_LIB" \
       PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
     python - <<'PY'
 from pathlib import Path
@@ -607,7 +605,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR DTK_ROOT ROCM_PATH \
+    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ROCM_PATH \
     FLAGOS_DCU_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH \
     FLAGGEMS_CPP FLAGGEMS_KERNEL FLAGOS_USE_FLAGGEMS_CPP \
     CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH; do

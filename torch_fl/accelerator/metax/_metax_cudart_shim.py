@@ -34,13 +34,9 @@ def ensure_cudart_shim():
     if _loaded:
         return
 
-    # Detect MetaX environment
-    metax_path = (
-        os.environ.get("METAX_PATH")
-        or os.environ.get("METAX_HOME")
-        or os.environ.get("MACA_PATH")
-        or os.environ.get("MACA_HOME")
-    )
+    # Detect MetaX environment. Candidate order matches _metax_compat and
+    # setup.py: the vendor's MACA_PATH, then MACA_HOME.
+    metax_path = os.environ.get("MACA_PATH") or os.environ.get("MACA_HOME")
     if not metax_path:
         for candidate in ["/opt/maca", "/opt/maca-3.3.0"]:
             if os.path.isdir(candidate):
