@@ -13,6 +13,16 @@ gate. It is written to be run on a chip that has never run it: every stage is
 isolated, the placement adapts to the cards it finds, and the readings a new
 chip should produce are stated so a result can be judged rather than guessed at.
 
+`Qwen/Qwen-Image-2.1` has its own flow next to this one, at
+`tests/manual/qwen_image_21/`, and it is worth running as well on a chip that
+passes here: it reaches a different encoder (Qwen3-VL rather than Qwen2.5-VL),
+gated MLPs, a causal prefix KV cache and a different VAE, so a route that is
+correct on one model is not evidence for the other. Its README states where the
+two differ — the placement rule is the opposite of this one's, and it cannot
+inject prompt embeddings. `compare.py` and `side_by_side.py` are shared: they
+are model-agnostic, so they live here and the 2.1 `run.sh` dispatches to them
+rather than keeping a second copy that could drift.
+
 ## Files
 
 | File | Role |
