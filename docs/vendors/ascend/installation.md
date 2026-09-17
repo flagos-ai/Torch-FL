@@ -238,9 +238,10 @@ kernel), and ops Ascend does not register at all are written `none` so they reac
 routes need no opt-in.
 
 To measure the two backends against each other, collapse the table with
-`ALL_USE_FLAGGEMS=1` or `ALL_USE_VENDOR=1` (mutually exclusive). Each only moves
-an op when the target actually implements it; ops that cannot move are listed on
-stderr and stay put, so `ALL_USE_VENDOR` is partial by nature.
+`FLAGOS_FORCE_BACKEND=flaggems` or `FLAGOS_FORCE_BACKEND=vendor` -- one name, so
+"both at once" is not a state that exists. Each mode only moves an op when the
+target actually implements it; ops that cannot move are listed on stderr and
+stay put, so the `vendor` mode is partial by nature.
 
 ### Runtime dtype fallback
 

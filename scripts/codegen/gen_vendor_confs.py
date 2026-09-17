@@ -1120,7 +1120,7 @@ NATIVE_KERNEL_PREFERRED = set()
 # not registered" class of failure this full-coverage rework exists to remove.
 # No shipped conf is generated for plain cuda (codegen_ops.py writes
 # backends_cuda.conf), so this is currently empty and the key reaches confs only
-# through the `# tileops` annotation that FLAGOS_USE_TILEOPS reads.
+# through the `# tileops` annotation that FLAGOS_FORCE_BACKEND=tileops reads.
 TILEOPS_PLATFORMS = set()
 
 # The 17 FlagGems C++ ops verified on MetaX hardware (of the 18 in the shared C++
@@ -1391,7 +1391,8 @@ def vendor_native_ops(vendor: str) -> set:
     from what is compiled, and a conf edit cannot invent or lose a kernel.
 
     The annotation is still *emitted* -- it is what tells a reader (and
-    ALL_USE_VENDOR) that a kernel exists behind an op FlagGems currently wins.
+    FLAGOS_FORCE_BACKEND=vendor) that a kernel exists behind an op FlagGems
+    currently wins.
     """
     native_inc, _ = VENDORS[vendor]
     return registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
@@ -1529,11 +1530,13 @@ def route(
     routes are the ones the per-platform gap sets are calibrated against; above
     the vendor kernel because the TileOps shims are the newer path being brought
     up, so where both exist the shim is what a run should exercise. The vendor
-    kernel stays reachable through the `# <vendor>` annotation and ALL_USE_VENDOR.
+    kernel stays reachable through the `# <vendor>` annotation and
+    FLAGOS_FORCE_BACKEND=vendor.
 
     An op the vendor implements but FlagGems or TileOps wins gets a trailing
     `# <vendor>` annotation. That is what tells a reader a kernel exists behind
-    the winning route, and what makes ALL_USE_VENDOR able to move the op.
+    the winning route, and what makes FLAGOS_FORCE_BACKEND=vendor able to move
+    the op.
     """
     if op not in registered:
         return "none"
@@ -1609,12 +1612,12 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
         "#",
         "# Override one op at runtime with FLAGOS_OP_<name>=<backend> (dots in",
         "# the op name become double underscores: FLAGOS_OP_mm__out=flaggems).",
-        "# Collapse the whole table onto one backend for A/B measurement with",
-        "# ALL_USE_FLAGGEMS=1 or ALL_USE_VENDOR=1 (mutually exclusive). An op",
-        "# only moves if that backend implements it -- known from the routed",
-        "# value plus its `# <backend>` annotation. The rest are reported on",
-        "# stderr and stay as configured, so ALL_USE_VENDOR is partial by",
-        "# nature: a vendor implements far fewer ops than FlagGems.",
+        "# Collapse the whole table onto one backend family for A/B measurement",
+        "# with FLAGOS_FORCE_BACKEND=flaggems|vendor|tileops. An op only moves if",
+        "# that backend implements it -- known from the routed value plus its",
+        "# `# <backend>` annotation. The rest are reported on stderr and stay as",
+        "# configured, so FLAGOS_FORCE_BACKEND=vendor is partial by nature: a",
+        "# vendor implements far fewer ops than FlagGems.",
         "",
     ]
     for op in sorted(routes):

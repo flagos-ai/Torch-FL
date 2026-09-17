@@ -51,6 +51,12 @@ enum class Backend {
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);
 
+// The value of FLAGOS_FORCE_BACKEND -- "flaggems", "vendor" or "tileops" -- or an
+// empty string when it is unset (or was unparseable, which warns and reads as
+// unset). Resolved once per process, so Dispatcher can consult it on the
+// dispatch-miss path without re-reading the environment per op.
+const std::string& ForcedBackendMode();
+
 // Dtypes this build's FlagGems (Triton) route cannot serve, whatever op is
 // asking. Consulted by Dispatcher so a `flaggems` route falls back to the
 // vendor kernel for those dtypes instead of failing inside the compiler.

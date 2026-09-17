@@ -20,7 +20,9 @@ this module existed there were a dozen parsers that disagreed: some accepted
 anything that was not ``0`` (so ``off`` meant *on*), the profiler shims enabled
 their logging on the *existence* of the variable (so ``=0`` turned it on), and
 ``ALL_USE_FLAGGEMS=off`` entered strict dispatch mode in C++ while leaving the
-routing table alone in ``common.cc``.
+routing table alone in ``common.cc`` -- a pair of booleans that collided. That
+pair is ``FLAGOS_FORCE_BACKEND`` now, one enum, so the disagreement is not
+expressible rather than merely fixed.
 
 Importing this module has no side effects beyond the one-shot scan described
 under `check_environment`. It imports nothing from ``torch_fl`` and nothing from
@@ -331,8 +333,10 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_RUNTIME,
         "No default (off)",
         "Repin every op onto one backend family for A/B measurement: flaggems, "
-        "vendor, or tileops. An op that backend does not implement is reported "
-        "and the dispatch raises rather than silently falling back. tileops "
+        "vendor, or tileops. An op the target does not implement is reported "
+        "on stderr and left on its configured backend; an op it does implement "
+        "but this wheel did not compile raises rather than falling back. The "
+        "tileops mode repins the ops the conf annotates `# tileops` and "
         "additionally needs the tileops package, an SM90 device and a "
         "FLAGOS_BUILD_TILEOPS=ON build",
     ),

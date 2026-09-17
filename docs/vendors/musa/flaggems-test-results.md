@@ -352,12 +352,12 @@ FLAGOS_OP_mm=musa python script.py  # Force mm to use mudnn
 
 Force all ops to vendor backend (where available):
 ```bash
-ALL_USE_VENDOR=1 python script.py
+FLAGOS_FORCE_BACKEND=vendor python script.py
 ```
 
 Force all ops to FlagGems (where available):
 ```bash
-ALL_USE_FLAGGEMS=1 python script.py
+FLAGOS_FORCE_BACKEND=flaggems python script.py
 ```
 
 Enable dispatch logging:

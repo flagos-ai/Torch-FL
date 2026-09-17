@@ -56,15 +56,14 @@ override or widen that table.
 |----------|-------|---------|---------|
 | `FLAGOS_BACKEND_CONFIG` | Runtime | Derived from the build record (`_build_config.py` + `lib/flagos_platform`) | Absolute path to a `backends_*.conf` file; overrides auto-detection |
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
-| `ALL_USE_FLAGGEMS` | Runtime | `0` (off) | Collapse the routing table onto the FlagGems backends for A/B measurement. Mutually exclusive with `ALL_USE_VENDOR`. Ops that backend does not implement are reported and left on their configured backend; the dispatcher raises rather than silently falling back |
-| `ALL_USE_VENDOR` | Runtime | `0` (off) | Same, onto the vendor-native backends |
-| `FLAGOS_USE_TILEOPS` | Runtime | `0` (off) | Repin every op the conf annotates `# tileops` onto the TileOps backend. Needs the `tileops` package, an SM90 device, and a `FLAGOS_BUILD_TILEOPS=ON` build. Ignored when `ALL_USE_*` is set, so that measurement stays on one backend |
+| `FLAGOS_FORCE_BACKEND` | Runtime | No default (off) | Collapse the routing table onto one backend family for A/B measurement: `flaggems`, `vendor`, or `tileops`. An op only moves if that family actually implements it (known from the routed value plus its `# <backend>` annotation); the rest are reported on stderr and left on their configured backend, and for `flaggems`/`vendor` the dispatcher raises rather than silently falling back when the family was named yet nothing is compiled in. The `tileops` mode repins the ops the conf annotates `# tileops` and additionally needs the `tileops` package, an SM90 device, and a `FLAGOS_BUILD_TILEOPS=ON` build |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Leave the FlagGems Python layer unregistered (C++ stub-only mode) |
 | `FLAGGEMS_SOURCE_DIR` | Runtime | Required when FlagGems is active | Absolute path to FlagGems source directory (Python Triton kernels); must match the version liboperators.so was built against |
 
-The `ALL_USE_*` pair is deliberately unprefixed: it belongs to the dispatcher's
-measurement plumbing, not to the per-platform knob set. An empty or `0` value
-means "leave the conf's routing alone" — the default.
+`FLAGOS_FORCE_BACKEND` is a single enum rather than the three switches it
+replaced (`ALL_USE_FLAGGEMS`, `ALL_USE_VENDOR`, `FLAGOS_USE_TILEOPS`), so
+"two at once" is unrepresentable instead of having to be detected and rejected
+at runtime. An unset value means "leave the conf's routing alone" — the default.
 
 `FLAGOS_USE_FLAGGEMS` is retired. It named a conf when there were three; there is
 now one conf per platform, so an exported value is a no-op.

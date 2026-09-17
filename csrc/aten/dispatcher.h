@@ -145,23 +145,7 @@ class Dispatcher {
     auto fn = ResolveFn(backend, args...);
     LogDispatch(op_name_, backend);
 
-    // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
-    if (!fn) {
-      static const bool strict_flaggems = flagos_env::EnvFlag("ALL_USE_FLAGGEMS");
-      static const bool strict_vendor = flagos_env::EnvFlag("ALL_USE_VENDOR");
-
-      if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
-        std::string msg = std::string(op_name_) +
-                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGOS_BUILD_FLAGGEMS_CPP=1 or FLAGOS_BUILD_FLAGGEMS=1)";
-        throw std::runtime_error(msg);
-      }
-      if (strict_vendor && backend != Backend::kFlagGemsCpp && backend != Backend::kFlagGems &&
-          backend != Backend::kNone && backend != Backend::kTileOps) {
-        std::string msg = std::string(op_name_) +
-                         ": ALL_USE_VENDOR=1 but vendor kernel not registered";
-        throw std::runtime_error(msg);
-      }
-    }
+    if (!fn) ThrowIfForcedBackendMissing(op_name_, backend);
 
     TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
@@ -180,29 +164,41 @@ class Dispatcher {
     auto fn = ResolveFn(backend, args...);
     LogDispatch(op_name, backend);
 
-    // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
-    if (!fn) {
-      static const bool strict_flaggems = flagos_env::EnvFlag("ALL_USE_FLAGGEMS");
-      static const bool strict_vendor = flagos_env::EnvFlag("ALL_USE_VENDOR");
-
-      if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
-        std::string msg = op_name +
-                         ": ALL_USE_FLAGGEMS=1 but FlagGems impl not compiled (set FLAGOS_BUILD_FLAGGEMS_CPP=1 or FLAGOS_BUILD_FLAGGEMS=1)";
-        throw std::runtime_error(msg);
-      }
-      if (strict_vendor && backend != Backend::kFlagGemsCpp && backend != Backend::kFlagGems &&
-          backend != Backend::kNone && backend != Backend::kTileOps) {
-        std::string msg = op_name +
-                         ": ALL_USE_VENDOR=1 but vendor kernel not registered";
-        throw std::runtime_error(msg);
-      }
-    }
+    if (!fn) ThrowIfForcedBackendMissing(op_name, backend);
 
     TORCH_CHECK(fn, op_name, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
   }
 
  private:
+  // FLAGOS_FORCE_BACKEND asks for one backend family across the whole routing
+  // table, so a miss for the family it named is a hard error rather than a
+  // silent fall-through. Only `flaggems` and `vendor` get here: `tileops` is a
+  // repin of ops the conf already annotates `# tileops`, so a miss there means
+  // the op was never a TileOPs candidate and nothing was asked of it.
+  void ThrowIfForcedBackendMissing(const std::string& op_name,
+                                   Backend backend) const {
+    const std::string& forced = ForcedBackendMode();
+    if (forced.empty()) return;
+
+    if (forced == "flaggems" &&
+        (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
+      throw std::runtime_error(
+          op_name +
+          ": FLAGOS_FORCE_BACKEND=flaggems but no FlagGems implementation is "
+          "compiled into this wheel (rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=1 "
+          "or FLAGOS_BUILD_FLAGGEMS=1)");
+    }
+    if (forced == "vendor" && backend != Backend::kFlagGemsCpp &&
+        backend != Backend::kFlagGems && backend != Backend::kNone &&
+        backend != Backend::kTileOps) {
+      throw std::runtime_error(
+          op_name +
+          ": FLAGOS_FORCE_BACKEND=vendor but no vendor kernel is registered "
+          "for this op");
+    }
+  }
+
   // The build's own native kernel slot, with the backend name that selects it.
   // Exactly one is ever populated: a build registers its native kernels into
   // its own slot (kAscend on Ascend, kMusa on MUSA, ...) and, on the

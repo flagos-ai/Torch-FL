@@ -32,9 +32,9 @@ in Python -- TileOPs ships no C++ API -- so each generated stub calls back into
 
 Going through the dispatcher rather than binding on PrivateUse1 directly is what
 makes ``FLAGOS_OP_<op>=<backend>``, ``FLAGOS_LOG_DISPATCH=1`` and
-``FLAGOS_USE_TILEOPS=1`` work without reimplementing any of them in Python: a
-torch.library PrivateUse1 binding intercepts *before* the dispatcher, so an op
-bound there never sees its own routing config.
+``FLAGOS_FORCE_BACKEND=tileops`` work without reimplementing any of them in
+Python: a torch.library PrivateUse1 binding intercepts *before* the dispatcher,
+so an op bound there never sees its own routing config.
 
 C++ signatures are read back from the committed ``csrc/aten/generated/ops.h``
 (types) and ``register.inc`` (parameter names) rather than re-derived from
@@ -773,11 +773,11 @@ def render_coverage(routes: List[Route], current: str) -> str:
     -- a full copy of backends_cuda.conf with these overloads flipped to
     `tileops`. That file was a per-*mode* conf rather than a per-platform one, so
     torch_fl/configs/ held two files describing one platform and
-    FLAGOS_USE_TILEOPS=1 had to swap between them.
+    FLAGOS_FORCE_BACKEND=tileops had to swap between them.
 
     `tileops` is now a routing key like any other, carried as a `# tileops`
-    annotation in backends_cuda.conf, and FLAGOS_USE_TILEOPS=1 repins the
-    annotated ops in the loaded table (ApplyTileOpsOptIn in csrc/aten/common.cc).
+    annotation in backends_cuda.conf, and FLAGOS_FORCE_BACKEND=tileops repins the
+    annotated ops in the loaded table (ApplyForcedBackend in csrc/aten/common.cc).
     Default routing is untouched, which is what the annotation buys: TileOPs is
     SM90-only and an optional dependency, so it must stay opt-in rather than
     becoming the default for every CUDA build.
@@ -940,10 +940,11 @@ def render_test(routes: List[Route]) -> str:
         "    Every other test here calls build_impl or the shim directly, which",
         "    would keep passing if the generated .cc stubs were never compiled in",
         "    or the conf never routed to them. This one runs a subprocess with",
-        "    FLAGOS_USE_TILEOPS=1 and reads the dispatcher's own log line, so it",
-        "    fails if the C++ registration is missing. The FLAGOS_OP_ half proves",
-        "    the per-op override reaches TileOPs routes -- the feature that had to",
-        "    be reimplemented in Python back when registration lived there.",
+        "    FLAGOS_FORCE_BACKEND=tileops and reads the dispatcher's own log",
+        "    line, so it fails if the C++ registration is missing. The FLAGOS_OP_",
+        "    half proves the per-op override reaches TileOPs routes -- the feature",
+        "    that had to be reimplemented in Python back when registration lived",
+        "    there.",
         '    """',
         "    prog = (",
         "        'import torch, torch_fl; '",
@@ -955,14 +956,14 @@ def render_test(routes: List[Route]) -> str:
         "    # which would read as a dispatch failure.",
         "    base = dict(",
         "        os.environ,",
-        "        FLAGOS_USE_TILEOPS='1',",
+        "        FLAGOS_FORCE_BACKEND='tileops',",
         "        FLAGOS_LOG_DISPATCH='1',",
         "        PYTHONPATH=os.pathsep.join(p for p in sys.path if p),",
         "    )",
         "    # importing torch_fl (which this module does at collection time) writes",
         "    # the resolved conf path back into os.environ. Inherited by the child it",
-        "    # outranks FLAGOS_USE_TILEOPS, pinning it to whichever conf the *parent*",
-        "    # happened to select.",
+        "    # outranks FLAGOS_FORCE_BACKEND, pinning it to whichever conf the",
+        "    # *parent* happened to select.",
         "    base.pop('FLAGOS_BACKEND_CONFIG', None)",
         "",
         "    out = subprocess.run(",

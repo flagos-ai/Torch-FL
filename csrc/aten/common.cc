@@ -152,8 +152,8 @@ const char* BackendName(Backend b) {
 // `alt` collects trailing `# <backend>` annotations: a generated vendor conf
 // writes `abs = flaggems  # musa` to record that the vendor also implements the
 // op even though priority routed it to FlagGems. Runtime routing ignores the
-// annotation; ALL_USE_VENDOR needs it to know which ops may legally be pinned
-// back to the vendor kernel.
+// annotation; FLAGOS_FORCE_BACKEND=vendor needs it to know which ops may
+// legally be pinned back to the vendor kernel.
 void ParseConfigInto(const std::string& path,
                      std::unordered_map<std::string, Backend>& table,
                      std::unordered_map<std::string, Backend>& alt,
@@ -226,34 +226,50 @@ void ParseConfigInto(const std::string& path,
   }
 }
 
-// Kept as a named forwarder rather than replaced at every call site so the
-// boolean truth table lives in exactly one place (csrc/include/flagos_env.h).
-// This used to be its own parser -- "anything that is not 0/off/false" -- which
-// disagreed with dispatcher.h's "anything that is not 0".
-bool EnvIsOn(const char* name) { return flagos_env::EnvFlag(name); }
+// The last boolean reader in this file was EnvIsOn, a thin forwarder onto
+// flagos_env::EnvFlag that existed only to keep the truth table in one place
+// (csrc/include/flagos_env.h) while its call sites were migrated. It had two --
+// both table-collapse switches -- and FLAGOS_FORCE_BACKEND is an enum rather
+// than a flag, so the forwarder is gone and every read now names flagos_env
+// directly.
 
 bool IsFlagGems(Backend b) {
   return b == Backend::kFlagGemsCpp || b == Backend::kFlagGems;
 }
 
-// ALL_USE_FLAGGEMS=1 / ALL_USE_VENDOR=1 collapse the whole table onto one
-// backend, for A/B measurement against the default mixed routing. Each op is
-// only movable if that backend actually implements it -- known from the routed
-// value plus the `# <backend>` annotation. Ops that are not are reported and
-// left on their configured backend; nothing is silently rerouted to a kernel
-// that does not exist, which would surface much later as "backend not
-// registered" mid-model.
-void ApplyAllUseOverride(std::unordered_map<std::string, Backend>& table,
-                         const std::unordered_map<std::string, Backend>& alt) {
-  const bool all_flaggems = EnvIsOn("ALL_USE_FLAGGEMS");
-  const bool all_vendor = EnvIsOn("ALL_USE_VENDOR");
-  if (!all_flaggems && !all_vendor) return;
-  if (all_flaggems && all_vendor) {
-    fprintf(stderr,
-            "[flagos] ALL_USE_FLAGGEMS and ALL_USE_VENDOR are mutually "
-            "exclusive, ignoring both\n");
-    return;
-  }
+// FLAGOS_FORCE_BACKEND=<flaggems|vendor|tileops> collapses the whole table onto
+// one backend family, for A/B measurement against the default mixed routing.
+// One name rather than the three it replaces (ALL_USE_FLAGGEMS, ALL_USE_VENDOR,
+// FLAGOS_USE_TILEOPS), because "two of them at once" was a state the old code
+// had to detect and reject at runtime -- here it is unrepresentable.
+//
+// An op is only movable if the target backend actually implements it -- known
+// from the routed value plus the `# <backend>` annotation. Ops that are not are
+// reported and left on their configured backend; nothing is silently rerouted to
+// a kernel that does not exist, which would surface much later as "backend not
+// registered" mid-model. That is also why the flaggems and vendor modes raise on
+// a miss inside Dispatcher (dispatcher.h) rather than falling through: the user
+// asked for that backend across the whole table.
+//
+// The vendor mode is partial by nature -- a vendor implements far fewer ops than
+// FlagGems -- and an op routed to tileops already counts as a vendor-side
+// target, so it is left where it is.
+//
+// The tileops mode is an opt-in path in a different sense: it needs the
+// `tileops` package, an SM90 device and a FLAGOS_BUILD_TILEOPS=ON build, so the
+// default routing must not name it. Its op set is the one the conf annotates
+// `# tileops` -- keeping the set in the conf as an annotation rather than in a
+// separate backends_tileops.conf means the per-op default and the TileOPs
+// candidate are stated on one line, and the same `alt` map the other modes read
+// carries it. Ops it misses are simply not TileOPs candidates; there is nothing
+// to report.
+void ApplyForcedBackend(std::unordered_map<std::string, Backend>& table,
+                        const std::unordered_map<std::string, Backend>& alt) {
+  const std::string& mode = ForcedBackendMode();
+  if (mode.empty()) return;
+
+  const bool to_tileops = mode == "tileops";
+  const bool to_flaggems = mode == "flaggems";
 
   std::vector<std::string> unsupported;
   size_t moved = 0;
@@ -261,9 +277,16 @@ void ApplyAllUseOverride(std::unordered_map<std::string, Backend>& table,
     auto it = alt.find(op);
     Backend annotated = it != alt.end() ? it->second : Backend::kNone;
 
+    if (to_tileops) {
+      if (annotated != Backend::kTileOps || backend == Backend::kTileOps) continue;
+      backend = Backend::kTileOps;
+      ++moved;
+      continue;
+    }
+
     // The op's candidates are its routed backend and its annotation.
     Backend target = Backend::kNone;
-    if (all_flaggems) {
+    if (to_flaggems) {
       if (IsFlagGems(backend)) target = backend;
       else if (IsFlagGems(annotated)) target = annotated;
     } else {
@@ -281,12 +304,21 @@ void ApplyAllUseOverride(std::unordered_map<std::string, Backend>& table,
     }
   }
 
-  const char* which = all_flaggems ? "ALL_USE_FLAGGEMS" : "ALL_USE_VENDOR";
-  fprintf(stderr, "[flagos] %s=1: %zu ops repinned, %zu left as configured\n",
+  if (to_tileops) {
+    fprintf(stderr, "[flagos] FLAGOS_FORCE_BACKEND=tileops: %zu ops repinned\n",
+            moved);
+    return;
+  }
+
+  const char* which = to_flaggems ? "flaggems" : "vendor";
+  fprintf(stderr,
+          "[flagos] FLAGOS_FORCE_BACKEND=%s: %zu ops repinned, %zu left as "
+          "configured\n",
           which, moved, unsupported.size());
   if (!unsupported.empty()) {
     std::sort(unsupported.begin(), unsupported.end());
-    fprintf(stderr, "[flagos] %s: no implementation for", which);
+    fprintf(stderr, "[flagos] FLAGOS_FORCE_BACKEND=%s: no implementation for",
+            which);
     for (size_t i = 0; i < unsupported.size() && i < 12; ++i) {
       fprintf(stderr, " %s", unsupported[i].c_str());
     }
@@ -295,39 +327,6 @@ void ApplyAllUseOverride(std::unordered_map<std::string, Backend>& table,
     }
     fprintf(stderr, "\n");
   }
-}
-
-// FLAGOS_USE_TILEOPS=1 repins every op the conf annotates `# tileops` onto the
-// TileOPs backend. TileOPs is an opt-in path: it needs the `tileops` package
-// plus an SM90 device, and its kernels are only built when FLAGOS_BUILD_TILEOPS=ON,
-// so the default routing must not name it. Keeping the op set in the conf as an
-// annotation -- rather than in a separate backends_tileops.conf -- means the
-// per-op default and the TileOPs candidate are stated on one line, and the same
-// `alt` map ALL_USE_* already reads carries it.
-//
-// If a table-collapse flag is also set it wins: ALL_USE_* exists to measure one
-// backend against the mixed default, and silently leaving 60 ops on a third
-// backend would corrupt exactly that measurement.
-void ApplyTileOpsOptIn(std::unordered_map<std::string, Backend>& table,
-                       const std::unordered_map<std::string, Backend>& alt) {
-  if (!EnvIsOn("FLAGOS_USE_TILEOPS")) return;
-  if (EnvIsOn("ALL_USE_FLAGGEMS") || EnvIsOn("ALL_USE_VENDOR")) {
-    fprintf(stderr,
-            "[flagos] FLAGOS_USE_TILEOPS ignored: ALL_USE_FLAGGEMS/"
-            "ALL_USE_VENDOR pin the whole table\n");
-    return;
-  }
-
-  size_t moved = 0;
-  for (auto& [op, backend] : table) {
-    auto it = alt.find(op);
-    if (it == alt.end() || it->second != Backend::kTileOps) continue;
-    if (backend == Backend::kTileOps) continue;
-    backend = Backend::kTileOps;
-    ++moved;
-  }
-  fprintf(stderr, "[flagos] FLAGOS_USE_TILEOPS=1: %zu ops repinned to tileops\n",
-          moved);
 }
 
 std::unordered_map<std::string, Backend> LoadBackendConfig() {
@@ -341,8 +340,7 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
 
   std::unordered_map<std::string, Backend> alt;
   ParseConfigInto(path, table, alt);
-  ApplyAllUseOverride(table, alt);
-  ApplyTileOpsOptIn(table, alt);
+  ApplyForcedBackend(table, alt);
 
   // Per-op env var overrides: FLAGOS_OP_<op_name>=cuda|metax|flaggems|tileops
   // e.g. FLAGOS_OP_mm=cuda  or  FLAGOS_OP_mm__out=cuda
@@ -376,6 +374,21 @@ const std::unordered_map<std::string, Backend>& BackendTable() {
 }
 
 } // namespace
+
+// Declared in common.h and read from dispatcher.h's inline dispatch path, so it
+// lives outside the anonymous namespace above.
+const std::string& ForcedBackendMode() {
+  // Resolved once: the routing table is built once and the environment cannot
+  // change under a running process, and the dispatch-miss path must not pay for
+  // a getenv per op.
+  static const std::string mode = [] {
+    std::string out;
+    flagos_env::EnvChoice("FLAGOS_FORCE_BACKEND", {"flaggems", "vendor", "tileops"},
+                          "", &out);
+    return out;
+  }();
+  return mode;
+}
 
 Backend GetBackendForOp(const std::string& op_name) {
   const auto& table = BackendTable();

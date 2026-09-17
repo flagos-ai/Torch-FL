@@ -124,8 +124,8 @@ def test_route_withholds_flaggems_from_unregistered_ops():
 
 
 def test_route_annotates_vendor_kernels_that_lose_to_flaggems():
-    """The annotation is what tells a reader (and ALL_USE_VENDOR) that a kernel
-    exists behind an op FlagGems currently wins."""
+    """The annotation is what tells a reader (and FLAGOS_FORCE_BACKEND=vendor)
+    that a kernel exists behind an op FlagGems currently wins."""
     both = {"mm"}
     assert g.route("mm", "musa", both, set(), both, both) == "flaggems_cpp  # musa"
     assert g.route("mm", "musa", set(), both, both, both) == "flaggems  # musa"
@@ -444,7 +444,7 @@ def test_tileops_set_survived_the_conf_deletion():
     file that was otherwise a copy of backends_cuda.conf. It is now
     TILEOPS_OPS in scripts/codegen/backend_coverage.py, regenerated in place by
     scripts/codegen/codegen_tileops.py. The count is pinned because losing entries here
-    silently shrinks what FLAGOS_USE_TILEOPS=1 can repin."""
+    silently shrinks what FLAGOS_FORCE_BACKEND=tileops can repin."""
     ops = g.tileops_ops()
     assert len(ops) == 60, f"expected 60 tileops ops, got {len(ops)}"
     assert {"abs", "add.Tensor", "_softmax"} <= ops

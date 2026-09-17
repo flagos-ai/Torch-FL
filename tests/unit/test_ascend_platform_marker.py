@@ -52,7 +52,7 @@ def fake_ascend_install(tmp_path, monkeypatch):
 
     monkeypatch.setattr(torch_fl, "__file__", str(tmp_path / "__init__.py"))
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
-    monkeypatch.delenv("FLAGOS_USE_TILEOPS", raising=False)
+    monkeypatch.delenv("FLAGOS_FORCE_BACKEND", raising=False)
     return conf_dir
 
 

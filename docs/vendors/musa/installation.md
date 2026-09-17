@@ -103,9 +103,9 @@ executed with `flagtree 0.6.2a3+mthreads3.6` (Triton 3.6.0, backend `mthreads`).
 A generic PyPI Triton wheel is not sufficient -- it ships no `mthreads` backend
 -- and must not be used for this path.
 
-To pin the table to one backend for A/B measurement, set `ALL_USE_FLAGGEMS=1` or
-`ALL_USE_VENDOR=1` (mutually exclusive). Ops the target does not implement are
-listed on stderr and stay on their configured backend.
+To pin the table to one backend for A/B measurement, set
+`FLAGOS_FORCE_BACKEND` to `flaggems` or `vendor`. Ops the target does not
+implement are listed on stderr and stay on their configured backend.
 
 ## Testing
 

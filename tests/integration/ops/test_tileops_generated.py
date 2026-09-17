@@ -129,10 +129,11 @@ def test_dispatches_through_cpp():
     Every other test here calls build_impl or the shim directly, which
     would keep passing if the generated .cc stubs were never compiled in
     or the conf never routed to them. This one runs a subprocess with
-    FLAGOS_USE_TILEOPS=1 and reads the dispatcher's own log line, so it
-    fails if the C++ registration is missing. The FLAGOS_OP_ half proves
-    the per-op override reaches TileOPs routes -- the feature that had to
-    be reimplemented in Python back when registration lived there.
+    FLAGOS_FORCE_BACKEND=tileops and reads the dispatcher's own log
+    line, so it fails if the C++ registration is missing. The FLAGOS_OP_
+    half proves the per-op override reaches TileOPs routes -- the feature
+    that had to be reimplemented in Python back when registration lived
+    there.
     """
     prog = (
         "import torch, torch_fl; "
@@ -144,14 +145,14 @@ def test_dispatches_through_cpp():
     # which would read as a dispatch failure.
     base = dict(
         os.environ,
-        FLAGOS_USE_TILEOPS="1",
+        FLAGOS_FORCE_BACKEND="tileops",
         FLAGOS_LOG_DISPATCH="1",
         PYTHONPATH=os.pathsep.join(p for p in sys.path if p),
     )
     # importing torch_fl (which this module does at collection time) writes
     # the resolved conf path back into os.environ. Inherited by the child it
-    # outranks FLAGOS_USE_TILEOPS, pinning it to whichever conf the *parent*
-    # happened to select.
+    # outranks FLAGOS_FORCE_BACKEND, pinning it to whichever conf the
+    # *parent* happened to select.
     base.pop("FLAGOS_BACKEND_CONFIG", None)
 
     out = subprocess.run(

@@ -1932,7 +1932,7 @@ The FlagGems count differs per platform because it is now the intersection of th
 shared coverage set with that platform's registrations, not the shared set
 itself. Ops the vendor also implements but that FlagGems covers are routed to
 FlagGems by priority; a trailing `# <vendor>` annotation records the kernel so it
-stays recoverable and `ALL_USE_VENDOR` can find it (248 such kernels on Ascend, 88 on GCU, 115 on
+stays recoverable and `FLAGOS_FORCE_BACKEND=vendor` can find it (248 such kernels on Ascend, 88 on GCU, 115 on
 MUSA — MUSA's remaining 7 FlagGems routes come from
 `musa_flaggems_register.inc`, which registers wrappers without native kernels
 behind them). On GCU that 88 became 144 with the 2026-09-15 rerouting.
