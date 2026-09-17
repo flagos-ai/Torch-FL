@@ -25,11 +25,10 @@ def _detect_platform() -> str:
     native-kernel builds write is authoritative in that case, and the resolved
     FLAGOS_BACKEND_CONFIG name is the last resort.
 
-    PPU is the exception to the ACCELERATOR rule: it is a CUDA-ABI boxing
-    backend whose build and CI deliberately report ACCELERATOR=cuda, so the
-    variable cannot tell it apart. It is detected through the same signals
-    torch_fl itself uses (torch_fl._is_ppu_build): the PPU_SDK / PPU_HOME
-    environment, else the lib_ppu/ bundle directory the wheel ships.
+    Every chip has its own ACCELERATOR value, PPU included (it is a CUDA-ABI
+    boxing vendor, not a cuda build). Older PPU wheels reported ACCELERATOR=cuda,
+    so the PPU_SDK / PPU_HOME environment and the lib_ppu/ bundle directory stay
+    as fallbacks for them.
     """
     accelerator = os.environ.get("ACCELERATOR", "").lower()
     if accelerator == "ascend":
@@ -40,6 +39,8 @@ def _detect_platform() -> str:
         return "musa"
     if accelerator == "dcu":
         return "dcu"
+    if accelerator == "ppu":
+        return "ppu"
     if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
         return "ppu"
 

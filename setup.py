@@ -31,8 +31,8 @@ from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
 IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-# Accelerator platform: "cuda" (default), "metax", "ascend", "tsingmicro",
-# "dcu", "gcu", "musa", or "bpu"
+# Accelerator platform: "cuda" (default), "ppu", "metax", "ascend",
+# "tsingmicro", "dcu", "gcu", "musa", or "bpu"
 ACCELERATOR = os.environ.get("ACCELERATOR", "cuda").lower()
 
 # Directory inside the wheel holding a bundled forked libtorch, for the backends
@@ -40,11 +40,9 @@ ACCELERATOR = os.environ.get("ACCELERATOR", "cuda").lower()
 # bundle dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
 # Must match FLAGOS_BUNDLE_LIBDIR in CMakeLists.txt -- _C.so's RUNPATH has to
 # reach the bundle or its auditwheel-mangled deps (libglog-*.so.0) go missing.
-_BUNDLE_LIBDIR = {"metax": "lib_maca", "dcu": "lib_dcu"}.get(ACCELERATOR, "lib")
-if _BUNDLE_LIBDIR == "lib" and (
-    os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME")
-):
-    _BUNDLE_LIBDIR = "lib_ppu"
+_BUNDLE_LIBDIR = {"metax": "lib_maca", "dcu": "lib_dcu", "ppu": "lib_ppu"}.get(
+    ACCELERATOR, "lib"
+)
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -250,7 +248,8 @@ def _find_flaggems_dir() -> str | None:
 
 def _metax_path_from_env() -> str:
     return (
-        os.environ.get("METAX_PATH")
+        os.environ.get("FLAGOS_SDK_ROOT")
+        or os.environ.get("METAX_PATH")
         or os.environ.get("METAX_HOME")
         or os.environ.get("MACA_PATH")
         or os.environ.get("MACA_HOME")
@@ -259,12 +258,17 @@ def _metax_path_from_env() -> str:
 
 
 def _setup_metax_build_env(env: dict) -> str:
-    """PATH/LD_LIBRARY_PATH for mxcc/cucc and MetaX runtime. Returns METAX_PATH."""
+    """PATH/LD_LIBRARY_PATH for the MetaX SDK. Returns METAX_PATH.
+
+    MetaX is a CUDA-boxing build: host g++ compiles the generated boxing kernels
+    against maca's cu-bridge headers, so the SDK's include/lib directories have
+    to be reachable. The mxcc/cucc device compiler belonged to the retired
+    native-kernel path, so its absence is no longer an error here.
+    """
     metax_path = _metax_path_from_env()
     cu_bridge = os.path.join(metax_path, "tools", "cu-bridge")
-    cucc = os.path.join(cu_bridge, "bin", "cucc")
-    if not os.path.isfile(cucc):
-        raise RuntimeError(f"MetaX cucc/mxcc not found: {cucc}")
+    if not os.path.isdir(os.path.join(cu_bridge, "include")):
+        raise RuntimeError(f"MetaX cu-bridge headers not found: {cu_bridge}/include")
 
     env.setdefault("METAX_PATH", metax_path)
     env["PATH"] = os.pathsep.join(
@@ -402,6 +406,16 @@ def build_deps():
         # links torch_python_library, already in the link set, so this adds
         # nothing to the wheel size. Set FLAGGEMS_KERNEL=0 for a slim pure-boxing
         # build; the generic pass-through below honors that.
+        cmake_args.extend(
+            [
+                "-DFLAGGEMS_CPP=OFF",
+            ]
+        )
+    elif ACCELERATOR == "ppu":
+        # PPU (T-Head) builds against PPU_SDK/CUDA_SDK and reuses the CUDA
+        # boxing kernels, but its libtorch is a local PPU build bundled into
+        # lib_ppu/, and no FlagGems C++ runtime exists for it. TILEOPS_KERNEL is
+        # already forced off by the non-cuda rule above (TileOps is SM90).
         cmake_args.extend(
             [
                 "-DFLAGGEMS_CPP=OFF",
@@ -767,11 +781,7 @@ def _get_setup_kwargs():
     # better than leaving two incompatible wheels both called 0.1.0. Override
     # with FLAGOS_WHEEL_LOCAL to pin the exact SDK, e.g.
     # FLAGOS_WHEEL_LOCAL=metax3.8.1 / FLAGOS_WHEEL_LOCAL=dtk2604.
-    _default_local = {"metax": "metax", "dcu": "dtk"}.get(ACCELERATOR)
-    if _default_local is None and (
-        os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME")
-    ):
-        _default_local = "ppu"
+    _default_local = {"metax": "metax", "dcu": "dtk", "ppu": "ppu"}.get(ACCELERATOR)
     local = os.environ.get("FLAGOS_WHEEL_LOCAL", _default_local)
     if local:
         version = f"{version}+{local}"
@@ -835,15 +845,13 @@ def _vendor_supplies_triton() -> bool:
       band (it has no PyPI release satisfying `triton>=3.5.1`). Declaring the
       dep makes pip install stock triton over FlagTree, after which any
       Triton entry point dies with "0 active drivers".
-    - PPU (PPU_SDK present): the vendor Triton lives on a private index and is
+    - PPU (ACCELERATOR=ppu): the vendor Triton lives on a private index and is
       versioned 3.x+<sdk> (e.g. 3.5.0+v0.2.0.ppu2.1.0), which does not satisfy
       a `triton>=3.5.1` pin; its sdist is also a download shim that pip cannot
       always build. Install it manually, then `pip install --no-deps` this
       package. See "Build from Source (PPU Platform)" in the README.
     """
-    if ACCELERATOR in ("dcu", "ascend"):
-        return True
-    return bool(os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"))
+    return ACCELERATOR in ("dcu", "ascend", "ppu")
 
 
 # The checked-in csrc/aten/generated/* bindings are generated against a

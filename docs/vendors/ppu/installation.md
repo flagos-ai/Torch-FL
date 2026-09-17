@@ -2,13 +2,13 @@
 
 ## Overview
 
-PPU (`PPU_SDK`) presents itself as a **CUDA-compatible** device, reusing the CUDA build directly with no dedicated `ACCELERATOR=ppu` branch. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`), and `PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit. This makes PPU the simplest compatibility-boxing case:
+PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`), which makes PPU the simplest compatibility-boxing case:
 
 - **No stock `+cpu` wheel and no external `libtorch_cuda.so`** are required — the PPU torch wheel ships its own CUDA runtime
 - PPU registers ops under the `CUDA` dispatch key (not `PrivateUse1`), so the generated CUDA boxing kernels are reused unchanged
-- Build selector remains `ACCELERATOR=cuda`; `PPU_SDK` detection disables bundling external CUDA assets
+- `ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and, at runtime, `backends_ppu.conf`; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
 
-**Status:** Experimental. No CI manifest exists for this platform; validation rests on the build-from-source instructions and setup-specific testing.
+**Status:** Experimental. CI covers the build plus the manifest in `.github/configs/ppu.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ cd PyTorch-Plugin-FL
 # CUDA_HOME points at the PPU CUDA_SDK; FLAGOS_SKIP_CUDA_ASSETS=1 skips
 # bundling an external libtorch_cuda.so AND skips pinned nvidia-*-cu12 deps
 # (PPU supplies CUDA 13 via PPU_SDK/CUDA_SDK).
-ACCELERATOR=cuda \
+ACCELERATOR=ppu \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
   FLAGGEMS_CPP=OFF \
   FLAGGEMS_KERNEL=OFF \
@@ -176,7 +176,7 @@ The vendor `triton` sdist is a downloader shim that fetches the real wheel and `
 ### FlagGems Build
 
 ```bash
-ACCELERATOR=cuda \
+ACCELERATOR=ppu \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
   FLAGGEMS_KERNEL=ON \
   FLAGOS_SKIP_CUDA_ASSETS=1 \

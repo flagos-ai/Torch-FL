@@ -23,9 +23,9 @@
 | Platform | Build selector | Execution path | Eager and autograd | `torch.compile` | Distributed | Profiler | FlagGems | Status |
 |---|---|---|---|---|---|---|---|---|
 | NVIDIA CUDA | `ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
-| MetaX | `ACCELERATOR=metax` | CUDA-boxing reuse via `cu-bridge`/mxcc, or native MetaX kernels | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
+| MetaX | `ACCELERATOR=metax` | CUDA boxing via `cu-bridge` against the vendor libtorch | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
 | Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 routes fall back to ACLNN) | Beta |
-| PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
+| PPU | `ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
 | Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
 | Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
@@ -145,16 +145,15 @@ every strategy resolves through FlagTree's real registry
 
 ### PPU
 
-PPU is not a separate `ACCELERATOR` value. It is `ACCELERATOR=cuda` plus `PPU_SDK`/`PPU_HOME`
-detection (see [`setup.py`](../../setup.py), lines 43-46 and 732-736), reusing the CUDA-boxing
-build against the PPU's CUDA-13-compatible SDK. There is no CI manifest for this platform (no
-`ppu.yml` under `.github/configs/`), so all capabilities here rest on the
-[README](../../README.md)'s build-from-source instructions rather than automated tests.
+PPU has its own `ACCELERATOR=ppu` value (see [`setup.py`](../../setup.py)) and rides the
+CUDA-boxing build against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into
+`lib_ppu/`. `.github/configs/ppu.yml` carries the CI manifest. The
+[README](../../README.md)'s build-from-source instructions remain the full local procedure.
 The shared `AutocastPrivateUse1` policies and CUDA-boxing AMP routes expose
 `torch.autocast("flagos")` and `torch.amp.GradScaler("flagos")`, with FP16 and
 BF16 as the advertised target dtypes. The AMP contract is covered by
 `tests/integration/test_amp_contract.py` (`-m amp`), but its runtime results are
-only PPU evidence when run with `PPU_SDK` or `PPU_HOME` against a real PPU
+only PPU evidence when run against a real PPU
 device; ordinary NVIDIA CUDA and CPU runs do not validate this row. The current
 PPU validation covered both FP16 and BF16 autocast, the mutable `found_inf`
 unscale path, finite scale growth, overflow backoff, and an autocast training

@@ -38,18 +38,17 @@ def _build_accelerator() -> str:
 def _is_ppu_build() -> bool:
     """True for a PPU wheel, which needs backends_ppu.conf rather than CUDA's.
 
-    PPU cannot be told apart by _build_accelerator() the way DCU can: it is a
-    CUDA-ABI boxing backend whose CI deliberately reports ACCELERATOR=cuda, and
-    torch.version.hip is unreadable here anyway (this runs before `import
-    torch`). Use the same signal setup.py bundles the wheel on -- PPU_SDK /
-    PPU_HOME, else the lib_ppu/ bundle directory the wheel ships.
+    PPU has its own ACCELERATOR value now (it is a CUDA-ABI boxing vendor like
+    MetaX/DCU), so the build record already answers this -- no environment probe.
+    The lib_ppu/ bundle directory stays as a fallback so a wheel built before
+    PPU had its own ACCELERATOR value is still recognised.
 
     Without this, PPU read backends_cuda.conf and inherited its FlagGems routes.
     That is what sent mm/bmm through the _hygon kernel PPU's triton cannot
     compile: 28 minutes inside a single test_mm and a SIGSEGV at interpreter
     exit, on a runner where every assertion still passed.
     """
-    if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
+    if _build_accelerator() == "ppu":
         return True
     return os.path.isdir(os.path.join(os.path.dirname(__file__), "lib_ppu"))
 
@@ -262,9 +261,9 @@ def _relink_vendor_libtorch() -> None:
         setup_dcu_runtime()
         return
 
-    # PPU builds as ACCELERATOR=cuda (it targets PPU_SDK/CUDA_SDK), so the only
-    # distinguishing signal at import time is its own bundle dir.
-    if accel in ("cuda", ""):
+    # PPU is its own accelerator now; an older PPU wheel reports "cuda" and is
+    # recognised by its lib_ppu/ bundle instead.
+    if accel in ("cuda", "", "ppu"):
         from torch_fl.accelerator._vendor_libtorch import bundled_lib_dir
 
         if bundled_lib_dir("lib_ppu", "libtorch_cuda.so"):
@@ -1119,13 +1118,14 @@ _patch_cuda_device_context()
 
 # Initialize CUDA runtime only when FlagGems Python path needs it (CUDA backend ops).
 # The check must be against the *build* backend, not torch.cuda.is_available():
-# a DCU/PPU self-contained wheel relinks a hipified/cuda libtorch into a stock
-# +cpu torch, which makes is_available() return True even though the CUDA runtime
-# libs are absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not
-# found". Only actual CUDA-backend builds need this init.
+# a DCU self-contained wheel relinks a hipified libtorch into a stock +cpu torch,
+# which makes is_available() return True even though the CUDA runtime libs are
+# absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not found".
+# PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
+# bundled, so the init works and is what its FlagGems/Triton path relies on.
 if (
     os.environ.get("FLAGOS_DISABLE_FLAGGEMS_PY", "0") != "1"
-    and _build_accelerator() in ("cuda", "")
+    and _build_accelerator() in ("cuda", "", "ppu")
     and torch.cuda.is_available()
 ):
     torch.cuda.init()

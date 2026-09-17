@@ -32,10 +32,40 @@ option(FLAGGEMS_KERNEL "Build FlagGems Python kernel wrappers (calls via Python,
 option(BOXING_KERNEL "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 
+# Resolve one accelerator's SDK/toolkit root into a CMake variable.
+#
+#   flagos_resolve_sdk_root(<out_var> <default_path> <vendor_env_name>...)
+#
+# Order: an explicit -D<out_var> (already set) wins, then FLAGOS_SDK_ROOT, then
+# the accelerator's vendor-native environment variable(s), then the default.
+#
+# Vendors export their own name (CUDA_HOME, ASCEND_HOME, MUSA_HOME, TOPS_HOME,
+# METAX_PATH/MACA_PATH, ROCM_PATH, PPU_SDK, ...), so those must keep working --
+# that is what a vendor's own set_env script writes. FLAGOS_SDK_ROOT sits on top
+# as the one uniform override for a script that does not know which vendor is
+# active, so cross-platform automation has a single knob instead of nine.
+function(flagos_resolve_sdk_root out_var default_path)
+  if(DEFINED ${out_var} AND NOT "${${out_var}}" STREQUAL "")
+    return()
+  endif()
+  if(DEFINED ENV{FLAGOS_SDK_ROOT} AND NOT "$ENV{FLAGOS_SDK_ROOT}" STREQUAL "")
+    set(${out_var} "$ENV{FLAGOS_SDK_ROOT}" PARENT_SCOPE)
+    return()
+  endif()
+  foreach(_flagos_sdk_candidate IN LISTS ARGN)
+    if(DEFINED ENV{${_flagos_sdk_candidate}}
+       AND NOT "$ENV{${_flagos_sdk_candidate}}" STREQUAL "")
+      set(${out_var} "$ENV{${_flagos_sdk_candidate}}" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+  set(${out_var} "${default_path}" PARENT_SCOPE)
+endfunction()
+
 if(ACCELERATOR STREQUAL "ascend")
   project(TORCH_FLAGOS CXX C)
 elseif(ACCELERATOR STREQUAL "metax")
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/MetaxEnv.cmake)
+  flagos_resolve_sdk_root(METAX_PATH "/opt/maca" METAX_PATH METAX_HOME MACA_PATH MACA_HOME)
   # MetaX is a CUDA-boxing build: the generated CUDA boxing kernels
   # (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) re-dispatch
   # PrivateUse1 -> CUDA into maca's libtorch_cuda.so. The hand-written mxcc
@@ -91,21 +121,32 @@ elseif(ACCELERATOR STREQUAL "bpu")
   # device/stream stubs) is native, all plain host C++.
   set(FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
   project(TORCH_FLAGOS CXX C)
-else()
-  # PPU rides this branch: it has no accelerator value of its own because it is
-  # built against PPU_SDK/CUDA_SDK, so the CUDA boxing kernels apply unchanged
-  # (see the README's PPU section). It still needs its own bundle dir, since that
-  # libtorch is a local PPU build and not the upstream one. Detected by the SDK
-  # env vars, matching setup.py::_vendor_supplies_triton().
-  if(DEFINED ENV{PPU_SDK} OR DEFINED ENV{PPU_HOME})
+elseif(ACCELERATOR STREQUAL "cuda" OR ACCELERATOR STREQUAL "ppu")
+  # PPU builds against PPU_SDK/CUDA_SDK, so it rides the CUDA toolchain (CUDA
+  # boxing kernels, project(CUDA)); it differs only in the libtorch it bundles
+  # -- a local PPU build, not upstream's. Its own ACCELERATOR value makes it a
+  # first-class chip like every other vendor (previously it was told apart from
+  # cuda by the PPU_SDK environment, i.e. env-based chip detection).
+  if(ACCELERATOR STREQUAL "ppu")
     set(FLAGOS_BUNDLE_LIBDIR "lib_ppu")
-    message(STATUS "PPU SDK detected: bundling libtorch into torch_fl/lib_ppu")
+    message(STATUS "PPU build: CUDA toolchain + bundled PPU libtorch (lib_ppu)")
   endif()
   # project(... CUDA) runs nvcc compiler-id before find_package(CUDAToolkit); conda
   # layouts need CUDAToolkit_ROOT (headers under targets/x86_64-linux/include).
+  #
+  # FLAGOS_SDK_ROOT overrides the toolkit root here too: it is the CUDA toolkit
+  # itself for a cuda build, and PPU_SDK's CUDA_SDK for a ppu build. The
+  # existence check is what makes the candidate usable, so a value that does not
+  # actually hold cuda_runtime.h falls through to CUDA_HOME / conda.
   if(NOT CUDAToolkit_ROOT)
-    if(DEFINED ENV{CUDA_HOME} AND EXISTS "$ENV{CUDA_HOME}/include/cuda_runtime.h")
+    if(DEFINED ENV{FLAGOS_SDK_ROOT} AND EXISTS "$ENV{FLAGOS_SDK_ROOT}/include/cuda_runtime.h")
+      set(CUDAToolkit_ROOT "$ENV{FLAGOS_SDK_ROOT}" CACHE PATH "CUDA toolkit root")
+    elseif(DEFINED ENV{FLAGOS_SDK_ROOT} AND EXISTS "$ENV{FLAGOS_SDK_ROOT}/CUDA_SDK/include/cuda_runtime.h")
+      set(CUDAToolkit_ROOT "$ENV{FLAGOS_SDK_ROOT}/CUDA_SDK" CACHE PATH "CUDA toolkit root")
+    elseif(DEFINED ENV{CUDA_HOME} AND EXISTS "$ENV{CUDA_HOME}/include/cuda_runtime.h")
       set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}" CACHE PATH "CUDA toolkit root")
+    elseif(DEFINED ENV{PPU_SDK} AND EXISTS "$ENV{PPU_SDK}/CUDA_SDK/include/cuda_runtime.h")
+      set(CUDAToolkit_ROOT "$ENV{PPU_SDK}/CUDA_SDK" CACHE PATH "CUDA toolkit root")
     elseif(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}/targets/x86_64-linux/include/cuda_runtime.h")
       set(CUDAToolkit_ROOT "$ENV{CONDA_PREFIX}/targets/x86_64-linux" CACHE PATH "CUDA toolkit root")
     endif()
@@ -118,6 +159,10 @@ else()
     endif()
   endif()
   project(TORCH_FLAGOS CUDA CXX C)
+else()
+  message(FATAL_ERROR
+    "Unknown ACCELERATOR '${ACCELERATOR}'. Expected one of: cuda, ppu, metax, "
+    "ascend, dcu, gcu, musa, bpu, tsingmicro.")
 endif()
 
 include(GNUInstallDirs)
@@ -157,12 +202,7 @@ set(Torch_DIR ${PYTORCH_INSTALL_DIR}/share/cmake/Torch)
 
 if(ACCELERATOR STREQUAL "ascend")
   # Huawei CANN SDK
-  if(NOT ASCEND_HOME)
-    set(ASCEND_HOME "$ENV{ASCEND_HOME}")
-  endif()
-  if(NOT ASCEND_HOME)
-    set(ASCEND_HOME "/usr/local/Ascend/ascend-toolkit/latest")
-  endif()
+  flagos_resolve_sdk_root(ASCEND_HOME "/usr/local/Ascend/ascend-toolkit/latest" ASCEND_HOME)
   message(STATUS "Huawei CANN SDK path: ${ASCEND_HOME}")
 
   set(VENDOR_KERNEL ON CACHE BOOL "Build the ACCELERATOR vendor's native kernels" FORCE)
@@ -202,16 +242,8 @@ elseif(ACCELERATOR STREQUAL "tsingmicro")
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
 elseif(ACCELERATOR STREQUAL "dcu")
-  # Hygon DTK. DTK_ROOT defaults to /opt/dtk (ROCM_PATH is what env.sh exports).
-  if(NOT DTK_ROOT)
-    set(DTK_ROOT "$ENV{DTK_ROOT}")
-  endif()
-  if(NOT DTK_ROOT)
-    set(DTK_ROOT "$ENV{ROCM_PATH}")
-  endif()
-  if(NOT DTK_ROOT)
-    set(DTK_ROOT "/opt/dtk")
-  endif()
+  # Hygon DTK. ROCM_PATH is what the DTK env.sh exports.
+  flagos_resolve_sdk_root(DTK_ROOT "/opt/dtk" DTK_ROOT ROCM_PATH)
   message(STATUS "Hygon DTK path: ${DTK_ROOT}")
 
   # DTK's CUDA compatibility toolkit. Its libcudart.so.12 is a shim over
@@ -265,12 +297,7 @@ elseif(ACCELERATOR STREQUAL "dcu")
   # (guard: if(TARGET torch::cudart) return()).
 elseif(ACCELERATOR STREQUAL "gcu")
   # Enflame TopsRider SDK: tops runtime (libtopsrt) + topsaten operator library.
-  if(NOT TOPS_ROOT)
-    set(TOPS_ROOT "$ENV{TOPS_HOME}")
-  endif()
-  if(NOT TOPS_ROOT)
-    set(TOPS_ROOT "/opt/tops")
-  endif()
+  flagos_resolve_sdk_root(TOPS_ROOT "/opt/tops" TOPS_HOME)
   message(STATUS "Enflame TopsRider SDK path: ${TOPS_ROOT}")
 
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
@@ -320,12 +347,7 @@ elseif(ACCELERATOR STREQUAL "musa")
   # (unlike MetaX/DCU), so nothing pretends to be CUDA -- cuda_runtime_compat
   # points at the native musa* headers and libmusart, and the runtime sources
   # under csrc/runtime/accelerator/musa/ call musaMalloc/musaStreamCreate/etc.
-  if(NOT MUSA_HOME)
-    set(MUSA_HOME "$ENV{MUSA_HOME}")
-  endif()
-  if(NOT MUSA_HOME)
-    set(MUSA_HOME "/usr/local/musa")
-  endif()
+  flagos_resolve_sdk_root(MUSA_HOME "/usr/local/musa" MUSA_HOME)
   if(NOT EXISTS "${MUSA_HOME}/include/musa_runtime.h")
     message(FATAL_ERROR
         "ACCELERATOR=musa selected, but the MUSA toolkit was not found "
@@ -408,22 +430,10 @@ elseif(ACCELERATOR STREQUAL "bpu")
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
 elseif(ACCELERATOR STREQUAL "metax")
-  # MetaX SDK: use cu-bridge headers and runtime_cu library
-  if(NOT METAX_PATH)
-    set(METAX_PATH "$ENV{METAX_PATH}")
-  endif()
-  if(NOT METAX_PATH)
-    set(METAX_PATH "$ENV{METAX_HOME}")
-  endif()
-  if(NOT METAX_PATH)
-    set(METAX_PATH "$ENV{MACA_PATH}")
-  endif()
-  if(NOT METAX_PATH)
-    set(METAX_PATH "$ENV{MACA_HOME}")
-  endif()
-  if(NOT METAX_PATH)
-    set(METAX_PATH "/opt/maca")
-  endif()
+  # MetaX SDK: use cu-bridge headers and runtime_cu library.
+  # METAX_PATH was resolved in the metax branch above (METAX_PATH ->
+  # METAX_HOME -> MACA_PATH -> MACA_HOME -> /opt/maca, with FLAGOS_SDK_ROOT on
+  # top), so it is reported here for the build log.
   message(STATUS "MetaX SDK path: ${METAX_PATH}")
 
   # The maca runtime (mcblas/mcdnn/...) comes from the target's /opt/maca driver
@@ -573,7 +583,7 @@ if(FLAGGEMS_CPP)
   message(STATUS "FlagGems liboperators RPATH: ${_flaggems_libdir}")
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
 elseif(ACCELERATOR STREQUAL "metax")
-  message(STATUS "MetaX build: native runtime + CUDA boxing kernels (host g++, no mxcc/FlagGems)")
+  message(STATUS "MetaX build: CUDA boxing kernels + bundled maca libtorch (no native mxcc)")
 endif()
 
 if(DEFINED PYTHON_INCLUDE_DIR)

@@ -161,7 +161,7 @@ Add operator correctness tests for `torch.nn.functional.gelu` on the MetaX backe
 Hardware: MetaX C550  
 SDK: MACA 2.8.0  
 PyTorch: 2.6.0  
-torch_fl build: `ACCELERATOR=metax VENDOR_KERNEL=ON`
+torch_fl build: `ACCELERATOR=metax` (boxing; `VENDOR_KERNEL=OFF` is forced)
 
 Commands:
 ```bash

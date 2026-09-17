@@ -128,6 +128,12 @@ endif()
 # there). This replaces the old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
 # switches, which could never be meaningfully combined anyway -- exactly one
 # vendor is ever enabled per build.
+#
+# MetaX's directory is retired: the hand-written mxcc kernels are no longer
+# built (MetaX is a CUDA-boxing vendor now), so the whole dir is excluded even
+# when VENDOR_KERNEL is ON. The sources stay on disk for a future move away
+# from boxing; cmake/MetaxKernels.cmake, the mxcc build driver they needed, is
+# gone.
 if(NOT VENDOR_KERNEL)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(metax|ascend|gcu|musa)/.*")
   message(STATUS "VENDOR_KERNEL=OFF: no vendor native kernels")
@@ -141,7 +147,7 @@ else()
 endif()
 
 if(ACCELERATOR STREQUAL "metax")
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*\\.cu$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*")
 endif()
 
 # Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
@@ -199,12 +205,6 @@ if(NOT _needs_python_op_caller)
 endif()
 
 set(_torch_fl_sources ${SOURCE_FILES})
-
-if(ACCELERATOR STREQUAL "metax" AND VENDOR_KERNEL)
-  include(${CMAKE_SOURCE_DIR}/cmake/MetaxKernels.cmake)
-  flagos_add_metax_kernel_objects(_flagos_metax_kernel_objs)
-  list(APPEND _torch_fl_sources ${_flagos_metax_kernel_objs})
-endif()
 
 add_library(${LIBRARY_NAME} SHARED ${_torch_fl_sources})
 set_target_properties(${LIBRARY_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

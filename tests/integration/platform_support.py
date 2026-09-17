@@ -28,7 +28,7 @@ from pathlib import Path
 def detect_platform() -> str:
     """Return the active hardware platform using the integration conventions."""
     accelerator = os.environ.get("ACCELERATOR", "").lower()
-    if accelerator in {"ascend", "dcu", "metax", "maca", "musa", "gcu"}:
+    if accelerator in {"ascend", "dcu", "metax", "maca", "musa", "gcu", "ppu"}:
         return "metax" if accelerator == "maca" else accelerator
     if os.environ.get("PPU_SDK") or os.environ.get("PPU_HOME"):
         return "ppu"

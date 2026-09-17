@@ -12,30 +12,40 @@ wins over both via the generic pass-through.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu` |
-| `VENDOR_KERNEL` | Build | `ON` | Build the `ACCELERATOR` vendor's native kernels (no-op where the vendor ships none: `cuda`, `dcu`, `tsingmicro`, `bpu`). `setup.py` forces `OFF` for metax boxing builds |
+| `ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu` |
+| `VENDOR_KERNEL` | Build | `ON` | Build the `ACCELERATOR` vendor's native kernels (no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `tsingmicro`, `bpu`; MetaX's native dir is retired and excluded). `setup.py` forces `OFF` for MetaX |
 | `FLAGGEMS_KERNEL` | Build | `ON` | FlagGems integration: Python kernel wrappers (calls via Python, no C++ linking); set `OFF` for a slim pure-boxing build |
-| `BOXING_KERNEL` | Build | `ON` | CUDA Boxing integration: generated boxing kernels for CUDA-ABI vendors (libtorch extracted from the vendor torch package); `setup.py` forces `OFF` for `gcu`/`musa`, which have no CUDA runtime |
+| `BOXING_KERNEL` | Build | `ON` | CUDA Boxing integration: generated boxing kernels for CUDA-ABI vendors (libtorch extracted from the vendor torch package); `setup.py` forces `OFF` for `ascend`/`gcu`/`musa`, which have no CUDA runtime |
 | `FLAGGEMS_CPP` | Build | `ON` | Enable the FlagGems C++ wrapper (`cpp_wrapper`): links `liboperators.so`; `setup.py` forces `OFF` unless a vendor-built FlagGems is pointed at via `FLAGGEMS_DIR` |
 | `TILEOPS_KERNEL` | Build | `ON` on CUDA, forced `OFF` elsewhere | TileOps kernel wrappers; `setup.py` forces `OFF` for non-CUDA builds |
 | `FLAGOS_BUILD_JOBS` | Build | System CPU count | Parallel jobs for CMake build |
 
 ## SDK and Compiler Discovery
 
-These variables locate platform SDKs and toolchains. CMake searches common install paths when they are absent.
+These variables locate platform SDKs and toolchains. Only the active
+`ACCELERATOR`'s entries apply; CMake falls back to a built-in default when the
+environment sets none.
+
+`FLAGOS_SDK_ROOT` is the one uniform override: it stands in for whichever SDK
+root the active accelerator uses, so a script that does not know which vendor is
+on the machine has a single knob. The vendor-native names below keep working
+underneath it, because that is what a vendor's own `set_env` script exports.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `CUDA_HOME` | Build & runtime | Auto-detected (system CUDA or conda prefix) | CUDA toolkit path for headers and libraries |
+| `FLAGOS_SDK_ROOT` | Build | No default | Override the active accelerator's SDK/toolkit root (uniform across vendors) |
+| `CUDA_HOME` | Build & runtime | Auto (system CUDA, else `$CONDA_PREFIX/targets/x86_64-linux`) | CUDA toolkit root for `ACCELERATOR=cuda` and `ppu` |
 | `ASCEND_HOME` | Build | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit path for Ascend NPU builds |
 | `MUSA_HOME` | Build | `/usr/local/musa` | Moore Threads MUSA toolkit path |
 | `TOPS_HOME` | Build | `/opt/tops` | Enflame TopsRider SDK path for GCU builds |
-| `METAX_PATH` | Build | `/opt/maca` or `$METAX_HOME` or `$MACA_PATH` or `$MACA_HOME` (first found) | MetaX SDK path |
-| `METAX_ARCH` | Build | No global default | MetaX GPU architecture string (e.g., `mp_21`) |
-| `METAX_MXCC` | Build | No global default | Path to mxcc/cucc compiler override |
-| `DTK_ROOT` | Build | `$ROCM_PATH` or `/opt/dtk` | Hygon DTK path for DCU builds |
-| `PPU_SDK` / `PPU_HOME` | Build | No global default | PPU SDK path for Tsingmicro builds |
-| `CONDA_PREFIX` | Build & runtime | Auto-detected | Conda environment prefix (fallback for CUDA discovery) |
+| `METAX_PATH` (`METAX_HOME`, `MACA_PATH`, `MACA_HOME` fallbacks) | Build | `/opt/maca` | MetaX SDK path |
+| `DTK_ROOT` (`ROCM_PATH` fallback) | Build | `/opt/dtk` | Hygon DTK path for DCU builds |
+| `PPU_SDK` (`PPU_HOME` fallback) | Build | No default | PPU SDK path; its CUDA toolkit is `$PPU_SDK/CUDA_SDK` |
+| `CONDA_PREFIX` | Build & runtime | Auto-detected | Conda environment prefix (CUDA discovery fallback) |
+| `TOPSATEN_LIB` | Build | Discovered under `$TOPS_HOME` | Enflame topsaten library override |
+| `MUDNN_LIB` / `MURAND_LIB` | Build | Discovered under `$MUSA_HOME/lib` | MUSA kernel-library overrides |
+| `TRITON_GCU_PATH` | Runtime | `/opt/triton_gcu` | Vendor Triton/compiler root for GCU |
+| `FLAGGEMS_DIR` / `FLAGGEMS_SOURCE_DIR` | Build | Auto-detected from the installed `flag_gems` | FlagGems CMake config directory (`FlagGemsConfig.cmake`) |
 
 ## Operator Routing
 
@@ -45,7 +55,7 @@ These variables control which backend implementation (CUDA boxing, vendor C++, F
 |----------|-------|---------|---------|
 | `FLAGOS_BACKEND_CONFIG` | Runtime | Derived from the build record (`_build_config.py` + `lib/flagos_platform`) | Absolute path to a `backends_*.conf` file; overrides auto-detection |
 | `FLAGOS_USE_FLAGGEMS` | Retired (no-op) | — | Removed: routing is stated per op in `backends_<platform>.conf` (FlagGems first, vendor fallback, CPU fallback). `ALL_USE_FLAGGEMS=1` / `ALL_USE_VENDOR=1` collapse the table onto one backend family for A/B measurement; the dispatcher raises instead of falling back when the resolved backend has no compiled implementation |
-| `FLAGOS_USE_FLAGGEMS_CPP` | Runtime | `0` (off) | Enable FlagGems C++ operators (kFlagOs dispatch, no GIL); selects `backends_flaggems_cpp.conf`; requires wheel built with `FLAGGEMS_KERNEL=ON` |
+| `FLAGOS_USE_FLAGGEMS_CPP` | Runtime | `0` (off) | Enable FlagGems C++ operators (kFlagOs dispatch, no GIL); requires a wheel built with `FLAGGEMS_CPP=ON` |
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
 | `FLAGOS_LOG_DISPATCH` | Runtime | `0` (off) | Print backend selection to stderr for each operator dispatch |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Disable FlagGems Python-layer registration (C++ stub-only mode) |

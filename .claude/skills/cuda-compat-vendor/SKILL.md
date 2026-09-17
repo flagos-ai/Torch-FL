@@ -75,7 +75,7 @@ Three shapes exist, in increasing order of work:
 |---|---|---|---|
 | SDK ships a `libcudart` shim, `cuda_runtime.h` compiles | Hygon DCU (DTK) | **reuses `accelerator/cuda/*.cc` verbatim** — no vendor dir | none |
 | CUDA-compatible SDK, own detection | PPU | reuses `cuda` sources, `ACCELERATOR=cuda` + `PPU_SDK` detection | none |
-| CUDA-compatible but needs a shim layer | MetaX (cu-bridge/mxcc) | `accelerator/metax/` incl. `cudart_shim.c` + a `.version` script | none |
+| CUDA-compatible but needs a shim layer | MetaX (cu-bridge) | `accelerator/metax/` incl. `cudart_shim.c` + a `.version` script | none |
 
 Read `csrc/runtime/accelerator/CMakeLists.txt` for how each is wired; DCU's
 branch (which globs `cuda/*.cc` from a non-cuda ACCELERATOR) is the cleanest

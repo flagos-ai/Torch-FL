@@ -15,24 +15,25 @@
 
 # PPU (T-Head Jianwu ZW810E) environment bootstrap for CI.
 #
-# PPU is a CUDA-ABI boxing backend: ACCELERATOR=cuda, PPU torch is a local
-# USE_CUDA=1 build whose libtorch_cpu.so provides ~2092 undefined symbols of
-# libtorch_fl.so. The stock CPU wheel's core libs must be replaced by the PPU
-# build at import time. This script:
+# PPU is a CUDA-ABI boxing backend with its own ACCELERATOR value: the toolchain
+# is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
+# ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
+# build bundles its libtorch into lib_ppu/. The stock CPU wheel's core libs must
+# be replaced by the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
 #   3. Installs the FlagGems stack into it: FlagTree (the FlagOS triton dist
 #      with the `ppu` backend) and FlagGems master from git.
-#   4. Exports ACCELERATOR=cuda + PPU_SDK + the two CUDA-assets kill switches.
+#   4. Exports ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
 #   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
 #      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
 #
 # Nothing here reads a host bind mount, so the environment is fully reproducible
 # from the image plus this script's indexes.
 #
-# Core replacement itself is automatic at `import torch_fl` time
-# (torch_fl/__init__.py:222-232), gated only on lib_ppu/libtorch_cuda.so
-# existing + ACCELERATOR=cuda. No env var triggers it.
+# Core replacement itself is automatic at `import torch_fl` time, gated on
+# lib_ppu/libtorch_cuda.so existing; the ACCELERATOR value is what selects
+# backends_ppu.conf. No mode env var is involved.
 
 set -euo pipefail
 
@@ -502,21 +503,19 @@ export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
-export ACCELERATOR=cuda
+export ACCELERATOR=ppu
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
 export FLAGOS_PPU_TORCH_LIB="$VENDOR_TORCH_LIB"
 export FLAGOS_WHEEL_LOCAL="${FLAGOS_WHEEL_LOCAL:-ppu}"
 # PPU image ships FlagGems as source only (no built liboperators.so /
-# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGGEMS_CPP) must be
-# off. setup.py's cuda branch does not pass -DFLAGGEMS_CPP=OFF (it assumes a
-# real cuda image has FlagGems C++ installed); the generic env pass-through
-# reads this env and emits -DFLAGGEMS_CPP=OFF, skipping
-# the find_package(FlagGems) gate. Mirrors
-# metax set_env which exports FLAGGEMS_CPP=0 for the same reason. The
-# Python-path kernels (FLAGGEMS_KERNEL) stay at the default ON -- they compile
-# without importing flag_gems, and the FlagGems runtime test step needs them.
+# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGGEMS_CPP) must be off.
+# setup.py's `ppu` branch already forces it OFF; exporting it here keeps the
+# environment consistent for the pre-build assertions and any manual cmake run.
+# The Python-path kernels (FLAGGEMS_KERNEL) stay at the default ON -- they
+# compile without importing flag_gems, and the FlagGems runtime test step needs
+# them.
 export FLAGGEMS_CPP=0
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 

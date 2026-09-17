@@ -5,9 +5,9 @@
 | Platform | Build selector | Execution path | Installation guide |
 |---|---|---|---|
 | NVIDIA CUDA | `ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | [CUDA Installation](../vendors/cuda/installation.md) |
-| MetaX | `ACCELERATOR=metax` | CUDA-boxing reuse via `cu-bridge`/mxcc, or native MetaX kernels | [MetaX Installation](../vendors/metax/installation.md) |
+| MetaX | `ACCELERATOR=metax` | CUDA boxing via `cu-bridge` against the vendor libtorch | [MetaX Installation](../vendors/metax/installation.md) |
 | Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | [Ascend Installation](../vendors/ascend/installation.md) |
-| PPU | `ACCELERATOR=cuda` + `PPU_SDK`/`PPU_HOME` detection | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK | [PPU Installation](../vendors/ppu/installation.md) |
+| PPU | `ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into `lib_ppu/` | [PPU Installation](../vendors/ppu/installation.md) |
 | Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | [DCU Installation](../vendors/dcu/installation.md) |
 | Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64 ops | [GCU Installation](../vendors/gcu/installation.md) |
 | Moore Threads MUSA | `ACCELERATOR=musa` | FlagGems-first Triton kernels, native `mudnn` backend as fallback, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |

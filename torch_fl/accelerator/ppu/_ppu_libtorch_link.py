@@ -14,8 +14,8 @@
 
 """Symlink the PPU libtorch .so into the active (official) torch wheel's lib dir.
 
-PPU builds against ``PPU_SDK/CUDA_SDK``, so ``ACCELERATOR=cuda`` and the CUDA
-boxing kernels apply unchanged.  What differs from a real NVIDIA box is the
+PPU builds against ``PPU_SDK/CUDA_SDK`` with its own ``ACCELERATOR=ppu`` value;
+the CUDA boxing kernels apply unchanged.  What differs from a real NVIDIA box is the
 libtorch: it is a local ``USE_CUDA=1`` source build, not the upstream wheel, and
 it resolves 2092 of ``libtorch_fl.so``'s undefined symbols (``libtorch_cuda.so``
 resolves 0, ``libc10_cuda.so`` 10) -- so the core libs must be swapped in, and

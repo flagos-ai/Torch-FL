@@ -15,13 +15,12 @@
 """Unit coverage for tests/integration/ops/conftest.py platform detection.
 
 The ops gate skips backend-specific tests per detected platform
-(_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend whose build and CI
-deliberately report ACCELERATOR=cuda, so the ACCELERATOR check cannot tell it
-apart -- before it was named here, PPU fell into the "default" bucket and was
-correct only by accident of that bucket's skip set. These tests pin the three
-PPU signals (PPU_SDK / PPU_HOME env, the lib_ppu/ bundle dir, the resolved
-backends_ppu.conf name -- the same signals torch_fl._is_ppu_build() uses) and
-the skip-set parity with "default" that keeps this change behavior-neutral.
+(_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend, but it has its own
+ACCELERATOR value like every other chip; older wheels reported
+ACCELERATOR=cuda and are still recognised through the PPU_SDK / PPU_HOME
+environment or the lib_ppu/ bundle directory. These tests pin the ACCELERATOR
+mapping, the legacy PPU fallbacks, and the skip-set parity with "default" that
+keeps those changes behavior-neutral.
 
 Run: pytest tests/unit/test_ops_conftest_platform.py -v
 """
@@ -106,14 +105,21 @@ def test_accelerator_names_still_map(monkeypatch):
         ("maca", "metax"),
         ("musa", "musa"),
         ("dcu", "dcu"),
+        ("ppu", "ppu"),
     ]:
         monkeypatch.setenv("ACCELERATOR", accelerator)
         assert ops_conftest._detect_platform() == expected
 
 
-def test_ppu_sdk_env_identifies_ppu_despite_cuda_accelerator(monkeypatch):
-    """PPU CI exports ACCELERATOR=cuda (load-bearing for the build); the env
-    signal is what tells the gate apart."""
+def test_ppu_accelerator_identifies_ppu(monkeypatch):
+    """PPU has its own ACCELERATOR value; no SDK probe needed."""
+    monkeypatch.setenv("ACCELERATOR", "ppu")
+    assert ops_conftest._detect_platform() == "ppu"
+
+
+def test_legacy_ppu_sdk_env_identifies_ppu_under_cuda_accelerator(monkeypatch):
+    """A wheel built before PPU had its own ACCELERATOR value reports cuda and
+    carries PPU_SDK; the env signal still tells the gate apart."""
     monkeypatch.setenv("ACCELERATOR", "cuda")
     monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
     assert ops_conftest._detect_platform() == "ppu"
