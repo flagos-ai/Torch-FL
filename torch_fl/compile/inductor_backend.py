@@ -35,6 +35,8 @@ import torch
 import torch.fx
 import torch.cuda
 
+from torch_fl import _env
+
 
 def _patch_native_triton_autotune() -> None:
     """Select the first compiled config without CUDA benchmarking.
@@ -400,7 +402,7 @@ def flagos_compile_backend(
     try:
         from torch._inductor.compile_fx import compile_fx
     except ImportError as e:
-        if os.environ.get("FLAGOS_COMPILE_FALLBACK_EAGER", "0") == "1":
+        if _env.flag("FLAGOS_COMPILE_FALLBACK_EAGER"):
             return gm.forward
         raise RuntimeError(
             "torch._inductor not available. Install torch with inductor support "
@@ -412,7 +414,7 @@ def flagos_compile_backend(
     # FlagTree substitutes itself for triton at install time, so if it is
     # installed inductor already compiles with it and there is nothing to switch
     # on here. This only asserts that, so the flag cannot silently no-op.
-    if os.environ.get("FLAGOS_USE_FLAGTREE", "0") == "1":
+    if _env.flag("FLAGOS_USE_FLAGTREE"):
         from torch_fl.compile.flagtree_shim import require_flagtree
 
         require_flagtree()
@@ -458,7 +460,7 @@ def flagos_compile_backend(
     try:
         return compile_fx(gm, example_inputs, config_patches=config_patches)
     except Exception as e:
-        if os.environ.get("FLAGOS_COMPILE_FALLBACK_EAGER", "0") == "1":
+        if _env.flag("FLAGOS_COMPILE_FALLBACK_EAGER"):
             import warnings
 
             warnings.warn(f"Inductor compilation failed: {e}. Falling back to eager.")

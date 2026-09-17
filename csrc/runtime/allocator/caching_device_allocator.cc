@@ -28,22 +28,18 @@
 #include <c10/util/Exception.h>
 
 #include <algorithm>
-#include <cstdlib>
+#include <flagos_env.h>
 
 namespace c10::flagos {
 
 // Static singleton pointer for the deleter callback.
 CachingDeviceAllocator* CachingDeviceAllocator::instance_ = nullptr;
 
-// Check env var to determine if caching is enabled.
+// Check env var to determine if caching is enabled. Off by an explicit
+// 0/false/off/no; the caching allocator is what the flagos device gets unless
+// somebody asks for the vendor runtime's raw allocator instead.
 bool CachingDeviceAllocator::is_enabled() {
-  static bool enabled = []() {
-    const char* env = std::getenv("FLAGOS_USE_CACHING_ALLOCATOR");
-    if (env && std::string(env) == "0") {
-      return false;
-    }
-    return true;
-  }();
+  static bool enabled = flagos_env::EnvFlag("FLAGOS_USE_CACHING_ALLOCATOR", true);
   return enabled;
 }
 

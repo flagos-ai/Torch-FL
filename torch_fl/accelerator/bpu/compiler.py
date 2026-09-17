@@ -31,25 +31,27 @@ from pathlib import Path
 import torch
 from torch.fx import GraphModule
 
+from torch_fl import _env
+
 log = logging.getLogger("torch_fl.bpu")
 
 # BPU micro-architecture. The BPU is nash-p; nash-e is S100 and nash-m is
 # S100P. Confirmed against the vendor docs and the march string embedded in
 # /opt/hobot/model/bpu/*.hbm.
-DEFAULT_MARCH = os.environ.get("FLAGOS_BPU_MARCH", "nash-p")
+DEFAULT_MARCH = _env.value("FLAGOS_BPU_MARCH", "nash-p")
 
 CACHE_DIR = Path(
-    os.environ.get("FLAGOS_BPU_CACHE", Path.home() / ".cache" / "torch_fl_bpu")
+    _env.path("FLAGOS_BPU_CACHE", str(Path.home() / ".cache" / "torch_fl_bpu"))
 )
 
 # Quantization is on by default: without it hbdk4 keeps conv in float and
 # lowers it to the CPU, so the BPU never runs the heavy work. Set
 # FLAGOS_BPU_QUANTIZE=0 to compile float artifacts (bit-exact, but no speedup).
-QUANTIZE = os.environ.get("FLAGOS_BPU_QUANTIZE", "1") not in ("0", "false", "no")
+QUANTIZE = _env.flag("FLAGOS_BPU_QUANTIZE", True)
 
 # Fallback activation scale for tensors with no calibration entry. int8 symmetric
 # with this scale covers roughly +-6.35, wide enough for post-BN/ReLU activations.
-ACT_SCALE = float(os.environ.get("FLAGOS_BPU_ACT_SCALE", "0.05"))
+ACT_SCALE = float(_env.value("FLAGOS_BPU_ACT_SCALE", "0.05"))
 
 
 class CompileError(RuntimeError):
@@ -59,11 +61,11 @@ class CompileError(RuntimeError):
 # An x86_64 CPython that has hbdk4 installed, run under an emulator on this
 # aarch64 board. hbdk4 ships x86_64-only wheels, so this is the only way to
 # compile on the board itself.
-X86_PYTHON = os.environ.get("FLAGOS_BPU_X86_PYTHON", "")
+X86_PYTHON = _env.value("FLAGOS_BPU_X86_PYTHON", "")
 
 # Explicit emulator override. Useful because the distro box64 is usually too old
 # (see x86_emulator) and a self-built one is not on PATH.
-X86_EMULATOR = os.environ.get("FLAGOS_BPU_X86_EMULATOR", "")
+X86_EMULATOR = _env.value("FLAGOS_BPU_X86_EMULATOR", "")
 
 # Directory holding import-only stand-ins for numba and torch. hbdk4's ONNX
 # entry point imports both unconditionally, but only calls into them for
@@ -74,7 +76,7 @@ X86_EMULATOR = os.environ.get("FLAGOS_BPU_X86_EMULATOR", "")
 #
 # Defaults to <x86 python prefix>/../stubs so a self-contained setup needs no
 # extra configuration; see docs/vendors/bpu/integration.md.
-X86_STUBS = os.environ.get("FLAGOS_BPU_X86_STUBS", "")
+X86_STUBS = _env.value("FLAGOS_BPU_X86_STUBS", "")
 
 _UNSET = object()
 _emulator: tuple[str, ...] | None | object = _UNSET

@@ -130,7 +130,7 @@ def _select_backend_config() -> None:
     before the first op dispatch triggers BackendTable() init; setting it at
     import time (before any flagos tensor op) is well before that.
     """
-    if os.environ.get("FLAGOS_BACKEND_CONFIG"):
+    if _env.value("FLAGOS_BACKEND_CONFIG"):
         return
 
     # A vendor build whose kernels are native (no CUDA boxing) records its
@@ -204,7 +204,7 @@ def _conf_routes_to_flaggems() -> bool:
     flag_gems to fail its own backend discovery on the very ops the conf routes
     to it. Read the conf instead, which is the thing that actually decides.
     """
-    conf = os.environ.get("FLAGOS_BACKEND_CONFIG")
+    conf = _env.value("FLAGOS_BACKEND_CONFIG")
     if not conf or not os.path.exists(conf):
         return False
     try:
@@ -219,7 +219,7 @@ def _conf_routes_to_flaggems() -> bool:
 
 
 # Optional: PyTorch wheels may require libcudart.so.12 version tags on MetaX.
-if os.environ.get("FLAGOS_METAX_CUDART_SHIM", "0") == "1":
+if _env.flag("FLAGOS_METAX_CUDART_SHIM"):
     from torch_fl.accelerator.metax._metax_cudart_shim import ensure_cudart_shim
 
     ensure_cudart_shim()
@@ -307,7 +307,7 @@ def _preload_cuda_assets() -> None:
     import glob
     import importlib.util
 
-    if os.environ.get("FLAGOS_DISABLE_CUDA_ASSETS", "0") == "1":
+    if _env.flag("FLAGOS_DISABLE_CUDA_ASSETS"):
         return
 
     lib_dir = os.path.join(os.path.dirname(__file__), "lib")
@@ -413,7 +413,7 @@ def _validate_dcu_decoupled_runtime() -> None:
     """
     if _build_accelerator() != "dcu":
         return
-    if os.environ.get("FLAGOS_DCU_SKIP_RUNTIME_CHECK", "0") == "1":
+    if _env.flag("FLAGOS_DCU_SKIP_RUNTIME_CHECK"):
         return
 
     from torch_fl.accelerator.dcu._dcu_libtorch_link import vendor_core_mode
@@ -464,7 +464,7 @@ if sys.platform == "win32":
 
 
 # Optional FlagGems-on-MetaX compat (does not patch torch.cuda unless enabled).
-if os.environ.get("FLAGOS_METAX_COMPAT", "0") == "1":
+if _env.flag("FLAGOS_METAX_COMPAT"):
     from torch_fl.accelerator.metax._metax_compat import (  # noqa: E402
         is_metax_available,
         patch_torch_cuda_for_metax,
@@ -850,7 +850,7 @@ def _restore_dcu_hip_version() -> None:
     if getattr(torch.version, "hip", None):
         return  # a real DTK torch is in front; leave its values alone.
 
-    hip_ver = os.environ.get("FLAGOS_DCU_HIP_VERSION", "").strip()
+    hip_ver = _env.value("FLAGOS_DCU_HIP_VERSION", "")
     rocm_ver = ""
     if not hip_ver:
         ver_py = os.path.join(os.path.dirname(__file__), "lib_dcu", "vendor_version.py")
@@ -920,9 +920,8 @@ def _patch_flaggems_codegen_config():
     # Auto-detects MetaX hardware (like DCU does) or triggered by explicit
     # FLAGOS_METAX_COMPAT=1. Must come before the ascend
     # fallback so MetaX never wrongly gets GEMS_VENDOR=ascend.
-    _metax_requested = (
-        _build_accelerator() == "metax"
-        or os.environ.get("FLAGOS_METAX_COMPAT", "0") == "1"
+    _metax_requested = _build_accelerator() == "metax" or _env.flag(
+        "FLAGOS_METAX_COMPAT"
     )
     if _metax_requested and os.environ.get("GEMS_VENDOR") not in ("nvidia", "ascend"):
         from torch_fl.accelerator.metax._metax_compat import (
@@ -993,8 +992,8 @@ def _patch_flaggems_codegen_config():
 
     # --- Generic NVIDIA CUDA branch (default) ---
     if (
-        os.environ.get("FLAGOS_DISABLE_CUDA_SHIM", "0") != "1"
-        and os.environ.get("FLAGOS_METAX_COMPAT", "0") != "1"
+        not _env.flag("FLAGOS_DISABLE_CUDA_SHIM")
+        and not _env.flag("FLAGOS_METAX_COMPAT")
         and _build_accelerator() != "metax"
         and os.environ.get("GEMS_VENDOR") != "ascend"
     ):
@@ -1131,7 +1130,7 @@ _patch_cuda_device_context()
 # PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
 # bundled, so the init works and is what its FlagGems/Triton path relies on.
 if (
-    os.environ.get("FLAGOS_DISABLE_FLAGGEMS_PY", "0") != "1"
+    not _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY")
     and _build_accelerator() in ("cuda", "", "ppu")
     and torch.cuda.is_available()
 ):
@@ -1210,7 +1209,7 @@ def _alias_cuda_to_flagos():
     """
     if torch.cuda.is_available():
         return
-    if os.environ.get("FLAGOS_ALIAS_CUDA", "1").lower() in ("0", "off", "false"):
+    if not _env.flag("FLAGOS_ALIAS_CUDA", True):
         return
 
     # From here on, every "cuda" this process sees is this alias. Anything that
@@ -1622,7 +1621,7 @@ def _register_flaggems_operators():
     """
     global _flaggems_lib, _autograd_lib, _registered_ops
 
-    if os.environ.get("FLAGOS_DISABLE_FLAGGEMS_PY", "0") == "1":
+    if _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY"):
         _registered_ops = []
         return 0
 

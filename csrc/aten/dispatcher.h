@@ -5,7 +5,7 @@
 #include "common.h"
 #include <c10/util/Exception.h>
 #include <cstdio>
-#include <cstdlib>
+#include <flagos_env.h>
 #include <optional>
 #include <string>
 #include <utility>
@@ -147,14 +147,8 @@ class Dispatcher {
 
     // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
     if (!fn) {
-      static const bool strict_flaggems = []() {
-        const char* v = std::getenv("ALL_USE_FLAGGEMS");
-        return v && std::string(v) != "0" && std::string(v) != "";
-      }();
-      static const bool strict_vendor = []() {
-        const char* v = std::getenv("ALL_USE_VENDOR");
-        return v && std::string(v) != "0" && std::string(v) != "";
-      }();
+      static const bool strict_flaggems = flagos_env::EnvFlag("ALL_USE_FLAGGEMS");
+      static const bool strict_vendor = flagos_env::EnvFlag("ALL_USE_VENDOR");
 
       if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
         std::string msg = std::string(op_name_) +
@@ -188,14 +182,8 @@ class Dispatcher {
 
     // Strict mode: ALL_USE_FLAGGEMS / ALL_USE_VENDOR require impl to exist
     if (!fn) {
-      static const bool strict_flaggems = []() {
-        const char* v = std::getenv("ALL_USE_FLAGGEMS");
-        return v && std::string(v) != "0" && std::string(v) != "";
-      }();
-      static const bool strict_vendor = []() {
-        const char* v = std::getenv("ALL_USE_VENDOR");
-        return v && std::string(v) != "0" && std::string(v) != "";
-      }();
+      static const bool strict_flaggems = flagos_env::EnvFlag("ALL_USE_FLAGGEMS");
+      static const bool strict_vendor = flagos_env::EnvFlag("ALL_USE_VENDOR");
 
       if (strict_flaggems && (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
         std::string msg = op_name +
@@ -324,10 +312,7 @@ class Dispatcher {
   }
 
   static void LogDispatch(const std::string& op_name, Backend backend) {
-    static const bool enabled = []() {
-      const char* v = std::getenv("FLAGOS_LOG_DISPATCH");
-      return v && std::string(v) == "1";
-    }();
+    static const bool enabled = flagos_env::EnvFlag("FLAGOS_LOG_DISPATCH");
     if (!enabled) return;
     const char* name;
     switch (backend) {

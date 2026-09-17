@@ -19,6 +19,9 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+
+#include <flagos_env.h>
 
 // Forward declarations to avoid including cupti headers directly.
 // This keeps CUPTI include paths out of the main build and prevents
@@ -224,13 +227,14 @@ struct CuptiShim {
     // override that only applied when nothing was loaded would be dead in the
     // one case it is advertised for (see reportLayoutMismatch's diagnostic).
     void* handle = nullptr;
-    if (const char* override_path = getenv("FLAGOS_CUPTI_LIBRARY")) {
-      handle = dlopen(override_path, RTLD_LAZY | RTLD_LOCAL);
+    const std::string override_path = flagos_env::EnvValue("FLAGOS_CUPTI_LIBRARY");
+    if (!override_path.empty()) {
+      handle = dlopen(override_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
       if (!handle) {
         fprintf(stderr,
                 "[flagos-cupti-shim] FLAGOS_CUPTI_LIBRARY=%s could not be "
                 "loaded: %s\n",
-                override_path, dlerror());
+                override_path.c_str(), dlerror());
       }
     }
 
@@ -312,7 +316,7 @@ struct CuptiShim {
       }
     }
 
-    if (getenv("FLAGOS_CUPTI_SHIM_DEBUG")) {
+    if (flagos_env::EnvFlag("FLAGOS_CUPTI_SHIM_DEBUG")) {
       if (ActivityRegisterCallbacks) {
         fprintf(stderr,
                 "[flagos-cupti-shim] bound cuptiActivityRegisterCallbacks -> %s "

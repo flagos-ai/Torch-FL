@@ -43,8 +43,9 @@ Two entry points:
 """
 
 import ctypes
-import os
 from dataclasses import dataclass, field
+
+from torch_fl import _env
 
 _patched = False
 _cuda_patched = False
@@ -526,7 +527,7 @@ def patch_torch_cuda_for_dcu() -> bool:
     # stack both selects and can execute, so state that up front and let the
     # composite's choice agree with it. FLAGOS_DCU_SDPA_FLASH=1 keeps the fused
     # backends enabled for a stack where DTK's adapter does resolve.
-    if os.environ.get("FLAGOS_DCU_SDPA_FLASH", "0") != "1":
+    if not _env.flag("FLAGOS_DCU_SDPA_FLASH"):
         try:
             torch.backends.cuda.enable_flash_sdp(False)
             torch.backends.cuda.enable_mem_efficient_sdp(False)

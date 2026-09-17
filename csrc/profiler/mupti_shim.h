@@ -18,6 +18,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
+
+#include <flagos_env.h>
 
 #include <musa.h>
 
@@ -81,8 +84,11 @@ struct MuptiShim {
       return ok;
     }
     loaded = true;
+    // An explicitly set but empty FLAGOS_MUPTI_LIBRARY means "unset", so the
+    // built-in names below still get their turn.
+    const std::string override_library = flagos_env::EnvValue("FLAGOS_MUPTI_LIBRARY");
     const char* candidates[] = {
-        std::getenv("FLAGOS_MUPTI_LIBRARY"),
+        override_library.c_str(),
         "libmupti.so",
         "libmupti.so.1.2",
         "/usr/local/musa/lib/libmupti.so",

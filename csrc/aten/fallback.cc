@@ -7,16 +7,12 @@
 #include "fallback.h"
 
 #include <ATen/native/CPUFallback.h>
-#include <cstdlib>
-#include <string>
+#include <flagos_env.h>
 
 namespace at::native::flagos {
 
 void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  static const bool log_enabled = []() {
-    const char* v = std::getenv("FLAGOS_LOG_FALLBACK");
-    return v && std::string(v) != "0";
-  }();
+  static const bool log_enabled = flagos_env::EnvFlag("FLAGOS_LOG_FALLBACK");
   if (log_enabled) {
     fprintf(stderr, "[flagos cpu_fallback] %s\n",
             op.schema().name().c_str());

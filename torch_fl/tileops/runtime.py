@@ -55,6 +55,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 
+from torch_fl import _env
 from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY
 
 __all__ = [
@@ -80,12 +81,12 @@ _available: Optional[bool] = None
 #: just a dict. Beyond the cap, _get stops caching and rebuilds per call: slower
 #: (see the cold-ctor cost in the module docstring), but bounded. Raise it with
 #: FLAGOS_TILEOPS_CACHE_MAX if you have many static shapes and headroom.
-_INSTANCE_CACHE_MAX = int(os.environ.get("FLAGOS_TILEOPS_CACHE_MAX", "512"))
+_INSTANCE_CACHE_MAX = int(_env.value("FLAGOS_TILEOPS_CACHE_MAX", "512"))
 _cache_full_warned = False
 
 
 def _use_l2() -> bool:
-    return os.environ.get("FLAGOS_TILEOPS_USE_L2") == "1"
+    return _env.flag("FLAGOS_TILEOPS_USE_L2")
 
 
 def _disable_frontend_cache() -> bool:
@@ -149,7 +150,7 @@ def is_tileops_available() -> bool:
     # Escape hatch: kill every TileLang cache. Correct but slow (see
     # _disable_frontend_cache), kept for hosts where the targeted fix does not
     # apply. Must precede the tileops import -- TileLang reads it at import time.
-    if os.environ.get("FLAGOS_TILEOPS_DISABLE_ALL_CACHE") == "1":
+    if _env.flag("FLAGOS_TILEOPS_DISABLE_ALL_CACHE"):
         os.environ.setdefault("TILELANG_DISABLE_CACHE", "1")
 
     try:
@@ -209,7 +210,7 @@ def _log_declined(overload: str) -> None:
     kernel is aten's, so this second line is what explains a "-> tileops" log
     line followed by vendor-speed timings.
     """
-    if os.environ.get("FLAGOS_LOG_DISPATCH") == "1":
+    if _env.flag("FLAGOS_LOG_DISPATCH"):
         print(f"[flagos dispatch] {overload} -> cuda (tileops declined)", flush=True)
 
 

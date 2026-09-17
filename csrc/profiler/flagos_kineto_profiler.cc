@@ -30,6 +30,7 @@
 
 #include "flagos_kineto_profiler.h"
 #include "device_tracer.h"
+#include <flagos_env.h>
 
 #include <kineto/ActivityType.h>
 #include <kineto/ILoggerObserver.h>
@@ -50,7 +51,7 @@
 // profiling runs stay quiet.
 namespace {
 inline bool flagos_kineto_debug() {
-  static const bool on = (std::getenv("FLAGOS_KINETO_SHIM_DEBUG") != nullptr);
+  static const bool on = flagos_env::EnvFlag("FLAGOS_KINETO_SHIM_DEBUG");
   return on;
 }
 }  // namespace

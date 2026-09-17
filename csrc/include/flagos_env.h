@@ -30,6 +30,14 @@
 // builds it standalone into libcudart_shim.so for LD_PRELOAD, so it cannot link
 // libtorch_fl.so and keeps its own getenv. It reads only vendor *paths*
 // (MACA_PATH/MACA_HOME), never a boolean, so it is unaffected by the table.
+//
+// The namespace is `flagos_env`, not `flagos`, and that is load-bearing rather
+// than decorative. Almost every caller lives inside `at::native::flagos` or
+// `c10::flagos`, where unqualified lookup of the name `flagos` finds the
+// *enclosing* namespace: `flagos::EnvFlag` there would resolve to
+// at::native::flagos::EnvFlag and fail to compile. `flagos_env` collides with
+// nothing in the tree, so the plain qualification works everywhere. The
+// compile check for this lives in the header's own usage smoke test.
 
 #include <cctype>
 #include <cstdio>
@@ -38,7 +46,7 @@
 #include <initializer_list>
 #include <string>
 
-namespace flagos {
+namespace flagos_env {
 
 // Emit one "[flagos] ..." line to stderr. Warnings name the variable and the
 // value that was rejected, so a misconfiguration is diagnosable from the log
@@ -62,15 +70,18 @@ inline bool EnvRaw(const char* name, std::string* out) {
   return true;
 }
 
-// Case-insensitive compare against a lowercase literal. Names in this header
-// are always lowercase ASCII.
-inline bool EnvIs(const char* raw, const char* lowered) {
-  for (; *raw != '\0' && *lowered != '\0'; ++raw, ++lowered) {
-    char c = *raw;
-    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    if (c != *lowered) return false;
+// Case-insensitive equality. Both sides are folded, so a caller may write the
+// literal either way -- EnvListed("FLAGOS_LOG", "fallback") and
+// EnvListed("FLAGOS_LOG", "Fallback") both match FLAGOS_LOG=dispatch,FALLBACK.
+inline bool EnvIs(const char* raw, const char* want) {
+  for (; *raw != '\0' && *want != '\0'; ++raw, ++want) {
+    char a = *raw;
+    char b = *want;
+    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+    if (a != b) return false;
   }
-  return *raw == '\0' && *lowered == '\0';
+  return *raw == '\0' && *want == '\0';
 }
 
 // Read a boolean switch. 1/true/on/yes are true, 0/false/off/no and an unset or
@@ -96,9 +107,11 @@ inline std::string EnvValue(const char* name, const char* def = "") {
   return EnvRaw(name, &raw) ? raw : std::string(def);
 }
 
-// Read one of `allowed` (case-insensitively). Returns false and writes `def`
-// when the value is unset, and returns false after warning when it is present
-// but not listed -- so a caller can distinguish "not set" from "set wrong".
+// Read one of `allowed` (case-insensitively) into `out`. Returns true when the
+// variable was set -- `out` is then the matching candidate, or `def` after a
+// warning if the value was none of them. Returns false when it was unset, with
+// `out` set to `def`; a caller that needs to distinguish "not set" from "set
+// wrong" reads the return value.
 inline bool EnvChoice(const char* name,
                       std::initializer_list<const char*> allowed,
                       const char* def,
@@ -143,4 +156,4 @@ inline bool EnvListed(const char* name, const char* item) {
   return false;
 }
 
-}  // namespace flagos
+}  // namespace flagos_env

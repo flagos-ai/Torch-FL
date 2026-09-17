@@ -4,13 +4,14 @@
 
 #include <algorithm>
 #include <cstdio>
-
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <flagos_env.h>
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -225,12 +226,11 @@ void ParseConfigInto(const std::string& path,
   }
 }
 
-bool EnvIsOn(const char* name) {
-  const char* v = std::getenv(name);
-  if (!v || !*v) return false;
-  std::string s(v);
-  return s != "0" && s != "off" && s != "OFF" && s != "false" && s != "FALSE";
-}
+// Kept as a named forwarder rather than replaced at every call site so the
+// boolean truth table lives in exactly one place (csrc/include/flagos_env.h).
+// This used to be its own parser -- "anything that is not 0/off/false" -- which
+// disagreed with dispatcher.h's "anything that is not 0".
+bool EnvIsOn(const char* name) { return flagos_env::EnvFlag(name); }
 
 bool IsFlagGems(Backend b) {
   return b == Backend::kFlagGemsCpp || b == Backend::kFlagGems;
@@ -333,8 +333,11 @@ void ApplyTileOpsOptIn(std::unordered_map<std::string, Backend>& table,
 std::unordered_map<std::string, Backend> LoadBackendConfig() {
   std::unordered_map<std::string, Backend> table;
 
-  const char* env = std::getenv("FLAGOS_BACKEND_CONFIG");
-  std::string path = env ? env : DefaultConfigPath();
+  // An explicitly set but empty FLAGOS_BACKEND_CONFIG means "unset", so a shell
+  // idiom like FLAGOS_BACKEND_CONFIG=$EXTRA_CONF falls back to auto-detection
+  // rather than failing to open "".
+  std::string path = flagos_env::EnvValue("FLAGOS_BACKEND_CONFIG");
+  if (path.empty()) path = DefaultConfigPath();
 
   std::unordered_map<std::string, Backend> alt;
   ParseConfigInto(path, table, alt);
@@ -351,8 +354,8 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
       if (c == '.') key += "__";
       else key += c;
     }
-    const char* override_val = std::getenv(key.c_str());
-    if (!override_val) continue;
+    std::string override_val = flagos_env::EnvValue(key.c_str());
+    if (override_val.empty()) continue;
     Backend parsed;
     if (ParseBackendName(override_val, &parsed)) {
       table[op] = parsed;
@@ -360,7 +363,7 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
               BackendName(parsed));
     } else {
       fprintf(stderr, "[flagos] env override: unknown backend '%s' for op '%s', ignored\n",
-              override_val, op.c_str());
+              override_val.c_str(), op.c_str());
     }
   }
 

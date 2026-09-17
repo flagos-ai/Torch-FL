@@ -19,6 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
+
+#include <flagos_env.h>
 
 #if defined(FLAGOS_HAVE_TOPSPTI)
 #include <topspti_activity.h>
@@ -85,8 +88,11 @@ struct TopsptiShim {
       return ok;
     }
     loaded = true;
+    // An explicitly set but empty FLAGOS_TOPSPTI_LIBRARY means "unset", so the
+    // built-in names below still get their turn.
+    const std::string override_library = flagos_env::EnvValue("FLAGOS_TOPSPTI_LIBRARY");
     const char* candidates[] = {
-        std::getenv("FLAGOS_TOPSPTI_LIBRARY"),
+        override_library.c_str(),
         "libtopspti.so",
         "/opt/tops/extras/TOPSPTI/lib64/libtopspti.so",
         "/opt/tops/lib/libtopspti_prof.so",

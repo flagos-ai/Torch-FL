@@ -22,6 +22,7 @@
 #if defined(FLAGOS_HAVE_MSPTI)
 
 #include <mspti.h>
+#include <flagos_env.h>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -53,7 +54,9 @@ constexpr size_t kBufferSize = 8 * 1024 * 1024;
 constexpr uint64_t kMaxPlausibleDurationNs = 3600ull * 1000 * 1000 * 1000;
 
 bool debug_enabled() {
-  static const bool enabled = std::getenv("FLAGOS_MSPTI_DEBUG") != nullptr;
+  // Was "the variable exists", which made FLAGOS_MSPTI_DEBUG=0 turn the
+  // logging ON. The shared truth table reads 1/true/on/yes as on.
+  static const bool enabled = flagos_env::EnvFlag("FLAGOS_MSPTI_DEBUG");
   return enabled;
 }
 

@@ -18,6 +18,7 @@
 
 #include "device_tracer.h"
 #include "cupti_shim.h"
+#include <flagos_env.h>
 
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -53,7 +54,7 @@
 // profiling runs stay quiet (these callbacks fire once per buffer/session).
 namespace {
 inline bool flagos_cupti_debug() {
-  static const bool on = (std::getenv("FLAGOS_CUPTI_SHIM_DEBUG") != nullptr);
+  static const bool on = flagos_env::EnvFlag("FLAGOS_CUPTI_SHIM_DEBUG");
   return on;
 }
 }  // namespace

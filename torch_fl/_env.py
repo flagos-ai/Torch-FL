@@ -422,36 +422,50 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     ),
     # --- BPU compiler -----------------------------------------------------
     "FLAGOS_BPU_MARCH": (
-        SCOPE_BUILD,
-        "No default",
-        "BPU target architecture passed to the vendor compiler",
+        SCOPE_RUNTIME,
+        "nash-p",
+        "BPU micro-architecture. nash-p is the BPU, nash-e the S100 and nash-m "
+        "the S100P",
     ),
-    "FLAGOS_BPU_CACHE": (SCOPE_BUILD, "0 (off)", "Reuse the BPU compiler cache"),
+    "FLAGOS_BPU_CACHE": (
+        SCOPE_RUNTIME,
+        "~/.cache/torch_fl_bpu",
+        "Directory holding the BPU compiler cache",
+    ),
+    "FLAGOS_BPU_QUANTIZE": (
+        SCOPE_RUNTIME,
+        "1 (on)",
+        "Quantize BPU kernels. Without it hbdk4 keeps conv in float and lowers "
+        "it to the CPU, so the BPU never runs the heavy work",
+    ),
     "FLAGOS_BPU_ACT_SCALE": (
-        SCOPE_BUILD,
-        "No default",
-        "BPU quantization activation scale",
+        SCOPE_RUNTIME,
+        "0.05",
+        "Fallback activation scale for tensors with no calibration entry",
     ),
-    "FLAGOS_BPU_QUANTIZE": (SCOPE_BUILD, "0 (off)", "Quantize BPU kernels"),
     "FLAGOS_BPU_MLIR_LIBS": (
-        SCOPE_BUILD,
-        "Auto-discovered",
-        "BPU MLIR plugin libraries",
-    ),
-    "FLAGOS_BPU_X86_EMULATOR": (
-        SCOPE_BUILD,
-        "0 (off)",
-        "Build the BPU x86 emulator path",
+        SCOPE_RUNTIME,
+        "Unset",
+        "Directory of the BPU MLIR plugin libraries (libhbtl.so), preloaded by "
+        "the x86 compile driver",
     ),
     "FLAGOS_BPU_X86_PYTHON": (
-        SCOPE_BUILD,
-        "Auto-discovered",
-        "Python interpreter for the BPU x86 emulator",
+        SCOPE_RUNTIME,
+        "Unset",
+        "An x86_64 CPython with hbdk4 installed, run under an emulator: hbdk4 "
+        "ships x86_64-only wheels",
+    ),
+    "FLAGOS_BPU_X86_EMULATOR": (
+        SCOPE_RUNTIME,
+        "Unset",
+        "BPU x86_64 emulator binary. Useful because the distro box64 is usually "
+        "too old for hbdk4, or the user has one that is not in PATH",
     ),
     "FLAGOS_BPU_X86_STUBS": (
-        SCOPE_BUILD,
-        "Auto-discovered",
-        "Stub libraries for the BPU x86 emulator",
+        SCOPE_RUNTIME,
+        "<x86 python prefix>/../stubs",
+        "Directory of import-only stand-ins for numba and torch, which hbdk4's "
+        "ONNX entry point imports unconditionally",
     ),
 }
 

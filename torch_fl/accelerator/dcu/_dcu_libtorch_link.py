@@ -58,6 +58,7 @@ The DTK driver stack (``libgalaxyhip.so.5``, ``libMIOpen.so.1``,
 import ctypes
 import os
 
+from torch_fl import _env
 from torch_fl.accelerator._vendor_libtorch import (
     active_torch_lib,
     bundled_lib_dir,
@@ -149,12 +150,7 @@ _preloaded = False
 
 def vendor_core_mode():
     """True when the legacy vendor-core (symlink) path is requested."""
-    return os.environ.get("FLAGOS_DCU_VENDOR_CORE", "0").lower() in (
-        "1",
-        "on",
-        "true",
-        "yes",
-    )
+    return _env.flag("FLAGOS_DCU_VENDOR_CORE")
 
 
 def _bundled_dcu_lib():

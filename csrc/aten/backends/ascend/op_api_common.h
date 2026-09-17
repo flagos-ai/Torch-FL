@@ -8,6 +8,7 @@
 
 #include <ATen/ATen.h>
 #include <dlfcn.h>
+#include <flagos_env.h>
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
@@ -439,10 +440,7 @@ GetExecCache() {
 
 // --- optional hit/miss stats (FLAGOS_CACHE_STATS=1) --------------------------
 inline bool CacheStatsEnabled() {
-  static const bool on = [] {
-    const char* e = std::getenv("FLAGOS_CACHE_STATS");
-    return e && e[0] == '1';
-  }();
+  static const bool on = flagos_env::EnvFlag("FLAGOS_CACHE_STATS");
   return on;
 }
 
