@@ -60,4 +60,8 @@ at::Tensor _conj(const at::Tensor& self);
 
 at::Tensor _neg_view(const at::Tensor& self);
 
+at::Tensor view_as_real(const at::Tensor& self);
+
+at::Tensor view_as_complex(const at::Tensor& self);
+
 } // namespace at::native::flagos

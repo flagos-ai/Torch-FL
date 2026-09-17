@@ -7,7 +7,10 @@
 #include "strided_ops.h"
 #include "generated/ops.h"
 
+#include <ATen/EmptyTensor.h>
 #include <ATen/native/Resize.h>
+#include <c10/core/Allocator.h>
+#include <c10/core/DeviceGuard.h>
 #include <ATen/ops/transpose_native.h>
 #include <ATen/ops/permute_native.h>
 #include <ATen/ops/select_native.h>
@@ -22,6 +25,8 @@
 #include <ATen/ops/unfold_native.h>
 #include <ATen/ops/_conj_native.h>
 #include <ATen/ops/_neg_view_native.h>
+#include <ATen/ops/view_as_real_native.h>
+#include <ATen/ops/view_as_complex_native.h>
 
 namespace at::native::flagos {
 
@@ -38,12 +43,80 @@ at::Tensor as_strided(
   return at::native::as_strided_tensorimpl(self, int_size, int_stride, int_offset);
 }
 
+namespace {
+
+// Grow `self`'s storage to hold `size` contiguous elements, the way
+// at::native::maybe_resize_storage_cpu does -- except for how the old contents
+// are moved.
+//
+// Reaching at::native::resize_ with a flagos tensor lands in
+// maybe_resize_storage_cpu -> resize_bytes_cpu. That helper allocates the new
+// block through the storage's own allocator, which is correct here (a flagos
+// storage carries the PrivateUse1 allocator), but then moves the existing
+// bytes with a **host** memcpy: `libtorch_cpu.so+0x2164723: call memcpy@plt`,
+// called from resize_bytes_cpu+0x168 (objdump, plus the SIGSEGV register dump
+// in /tmp/bt_segv2.py). The bytes of a flagos storage live in HBM, so the
+// first load of that copy faults. It is why growing a tensor that already has
+// content segfaults while growing one from empty does not -- with an empty new
+// shape the helper returns before it allocates or copies anything, and a
+// shrink or an unchanged shape never gets that far.
+//
+// CUDA does not have this problem because it has its own Resize.h with
+// maybe_resize_storage_cuda / resize_bytes_cuda, which performs that copy with
+// cudaMemcpy. This is the same two steps -- allocate, then move the bytes
+// through the backend -- written with the allocator's copy_data, which is the
+// device memcpy (CachingDeviceAllocator::copy_data -> MemcpyDeviceToDevice).
+//
+// Called before at::native::resize_ so that the shape update ATen performs
+// afterwards finds the storage already large enough and never enters
+// resize_bytes_cpu.
+void maybe_resize_storage_flagos(const at::Tensor& self, c10::IntArrayRef size) {
+  auto* self_ = self.unsafeGetTensorImpl();
+  const size_t new_size_bytes = at::detail::computeStorageNbytesContiguous(
+      size,
+      self_->dtype().itemsize(),
+      static_cast<size_t>(self_->storage_offset()));
+  // A zero-element requirement needs no storage, and computing one from a
+  // non-zero storage_offset would be wrong for it (ATen bails on the same
+  // condition -- on the new numel -- in maybe_resize_storage_cpu).
+  if (new_size_bytes == 0) {
+    return;
+  }
+  const c10::Storage& storage = self_->unsafe_storage();
+  TORCH_CHECK(storage, "Cannot resize a flagos tensor that has no storage");
+  if (new_size_bytes <= storage.nbytes()) {
+    return;
+  }
+  c10::StorageImpl* storage_impl = storage.unsafeGetStorageImpl();
+  TORCH_CHECK(
+      storage_impl->resizable(), "Trying to resize storage that is not resizable");
+  c10::Allocator* allocator = storage_impl->allocator();
+  TORCH_CHECK(
+      allocator != nullptr, "Trying to resize storage without an allocator");
+  // The block pool resolves the device to allocate from at call time, from the
+  // current one, and allocate() installs no guard of its own -- empty_strided
+  // pays for the same guard. Growth is rare enough that the guard costs
+  // nothing measurable here.
+  const c10::DeviceGuard device_guard(self.device());
+  c10::DataPtr new_data = allocator->allocate(new_size_bytes);
+  if (storage.nbytes() > 0) {
+    allocator->copy_data(new_data.get(), storage.data(), storage.nbytes());
+  }
+  storage_impl->set_data_ptr_noswap(std::move(new_data));
+  storage_impl->set_nbytes(new_size_bytes);
+}
+
+} // namespace
+
 const at::Tensor& resize_(
     const at::Tensor& self,
     c10::SymIntArrayRef size,
     ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::resize_(
-      self, C10_AS_INTARRAYREF_SLOW(size), memory_format);
+  auto int_size = C10_AS_INTARRAYREF_SLOW(size);
+  // Grow on the device first: at::native::resize_ is the CPU implementation,
+  // and growing from inside it host-memcpys the device contents (see above).
+  maybe_resize_storage_flagos(self, int_size);
+  return at::native::resize_(self, int_size, memory_format);
 }
 
 at::Tensor _reshape_alias(
@@ -154,6 +227,32 @@ at::Tensor _neg_view(const at::Tensor& self) {
   return at::native::_neg_view(self);
 }
 
+// view_as_real / view_as_complex reinterpret the last dimension as a complex
+// scalar (or the reverse) without touching storage: sizes, strides and dtype are
+// recomputed in at::native's ComplexHelper.h and the result is built over self's
+// own storage. There is no topsaten entry point for either and there cannot be
+// one -- the op moves no data -- so scripts/codegen/codegen_gcu.py cannot
+// generate a kernel for them (every category template ends in a topsaten::
+// call) and lists them in METADATA_OPS instead, which is what puts them in
+// gcu_register.inc and routes them here.
+//
+// Registering them matters beyond coverage: a view op that reaches cpu_fallback
+// is *copied*, so the result silently stops aliasing the input, and the Qwen-
+// Image RoPE path calls each of these 488 times per denoise step (19.3 ms and
+// 18.5 ms per call at (1, 4096, 24, 128) -- the two largest remaining host
+// round trips on the S60). Like the ops above, at::native:: avoids
+// re-dispatching back through PrivateUse1 into this same kernel.
+//
+// No dtype guard: the complex reinterpretation is metadata, so it is correct for
+// every real dtype the dispatcher accepts, and the tensor stays on flagos.
+at::Tensor view_as_real(const at::Tensor& self) {
+  return at::native::view_as_real(self);
+}
+
+at::Tensor view_as_complex(const at::Tensor& self) {
+  return at::native::view_as_complex(self);
+}
+
 // View ops are pure metadata (stride) operations; they route through the
 // generated dispatchers but need a backend kernel registered. Register them
 // for the Ascend backend so the generated wrappers in register.inc resolve.
@@ -240,5 +339,21 @@ REGISTER_IMPL_TO_DISPATCHER(
     priv_neg_view_dispatcher,
     Backend::kAscend,
     _neg_view)
+
+// The two complex views are registered for GCU only. Ascend has the identical
+// gap in its conf (both ops route to `none`), but that platform was not
+// revalidated for this change, so its routing is left as it stands rather than
+// widened from a measurement taken on the S60.
+REGISTER_IMPL_TO_DISPATCHER(
+    ViewAsRealFn,
+    view_as_real_dispatcher,
+    Backend::kGcu,
+    view_as_real)
+
+REGISTER_IMPL_TO_DISPATCHER(
+    ViewAsComplexFn,
+    view_as_complex_dispatcher,
+    Backend::kGcu,
+    view_as_complex)
 
 } // namespace at::native::flagos
