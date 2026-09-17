@@ -1958,9 +1958,11 @@ and key spellings changed. **The MetaX distribution was superseded on
 lost `mul_.Tensor` to `cuda` when that op left the coverage set.
 
 The `flaggems_cpp` key is emitted **only** in `backends_metax.conf`. That slot
-is `Backend::kFlagOs`, registered behind `#ifdef FLAGOS_FLAGGEMS_CPP`, which is
-defined only for a `FLAGGEMS_KERNEL=ON` build; `CMakeLists.txt` force-sets it
-`OFF` for ascend, dcu, musa, bpu, tsingmicro and non-boxing metax. When a build
+is `Backend::kFlagGemsCpp`, registered behind `#ifdef FLAGOS_FLAGGEMS_CPP`, which
+`csrc/CMakeLists.txt` defines only for a `FLAGOS_BUILD_FLAGGEMS_CPP=ON` build.
+That switch defaults ON for cuda and tsingmicro and OFF everywhere else, and
+`CMakeLists.txt` pins it OFF for dcu, musa and bpu because the path needs
+FlagGems' `liboperators.so` built for that vendor's own toolkit. When a build
 without that slot reads a `flaggems_cpp` entry, `Dispatcher::GetFn` degrades to
 the boxing kernel instead of raising, so the file is safe for both opt-in and
 plain boxing builds. No coverage is lost: the C++ op set is a subset of the

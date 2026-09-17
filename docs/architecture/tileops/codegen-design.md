@@ -194,7 +194,7 @@ Reuse the existing machinery, adding `Backend::kTileOps`:
 The C++ kernels are generated into
 `csrc/aten/generated/tileops_python_kernels.cc` (section 3.4a), so a route set
 to `= tileops` in the conf lands in a real `tileops_fn_` slot. An empty slot
-still means fallback, which is what a build with `TILEOPS_KERNEL=OFF` (every
+still means fallback, which is what a build with `FLAGOS_BUILD_TILEOPS=OFF` (every
 non-CUDA accelerator, since TileOPs is SM90 NVIDIA-only) produces.
 
 Because the decision is made in `dispatcher.h` rather than in Python,
@@ -623,7 +623,7 @@ that is conf'd to `tileops` on a box without TileOPs therefore still enters the
 stub and crosses into Python before falling back -- correct, and the extra ~1 us
 only affects a misconfigured host.
 
-Build-side gating is separate: `TILEOPS_KERNEL` (CMake) defaults ON for CUDA and
+Build-side gating is separate: `FLAGOS_BUILD_TILEOPS` (CMake) defaults ON for CUDA and
 OFF for every other accelerator in `setup.py`, since TileOPs is SM90 NVIDIA-only.
 With it OFF, `tileops_fn_` is never populated and the dispatcher falls through.
 

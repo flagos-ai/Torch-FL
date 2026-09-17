@@ -33,7 +33,7 @@ with no accelerated implementation:
 
     flaggems_cpp > flaggems > tileops > <vendor> > none
 
-`flaggems_cpp` is only emitted for the confs a FLAGGEMS_KERNEL=ON build selects
+`flaggems_cpp` is only emitted for the confs a FLAGOS_BUILD_FLAGGEMS=ON build selects
 (see FLAGGEMS_CPP_PLATFORMS); everywhere else those ops take the Python path to
 the same kernels, because the C++ dispatcher slot is not compiled in.
 
@@ -388,13 +388,14 @@ CSRC_DIR = REPO_ROOT / "csrc/aten"
 #
 # That slot is Backend::kFlagGemsCpp, registered in csrc/aten/flaggems_cpp_kernels.cc
 # behind `#ifdef FLAGOS_FLAGGEMS_CPP`, which csrc/CMakeLists.txt defines only for
-# a FLAGGEMS_KERNEL=ON build -- and CMakeLists.txt force-sets FLAGGEMS_KERNEL OFF
-# for ascend, dcu, musa, bpu, tsingmicro and non-boxing metax, because the path
-# needs FlagGems' liboperators.so built for that vendor.
+# a FLAGOS_BUILD_FLAGGEMS_CPP=ON build. That switch defaults ON for cuda and
+# tsingmicro and OFF everywhere else, and CMakeLists.txt pins it OFF for dcu,
+# musa and bpu, because the path needs FlagGems' liboperators.so built for that
+# vendor's toolkit.
 #
 # One platform now means one conf, so a conf can no longer be reserved for the
 # opt-in build that compiles the slot: backends_metax.conf is what every MetaX
-# build reads, with or without FLAGGEMS_KERNEL=ON. The key stays legal there
+# build reads, with or without FLAGOS_BUILD_FLAGGEMS_CPP=ON. The key stays legal there
 # because Dispatcher::GetFn (csrc/aten/dispatcher.h) degrades kFlagGemsCpp to the
 # boxing kernel when the slot is empty, instead of raising "backend not
 # registered". So the 17 measured C++ routes are used when a MACA-built FlagGems
@@ -1112,7 +1113,7 @@ NATIVE_KERNEL_PREFERRED = set()
 
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
-# setup.py force-sets TILEOPS_KERNEL=OFF for every ACCELERATOR != "cuda" -- so on
+# setup.py force-sets FLAGOS_BUILD_TILEOPS=OFF for every FLAGOS_ACCELERATOR != "cuda" -- so on
 # any other platform the slot is empty, Dispatcher::GetFn degrades kTileOps to
 # cuda_fn_, and on a native-kernel vendor that is empty too. Naming `tileops` in
 # those confs would therefore route a real op at nothing, which is the "backend
@@ -1577,7 +1578,7 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
         "# Values:",
         "#   flaggems_cpp  FlagGems C++ runtime (liboperators.so)",
         "#   flaggems      FlagGems Python/Triton path",
-        "#   tileops       TileOPs Triton shims (needs TILEOPS_KERNEL=ON + SM90)",
+        "#   tileops       TileOPs Triton shims (needs FLAGOS_BUILD_TILEOPS=ON + SM90)",
         f"#   {vendor:<13} {vendor_desc}",
     ]
     if boxing:
@@ -1658,7 +1659,7 @@ def build_all(conf_dir: Path) -> dict:
 
     out = {}
     for vendor in VENDORS:
-        # A vendor build is FLAGGEMS_KERNEL=OFF, so the flaggems_cpp slot has no
+        # A vendor build is FLAGOS_BUILD_FLAGGEMS=OFF, so the flaggems_cpp slot has no
         # kernel -- withhold the key and let those ops take the Python path.
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
         py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()

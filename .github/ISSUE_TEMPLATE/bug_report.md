@@ -22,7 +22,7 @@ assignees: ''
 <!-- Include relevant build flags used -->
 ```bash
 # Example:
-ACCELERATOR=cuda FLAGGEMS_CPP=1 pip install -e .
+FLAGOS_ACCELERATOR=cuda FLAGOS_BUILD_FLAGGEMS_CPP=1 pip install -e .
 ```
 
 ## Runtime Configuration

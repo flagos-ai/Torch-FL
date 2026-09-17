@@ -33,7 +33,7 @@ torch_fl = pytest.importorskip("torch_fl")
 
 pytestmark = pytest.mark.skipif(
     torch_fl._build_accelerator() != "bpu",
-    reason="requires a build with ACCELERATOR=bpu",
+    reason="requires a build with FLAGOS_ACCELERATOR=bpu",
 )
 
 DEV = "flagos"

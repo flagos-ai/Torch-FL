@@ -452,7 +452,7 @@ For hardware support reporting, the Ascend memcpy capability is measured only wh
 
 MUSA uses `csrc/profiler/musa_mupti_device_tracer.cc` and the optional `mupti_shim.h`. The tracer
 keeps MUPTI types and record decoding below the generic `DeviceTracer` boundary, and CMake
-excludes CUPTI, ROCtracer, and MSPTI for `ACCELERATOR=musa`, leaving exactly one factory.
+excludes CUPTI, ROCtracer, and MSPTI for `FLAGOS_ACCELERATOR=musa`, leaving exactly one factory.
 `muptiActivityRegisterCallbacks` and the activity kinds are armed at session start, not shared
 library import, so ordinary MUSA execution does not load the profiler. The buffer callbacks decode
 `MUpti_ActivityKernel6`, `MUpti_ActivityMemcpy4`, `MUpti_ActivityMemset3`, `MUpti_ActivityAPI`,
@@ -476,7 +476,7 @@ Enflame TopsRider SDK ships a CUPTI-shaped tracing interface in
 `/opt/tops/extras/TOPSPTI` (`libtopspti.so`), which delivers kernel, memcpy, memset, runtime,
 and driver records through asynchronous activity buffers. The tracer keeps every TOPSPTI type
 below the generic `DeviceTracer` boundary, and CMake excludes CUPTI, ROCtracer, MSPTI, and
-MUPTI for `ACCELERATOR=gcu`, leaving exactly one `MakeDeviceTracer()` factory.
+MUPTI for `FLAGOS_ACCELERATOR=gcu`, leaving exactly one `MakeDeviceTracer()` factory.
 `topsptiActivityRegisterCallbacks` and the activity kinds are armed when a Kineto session
 starts, not at shared-library import, so ordinary GCU operator processes never load the
 vendor profiler. Records with implausible timestamps are dropped rather than emitted as

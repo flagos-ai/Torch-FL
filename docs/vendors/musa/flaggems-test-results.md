@@ -38,7 +38,7 @@ covered in [flaggems-setup.md](flaggems-setup.md).
 
 4. **Build and install torch_fl**:
    ```bash
-   ACCELERATOR=musa python -m build --wheel --no-isolation
+   FLAGOS_ACCELERATOR=musa python -m build --wheel --no-isolation
    pip install dist/torch_fl-0.1.0-cp310-cp310-linux_x86_64.whl
    ```
 
@@ -51,7 +51,7 @@ covered in [flaggems-setup.md](flaggems-setup.md).
 ### Environment Variables
 ```bash
 export MUSA_HOME=/usr/local/musa
-export ACCELERATOR=musa MUSA_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGGEMS_KERNEL=0
+export FLAGOS_ACCELERATOR=musa MUSA_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGOS_BUILD_FLAGGEMS=0
 export LD_LIBRARY_PATH=/publi-flash/lvyufeng/env/miniconda3/envs/musa_test/lib:/usr/local/musa/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/publi-flash/lvyufeng/PyTorch-Plugin-FL
 ```

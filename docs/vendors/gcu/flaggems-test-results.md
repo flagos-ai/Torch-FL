@@ -81,7 +81,7 @@ pip install packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48'
 The shell used for every run below:
 
 ```bash
-export TOPS_HOME=/opt/tops ACCELERATOR=gcu GCU_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGGEMS_KERNEL=0
+export TOPS_HOME=/opt/tops FLAGOS_ACCELERATOR=gcu GCU_KERNEL=1 FLAGGEMS_PYTHON=1 FLAGOS_BUILD_FLAGGEMS=0
 export PYTHONPATH=/public-flash/lvyufeng/PyTorch-Plugin-FL
 source /public-flash/lvyufeng/venvs/gcu-flagtree/bin/activate
 ```

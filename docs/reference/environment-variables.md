@@ -5,25 +5,25 @@ This document lists configuration variables that control torch_fl's build, opera
 ## Build Selection
 
 These variables control which kernel sets are compiled into the wheel.
-Which chip they apply to is `ACCELERATOR`'s job alone -- there are no
+Which chip they apply to is `FLAGOS_ACCELERATOR`'s job alone -- there are no
 per-chip switches. Defaults below are the CMake defaults; `setup.py` forces
 per-accelerator values (see each branch) and any explicit environment value
 wins over both via the generic pass-through.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu` |
-| `VENDOR_KERNEL` | Build | `ON` | Build the `ACCELERATOR` vendor's native kernels (no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `tsingmicro`, `bpu`; MetaX's native dir is retired and excluded). `setup.py` forces `OFF` for MetaX |
-| `FLAGGEMS_KERNEL` | Build | `ON` | FlagGems integration: Python kernel wrappers (calls via Python, no C++ linking); set `OFF` for a slim pure-boxing build |
-| `BOXING_KERNEL` | Build | `ON` | CUDA Boxing integration: generated boxing kernels for CUDA-ABI vendors (libtorch extracted from the vendor torch package); `setup.py` forces `OFF` for `ascend`/`gcu`/`musa`, which have no CUDA runtime |
-| `FLAGGEMS_CPP` | Build | `ON` | Enable the FlagGems C++ wrapper (`cpp_wrapper`): links `liboperators.so`; `setup.py` forces `OFF` unless a vendor-built FlagGems is pointed at via `FLAGGEMS_DIR` |
-| `TILEOPS_KERNEL` | Build | `ON` on CUDA, forced `OFF` elsewhere | TileOps kernel wrappers; `setup.py` forces `OFF` for non-CUDA builds |
+| `FLAGOS_ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu` |
+| `FLAGOS_BUILD_VENDOR` | Build | `ON` | Build the `FLAGOS_ACCELERATOR` vendor's native kernels (no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `tsingmicro`, `bpu`; MetaX's native dir is retired and excluded). `setup.py` forces `OFF` for MetaX |
+| `FLAGOS_BUILD_FLAGGEMS` | Build | `ON` | FlagGems integration: Python kernel wrappers (calls via Python, no C++ linking); set `OFF` for a slim pure-boxing build |
+| `FLAGOS_BUILD_BOXING` | Build | `ON` | CUDA Boxing integration: generated boxing kernels for CUDA-ABI vendors (libtorch extracted from the vendor torch package); `setup.py` forces `OFF` for `ascend`/`gcu`/`musa`, which have no CUDA runtime |
+| `FLAGOS_BUILD_FLAGGEMS_CPP` | Build | `ON` | Enable the FlagGems C++ wrapper (`cpp_wrapper`): links `liboperators.so`; `setup.py` forces `OFF` unless a vendor-built FlagGems is pointed at via `FLAGGEMS_DIR` |
+| `FLAGOS_BUILD_TILEOPS` | Build | `ON` on CUDA, forced `OFF` elsewhere | TileOps kernel wrappers; `setup.py` forces `OFF` for non-CUDA builds |
 | `FLAGOS_BUILD_JOBS` | Build | System CPU count | Parallel jobs for CMake build |
 
 ## SDK and Compiler Discovery
 
 These variables locate platform SDKs and toolchains. Only the active
-`ACCELERATOR`'s entries apply; CMake falls back to a built-in default when the
+`FLAGOS_ACCELERATOR`'s entries apply; CMake falls back to a built-in default when the
 environment sets none.
 
 Each name is the vendor's own — the one the vendor's `set_env` script writes.
@@ -31,7 +31,7 @@ There are no `FLAGOS_`/`METAX_`-style aliases; one name per vendor.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `CUDA_HOME` | Build & runtime | Auto (system CUDA, else `$CONDA_PREFIX/targets/x86_64-linux`) | CUDA toolkit root for `ACCELERATOR=cuda` and `ppu` |
+| `CUDA_HOME` | Build & runtime | Auto (system CUDA, else `$CONDA_PREFIX/targets/x86_64-linux`) | CUDA toolkit root for `FLAGOS_ACCELERATOR=cuda` and `ppu` |
 | `ASCEND_HOME` | Build | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit path for Ascend NPU builds |
 | `MUSA_HOME` | Build | `/usr/local/musa` | Moore Threads MUSA toolkit path |
 | `TOPS_HOME` | Build | `/opt/tops` | Enflame TopsRider SDK path for GCU builds |
@@ -58,7 +58,7 @@ override or widen that table.
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
 | `ALL_USE_FLAGGEMS` | Runtime | `0` (off) | Collapse the routing table onto the FlagGems backends for A/B measurement. Mutually exclusive with `ALL_USE_VENDOR`. Ops that backend does not implement are reported and left on their configured backend; the dispatcher raises rather than silently falling back |
 | `ALL_USE_VENDOR` | Runtime | `0` (off) | Same, onto the vendor-native backends |
-| `FLAGOS_USE_TILEOPS` | Runtime | `0` (off) | Repin every op the conf annotates `# tileops` onto the TileOps backend. Needs the `tileops` package, an SM90 device, and a `TILEOPS_KERNEL=ON` build. Ignored when `ALL_USE_*` is set, so that measurement stays on one backend |
+| `FLAGOS_USE_TILEOPS` | Runtime | `0` (off) | Repin every op the conf annotates `# tileops` onto the TileOps backend. Needs the `tileops` package, an SM90 device, and a `FLAGOS_BUILD_TILEOPS=ON` build. Ignored when `ALL_USE_*` is set, so that measurement stays on one backend |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Leave the FlagGems Python layer unregistered (C++ stub-only mode) |
 | `FLAGGEMS_SOURCE_DIR` | Runtime | Required when FlagGems is active | Absolute path to FlagGems source directory (Python Triton kernels); must match the version liboperators.so was built against |
 

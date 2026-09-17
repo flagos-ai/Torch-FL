@@ -141,7 +141,7 @@ export FLAGOS_DCU_TORCH_LIB="$VENDOR_TORCH_LIB"
 # vendor wheel instead of hard-coding it.
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$VENDOR_TORCH_BASE_VERSION}"
 
-# FlagGems C++ package is optional for DCU (FLAGGEMS_CPP=OFF in setup.py);
+# FlagGems C++ package is optional for DCU (FLAGOS_BUILD_FLAGGEMS_CPP=OFF in setup.py);
 # the flaggems runtime path uses the DTK triton hcu backend + Python flag_gems.
 # Probe it for CMAKE_PREFIX_PATH but never fail when absent.
 VENDOR_FLAGGEMS_DIR="$("$VENDOR_PYTHON" - <<'PY'
@@ -341,15 +341,15 @@ export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
-export ACCELERATOR=dcu
+export FLAGOS_ACCELERATOR=dcu
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
 # exactly the CUDA-compatible path a kernel library needs here. Mirrors the
-# backend selection set_env_musa.sh performs -- FLAGGEMS_CPP is the C++
+# backend selection set_env_musa.sh performs -- FLAGOS_BUILD_FLAGGEMS_CPP is the C++
 # switch and stays off so nothing tries to rebuild flag_gems
 # against the DCU toolchain.
-export FLAGGEMS_CPP=0
-export FLAGGEMS_KERNEL=1
+export FLAGOS_BUILD_FLAGGEMS_CPP=0
+export FLAGOS_BUILD_FLAGGEMS=1
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 
@@ -604,9 +604,9 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR ROCM_PATH \
+    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ROCM_PATH \
     FLAGOS_DCU_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH \
-    FLAGGEMS_CPP FLAGGEMS_KERNEL \
+    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS \
     CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

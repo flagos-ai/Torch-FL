@@ -2,12 +2,12 @@
 
 ## Overview
 
-Hygon DCU (DTK) reuses the **CUDA boxing route** with a dedicated `ACCELERATOR=dcu` branch. Two properties of the vendor stack enable this:
+Hygon DCU (DTK) reuses the **CUDA boxing route** with a dedicated `FLAGOS_ACCELERATOR=dcu` branch. Two properties of the vendor stack enable this:
 
 - The DCU `torch` wheel is a **hipified** build: it registers HIP kernels under the `CUDA` dispatch key and its tensors report `DeviceType::CUDA` (`torch.version.cuda is None`, `torch.version.hip == '6.3.x'`). Generated PrivateUse1 → CUDA boxing kernels dispatch into `libtorch_hip.so` unchanged.
 - DTK ships a **CUDA compatibility toolkit** at `$ROCM_PATH/cuda/cuda-*` whose `libcudart.so.12` is a thin shim over `libgalaxyhip.so` — the same runtime `libtorch_hip.so` uses. Runtime sources compile as-is with plain host `g++`; no `nvcc`, no `hipcc`, no hipify pass.
 
-The build is **pure boxing**: no vendor kernels (`VENDOR_KERNEL` has no DCU backend directory to enable), the generated PrivateUse1 → CUDA boxing kernels compile by default, FlagGems Python is on by default and only the C++ path stays off (`FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so).
+The build is **pure boxing**: no vendor kernels (`FLAGOS_BUILD_VENDOR` has no DCU backend directory to enable), the generated PrivateUse1 → CUDA boxing kernels compile by default, FlagGems Python is on by default and only the C++ path stays off (`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so).
 
 **Status:** Beta. CI validates vendor-backend and FlagGems-runtime operator suites, general tests, and profiler parity on DCU runners. Inference and training smoke tests are deferred pending model mount and card-count confirmation.
 
@@ -33,17 +33,17 @@ cd PyTorch-Plugin-FL
 # Source DTK environment (exports ROCM_PATH and other variables)
 source /opt/dtk/env.sh
 
-# Build with ACCELERATOR=dcu (pure boxing, no FlagGems by default)
-ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
+# Build with FLAGOS_ACCELERATOR=dcu (pure boxing, no FlagGems by default)
+FLAGOS_ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
 ```
 
 `ROCM_PATH` (what DTK's `env.sh` exports) selects the DTK root; the default is `/opt/dtk`. Pass it explicitly if DTK lives elsewhere.
 
 ### Build Notes
 
-- **`ACCELERATOR=dcu` forces boxing mode:** `VENDOR_KERNEL` has no DCU backend directory and `FLAGGEMS_CPP=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) plus the FlagGems Python path are the kernel sets compiled.
+- **`FLAGOS_ACCELERATOR=dcu` forces boxing mode:** `FLAGOS_BUILD_VENDOR` has no DCU backend directory and `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) plus the FlagGems Python path are the kernel sets compiled.
 - **No `nvcc` or `hipcc` needed:** CUDA runtime sources compile with plain `g++` using DTK's CUDA compatibility toolkit headers.
-- **MIOpen CMake config fix:** DTK's exported MIOpen config bakes in `/usr/lib/x86_64-linux-gnu/librt.so`, which no longer exists on glibc ≥ 2.34 (librt was folded into libc). The `ACCELERATOR=dcu` branch rewrites that dangling path to `-lrt`.
+- **MIOpen CMake config fix:** DTK's exported MIOpen config bakes in `/usr/lib/x86_64-linux-gnu/librt.so`, which no longer exists on glibc ≥ 2.34 (librt was folded into libc). The `FLAGOS_ACCELERATOR=dcu` branch rewrites that dangling path to `-lrt`.
 
 ## Vendor core libraries
 
@@ -66,7 +66,7 @@ Two consequences worth knowing:
 To build the bundle:
 
 ```bash
-ACCELERATOR=dcu python setup.py build_ext --inplace   # builds the ABI shim
+FLAGOS_ACCELERATOR=dcu python setup.py build_ext --inplace   # builds the ABI shim
 bash scripts/vendor/bundle_dcu_libtorch.sh                    # stages DTK's device libs
 ```
 
@@ -208,7 +208,7 @@ See [Profiler Architecture](../../architecture/profiler.md) for details on devic
 FlagGems runs on the `hcu` backend of the FlagTree Triton build, whose `hygon`
 vendor declares `device_name="cuda"` — exactly what the boxing route expects. The
 kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
-`FLAGGEMS_CPP=0` and `FLAGGEMS_KERNEL=1` are the build switches.
+`FLAGOS_BUILD_FLAGGEMS_CPP=0` and `FLAGOS_BUILD_FLAGGEMS=1` are the build switches.
 
 `.github/scripts/set_env_dcu.sh` performs all of the following; routing comes from
 `backends_dcu.conf` itself, so a CI job runs the FlagGems path with no switch
@@ -239,9 +239,9 @@ against the NumPy 1.x ABI.
 ```bash
 source /opt/dtk/env.sh
 
-ACCELERATOR=dcu \
-  FLAGGEMS_CPP=0 \
-  FLAGGEMS_KERNEL=1 \
+FLAGOS_ACCELERATOR=dcu \
+  FLAGOS_BUILD_FLAGGEMS_CPP=0 \
+  FLAGOS_BUILD_FLAGGEMS=1 \
   pip install --no-build-isolation -e .
 ```
 
@@ -253,7 +253,7 @@ export FLAGOS_USE_FLAGGEMS_CPP=0
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 
-A DCU build records `ACCELERATOR=dcu` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `ACCELERATOR` at runtime, and no opt-in variable exists any more.
+A DCU build records `FLAGOS_ACCELERATOR=dcu` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `FLAGOS_ACCELERATOR` at runtime, and no opt-in variable exists any more.
 
 Confirm what the interpreter actually resolved before trusting the flags:
 
@@ -354,7 +354,7 @@ PyTorch's `register_privateuse1_backend` makes `at::getAccelerator()` return `Pr
 
 **Cause:** DTK's MIOpen CMake config references the no-longer-present `/usr/lib/x86_64-linux-gnu/librt.so`.
 
-**Fix:** This is automatically rewritten by the `ACCELERATOR=dcu` branch in `CMakeLists.txt`. If you see this error, verify `ACCELERATOR=dcu` is set and you are using the latest repository code.
+**Fix:** This is automatically rewritten by the `FLAGOS_ACCELERATOR=dcu` branch in `CMakeLists.txt`. If you see this error, verify `FLAGOS_ACCELERATOR=dcu` is set and you are using the latest repository code.
 
 ### Triton: `No backend registered for 'hcu'`
 

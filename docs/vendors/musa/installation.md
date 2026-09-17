@@ -30,15 +30,15 @@ pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-ACCELERATOR=musa pip install --no-build-isolation -v -e .
+FLAGOS_ACCELERATOR=musa pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `ACCELERATOR=musa`: selects the MUSA build path and enables `VENDOR_KERNEL=ON`
-- `VENDOR_KERNEL=ON`: compiles generated `mudnn` operator kernels (automatic when `ACCELERATOR=musa`)
-- `FLAGGEMS_KERNEL=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_musa.conf`
-- `BOXING_KERNEL=OFF`: forced (the MUSA toolkit exports no CUDA symbols)
-- `FLAGGEMS_CPP=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
+- `FLAGOS_ACCELERATOR=musa`: selects the MUSA build path and enables `FLAGOS_BUILD_VENDOR=ON`
+- `FLAGOS_BUILD_VENDOR=ON`: compiles generated `mudnn` operator kernels (automatic when `FLAGOS_ACCELERATOR=musa`)
+- `FLAGOS_BUILD_FLAGGEMS=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_musa.conf`
+- `FLAGOS_BUILD_BOXING=OFF`: forced (the MUSA toolkit exports no CUDA symbols)
+- `FLAGOS_BUILD_FLAGGEMS_CPP=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
 
 The build runs `scripts/codegen/codegen_mudnn.py` to generate kernels. Coverage is **64 generated ops** plus 2 handwritten convolution kernels; native RNG kernels add muRAND-backed `rand`/`randn`, `rand_like`/`randn_like`, `randint`, `normal_`, `uniform_`, `random_`, and mudnn dropout paths. Everything outside those sets reaches the `cpu_fallback`.
@@ -120,7 +120,7 @@ This test file checks that ops route to the `musa` backend, exercises per-op env
 Run the autocast and GradScaler suite:
 
 ```bash
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa \
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_ACCELERATOR=musa \
   LD_LIBRARY_PATH=/usr/local/musa/lib:$LD_LIBRARY_PATH \
   pytest tests/integration/test_amp_contract.py -m amp -v
 ```
@@ -280,7 +280,7 @@ correlation IDs: the former draws flow arrows and the latter attributes device t
 Run the focused hardware test on an MTT S5000 host:
 
 ```bash
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa \
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_ACCELERATOR=musa \
 LD_LIBRARY_PATH=/usr/local/musa/lib:$LD_LIBRARY_PATH \
 pytest tests/integration/test_profiler_musa.py -q
 ```
@@ -328,7 +328,7 @@ Use a process with the vendor runtime before running the focused compile tests:
 ```bash
 PYTHONPATH=/path/to/flagtree-mthreads-runtime:$PWD \\
 LD_LIBRARY_PATH=/path/to/flagtree-mthreads-runtime/triton/_C:/usr/local/musa/lib:$LD_LIBRARY_PATH \\
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \\
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \\
 pytest tests/integration/test_compile.py -v
 ```
 
@@ -374,7 +374,7 @@ mudnn/muRAND plus CPU fallback remain usable for the ops it sends to `musa` or
 To build the runtime layer only (device/memory/stream support) with no native operator kernels:
 
 ```bash
-ACCELERATOR=musa VENDOR_KERNEL=OFF pip install --no-build-isolation -v -e .
+FLAGOS_ACCELERATOR=musa FLAGOS_BUILD_VENDOR=OFF pip install --no-build-isolation -v -e .
 ```
 
 All compute ops will fall back to CPU. This mode is useful for testing the runtime layer in isolation.

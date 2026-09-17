@@ -10,7 +10,7 @@ comparable:
 
 Usage:
     # aclnn path (env ascend_p0_210)
-    ACCELERATOR=ascend python tests/perf/e2e_qwen3_infer_ascend.py \
+    FLAGOS_ACCELERATOR=ascend python tests/perf/e2e_qwen3_infer_ascend.py \
         --backend torch_fl --model /tmp/Qwen3-0.6B --tokens 64
 
     # torch_npu baseline (env torch_npu_210)

@@ -44,7 +44,7 @@
 #   ROCM_PATH=/opt/dtk bash scripts/vendor/bundle_dcu_libtorch.sh
 #   FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh   # legacy
 #
-# Should run after `python setup.py build_ext --inplace` (ACCELERATOR=dcu) and
+# Should run after `python setup.py build_ext --inplace` (FLAGOS_ACCELERATOR=dcu) and
 # before packing the wheel. Idempotent.
 
 set -euo pipefail
@@ -237,7 +237,7 @@ else
   # build_ext, i.e. it is already there before this script runs.
   if [ ! -f "${LIB_DCU}/${COMPAT_SO}" ]; then
     echo "error: ${LIB_DCU}/${COMPAT_SO} is missing. Build first with" >&2
-    echo "       ACCELERATOR=dcu python setup.py build_ext --inplace" >&2
+    echo "       FLAGOS_ACCELERATOR=dcu python setup.py build_ext --inplace" >&2
     exit 1
   fi
 

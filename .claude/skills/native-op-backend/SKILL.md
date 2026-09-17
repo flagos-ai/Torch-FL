@@ -169,8 +169,8 @@ Three edits outside the generator:
    `# --- generated ---` block at the end of this file idempotently.
 3. **CMake** — generated sources under `csrc/aten/backends/<vendor>/` must be
    excluded from other platforms' builds. They are covered by the generic
-   `VENDOR_KERNEL` gate in `csrc/CMakeLists.txt` (which keeps only the
-   `ACCELERATOR` vendor's directory): add `<vendor>` to its directory list,
+   `FLAGOS_BUILD_VENDOR` gate in `csrc/CMakeLists.txt` (which keeps only the
+   `FLAGOS_ACCELERATOR` vendor's directory): add `<vendor>` to its directory list,
    no per-vendor switch needed.
 
 Registration and routing are **two separate mechanisms**. A kernel that is
@@ -183,7 +183,7 @@ Per-operator CPU comparison is the only trustworthy check — a native kernel th
 returns plausible-looking wrong numbers is the characteristic failure of this path.
 
 ```bash
-ACCELERATOR=<vendor> VENDOR_KERNEL=1 FLAGGEMS_CPP=0 \
+FLAGOS_ACCELERATOR=<vendor> FLAGOS_BUILD_VENDOR=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 \
   pip install -e . --no-build-isolation
 
 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_<vendor>.conf \
@@ -191,7 +191,7 @@ FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_<vendor>.conf \
 ```
 
 Pass **all** the build env vars explicitly. `setup.py` defaults to
-`ACCELERATOR=cuda`, and omitting them fails at the cmake configure stage with an
+`FLAGOS_ACCELERATOR=cuda`, and omitting them fails at the cmake configure stage with an
 error that does not obviously point back at the missing variable.
 
 Tolerances measured on Ascend, useful as a sanity reference: unary ≤4.4e-5,

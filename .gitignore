@@ -11,7 +11,7 @@ torch_fl/.nfs*
 # Machine-local staging dir/symlink for the external libtorch_cuda.so assets
 # (scripts/vendor/with_cuda_libtorch.sh, setup.py). Path differs per machine; not source.
 .libtorch_cuda_assets
-# Written by setup.py at build time (records ACCELERATOR); not source.
+# Written by setup.py at build time (records ACCELERATOR and KERNELS); not source.
 torch_fl/_build_config.py
 
 # Python

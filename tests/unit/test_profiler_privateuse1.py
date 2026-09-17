@@ -135,7 +135,7 @@ def test_stage_a_privateuse1_device_time():
 )
 def test_cupti_library_locatable():
     """Confirm the profiler library for the selected accelerator is loadable."""
-    accelerator = os.environ.get("ACCELERATOR", "cuda").lower()
+    accelerator = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
     if accelerator == "metax":
         candidates = ["libmcpti.so"]
         metax_path = os.environ.get("MACA_PATH", "/opt/maca")

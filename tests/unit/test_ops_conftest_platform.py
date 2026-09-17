@@ -16,9 +16,9 @@
 
 The ops gate skips backend-specific tests per detected platform
 (_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend, but it has its own
-ACCELERATOR value like every other chip; older wheels reported
-ACCELERATOR=cuda and are still recognised through the PPU_SDK
-environment or the lib_ppu/ bundle directory. These tests pin the ACCELERATOR
+FLAGOS_ACCELERATOR value like every other chip; older wheels reported
+FLAGOS_ACCELERATOR=cuda and are still recognised through the PPU_SDK
+environment or the lib_ppu/ bundle directory. These tests pin the FLAGOS_ACCELERATOR
 mapping, the legacy PPU fallbacks, and the skip-set parity with "default" that
 keeps those changes behavior-neutral.
 
@@ -51,7 +51,7 @@ ops_conftest = _load_ops_conftest()
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("ACCELERATOR", raising=False)
+    monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
 
@@ -106,20 +106,20 @@ def test_accelerator_names_still_map(monkeypatch):
         ("dcu", "dcu"),
         ("ppu", "ppu"),
     ]:
-        monkeypatch.setenv("ACCELERATOR", accelerator)
+        monkeypatch.setenv("FLAGOS_ACCELERATOR", accelerator)
         assert ops_conftest._detect_platform() == expected
 
 
 def test_ppu_accelerator_identifies_ppu(monkeypatch):
-    """PPU has its own ACCELERATOR value; no SDK probe needed."""
-    monkeypatch.setenv("ACCELERATOR", "ppu")
+    """PPU has its own FLAGOS_ACCELERATOR value; no SDK probe needed."""
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "ppu")
     assert ops_conftest._detect_platform() == "ppu"
 
 
 def test_legacy_ppu_sdk_env_identifies_ppu_under_cuda_accelerator(monkeypatch):
-    """A wheel built before PPU had its own ACCELERATOR value reports cuda and
+    """A wheel built before PPU had its own FLAGOS_ACCELERATOR value reports cuda and
     carries PPU_SDK; the env signal still tells the gate apart."""
-    monkeypatch.setenv("ACCELERATOR", "cuda")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "cuda")
     monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
     assert ops_conftest._detect_platform() == "ppu"
 
@@ -134,7 +134,7 @@ def test_cuda_without_ppu_signals_stays_default(
     monkeypatch, isolated_torch_fl_import, fake_torch_fl
 ):
     """No PPU signal anywhere: same bucket as before this change."""
-    monkeypatch.setenv("ACCELERATOR", "cuda")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "cuda")
     assert ops_conftest._detect_platform() == "default"
 
 
@@ -143,7 +143,7 @@ def test_lib_ppu_bundle_dir_identifies_ppu_without_env(
 ):
     """An installed PPU wheel with no PPU_SDK in the environment
     (dev pod with the baked SDK) is still recognized by its bundle dir."""
-    monkeypatch.setenv("ACCELERATOR", "cuda")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "cuda")
     for _ in _fake_torch_fl(tmp_path, bundle_lib_ppu=True):
         assert ops_conftest._detect_platform() == "ppu"
 
@@ -153,7 +153,7 @@ def test_marker_stays_authoritative_over_bundle_dir(
 ):
     """A flagos_platform marker wins even if lib_ppu/ is also present, so the
     native-kernel platforms keep their existing precedence."""
-    monkeypatch.setenv("ACCELERATOR", "cuda")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "cuda")
     for _ in _fake_torch_fl(tmp_path, marker="gcu", bundle_lib_ppu=True):
         assert ops_conftest._detect_platform() == "gcu"
 

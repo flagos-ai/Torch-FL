@@ -10,7 +10,7 @@ This directory contains manual tests for MUSA distributed communication via Flag
 2. **Software**:
    - MUSA toolkit (mudnn + musart runtime)
    - FlagCX built with MUSA adaptor support
-   - torch_fl built with `ACCELERATOR=musa`
+   - torch_fl built with `FLAGOS_ACCELERATOR=musa`
    - transformers library (for Qwen3 tests)
 
 ## Building FlagCX with MUSA Support

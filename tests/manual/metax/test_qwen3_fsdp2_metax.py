@@ -39,7 +39,7 @@ Run (from repo root), sequentially so the two runs do not share GPUs:
     export LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH
     export PYTHONPATH=$PWD
 
-    ACCELERATOR=metax \
+    FLAGOS_ACCELERATOR=metax \
         python tests/manual/metax/test_qwen3_fsdp2_metax.py --mode flagos
     python tests/manual/metax/test_qwen3_fsdp2_metax.py --mode native
     python tests/manual/metax/test_qwen3_fsdp2_metax.py --compare

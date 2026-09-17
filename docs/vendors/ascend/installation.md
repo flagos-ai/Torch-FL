@@ -40,12 +40,12 @@ with native ACLNN kernels as the fallback:
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-ACCELERATOR=ascend pip install --no-build-isolation -v -e .
+FLAGOS_ACCELERATOR=ascend pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `ACCELERATOR=ascend`: selects the Ascend build path and native ACLNN kernel backend
-- `VENDOR_KERNEL=1`: compiled automatically when `ACCELERATOR=ascend` (default ON)
+- `FLAGOS_ACCELERATOR=ascend`: selects the Ascend build path and native ACLNN kernel backend
+- `FLAGOS_BUILD_VENDOR=1`: compiled automatically when `FLAGOS_ACCELERATOR=ascend` (default ON)
 - `--no-build-isolation`: ensures the build uses your installed CPU torch, not pip's overlay
 
 The build runs `scripts/codegen/codegen_ascend.py` to generate operator kernels calling ACLNN APIs (`libopapi.so`) directly. Coverage is category-driven: unary, binary, reductions, and matmul families are generated; ops without an ACLNN mapping fall back to CPU.
@@ -172,15 +172,15 @@ import, and the Ascend test groups import both.
 ### Rebuild torch_fl
 
 ```bash
-ACCELERATOR=ascend FLAGGEMS_CPP=0 FLAGGEMS_KERNEL=1 \
-  VENDOR_KERNEL=1 \
+FLAGOS_ACCELERATOR=ascend FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_FLAGGEMS=1 \
+  FLAGOS_BUILD_VENDOR=1 \
   pip install --no-build-isolation -v -e .
 ```
 
 Build flags:
-- `FLAGGEMS_KERNEL=1` (the `ACCELERATOR=ascend` default): enables Python-dispatch wrappers for FlagGems Triton kernels
-- `FLAGGEMS_CPP=0`: no C++ FlagGems kernels — nothing builds `liboperators.so` for this backend
-- `VENDOR_KERNEL=1`: keeps the native ACLNN backend for ops FlagGems cannot compile or run
+- `FLAGOS_BUILD_FLAGGEMS=1` (the `FLAGOS_ACCELERATOR=ascend` default): enables Python-dispatch wrappers for FlagGems Triton kernels
+- `FLAGOS_BUILD_FLAGGEMS_CPP=0`: no C++ FlagGems kernels — nothing builds `liboperators.so` for this backend
+- `FLAGOS_BUILD_VENDOR=1`: keeps the native ACLNN backend for ops FlagGems cannot compile or run
 
 ### Import order
 
@@ -257,7 +257,7 @@ op that also has an ACLNN kernel, lands on the native backend. Set
 
 `torch.compile(backend="flagos")` compiles inductor's fused Triton kernels with
 the installed Triton build. The Ascend profile is picked from the
-`ACCELERATOR=ascend` build and eager ACLNN keeps working unchanged.
+`FLAGOS_ACCELERATOR=ascend` build and eager ACLNN keeps working unchanged.
 
 **Status: not revalidated on FlagTree.** The measured result quoted below was
 taken on `triton-ascend 3.2.0`; since Ascend's FlagGems route moved to FlagTree

@@ -67,7 +67,7 @@ class DeviceTracer {
 };
 
 // Factory: returns CUPTI tracer on NVIDIA, CANN tracer on Ascend, etc.
-// Vendor selection is compile-time (based on ACCELERATOR cmake var).
+// Vendor selection is compile-time (based on FLAGOS_ACCELERATOR cmake var).
 std::unique_ptr<DeviceTracer> MakeDeviceTracer();
 
 }  // namespace profiler

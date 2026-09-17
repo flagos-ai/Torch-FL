@@ -53,7 +53,7 @@ def as_cuda(monkeypatch):
             lambda: pp._CUDA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "cuda")
     return pp._CUDA_PROFILE
 
 
@@ -62,7 +62,7 @@ def as_musa(monkeypatch):
     """Force every profile consumer onto the MUSA profile.
 
     Not CUDA-like, but not Ascend either: the third shape, and the one a single
-    `is_cuda_like` boolean cannot express. ACCELERATOR is patched alongside the
+    `is_cuda_like` boolean cannot express. FLAGOS_ACCELERATOR is patched alongside the
     profile because the generated-code snippets branch on it directly, so a run
     on any other platform's CI would otherwise take the wrong branch.
     """
@@ -72,7 +72,7 @@ def as_musa(monkeypatch):
             lambda: pp._MUSA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "musa")
     return pp._MUSA_PROFILE
 
 
@@ -94,8 +94,8 @@ def as_musa(monkeypatch):
     ],
 )
 def test_profile_selected_by_accelerator(monkeypatch, accelerator, expected):
-    """ACCELERATOR picks the profile; unknown values fall back to CUDA."""
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", accelerator)
+    """FLAGOS_ACCELERATOR picks the profile; unknown values fall back to CUDA."""
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", accelerator)
     assert pp.platform_profile() == expected
 
 

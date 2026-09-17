@@ -299,7 +299,7 @@ void ApplyAllUseOverride(std::unordered_map<std::string, Backend>& table,
 
 // FLAGOS_USE_TILEOPS=1 repins every op the conf annotates `# tileops` onto the
 // TileOPs backend. TileOPs is an opt-in path: it needs the `tileops` package
-// plus an SM90 device, and its kernels are only built when TILEOPS_KERNEL=ON,
+// plus an SM90 device, and its kernels are only built when FLAGOS_BUILD_TILEOPS=ON,
 // so the default routing must not name it. Keeping the op set in the conf as an
 // annotation -- rather than in a separate backends_tileops.conf -- means the
 // per-op default and the TileOPs candidate are stated on one line, and the same

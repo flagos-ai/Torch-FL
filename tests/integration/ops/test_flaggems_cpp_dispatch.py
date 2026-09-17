@@ -15,14 +15,14 @@
 """
 FlagGems C++ dispatch (kFlagGemsCpp) integration tests.
 
-Verifies that torch_fl built with FLAGGEMS_CPP=ON routes ops to the C++
+Verifies that torch_fl built with FLAGOS_BUILD_FLAGGEMS_CPP=ON routes ops to the C++
 FlagGems path (backend label "flagos") and that results are numerically correct.
 
-These tests require a torch_fl wheel built with FLAGGEMS_CPP=ON (i.e.
+These tests require a torch_fl wheel built with FLAGOS_BUILD_FLAGGEMS_CPP=ON (i.e.
 liboperators.so linked in).  They are gated by @pytest.mark.flaggems_cpp, which
 tests/integration/ops/conftest.py resolves by reading the compiled kernel set
 out of the wheel's build record -- there is no environment variable to export.
-They are not included in the default CI matrix (which uses FLAGGEMS_CPP=OFF
+They are not included in the default CI matrix (which uses FLAGOS_BUILD_FLAGGEMS_CPP=OFF
 wheels); add them once FlagGems C++ runtime is in the CI build image.
 
 Usage (on a C++ wheel):

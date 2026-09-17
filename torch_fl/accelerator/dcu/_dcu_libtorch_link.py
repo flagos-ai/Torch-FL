@@ -215,7 +215,7 @@ def preload_dcu_device_libs():
             f"{lib_dir}. It supplies the DTK-private ATen symbols that "
             "libtorch_hip.so imports from DTK's forked core, so the official "
             "PyTorch core cannot be used without it. Rebuild with "
-            "ACCELERATOR=dcu python setup.py build_ext --inplace, or set "
+            "FLAGOS_ACCELERATOR=dcu python setup.py build_ext --inplace, or set "
             "FLAGOS_DCU_VENDOR_CORE=1 to use DTK's own core libraries."
         )
 

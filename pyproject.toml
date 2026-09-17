@@ -49,7 +49,7 @@ classifiers = [
 # only make upgrades harder. Versions match the validated 2.10 env.
 #
 # Declared dynamic so setup.py can drop flag_gems/triton on platforms built in
-# pure-boxing mode (ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
+# pure-boxing mode (FLAGOS_ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
 # is the wrong artifact — DTK ships its own. See _install_requires() in setup.py.
 dynamic = ["version", "dependencies"]
 

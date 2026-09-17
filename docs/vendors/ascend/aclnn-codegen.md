@@ -51,8 +51,8 @@ codegen is organized around **categories**.
 Generated file: `csrc/aten/backends/ascend/generated/ascend_kernels.cc`
 
 - That path is already excluded automatically from non-ascend builds by the
-  `VENDOR_KERNEL` gate in `csrc/CMakeLists.txt` (which keeps only the
-  `ACCELERATOR` vendor's backend directory); no new CMake rule is needed.
+  `FLAGOS_BUILD_VENDOR` gate in `csrc/CMakeLists.txt` (which keeps only the
+  `FLAGOS_ACCELERATOR` vendor's backend directory); no new CMake rule is needed.
 - Includes:
   ```cpp
   #include "../../../generated/ops.h"   // Fn typedefs + DECLARE_DISPATCHER
@@ -343,12 +343,12 @@ Output:
 ## 7. Verification loop
 
 Build with
-`ACCELERATOR=ascend VENDOR_KERNEL=1 FLAGGEMS_KERNEL=1 FLAGGEMS_CPP=0`, set
+`FLAGOS_ACCELERATOR=ascend FLAGOS_BUILD_VENDOR=1 FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0`, set
 `FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_ascend.conf`, and compare each op against CPU.
 51/51 pass (unary max_err≤4.4e-5, binary ≤4.7e-6, comparisons match exactly).
 
 **Note**: the full set of env vars must be passed explicitly at build time
-(`ACCELERATOR=ascend …`), or setup.py defaults to `ACCELERATOR=cuda` and the cmake configure stage
+(`FLAGOS_ACCELERATOR=ascend …`), or setup.py defaults to `FLAGOS_ACCELERATOR=cuda` and the cmake configure stage
 fails.
 
 ## 8. Related

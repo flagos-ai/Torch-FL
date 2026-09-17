@@ -190,7 +190,7 @@ serialization is a safety workaround for the vendor driver, not a performance
 claim; remove it only after the relevant FlagTree driver is verified fork-safe.
 
 On the measured MTT S5000 setup, validation requires the vendor FlagTree runtime,
-`ACCELERATOR=musa`, and `FLAGOS_USE_FLAGTREE=1`. The generic Triton 3.7.1 runtime
+`FLAGOS_ACCELERATOR=musa`, and `FLAGOS_USE_FLAGTREE=1`. The generic Triton 3.7.1 runtime
 is not MThreads execution evidence.
 
 Example environment:
@@ -198,7 +198,7 @@ Example environment:
 ```bash
 PYTHONPATH=/path/to/flagtree-mthreads-runtime:$PWD \
 LD_LIBRARY_PATH=/path/to/flagtree-mthreads-runtime/triton/_C:/usr/local/musa/lib:$LD_LIBRARY_PATH \
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \
 pytest tests/integration/test_compile.py -v
 ```
 
@@ -287,7 +287,7 @@ code with its own defect surface.
 No extra configuration is needed beyond
 the environment FlagGems already requires
 ([vendor setup](../vendors/ascend/installation.md)) — `torch.compile(backend="flagos")`
-picks the Ascend profile from `ACCELERATOR=ascend`.
+picks the Ascend profile from `FLAGOS_ACCELERATOR=ascend`.
 
 Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0,
 torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and

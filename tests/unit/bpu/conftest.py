@@ -25,7 +25,7 @@ import torch_fl
 # CUDA, or other vendor build must not collect them as ordinary unit tests.
 requires_bpu = pytest.mark.skipif(
     torch_fl._build_accelerator() != "bpu",
-    reason="BPU unit tests require a D-Robotics S600 build (ACCELERATOR=bpu)",
+    reason="BPU unit tests require a D-Robotics S600 build (FLAGOS_ACCELERATOR=bpu)",
 )
 
 

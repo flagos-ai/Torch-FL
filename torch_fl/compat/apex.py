@@ -63,7 +63,7 @@ def _is_disabled() -> bool:
 
 def _build_accelerator() -> str:
     """Return the build accelerator without importing torch_fl.__init__."""
-    value = os.environ.get("ACCELERATOR", "").strip().lower()
+    value = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
     if value:
         return value
     try:

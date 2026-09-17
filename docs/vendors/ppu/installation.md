@@ -2,11 +2,11 @@
 
 ## Overview
 
-PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`), which makes PPU the simplest compatibility-boxing case:
+PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `FLAGOS_ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`), which makes PPU the simplest compatibility-boxing case:
 
 - **No stock `+cpu` wheel and no external `libtorch_cuda.so`** are required — the PPU torch wheel ships its own CUDA runtime
 - PPU registers ops under the `CUDA` dispatch key (not `PrivateUse1`), so the generated CUDA boxing kernels are reused unchanged
-- `ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and, at runtime, `backends_ppu.conf`; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
+- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and, at runtime, `backends_ppu.conf`; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
 
 **Status:** Experimental. CI covers the build plus the manifest in `.github/configs/ppu.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
 
@@ -29,10 +29,10 @@ cd PyTorch-Plugin-FL
 # CUDA_HOME points at the PPU CUDA_SDK; FLAGOS_SKIP_CUDA_ASSETS=1 skips
 # bundling an external libtorch_cuda.so AND skips pinned nvidia-*-cu12 deps
 # (PPU supplies CUDA 13 via PPU_SDK/CUDA_SDK).
-ACCELERATOR=ppu \
+FLAGOS_ACCELERATOR=ppu \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
-  FLAGGEMS_CPP=OFF \
-  FLAGGEMS_KERNEL=OFF \
+  FLAGOS_BUILD_FLAGGEMS_CPP=OFF \
+  FLAGOS_BUILD_FLAGGEMS=OFF \
   FLAGOS_SKIP_CUDA_ASSETS=1 \
   pip install --no-build-isolation -vvv -e .
 ```
@@ -128,7 +128,7 @@ scaler.update()
 ```
 
 Run the PPU-only AMP contract after installing the PPU torch wheel and loading
-the driver. `ACCELERATOR=ppu` (with `PPU_SDK` present) is what the contract's
+the driver. `FLAGOS_ACCELERATOR=ppu` (with `PPU_SDK` present) is what the contract's
 platform check reads, so the test cannot be mistaken
 for validation on an ordinary NVIDIA CUDA build:
 
@@ -154,7 +154,7 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ## Optional: FlagGems on PPU
 
-Set `FLAGGEMS_KERNEL=ON` at build time (the default); `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first, falling back to the vendor kernel and then CPU. No runtime opt-in variable is needed.
+Set `FLAGOS_BUILD_FLAGGEMS=ON` at build time (the default); `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first, falling back to the vendor kernel and then CPU. No runtime opt-in variable is needed.
 
 PPU needs no compatibility shim beyond the generic CUDA one: `libcuda.so` is a real driver, so `is_nvidia_cuda_available()` succeeds, `GEMS_VENDOR=nvidia` is set automatically, and `triton.language.extra.cuda.libdevice` resolves.
 
@@ -177,9 +177,9 @@ The vendor `triton` sdist is a downloader shim that fetches the real wheel and `
 ### FlagGems Build
 
 ```bash
-ACCELERATOR=ppu \
+FLAGOS_ACCELERATOR=ppu \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
-  FLAGGEMS_KERNEL=ON \
+  FLAGOS_BUILD_FLAGGEMS=ON \
   FLAGOS_SKIP_CUDA_ASSETS=1 \
   pip install --no-build-isolation -vvv -e .
 ```

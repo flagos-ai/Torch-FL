@@ -29,7 +29,7 @@ cd PyTorch-Plugin-FL
 pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
 # Build torch_fl with CUDA boxing kernels and bundled CUDA assets
-ACCELERATOR=cuda \
+FLAGOS_ACCELERATOR=cuda \
   pip install --no-build-isolation -vvv -e .
 ```
 
@@ -44,8 +44,8 @@ This build:
 To enable the C++ fast path for FlagGems Triton kernels:
 
 ```bash
-ACCELERATOR=cuda \
-  FLAGGEMS_CPP=1 \
+FLAGOS_ACCELERATOR=cuda \
+  FLAGOS_BUILD_FLAGGEMS_CPP=1 \
   FLAGGEMS_DIR=<path-to-FlagGems>/lib/cmake/FlagGems \
   pip install --no-build-isolation -vvv -e .
 ```

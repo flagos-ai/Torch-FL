@@ -12,7 +12,7 @@ single-tensor path); the setting is applied identically either way so the
 optimizer contributes the same op mix to both measurements.
 
 Usage:
-    ACCELERATOR=ascend python tests/perf/e2e_qwen3_train_ascend.py \
+    FLAGOS_ACCELERATOR=ascend python tests/perf/e2e_qwen3_train_ascend.py \
         --backend torch_fl --model /tmp/Qwen3-0.6B --steps 10
 
     python tests/perf/e2e_qwen3_train_ascend.py \

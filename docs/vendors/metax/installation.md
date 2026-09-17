@@ -43,8 +43,8 @@ git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
 # Build the boxing artifacts (no native kernels)
-ACCELERATOR=metax \
-  VENDOR_KERNEL=OFF \
+FLAGOS_ACCELERATOR=metax \
+  FLAGOS_BUILD_VENDOR=OFF \
   FLAGOS_MACA_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   FLAGOS_WHEEL_LOCAL=metax3.8.1 \
   python setup.py bdist_wheel
@@ -329,7 +329,7 @@ MetaX carries FSDP2 and Qwen3 training parity work in repository history, but th
 **Cause:** the MetaX-specific import-time setup (libtorch relink, `torch.cuda`
 shim) did not run.
 
-**Fix:** confirm the wheel was built for MetaX (`ACCELERATOR=metax`, recorded at
+**Fix:** confirm the wheel was built for MetaX (`FLAGOS_ACCELERATOR=metax`, recorded at
 build time) and that the vendor torch is reachable through
 `FLAGOS_MACA_TORCH_LIB` or the bundled `lib_maca/`. No mode environment variable
 is involved any more.

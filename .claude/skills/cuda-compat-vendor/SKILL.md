@@ -74,11 +74,11 @@ Three shapes exist, in increasing order of work:
 | Shape | Example | Runtime dir | Operator work |
 |---|---|---|---|
 | SDK ships a `libcudart` shim, `cuda_runtime.h` compiles | Hygon DCU (DTK) | **reuses `accelerator/cuda/*.cc` verbatim** — no vendor dir | none |
-| CUDA-compatible SDK, own detection | PPU | reuses `cuda` sources, `ACCELERATOR=cuda` + `PPU_SDK` detection | none |
+| CUDA-compatible SDK, own detection | PPU | reuses `cuda` sources, `FLAGOS_ACCELERATOR=cuda` + `PPU_SDK` detection | none |
 | CUDA-compatible but needs a shim layer | MetaX (cu-bridge) | `accelerator/metax/` incl. `cudart_shim.c` + a `.version` script | none |
 
 Read `csrc/runtime/accelerator/CMakeLists.txt` for how each is wired; DCU's
-branch (which globs `cuda/*.cc` from a non-cuda ACCELERATOR) is the cleanest
+branch (which globs `cuda/*.cc` from a non-cuda FLAGOS_ACCELERATOR) is the cleanest
 precedent and worth copying when the shim exists.
 
 ## Step 2 — extract the vendor .so set
@@ -142,15 +142,15 @@ needs extra libs (MetaX needs its shim, DCU pulls from the DTK tree).
 
 ## Step 4 — build wiring
 
-Which `ACCELERATOR` value to use depends on the shape from Step 1, and the choice
+Which `FLAGOS_ACCELERATOR` value to use depends on the shape from Step 1, and the choice
 is not cosmetic:
 
-- **Shim present, `cuda_runtime.h` compiles** — follow DCU: add an `ACCELERATOR`
+- **Shim present, `cuda_runtime.h` compiles** — follow DCU: add a `FLAGOS_ACCELERATOR`
   branch in `csrc/runtime/accelerator/CMakeLists.txt` that globs
   `${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc`, and add no vendor runtime directory at
   all. Least code, least drift.
 - **CUDA-compatible with its own detection** — follow PPU: keep
-  `ACCELERATOR=cuda` and add SDK detection in `setup.py`.
+  `FLAGOS_ACCELERATOR=cuda` and add SDK detection in `setup.py`.
 - **Needs a shim layer** — follow MetaX: a real `accelerator/<vendor>/` directory
   with `cudart_shim.c` and a linker `.version` script.
 
@@ -160,7 +160,7 @@ wanting nvcc, something has pulled in a real CUDA dependency and the scheme's ma
 benefit is gone.
 
 ```bash
-ACCELERATOR=<vendor> FLAGGEMS_KERNEL=OFF FLAGGEMS_CPP=OFF \
+FLAGOS_ACCELERATOR=<vendor> FLAGOS_BUILD_FLAGGEMS=OFF FLAGOS_BUILD_FLAGGEMS_CPP=OFF \
   pip install -e . --no-build-isolation
 ```
 

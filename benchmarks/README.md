@@ -60,7 +60,7 @@ same device (`flagos:0`, shared GPU memory):
 ```bash
 python benchmarks/flaggems_dispatch_bench.py            # defaults: submit=300 e2e=100
 
-# gems_cpp column additionally needs a FLAGGEMS_KERNEL=ON wheel + (one line):
+# gems_cpp column additionally needs a FLAGOS_BUILD_FLAGGEMS=ON wheel + (one line):
 FLAGGEMS_SOURCE_DIR=/path/to/FlagGems-src/src/flag_gems \
 LD_LIBRARY_PATH=/path/to/FlagGems-src/cpp/build/lib:$LD_LIBRARY_PATH \
 python benchmarks/flaggems_dispatch_bench.py --submit 500 --e2e 200

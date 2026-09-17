@@ -54,18 +54,18 @@ platform_support = _load_platform_support()
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("ACCELERATOR", raising=False)
+    monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
 
 
 def test_accelerator_env_wins_outright(monkeypatch):
-    monkeypatch.setenv("ACCELERATOR", "ascend")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "ascend")
     assert platform_support.detect_platform() == "ascend"
 
 
 def test_dcu_accelerator_is_recognized(monkeypatch):
-    """ACCELERATOR=dcu must resolve to "dcu", not fall through to "cuda".
+    """FLAGOS_ACCELERATOR=dcu must resolve to "dcu", not fall through to "cuda".
 
     DCU is a boxing build, so every other signal detect_platform() consults
     reports CUDA: the marker records the accelerator name, but a DCU wheel
@@ -75,7 +75,7 @@ def test_dcu_accelerator_is_recognized(monkeypatch):
     dead code -- tests/integration/test_amp_contract.py had two such guards
     that never once evaluated true in CI.
     """
-    monkeypatch.setenv("ACCELERATOR", "dcu")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "dcu")
     assert platform_support.detect_platform() == "dcu"
 
 
@@ -102,7 +102,7 @@ def isolated_torch_fl_import(monkeypatch):
 def test_marker_identifies_ascend_without_any_env_or_config(
     isolated_torch_fl_import, tmp_path
 ):
-    """The scenario the issue's reproduction targets: no ACCELERATOR, no
+    """The scenario the issue's reproduction targets: no FLAGOS_ACCELERATOR, no
     FLAGOS_BACKEND_CONFIG. Previously this fell through to the "cuda" default
     unless torch_fl's own /dev/davinci* probe had already set
     FLAGOS_BACKEND_CONFIG as a side effect of import. The marker makes this

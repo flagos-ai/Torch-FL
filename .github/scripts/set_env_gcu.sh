@@ -103,16 +103,16 @@ if [[ "$CI_STAGE" == "integration" && ! -c /dev/gcu0 ]]; then
   exit 1
 fi
 
-export ACCELERATOR=gcu
-export VENDOR_KERNEL=1
-# FLAGGEMS_CPP=0: the FlagGems C++ kernels (liboperators.so) need
-# FLAGGEMS_CPP=ON, which is not built here. FLAGGEMS_KERNEL=1 is what makes
+export FLAGOS_ACCELERATOR=gcu
+export FLAGOS_BUILD_VENDOR=1
+# FLAGOS_BUILD_FLAGGEMS_CPP=0: the FlagGems C++ kernels (liboperators.so) need
+# FLAGOS_BUILD_FLAGGEMS_CPP=ON, which is not built here. FLAGOS_BUILD_FLAGGEMS=1 is what makes
 # the flaggems routes in backends_gcu.conf resolvable at all: setup.py turns
-# FLAGGEMS_KERNEL on for ACCELERATOR=gcu, but this environment variable is
+# FLAGOS_BUILD_FLAGGEMS on for FLAGOS_ACCELERATOR=gcu, but this environment variable is
 # applied afterwards and would otherwise switch it back off, producing a wheel
 # whose conf routes ops to dispatcher slots that were never compiled in.
-export FLAGGEMS_CPP=0
-export FLAGGEMS_KERNEL=1
+export FLAGOS_BUILD_FLAGGEMS_CPP=0
+export FLAGOS_BUILD_FLAGGEMS=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
@@ -304,8 +304,8 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR VENDOR_KERNEL \
-    FLAGGEMS_CPP FLAGGEMS_KERNEL \
+    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR \
+    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS \
     FLAGOS_DISABLE_CUDA_ASSETS TOPS_HOME TOPSATEN_LIB CPATH LIBRARY_PATH \
     LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"

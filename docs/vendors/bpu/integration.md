@@ -7,7 +7,7 @@ provides a real device (UCP-backed memory, device/stream layer) plus a
 
 ```bash
 pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
-ACCELERATOR=bpu pip install --no-build-isolation -e .
+FLAGOS_ACCELERATOR=bpu pip install --no-build-isolation -e .
 ```
 
 ```python

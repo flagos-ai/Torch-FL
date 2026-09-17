@@ -62,7 +62,7 @@ adapters**.
 ## 2. Findings from hardware verification
 
 Environment: H800 xN, torch 2.10.0+cu130, CUDA 13.0, SM90, Python 3.12.
-`torch_fl` builds cleanly with `ACCELERATOR=cuda CUDA_KERNEL=1 FLAGGEMS_KERNEL=0
+`torch_fl` builds cleanly with `FLAGOS_ACCELERATOR=cuda CUDA_KERNEL=1 FLAGOS_BUILD_FLAGGEMS=0
 FLAGGEMS_PYTHON=0 python setup.py build_ext --inplace`.
 
 ### 2.1 The dependency stack must be pinned exactly (or import crashes)

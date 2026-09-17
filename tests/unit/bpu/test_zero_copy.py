@@ -32,7 +32,7 @@ from torch_fl.accelerator.bpu.runtime import _as_numpy, _device_view  # noqa: E4
 
 on_bpu = pytest.mark.skipif(
     torch_fl._build_accelerator() != "bpu",
-    reason="requires a build with ACCELERATOR=bpu",
+    reason="requires a build with FLAGOS_ACCELERATOR=bpu",
 )
 
 

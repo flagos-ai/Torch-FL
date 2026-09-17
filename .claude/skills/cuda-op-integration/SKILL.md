@@ -110,7 +110,7 @@ conda activate libtorch_<ver> && cd <repo>
 python scripts/codegen/codegen_ops.py           # writes csrc/aten/generated/*
 
 # b) build CPU-only (FlagGems OFF because it needs flag_gems; CUDA boxing ON)
-FLAGGEMS_CPP=OFF FLAGGEMS_KERNEL=OFF \
+FLAGOS_BUILD_FLAGGEMS_CPP=OFF FLAGOS_BUILD_FLAGGEMS=OFF \
   pip install -e . --no-build-isolation
 
 # c) smoke test THROUGH the wrapper (LD_PRELOAD external libtorch_cuda.so)
@@ -222,7 +222,7 @@ allocator — that reaches into `torch.cuda` internals the scheme deliberately a
 ## Done criteria
 
 - `python scripts/codegen/codegen_ops.py` emits 71 ops (or whatever the conf lists), no WARNINGs.
-- Build succeeds with `FLAGGEMS_CPP=OFF FLAGGEMS_KERNEL=OFF`.
+- Build succeeds with `FLAGOS_BUILD_FLAGGEMS_CPP=OFF FLAGOS_BUILD_FLAGGEMS=OFF`.
 - `import torch_fl` is clean (no signature mismatch, no segfault) through the wrapper.
 - `pytest tests/integration/ops/ -m "not flaggems and not flaggems_python"` passes,
   modulo the 2 `*_out_cuda_override` log tests (Gotcha 5) under external-libtorch.

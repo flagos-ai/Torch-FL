@@ -155,10 +155,10 @@ the `project()` selector near the top (non-CUDA vendors declare `CXX C` so cmake
 does not demand nvcc), and the per-vendor source/link block below.
 
 ```cmake
-elseif(ACCELERATOR STREQUAL "<vendor>")
+elseif(FLAGOS_ACCELERATOR STREQUAL "<vendor>")
   project(FLAGOS_RUNTIME CXX C)
 ...
-elseif(ACCELERATOR STREQUAL "<vendor>")
+elseif(FLAGOS_ACCELERATOR STREQUAL "<vendor>")
   file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/<vendor>/*.cc")
   add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
   target_include_directories(${LIBRARY_NAME} PUBLIC
@@ -199,7 +199,7 @@ comment saying *why* your `provides_caching()` choice is what it is — every
 existing arm does, and those comments are the reason the DCU/MUSA divergence is
 understandable at all.
 
-**`setup.py`** — add the `ACCELERATOR == "<vendor>"` arm for SDK discovery and
+**`setup.py`** — add the `FLAGOS_ACCELERATOR == "<vendor>"` arm for SDK discovery and
 cmake args. Follow the `musa`/`gcu` arms.
 
 ## Step 5 — the operator-free smoke test
@@ -244,7 +244,7 @@ single-allocation test will never catch it.
 - All 10 allocator virtuals implemented; `provides_caching()` decision commented
 - `USE_<VENDOR>` added at all three CMake/allocator sites, **including the
   negative CUDA-include guard**
-- `ACCELERATOR=<vendor> pip install -e .` builds
+- `FLAGOS_ACCELERATOR=<vendor> pip install -e .` builds
 - Smoke test passes with zero operators registered
 - Allocator churn loop across two streams passes
 

@@ -20,17 +20,17 @@ import pytest
 def _detect_platform() -> str:
     """Infer the active hardware/backend platform.
 
-    ACCELERATOR is a *build*-time variable, so it is usually absent when running
+    FLAGOS_ACCELERATOR is a *build*-time variable, so it is usually absent when running
     the tests against an installed wheel. The lib/flagos_platform marker that
     native-kernel builds write is authoritative in that case, and the resolved
     FLAGOS_BACKEND_CONFIG name is the last resort.
 
-    Every chip has its own ACCELERATOR value, PPU included (it is a CUDA-ABI
-    boxing vendor, not a cuda build). Older PPU wheels reported ACCELERATOR=cuda,
+    Every chip has its own FLAGOS_ACCELERATOR value, PPU included (it is a CUDA-ABI
+    boxing vendor, not a cuda build). Older PPU wheels reported FLAGOS_ACCELERATOR=cuda,
     so the PPU_SDK environment and the lib_ppu/ bundle directory stay
     as fallbacks for them.
     """
-    accelerator = os.environ.get("ACCELERATOR", "").lower()
+    accelerator = os.environ.get("FLAGOS_ACCELERATOR", "").lower()
     if accelerator == "ascend":
         return "ascend"
     if accelerator in ("metax", "maca"):
@@ -103,7 +103,7 @@ def _flaggems_cpp_enabled() -> bool:
     Read from the build record (setup.py writes ``KERNELS`` into
     ``torch_fl/_build_config.py``), not from an environment variable. It used to
     be ``FLAGOS_USE_FLAGGEMS_CPP``, which had to be exported by hand and kept in
-    step with the ``FLAGGEMS_CPP`` build switch; the record cannot disagree with
+    step with the ``FLAGOS_BUILD_FLAGGEMS_CPP`` build switch; the record cannot disagree with
     the wheel it is inside, so tests marked ``flaggems_cpp`` are now collected
     exactly when the feature exists.
     """
@@ -140,7 +140,7 @@ def pytest_collection_modifyitems(
                 pytest.mark.skip(
                     reason=(
                         "FlagGems C++ kernels are not compiled into this wheel "
-                        "(rebuild with FLAGGEMS_CPP=ON)"
+                        "(rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=ON)"
                     )
                 )
             )
@@ -182,7 +182,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "flaggems_cpp: requires torch_fl built with FLAGGEMS_CPP=ON",
+        "flaggems_cpp: requires torch_fl built with FLAGOS_BUILD_FLAGGEMS_CPP=ON",
     )
     config.addinivalue_line(
         "markers", "flaggems_python: requires FlagGems Python wrapper backend"

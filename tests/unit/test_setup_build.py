@@ -25,11 +25,11 @@ from setuptools.command.build_ext import build_ext
 ROOT = Path(__file__).resolve().parents[2]
 
 KERNEL_SWITCHES = (
-    "VENDOR_KERNEL",
-    "FLAGGEMS_KERNEL",
-    "BOXING_KERNEL",
-    "FLAGGEMS_CPP",
-    "TILEOPS_KERNEL",
+    "FLAGOS_BUILD_VENDOR",
+    "FLAGOS_BUILD_FLAGGEMS",
+    "FLAGOS_BUILD_BOXING",
+    "FLAGOS_BUILD_FLAGGEMS_CPP",
+    "FLAGOS_BUILD_TILEOPS",
 )
 
 
@@ -42,7 +42,8 @@ def _load_setup(monkeypatch):
 
 @pytest.fixture
 def clean_kernel_env(monkeypatch):
-    """No kernel switch inherited from the ambient environment."""
+    """No build switch inherited from the ambient environment."""
+    monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
     for name in KERNEL_SWITCHES:
         monkeypatch.delenv(name, raising=False)
 
@@ -58,7 +59,7 @@ def test_build_ext_stages_generated_build_config(
     command_type = setup_kwargs["cmdclass"]["build_ext"]
     setup_globals = command_type.run.__globals__
     monkeypatch.setitem(setup_globals, "BASE_DIR", str(source_root))
-    monkeypatch.setitem(setup_globals, "ACCELERATOR", "musa")
+    monkeypatch.setitem(setup_globals, "FLAGOS_ACCELERATOR", "musa")
     monkeypatch.setitem(
         setup_globals,
         "build_deps",
@@ -88,7 +89,7 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     # own globals -- assigning into `namespace` would leave BASE_DIR alone.
     globals_ = namespace["_write_build_config"].__globals__
     monkeypatch.setitem(globals_, "BASE_DIR", str(root))
-    monkeypatch.setitem(globals_, "ACCELERATOR", "cuda")
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "cuda")
     namespace["_write_build_config"]()
 
     generated = {}
@@ -117,7 +118,7 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
         ("tsingmicro", {"vendor", "flaggems", "boxing", "flaggems_cpp"}),
         ("gcu", {"vendor", "flaggems"}),
         ("musa", {"vendor", "flaggems"}),
-        # BPU keeps the VENDOR_KERNEL default, but csrc/aten/backends/bpu/ does
+        # BPU keeps the FLAGOS_BUILD_VENDOR default, but csrc/aten/backends/bpu/ does
         # not exist, so "vendor" here records a switch that is on rather than a
         # kernel set that is present.
         ("bpu", {"vendor", "boxing"}),
@@ -137,10 +138,10 @@ def test_explicit_kernel_switch_overrides_the_vendor_default(
 ):
     """MetaX builds FlagGems into the boxing wheel by default, but not always."""
     namespace, _ = _load_setup(monkeypatch)
-    monkeypatch.setenv("FLAGGEMS_KERNEL", "0")
-    assert namespace["_kernel_switches"]("metax")["FLAGGEMS_KERNEL"] is False
+    monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS", "0")
+    assert namespace["_kernel_switches"]("metax")["FLAGOS_BUILD_FLAGGEMS"] is False
     # And on CUDA the same variable turns it off too.
-    assert namespace["_kernel_switches"]("cuda")["FLAGGEMS_KERNEL"] is False
+    assert namespace["_kernel_switches"]("cuda")["FLAGOS_BUILD_FLAGGEMS"] is False
 
 
 def test_kernel_switch_uses_the_shared_truth_table(monkeypatch, clean_kernel_env):
@@ -156,13 +157,15 @@ def test_kernel_switch_uses_the_shared_truth_table(monkeypatch, clean_kernel_env
         ("No", False),
         ("2", True),  # not a boolean: falls back to the vendor default, not "on"
     ):
-        monkeypatch.setenv("VENDOR_KERNEL", raw)
-        assert namespace["_kernel_switches"]("cuda")["VENDOR_KERNEL"] is expected, raw
+        monkeypatch.setenv("FLAGOS_BUILD_VENDOR", raw)
+        assert (
+            namespace["_kernel_switches"]("cuda")["FLAGOS_BUILD_VENDOR"] is expected
+        ), raw
     # On a set whose default is off the same input stays off, which is what
     # distinguishes "falls back to the default" from the hand-rolled parser's
     # "anything that is not 0/false/off/no is on".
-    monkeypatch.setenv("TILEOPS_KERNEL", "2")
-    assert namespace["_kernel_switches"]("metax")["TILEOPS_KERNEL"] is False
+    monkeypatch.setenv("FLAGOS_BUILD_TILEOPS", "2")
+    assert namespace["_kernel_switches"]("metax")["FLAGOS_BUILD_TILEOPS"] is False
 
 
 def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):
@@ -194,12 +197,12 @@ def test_impossible_kernel_switch_raises_instead_of_being_ignored(
     wheel does not have.
     """
     namespace, _ = _load_setup(monkeypatch)
-    monkeypatch.setenv("VENDOR_KERNEL", "0")
-    with pytest.raises(ValueError, match="VENDOR_KERNEL"):
+    monkeypatch.setenv("FLAGOS_BUILD_VENDOR", "0")
+    with pytest.raises(ValueError, match="FLAGOS_BUILD_VENDOR"):
         namespace["_kernel_switches"]("musa")
     # The pin agrees with the default, so this is accepted.
-    monkeypatch.setenv("VENDOR_KERNEL", "1")
-    assert namespace["_kernel_switches"]("musa")["VENDOR_KERNEL"] is True
+    monkeypatch.setenv("FLAGOS_BUILD_VENDOR", "1")
+    assert namespace["_kernel_switches"]("musa")["FLAGOS_BUILD_VENDOR"] is True
     # And a platform with no pin has no such objection.
-    monkeypatch.setenv("FLAGGEMS_CPP", "1")
-    assert namespace["_kernel_switches"]("ppu")["FLAGGEMS_CPP"] is True
+    monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS_CPP", "1")
+    assert namespace["_kernel_switches"]("ppu")["FLAGOS_BUILD_FLAGGEMS_CPP"] is True

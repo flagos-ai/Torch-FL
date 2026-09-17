@@ -17,7 +17,7 @@ Install the upstream CPU torch wheel, then build torch_fl with the BPU accelerat
 
 ```bash
 pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
-ACCELERATOR=bpu pip install --no-build-isolation -e .
+FLAGOS_ACCELERATOR=bpu pip install --no-build-isolation -e .
 ```
 
 No SDK root configuration is needed — the runtime ships at standard system paths.

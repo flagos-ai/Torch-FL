@@ -20,7 +20,7 @@
 // directly without touching Python or the GIL — then unbox the result back
 // to flagos.
 //
-// This file is compiled only when FLAGGEMS_CPP=ON (csrc/CMakeLists.txt
+// This file is compiled only when FLAGOS_BUILD_FLAGGEMS_CPP=ON (csrc/CMakeLists.txt
 // defines FLAGOS_FLAGGEMS_CPP). kFlagGemsCpp is registered here; kFlagGems is
 // registered by generated/flaggems_python_kernels.cc. Whether an op actually
 // dispatches here is stated by the `flaggems_cpp` keys in the active

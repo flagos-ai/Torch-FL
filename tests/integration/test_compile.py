@@ -26,7 +26,7 @@ import pytest
 import torch_fl
 import torch
 
-from torch_fl._build_config import ACCELERATOR
+from torch_fl._build_config import FLAGOS_ACCELERATOR
 
 
 # Skip all tests if torch.compile not available (torch < 2.0)
@@ -470,7 +470,7 @@ class NormalizedModel(torch.nn.Module):
 
 
 ascend_only = pytest.mark.skipif(
-    ACCELERATOR != "ascend",
+    FLAGOS_ACCELERATOR != "ascend",
     reason="Ascend build required",
 )
 
@@ -711,7 +711,7 @@ def test_non_ppu_flagtree_keeps_default_compile_threads(monkeypatch):
     # backend, so pin it: on a GCU build the vendor driver serializes regardless
     # of the FlagTree backend name, which is a different rule than the one under
     # test here.
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "cuda")
 
     patches = {}
     inductor_backend._patch_ppu_flagtree_compile_workers(patches)
@@ -727,7 +727,7 @@ def test_musa_flagtree_defaults_to_serial_compile(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "musa")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -742,7 +742,7 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "musa")
 
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -819,10 +819,10 @@ def test_musa_flagtree_binds_to_torch_fl_runtime():
     other runtime would still compile, just not against the device that owns the
     tensors.
     """
-    from torch_fl._build_config import ACCELERATOR
+    from torch_fl._build_config import FLAGOS_ACCELERATOR
     from torch_fl.compile import flagtree_shim
 
-    if ACCELERATOR != "musa":
+    if FLAGOS_ACCELERATOR != "musa":
         pytest.skip("MUSA build required")
     if (
         not flagtree_shim.is_flagtree_active()
@@ -869,10 +869,10 @@ def test_musa_flagtree_binds_to_torch_fl_runtime():
 @pytest.mark.musa
 def test_musa_flagtree_compiles_forward_backward(device):
     """The MThreads FlagTree path must preserve native MUSA autograd."""
-    from torch_fl._build_config import ACCELERATOR
+    from torch_fl._build_config import FLAGOS_ACCELERATOR
     from torch_fl.compile.flagtree_shim import flagtree_backend, is_flagtree_active
 
-    if ACCELERATOR != "musa":
+    if FLAGOS_ACCELERATOR != "musa":
         pytest.skip("MUSA build required")
     if not is_flagtree_active() or flagtree_backend() != "mthreads":
         pytest.skip("MThreads FlagTree runtime required")
@@ -903,9 +903,9 @@ def _skip_unless_gcu(*, needs_triton: bool = True):
     ``needs_triton=False`` is for the checks that only read torch_fl's own
     state.
     """
-    from torch_fl._build_config import ACCELERATOR
+    from torch_fl._build_config import FLAGOS_ACCELERATOR
 
-    if ACCELERATOR != "gcu":
+    if FLAGOS_ACCELERATOR != "gcu":
         pytest.skip("GCU build required")
     if needs_triton:
         from torch_fl.accelerator.gcu._gcu_compat import is_gcu_triton_available
@@ -1041,7 +1041,7 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "gcu")
+    monkeypatch.setattr("torch_fl._build_config.FLAGOS_ACCELERATOR", "gcu")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)

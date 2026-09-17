@@ -21,7 +21,7 @@
 #   FLAGOS_MACA_TORCH_LIB=<maca torch/lib> bash scripts/vendor/bundle_maca_libtorch.sh
 #   MACA_PATH=/opt/maca bash scripts/vendor/bundle_maca_libtorch.sh   # override maca path
 #
-# Should run after `python setup.py bdist_wheel` (ACCELERATOR=metax) and before
+# Should run after `python setup.py bdist_wheel` (FLAGOS_ACCELERATOR=metax) and before
 # packing the wheel, or re-pack the wheel after running. Idempotent.
 
 set -euo pipefail

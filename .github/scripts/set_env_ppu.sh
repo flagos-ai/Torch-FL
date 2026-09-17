@@ -15,7 +15,7 @@
 
 # PPU (T-Head Jianwu ZW810E) environment bootstrap for CI.
 #
-# PPU is a CUDA-ABI boxing backend with its own ACCELERATOR value: the toolchain
+# PPU is a CUDA-ABI boxing backend with its own FLAGOS_ACCELERATOR value: the toolchain
 # is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
 # ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
 # build bundles its libtorch into lib_ppu/. The stock CPU wheel's core libs must
@@ -24,7 +24,7 @@
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
 #   3. Installs the FlagGems stack into it: FlagTree (the FlagOS triton dist
 #      with the `ppu` backend) and FlagGems master from git.
-#   4. Exports ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
+#   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
 #   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
 #      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
 #
@@ -32,7 +32,7 @@
 # from the image plus this script's indexes.
 #
 # Core replacement itself is automatic at `import torch_fl` time, gated on
-# lib_ppu/libtorch_cuda.so existing; the ACCELERATOR value is what selects
+# lib_ppu/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
 # backends_ppu.conf. No mode env var is involved.
 
 set -euo pipefail
@@ -185,9 +185,9 @@ echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
 echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
 echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
-# PPU build_ext runs with FLAGGEMS_CPP=OFF (setup.py cuda-branch default), so
+# PPU build_ext runs with FLAGOS_BUILD_FLAGGEMS_CPP=OFF (setup.py cuda-branch default), so
 # the C++ FlagGems dispatch (which needs liboperators.so + FlagGemsConfig.cmake)
-# is never linked and find_package(FlagGems) is skipped. FLAGGEMS_KERNEL=ON
+# is never linked and find_package(FlagGems) is skipped. FLAGOS_BUILD_FLAGGEMS=ON
 # compiles the Python-path kernels without importing flag_gems at build time, so
 # the cuda-style FlagGems C++ asset discovery is omitted here. The runtime
 # flag_gems import for the FlagGems test step comes from the venv install further
@@ -502,20 +502,20 @@ export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
-export ACCELERATOR=ppu
+export FLAGOS_ACCELERATOR=ppu
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
 export FLAGOS_PPU_TORCH_LIB="$VENDOR_TORCH_LIB"
 export FLAGOS_WHEEL_LOCAL="${FLAGOS_WHEEL_LOCAL:-ppu}"
 # PPU image ships FlagGems as source only (no built liboperators.so /
-# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGGEMS_CPP) must be off.
+# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGOS_BUILD_FLAGGEMS_CPP) must be off.
 # setup.py's `ppu` branch already forces it OFF; exporting it here keeps the
 # environment consistent for the pre-build assertions and any manual cmake run.
-# The Python-path kernels (FLAGGEMS_KERNEL) stay at the default ON -- they
+# The Python-path kernels (FLAGOS_BUILD_FLAGGEMS) stay at the default ON -- they
 # compile without importing flag_gems, and the FlagGems runtime test step needs
 # them.
-export FLAGGEMS_CPP=0
+export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
@@ -605,9 +605,9 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH ACCELERATOR CUDA_HOME CUDA_PATH \
+    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
     PPU_SDK FLAGOS_PPU_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_WHEEL_LOCAL FLAGGEMS_CPP FLAGCX_PATH \
+    FLAGOS_WHEEL_LOCAL FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

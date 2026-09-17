@@ -22,15 +22,15 @@
 
 | Platform | Build selector | Execution path | Eager and autograd | `torch.compile` | Distributed | Profiler | FlagGems | Status |
 |---|---|---|---|---|---|---|---|---|
-| NVIDIA CUDA | `ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
-| MetaX | `ACCELERATOR=metax` | CUDA boxing via `cu-bridge` against the vendor libtorch | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
-| Ascend | `ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 routes fall back to ACLNN) | Beta |
-| PPU | `ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
-| Hygon DCU | `ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
-| Enflame GCU | `ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
-| Moore Threads MUSA | `ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
-| D-Robotics BPU | `ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
-| TsingMicro | `ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | Runtime only | Not validated | Not validated | Not validated | Not applicable | Runtime only |
+| NVIDIA CUDA | `FLAGOS_ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
+| MetaX | `FLAGOS_ACCELERATOR=metax` | CUDA boxing via `cu-bridge` against the vendor libtorch | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
+| Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Runtime only (device/runtime events not emitted; profiler parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 routes fall back to ACLNN) | Beta |
+| PPU | `FLAGOS_ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
+| Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
+| Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
+| Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
+| D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
+| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | Runtime only | Not validated | Not validated | Not validated | Not applicable | Runtime only |
 
 ## Platform Notes
 
@@ -145,7 +145,7 @@ every strategy resolves through FlagTree's real registry
 
 ### PPU
 
-PPU has its own `ACCELERATOR=ppu` value (see [`setup.py`](../../setup.py)) and rides the
+PPU has its own `FLAGOS_ACCELERATOR=ppu` value (see [`setup.py`](../../setup.py)) and rides the
 CUDA-boxing build against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into
 `lib_ppu/`. `.github/configs/ppu.yml` carries the CI manifest. The
 [README](../../README.md)'s build-from-source instructions remain the full local procedure.
@@ -170,8 +170,8 @@ and FlagGems-runtime operator suites, general tests, and the profiler parity sui
 inference and training smoke are explicitly deferred pending a model mount and card-count
 confirmation on the runner (same file, lines 57-61). DCU is a CUDA-boxing build over the
 hipified DTK torch, so it reuses the generated CUDA boxing kernels with no hand-written kernels
-of its own (see [`setup.py`](../../setup.py), the `ACCELERATOR=dcu` branch). FlagGems C++ dispatch is not built
-for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) and [`setup.py`](../../setup.py) force `FLAGGEMS_CPP=OFF` with the comment "FLAGGEMS_CPP needs liboperators.so,
+of its own (see [`setup.py`](../../setup.py), the `FLAGOS_ACCELERATOR=dcu` branch). FlagGems C++ dispatch is not built
+for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) and [`setup.py`](../../setup.py) force `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` with the comment "FLAGOS_BUILD_FLAGGEMS_CPP needs liboperators.so,
 which is not built for DTK," and [`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) line
 87 excludes C++ tests with `-m "not flaggems_cpp"`. Distributed collectives (all_reduce,
 broadcast, all_gather, all_gather_into_tensor, reduce_scatter_tensor) and DDP are measured
@@ -271,7 +271,7 @@ CPU-only PyTorch 2.10 wheel used for this measurement does not justify a general
 ### D-Robotics BPU
 
 BPU is **Runtime only** for eager execution: every kernel set is disabled at build time for
-`ACCELERATOR=bpu` (see [`setup.py`](../../setup.py), lines 398-413), so eager compute falls
+`FLAGOS_ACCELERATOR=bpu` (see [`setup.py`](../../setup.py), lines 398-413), so eager compute falls
 back to CPU. Acceleration is graph-level, through `torch.compile(backend="bpu")`, which
 partitions a traced graph, quantizes it, and compiles it with hbdk4 into a `.hbm` artifact run
 on the board's native runtime (see [`docs/vendors/bpu/integration.md`](../vendors/bpu/integration.md),
@@ -283,7 +283,7 @@ evidence above is from on-board measurement, not continuous validation.
 
 ### TsingMicro
 
-TsingMicro has a build selector (`ACCELERATOR=tsingmicro`) and links against the Kuiper SDK
+TsingMicro has a build selector (`FLAGOS_ACCELERATOR=tsingmicro`) and links against the Kuiper SDK
 (see [`CMakeLists.txt`](../../CMakeLists.txt), lines 196-216), but
 [`setup.py`](../../setup.py) (lines 367-375) disables every kernel set for it, mirroring the
 same "no per-op kernel to call" treatment documented for BPU (see

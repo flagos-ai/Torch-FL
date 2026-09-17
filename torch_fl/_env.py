@@ -245,33 +245,38 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     ),
     "FLAGOS_BUILD_VENDOR": (
         SCOPE_BUILD,
-        "ON",
+        "ON, OFF on metax",
         "Compile the accelerator vendor's native kernels (a no-op where the "
-        "vendor ships none: cuda, dcu, ppu, tsingmicro, bpu)",
+        "vendor ships none: cuda, dcu, ppu, tsingmicro, bpu). MetaX defaults OFF "
+        "because its native path is retired -- the generated CUDA boxing kernels "
+        "are what accelerate that platform",
     ),
     "FLAGOS_BUILD_FLAGGEMS": (
         SCOPE_BUILD,
-        "ON",
+        "ON, OFF on bpu",
         "Compile the FlagGems Python kernel wrappers (calls into Python, no C++ "
         "linking). Set OFF for a slim pure-boxing build",
     ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,
-        "ON",
-        "Compile the CUDA boxing kernels for CUDA-ABI vendors. Forced OFF for "
-        "ascend, gcu and musa, which have no CUDA runtime",
+        "ON, OFF on ascend, gcu and musa",
+        "Compile the generated CUDA boxing kernels. OFF is a default for "
+        "ascend, gcu and musa, which have no CUDA runtime to box onto",
     ),
     "FLAGOS_BUILD_FLAGGEMS_CPP": (
         SCOPE_BUILD,
-        "ON",
-        "Compile the FlagGems C++ wrapper (cpp_wrapper), which links "
-        "liboperators.so. Forced OFF unless a vendor-built FlagGems is pointed "
-        "at via FLAGGEMS_DIR",
+        "ON on cuda and tsingmicro, off elsewhere",
+        "Compile the FlagGems C++ wrapper, which links liboperators.so. Defaults "
+        "OFF outside cuda/tsingmicro because that library has to be built for "
+        "the vendor's own toolkit and pointed at with FLAGGEMS_DIR; a build with "
+        "one may turn this ON explicitly (MetaX's MACA build is the case). "
+        "Pinned OFF for dcu, musa and bpu, where no such library exists at all",
     ),
     "FLAGOS_BUILD_TILEOPS": (
         SCOPE_BUILD,
-        "ON on CUDA, forced OFF elsewhere",
-        "Compile the TileOps kernel wrappers. Forced OFF for non-CUDA builds",
+        "ON on cuda, OFF elsewhere",
+        "Compile the TileOps kernel wrappers, which are TileLang on SM90 "
+        "NVIDIA parts only",
     ),
     "FLAGOS_BUILD_JOBS": (
         SCOPE_BUILD,
@@ -532,7 +537,9 @@ RETIRED: frozenset[str] = frozenset(
     {
         # Renamed to FLAGOS_ACCELERATOR.
         "ACCELERATOR",
-        # Renamed to FLAGOS_BUILD_*.
+        # Renamed to FLAGOS_BUILD_*. These are the pre-rename spellings, so a
+        # bare VENDOR_KERNEL=1 export is inert rather than silently enabling a
+        # kernel set.
         "VENDOR_KERNEL",
         "FLAGGEMS_KERNEL",
         "BOXING_KERNEL",

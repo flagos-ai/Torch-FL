@@ -2,7 +2,7 @@
 # Bundle the locally built PPU libtorch C++ .so into torch_fl/lib_ppu/ for a
 # self-contained single wheel.
 #
-# PPU is compiled against PPU_SDK/CUDA_SDK with its own ACCELERATOR=ppu value;
+# PPU is compiled against PPU_SDK/CUDA_SDK with its own FLAGOS_ACCELERATOR=ppu value;
 # the CUDA boxing kernels work as-is. The difference from a real NVIDIA machine lies in
 # libtorch: it is a local USE_CUDA=1 source build, not an upstream wheel.
 # Measured undefined symbols in libtorch_fl.so show that its libtorch_cpu.so

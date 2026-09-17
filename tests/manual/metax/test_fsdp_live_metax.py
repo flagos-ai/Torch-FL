@@ -38,7 +38,7 @@ same input, so per-step losses must match the reference to tolerance and must
 agree across ranks.
 
 Run (from repo root):
-    ACCELERATOR=metax \
+    FLAGOS_ACCELERATOR=metax \
     MACA_PATH=/opt/maca \
     LD_LIBRARY_PATH=/opt/maca/lib:/opt/maca/lib64:$LD_LIBRARY_PATH \
     PYTHONPATH=$PWD \

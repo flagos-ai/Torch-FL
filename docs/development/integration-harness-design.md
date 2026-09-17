@@ -166,8 +166,8 @@ synchronized — with every operator still falling back to CPU.
 
 ### Naming note
 
-Do not use `xpu` as the `ACCELERATOR` value for Kunlun. `torch.xpu` is PyTorch's
-own Intel GPU namespace, and a `ACCELERATOR=xpu` selector inside a PyTorch
+Do not use `xpu` as the `FLAGOS_ACCELERATOR` value for Kunlun. `torch.xpu` is PyTorch's
+own Intel GPU namespace, and a `FLAGOS_ACCELERATOR=xpu` selector inside a PyTorch
 plugin will be read as Intel by every future reader. Use `kunlun`.
 
 ### Phase 2a — SDK reconnaissance (read-only)
@@ -207,10 +207,10 @@ for a runtime with its own idioms and a self-managed allocator.
 
 ### Phase 2c — Build wiring
 
-- `csrc/runtime/accelerator/CMakeLists.txt` — an `elseif(ACCELERATOR STREQUAL
+- `csrc/runtime/accelerator/CMakeLists.txt` — an `elseif(FLAGOS_ACCELERATOR STREQUAL
   "<vendor>")` arm for the source subdirectory and one for include/link paths
   (both lists exist separately in that file; both need the arm)
-- `setup.py` — the `ACCELERATOR` branch for SDK detection, with a clear
+- `setup.py` — the `FLAGOS_ACCELERATOR` branch for SDK detection, with a clear
   actionable error when the SDK is absent, matching the DTK/BPU precedent
 - `torch_fl/configs/backends_<vendor>.conf` — created, and for this command
   deliberately near-empty: every operator falls back to CPU
@@ -299,7 +299,7 @@ wheel:
    built on 2.9.0 pairs only with the `2.9` branch — this is precisely why
    command 1 exists as a separate axis, and why the branch is chosen first.
 3. Stage into the assets dir and bundle. `setup.py::_bundle_cuda_assets()`
-   already implements this, gated on `ACCELERATOR == "cuda"` and reading
+   already implements this, gated on `FLAGOS_ACCELERATOR == "cuda"` and reading
    `FLAGOS_CUDA_ASSETS_DIR`. Extending that gate to accept a vendor selector is
    the code change this command needs — the copy logic itself is done, including
    the size-comparison skip that avoids re-copying ~1GB.

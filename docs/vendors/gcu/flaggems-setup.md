@@ -61,11 +61,11 @@ python3 -m pip uninstall -y torch_gcu triton_gcu
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-ACCELERATOR=gcu FLAGGEMS_KERNEL=1 pip install --no-build-isolation -v -e .
+FLAGOS_ACCELERATOR=gcu FLAGOS_BUILD_FLAGGEMS=1 pip install --no-build-isolation -v -e .
 ```
 
-`FLAGGEMS_KERNEL=1` must be exported even though `setup.py` turns it on for
-`ACCELERATOR=gcu`: environment variables are applied *after* the per-accelerator
+`FLAGOS_BUILD_FLAGGEMS=1` must be exported even though `setup.py` turns it on for
+`FLAGOS_ACCELERATOR=gcu`: environment variables are applied *after* the per-accelerator
 defaults, so exporting `0` switches it back off and produces a wheel whose conf
 routes operators to dispatcher slots that were never compiled in.
 
@@ -98,7 +98,7 @@ change to the generator also requires re-running it:
 cd /path/to/PyTorch-Plugin-FL
 python3 scripts/codegen/codegen_gcu_flaggems.py
 python3 scripts/codegen/gen_vendor_confs.py
-ACCELERATOR=gcu python setup.py build_ext --inplace
+FLAGOS_ACCELERATOR=gcu python setup.py build_ext --inplace
 ```
 
 ## Environment variables
@@ -106,7 +106,7 @@ ACCELERATOR=gcu python setup.py build_ext --inplace
 ```bash
 export TOPS_HOME=/opt/tops
 export TOPSATEN_LIB=/usr/lib/libtopsaten.so
-export ACCELERATOR=gcu VENDOR_KERNEL=1 FLAGGEMS_KERNEL=1 FLAGGEMS_CPP=0
+export FLAGOS_ACCELERATOR=gcu FLAGOS_BUILD_VENDOR=1 FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0
 export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):$LD_LIBRARY_PATH
 ```
 
@@ -114,9 +114,9 @@ export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):
 |---|---|---|
 | `TOPS_HOME` | yes | Locates `libtopsrt.so` / `libtopsaten.so` at build and run time |
 | `TOPSATEN_LIB` | no | Overrides the `libtopsaten.so` path when it is outside `TOPS_HOME/lib` |
-| `ACCELERATOR=gcu` | build time | Selects the GCU backend when building |
+| `FLAGOS_ACCELERATOR=gcu` | build time | Selects the GCU backend when building |
 | `LD_LIBRARY_PATH` | yes | Must include `$TOPS_HOME/lib` and the `libtopsaten.so` directory |
-| `VENDOR_KERNEL` / `FLAGGEMS_KERNEL` / `FLAGGEMS_CPP` | yes | Select the kernel paths the wheel was built with |
+| `FLAGOS_BUILD_VENDOR` / `FLAGOS_BUILD_FLAGGEMS` / `FLAGOS_BUILD_FLAGGEMS_CPP` | yes | Select the kernel paths the wheel was built with |
 | `GEMS_VENDOR=enflame` | **no** | Set automatically by `torch_fl` at import (`torch_fl/__init__.py`) when a GCU Triton backend is importable and the selected conf routes anything to FlagGems |
 | `FLAGOS_BACKEND_CONFIG` | **no** | `torch_fl` selects `configs/backends_gcu.conf` itself; set this only to force a different conf for testing |
 | `FLAGOS_LOG_DISPATCH=1` | no | Logs `[flagos dispatch] <op> -> <backend>` for every dispatch |

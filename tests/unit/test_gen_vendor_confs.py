@@ -102,7 +102,7 @@ def test_route_loses_tileops_to_flaggems_and_withholds_it_when_unregistered():
 
 
 def test_route_omits_tileops_when_the_platform_cannot_compile_the_slot():
-    """TILEOPS_PLATFORMS gates the key. setup.py forces TILEOPS_KERNEL=OFF for
+    """TILEOPS_PLATFORMS gates the key. setup.py forces FLAGOS_BUILD_TILEOPS=OFF for
     every non-cuda accelerator, where kTileOps degrades to an equally empty
     cuda_fn_ -- so an ungated key would route a real op at nothing."""
     assert not g.TILEOPS_PLATFORMS
@@ -405,9 +405,10 @@ def test_every_platform_covers_the_same_op_set():
 def test_flaggems_cpp_only_appears_where_the_slot_is_compiled_in():
     """`flaggems_cpp` is Backend::kFlagGemsCpp, registered in flaggems_cpp_kernels.cc
     behind `#ifdef FLAGOS_FLAGGEMS_CPP` -- which csrc/CMakeLists.txt defines only
-    for FLAGGEMS_CPP=ON. CMakeLists.txt force-sets that OFF for ascend, dcu,
-    musa, bpu, tsingmicro and a non-boxing metax build. For those, the slot is
-    empty and Dispatcher::GetFn degrades to the boxing kernel instead of raising.
+    for FLAGOS_BUILD_FLAGGEMS_CPP=ON. That switch defaults ON only for cuda and
+    tsingmicro and OFF everywhere else, and CMakeLists.txt pins it OFF for dcu,
+    musa and bpu. For those, the slot is empty and Dispatcher::GetFn degrades to
+    the boxing kernel instead of raising.
 
     backends_metax.conf is the only generated conf that routes any ops to the C++
     path. The vendor confs (musa/gcu/ascend) omit the key entirely: every C++ op
