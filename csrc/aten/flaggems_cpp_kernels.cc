@@ -20,11 +20,12 @@
 // directly without touching Python or the GIL — then unbox the result back
 // to flagos.
 //
-// This file is compiled only when FLAGGEMS_KERNEL=ON (csrc/CMakeLists.txt
+// This file is compiled only when FLAGGEMS_CPP=ON (csrc/CMakeLists.txt
 // defines FLAGOS_FLAGGEMS_CPP). kFlagGemsCpp is registered here; kFlagGems is
-// registered by generated/flaggems_python_kernels.cc. Activating this path
-// requires building torch_fl against FlagGems' liboperators.so and setting
-// FLAGOS_USE_FLAGGEMS_CPP=1 at runtime (loads backends_flaggems_cpp.conf).
+// registered by generated/flaggems_python_kernels.cc. Whether an op actually
+// dispatches here is stated by the `flaggems_cpp` keys in the active
+// backends_<platform>.conf; there is no runtime switch. A wheel built without
+// liboperators.so simply has no implementation registered for this backend.
 
 #ifdef FLAGOS_FLAGGEMS_CPP
 

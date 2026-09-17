@@ -245,6 +245,7 @@ torch-side view is what you want.
 | `FLAGOS_BPU_X86_PYTHON` | unset | x86_64 python with `hbdk4-compiler`, run under box64 |
 | `FLAGOS_BPU_X86_EMULATOR` | unset | path to a box64 binary; needed because the distro 0.2.6 is too old and a self-built one is not on `PATH` |
 | `FLAGOS_BPU_X86_STUBS` | `<x86 python>/../../stubs` | numba/torch import stubs for the emulated interpreter |
+| `FLAGOS_BPU_MLIR_LIBS` | unset | directory containing `libhbtl.so`; preloaded `RTLD_GLOBAL` by the emulated interpreter before `hbdk4` is imported |
 | `FLAGOS_BPU_MARCH` | `nash-p` | BPU micro-architecture (`nash-p`=BPU, `nash-e`=S100, `nash-m`=S100P) |
 | `FLAGOS_BPU_QUANTIZE` | `1` | int8 Q/DQ insertion; `0` compiles float (bit-exact, no BPU speedup) |
 | `FLAGOS_BPU_ACT_SCALE` | `0.05` | fallback activation scale for uncalibrated tensors |

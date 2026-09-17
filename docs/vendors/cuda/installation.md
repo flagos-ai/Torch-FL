@@ -56,7 +56,7 @@ ACCELERATOR=cuda \
 
 The following environment variables control runtime behavior:
 
-- `FLAGOS_USE_FLAGGEMS_CPP=1`: Prefer C++ dispatch over Python dispatch when both are available
+- `FLAGOS_USE_FLAGGEMS_CPP=1`: Enable the `flaggems_cpp` test gate. Routing itself follows the conf's `flaggems_cpp` keys, so this variable only decides whether those tests are collected
 - `CUDA_VISIBLE_DEVICES`: Control which GPUs are visible to the process
 
 ## Verification
