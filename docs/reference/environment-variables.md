@@ -16,7 +16,7 @@ These variables control which backends and kernels are compiled into the wheel.
 | `MUSA_KERNEL` | Build | Auto (enabled when `ACCELERATOR=musa`) | Enable Moore Threads MUSA mudnn kernels |
 | `METAX_KERNEL` | Build | Auto (enabled when `ACCELERATOR=metax`) | Enable MetaX C++ kernel build |
 | `FLAGGEMS_KERNEL` | Build | `ON` | Enable FlagGems C++ kernel wrappers (liboperators.so); set `OFF` for pure vendor builds |
-| `FLAGGEMS_PYTHON` | Build | `OFF` | Enable FlagGems Python wrapper backend registration |
+| `FLAGGEMS_PYTHON` | Build | `ON` | Enable FlagGems Python wrapper backend registration; set `OFF` for a slim pure-boxing build |
 | `FLAGOS_METAX_BOXING` | Build | `OFF` | Enable MetaX boxing mode (reuse CUDA boxing kernels + optional FlagGems, no mxcc backend) |
 
 ## SDK and Compiler Discovery
@@ -29,9 +29,8 @@ These variables locate platform SDKs and toolchains. CMake searches common insta
 | `ASCEND_HOME` | Build | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit path for Ascend NPU builds |
 | `MUSA_HOME` | Build | `/usr/local/musa` | Moore Threads MUSA toolkit path |
 | `TOPS_HOME` | Build | `/opt/tops` | Enflame TopsRider SDK path for GCU builds |
+| `TOPSATEN_LIB` | Build | Discovered under `TOPS_HOME` (`$TOPS_HOME/lib/libtopsaten.so`, then `/usr/lib64/libtopsaten.so`) | Enflame topsaten library path override |
 | `METAX_PATH` | Build | `/opt/maca` or `$METAX_HOME` or `$MACA_PATH` or `$MACA_HOME` (first found) | MetaX SDK path |
-| `METAX_ARCH` | Build | No global default | MetaX GPU architecture string (e.g., `mp_21`) |
-| `METAX_MXCC` | Build | No global default | Path to mxcc/cucc compiler override |
 | `DTK_ROOT` | Build | `$ROCM_PATH` or `/opt/dtk` | Hygon DTK path for DCU builds |
 | `PPU_SDK` / `PPU_HOME` | Build | No global default | PPU SDK path for Tsingmicro builds |
 | `CONDA_PREFIX` | Build & runtime | Auto-detected | Conda environment prefix (fallback for CUDA discovery) |
@@ -46,6 +45,8 @@ These variables control which backend implementation (CUDA boxing, vendor C++, F
 | `FLAGOS_USE_FLAGGEMS` | Retired (no-op) | — | Removed: routing is stated per op in `backends_<platform>.conf` (FlagGems first, vendor fallback, CPU fallback). `ALL_USE_FLAGGEMS=1` / `ALL_USE_VENDOR=1` collapse the table onto one backend family for A/B measurement; the dispatcher raises instead of falling back when the resolved backend has no compiled implementation |
 | `FLAGOS_USE_FLAGGEMS_CPP` | Runtime | `0` (off) | Enable FlagGems C++ operators (kFlagOs dispatch, no GIL); selects `backends_flaggems_cpp.conf`; requires wheel built with `FLAGGEMS_KERNEL=ON` |
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g., `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
+| `ALL_USE_FLAGGEMS` | Runtime | No default (off) | Collapse the whole routing table onto FlagGems paths for A/B measurement against the mixed default; mutually exclusive with `ALL_USE_VENDOR`; the dispatcher raises instead of falling back when the resolved backend has no compiled implementation |
+| `ALL_USE_VENDOR` | Runtime | No default (off) | Same, collapsed onto the vendor path |
 | `FLAGOS_LOG_DISPATCH` | Runtime | `0` (off) | Print backend selection to stderr for each operator dispatch |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Disable FlagGems Python-layer registration (C++ stub-only mode) |
 | `FLAGGEMS_SOURCE_DIR` | Runtime | Required when FlagGems is active | Absolute path to FlagGems source directory (Python Triton kernels); must match the version liboperators.so was built against |
@@ -64,13 +65,23 @@ These variables control asset loading, bundled libtorch behavior, and import-tim
 |----------|-------|---------|---------|
 | `FLAGOS_DISABLE_CUDA_ASSETS` | Runtime | `0` (off) | Skip preloading bundled `libtorch_cuda.so` and CUDA libraries (for builds that use system libtorch) |
 | `FLAGOS_DISABLE_CUDA_SHIM` | Runtime | `0` (off) | Skip registering the `torch.cuda` compatibility shim for generic GPU operations |
-| `FLAGOS_ALIAS_CUDA` | Runtime | `0` (off) | Alias `cuda` device string to `flagos` for drop-in compatibility |
+| `FLAGOS_ALIAS_CUDA` | Runtime | `1` (on) | Alias `cuda` device string to `flagos` for drop-in compatibility |
 | `FLAGOS_METAX_CUDART_SHIM` | Runtime | `0` (off) | Preload libcudart version-tag shim before `import torch` (MetaX-specific; required for generic PyTorch wheels) |
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for DCU runtime |
 | `FLAGOS_DCU_VENDOR_CORE` | Build & Runtime | `0` (off) | Use DTK's forked core libraries instead of the official PyTorch core: bundles the full vendor core and symlinks it over the installed torch wheel. Must match at build and import time. See [DCU without DTK's core libraries](../vendors/dcu/vendor-free-core-libs.md) |
 | `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence). For deliberately testing a non-matching wheel pair |
+| `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Use the caching device allocator; set `0` to disable |
+| `FLAGOS_LOG_FALLBACK` | Runtime | `0` (off) | Print each `cpu_fallback` dispatch to stderr |
+| `FLAGOS_CACHE_STATS` | Runtime | `0` (off) | Print op-cache hit/miss stats |
+| `MTHREADS_VISIBLE_DEVICES` | Runtime | `all` | Vendor (MThreads) device visibility; exported by the MUSA setup |
+| `TRITON_ENABLE_TASKQUEUE` | Runtime | Set `false` by the Ascend setup | Triton task-queue switch; off because the queue launches through a `torch_npu` symbol this environment must not have |
+| `USE_FLAGTUNE` | Runtime (CUDA CI, temporary) | No default | Force FlagGems tuning mode: `0` selects the legacy default autotune policy. Temporary workaround until the CUDA FlagTree ships the FlagTune manifest machinery; do not copy to other platforms |
 | `FLAGOS_DCU_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to DTK's `torch/lib`, used when no bundled `lib_dcu/` is present |
+| `FLAGOS_MACA_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the MetaX vendor `torch/lib`; priority is bundled `lib_maca/`, then this variable, then a sibling install |
+| `FLAGOS_PPU_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the PPU vendor `torch/lib`; same bundled-first priority as above |
+| `FLAGOS_CUDA_ASSETS_DIR` | Build | `.libtorch_cuda_assets` under the repo root | Directory of external CUDA `.so` assets bundled into `torch_fl/lib` |
+| `FLAGGEMS_DIR` | Build | No default | Path to the FlagGems CMake config directory (`FlagGemsConfig.cmake`); enables C++ dispatch linkage |
 | `FLAGOS_SKIP_CUDA_ASSETS` | Build | `0` (off) | Skip bundling external `libtorch_cuda.so` into the wheel (for in-tree builds) |
 | `FLAGOS_WHEEL_LOCAL` | Build | `0` (off) | Build a wheel with machine-local paths (non-portable; for dev testing only) |
 | `FLAGCX_TORCH_BACKEND` | Build & Runtime | `torch_gcu` for Enflame FlagCX builds; torch-fl sets `flagos` by default | Select the Enflame FlagCX torch integration. `flagos` links `libflagos.so` and avoids the vendor `torch-gcu` package; an explicit value is preserved. |
@@ -86,6 +97,12 @@ These variables control torch.compile integration and specialized compilation pa
 |----------|-------|---------|---------|
 | `FLAGOS_COMPILE_FALLBACK_EAGER` | Runtime | `0` (off) | Fall back to eager mode when torch.compile encounters unsupported operations |
 | `FLAGOS_USE_FLAGTREE` | Runtime | `0` (off) | Enable FlagTree compiler backend integration |
+| `FLAGOS_USE_TILEOPS` | Runtime | `0` (off) | Route tileops-annotated ops to the TileOps backend instead of the conf default |
+| `FLAGOS_TILEOPS_USE_L2` | Runtime | `0` (off) | Enable the TileOps L2 cache tier |
+| `FLAGOS_TILEOPS_FULL` | Testing | `0` (off) | Larger manifest workload shapes in TileOps generated tests |
+| `FLAGOS_TILEOPS_DISABLE_ALL_CACHE` | Runtime | `0` (off) | Disable all TileOps caches |
+| `FLAGOS_TILEOPS_CACHE_MAX` | Runtime | `512` | TileOps instance cache size |
+| `FLAGOS_EXEC_CACHE` | Build (codegen) | `1` (on) | Cache Ascend codegen exec results; set `0` to regenerate |
 
 For BPU-specific compilation variables, see [BPU Integration Guide](../vendors/bpu/integration.md).
 

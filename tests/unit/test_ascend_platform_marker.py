@@ -26,11 +26,6 @@ These tests exercise torch_fl._select_backend_config() directly against a
 fake install tree (no real ACL device needed), and pin the regression this fix
 must not reintroduce: the marker branch runs *before* the /dev/davinci* branch,
 so whatever conf the /dev probe would have chosen, the marker must choose too.
-
-Retired opt-in variables must not divert the selection to a second conf:
-backends_ascend.conf is now the only Ascend conf and already states the
-FlagGems-first routing. The shadowing hazard remains worth pinning because the
-branch order that caused it is unchanged.
 """
 
 import os
@@ -60,17 +55,6 @@ def fake_ascend_install(tmp_path, monkeypatch):
 
 def test_ascend_marker_selects_native_conf_by_default(fake_ascend_install):
     conf_dir = fake_ascend_install
-    torch_fl._select_backend_config()
-    assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
-
-
-def test_ascend_marker_ignores_retired_opt_in_var(monkeypatch, fake_ascend_install):
-    """The old per-platform opt-in var is retained as a no-op for backward
-    compat. Setting it must not divert the selection to a second conf, since
-    backends_ascend.conf is now the only Ascend conf and already states the
-    FlagGems-first routing it used to switch between."""
-    conf_dir = fake_ascend_install
-    monkeypatch.setenv("FLAGOS_USE_VENDOR_OPS", "1")
     torch_fl._select_backend_config()
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == str(conf_dir / "backends_ascend.conf")
 

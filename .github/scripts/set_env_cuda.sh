@@ -37,7 +37,9 @@ FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-3.12}"
 FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-2.38}"
 # FlagGems currently uses master as its default branch; the repository has no
 # main branch. Keep this overrideable so a tested revision can be pinned by CI.
-FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-https://github.com/flagos-ai/FlagGems.git}"
+# Canonical override is TORCH_FL_FLAGGEMS_REPO like the other six setup
+# scripts; TORCH_FL_FLAGGEMS_REPOSITORY stays as a deprecated alias.
+FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}}"
 # TEMPORARY PIN -- revert the default to `master` once upstream fixes
 # flagos-ai/FlagGems: d312aa02 (2026-09-16) added
 # ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
