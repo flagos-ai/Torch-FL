@@ -647,7 +647,11 @@ class BuildExtWithCmake(_build_ext):
         # ``build`` runs build_py before build_ext, but CMake installs package
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
         # list, so copy late-generated files explicitly into wheel staging.
-        relative_paths = ["lib/flagos_platform", "include/flagos.h"]
+        relative_paths = [
+            "_build_config.py",
+            "lib/flagos_platform",
+            "include/flagos.h",
+        ]
         patterns = ["lib/*.so*", "lib/*.dylib*", "lib/*.dll", "lib/*.lib"]
         if ACCELERATOR == "dcu":
             # cmake installs the core-ABI shim straight into lib_dcu during
