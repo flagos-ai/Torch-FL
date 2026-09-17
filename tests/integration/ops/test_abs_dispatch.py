@@ -143,9 +143,7 @@ class TestAbsDispatch:
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """
-        result = _run_abs_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_abs_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("abs")
         assert f"[flagos dispatch] abs -> {expected}" in result.stderr

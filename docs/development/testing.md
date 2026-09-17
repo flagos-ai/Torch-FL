@@ -334,7 +334,7 @@ ruff check --fix .
 GitHub Actions CI runs a subset of tests based on pytest marks:
 
 - **Smoke tests**: `-m main_ops` (CUDA boxing kernels only)
-- **FlagGems tests**: `-m "flaggems and main_ops"` (when `FLAGOS_USE_FLAGGEMS=1`)
+- **FlagGems tests**: `-m "flaggems and main_ops"` (no env gate; the conf decides the route)
 - **Platform tests**: Vendor-specific runners filter by platform marker (e.g., `-m "ascend and main_ops"`)
 - **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
 

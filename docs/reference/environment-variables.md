@@ -122,7 +122,7 @@ import time.
 | `FLAGOS_MACA_TORCH_LIB`, `FLAGOS_DCU_TORCH_LIB`, `FLAGOS_PPU_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_maca/`/`lib_dcu/`/`lib_ppu/` is present. Each is the vendor's own libtorch; there is no shared name because the three SDK layouts differ |
 | `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Caching device allocator. Set `0` to hand every allocation straight to the vendor runtime |
 | `FLAGOS_WHEEL_LOCAL` | Build | SDK-derived | Local version label for the wheel (e.g., `FLAGOS_WHEEL_LOCAL=metax3.8.1`), for dev builds that must pin the exact SDK |
-| `FLAGCX_TORCH_BACKEND` | Build & Runtime | `flagos` | Select the Enflame FlagCX torch integration. `flagos` links `libflagos.so` and avoids the vendor `torch-gcu` package; an explicit value is preserved. FlagCX's own build inputs (`FLAGOS_INSTALL_PATH`, `FLAGOS_INCLUDE_DIR`, `FLAGOS_LIBRARY_DIR`) are documented in that project, not here |
+| `FLAGCX_TORCH_BACKEND` | Build & Runtime | `flagos` | Select the Enflame FlagCX torch integration. `flagos` links `libflagos.so` and avoids the vendor `torch-gcu` package; an explicit value is preserved |
 
 ## Compiler and Feature Backends
 

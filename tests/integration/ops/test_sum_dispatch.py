@@ -157,9 +157,7 @@ class TestSumDimDispatch:
         this test meaningful on every platform rather than pinning it to the one
         it was written on.
         """
-        result = _run_subprocess(
-            {"FLAGOS_LOG_DISPATCH": "1", "FLAGOS_USE_FLAGGEMS": "1"}
-        )
+        result = _run_subprocess({"FLAGOS_LOG_DISPATCH": "1"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("sum.dim_IntList")
         assert f"[flagos dispatch] sum.dim_IntList -> {expected}" in result.stderr
