@@ -18,8 +18,8 @@ pytest_plugins = ("profiler_support", "amp_support")
 
 
 # Backend config selection moved fully into torch_fl._select_backend_config(),
-# which reads the build record (FLAGOS_ACCELERATOR + the lib/flagos_platform marker)
-# and picks backends_<platform>.conf. conftest no longer pre-empts it: a MetaX
+# which reads the build record (the recorded accelerator + the lib/flagos_platform
+# marker) and picks backends_<platform>.conf. conftest no longer pre-empts it: a MetaX
 # wheel is boxing-only, so torch_fl already resolves backends_metax.conf, and
 # hard-coding the file here only duplicated -- and could contradict -- that.
 

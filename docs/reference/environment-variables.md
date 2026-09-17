@@ -12,7 +12,7 @@ wins over both via the generic pass-through.
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
-| `FLAGOS_ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu` |
+| `FLAGOS_ACCELERATOR` | Build | `cuda` | Hardware platform: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu`. Read by `setup.py` alone; the wheel records it in `_build_config.py`, and that record — not a re-export — is what every runtime reader consults |
 | `FLAGOS_BUILD_VENDOR` | Build | `ON` | Build the `FLAGOS_ACCELERATOR` vendor's native kernels (no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `tsingmicro`, `bpu`; MetaX's native dir is retired and excluded). `setup.py` forces `OFF` for MetaX |
 | `FLAGOS_BUILD_FLAGGEMS` | Build | `ON` | FlagGems integration: Python kernel wrappers (calls via Python, no C++ linking); set `OFF` for a slim pure-boxing build |
 | `FLAGOS_BUILD_BOXING` | Build | `ON` | CUDA Boxing integration: generated boxing kernels for CUDA-ABI vendors (libtorch extracted from the vendor torch package); `setup.py` forces `OFF` for `ascend`/`gcu`/`musa`, which have no CUDA runtime |

@@ -135,7 +135,10 @@ def test_stage_a_privateuse1_device_time():
 )
 def test_cupti_library_locatable():
     """Confirm the profiler library for the selected accelerator is loadable."""
-    accelerator = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
+    # The wheel's own answer, not os.environ: FLAGOS_ACCELERATOR is a build
+    # input and no longer overrides the build record, so reading the shell here
+    # could look for MetaX's library on a CUDA build.
+    accelerator = torch_fl._build_accelerator() or "cuda"
     if accelerator == "metax":
         candidates = ["libmcpti.so"]
         metax_path = os.environ.get("MACA_PATH", "/opt/maca")

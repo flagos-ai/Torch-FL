@@ -113,8 +113,9 @@ export MACA_PATH=/opt/maca
 export MACA_HOME=/opt/maca
 
 # MetaX is a boxing-only build: no native mxcc kernels compile in, so
-# FLAGOS_BUILD_VENDOR=OFF is the one build-side statement. The runtime side derives
-# its conf from FLAGOS_ACCELERATOR=metax (torch_fl._select_backend_config) -- there is
+# FLAGOS_BUILD_VENDOR=OFF is the one build-side statement. The export above is a
+# build input -- setup.py records it in torch_fl/_build_config.py, and the runtime
+# derives its conf from that record (torch_fl._select_backend_config), so there is
 # no mode variable to keep in agreement with the build any more.
 export FLAGOS_BUILD_VENDOR=OFF
 export FLAGOS_METAX_CUDART_SHIM=1

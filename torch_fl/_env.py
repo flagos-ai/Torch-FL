@@ -243,7 +243,9 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_BUILD,
         "cuda",
         "Hardware platform the wheel is built for: cuda, ppu, metax, ascend, "
-        "tsingmicro, dcu, gcu, musa, or bpu",
+        "tsingmicro, dcu, gcu, musa, or bpu. Read by setup.py alone -- the wheel "
+        "records it in _build_config.py, and that record, not a re-export, is "
+        "what every run-time reader consults",
     ),
     "FLAGOS_BUILD_VENDOR": (
         SCOPE_BUILD,

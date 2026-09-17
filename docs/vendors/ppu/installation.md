@@ -6,7 +6,7 @@ PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain
 
 - **No stock `+cpu` wheel and no external `libtorch_cuda.so`** are required — the PPU torch wheel ships its own CUDA runtime
 - PPU registers ops under the `CUDA` dispatch key (not `PrivateUse1`), so the generated CUDA boxing kernels are reused unchanged
-- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and, at runtime, `backends_ppu.conf`; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
+- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and is recorded in `torch_fl/_build_config.py`, which is what selects `backends_ppu.conf` at runtime — the environment is not consulted there; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
 
 **Status:** Experimental. CI covers the build plus the manifest in `.github/configs/ppu.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
 

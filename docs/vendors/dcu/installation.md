@@ -253,7 +253,7 @@ export FLAGOS_USE_FLAGGEMS_CPP=0
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 
-A DCU build records `FLAGOS_ACCELERATOR=dcu` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `FLAGOS_ACCELERATOR` at runtime, and no opt-in variable exists any more.
+A DCU build records `ACCELERATOR = "dcu"` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `FLAGOS_ACCELERATOR` at runtime (the record is the only thing read there), and no opt-in variable exists any more.
 
 Confirm what the interpreter actually resolved before trusting the flags:
 

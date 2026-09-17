@@ -12,25 +12,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.machinery
+import importlib.util
 import os
+from pathlib import Path
 
 import pytest
+
+
+def _build_accelerator() -> str:
+    """The accelerator the installed wheel was built for ("" if unknown).
+
+    From the build record setup.py writes (torch_fl/_build_config.py), the same
+    source torch_fl itself reads: FLAGOS_ACCELERATOR is a build input and no
+    longer overrides the record at run time, so reading it here would let a
+    stale export from another build choose this gate's skip set.
+
+    find_spec() locates the package without executing it, so this stays free of
+    the torch import that must not happen before the assets are preloaded; the
+    record itself imports nothing.
+    """
+    try:
+        spec = importlib.util.find_spec("torch_fl")
+    except (ImportError, ValueError):
+        return ""
+    if spec is None or not spec.origin:
+        return ""
+    path = Path(spec.origin).resolve().parent / "_build_config.py"
+    try:
+        loader = importlib.machinery.SourceFileLoader("_flagos_build_record", str(path))
+        module = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader(loader.name, loader)
+        )
+        loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError):
+        # A source checkout with no build yet; the marker below is what
+        # identifies such an install.
+        return ""
+    return str(getattr(module, "ACCELERATOR", "")).strip().lower()
 
 
 def _detect_platform() -> str:
     """Infer the active hardware/backend platform.
 
-    FLAGOS_ACCELERATOR is a *build*-time variable, so it is usually absent when running
-    the tests against an installed wheel. The lib/flagos_platform marker that
-    native-kernel builds write is authoritative in that case, and the resolved
+    The accelerator is read from the wheel's build record, which is what
+    torch_fl consults. The lib/flagos_platform marker that native-kernel builds
+    write is authoritative for those platforms, and the resolved
     FLAGOS_BACKEND_CONFIG name is the last resort.
 
-    Every chip has its own FLAGOS_ACCELERATOR value, PPU included (it is a CUDA-ABI
-    boxing vendor, not a cuda build). Older PPU wheels reported FLAGOS_ACCELERATOR=cuda,
-    so the PPU_SDK environment and the lib_ppu/ bundle directory stay
-    as fallbacks for them.
+    Every chip has its own record value, PPU included (it is a CUDA-ABI boxing
+    vendor, not a cuda build). Wheels built before PPU had a value of its own
+    report cuda and are still recognised through the PPU_SDK environment or the
+    lib_ppu/ bundle directory.
     """
-    accelerator = os.environ.get("FLAGOS_ACCELERATOR", "").lower()
+    accelerator = _build_accelerator()
     if accelerator == "ascend":
         return "ascend"
     if accelerator in ("metax", "maca"):

@@ -62,10 +62,12 @@ def _is_disabled() -> bool:
 
 
 def _build_accelerator() -> str:
-    """Return the build accelerator without importing torch_fl.__init__."""
-    value = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
-    if value:
-        return value
+    """Return the build accelerator without importing torch_fl.__init__.
+
+    From the build record alone, like torch_fl._build_accelerator() -- see that
+    function for why the environment is not consulted. Duplicated rather than
+    imported because importing torch_fl there would pull in torch.
+    """
     try:
         from torch_fl._build_config import ACCELERATOR
     except ImportError:

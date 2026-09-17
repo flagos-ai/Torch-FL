@@ -49,7 +49,7 @@ Both support modules share `platform_support.detect_platform()` and must not imp
 
 ### Platform Detection
 
-Test filtering is automatic: `conftest.py` detects the active platform from `FLAGOS_ACCELERATOR`, `lib/flagos_platform`, or `FLAGOS_BACKEND_CONFIG` and skips tests marked for unavailable backends.
+Test filtering is automatic: `conftest.py` detects the active platform from the wheel's build record (`_build_config.py`, plus the `PPU_SDK` environment or the `lib_ppu/` bundle for wheels that predate PPU's own record value), `lib/flagos_platform`, or `FLAGOS_BACKEND_CONFIG`, and skips tests marked for unavailable backends.
 
 ## Running Tests
 

@@ -27,14 +27,18 @@ from torch_fl import _env  # noqa: F401
 def _build_accelerator() -> str:
     """Accelerator this wheel was built for, lowercased ("" if unknown).
 
-    Reads the FLAGOS_ACCELERATOR env var first, then the _build_config.py that
-    setup.py writes at build time. The generated file is what makes a DCU wheel
+    Read from the _build_config.py that setup.py writes at build time, and never
+    from the environment. The generated file is what makes a DCU wheel
     self-describing: _select_backend_config() runs before `import torch`, so it
     cannot inspect torch.version.hip to detect DCU on its own.
+
+    The environment used to win over it, which meant a stale FLAGOS_ACCELERATOR
+    left over from an earlier build -- or exported by a script written for
+    another machine -- silently selected a conf the wheel was not built for.
+    FLAGOS_ACCELERATOR is a build input; the wheel it produced is the only thing
+    that can say what that build was. To route through a different conf on
+    purpose, FLAGOS_BACKEND_CONFIG names the file directly.
     """
-    env = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
-    if env:
-        return env
     try:
         from torch_fl._build_config import ACCELERATOR as built
     except ImportError:
@@ -68,8 +72,8 @@ def _select_backend_config() -> None:
     suffix -- so the selection is a property of the build, not of an env var:
 
       * a native-kernel vendor marker -> backends_<that platform>.conf
-      * FLAGOS_ACCELERATOR=metax      -> backends_metax.conf (boxing-only build)
-      * FLAGOS_ACCELERATOR=dcu        -> backends_dcu.conf
+      * a MetaX build                 -> backends_metax.conf (boxing-only build)
+      * a DCU build                   -> backends_dcu.conf
       * a PPU wheel                   -> backends_ppu.conf
       * otherwise                     -> backends_cuda.conf
 
@@ -407,7 +411,7 @@ def _disable_vendor_backend_autoload() -> None:
 def _validate_dcu_decoupled_runtime() -> None:
     """Prove the DTK device libs really bound to the official core.
 
-    Only runs for a decoupled DCU build (FLAGOS_ACCELERATOR=dcu without
+    Only runs for a decoupled DCU build (a DCU wheel without
     FLAGOS_DCU_VENDOR_CORE=1), right after `import torch`; the checks themselves
     live in accelerator/dcu/_dcu_runtime_check.py. Set
     FLAGOS_DCU_SKIP_RUNTIME_CHECK=1 to bypass (e.g. when deliberately testing a
@@ -893,7 +897,7 @@ def _patch_flaggems_codegen_config():
       avoid the triton-metax block-pointer bug), and patch torch.cuda (device
       props + stream/availability) so FlagGems' Triton kernels run on the
       CPU-frozen torch wheel against maca's libtorch_cuda.so. Auto-selected on a
-      MetaX build (FLAGOS_ACCELERATOR=metax) or with FLAGOS_METAX_COMPAT=1 when a MetaX
+      MetaX build or with FLAGOS_METAX_COMPAT=1 when a MetaX
       card is present.
 
     - Hygon DCU (DTK): set GEMS_VENDOR=hygon so FlagGems uses its _hygon
