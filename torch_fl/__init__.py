@@ -16,6 +16,13 @@ import os
 import re
 import sys
 
+# Single access point for every FLAGOS_* variable (see torch_fl/_env.py). Imported
+# for its side effect as well: it scans the environment once and warns about a
+# FLAGOS_* name torch_fl does not recognise, which is the only way a typo like
+# FLAGOS_LOG_DISPACH is ever noticed -- the misspelled variable is simply never
+# read and the setting silently does nothing.
+from torch_fl import _env  # noqa: F401
+
 
 def _build_accelerator() -> str:
     """Accelerator this wheel was built for, lowercased ("" if unknown).
