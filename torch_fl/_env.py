@@ -69,8 +69,12 @@ __all__ = [
 # both sets is not silently truthy: it warns and falls back to the default. That
 # single rule is what removes the profiler shims' existence-based bug, where
 # FLAGOS_CUPTI_SHIM_DEBUG=0 enabled logging.
+# The empty string is absent from both sets on purpose: _raw() maps it to
+# "unset", so it never reaches the table and always yields the default. A switch
+# that defaults on (FLAGOS_ALIAS_CUDA) is therefore on when set to "", which is
+# what the shell idiom `FLAGOS_ALIAS_CUDA=$MAYBE_UNSET` needs.
 _TRUTHY = frozenset({"1", "true", "on", "yes"})
-_FALSY = frozenset({"0", "false", "off", "no", ""})
+_FALSY = frozenset({"0", "false", "off", "no"})
 
 # (name, value) pairs already warned about, so a hot read path does not spam.
 _warned: set[tuple[str, str]] = set()

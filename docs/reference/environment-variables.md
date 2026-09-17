@@ -19,21 +19,22 @@ override for measurement, or a diagnostic.
 Every owned variable is read through `torch_fl/_env.py`, so the rules are stated
 once instead of being re-invented per call site.
 
-**Booleans.** `1`, `true`, `on` and `yes` are **on**; `0`, `false`, `off`, `no`
-and the empty string are **off**; anything else is not a boolean at all — torch_fl
-prints one `[flagos]` line to stderr and uses the variable's default rather than
-treating the value as truthy. Matching is case-insensitive.
+**Booleans.** `1`, `true`, `on` and `yes` are **on**; `0`, `false`, `off` and `no`
+are **off**; anything else is not a boolean at all — torch_fl prints one
+`[flagos]` line to stderr and uses the variable's default rather than treating
+the value as truthy. Matching is case-insensitive.
 
 | Value | Meaning |
 |-------|---------|
 | `1`, `true`, `on`, `yes` (any case) | on |
-| `0`, `false`, `off`, `no` (any case), `""` | off |
-| unset | the default in the table below |
+| `0`, `false`, `off`, `no` (any case) | off |
+| unset, or empty (see below) | the default in the table below |
 | anything else (`FLAGOS_ALIAS_CUDA=2`) | warns once, then the default |
 
 **Empty means unset.** `FLAGOS_LOG=${EXTRA_LOG}` with `EXTRA_LOG` unset is the
 same as not exporting `FLAGOS_LOG` at all, so shell idioms do not accidentally
-override a default.
+override a default. An empty value is the default, not "off": a switch that
+defaults on, such as `FLAGOS_ALIAS_CUDA`, stays on when set to `""`.
 
 **Enums.** A switch naming a mode rather than a boolean (`FLAGOS_FORCE_BACKEND`)
 reports the alternatives and uses the default when given a value outside them.

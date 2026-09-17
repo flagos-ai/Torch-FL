@@ -81,6 +81,7 @@ jobs:
           python -m pytest \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
+            tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_integration_workdir.py \
             tests/unit/test_ops_conftest_platform.py \
