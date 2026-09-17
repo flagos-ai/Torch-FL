@@ -45,6 +45,7 @@
   m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
   m.impl("_standard_gamma", WrapperPrivStandardGamma);
   m.impl("_unsafe_view", WrapperPrivUnsafeView);
+  m.impl("_upsample_nearest_exact2d", WrapperPrivUpsampleNearestExact2d);
   m.impl("abs", WrapperAbs);
   m.impl("acos", WrapperAcos);
   m.impl("acos_", WrapperAcosInplace);
