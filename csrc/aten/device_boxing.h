@@ -13,6 +13,8 @@
 #include <c10/core/TensorImpl.h>
 #include <c10/util/SmallVector.h>
 
+#include <flagos.h>
+
 #include <type_traits>
 
 namespace at::native::flagos {
@@ -55,6 +57,90 @@ inline void UnboxToFlagos(const at::Tensor& t) {
   SetTensorDevice(t, c10::DeviceType::PrivateUse1);
 }
 
+// The device half of the boxing contract.
+//
+// A boxed call runs through c10's CUDA machinery, so the *device* it leaves
+// behind is c10::cuda's business rather than the flagos runtime's, and the two
+// drift apart. c10's device guards switch with `cudaSetDevice`, and they only
+// switch back when the previous device has a primary context: otherwise
+// `c10::cuda::MaybeSetDevice` parks the index in its `targetDeviceIndex` TLS
+// and trusts a later `SetTargetDevice()` to apply it, which nothing on the
+// boxing path performs. A boxed call is entered with the caller's device
+// current (flagos:0 in a single-device workload) while its tensors claim the
+// accelerator index they were allocated on, so the switch really happens -- and
+// it sticks.
+//
+// That is not harmless, because "current device" is what the flagos runtime
+// keys its own decisions on: `empty_memory_format` emits a device guard only
+// when the requested index differs from the one it reads back, and
+// `DeviceAllocator` tags every block with the index read back at allocation
+// time. Once the runtime reports N for the rest of the process, its guards stop
+// binding N, allocations for an N-device tensor follow whatever context happens
+// to be current instead, and the per-device pool ends up holding segments from
+// two contexts. Measured on PPU (issue #313): with a 1 GiB tensor already
+// allocated, `m.to(torch.bool)` on `flagos:15` leaves both
+// `torch.cuda.current_device()` and `torch.flagos.current_device()` reporting
+// 15 with a second CUDA context current, and a later FlagGems `sum` obtains its
+// `mid` scratch block from one context while its operand lives in the other --
+// Triton's launcher then rejects `mid`'s pointer
+// (`cuPointerGetAttribute(CU_POINTER_ATTRIBUTE_DEVICE_POINTER)` returning
+// CUDA_ERROR_INVALID_VALUE) as "Pointer argument (at N) cannot be accessed from
+// Triton (cpu tensor?)".
+//
+// Binding the boxed tensors' device with the runtime's own `SetDevice` for the
+// lifetime of the boxed call keeps the two in step: c10's guards find that
+// device already current and leave the process alone, and the caller's device
+// is put back when the guard is destroyed, so a boxed op cannot silently
+// relocate the process. A no-op when the boxed call's device already is the
+// current one, i.e. for every flagos:0 workload.
+class BoxingDeviceScope {
+ public:
+  BoxingDeviceScope() = default;
+
+  // Called with the index of the first flagos tensor the boxed call touches,
+  // before that tensor's metadata is rewritten. Later calls are no-ops: a boxed
+  // call's tensors share one accelerator index (cross-device copies box only
+  // the operand that must match the other side's device type, and the native
+  // copy handles the two indices itself).
+  void bind(int device_index) {
+    if (bound_ || device_index < 0) {
+      return;
+    }
+    bound_ = true;
+    int current = -1;
+    if (::GetDevice(&current) != Success) {
+      // No readable previous device to come back to. Still bind the boxed
+      // device so the call runs where its tensors live, and skip the restore
+      // rather than guess at a device to return to.
+      ::SetDevice(device_index);
+      return;
+    }
+    if (current == device_index) {
+      // The common case, and the only one for a single-device workload: the
+      // boxed call is already where its tensors live, so leave the process
+      // alone entirely -- no switch, and nothing to put back.
+      return;
+    }
+    saved_ = current;
+    ::SetDevice(device_index);
+    restore_ = true;
+  }
+
+  ~BoxingDeviceScope() {
+    if (restore_) {
+      ::SetDevice(saved_);
+    }
+  }
+
+  BoxingDeviceScope(const BoxingDeviceScope&) = delete;
+  BoxingDeviceScope& operator=(const BoxingDeviceScope&) = delete;
+
+ private:
+  int saved_{-1};
+  bool bound_{false};
+  bool restore_{false};
+};
+
 // RAII guard: boxes flagos (PrivateUse1) tensors to CUDA, unboxes on destruction.
 // CPU/CUDA inputs are left unchanged (e.g. mul/add with a CPU scalar).
 //
@@ -86,11 +172,13 @@ class DeviceBoxingGuard {
  private:
   void maybe_box(const at::Tensor& t) {
     if (t.defined() && t.is_privateuseone()) {
+      device_.bind(t.device().index());
       auto* impl = t.unsafeGetTensorImpl();
       SetTensorImplDevice(impl, c10::DeviceType::CUDA);
       boxed_.push_back(impl);
     }
   }
+  BoxingDeviceScope device_;
   c10::SmallVector<c10::TensorImpl*, 4> boxed_;
 };
 
@@ -171,6 +259,7 @@ class TensorListBoxingGuard {
   void box(at::TensorList tensors) {
     for (const auto& t : tensors) {
       if (t.defined() && t.is_privateuseone()) {
+        device_.bind(t.device().index());
         auto* impl = t.unsafeGetTensorImpl();
         SetTensorImplDevice(impl, c10::DeviceType::CUDA);
         boxed_.push_back(impl);
@@ -180,7 +269,10 @@ class TensorListBoxingGuard {
 
   // Track a tensor that was already boxed (for ITensorListRef iteration)
   void track(const at::Tensor& t) {
-    if (t.defined()) boxed_.push_back(t.unsafeGetTensorImpl());
+    if (t.defined()) {
+      device_.bind(t.device().index());
+      boxed_.push_back(t.unsafeGetTensorImpl());
+    }
   }
 
   ~TensorListBoxingGuard() {
@@ -193,6 +285,7 @@ class TensorListBoxingGuard {
   TensorListBoxingGuard& operator=(const TensorListBoxingGuard&) = delete;
 
  private:
+  BoxingDeviceScope device_;
   c10::SmallVector<c10::TensorImpl*, 4> boxed_;
 };
 

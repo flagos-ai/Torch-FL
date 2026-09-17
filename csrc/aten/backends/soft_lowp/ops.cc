@@ -101,7 +101,14 @@ at::Tensor DecodeMatrix(const at::Tensor& input, bool packed_dim0) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing
+  // FP8 handled via boxing. This is the one boxing site outside the guards, so
+  // it binds the device itself: the boxed copy goes through c10's CUDA
+  // machinery, and the `at::empty` below relies on the runtime's current device
+  // to place the result. See BoxingDeviceScope.
+  BoxingDeviceScope device;
+  if (input.device().is_privateuseone()) {
+    device.bind(input.device().index());
+  }
   auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
   if (IsFp8(input.scalar_type())) {
     at::Tensor boxed = input;
@@ -132,7 +139,11 @@ at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing
+  // FP8 handled via boxing; see the note in DecodeMatrix.
+  BoxingDeviceScope device;
+  if (input.device().is_privateuseone()) {
+    device.bind(input.device().index());
+  }
   auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
   if (IsFp8(input.scalar_type())) {
     at::Tensor boxed = input;
