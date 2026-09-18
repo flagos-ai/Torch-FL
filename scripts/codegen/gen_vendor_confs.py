@@ -869,10 +869,19 @@ NATIVE_TRITON_GAPS = {
         # comparisons: they are what `torch.zeros` / `torch.full` decompose into
         # on a device, so routing them to `gcu` is what keeps the int64 raise
         # from turning every factory call in a model into a host round trip. The
-        # rest of the group -- the out-of-place `fill.*`, `masked_select`,
-        # `where.self`, `all`/`any` and the bitwise family -- has no topsaten
+        # rest of the group -- the out-of-place `fill.*` and `masked_fill.*`,
+        # `masked_select`, `any` and the bitwise family -- has no topsaten
         # kernel, so it lands on `none` and the call reaches cpu_fallback, the
         # same route these ops already took before GCU had a FlagGems path.
+        #
+        # `where.self` and the whole-tensor `all` were in that list and are not
+        # any more: codegen_gcu.py claims both now, so they route to `gcu`. The
+        # entries stay in the set anyway, and dropping either one would be a
+        # regression rather than a cleanup -- the set is what closes the FlagGems
+        # route, and FlagGems still wins the route whenever both exist (see the
+        # i64 note above). Which overload `all` is matters here: only the
+        # no-dim schema is claimed, while `all.dim`/`all.dims` stay on FlagGems
+        # and `all.out`/`all.all_out` stay on `none`.
         "eq.Scalar",
         "eq.Tensor",
         "ne.Scalar",

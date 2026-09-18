@@ -163,7 +163,7 @@ A second, later change to the same conf moved eleven overloads from `none` to
 `view_as_real`, `view_as_complex`, `linalg_vector_norm` -- which is the whole of
 the +11 in the `gcu` column above and the whole of the -11 in `none`. It was
 selected by census rather than by survey: a 50-step Qwen-Image-2512 run at
-1024x1024 with `FLAGOS_LOG_FALLBACK=1` recorded **80,536 `cpu_fallback` calls in
+1024x1024 with `FLAGOS_LOG=fallback` recorded **80,536 `cpu_fallback` calls in
 exactly six operators** (`fill_` 23,570, `zero_` 19,221, `view_as_complex`
 18,794, `view_as_real` 18,794, `arange` 79, `linalg_vector_norm` 78) against
 468,227 device dispatches, with no seventh operator anywhere in the log.
@@ -179,7 +179,7 @@ A third change to the same conf moved three more overloads from `none` to `gcu`
 -- `add.out`, `sub.out` and `mul.out` -- which is the whole of the remaining
 `156 -> 159` in the `gcu` column and the `1625 -> 1622` in `none`. They were
 selected the same way, by census rather than by survey: two Adam steps over a
-five-parameter model with `FLAGOS_LOG_FALLBACK=1` recorded **45 `cpu_fallback`
+five-parameter model with `FLAGOS_LOG=fallback` recorded **45 `cpu_fallback`
 calls, 25 of them `aten::add` and 10 `aten::mul`**, all from the optimizer's own
 state updates. Those two names were misleading -- `csrc/aten/fallback.cc:21`
 logs `op.schema().name()`, so `add_.Tensor`, `add.out` and `add.Tensor` all
@@ -210,7 +210,7 @@ A fourth change to the same conf moved twelve more overloads from `none` to
 `index_fill_.int_Scalar` and `index_fill_.int_Tensor` -- which is the whole of the
 `159 -> 171` in the `gcu` column and the `1622 -> 1610` in `none`. Two censuses
 picked them. A training step (two Adam steps over a five-parameter model with an
-embedding lookup and an `index_select` path) with `FLAGOS_LOG_FALLBACK=1` recorded
+embedding lookup and an `index_select` path) with `FLAGOS_LOG=fallback` recorded
 **11 `cpu_fallback` calls in four operators** -- `aten::index_select` 4,
 `aten::embedding_dense_backward` 4, `aten::index_fill_` 2, `aten::nonzero_static`
 1. The first three names cover all eight `index_*` / `embedding_dense_backward`
@@ -266,7 +266,7 @@ FLAGOS_BACKEND_CONFIG=/path/to.conf   # force a different conf (testing only)
 ### Native kernels for the six measured CPU fallbacks
 
 The eleven `none` -> `gcu` moves recorded above came from a census of the host
-round trips a real model makes, not from the survey. `FLAGOS_LOG_FALLBACK=1`
+round trips a real model makes, not from the survey. `FLAGOS_LOG=fallback`
 over a 50-step Qwen-Image-2512 run at 1024x1024 lists six operators and no
 seventh, which is the set `scripts/codegen/codegen_gcu.py` was taught to serve:
 `arange` (three overloads, from `at::native::compute_arange_size` on the host

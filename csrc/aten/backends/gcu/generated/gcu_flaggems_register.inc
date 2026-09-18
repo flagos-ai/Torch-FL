@@ -246,7 +246,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 248 ops registered here, 97 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 248 ops registered here, 100 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);

@@ -42,6 +42,7 @@
   m.impl("add.out", WrapperAddOut);
   m.impl("addmm", WrapperAddmm);
   m.impl("addmm.out", WrapperAddmmOut);
+  m.impl("all", WrapperAll);
   m.impl("amax", WrapperAmax);
   m.impl("amin", WrapperAmin);
   m.impl("arange", WrapperArange);
@@ -84,6 +85,7 @@
   m.impl("gelu", WrapperGelu);
   m.impl("gt.Scalar", WrapperGtScalar);
   m.impl("gt.Tensor", WrapperGtTensor);
+  m.impl("index.Tensor", WrapperIndexTensor);
   m.impl("index_fill.int_Scalar", WrapperIndexFillIntScalar);
   m.impl("index_fill.int_Scalar_out", WrapperIndexFillIntScalarOut);
   m.impl("index_fill.int_Tensor", WrapperIndexFillIntTensor);
@@ -123,6 +125,8 @@
   m.impl("ne.Scalar", WrapperNeScalar);
   m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg", WrapperNeg);
+  m.impl("nonzero", WrapperNonzero);
+  m.impl("nonzero_static", WrapperNonzeroStatic);
   m.impl("normal.Tensor_Tensor", WrapperNormalTensorTensor);
   m.impl("normal.Tensor_float", WrapperNormalTensorFloat);
   m.impl("normal.float_float", WrapperNormalFloatFloat);
@@ -185,5 +189,6 @@
   m.impl("uniform_", WrapperUniformInplace);
   m.impl("view_as_complex", WrapperViewAsComplex);
   m.impl("view_as_real", WrapperViewAsReal);
+  m.impl("where.self", WrapperWhereSelf);
   m.impl("zero_", WrapperZeroInplace);
   m.impl("zeros_like", WrapperZerosLike);

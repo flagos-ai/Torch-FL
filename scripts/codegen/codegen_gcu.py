@@ -268,6 +268,35 @@ OPS = {
         "foreach_ternary_scalarlist_inplace",
         "ForeachAddcdiv",
     ),
+    # ---- the rest of the cpu_fallback census ----
+    # The five ops below are what a Qwen-Image denoise step still reaches
+    # cpu_fallback on after the indexed/embedding/upsample work (measured with
+    # FLAGOS_LOG=fallback on the S60: 56 @where, 2 @nonzero, 2 @index, 2 @all
+    # per run). Each has a topsaten entry point, measured on card 4 rather than
+    # assumed -- see the templates for what each kernel encodes.
+    #
+    # Listing them here is what makes them routable at all, in two steps that are
+    # easy to confuse: this dict emits the m.impl() into gcu_register.inc, which
+    # is the registration gen_vendor_confs.route() gates every route on, and the
+    # conf then places the op. `where.self`, `all` and `nonzero` are already in
+    # the GCU NATIVE_TRITON_GAPS set and `nonzero_static` in
+    # FLAGGEMS_PENDING_NATIVE_OPS, so the FlagGems route is closed for them and
+    # they land on `gcu`; `index.Tensor` is in no FlagGems set at all.
+    #
+    # index.Tensor needs a word of warning: ATen's advanced indexing is one op
+    # covering a rank-1 index (== index_select), several index tensors at once,
+    # a bool mask and a 0-dim index, and only the first of those is what the
+    # vendor's index kernel implements. The kernel recognises that case and
+    # delegates; everything else takes the host path with ATen's own semantics.
+    "where.self": ("where_self", None),
+    "all": ("all_whole", None),
+    "index.Tensor": ("index_tensor", None),
+    "nonzero": ("nonzero", None),
+    # Built on topsatenNonzero plus a count, an i32 staging tensor and a cast;
+    # the override names the entry point the op is built on, which is also the
+    # symbol the generator validates against libtopsaten.so (there is no
+    # topsatenNonzeroStatic).
+    "nonzero_static": ("nonzero_static", "Nonzero"),
 }
 
 # Ops handwritten elsewhere for GCU would double-register the kGcu slot (which
@@ -2599,6 +2628,281 @@ void {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
 
+# where.self is the busiest of the five ops this file's last census still
+# reached cpu_fallback on: the Qwen-Image denoise loop issues 56 of them per
+# step. Three of the call sites are the rotary shift selection
+# (transformer_qwenimage.py:709-711, `where(index_expanded == 0, shift_0, shift_1)`)
+# and two build position ids out of the encoder mask (197, 199).
+#
+# topsatenWhere is also the one entry point here that takes every dtype it can
+# represent, f64 and i64 included, so there is no operand guard at all -- only
+# the two things that are measured to fail: a non-PRED condition (a u8 condition
+# is BAD_PARAM at the vendor, while ATen casts it and proceeds, so that case is a
+# host call rather than an error) and a dtype with no topsaten mapping, which
+# would raise from the wrapper instead of falling back.
+#
+# The dtype promotion mirrors _BINARY_PROLOGUE, and for the same reason: where
+# promotes its two value operands, and the vendor's op does not. The condition is
+# moved to self's device for the same reason it is everywhere else -- a Python
+# boolean mask arrives as a host tensor, and a host pointer in a topsaten
+# descriptor fails in the driver rather than returning wrong values.
+T_WHERE_SELF = """\
+at::Tensor {kernel}(
+    const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {{
+  auto result_dtype = at::result_type(self, other);
+  if (condition.scalar_type() != at::kBool ||
+      !gcu::TopsatenWhereDtype(result_dtype)) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  auto cond_c = condition.to(self.device(), at::kBool);
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  // All three operands are expanded, not just the two values: the vendor does not
+  // broadcast, and ATen broadcasts the condition against the values' common
+  // shape, which is not the same thing when the condition is the wider one.
+  auto out_shape = at::infer_size(
+      at::infer_size(cond_c.sizes(), self_c.sizes()), other_c.sizes());
+  auto cond_b = cond_c.expand(out_shape).contiguous();
+  auto self_b = self_c.expand(out_shape).contiguous();
+  auto other_b = other_c.expand(out_shape).contiguous();
+  auto out = at::empty(out_shape, self_b.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+
+  gcu::TopsatenTensorWrapper t_cond(cond_b);
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      {tops}, out, t_out.get(), t_cond.get(), t_self.get(), t_other.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# The whole-tensor `all` -- `torch.all(t)`, no dim -- which is the spelling
+# pipeline_qwenimage.py:265 uses to ask whether the prompt-embedding mask has any
+# zero in it. The dim/dims overloads are a different category and are already on
+# another backend, so this template is reached for one schema only.
+#
+# The output is a 0-dim bool, and the vendor needs a (1,) PRED destination: a
+# bare rank-0 descriptor aborts it. TopsatenTensorWrapper already rewrites a
+# rank-0 tensor to a 1-element vector, so the 0-dim result is passed straight
+# through and no separate buffer or reshape is needed -- `at::Tensor::reshape`
+# and `squeeze` are both dispatcher calls that GCU does not carry a kernel for.
+#
+# Both empty inputs and a PRED operand are measured working at the vendor, with
+# the same vacuous True ATen gives, so neither needs a special case. An empty
+# input is still routed to the host: an empty device tensor's data pointer is not
+# worth handing to the driver for a result that costs nothing to compute here.
+T_ALL_WHOLE = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  auto operand = gcu::TopsatenAllOperand(self);
+  if (!operand.defined() || self.numel() == 0) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  // ATen's dtype inference is not uniformly bool here: `all` on a uint8
+  // operand is uint8, on every other dtype bool. That is the *meta* function,
+  // not a CPU kernel quirk, so a backend that answers bool is the deviant one.
+  // The vendor writes the correct 0/1 into either descriptor (measured on card
+  // 4), so the declared dtype is the one to allocate.
+  auto out = at::empty(
+      {{}}, self.options().dtype(
+                self.scalar_type() == at::kByte ? at::kByte : at::kBool));
+
+  gcu::TopsatenTensorWrapper t_self(operand);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, out, t_out.get(), t_self.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# index.Tensor is ATen's advanced indexing, and it is one dispatch for several
+# different operations: a single rank-1 index tensor (which is index_select on
+# dim 0), several index tensors at once, a bool mask, and a 0-dim index. The
+# vendor's kernel implements the first of those, so the template recognises it
+# and delegates to the index_select kernel this file already generates; every
+# other spelling takes the host path with ATen's own semantics.
+#
+# The recognition is the whole content of the template. A rank-1 index is
+# index_select on dim 0 only when it is the *only* index (measured against
+# ATen: `t[[i]] == index_select(t, 0, i)` is True), and only when every
+# coordinate is non-negative -- ATen wraps a negative index into the tensor,
+# while the vendor resolves it outside, which is what `TopsatenIndexNonNegative`
+# reads back to check. A 0-dim index is excluded by the rank test and is not an
+# oversight: `t[tensor(1)]` drops the indexed dimension (shape (4,) for a (3,4))
+# where index_select keeps it ((1,4)), so it is a different operation. A bool
+# index is excluded by the dtype test and is a mask, not a coordinate list.
+T_INDEX_TENSOR = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const c10::List<::std::optional<at::Tensor>>& indices) {{
+  if (indices.size() == 1 && indices[0].has_value() &&
+      indices[0]->defined()) {{
+    const at::Tensor& index = indices[0].value();
+    if (index.dim() == 1 && gcu::TopsatenIndexDtype(index.scalar_type()) &&
+        gcu::TopsatenIndexNonNegative(index)) {{
+      // The delegate carries its own guard: a 0-dim self, an unsupported
+      // operand dtype or a non-contiguous operand all fall out of it onto the
+      // same host path this template uses below, so there is nothing to test
+      // here that index_select does not already test.
+      return IndexSelectKernelGcu(self, 0, index);
+    }}
+  }}
+  // The indices travel with the operand: ATen's CPU advanced indexing runs on
+  // whichever device holds the data, and a device index would otherwise reach it
+  // as a device pointer. This is the same marshalling register.cc's
+  // WrapperIndexPut_ does.
+  c10::List<::std::optional<at::Tensor>> indices_cpu;
+  for (int64_t i = 0; i < static_cast<int64_t>(indices.size()); ++i) {{
+    auto opt = indices.get(i);
+    if (opt.has_value() && opt->defined()) {{
+      indices_cpu.push_back(opt->cpu());
+    }} else {{
+      indices_cpu.push_back(::std::nullopt);
+    }}
+  }}
+  return at::{at_op}(self.cpu(), indices_cpu).to(self.device());
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# nonzero / nonzero_static share one vendor chain, and it is three calls rather
+# than the one an op of this shape would expect: the output's first dimension is
+# the *count* of nonzeros, so nothing about the answer is known before the data
+# has been read once.
+#
+#   1. topsatenCountNonzero writes the count into a device int32 -- a device
+#      buffer, not a host one: the vendor writes it as a device value, and the
+#      status alone is not enough to trust it, because on a dtype it does not
+#      support the call returns SUCCESS and a wrong count.
+#   2. topsatenNonzero writes the coordinates as int32, and only ever into an
+#      (nnz, rank) output -- a partial write is refused outright (see
+#      TopsatenRowView).
+#   3. topsatenTo widens int32 to int64, since ATen's result is int64 and the
+#      vendor writes int32 coordinates.
+#
+# Steps 2 and 3 are the same for both ops; what differs is the output size, which
+# is why there are two templates rather than one with a flag.
+T_NONZERO = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  auto operand = gcu::TopsatenNonzeroOperand(self);
+  // A rank-0 operand is not a coverage gap: ATen's result for one is (1, 0), a
+  // nonzero number of rows with zero columns, which no topsaten output can
+  // describe. An empty operand is declined for the same kind of reason -- there
+  // is nothing to read, and a zero-element descriptor is not worth handing to
+  // the driver.
+  if (!operand.defined() || self.dim() == 0 || self.numel() == 0) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  const int64_t rank = self.dim();
+  auto count = at::empty({{1}}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_operand(operand);
+  EXEC_TOPSATEN_CMD(
+      topsatenCountNonzero, self, reinterpret_cast<int32_t*>(count.data_ptr()),
+      t_operand.get());
+  const auto count_host = count.cpu();
+  const int64_t nnz = count_host.const_data_ptr<int32_t>()[0];
+
+  auto out = at::empty({{nnz, rank}}, self.options().dtype(at::kLong));
+  if (nnz == 0) {{
+    return out;
+  }}
+  auto staging = at::empty({{nnz, rank}}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_staging(staging);
+  EXEC_TOPSATEN_CMD({tops}, self, t_staging.get(), t_operand.get());
+
+  topsatenDataType_t want = TOPSATEN_DATA_I64;
+  gcu::TopsatenTensorWrapper t_dst(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenTo, self, t_dst.get(), t_staging.get(), want, false, false,
+      TOPSATEN_MEMORY_PRESERVE);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# nonzero_static is `nonzero` with the first dimension fixed by the caller: the
+# result is always (size, rank), coordinates first, and `fill_value` wherever
+# there were fewer than `size` nonzeros. That padding is why this needs a staging
+# buffer of `max(size, nnz)` rows -- the tail has to be filled, and the fill
+# lands in the int32 staging because the vendor has no int64 fill.
+#
+# The whole design is pinned by one measured property of topsatenNonzero: it
+# refuses a partial write. Handed an output narrower than the count, it returns
+# BAD_PARAM and writes nothing -- (2, 3) over a rank-3 input with four nonzeros
+# failed, while (4, 3) and (6, 3) both succeeded. So the coordinates always go
+# into an (nnz, rank) description of the staging and the read-back is what gets
+# shortened, in either direction. See TopsatenRowView.
+T_NONZERO_STATIC = """\
+at::Tensor {kernel}(
+    const at::Tensor& self, int64_t size, int64_t fill_value) {{
+  if (size < 0) {{
+    // ATen's own message -- "nonzero_static: 'size' must be an non-negative
+    // integer" -- and its own kernel is the only spelling of it that cannot
+    // drift from ATen.
+    return at::{at_op}(self.cpu(), size, fill_value).to(self.device());
+  }}
+  auto operand = gcu::TopsatenNonzeroOperand(self);
+  if (!operand.defined() || self.dim() == 0 || self.numel() == 0) {{
+    return at::{at_op}(self.cpu(), size, fill_value).to(self.device());
+  }}
+  const int64_t rank = self.dim();
+  if (size == 0) {{
+    return at::empty({{size, rank}}, self.options().dtype(at::kLong));
+  }}
+  auto count = at::empty({{1}}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_operand(operand);
+  EXEC_TOPSATEN_CMD(
+      topsatenCountNonzero, self, reinterpret_cast<int32_t*>(count.data_ptr()),
+      t_operand.get());
+  const auto count_host = count.cpu();
+  const int64_t nnz = count_host.const_data_ptr<int32_t>()[0];
+
+  // Nothing to fill when the coordinates already reach `size`, so the staging is
+  // exactly as wide as the call needs.
+  const bool fill = size > nnz;
+  if (fill && (fill_value < std::numeric_limits<int32_t>::min() ||
+               fill_value > std::numeric_limits<int32_t>::max())) {{
+    // The padding lands in an int32 staging buffer, so a fill_value that does
+    // not survive the round trip would be truncated on the way in and widened
+    // back wrong. ATen accepts any int64, so that case takes the host path
+    // rather than producing a narrowed tail.
+    return at::{at_op}(self.cpu(), size, fill_value).to(self.device());
+  }}
+  const int64_t rows = fill ? size : nnz;
+  auto staging = at::empty({{rows, rank}}, self.options().dtype(at::kInt));
+  if (fill) {{
+    gcu::TopsatenTensorWrapper t_staging(staging);
+    topsatenScalar_t value = gcu::ToTopsatenScalar(at::Scalar(fill_value), at::kInt);
+    EXEC_TOPSATEN_CMD(topsatenFill_, staging, t_staging.get(), value);
+  }}
+  if (nnz > 0) {{
+    gcu::TopsatenRowView stage_rows(staging, nnz, rank);
+    EXEC_TOPSATEN_CMD({tops}, self, stage_rows.get(), t_operand.get());
+  }}
+
+  auto out = at::empty({{size, rank}}, self.options().dtype(at::kLong));
+  topsatenDataType_t want = TOPSATEN_DATA_I64;
+  gcu::TopsatenTensorWrapper t_dst(out);
+  // Equal to the staging when size >= nnz and a prefix of it when size < nnz;
+  // both are one copy of the first `size` rows.
+  gcu::TopsatenRowView stage_out(staging, size, rank);
+  EXEC_TOPSATEN_CMD(
+      topsatenTo, self, t_dst.get(), stage_out.get(), want, false, false,
+      TOPSATEN_MEMORY_PRESERVE);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -2664,6 +2968,11 @@ CATEGORIES = {
     "foreach_lerp_scalar_inplace": T_FOREACH_LERP_SCALAR_INPLACE,
     "foreach_ternary_scalar_inplace": T_FOREACH_TERNARY_SCALAR_INPLACE,
     "foreach_ternary_scalarlist_inplace": T_FOREACH_TERNARY_SCALARLIST_INPLACE,
+    "where_self": T_WHERE_SELF,
+    "all_whole": T_ALL_WHOLE,
+    "index_tensor": T_INDEX_TENSOR,
+    "nonzero": T_NONZERO,
+    "nonzero_static": T_NONZERO_STATIC,
 }
 
 FILE_HEADER = """\
@@ -2681,20 +2990,28 @@ FILE_HEADER = """\
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/native/RangeUtils.h>
+#include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
 #include <ATen/ops/embedding_dense_backward.h>
+#include <ATen/ops/index.h>
 #include <ATen/ops/index_select.h>
 #include <ATen/ops/linalg_vector_norm.h>
+#include <ATen/ops/nonzero.h>
+#include <ATen/ops/nonzero_static.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/where.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/ops/_upsample_nearest_exact2d.h>
 #include <ATen/native/ConvUtils.h>
+#include <ATen/core/List.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"

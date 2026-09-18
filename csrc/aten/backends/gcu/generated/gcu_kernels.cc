@@ -12,20 +12,28 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/native/RangeUtils.h>
+#include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
 #include <ATen/ops/embedding_dense_backward.h>
+#include <ATen/ops/index.h>
 #include <ATen/ops/index_select.h>
 #include <ATen/ops/linalg_vector_norm.h>
+#include <ATen/ops/nonzero.h>
+#include <ATen/ops/nonzero_static.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/where.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/ops/_upsample_nearest_exact2d.h>
 #include <ATen/native/ConvUtils.h>
+#include <ATen/core/List.h>
 #include <c10/core/Scalar.h>
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"
@@ -3003,5 +3011,192 @@ void ForeachAddcdivInplaceScalarlistKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kGcu, ForeachAddcdivInplaceScalarlistKernelGcu)
+
+at::Tensor WhereSelfKernelGcu(
+    const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
+  if (condition.scalar_type() != at::kBool ||
+      !gcu::TopsatenWhereDtype(result_dtype)) {
+    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }
+  auto cond_c = condition.to(self.device(), at::kBool);
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  // All three operands are expanded, not just the two values: the vendor does not
+  // broadcast, and ATen broadcasts the condition against the values' common
+  // shape, which is not the same thing when the condition is the wider one.
+  auto out_shape = at::infer_size(
+      at::infer_size(cond_c.sizes(), self_c.sizes()), other_c.sizes());
+  auto cond_b = cond_c.expand(out_shape).contiguous();
+  auto self_b = self_c.expand(out_shape).contiguous();
+  auto other_b = other_c.expand(out_shape).contiguous();
+  auto out = at::empty(out_shape, self_b.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+
+  gcu::TopsatenTensorWrapper t_cond(cond_b);
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenWhere, out, t_out.get(), t_cond.get(), t_self.get(), t_other.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kGcu, WhereSelfKernelGcu)
+
+at::Tensor AllKernelGcu(const at::Tensor& self) {
+  auto operand = gcu::TopsatenAllOperand(self);
+  if (!operand.defined() || self.numel() == 0) {
+    return at::all(self.cpu()).to(self.device());
+  }
+  // ATen's dtype inference is not uniformly bool here: `all` on a uint8
+  // operand is uint8, on every other dtype bool. That is the *meta* function,
+  // not a CPU kernel quirk, so a backend that answers bool is the deviant one.
+  // The vendor writes the correct 0/1 into either descriptor (measured on card
+  // 4), so the declared dtype is the one to allocate.
+  auto out = at::empty(
+      {}, self.options().dtype(
+                self.scalar_type() == at::kByte ? at::kByte : at::kBool));
+
+  gcu::TopsatenTensorWrapper t_self(operand);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenAll, out, t_out.get(), t_self.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kGcu, AllKernelGcu)
+
+at::Tensor IndexTensorKernelGcu(
+    const at::Tensor& self,
+    const c10::List<::std::optional<at::Tensor>>& indices) {
+  if (indices.size() == 1 && indices[0].has_value() &&
+      indices[0]->defined()) {
+    const at::Tensor& index = indices[0].value();
+    if (index.dim() == 1 && gcu::TopsatenIndexDtype(index.scalar_type()) &&
+        gcu::TopsatenIndexNonNegative(index)) {
+      // The delegate carries its own guard: a 0-dim self, an unsupported
+      // operand dtype or a non-contiguous operand all fall out of it onto the
+      // same host path this template uses below, so there is nothing to test
+      // here that index_select does not already test.
+      return IndexSelectKernelGcu(self, 0, index);
+    }
+  }
+  // The indices travel with the operand: ATen's CPU advanced indexing runs on
+  // whichever device holds the data, and a device index would otherwise reach it
+  // as a device pointer. This is the same marshalling register.cc's
+  // WrapperIndexPut_ does.
+  c10::List<::std::optional<at::Tensor>> indices_cpu;
+  for (int64_t i = 0; i < static_cast<int64_t>(indices.size()); ++i) {
+    auto opt = indices.get(i);
+    if (opt.has_value() && opt->defined()) {
+      indices_cpu.push_back(opt->cpu());
+    } else {
+      indices_cpu.push_back(::std::nullopt);
+    }
+  }
+  return at::index(self.cpu(), indices_cpu).to(self.device());
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kGcu, IndexTensorKernelGcu)
+
+at::Tensor NonzeroKernelGcu(const at::Tensor& self) {
+  auto operand = gcu::TopsatenNonzeroOperand(self);
+  // A rank-0 operand is not a coverage gap: ATen's result for one is (1, 0), a
+  // nonzero number of rows with zero columns, which no topsaten output can
+  // describe. An empty operand is declined for the same kind of reason -- there
+  // is nothing to read, and a zero-element descriptor is not worth handing to
+  // the driver.
+  if (!operand.defined() || self.dim() == 0 || self.numel() == 0) {
+    return at::nonzero(self.cpu()).to(self.device());
+  }
+  const int64_t rank = self.dim();
+  auto count = at::empty({1}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_operand(operand);
+  EXEC_TOPSATEN_CMD(
+      topsatenCountNonzero, self, reinterpret_cast<int32_t*>(count.data_ptr()),
+      t_operand.get());
+  const auto count_host = count.cpu();
+  const int64_t nnz = count_host.const_data_ptr<int32_t>()[0];
+
+  auto out = at::empty({nnz, rank}, self.options().dtype(at::kLong));
+  if (nnz == 0) {
+    return out;
+  }
+  auto staging = at::empty({nnz, rank}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_staging(staging);
+  EXEC_TOPSATEN_CMD(topsatenNonzero, self, t_staging.get(), t_operand.get());
+
+  topsatenDataType_t want = TOPSATEN_DATA_I64;
+  gcu::TopsatenTensorWrapper t_dst(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenTo, self, t_dst.get(), t_staging.get(), want, false, false,
+      TOPSATEN_MEMORY_PRESERVE);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NonzeroFn, nonzero_dispatcher, Backend::kGcu, NonzeroKernelGcu)
+
+at::Tensor NonzeroStaticKernelGcu(
+    const at::Tensor& self, int64_t size, int64_t fill_value) {
+  if (size < 0) {
+    // ATen's own message -- "nonzero_static: 'size' must be an non-negative
+    // integer" -- and its own kernel is the only spelling of it that cannot
+    // drift from ATen.
+    return at::nonzero_static(self.cpu(), size, fill_value).to(self.device());
+  }
+  auto operand = gcu::TopsatenNonzeroOperand(self);
+  if (!operand.defined() || self.dim() == 0 || self.numel() == 0) {
+    return at::nonzero_static(self.cpu(), size, fill_value).to(self.device());
+  }
+  const int64_t rank = self.dim();
+  if (size == 0) {
+    return at::empty({size, rank}, self.options().dtype(at::kLong));
+  }
+  auto count = at::empty({1}, self.options().dtype(at::kInt));
+  gcu::TopsatenTensorWrapper t_operand(operand);
+  EXEC_TOPSATEN_CMD(
+      topsatenCountNonzero, self, reinterpret_cast<int32_t*>(count.data_ptr()),
+      t_operand.get());
+  const auto count_host = count.cpu();
+  const int64_t nnz = count_host.const_data_ptr<int32_t>()[0];
+
+  // Nothing to fill when the coordinates already reach `size`, so the staging is
+  // exactly as wide as the call needs.
+  const bool fill = size > nnz;
+  if (fill && (fill_value < std::numeric_limits<int32_t>::min() ||
+               fill_value > std::numeric_limits<int32_t>::max())) {
+    // The padding lands in an int32 staging buffer, so a fill_value that does
+    // not survive the round trip would be truncated on the way in and widened
+    // back wrong. ATen accepts any int64, so that case takes the host path
+    // rather than producing a narrowed tail.
+    return at::nonzero_static(self.cpu(), size, fill_value).to(self.device());
+  }
+  const int64_t rows = fill ? size : nnz;
+  auto staging = at::empty({rows, rank}, self.options().dtype(at::kInt));
+  if (fill) {
+    gcu::TopsatenTensorWrapper t_staging(staging);
+    topsatenScalar_t value = gcu::ToTopsatenScalar(at::Scalar(fill_value), at::kInt);
+    EXEC_TOPSATEN_CMD(topsatenFill_, staging, t_staging.get(), value);
+  }
+  if (nnz > 0) {
+    gcu::TopsatenRowView stage_rows(staging, nnz, rank);
+    EXEC_TOPSATEN_CMD(topsatenNonzero, self, stage_rows.get(), t_operand.get());
+  }
+
+  auto out = at::empty({size, rank}, self.options().dtype(at::kLong));
+  topsatenDataType_t want = TOPSATEN_DATA_I64;
+  gcu::TopsatenTensorWrapper t_dst(out);
+  // Equal to the staging when size >= nnz and a prefix of it when size < nnz;
+  // both are one copy of the first `size` rows.
+  gcu::TopsatenRowView stage_out(staging, size, rank);
+  EXEC_TOPSATEN_CMD(
+      topsatenTo, self, t_dst.get(), stage_out.get(), want, false, false,
+      TOPSATEN_MEMORY_PRESERVE);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NonzeroStaticFn, nonzero_static_dispatcher, Backend::kGcu, NonzeroStaticKernelGcu)
 
 } // namespace at::native::flagos
