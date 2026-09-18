@@ -235,6 +235,29 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #endif
   }
 
+  // The accelerator API -- torch.accelerator.synchronize(), and through it
+  // every caller of torch.utils.benchmark.Timer, which synchronises that way --
+  // reaches this method, and the interface's default refuses with "Backend
+  // doesn't support synchronizing all streams on device." Delegating to the
+  // stream primitive is not the same request: this one is for the whole device.
+  //
+  // A negative index means "the current device", which is what c10 passes when
+  // the caller named none, so it is left alone. Otherwise the device is selected
+  // for the duration and the previous one restored, matching CUDAGuardImpl: the
+  // caller asked about one device and must not come back having switched.
+  void synchronizeDevice(const c10::DeviceIndex device_index) const override {
+    const c10::DeviceIndex previous =
+        device_index < 0 ? -1 : exchangeDeviceIndex(device_index);
+#ifdef USE_ASCEND
+    aclrtSynchronizeDevice();
+#else
+    ::DeviceSynchronize();
+#endif
+    if (previous >= 0) {
+      ::SetDevice(previous);
+    }
+  }
+
   void synchronizeEvent(void* event) const override {
     if (event) {
       ::EventSynchronize((Event_t)event);
