@@ -149,6 +149,16 @@ def _select_backend_config() -> None:
     """
     global _BACKEND_CONFIG_PATH
 
+    # Recorded per call, not accumulated. backend_config_path() reports what this
+    # resolution picked *first*, mirroring the C++ reader's setter-before-env
+    # order, so a path left over from an earlier call would outrank the user's
+    # FLAGOS_BACKEND_CONFIG and the early return below would leave it in place.
+    # At import time the function runs once and the reset is a no-op; it is what
+    # makes a direct second call -- which tests/unit/test_ascend_platform_marker.py
+    # makes, against a different fake tree each time -- answer for the
+    # environment in front of it rather than for the previous test's.
+    _BACKEND_CONFIG_PATH = ""
+
     if _env.value("FLAGOS_BACKEND_CONFIG"):
         return
 
