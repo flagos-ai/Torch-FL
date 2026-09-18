@@ -158,6 +158,11 @@ def place_pipeline(torch, pipe, args):
     model -- so the interesting part is the split case, and both go through
     ``common.split_transformer``. Stages that never call the transformer must not
     pay to load 14.2 GB of it onto a card.
+
+    ``--stage full`` places the encoder and the VAE together through
+    ``common.colocated``, which refuses a VAE on another card before the weights
+    are read rather than letting the decode fail minutes later. The two isolated
+    stages reach one component each, so they place it alone and are not checked.
     """
     encoder, transformer, vae = common.resolve_placement(torch, args)
 
@@ -174,7 +179,7 @@ def place_pipeline(torch, pipe, args):
         pipe.text_encoder.to(torch.device(encoder))
         print(f"  text_encoder -> {encoder}")
     if args.stage == "full":
-        pipe.vae.to(torch.device(vae))
+        pipe.vae.to(torch.device(common.colocated(encoder, vae)))
         print(f"  vae          -> {vae}")
 
     return common.split_transformer(

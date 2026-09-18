@@ -143,7 +143,13 @@ def cases(torch, dev, scale):
     vae_act = t(1, vae, 1, spatial, spatial)
     vae_w = t(vae, vae, 3, 3, 3)
     small = t(1, seq // 4, min(64, hidden))
-    mask = cpu(1, seq, hidden).to(device=dev, dtype=torch.bool)
+    # A mask that is genuinely both-valued. `randn` cast to bool is all True --
+    # a float is False only when it is exactly 0.0 -- so `where` would return
+    # the x branch everywhere and `masked_fill` would be a no-op, and a backend
+    # with a broken false branch would agree with the reference by never
+    # reaching it. Compared against zero, the generator's own reproducibility
+    # still makes both backends start from the same bytes.
+    mask = (cpu(1, seq, hidden) > 0).to(device=dev)
     idx = torch.arange(max(1, seq // 64), device=dev, dtype=torch.long)
     # The complex-dtype rotary embeddings: view_as_complex / view_as_real are
     # what the encoder's RoPE reaches, and the pair must round-trip exactly.
@@ -294,10 +300,19 @@ def run(args):
             results["views"][name] = {"aliases": bool(shared)}
         except Exception as exc:
             results["views"][name] = {"error": f"{type(exc).__name__}: {exc}"}
+            print(
+                f"view {name:<21}{'':>10}   FAILED {type(exc).__name__}: "
+                f"{str(exc)[:60]}"
+            )
 
-    ok = sum(1 for entry in results["ops"].values() if "error" not in entry)
+    # Counted separately, and both halves printed: a view that raised is not an
+    # aliasing check that ran, and reporting it as one overstates the coverage
+    # on this backend. `--compare` is what judges the candidate's errors.
+    ops_ran = sum(1 for entry in results["ops"].values() if "error" not in entry)
+    views_ran = sum(1 for entry in results["views"].values() if "aliases" in entry)
     print(
-        f"\n{ok}/{len(results['ops'])} ops ran, {len(results['views'])} aliasing checks"
+        f"\n{ops_ran}/{len(results['ops'])} ops ran, "
+        f"{views_ran}/{len(results['views'])} aliasing checks ran"
     )
     if args.out:
         torch.save(results, args.out)
@@ -350,21 +365,35 @@ def compare(paths):
 
     print()
     view_bad = []
+    view_skipped = 0
+    view_compared = 0
     for name, want in reference["views"].items():
         got = candidate["views"].get(name)
-        if (
-            got is None
-            or "aliases" in want
-            and "aliases" in got
-            and want["aliases"] != got["aliases"]
-        ):
+        if "error" in want:
+            # The reference could not run it -- on the CPU a complex view, say --
+            # so there is nothing to compare against and the candidate is not at
+            # fault. Same rule as the ops above.
+            view_skipped += 1
+            print(f"view {name:<21}{'':>12}{'':>12}   (reference errored, skipped)")
+            continue
+        # An entry that is missing, or that carries an error instead of an
+        # `aliases` flag, is a view the candidate could not do. It is a failure,
+        # not agreement: an `and` chain that only compares when both sides have
+        # the key reports a backend whose `permute` raises as "all agree".
+        if got is None or "error" in got or got.get("aliases") != want["aliases"]:
             view_bad.append(name)
             print(
                 f"view {name:<21}{'':>12}{'':>12}   ALIASING "
-                f"{want.get('aliases')} vs {got.get('aliases') if got else None}"
+                f"{want['aliases']} vs "
+                f"{got.get('aliases') if got and 'error' not in got else got}"
             )
+        else:
+            view_compared += 1
     if not view_bad:
-        print(f"view aliasing: all {len(reference['views'])} agree")
+        print(
+            f"view aliasing: all {view_compared} agree"
+            + (f", {view_skipped} skipped" if view_skipped else "")
+        )
 
     print()
     if errors:

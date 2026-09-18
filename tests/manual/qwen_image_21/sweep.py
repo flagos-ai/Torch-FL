@@ -103,21 +103,32 @@ def release(torch, device_kind):
         module.empty_cache()
 
 
-def footprint(torch, device):
-    """Reserved and allocated on the card the prompt actually ran on.
+def footprint(torch, devices):
+    """Reserved and allocated on every card the placement uses, keyed by card.
 
-    ``device`` is the resolved placement -- ``flagos:2``, not ``flagos``. The
-    counters are per card, and an index-less query answers for the backend's
-    current device rather than the one the placement named, which silently
-    records 0.00 GiB for a prompt that just allocated 33 GB.
+    Each name is a resolved device -- ``flagos:2``, not ``flagos``. The counters
+    are per card, and an index-less query answers for the backend's current
+    device rather than the one the placement named, which silently records
+    0.00 GiB for a prompt that just allocated 33 GB.
+
+    Every card, rather than the transformer's first: the encoder and the VAE are
+    18.85 GB of the 33, and a run whose transformer is split across cards can
+    have those on a card the transformer's first shard is not on. Reporting one
+    card would then describe a different one than the reading came from.
     """
-    resolved = torch.device(device)
-    module = common.device_module(torch, resolved.type)
-    if not hasattr(module, "memory_reserved"):
-        return None
-    reserved = module.memory_reserved(resolved.index) / (1024**3)
-    allocated = module.memory_allocated(resolved.index) / (1024**3)
-    return {"reserved_gib": round(reserved, 2), "allocated_gib": round(allocated, 2)}
+    readings = {}
+    for device in devices:
+        resolved = torch.device(device)
+        module = common.device_module(torch, resolved.type)
+        if not hasattr(module, "memory_reserved"):
+            return None
+        reserved = module.memory_reserved(resolved.index) / (1024**3)
+        allocated = module.memory_allocated(resolved.index) / (1024**3)
+        readings[str(resolved)] = {
+            "reserved_gib": round(reserved, 2),
+            "allocated_gib": round(allocated, 2),
+        }
+    return readings
 
 
 def main(argv=None):
@@ -136,7 +147,7 @@ def main(argv=None):
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    encoder, transformer, _ = common.resolve_placement(torch, args)
+    encoder, transformer, vae = common.resolve_placement(torch, args)
     print(f"device: {args.device}   torch: {torch.__version__}")
     print(f"diffusers {diffusers.__version__}")
     print(f"model: {args.model}")
@@ -154,20 +165,16 @@ def main(argv=None):
     pipe = diffusers.QwenImage21Pipeline.from_pretrained(
         args.model, dtype=torch.bfloat16
     )
-    common.split_transformer(
-        pipe.transformer,
-        [torch.device(name) for name in transformer],
-        args.blocks_per_device,
+    _, placement = common.place_components(
+        torch, pipe, encoder, transformer, vae, args.blocks_per_device
     )
-    pipe.text_encoder.to(torch.device(encoder))
-    pipe.vae.to(torch.device(encoder))
-    print(f"  text_encoder -> {encoder}   vae -> {encoder}")
 
     manifest = {
         "device": args.device,
         "torch": torch.__version__,
         "diffusers": diffusers.__version__,
         "model": args.model,
+        "placement": placement,
         "prompts_file": args.prompts_file,
         "prompts_sha256": {entry["id"]: entry["sha256"] for entry in cohort},
         "negative_prompt": args.negative_prompt,
@@ -180,6 +187,10 @@ def main(argv=None):
     }
 
     started = time.time()
+    # The cards the components were placed on, encoder first, each once: the
+    # manifest reports one footprint per card rather than one per run, because
+    # a split run has components on more than one.
+    cards = list(dict.fromkeys([placement["encoder"], *placement["transformer"]]))
     for entry in cohort:
         # A generator per prompt, seeded identically: the pipeline does not
         # reset one between prompts, so a shared generator would make every
@@ -211,7 +222,7 @@ def main(argv=None):
             "prompt_sha256": entry["sha256"],
             "file": path.name,
             "seconds": seconds,
-            "memory": footprint(torch, transformer[0]),
+            "memory": footprint(torch, cards),
         }
         manifest["images"].append(record)
         print(f"  -> {path}  {result.images[0].size}  {seconds}s")

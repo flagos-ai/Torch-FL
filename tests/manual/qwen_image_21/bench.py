@@ -657,14 +657,12 @@ def run(argv=None):
     pipe = diffusers.QwenImage21Pipeline.from_pretrained(
         args.model, dtype=torch.bfloat16
     )
-    common.split_transformer(
-        pipe.transformer,
-        [torch.device(name) for name in transformer],
-        args.blocks_per_device,
+    # What place_components returns, not what was asked for: the two differ
+    # whenever --vae-device or --devices cannot be honoured, and a record that
+    # describes the request rather than the run is worse than no record.
+    _, placement = common.place_components(
+        torch, pipe, encoder, transformer, vae, args.blocks_per_device
     )
-    pipe.text_encoder.to(torch.device(encoder))
-    pipe.vae.to(torch.device(encoder))
-    placement = {"encoder": encoder, "transformer": transformer, "vae": vae}
 
     try:
         measured = measure(torch, pipe, args, prompt["prompt"], device)

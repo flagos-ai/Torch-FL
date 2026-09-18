@@ -108,31 +108,49 @@ prepend that did not take — it says so.
 `--device` names a torch device module: `flagos` (imports torch_fl first),
 `cuda`, or any vendor name a plugin registered.
 
-**Everything goes on one card.** 33 GB of bf16 weights (17.5 text encoder, 14.2
-transformer, 1.35 VAE) fits a 40 GB part with 37.6 GiB reserved, and spreading it
-across two cards would add a hidden-state round trip on every forward for
-nothing. This is deliberately the opposite of the 2512 flow, whose transformer
-alone is 40.9 GB and must be split.
+**Everything goes on one card by default.** 33 GB of bf16 weights (17.5 text
+encoder, 14.2 transformer, 1.35 VAE) fits a 40 GB part with 37.6 GiB reserved,
+and spreading it across two cards would add a hidden-state round trip on every
+forward for nothing. This is deliberately the opposite of the 2512 flow, whose
+transformer alone is 40.9 GB and must be split.
 
-A chip whose card is smaller splits the transformer:
+The resolved placement is: the transformer gets every card named by `--devices`
+(one card, `<device>:0`, when none are named), and the text encoder and the VAE
+go on the first of them. So:
 
 ```bash
-# transformer split 16/16 across two cards, encoder and VAE on the first
+# one card: everything on it. The default.
+tests/manual/qwen_image_21/run.sh infer --stage full
+
+# a chip whose card cannot hold 14.2 GB: name several cards and the transformer
+# is split across them, encoder and VAE staying on the first
+tests/manual/qwen_image_21/run.sh infer --stage full --devices flagos:0 flagos:1
+
+# the same placement, written out. Use this when the shards are not the whole
+# of --devices
 tests/manual/qwen_image_21/run.sh infer --stage full \
     --devices flagos:0 --transformer-devices flagos:0 flagos:1
 ```
 
-That path goes through `accelerate.dispatch_model` with a hand-built device map,
+The split goes through `accelerate.dispatch_model` with a hand-built device map,
 and it is measured working on A100: blocks 0–15 land on the first card, 16–31 on
 the second, `norm_out` stays on the first, and a two-step run completes.
 `--blocks-per-device` moves the boundary and is checked against the model's block
 count rather than trusted.
 
-The encoder and the VAE must share a card. `DiffusionPipeline._execution_device`
-falls back to `self.device`, the first non-CPU component in
-`_get_signature_keys` order — and that order is *sorted*, so `text_encoder`
-outranks `transformer` and `vae`. The pipeline therefore builds its latents and
-decodes them on the encoder's card, so the VAE has to be there too.
+The encoder and the VAE must share a card, and that is enforced rather than
+assumed. `DiffusionPipeline._execution_device` falls back to `self.device`, the
+first non-CPU component in `_get_signature_keys` order — and that order is
+*sorted*, so `text_encoder` outranks `transformer` and `vae`. The pipeline builds
+its latents and decodes them on the encoder's card, so the VAE has to be there
+too, and `common.colocated()` stops a full run whose `--vae-device` names a
+different one — before the weights are read, rather than as a cross-device error
+inside the decode several minutes later. `--vae-device` therefore exists for
+`infer.py --stage vae`, which places the VAE alone and is not checked.
+
+`bench.py` and `sweep.py` record the placement that was **applied**, from
+`common.place_components`, not the one that was requested. Where they disagree,
+the record is what the run did.
 
 ## 4. The stages
 
@@ -398,8 +416,8 @@ prompt written for this flow.
 | Metric | Definition | Industry analogue |
 | --- | --- | --- |
 | `latency.per_image_s` | Wall time of one `pipe(...)` call at the run's batch, divided by the batch. Includes the text encoder, the denoise loop, the VAE decode and the postprocess to PIL. Excludes model load, placement and the PNG write. | MLPerf SingleStream latency |
-| `phases["*"]` | The same call split into text encoder / denoise loop / loop per step / VAE decode. | component breakdown |
-| `phases["loop per step"]` | Denoise loop ÷ (steps − 1). Steps-normalised, so two chips at different step counts still compare. | s/iteration |
+| `phases["*"]` | The same call split into text encoder / denoise loop / loop per step / VAE decode. Every edge is synchronised, so each is device time rather than host-return time. | component breakdown |
+| `phases["loop per step"]` | Denoise loop ÷ the number of steps in it. Steps-normalised, so two chips at different step counts still compare. | s/iteration |
 | `throughput.images_per_s` | `batch / median per-call time`, reported only when `--batch N` (N > 1) runs. | MLPerf Offline samples/s |
 | `memory.peak_gib` | Peak allocated watermark, reset before each measured call and read after it. Falls back to `memory_reserved`, and names which it used. | diffusers `mem_plain_GB` |
 | `determinism.identical` | Whether the first and last measured calls produced byte-identical images. | prerequisite for §6.1 |
@@ -472,14 +490,14 @@ external CUDA 12.8 assets, the 2.1 checkout at `0.41.0.dev0`.
 | metric | cuda | flagos |
 | --- | --- | --- |
 | prompt | 01 / `bb383cba` | 01 / `bb383cba` |
-| latency, median s/image | 17.41 | 21.94 |
-| latency, mean s/image | 17.41 | 21.94 |
-| latency, min s/image | 17.41 | 21.93 |
-| latency std, s | 0.003 | 0.012 |
+| latency, median s/image | 17.42 | 22.25 |
+| latency, mean s/image | 17.42 | 22.25 |
+| latency, min s/image | 17.41 | 22.25 |
+| latency std, s | 0.008 | 0.010 |
 | measured calls | 4 | 3 |
 | text encoder, median s | 0.04 | 0.21 |
-| denoise loop, median s | 16.61 | 20.72 |
-| loop per step, median ms | 425.9 | 531.4 |
+| denoise loop, median s | 17.10 | 21.63 |
+| loop per step, median ms | 427.5 | 540.6 |
 | vae decode, median s | 0.23 | 0.34 |
 | throughput, images/s | n/a | n/a |
 | peak GiB | 36.80 | 37.81 |
@@ -487,12 +505,19 @@ external CUDA 12.8 assets, the 2.1 checkout at `0.41.0.dev0`.
 | determinism | identical | identical |
 | `FLAGOS_LOG` | fallback | fallback |
 | triton cache | default | default |
-| **vs cuda, latency** | **1.00x** | **1.26x** |
+| **vs cuda, latency** | **1.00x** | **1.28x** |
 
-**1.26x is the end-to-end figure on this chip.** The denoise loop — the only part
-that scales with step count — is 1.25x (16.61 s against 20.72 s); the text encoder
-is 5x and the VAE 1.5x, but those are one call each and a small share of the
-total, so the ratio a chip reports depends on how many images a run produces.
+The three phase rows now add up to the latency row on both sides — 0.04 + 17.10
++ 0.23 = 17.37 against 17.42, and 0.21 + 21.63 + 0.34 = 22.18 against 22.25 — the
+remainder being the latent preparation and the postprocess to PIL, which are not
+attributed to a phase. They did not add up before the loop's start was bracketed;
+see the note below.
+
+**1.28x is the end-to-end figure on this chip.** The denoise loop — the only part
+that scales with step count — is 1.26x (17.10 s against 21.63 s), and the same
+1.26x per step (427.5 ms against 540.6 ms); the text encoder is 5x and the VAE
+1.5x, but those are one call each and a small share of the total, so the ratio a
+chip reports depends on how many images a run produces.
 
 `throughput` is `n/a` on both because both are batch 1, and no rate is derived
 from a batch-1 latency (§7.1). A batch-4 run on this 40 GB card does not fit at
@@ -501,6 +526,23 @@ allocator's own message and whose latency fields are `null`, which is the
 truthful answer rather than an estimate. A real throughput column needs a card
 that holds four images at once; none was available here, and this document does
 not guess at one.
+
+**What changed between measurements.** An earlier revision of this table read
+1.26x, from a loop phase one step short: `callback_on_step_end` fires *after*
+each step, so N callbacks bound only N−1 intervals, and the loop total omitted
+the first step. `loop per step` was right in both revisions — N−1 intervals
+divided by N−1 — but the total was 2.5% short and the phase rows visibly failed
+to add up to the latency. `PhaseTimer` now brackets the loop from the transformer
+forward that begins it and synchronises inside each callback, so the total covers
+all 40 steps and each edge is device-attributed rather than host-return. Both
+sides moved, which is why the ratio moved with them.
+
+The synchronise is the part that is not merely cosmetic. Nothing in the pipeline
+blocks the host between steps, so an unsynchronised callback stamps when work was
+enqueued. Measured on A100 by running the same loop twice in one process: 20.88 s
+unsynchronised against 20.91 s synchronised, or 0.15%. The two agree *here*
+because the 40 GB card's allocator is nearly full and blocks the host on every
+step — a property of this chip's memory pressure, not of the measurement.
 
 A single-shot run of the same pipeline with injected latents, taken a day earlier
 with `infer.py --stage full`, gave **17.5 s against 23.8 s (1.36x)** with a phase
@@ -582,6 +624,25 @@ strided view or raises. Values identical, so no numerics comparison could see
 it, and the copy silently doubled that tensor's memory. It was found by probing
 `untyped_storage().data_ptr()` directly. **Run this check on any chip whose views
 are routed somewhere other than the vendor's own kernel.**
+
+Two things about how it is judged, both of which it got wrong before and both of
+which would have reported a broken backend as a pass:
+
+- A view the candidate could **not run** is a failure, not agreement. The earlier
+  comparison only looked at the `aliases` flag when *both* sides had one, so a
+  backend whose `permute` raised produced `{"error": ...}` on the candidate side,
+  matched nothing, and exited 0 printing `view aliasing: all 5 agree`. A
+  reference-side error is still skipped, because there is nothing to compare
+  against and the candidate is not at fault — the same rule the value checks
+  above use. `run()` also counts checks that actually produced a reading rather
+  than entries in the file, so its own summary cannot overstate the coverage.
+- The `where` and `masked_fill` inputs use a **both-valued** mask. A `randn`
+  cast to `bool` is 100% True — a float is `False` only when it is exactly
+  `0.0` — so `where` returned its `x` branch on every element and `masked_fill`
+  filled nothing, and a backend with a broken false branch agreed with the
+  reference by never reaching it. Compared against zero, roughly half the
+  entries are True; the CPU generator still makes both backends start from the
+  same bytes.
 
 **Cost.** Host microseconds to *issue* one call, with no synchronisation — the
 device queue absorbs the work, so the loop is bounded by the host. This is the

@@ -138,10 +138,9 @@ never compared against one taken at batch 1 without that division.
 
 | Metric | Definition | Industry analogue |
 | --- | --- | --- |
-| `latency_s_per_image` | Wall time of one complete `pipe(...)` call at the run's `--batch`, divided by the batch size: text encoder + denoise loop + VAE decode + postprocess to PIL. Excludes model load, placement and PNG write. At the default batch of 1 this is the whole call. | MLPerf SingleStream latency; diffusers `time_plain_s` |
-| `phases["text encoder"]` | The text encoder forward, timed by a forward hook. One per call. | component breakdown |
+| `latency_s_per_image` | Wall time of one complete `pipe(...)` call at the run's `--batch`, divided by the batch size: text encoder + denoise loop + VAE decode + postprocess to PIL. Excludes model load, placement and PNG write. At the default batch of 1 this is the whole call. | MLPerf SingleStream latency; diffusers `time_plain_s` || `phases["text encoder"]` | The text encoder forward, timed by a forward hook. One per call. | component breakdown |
 | `phases["denoise loop"]` | First-to-last `callback_on_step_end` timestamp. | — |
-| `phases["loop per step"]` | `denoise loop` ÷ (`steps` − 1), the markup-free per-step cost. Steps-normalised so two chips at different step counts still compare. | diffusers s/iteration |
+| `phases["loop per step"]` | `denoise loop` ÷ the number of steps in it, the markup-free per-step cost. Steps-normalised so two chips at different step counts still compare. | diffusers s/iteration |
 | `phases["vae decode"]` | The wrapped `pipe.vae.decode`. | — |
 | `throughput_images_per_s` | `batch / latency_batch` when `--batch N` (N > 1) runs. `null` with the original error text when it does not. | MLPerf Offline samples/s |
 | `memory.peak_gib` | The peak allocated watermark, reset before each measured call and read after it. Falls back to `memory_reserved` on a backend without the peak API, and names which it used. | diffusers `mem_plain_GB` |
@@ -206,17 +205,31 @@ consumes it:
 ```python
 class PhaseTimer:
     def __init__(self, torch, pipe, device_kind)  # installs the text-encoder
-                                                  # hook and wraps pipe.vae.decode
+                                                  # hook, the transformer hook
+                                                  # that brackets the loop, and
+                                                  # wraps pipe.vae.decode
     def reset(self)                               # begin a new sample
     def sample(self) -> dict                      # this sample's four phases
     def on_step_end(self, pipe, index, ts, kwargs)  # for callback_on_step_end
     def close(self)                               # remove hooks, restore decode
 ```
 
-The timing internals are unchanged from the current implementation: both edges
-synchronised, `loop per step` divided by `len(marks) - 1`. `infer.py` calls
-`reset()` once and `sample()` once, so its printed phase table is byte-identical
-to today's.
+The loop's two edges are the part the original implementation got wrong, and
+both are now explicit. `callback_on_step_end` fires *after* each step, so N
+callbacks bound only N−1 intervals and the loop total omitted the first step —
+2.5% of it at 40 steps, and enough that the phase rows visibly failed to add up
+to the end-to-end latency. A pre-forward hook on the transformer records where
+the loop begins, so the span covers all N steps and `loop per step` divides by N.
+The callback also synchronises before stamping: nothing in the pipeline blocks
+the host between steps, so an unsynchronised stamp is a launch time rather than a
+completion time. Measured on A100 by running the same loop twice in one process,
+the two agree to 0.15% (20.88 s against 20.91 s) — but only because this card's
+allocator is nearly full and blocks the host on every step. That is a property of
+the chip's memory pressure, not of the measurement, which is why the synchronise
+is what makes the number device-attributed rather than incidentally so.
+
+`infer.py` calls `reset()` once and `sample()` once, so its printed phase table
+has the same shape as before.
 
 It also gains a small `sync()` helper, because three call sites now need the
 same "synchronise this backend or fail with a message naming it" behaviour.
@@ -341,7 +354,46 @@ No change to `numerics.py`, `compare.py`, `side_by_side.py`, or anything under
    Triton and that the recorded cache state differs from the warm run's.
 6. **§7.1 regenerated** from the new measurement.
 
-## 10. Open items
+## 10. Review round: placement and attribution
+
+A review of the implementation found four defects, all of which are fixed here
+and all of which are recorded because they share a shape: **something the flow
+reported that was not what the flow did.**
+
+1. **`resolve_placement` placed the encoder off the transformer's card when
+   `--devices` named several.** The default had been rewritten to "everything on
+   one card, the first of `--devices`", but the encoder still took `chosen[-1]`
+   while the transformer took `chosen[0]`, so `--devices flagos:0 flagos:1` put
+   the transformer on card 0 and the encoder and VAE on card 1. The module
+   docstring and the two flag help texts also disagreed with each other about
+   what the transformer's default was. The rule is now one statement in one
+   place: the transformer gets every card of `--devices` (so naming several is
+   the request for a split, which is the only reason to name several), and the
+   encoder and VAE get the first of them.
+
+2. **`PhaseTimer` reported a loop one step short and attributed the rest to the
+   host.** Covered in §7; the loop is now bracketed from the transformer forward
+   that begins it, and the step callback synchronises before stamping.
+
+3. **`bench.py` and `sweep.py` recorded a VAE placement they had not applied.**
+   Both moved the VAE to the encoder's card and then wrote the *requested*
+   `--vae-device` into the record; `sweep.py` also discarded the value and
+   accepted the flag without honouring it. Placement is now applied in one place,
+   `common.place_components`, which returns what it did and refuses a full run
+   whose `--vae-device` names a card the pipeline cannot decode on. `sweep.py`'s
+   manifest gains the placement it never had, and its per-prompt memory reading
+   covers every card the placement uses rather than the transformer's first.
+
+4. **`numerics.py` could report a broken view as agreement.** The aliasing
+   comparison only looked at the `aliases` flag when both sides had one, so a
+   candidate whose view op raised produced an `error` entry, matched nothing and
+   exited 0 printing `all agree`. A missing or errored candidate entry is now a
+   failure; a reference-side error is still skipped. Separately, the `where` and
+   `masked_fill` inputs were a `randn` cast to `bool`, which is 100% True, so
+   neither op's false branch was ever reached — the mask is now genuinely
+   both-valued.
+
+## 11. Open items
 
 None. The two decisions left open during design were settled: `--warmup`
 defaults to 2, and Qwen-Image-2512 is not covered by this change.

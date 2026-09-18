@@ -55,8 +55,9 @@ MODEL_DEFAULT = "/nfs/lvyufeng/Qwen-Image-2.1"
 # card by default, and this is deliberately the opposite of the Qwen-Image-2512
 # flow, whose transformer alone is 40.9 GB and has to be split. Spreading 2.1
 # across cards costs a hidden-state round trip on every forward and buys nothing
-# unless a card cannot hold the whole model -- ``--transformer-devices`` is there
-# for the chips where one cannot.
+# unless a card cannot hold the whole model -- name several with ``--devices``,
+# or name the shards with ``--transformer-devices``, for a chip where one
+# cannot.
 MAX_DEVICES = 3
 
 
@@ -180,41 +181,90 @@ def resolve_placement(torch, args):
 
     1. ``--encoder-device``/``--transformer-devices``/``--vae-device`` win
        outright.
-    2. Otherwise everything goes on ONE card -- the first device of
-       ``--devices``, or ``<device>:0``. See the module docstring: 2.1 is 33 GB
-       and one 40 GB card holds it, so a split would cost a cross-device round
-       trip per forward and buy nothing. This is where the rule differs from the
+    2. Otherwise the run takes the cards named by ``--devices``, or one card --
+       ``<device>:0`` -- when none are named. See the module docstring: 2.1 is
+       33 GB and one 40 GB card holds it, so a split costs a cross-device round
+       trip per forward and buys nothing. This is where the rule differs from the
        2512 flow, which splits because it has to.
-    3. The text encoder and the VAE share that card because the pipeline builds
-       its latents and decodes them on ``self._execution_device``, which falls
-       back to ``self.device`` -- the first non-CPU component in
+    3. The transformer gets every card of that list. Naming one card -- the
+       default, and what a 40 GB part needs -- therefore puts all 32 blocks on
+       it; naming several is how a chip whose card cannot hold 14.2 GB asks for
+       a split, and is the same placement as naming the same set with
+       ``--transformer-devices``.
+    4. The text encoder and the VAE go on the *first* card of the list, and the
+       transformer's first shard is there too. The encoder is where the pipeline
+       builds its latents and decodes them -- ``self._execution_device`` falls
+       back to ``self.device``, the first non-CPU component in
        ``_get_signature_keys`` order, and that order is *sorted*, so
-       ``text_encoder`` outranks ``transformer`` and ``vae``. Whatever card holds
-       the encoder is therefore where the latents are created and where the
-       decode input has to be, so the VAE belongs there too. Putting the VAE
-       elsewhere without moving the encoder as well fails on the first decode
-       with a cross-device error.
+       ``text_encoder`` outranks ``transformer`` and ``vae`` -- so the decode
+       input is created there, and :func:`colocated` refuses a full run whose
+       ``--vae-device`` would put the weights on a different card.
 
-    A transformer split across cards is supported (``--transformer-devices``
-    takes two or more) and is what a chip whose card is smaller than the model
-    needs; it is placed through accelerate's ``dispatch_model``, so the
-    cross-device boundary is accelerate's hooks rather than this script's.
+    A transformer split across cards is placed through accelerate's
+    ``dispatch_model``, so the cross-device boundary is accelerate's hooks
+    rather than this script's.
     """
     count = device_count(torch, args.device)
-    if args.devices:
-        chosen = _checked(args.devices, args.device, count)
-    else:
-        chosen = None
+    chosen = _checked(args.devices, args.device, count) if args.devices else None
+    first = chosen[0] if chosen else f"{args.device}:0"
 
     if args.transformer_devices:
         transformer = _checked(args.transformer_devices, args.device, count)
+    elif chosen:
+        # Naming several cards is the request for a split; naming one is not.
+        transformer = chosen
     else:
-        first = chosen[0] if chosen else f"{args.device}:0"
         transformer = [first]
 
-    staging = chosen[-1] if chosen else f"{args.device}:0"
-    encoder = args.encoder_device or staging
+    encoder = args.encoder_device or first
     return encoder, transformer, args.vae_device or encoder
+
+
+def colocated(encoder, vae):
+    """``vae``, or a stop if it is not the card the encoder is on.
+
+    A full run cannot spread the encoder and the VAE across two cards even
+    though both flags exist, because the pipeline decodes on the encoder's card
+    (see :func:`resolve_placement`, rule 4): the latents are built there, and
+    ``vae.decode`` would be handed a tensor on a card its weights are not on.
+    The failure is a cross-device error in the middle of a run that took minutes
+    to load, so it is refused here instead -- before the weights are read.
+
+    An isolated ``--stage vae`` places the VAE alone and is not checked by this;
+    ``infer.py`` does not call it on that path.
+    """
+    if encoder == vae:
+        return vae
+    raise SystemExit(
+        f"--vae-device {vae} is not the encoder's card ({encoder}). A full run "
+        f"decodes on the encoder's card, so the VAE has to be there: move the "
+        f"encoder with --encoder-device {vae} instead, or drop --vae-device and "
+        f"leave the VAE on {encoder}."
+    )
+
+
+def place_components(torch, pipe, encoder, transformer, vae, blocks_per_device=None):
+    """Move every component onto the cards ``resolve_placement`` named.
+
+    The one place a full run's placement is applied, so the placement a caller
+    reports is the placement that happened: bench.py and sweep.py both record
+    what this returned rather than what was asked for, which is the difference
+    between a record and a claim.
+
+    Returns ``(transformer, placement)`` -- the transformer comes back because a
+    caller may want the object accelerate dispatched, not because this changes
+    it.
+    """
+    vae = colocated(encoder, vae)
+    placed = split_transformer(
+        pipe.transformer,
+        [torch.device(name) for name in transformer],
+        blocks_per_device,
+    )
+    pipe.text_encoder.to(torch.device(encoder))
+    pipe.vae.to(torch.device(vae))
+    print(f"  text_encoder -> {encoder}   vae -> {vae}")
+    return placed, {"encoder": encoder, "transformer": transformer, "vae": vae}
 
 
 def block_boundaries(num_blocks, num_shards, blocks_per_device=None):
@@ -316,27 +366,34 @@ def add_placement_args(parser):
         default=None,
         help=(
             "the cards this run may use; default: the first card only, because "
-            "2.1 fits one 40 GB card and a split costs cross-device traffic"
+            "2.1 fits one 40 GB card and a split costs cross-device traffic. "
+            "Naming more than one splits the transformer across them, which is "
+            "what a chip whose card cannot hold 14.2 GB needs"
         ),
     )
     parser.add_argument(
         "--encoder-device",
         default=None,
-        help="default: the last entry of --devices, which is the staging card",
+        help="default: the first entry of --devices, which is the staging card",
     )
     parser.add_argument(
         "--transformer-devices",
         nargs="+",
         default=None,
         help=(
-            "default: the transformer shares the staging card. Pass two or more "
-            "to split it across cards on a chip whose card cannot hold 14.2 GB"
+            "default: the cards of --devices, so one card unless several were "
+            "named. Pass two or more explicitly to split the transformer across "
+            "a set --devices does not describe"
         ),
     )
     parser.add_argument(
         "--vae-device",
         default=None,
-        help="default: the encoder device, which is the pipeline's execution device",
+        help=(
+            "default: the encoder device. A full run must leave it there -- the "
+            "pipeline decodes on the encoder's card -- so this flag is for "
+            "infer.py's --stage vae, which places the VAE alone"
+        ),
     )
     parser.add_argument(
         "--blocks-per-device",
@@ -461,12 +518,21 @@ class PhaseTimer:
     so every full run reports them.
 
     The loop is timed from ``callback_on_step_end``, which the pipeline calls
-    after each step and which nothing else here needs. The text encoder and the
-    VAE are timed by wrapping them rather than by editing the pipeline: the VAE
-    is reached as ``self.vae.decode(...)``, a method call rather than
-    ``__call__``, so a forward hook never fires for it and the bound method has
-    to be wrapped instead. Both are synchronised on the way in and out, so the
-    number is device-attributed rather than merely "the host returned".
+    after each step and which nothing else here needs, bracketed at the front by
+    the transformer forward that begins it. Every edge is synchronised: the text
+    encoder and the VAE by wrapping them -- the VAE is reached as
+    ``self.vae.decode(...)``, a method call rather than ``__call__``, so a
+    forward hook never fires for it and the bound method has to be wrapped
+    instead -- and the step callback by synchronising inside it.
+
+    Both of the loop's edges need saying explicitly, because the denoise loop is
+    asynchronous: nothing in the pipeline blocks the host between steps, so a
+    callback that only reads the clock stamps when work was *enqueued*, not when
+    it finished. On this workload the two agree to 0.15% -- 20.88 s against
+    20.91 s measured on A100 -- but only because the 40 GB card's allocator is
+    nearly full and blocks the host on every step. That is a property of the
+    chip's memory pressure, not of the measurement, so the synchronise is what
+    makes the number device-attributed rather than incidentally so.
 
     One sample per ``reset``/``sample`` pair, rather than one accumulator for the
     whole run, because a benchmark needs each measured call's own phases: only
@@ -494,11 +560,18 @@ class PhaseTimer:
         self._marks = []
         self._timings = {}
         self._handles = []
+        self._loop_start = None
 
         encoder = getattr(pipe, "text_encoder", None)
         if encoder is not None:
             self._handles.append(encoder.register_forward_pre_hook(self._before))
             self._handles.append(encoder.register_forward_hook(self._after))
+
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is not None:
+            self._handles.append(
+                transformer.register_forward_pre_hook(self._loop_begins)
+            )
 
         self._original_decode = pipe.vae.decode
 
@@ -524,13 +597,33 @@ class PhaseTimer:
             time.perf_counter() - module._phase_t0
         )
 
+    def _loop_begins(self, module, args, kwargs=None):
+        """The first transformer forward after a reset is where the loop starts.
+
+        The step callbacks alone bound N-1 intervals for an N-step loop, so
+        without this the loop total is one step short of the loop -- 2.5% of it
+        at 40 steps, and enough to make the phases visibly fail to add up to the
+        end-to-end latency. Recorded once; the second forward of a step (true CFG
+        runs the transformer twice per step) does not move it.
+        """
+        if self._loop_start is None:
+            self._sync()
+            self._loop_start = time.perf_counter()
+
     def reset(self):
         """Begin a new sample: forget the previous one's marks and totals."""
         self._marks = []
         self._timings = {}
+        self._loop_start = None
 
     def on_step_end(self, _pipe, index, _timestep, kwargs):
-        """The ``callback_on_step_end`` the pipeline calls between steps."""
+        """The ``callback_on_step_end`` the pipeline calls between steps.
+
+        Synchronised before the stamp, for the reason in the class docstring:
+        the pipeline queues each step and returns to the host immediately, so an
+        unsynchronised stamp is a launch time.
+        """
+        self._sync()
         self._marks.append((index, time.perf_counter()))
         return kwargs
 
@@ -538,20 +631,34 @@ class PhaseTimer:
         """This sample's phases, all in seconds.
 
         A phase that did not run is absent rather than zero: a stage that never
-        reached the VAE must not read as a 0.000 s decode. ``loop per step``
-        divides by ``len(marks) - 1`` because N callbacks bound N-1 intervals --
-        dividing by the step count instead would understate the per-step cost by
-        one step's worth.
+        reached the VAE must not read as a 0.000 s decode.
+
+        ``denoise loop`` spans the whole loop and ``loop per step`` divides that
+        span by the number of steps in it, so the two always agree. Which numbers
+        those are depends on whether the loop's start was seen -- the transformer
+        hook in :meth:`_loop_begins` records it, and a run that never calls the
+        transformer has no loop to report:
+
+        - with it, the span covers all N steps, so the divisor is N;
+        - without it, only the N-1 intervals between callbacks remain, so the
+          divisor is N-1 and the total is one step short.
 
         Seconds for every phase, including the one that is *printed* in
         milliseconds: the unit a measurement is stored in should not depend on
         how it is rendered, and ``print_phases`` owns the rendering.
         """
         timings = dict(self._timings)
-        if len(self._marks) > 1:
-            first, last = self._marks[0][1], self._marks[-1][1]
-            timings["denoise loop"] = last - first
-            timings["loop per step"] = (last - first) / (len(self._marks) - 1)
+        if self._loop_start is not None and self._marks:
+            span = self._marks[-1][1] - self._loop_start
+            steps = len(self._marks)
+        elif len(self._marks) > 1:
+            span = self._marks[-1][1] - self._marks[0][1]
+            steps = len(self._marks) - 1
+        else:
+            span = None
+        if span is not None:
+            timings["denoise loop"] = span
+            timings["loop per step"] = span / steps
         return timings
 
     def close(self):
