@@ -89,6 +89,45 @@ class TestLeCorrectness:
         torch.testing.assert_close(out.cpu(), ref)
 
 
+class TestLeScalarCorrectness:
+    """`le.Scalar`, including the mixed integral/float pair that promotes.
+
+    ``int32_tensor <= 0.5`` compares in float32, not in int32: converting the
+    bound into the tensor's dtype first truncates it to ``0`` and answers
+    ``False`` for every value in ``[0, 1)``, which is what the CPU does *not*
+    do. Both the values and the operand dtypes are covered, because the
+    spellings that stay integral are the ones a conversion-only fix breaks.
+    """
+
+    @pytest.mark.anyplatform
+    def test_scalar_matches_cpu(self):
+        torch.manual_seed(0)
+        a = torch.randn(64, 64, device=DEVICE)
+        out = a <= 0.5
+        torch.testing.assert_close(out.cpu(), a.cpu() <= 0.5)
+
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("bound", [0.5, 1.5, 0.0, -0.5])
+    def test_integral_tensor_against_a_float_bound(self, bound):
+        a = torch.arange(4, dtype=torch.int32, device=DEVICE)
+        out = a <= bound
+        ref = a.cpu() <= bound
+        assert out.dtype == ref.dtype
+        torch.testing.assert_close(out.cpu(), ref)
+
+    @pytest.mark.anyplatform
+    def test_integral_tensor_against_an_integral_bound(self):
+        a = torch.arange(4, dtype=torch.int32, device=DEVICE)
+        torch.testing.assert_close((a <= 2).cpu(), a.cpu() <= 2)
+
+    @pytest.mark.anyplatform
+    def test_float_bound_in_the_open_unit_interval(self):
+        """The values the truncating conversion got wrong: `0 <= x < 1`."""
+        a = torch.tensor([0.0, 0.25, 0.75], device=DEVICE).to(torch.int32)
+        out = a <= 0.5
+        torch.testing.assert_close(out.cpu(), a.cpu() <= 0.5)
+
+
 class TestLeDispatch:
     """Verify dispatch routing for le.Tensor op."""
 

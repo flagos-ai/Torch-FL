@@ -17,6 +17,8 @@ mul.Tensor dispatch tests
 
 Verifies that torch.mul (Tensor variant):
   - produces correct results on flagos device
+  - produces correct results for a Python-number operand (`a * 2.0`), which
+    arrives as a wrapped scalar tensor
   - C++ wrapper routes to the backend the platform conf lists for the .Tensor
     overload (the vendor kernel on every current platform)
   - explicit overrides can still route to flaggems_python
@@ -93,6 +95,45 @@ class TestMulTensorCorrectness:
         b = b_cuda.to(DEVICE)
         out = torch.mul(a, b)
         torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
+
+
+class TestMulPythonNumberOperand:
+    """The `a * 2.0` spelling, whose operand is a wrapped scalar tensor.
+
+    ``torch.mul(a, 2.0)`` dispatches to ``mul.Tensor`` with a 0-dim tensor typed
+    from the number -- float64 for ``2.0``, int64 for ``2`` -- and flagged
+    ``is_wrapped_number``. Promotion deliberately stops that from widening ``a``,
+    so a kernel that tests the operand's own dtype instead of ``at::result_type``
+    sends the whole call to the host and back for the most ordinary spelling
+    there is. The dtype is asserted as well as the values, because the wrong
+    result type is the failure mode that reads as correct.
+    """
+
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("operand", [2.0, 2, 1.5, -3])
+    def test_python_number_matches_cpu(self, operand):
+        torch.manual_seed(0)
+        a = torch.randn(64, 64, device=DEVICE)
+        out = a * operand
+        ref = a.cpu() * operand
+        assert out.dtype == ref.dtype, f"device {out.dtype} vs cpu {ref.dtype}"
+        torch.testing.assert_close(out.cpu(), ref, rtol=1e-5, atol=1e-5)
+
+    @pytest.mark.anyplatform
+    def test_integral_operand_keeps_the_integral_dtype(self):
+        """`int32 * 2` stays int32; the python int must not widen it."""
+        a = torch.arange(16, dtype=torch.int32, device=DEVICE)
+        out = a * 2
+        assert out.dtype == torch.int32
+        torch.testing.assert_close(out.cpu(), a.cpu() * 2)
+
+    @pytest.mark.anyplatform
+    def test_zero_dim_device_operand_matches_python_number(self):
+        """A 0-dim tensor on the card takes the same path as the number does."""
+        torch.manual_seed(1)
+        a = torch.randn(32, 32, device=DEVICE)
+        two = torch.tensor(2.0, device=DEVICE)
+        torch.testing.assert_close((a * two).cpu(), (a * 2.0).cpu(), rtol=0, atol=0)
 
 
 class TestMulTensorDispatch:

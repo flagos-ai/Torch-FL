@@ -967,6 +967,16 @@ NATIVE_TRITON_GAPS = {
         "masked_fill_.Tensor",
         "masked_select",
         "where.self",
+        # The out= spelling is gapped for its own reason, and it is not a
+        # correctness one: FlagGems' `where_self_out` is correct but 46x slower
+        # than the vendor's op when the second operand is 0-dim, which is
+        # exactly how ATen's `_safe_softmax` calls it. Measured at
+        # (1, 24, 4114, 4114) fp32, condition (1, 24, 4114, 1) bool, with a
+        # drain on both sides: 1098.6 ms through FlagGems against 23.7 ms for
+        # `where.self` at the same shape. `_safe_softmax` is the SDPA math
+        # path's softmax and runs once per attention layer, so the gap is
+        # ~1.1 s/layer. See T_WHERE_SELF_OUT in codegen_gcu.py.
+        "where.self_out",
         "all",
         "any",
         # _conj is here for the same contract reason as musa's entry: flag_gems'

@@ -17,6 +17,8 @@ where.self dispatch tests
 
 Verifies that torch.where (condition, self, other):
   - produces correct results on flagos device
+  - the out= spelling does too, including the 0-dim `self` that ATen's
+    `_safe_softmax` calls it with
   - C++ wrapper routes to cuda/metax backend
   - attempting flaggems backend raises an error (not implemented)
 
@@ -94,6 +96,86 @@ class TestWhereCorrectness:
         b = torch.tensor([3.0, 4.0], device=DEVICE)
         out = torch.where(cond, a, b)
         assert out.device.type == "flagos"
+
+
+class TestWhereOutCorrectness:
+    """The `out=` spelling, which is a separate ATen overload from `where.self`.
+
+    It is what ATen's eager `_safe_softmax` ends on -- once per attention layer in
+    the SDPA math path -- and it calls `where` with a 0-dim `self` spelling the
+    zero, so that shape is covered here rather than left to the plain overload's
+    tests.
+    """
+
+    @pytest.mark.anyplatform
+    def test_out_matches_cpu(self):
+        torch.manual_seed(0)
+        cond = torch.rand(4, 8, device=DEVICE) > 0.5
+        a = torch.randn(4, 8, device=DEVICE)
+        b = torch.randn(4, 8, device=DEVICE)
+        out = torch.empty(4, 8, device=DEVICE)
+        returned = torch.where(cond, a, b, out=out)
+        assert returned is out
+        torch.testing.assert_close(
+            out.cpu(), torch.where(cond.cpu(), a.cpu(), b.cpu()), rtol=0, atol=0
+        )
+
+    @pytest.mark.anyplatform
+    def test_out_zero_dim_self(self):
+        """The `_safe_softmax` spelling: a 0-dim value operand broadcast over `out`."""
+        torch.manual_seed(0)
+        cond = torch.rand(4, 8, device=DEVICE) > 0.5
+        b = torch.randn(4, 8, device=DEVICE)
+        zero = torch.tensor(0.0, device=DEVICE)
+        out = torch.empty(4, 8, device=DEVICE)
+        torch.where(cond, zero, b, out=out)
+        torch.testing.assert_close(
+            out.cpu(),
+            torch.where(cond.cpu(), torch.tensor(0.0), b.cpu()),
+            rtol=0,
+            atol=0,
+        )
+
+    @pytest.mark.anyplatform
+    def test_out_broadcast_condition(self):
+        """The condition is the wider operand, so it is the values that expand."""
+        torch.manual_seed(0)
+        cond = torch.rand(1, 8, device=DEVICE) > 0.5
+        a = torch.randn(4, 1, device=DEVICE)
+        b = torch.randn(4, 1, device=DEVICE)
+        out = torch.empty(4, 8, device=DEVICE)
+        torch.where(cond, a, b, out=out)
+        torch.testing.assert_close(
+            out.cpu(), torch.where(cond.cpu(), a.cpu(), b.cpu()), rtol=0, atol=0
+        )
+
+    @pytest.mark.anyplatform
+    def test_out_grows_from_empty(self):
+        torch.manual_seed(0)
+        cond = torch.rand(2, 4, device=DEVICE) > 0.5
+        a = torch.randn(2, 4, device=DEVICE)
+        b = torch.randn(2, 4, device=DEVICE)
+        out = torch.empty(0, device=DEVICE)
+        torch.where(cond, a, b, out=out)
+        assert out.shape == (2, 4)
+        torch.testing.assert_close(
+            out.cpu(), torch.where(cond.cpu(), a.cpu(), b.cpu()), rtol=0, atol=0
+        )
+
+    @pytest.mark.anyplatform
+    def test_out_rejects_uncastable_dtype(self):
+        """A result that cannot be cast to `out` must raise, not narrow silently.
+
+        The exception class is deliberately not pinned: ATen's own out= contract
+        raises `RuntimeError`, and the FlagGems route asserts instead. What is
+        under test is that neither route writes a truncated result.
+        """
+        cond = torch.tensor([True, False], device=DEVICE)
+        a = torch.randn(2, device=DEVICE)
+        b = torch.randn(2, device=DEVICE)
+        out = torch.empty(2, dtype=torch.int32, device=DEVICE)
+        with pytest.raises(Exception):  # noqa: B017 - see the docstring
+            torch.where(cond, a, b, out=out)
 
 
 class TestWhereDispatch:

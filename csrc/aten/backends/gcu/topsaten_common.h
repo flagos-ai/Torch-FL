@@ -22,6 +22,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace at::native::flagos::gcu {
@@ -425,6 +426,33 @@ inline bool TopsatenWhereDtype(at::ScalarType type) {
   }
 }
 
+// Which device a multi-operand kernel should read its operands on, when one of
+// them may be a host scalar.
+//
+// A 0-dim CPU tensor is how ATen spells a scalar inside a C++ composite -- the
+// eager `_safe_softmax` builds its zero operand with `at::scalar_tensor(0, ...)`
+// and no device -- and it is a valid operand of a device op, not a reason to
+// compute on the host. A kernel that takes `self.device()` as the compute device
+// therefore *silently* picks the host for such a call: the operands are then
+// handed to the vendor as device pointers, which for where is a RUNTIME_ERROR out
+// of topsatenWhere and, at a vendor that does not validate, would be wrong
+// numbers instead.
+//
+// Returns the first operand that is actually on a card, so a kernel can hoist the
+// CPU operand onto it before expanding. When none of them is, the call really is
+// a host call and kCPU comes back, which every caller's fallback path takes.
+inline at::Device TopsatenComputeDevice(
+    const at::Tensor& first,
+    const at::Tensor& second,
+    const at::Tensor& third) {
+  for (const at::Tensor* candidate : {&first, &second, &third}) {
+    if (candidate->defined() && candidate->device().is_privateuseone()) {
+      return candidate->device();
+    }
+  }
+  return at::Device(at::kCPU);
+}
+
 // A tops device pointer resolves only against the *current* device, so an op
 // on flagos:1 must run with device 1 selected. Restores the previous device.
 class TopsDeviceGuard {
@@ -572,12 +600,24 @@ class TopsatenRowView {
 // a host buffer that the driver refuses inside this process ("Cannot create
 // memory object for kernel parameter 2"), so those ops go through the
 // tensor-with-tensor overload instead. topsaten does not broadcast, hence the
-// full-size tensor. Built on the host and copied once.
+// full-size tensor.
+//
+// The fill is done on the device. Staging it through the host instead --
+// `at::full(sizes, scalar, options.device(at::kCPU)).to(options.device())`, which
+// is what this used to do -- costs a full-size host allocation, a full-size CPU
+// fill, a full-size H2D transfer and a second full-size device allocation, once
+// per scalar operand, and the pipeline's scalar operands are not small. Measured
+// on S60 at the (1, 24, 4114, 4114) fp32 attention shape: `a + 1.0` through the
+// host is 630.1 ms against 3.7 ms for the device fill alone, and at the
+// (1, 4096, 3072) bf16 activation shape it is 17.2 ms against 0.3 ms. Every
+// codegen'd binary_scalar_as_tensor kernel stages its scalar this way, so a
+// forward pays it once per `x + 1.0`-style expression in the model, not once per
+// attention layer.
 inline at::Tensor ScalarToDeviceTensor(
     const at::Scalar& scalar,
     at::IntArrayRef sizes,
     const at::TensorOptions& options) {
-  return at::full(sizes, scalar, options.device(at::kCPU)).to(options.device());
+  return at::full(sizes, scalar, options);
 }
 
 // `topsatenScalar_t` is a plain {dtype, union{double fval; int64_t ival;}}, so
@@ -654,6 +694,31 @@ inline bool IsForeachEligible(at::TensorList tensors) {
 // Bounds used to fill in an absent clamp limit: clamping against the dtype's
 // own extreme leaves that side untouched. Floating types use -inf/+inf so that
 // NaN handling matches an unbounded clamp.
+//
+// The integral extreme has to be of the tensor's own width. The value reaches
+// the vendor in the int64 member of topsatenScalar_t and is read back as the
+// tensor's dtype, so a wider constant truncates: INT64_MAX handed to an int32
+// clamp arrives as -1 (its low 32 bits), which turns `clamp(min=0)` on an int32
+// tensor into a clamp to -1.
+inline int64_t IntegralExtreme(at::ScalarType type, bool lowest) {
+  switch (type) {
+    case at::kByte:
+      return lowest ? 0 : int64_t(std::numeric_limits<uint8_t>::max());
+    case at::kChar:
+      return lowest ? int64_t(std::numeric_limits<int8_t>::lowest())
+                    : int64_t(std::numeric_limits<int8_t>::max());
+    case at::kShort:
+      return lowest ? int64_t(std::numeric_limits<int16_t>::lowest())
+                    : int64_t(std::numeric_limits<int16_t>::max());
+    case at::kInt:
+      return lowest ? int64_t(std::numeric_limits<int32_t>::lowest())
+                    : int64_t(std::numeric_limits<int32_t>::max());
+    default:
+      return lowest ? std::numeric_limits<int64_t>::lowest()
+                    : std::numeric_limits<int64_t>::max();
+  }
+}
+
 inline at::Scalar DtypeLowest(at::ScalarType type) {
   if (at::isFloatingType(type)) {
     return at::Scalar(-std::numeric_limits<double>::infinity());
@@ -661,7 +726,7 @@ inline at::Scalar DtypeLowest(at::ScalarType type) {
   if (type == at::kBool) {
     return at::Scalar(false);
   }
-  return at::Scalar(std::numeric_limits<int64_t>::lowest());
+  return at::Scalar(IntegralExtreme(type, /*lowest=*/true));
 }
 
 inline at::Scalar DtypeHighest(at::ScalarType type) {
@@ -671,7 +736,29 @@ inline at::Scalar DtypeHighest(at::ScalarType type) {
   if (type == at::kBool) {
     return at::Scalar(true);
   }
-  return at::Scalar(std::numeric_limits<int64_t>::max());
+  return at::Scalar(IntegralExtreme(type, /*lowest=*/false));
+}
+
+// The dtype a clamp with scalar bounds computes in.
+//
+// ATen's clamp meta promotes its bounds into the result, so a float bound moves
+// the whole op to the default float dtype: `clamp_min(0.5)` on an int32 tensor
+// answers f32 [0.5, 2.0], while `clamp_min(0)` on the same tensor stays int32.
+// Converting the bounds into self's dtype instead truncates them, and
+// `clamp_min(0.5)` would then clamp at 0 for every value in [0, 1). The bounds
+// are converted to the promoted type and self is cast to it.
+inline at::ScalarType ClampComputeDtype(
+    const at::Tensor& self,
+    const ::std::optional<at::Scalar>& min,
+    const ::std::optional<at::Scalar>& max) {
+  auto dtype = self.scalar_type();
+  if (min.has_value()) {
+    dtype = c10::promoteTypes(dtype, at::result_type(self, min.value()));
+  }
+  if (max.has_value()) {
+    dtype = c10::promoteTypes(dtype, at::result_type(self, max.value()));
+  }
+  return dtype;
 }
 
 } // namespace at::native::flagos::gcu

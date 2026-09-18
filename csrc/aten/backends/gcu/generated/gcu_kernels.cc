@@ -395,11 +395,11 @@ at::Tensor SignKernelGcu(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kGcu, SignKernelGcu)
 
 at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::mul(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -417,11 +417,11 @@ at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kGcu, MulTensorKernelGcu)
 
 at::Tensor DivTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::div(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -439,11 +439,11 @@ at::Tensor DivTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kGcu, DivTensorKernelGcu)
 
 at::Tensor MaximumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::maximum(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -461,11 +461,11 @@ at::Tensor MaximumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kGcu, MaximumKernelGcu)
 
 at::Tensor MinimumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::minimum(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -483,11 +483,11 @@ at::Tensor MinimumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kGcu, MinimumKernelGcu)
 
 at::Tensor RemainderTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::remainder(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -505,11 +505,11 @@ at::Tensor RemainderTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kGcu, RemainderTensorKernelGcu)
 
 at::Tensor FmodTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::fmod(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -527,11 +527,11 @@ at::Tensor FmodTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kGcu, FmodTensorKernelGcu)
 
 at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::pow(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -549,11 +549,11 @@ at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kGcu, PowTensorTensorKernelGcu)
 
 at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -572,11 +572,11 @@ at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kGcu, AddTensorKernelGcu)
 
 at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::sub(self.cpu(), other.cpu(), alpha).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -602,8 +602,9 @@ at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at:
       at::result_type(self, other),
       " can't be cast to the desired output type ",
       out.scalar_type());
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     auto host = at::mul(self.cpu(), other.cpu());
     if (!out.sizes().equals(host.sizes())) {
       out.resize_(host.sizes());
@@ -611,7 +612,6 @@ at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at:
     out.copy_(host);
     return out;
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -646,8 +646,9 @@ at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
       at::result_type(self, other),
       " can't be cast to the desired output type ",
       out.scalar_type());
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     auto host = at::add(self.cpu(), other.cpu(), alpha);
     if (!out.sizes().equals(host.sizes())) {
       out.resize_(host.sizes());
@@ -655,7 +656,6 @@ at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
     out.copy_(host);
     return out;
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -691,8 +691,9 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
       at::result_type(self, other),
       " can't be cast to the desired output type ",
       out.scalar_type());
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     auto host = at::sub(self.cpu(), other.cpu(), alpha);
     if (!out.sizes().equals(host.sizes())) {
       out.resize_(host.sizes());
@@ -700,7 +701,6 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
     out.copy_(host);
     return out;
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -729,11 +729,11 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
 REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kGcu, SubOutKernelGcu)
 
 at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::eq(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -751,11 +751,11 @@ at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kGcu, EqTensorKernelGcu)
 
 at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::ne(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -773,11 +773,11 @@ at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kGcu, NeTensorKernelGcu)
 
 at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::lt(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -795,11 +795,11 @@ at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kGcu, LtTensorKernelGcu)
 
 at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::gt(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -817,11 +817,11 @@ at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kGcu, GtTensorKernelGcu)
 
 at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::le(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -839,11 +839,11 @@ at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kGcu, LeTensorKernelGcu)
 
 at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::ge(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -861,11 +861,11 @@ at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kGcu, GeTensorKernelGcu)
 
 at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::logical_and(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -883,11 +883,11 @@ at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kGcu, LogicalAndKernelGcu)
 
 at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::logical_or(self.cpu(), other.cpu()).to(self.device());
   }
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -1043,14 +1043,20 @@ at::Tensor SubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, c
 REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kGcu, SubScalarKernelGcu)
 
 at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::eq(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenEq, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1059,14 +1065,20 @@ at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kGcu, EqScalarKernelGcu)
 
 at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::ne(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenNe, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1075,14 +1087,20 @@ at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kGcu, NeScalarKernelGcu)
 
 at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::lt(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenLt, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1091,14 +1109,20 @@ at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kGcu, LtScalarKernelGcu)
 
 at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::gt(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenGt, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1107,14 +1131,20 @@ at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kGcu, GtScalarKernelGcu)
 
 at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::le(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenLe, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1123,14 +1153,20 @@ at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kGcu, LeScalarKernelGcu)
 
 at::Tensor GeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::ge(self.cpu(), other).to(self.device());
   }
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(topsatenGe, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1580,18 +1616,20 @@ at::Tensor ClampKernelGcu(
     const at::Tensor& self,
     const ::std::optional<at::Scalar>& min,
     const ::std::optional<at::Scalar>& max) {
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
+  auto result_dtype = gcu::ClampComputeDtype(self, min, max);
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::clamp(self.cpu(), min, max).to(self.device());
   }
-  auto self_c = self.contiguous();
+  auto self_c = (self.scalar_type() == result_dtype ? self : self.to(result_dtype))
+                    .contiguous();
   auto out = at::empty(self_c.sizes(), self_c.options());
-  auto dtype = self.scalar_type();
   auto lo = min.has_value()
-      ? gcu::ToTopsatenScalar(min.value(), dtype)
-      : gcu::ToTopsatenScalar(gcu::DtypeLowest(dtype), dtype);
+      ? gcu::ToTopsatenScalar(min.value(), result_dtype)
+      : gcu::ToTopsatenScalar(gcu::DtypeLowest(result_dtype), result_dtype);
   auto hi = max.has_value()
-      ? gcu::ToTopsatenScalar(max.value(), dtype)
-      : gcu::ToTopsatenScalar(gcu::DtypeHighest(dtype), dtype);
+      ? gcu::ToTopsatenScalar(max.value(), result_dtype)
+      : gcu::ToTopsatenScalar(gcu::DtypeHighest(result_dtype), result_dtype);
 
   gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
@@ -3015,13 +3053,25 @@ REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_i
 at::Tensor WhereSelfKernelGcu(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
-  if (condition.scalar_type() != at::kBool ||
-      !gcu::TopsatenWhereDtype(result_dtype)) {
-    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  // The operands are read on `dev`, not on `self.device()`. `self` is a 0-dim
+  // host tensor whenever a composite spells a scalar that way -- which is how
+  // ATen's eager `_safe_softmax` builds its zero -- and the earlier spelling of
+  // this template then ran the whole call, including the vendor call, against
+  // the host. See TopsatenComputeDevice.
+  auto dev = gcu::TopsatenComputeDevice(condition, self, other);
+  // ATen's own `where` takes a bool condition, and a byte one by casting it;
+  // every other condition dtype it rejects outright, which is the error the host
+  // path below reproduces verbatim. A byte condition is therefore not a reason to
+  // leave the card: it takes the same `.to(dev, at::kBool)` that the vendor's
+  // PRED operand needs.
+  if ((condition.scalar_type() != at::kBool &&
+       condition.scalar_type() != at::kByte) ||
+      !gcu::TopsatenWhereDtype(result_dtype) || dev.is_cpu()) {
+    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(dev);
   }
-  auto cond_c = condition.to(self.device(), at::kBool);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto cond_c = condition.to(dev, at::kBool);
+  auto self_c = self.to(dev, result_dtype);
+  auto other_c = other.to(dev, result_dtype);
   // All three operands are expanded, not just the two values: the vendor does not
   // broadcast, and ATen broadcasts the condition against the values' common
   // shape, which is not the same thing when the condition is the wider one.
@@ -3045,6 +3095,64 @@ at::Tensor WhereSelfKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kGcu, WhereSelfKernelGcu)
+
+at::Tensor& WhereSelfOutKernelGcu(
+    const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other,
+    at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(out);
+  auto result_dtype = at::result_type(self, other);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, out.scalar_type()),
+      "result type ",
+      result_dtype,
+      " can't be cast to the desired output type ",
+      out.scalar_type());
+  // Compute where `out` lives, which is also the device the guard just selected.
+  // `self` is a 0-dim host tensor for the composite that this kernel exists for,
+  // so its own device says nothing about where the work belongs; see
+  // TopsatenComputeDevice.
+  auto dev = gcu::TopsatenComputeDevice(out, self, other);
+  // The host cases are the out-of-place template's, plus `out`'s: a condition
+  // dtype ATen itself rejects, a dtype with no topsaten mapping that would raise
+  // out of the wrapper, and a destination topsaten would write through with the
+  // wrong width, in the wrong layout, or on another device. Each of those is a
+  // host call rather than a descriptor.
+  if ((condition.scalar_type() != at::kBool &&
+       condition.scalar_type() != at::kByte) ||
+      !gcu::TopsatenWhereDtype(result_dtype) || out.device() != dev ||
+      out.scalar_type() != result_dtype || !out.is_contiguous()) {
+    auto host = at::where(condition.cpu(), self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {
+      out.resize_(host.sizes());
+    }
+    out.copy_(host);
+    return out;
+  }
+  // All three operands are expanded, not just the two values: the vendor does not
+  // broadcast, and ATen broadcasts the condition against the values' common
+  // shape, which is not the same thing when the condition is the wider one.
+  auto out_shape = at::infer_size(
+      at::infer_size(condition.sizes(), self.sizes()), other.sizes());
+  if (!out.sizes().equals(out_shape)) {
+    out.resize_(out_shape);
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  auto cond_b = condition.to(dev, at::kBool).expand(out_shape).contiguous();
+  auto self_b = self.to(dev, result_dtype).expand(out_shape).contiguous();
+  auto other_b = other.to(dev, result_dtype).expand(out_shape).contiguous();
+
+  gcu::TopsatenTensorWrapper t_cond(cond_b);
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      topsatenWhere, out, t_out.get(), t_cond.get(), t_self.get(), t_other.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kGcu, WhereSelfOutKernelGcu)
 
 at::Tensor AllKernelGcu(const at::Tensor& self) {
   auto operand = gcu::TopsatenAllOperand(self);

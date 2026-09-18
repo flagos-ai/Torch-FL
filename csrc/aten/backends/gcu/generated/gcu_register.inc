@@ -190,5 +190,6 @@
   m.impl("view_as_complex", WrapperViewAsComplex);
   m.impl("view_as_real", WrapperViewAsReal);
   m.impl("where.self", WrapperWhereSelf);
+  m.impl("where.self_out", WrapperWhereSelfOut);
   m.impl("zero_", WrapperZeroInplace);
   m.impl("zeros_like", WrapperZerosLike);

@@ -11,9 +11,10 @@
 #include <flagos.h>
 #include "device_boxing.h"
 // Included unconditionally: the #else branches below cover TsingMicro, GCU and
-// MUSA-without-mudnn as well as Ascend, and this header supplies inline no-op
-// fallbacks for those platforms.
+// MUSA-without-mudnn as well as Ascend, and these headers supply inline no-op
+// fallbacks for every platform they do not implement.
 #include "backends/ascend/ascend_copy.h"
+#include "backends/gcu/gcu_copy.h"
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -101,10 +102,15 @@ at::Tensor contiguous(
       DeviceBoxingGuard guard(self, result);
       at::native::copy_(result, self, false);
 #else
-      // Ascend: copy the strided source into the contiguous result on-device
-      // via aclnnInplaceCopy. Falls back to a CPU round-trip only if that path
-      // is unavailable.
-      if (!ascend::StridedCopy(result, self)) {
+      // Ascend copies the strided source into the contiguous result on-device
+      // via aclnnInplaceCopy, GCU via topsatenCopy. Falls back to a CPU
+      // round-trip only if that path is unavailable.
+#if defined(USE_GCU)
+      const bool copied_on_device = gcu::StridedCopy(result, self);
+#else
+      const bool copied_on_device = ascend::StridedCopy(result, self);
+#endif
+      if (!copied_on_device) {
         size_t storage_size = self.storage().nbytes();
         at::Tensor storage_cpu = at::empty(
             {static_cast<int64_t>(storage_size)},
@@ -175,10 +181,18 @@ at::Tensor clone(
     // torch_musa implements for strided/dtype-casting copies on device.
     auto result = at::empty(
         self.sizes(), self.options().memory_format(memory_format));
-    // On-device strided copy (aclnnInplaceCopy) instead of result.copy_(self),
-    // which would bounce through a CPU round-trip. This is the Qwen3 GQA
-    // repeat_kv hotspot (~59% of inference time before this change).
-    if (!ascend::StridedCopy(result, self)) {
+    // On-device strided copy -- aclnnInplaceCopy on Ascend, topsatenCopy on
+    // GCU -- instead of result.copy_(self), which would bounce through a CPU
+    // round-trip. This is the Qwen3 GQA repeat_kv hotspot (~59% of inference
+    // time before this change), and on GCU it is the `.expand(...).clone()` /
+    // `.contiguous()` pattern in Qwen-Image's attention: 975.6 ms per call at
+    // the (1, 24, 4114, 4114) fp32 shape against 4.6 ms for the vendor call.
+#if defined(USE_GCU)
+    const bool copied_on_device = gcu::StridedCopy(result, self);
+#else
+    const bool copied_on_device = ascend::StridedCopy(result, self);
+#endif
+    if (!copied_on_device) {
       result.copy_(self);
     }
     return result;

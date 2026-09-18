@@ -242,11 +242,12 @@
 //   - var_mean.correction
 //   - vdot
 //   - where.self
+//   - where.self_out
 //   - zero_
 //   - zeros
 //   - zeros_like
 //
-// Total: 248 ops registered here, 100 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 247 ops registered here, 101 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
@@ -489,7 +490,6 @@
   m.impl("transpose.int", WrapperTransposeInt);
   m.impl("trunc_", WrapperTruncInplace);
   m.impl("upsample_linear1d_backward", WrapperUpsampleLinear1dBackward);
-  m.impl("where.self_out", WrapperWhereSelfOut);
   m.impl("xlogy.OutScalar_Other", WrapperXlogyOutscalarOther);
   m.impl("xlogy.OutScalar_Self", WrapperXlogyOutscalarSelf);
   m.impl("xlogy.OutTensor", WrapperXlogyOuttensor);

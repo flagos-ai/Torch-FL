@@ -289,6 +289,11 @@ OPS = {
     # vendor's index kernel implements. The kernel recognises that case and
     # delegates; everything else takes the host path with ATen's own semantics.
     "where.self": ("where_self", None),
+    # The out= spelling is claimed for a different reason than the out-of-place
+    # one: not a cpu_fallback, but the last op of ATen's eager `_safe_softmax`,
+    # which FlagGems serves at (1, 24, 4114, 4114) in 1098.6 ms against the
+    # vendor's 23.7 ms for the same operation. See T_WHERE_SELF_OUT.
+    "where.self_out": ("where_self_out", None),
     "all": ("all_whole", None),
     "index.Tensor": ("index_tensor", None),
     "nonzero": ("nonzero", None),
@@ -433,13 +438,69 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # mul.Tensor). Handing that host pointer to topsaten fails in the driver, so any
 # non-device operand is moved onto self's device first.
 _BINARY_PROLOGUE = """\
-  auto result_dtype = at::result_type(self, other);
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
   auto self_b = self_c.expand(out_shape).contiguous();
   auto other_b = other_c.expand(out_shape).contiguous();
 """
+
+
+# The dtype test has to be `at::result_type`, not `other.scalar_type()`.
+#
+# A Python number operand reaches these kernels as a *wrapped scalar tensor*: a
+# real 0-dim tensor carrying the number's own dtype (f64 for a float, i64 for an
+# int), flagged `is_wrapped_number`, which promotion deliberately stops from
+# widening `self`. So `other.scalar_type()` is f64 for the most ordinary spelling
+# there is -- `x * 2.0` -- while the arithmetic is f32 end to end. Testing that
+# dtype rejected the operand, and the guard's host fallback then moved the whole
+# tensor to the CPU and back:
+#
+#   (1,24,4114,4114) f32, 1.51 GiB     a * 2.0                        575 ms
+#                                      a * 2                          616 ms
+#                                      a * <f32 0-dim device tensor>   20 ms
+#                                      a * <f32 0-dim CPU tensor>      22 ms
+#   torch.profiler on `a * 2.0`: 2 x topsMemcpy (219 ms each), 0 topsLaunchKernel.
+#
+# `at::result_type` is wrapped-number aware (`ResultTypeState::wrappedResult`),
+# so it reports f32 for `mul(f32_tensor, wrapped_f64)` and for
+# `mul(f32_tensor, wrapped_i64)` -- the type the arithmetic is actually done in.
+# A genuine f64 operand, wrapped or not, still promotes to f64 and still falls
+# back, which is what the CPU does as well: topsaten has no float64 kernels.
+#
+# `TopsatenSupportsDtype(self.scalar_type())` stays. `self` is read as well as
+# written, so an i64 self has to fall back even when its promotion lands on f32.
+#
+# Both helpers below emit braces, and their output is concatenated into a
+# template that `CATEGORIES[cat].format(...)` expands later, so every brace is
+# doubled here -- the same convention the templates themselves use.
+def _binary_dtype_guard(host_body: str) -> str:
+    """Emit `result_dtype` and the unsupported-dtype fallback for a binary op.
+
+    `host_body` is the fallback itself, indented for the `if` body, and may use
+    `result_dtype`.
+    """
+    return (
+        "  auto result_dtype = at::result_type(self, other);\n"
+        "  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||\n"
+        "      !gcu::TopsatenSupportsDtype(result_dtype)) {{\n" + host_body + "  }}\n"
+    )
+
+
+def _binary_host_fallback(at_op: str, alpha: bool = False, out: bool = False) -> str:
+    """The fallback body for `_binary_dtype_guard`, as an indented block."""
+    args = "self.cpu(), other.cpu(), alpha" if alpha else "self.cpu(), other.cpu()"
+    if not out:
+        return f"    return at::{at_op}({args}).to(self.device());\n"
+    return (
+        f"    auto host = at::{at_op}({args});\n"
+        "    if (!out.sizes().equals(host.sizes())) {{\n"
+        "      out.resize_(host.sizes());\n"
+        "    }}\n"
+        "    out.copy_(host);\n"
+        "    return out;\n"
+    )
+
 
 # Every `*_out` kernel below may grow a caller-supplied `out`, and that resize
 # has to happen with the right device selected. `resize_` takes no device
@@ -501,11 +562,8 @@ def _out_cast_check(result_expr: str, define: bool = False) -> str:
 T_BINARY = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
-  }}
 """
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}"))
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
@@ -524,11 +582,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 T_BINARY_ALPHA = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {{
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu(), alpha).to(self.device());
-  }}
 """
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}", alpha=True))
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
@@ -579,17 +634,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, at::Tensor
 """
     + _OUT_DEVICE_GUARD
     + _out_cast_check("at::result_type(self, other)")
-    + """\
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
-    auto host = at::{at_op}(self.cpu(), other.cpu());
-    if (!out.sizes().equals(host.sizes())) {{
-      out.resize_(host.sizes());
-    }}
-    out.copy_(host);
-    return out;
-  }}
-"""
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}", out=True))
     + _BINARY_PROLOGUE
     + """\
   if (!out.sizes().equals(out_shape)) {{
@@ -621,17 +666,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, const at::
 """
     + _OUT_DEVICE_GUARD
     + _out_cast_check("at::result_type(self, other)")
-    + """\
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
-    auto host = at::{at_op}(self.cpu(), other.cpu(), alpha);
-    if (!out.sizes().equals(host.sizes())) {{
-      out.resize_(host.sizes());
-    }}
-    out.copy_(host);
-    return out;
-  }}
-"""
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}", alpha=True, out=True))
     + _BINARY_PROLOGUE
     + """\
   if (!out.sizes().equals(out_shape)) {{
@@ -661,11 +696,8 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 T_BINARY_CMP = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
-  }}
 """
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}"))
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
@@ -792,14 +824,20 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 
 T_BINARY_SCALAR_CMP = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
+  auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {{
+      !gcu::TopsatenSupportsDtype(result_dtype)) {{
     return at::{at_op}(self.cpu(), other).to(self.device());
   }}
+  // The comparison happens in the promoted type, not in self's. `int32 < 0.5`
+  // promotes to f32 and the CPU compares 0 < 0.5, so converting the scalar into
+  // self's dtype first would truncate the bound to 0 and answer False for every
+  // value in [0, 1). Casting self instead is what makes the two agree.
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto out = at::empty(self.sizes(), self.options().dtype(at::kBool));
-  auto t_other = gcu::ToTopsatenScalar(other, self.scalar_type());
+  auto t_other = gcu::ToTopsatenScalar(other, result_dtype);
 
-  gcu::TopsatenTensorWrapper t_self(self);
+  gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_self.get(), t_other);
   return out;
@@ -1122,23 +1160,28 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 
 # clamp: both bounds are optional. topsaten takes two required scalars, so an
 # absent bound becomes the dtype's limit, which is a no-op clamp on that side.
+# The bounds are promoted into the result the way ATen's clamp meta promotes
+# them, so a float bound on an integral tensor computes in float -- see
+# gcu::ClampComputeDtype.
 T_CLAMP = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
     const ::std::optional<at::Scalar>& min,
     const ::std::optional<at::Scalar>& max) {{
-  if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {{
+  auto result_dtype = gcu::ClampComputeDtype(self, min, max);
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(result_dtype)) {{
     return at::{at_op}(self.cpu(), min, max).to(self.device());
   }}
-  auto self_c = self.contiguous();
+  auto self_c = (self.scalar_type() == result_dtype ? self : self.to(result_dtype))
+                    .contiguous();
   auto out = at::empty(self_c.sizes(), self_c.options());
-  auto dtype = self.scalar_type();
   auto lo = min.has_value()
-      ? gcu::ToTopsatenScalar(min.value(), dtype)
-      : gcu::ToTopsatenScalar(gcu::DtypeLowest(dtype), dtype);
+      ? gcu::ToTopsatenScalar(min.value(), result_dtype)
+      : gcu::ToTopsatenScalar(gcu::DtypeLowest(result_dtype), result_dtype);
   auto hi = max.has_value()
-      ? gcu::ToTopsatenScalar(max.value(), dtype)
-      : gcu::ToTopsatenScalar(gcu::DtypeHighest(dtype), dtype);
+      ? gcu::ToTopsatenScalar(max.value(), result_dtype)
+      : gcu::ToTopsatenScalar(gcu::DtypeHighest(result_dtype), result_dtype);
 
   gcu::TopsatenTensorWrapper t_self(self_c);
   gcu::TopsatenTensorWrapper t_out(out);
@@ -2650,13 +2693,25 @@ T_WHERE_SELF = """\
 at::Tensor {kernel}(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {{
   auto result_dtype = at::result_type(self, other);
-  if (condition.scalar_type() != at::kBool ||
-      !gcu::TopsatenWhereDtype(result_dtype)) {{
-    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  // The operands are read on `dev`, not on `self.device()`. `self` is a 0-dim
+  // host tensor whenever a composite spells a scalar that way -- which is how
+  // ATen's eager `_safe_softmax` builds its zero -- and the earlier spelling of
+  // this template then ran the whole call, including the vendor call, against
+  // the host. See TopsatenComputeDevice.
+  auto dev = gcu::TopsatenComputeDevice(condition, self, other);
+  // ATen's own `where` takes a bool condition, and a byte one by casting it;
+  // every other condition dtype it rejects outright, which is the error the host
+  // path below reproduces verbatim. A byte condition is therefore not a reason to
+  // leave the card: it takes the same `.to(dev, at::kBool)` that the vendor's
+  // PRED operand needs.
+  if ((condition.scalar_type() != at::kBool &&
+       condition.scalar_type() != at::kByte) ||
+      !gcu::TopsatenWhereDtype(result_dtype) || dev.is_cpu()) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(dev);
   }}
-  auto cond_c = condition.to(self.device(), at::kBool);
-  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
-  auto other_c = other.to(self.device(), result_dtype);
+  auto cond_c = condition.to(dev, at::kBool);
+  auto self_c = self.to(dev, result_dtype);
+  auto other_c = other.to(dev, result_dtype);
   // All three operands are expanded, not just the two values: the vendor does not
   // broadcast, and ATen broadcasts the condition against the values' common
   // shape, which is not the same thing when the condition is the wider one.
@@ -2669,6 +2724,99 @@ at::Tensor {kernel}(
   if (out.numel() == 0) {{
     return out;
   }}
+
+  gcu::TopsatenTensorWrapper t_cond(cond_b);
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(
+      {tops}, out, t_out.get(), t_cond.get(), t_self.get(), t_other.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# `where.self_out` is the same operation through the out= contract, and it is
+# the single largest remaining cost in the Qwen-Image denoise step. ATen's eager
+# `_safe_softmax` -- which the SDPA math path runs once per attention layer on
+# this platform -- is a CompositeExplicitAutograd C++ kernel whose last op is
+# exactly this overload, so the whole op inherits FlagGems' cost here.
+#
+# Measured on the S60 (card 1) at (1, 24, 4114, 4114) fp32 with a
+# (1, 24, 4114, 1) bool condition, drain on both sides of every call:
+#
+#   flag_gems.where_self_out(cond, tensor(0), x, out=o)       1098.6 ms
+#   flag_gems.where_self_out(cond, full-size 0, x, out=o)       69.8 ms
+#   gcu                     where.self(cond, tensor(0), x)      23.7 ms
+#
+# The 0-dim value operand is what falls off the cliff, not its device: the same
+# call measures 1105.2 ms with the scalar on the host and 1098.6 ms with it on
+# the card, while a full-size second operand is 15x faster at the same shape.
+# Summed over the composite, one `_safe_softmax` costs 1135 ms through FlagGems
+# and 37.8 ms once this op is taken out of it, and at that shape the op costs the
+# same whether it runs alone or after the other four -- so this is the whole of
+# the gap, not an amplifier of it.
+#
+# The body is the out-of-place template plus the out= contract T_BINARY_OUT
+# spells out: the kernel sizes `out`, and everything the vendor cannot take
+# lands on the host path *in* `out`. Two orderings differ from T_BINARY_OUT on
+# purpose. That template resizes before testing `out`'s device, but `resize_`
+# takes no device argument and allocates out of the *current* device's pool, so a
+# mismatched `out` would be grown out of the wrong card's pool while still
+# reporting its own. Testing the device first and copying into `out` afterwards
+# keeps a caller's mistake on the host path instead of in the allocator -- which
+# is also why the device guard here is installed on `out` rather than on `self`:
+# `out` is both the tensor being grown and the one that names the device the work
+# belongs on, and `self` is a host scalar for the composite this kernel exists
+# for.
+T_WHERE_SELF_OUT = """\
+at::Tensor& {kernel}(
+    const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other,
+    at::Tensor& out) {{
+  gcu::TopsDeviceGuard out_guard(out);
+  auto result_dtype = at::result_type(self, other);
+  TORCH_CHECK(
+      c10::canCast(result_dtype, out.scalar_type()),
+      "result type ",
+      result_dtype,
+      " can't be cast to the desired output type ",
+      out.scalar_type());
+  // Compute where `out` lives, which is also the device the guard just selected.
+  // `self` is a 0-dim host tensor for the composite that this kernel exists for,
+  // so its own device says nothing about where the work belongs; see
+  // TopsatenComputeDevice.
+  auto dev = gcu::TopsatenComputeDevice(out, self, other);
+  // The host cases are the out-of-place template's, plus `out`'s: a condition
+  // dtype ATen itself rejects, a dtype with no topsaten mapping that would raise
+  // out of the wrapper, and a destination topsaten would write through with the
+  // wrong width, in the wrong layout, or on another device. Each of those is a
+  // host call rather than a descriptor.
+  if ((condition.scalar_type() != at::kBool &&
+       condition.scalar_type() != at::kByte) ||
+      !gcu::TopsatenWhereDtype(result_dtype) || out.device() != dev ||
+      out.scalar_type() != result_dtype || !out.is_contiguous()) {{
+    auto host = at::{at_op}(condition.cpu(), self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {{
+      out.resize_(host.sizes());
+    }}
+    out.copy_(host);
+    return out;
+  }}
+  // All three operands are expanded, not just the two values: the vendor does not
+  // broadcast, and ATen broadcasts the condition against the values' common
+  // shape, which is not the same thing when the condition is the wider one.
+  auto out_shape = at::infer_size(
+      at::infer_size(condition.sizes(), self.sizes()), other.sizes());
+  if (!out.sizes().equals(out_shape)) {{
+    out.resize_(out_shape);
+  }}
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  auto cond_b = condition.to(dev, at::kBool).expand(out_shape).contiguous();
+  auto self_b = self.to(dev, result_dtype).expand(out_shape).contiguous();
+  auto other_b = other.to(dev, result_dtype).expand(out_shape).contiguous();
 
   gcu::TopsatenTensorWrapper t_cond(cond_b);
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -2969,6 +3117,7 @@ CATEGORIES = {
     "foreach_ternary_scalar_inplace": T_FOREACH_TERNARY_SCALAR_INPLACE,
     "foreach_ternary_scalarlist_inplace": T_FOREACH_TERNARY_SCALARLIST_INPLACE,
     "where_self": T_WHERE_SELF,
+    "where_self_out": T_WHERE_SELF_OUT,
     "all_whole": T_ALL_WHOLE,
     "index_tensor": T_INDEX_TENSOR,
     "nonzero": T_NONZERO,

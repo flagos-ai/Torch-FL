@@ -19,9 +19,10 @@
 #include <optional>
 #include "device_boxing.h"
 // Included unconditionally: the #else branches below cover TsingMicro, GCU and
-// MUSA-without-mudnn as well as Ascend, and this header supplies inline no-op
-// fallbacks for those platforms.
+// MUSA-without-mudnn as well as Ascend, and these headers supply inline no-op
+// fallbacks for every platform they do not implement.
 #include "backends/ascend/ascend_copy.h"
+#include "backends/gcu/gcu_copy.h"
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -378,9 +379,16 @@ at::Tensor _copy_from(
         at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
       }
 #else
-      // Ascend: copy on-device via aclnnInplaceCopy, which honors both src and
-      // dst strides/offset and casts dtype. Avoids the CPU round-trip below.
-      if (!ascend::StridedCopy(dst, self)) {
+      // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy;
+      // both honor the src and dst strides and storage offset. Avoids the CPU
+      // round-trip below, which on GCU also D2H's the entire destination
+      // storage.
+#if defined(USE_GCU)
+      const bool copied_on_device = gcu::StridedCopy(dst, self);
+#else
+      const bool copied_on_device = ascend::StridedCopy(dst, self);
+#endif
+      if (!copied_on_device) {
         // Fallback: CPU round-trip (device->host, strided copy on CPU, host->device).
         at::Tensor self_contig = self.is_contiguous()
             ? self
@@ -694,10 +702,17 @@ at::Tensor _to_copy(
       // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).
       result = ascend::DtypeCast(self_contig, dtype);
 #endif
+#ifdef USE_GCU
+      // GCU casts on-device via topsatenToCopy, the same D2H->CPU->H2D
+      // round-trip being what makes this the single most expensive op in
+      // Qwen-Image's forward: 437.9 ms per cast at the (1, 24, 4114, 4114)
+      // attention shape, against 5.6 ms for the vendor call.
+      result = gcu::DtypeCast(self_contig, dtype);
+#endif
       if (!result.defined()) {
         // Fallback: CPU round-trip when no on-device cast is available
-        // (TsingMicro / GCU / MUSA / BPU, or an Ascend dtype pair aclnnCast
-        // rejects).
+        // (TsingMicro / MUSA / BPU, a GCU dtype pair topsatenToCopy declines,
+        // or an Ascend dtype pair aclnnCast rejects).
         size_t nbytes = self_contig.numel() * self_contig.element_size();
         at::Tensor cpu_tensor =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
