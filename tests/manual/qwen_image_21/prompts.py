@@ -26,7 +26,8 @@ Provenance of each entry, in ``PROMPTS`` order:
 
 ``01``  the only prompt the 2.1 authors published anywhere: the example in
         ``QwenImage21Pipeline``'s own docstring, in the diffusers source the
-        pipeline ships in. Copied verbatim, including its commas.
+        pipeline ships in. Copied verbatim, including its commas. This is also
+        ``CANONICAL_ID`` -- the one prompt ``bench.py`` measures with.
 
 ``02``-``08``  written for this flow. They are not a random spread -- each one
         is the cheapest prompt that reaches an operator surface the others do
@@ -119,6 +120,11 @@ PROMPTS = [
 # comparison against 2512's settings.
 NEGATIVE_PROMPT = " "
 
+# The prompt every performance run uses. See `canonical`: this is the cohort's
+# `01`, the only prompt the 2.1 authors published anywhere. The rest of the
+# cohort exists to make a failure attributable and is not a benchmark.
+CANONICAL_ID = "01"
+
 
 def load(path=None):
     """The cohort, from ``path`` when given else the table above.
@@ -126,18 +132,56 @@ def load(path=None):
     A file is the escape hatch for testing a cohort this module does not carry;
     it must be a JSON list of ``{"id": ..., "prompt": ...}`` objects, which is
     also the shape ``sweep.py`` writes into its manifest.
+
+    Every entry gains a ``sha256`` of its own prompt text, so an artifact can
+    name the exact bytes behind a number instead of quoting the text and hoping
+    it survived. See ``canonical``.
     """
     if path is None:
-        return [{"id": pid, "prompt": prompt} for pid, prompt in PROMPTS]
+        entries = [{"id": pid, "prompt": prompt} for pid, prompt in PROMPTS]
+    else:
+        import json
+        from pathlib import Path
 
-    import json
-    from pathlib import Path
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not raw:
+            raise SystemExit(f"{path}: expected a non-empty JSON list of prompts")
+        for entry in raw:
+            missing = {"id", "prompt"} - set(entry)
+            if missing:
+                raise SystemExit(
+                    f"{path}: entry {entry!r} is missing {sorted(missing)}"
+                )
+        entries = [{"id": str(e["id"]), "prompt": e["prompt"]} for e in raw]
 
-    entries = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(entries, list) or not entries:
-        raise SystemExit(f"{path}: expected a non-empty JSON list of prompts")
     for entry in entries:
-        missing = {"id", "prompt"} - set(entry)
-        if missing:
-            raise SystemExit(f"{path}: entry {entry!r} is missing {sorted(missing)}")
-    return [{"id": str(e["id"]), "prompt": e["prompt"]} for e in entries]
+        entry["sha256"] = sha256(entry["prompt"])
+    return entries
+
+
+def canonical():
+    """The one prompt a performance run uses, as ``{id, prompt, sha256}``.
+
+    ``bench.py`` has no ``--prompt`` flag and calls this, so a benchmark is
+    always the same measurement: the prompt is fixed in the code rather than
+    supplied by whoever runs it. ``infer.py`` and ``sweep.py`` take it as their
+    default too, which is what removes the second copy of the string that used
+    to live in ``infer.DEFAULT_PROMPT``.
+
+    Which prompt is canonical, and why: ``CANONICAL_ID`` is the only prompt the
+    2.1 authors published anywhere -- the example in ``QwenImage21Pipeline``'s
+    own docstring -- and it is the same order of length as the captions MLPerf
+    uses for text_to_image (10-15 words), so the text encoder's share of the
+    latency is representative rather than a property of a prompt written here.
+    """
+    for entry in load():
+        if entry["id"] == CANONICAL_ID:
+            return entry
+    raise SystemExit(f"CANONICAL_ID={CANONICAL_ID!r} is not in PROMPTS")
+
+
+def sha256(text):
+    """sha256 of a prompt's exact UTF-8 bytes, lowercase hex."""
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

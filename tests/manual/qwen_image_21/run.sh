@@ -21,6 +21,8 @@
 # Usage:
 #   tests/manual/qwen_image_21/run.sh infer  [--stage ... --device ...]
 #   tests/manual/qwen_image_21/run.sh sweep  [--device ... --only ...]
+#   tests/manual/qwen_image_21/run.sh bench  [--device ... --batch ... --out ...]
+#   tests/manual/qwen_image_21/run.sh table  JSON... [--baseline LABEL]
 #   tests/manual/qwen_image_21/run.sh numerics      run the per-op comparison
 #   tests/manual/qwen_image_21/run.sh side-by-side --left cuda --right flagos
 #   tests/manual/qwen_image_21/run.sh compare --a REF.png --b OUT.png
@@ -30,6 +32,10 @@
 # <OUT_DIR>/musa, <OUT_DIR>/cuda -- so the vendor run and the flagos run of the
 # same sweep do not overwrite each other, and side-by-side pairs them into
 # <OUT_DIR>/compare.
+#
+# bench writes one JSON per backend into its own directory; table reads those
+# JSONs and needs no torch and no device, so it runs anywhere the files can be
+# read -- including a laptop, from files carried off the chip.
 #
 # compare and side-by-side are model-agnostic: they read PNGs and a manifest and
 # know nothing about torch, so they live once, in the Qwen-Image-2512 directory,
@@ -49,10 +55,12 @@
 #   OUT_DIR   where images and logs land (default: ./qwen-image-21-out)
 #   LOG       log path override (default: $OUT_DIR/<mode>-<timestamp>.log)
 #
-#   FLAGOS_LOG_FALLBACK=1 and FLAGOS_LOG_DISPATCH=1 are exported for the run:
-#   the first is the cpu_fallback census, the second the per-op backend census.
-#   Both cost real time per op, so time a run with them OFF -- the loop is
-#   measurably shorter without them.
+#   FLAGOS_LOG is exported for the run. It defaults to `fallback` for bench,
+#   which measures, and `dispatch,fallback` for infer and sweep, which are
+#   censuses -- the dispatch census costs real time per operator call and the
+#   README records it as 12% of the denoise loop on the 2512 workload. Set it
+#   explicitly to override either default; bench records what it actually saw.
+#   The older per-diagnostic variables are retired and do nothing.
 #
 #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True is exported too, and on a
 #   40 GB card it is not optional: the pipeline reserves 38.6 GiB of 39.5 GiB
@@ -70,12 +78,10 @@ SHARED=tests/manual/qwen_image_2512
 PYTHON=${PYTHON:-python3}
 OUT_DIR=${OUT_DIR:-$PWD/qwen-image-21-out}
 
-export FLAGOS_LOG_FALLBACK=${FLAGOS_LOG_FALLBACK:-1}
-export FLAGOS_LOG_DISPATCH=${FLAGOS_LOG_DISPATCH:-1}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 usage() {
-    echo "usage: $(basename "${BASH_SOURCE[0]}") <infer|sweep|numerics|side-by-side|compare|census> [args...]" >&2
+    echo "usage: $(basename "${BASH_SOURCE[0]}") <infer|sweep|bench|table|numerics|side-by-side|compare|census> [args...]" >&2
     echo "see the header of this file for the modes and the environment" >&2
     exit 2
 }
@@ -150,13 +156,90 @@ summarise() {
     echo "entirely; the op list itself is in the log, next to each count."
 }
 
+# bench measures, so it reports the measurement rather than a census: the JSON it
+# wrote is the record, and re-reading it here is what keeps the summary and the
+# artifact from disagreeing. The keys are read by name so a missing one prints
+# "n/a" instead of failing the run that produced it.
+#
+# The path comes in as $1 rather than being assumed, so an explicit --out is
+# summarised from where it actually went.
+summarise_bench() {
+    local json=$1
+    echo
+    echo "---- readings ----"
+    echo "log                : $LOG"
+    echo "json               : $json"
+    if [ ! -f "$json" ]; then
+        echo "no JSON was written; the run's own output above is the record"
+        return
+    fi
+    "$PYTHON" - "$json" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+
+
+def show(label, *keys, fmt="{:.2f}", suffix=""):
+    value = record
+    for key in keys:
+        if not isinstance(value, dict):
+            value = None
+            break
+        value = value.get(key)
+    print(f"{label:<20} : {'n/a' if value is None else fmt.format(value)}{suffix}")
+
+
+show("latency            ", "latency", "per_image_s", "median_s", suffix=" s/image (median)")
+show("latency mean       ", "latency", "per_image_s", "mean_s", suffix=" s/image")
+show("latency std        ", "latency", "per_image_s", "std_s", fmt="{:.3f}", suffix=" s")
+show("measured calls     ", "protocol", "runs", fmt="{:.0f}")
+show("loop per step      ", "phases", "loop per step", "median_s", fmt="{:.3f}", suffix=" s")
+show("throughput         ", "throughput", "images_per_s", fmt="{:.4f}", suffix=" images/s")
+show("peak memory        ", "memory", "peak_gib", suffix=" GiB")
+show("memory counter     ", "memory", "source", fmt="{}")
+print(f"{'determinism        ':<20} : {record['determinism']['identical']}")
+print(f"{'prompt             ':<20} : {record['prompt']['id']} sha256 {record['prompt']['sha256'][:16]}...")
+print(f"{'FLAGOS_LOG         ':<20} : {record['environment']['log'] or 'unset'}")
+print(f"{'triton cache       ':<20} : {record['environment']['triton_cache_dir'] or 'default'}")
+for note in record.get("notes", []):
+    print(f"{'note               ':<20} : {note}")
+PY
+    echo
+    echo "render several of these together, on any interpreter:"
+    echo "  bash $ROOT/$SUBDIR/run.sh table <json>... --baseline <label>"
+}
+
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift || true
 
+# Diagnostics are one comma-separated list, FLAGOS_LOG. The three separate
+# variables this script used to set -- FLAGOS_LOG_DISPATCH, FLAGOS_LOG_FALLBACK,
+# FLAGOS_CACHE_STATS -- are retired and read by nothing, so exporting them would
+# silently produce no logging at all while the summary reported zero operators
+# as though the workload had not run any.
+#
+# bench measures, the other modes count operators. `dispatch` writes one
+# unbuffered line per operator call and costs real time per call -- 12% of the
+# denoise loop on the 2512 workload -- so it is left out exactly where a number
+# is going to be quoted, and included everywhere the log is the point.
+# `fallback` is cheap: it prints only when an operator actually leaves the
+# accelerator, so it stays on for every mode. An explicit FLAGOS_LOG in the
+# caller's environment wins, and bench records what it actually saw.
+case "$MODE" in
+bench) DEFAULT_LOG=fallback ;;
+*) DEFAULT_LOG=dispatch,fallback ;;
+esac
+export FLAGOS_LOG=${FLAGOS_LOG:-$DEFAULT_LOG}
+
 case "$MODE" in
 infer) SCRIPT=$SUBDIR/infer.py ;;
 sweep) SCRIPT=$SUBDIR/sweep.py ;;
+bench) SCRIPT=$SUBDIR/bench.py ;;
+# table reads bench JSONs and knows nothing about torch or the device it ran on,
+# so it is dispatched before any of the per-backend directory work below.
+table) SCRIPT=$SUBDIR/bench.py ;;
 numerics) SCRIPT=$SUBDIR/numerics.py ;;
 # Model-agnostic, so they live with the 2512 flow and are dispatched to from
 # here rather than copied: see the header.
@@ -175,6 +258,13 @@ census)
 *) usage ;;
 esac
 
+if [ "$MODE" = "table" ]; then
+    # No device, no OUT_DIR, no log: this reads files and prints a table. Called
+    # directly rather than through the backend-directory machinery below, which
+    # would need a --device it does not have an opinion about.
+    exec "$PYTHON" "$ROOT/$SCRIPT" --table "$@"
+fi
+
 # Each backend writes its own directory, so the vendor run and the flagos run of
 # the same sweep sit next to each other instead of overwriting one another.
 DEVICE=$(value_of_flag --device flagos "$@")
@@ -190,6 +280,9 @@ fi
 if [ "$MODE" = "sweep" ] && ! has_flag --output-dir "$@"; then
     ARGS=(--output-dir "$DEVICE_DIR" ${ARGS[@]+"${ARGS[@]}"})
 fi
+if [ "$MODE" = "bench" ] && ! has_flag --out "$@"; then
+    ARGS+=(--out "$DEVICE_DIR/bench.json")
+fi
 if [ "$MODE" = "numerics" ] && ! has_flag --out "$@"; then
     ARGS+=(--out "$DEVICE_DIR/numerics.pt")
 fi
@@ -201,7 +294,7 @@ LOG=${LOG:-$OUT_DIR/$MODE-$(date +%Y%m%d-%H%M%S).log}
 echo "python : $PYTHON"
 echo "script : $ROOT/$SCRIPT"
 case "$MODE" in
-infer | sweep | numerics) echo "output : $DEVICE_DIR" ;;
+infer | sweep | bench | numerics) echo "output : $DEVICE_DIR" ;;
 esac
 echo "log    : $LOG"
 echo
@@ -209,6 +302,10 @@ echo
 (cd "$ROOT" && "$PYTHON" "$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}) 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 
-summarise
+if [ "$MODE" = "bench" ]; then
+    summarise_bench "$(value_of_flag --out "$DEVICE_DIR/bench.json" ${ARGS[@]+"${ARGS[@]}"})"
+else
+    summarise
+fi
 echo "exit status        : $STATUS"
 exit "$STATUS"

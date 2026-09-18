@@ -31,6 +31,7 @@ would take that decision away from the caller.
 
 import os
 import sys
+import time
 
 DEFAULT_DEVICE = "flagos"
 
@@ -370,3 +371,212 @@ def report_memory(torch, device_kind):
             f"  {device_kind}:{index} reserved {reserved:.2f} GiB "
             f"allocated {allocated:.2f} GiB"
         )
+
+
+def sync(torch, device_kind):
+    """Block until this backend's queued work is done.
+
+    Its own function because three call sites need it for the same reason: a
+    number read without it is a measurement of how fast the host enqueued work,
+    not of how long the device took. ``device_module`` raises a message naming
+    the backend when there is no such module, which is the failure worth having.
+    """
+    device_module(torch, device_kind).synchronize()
+
+
+def peak_memory(torch, device_kind, device):
+    """Peak memory on one card, as ``(gib, source)``; ``(None, None)`` if unknown.
+
+    ``device`` is the resolved placement -- ``flagos:2``, not ``flagos``. The
+    counters are per card and an index-less query answers for the backend's
+    current device, which silently reports another card's number.
+
+    The peak allocated watermark is preferred, because that is what the
+    diffusers harness reports and it is the number that says whether a larger
+    batch would fit. Three surfaces are tried in order, because torch.cuda's
+    spelling is not the only one in use:
+
+    ``max_memory_allocated``
+        ``torch.cuda`` and the vendor shims that mirror it.
+    ``memory_stats(...)["peak_allocated_bytes"]``
+        ``torch.flagos``, whose stats dict is flat and has no separate
+        ``max_memory_allocated``.
+    ``memory_reserved``
+        Last resort. It is a different measurement -- the allocator's whole pool
+        rather than what was live -- so the source is returned alongside and a
+        table that mixes the two says so.
+    """
+    module = getattr(torch, device_kind, None)
+    if module is None:
+        return None, None
+    index = torch.device(device).index
+
+    reader = getattr(module, "max_memory_allocated", None)
+    if reader is not None:
+        try:
+            return reader(index) / (1024**3), "peak allocated"
+        except Exception:  # noqa: BLE001 - a counter that exists but refuses is not fatal
+            pass
+
+    stats = getattr(module, "memory_stats", None)
+    if stats is not None:
+        try:
+            blob = stats(index)
+            if isinstance(blob, dict) and "peak_allocated_bytes" in blob:
+                return blob["peak_allocated_bytes"] / (1024**3), "peak allocated"
+        except Exception:  # noqa: BLE001
+            pass
+
+    reader = getattr(module, "memory_reserved", None)
+    if reader is not None:
+        try:
+            return reader(index) / (1024**3), "reserved"
+        except Exception:  # noqa: BLE001
+            pass
+    return None, None
+
+
+def reset_peak_memory(torch, device_kind, device):
+    """Drop this card's peak watermark, so the next read is this call's own.
+
+    Best effort by design: a backend that does not implement it still produces a
+    running maximum, which is a peak of the run rather than of the call. That is
+    a weaker number, not a wrong one, and refusing to benchmark would be worse.
+    """
+    module = getattr(torch, device_kind, None)
+    if module is None or not hasattr(module, "reset_peak_memory_stats"):
+        return False
+    try:
+        module.reset_peak_memory_stats(torch.device(device).index)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class PhaseTimer:
+    """Attribute the pipeline's wall time to its three components.
+
+    A whole-run number cannot say whether the chip is slow in the text encoder,
+    the denoise loop or the decode, and the three fail for different reasons --
+    so every full run reports them.
+
+    The loop is timed from ``callback_on_step_end``, which the pipeline calls
+    after each step and which nothing else here needs. The text encoder and the
+    VAE are timed by wrapping them rather than by editing the pipeline: the VAE
+    is reached as ``self.vae.decode(...)``, a method call rather than
+    ``__call__``, so a forward hook never fires for it and the bound method has
+    to be wrapped instead. Both are synchronised on the way in and out, so the
+    number is device-attributed rather than merely "the host returned".
+
+    One sample per ``reset``/``sample`` pair, rather than one accumulator for the
+    whole run, because a benchmark needs each measured call's own phases: only
+    independent samples can be given a mean and a spread. ``infer.py`` resets
+    once and samples once, which is the same table it printed before this class
+    existed.
+
+    Usage::
+
+        timer = PhaseTimer(torch, pipe, device_kind)
+        ...
+        timer.reset()
+        pipe(..., callback_on_step_end=timer.on_step_end)
+        phases = timer.sample()
+        ...
+        timer.close()
+    """
+
+    #: The four keys ``sample`` returns, in the order infer.py prints them.
+    KEYS = ("text encoder", "denoise loop", "loop per step", "vae decode")
+
+    def __init__(self, torch, pipe, device_kind):
+        self._pipe = pipe
+        self._sync = lambda: sync(torch, device_kind)
+        self._marks = []
+        self._timings = {}
+        self._handles = []
+
+        encoder = getattr(pipe, "text_encoder", None)
+        if encoder is not None:
+            self._handles.append(encoder.register_forward_pre_hook(self._before))
+            self._handles.append(encoder.register_forward_hook(self._after))
+
+        self._original_decode = pipe.vae.decode
+
+        def timed_decode(*call_args, **call_kwargs):
+            self._sync()
+            started = time.perf_counter()
+            out = self._original_decode(*call_args, **call_kwargs)
+            self._sync()
+            self._timings["vae decode"] = self._timings.get("vae decode", 0.0) + (
+                time.perf_counter() - started
+            )
+            return out
+
+        pipe.vae.decode = timed_decode
+
+    def _before(self, module, args, kwargs=None):
+        self._sync()
+        module._phase_t0 = time.perf_counter()
+
+    def _after(self, module, args, output):
+        self._sync()
+        self._timings["text encoder"] = self._timings.get("text encoder", 0.0) + (
+            time.perf_counter() - module._phase_t0
+        )
+
+    def reset(self):
+        """Begin a new sample: forget the previous one's marks and totals."""
+        self._marks = []
+        self._timings = {}
+
+    def on_step_end(self, _pipe, index, _timestep, kwargs):
+        """The ``callback_on_step_end`` the pipeline calls between steps."""
+        self._marks.append((index, time.perf_counter()))
+        return kwargs
+
+    def sample(self):
+        """This sample's phases, all in seconds.
+
+        A phase that did not run is absent rather than zero: a stage that never
+        reached the VAE must not read as a 0.000 s decode. ``loop per step``
+        divides by ``len(marks) - 1`` because N callbacks bound N-1 intervals --
+        dividing by the step count instead would understate the per-step cost by
+        one step's worth.
+
+        Seconds for every phase, including the one that is *printed* in
+        milliseconds: the unit a measurement is stored in should not depend on
+        how it is rendered, and ``print_phases`` owns the rendering.
+        """
+        timings = dict(self._timings)
+        if len(self._marks) > 1:
+            first, last = self._marks[0][1], self._marks[-1][1]
+            timings["denoise loop"] = last - first
+            timings["loop per step"] = (last - first) / (len(self._marks) - 1)
+        return timings
+
+    def close(self):
+        """Remove the hooks and put ``pipe.vae.decode`` back."""
+        for handle in self._handles:
+            handle.remove()
+        self._handles = []
+        self._pipe.vae.decode = self._original_decode
+
+
+def print_phases(timings):
+    """The phase table ``infer.py`` and ``bench.py`` both print.
+
+    Formatting lives here so the two cannot drift into two opinions about what
+    the same measurement looks like. Ordered by ``PhaseTimer.KEYS`` rather than
+    by insertion, so a phase that happens to be recorded first does not move
+    rows around between runs.
+    """
+    print()
+    print("---- phases ----")
+    ordered = [name for name in PhaseTimer.KEYS if name in timings]
+    ordered += [name for name in timings if name not in ordered]
+    for name in ordered:
+        seconds = timings[name]
+        if name.endswith("per step"):
+            print(f"  {name:<16}: {seconds * 1e3:8.1f} ms")
+        else:
+            print(f"  {name:<16}: {seconds:8.3f} s")

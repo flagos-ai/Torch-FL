@@ -66,15 +66,11 @@ The full procedure, the per-stage expectations, and the readings to record:
 
 import argparse
 import sys
-import time
 
 import common
+import prompts
 
 STAGES = ("text-encoder", "transformer-step", "vae", "full")
-
-DEFAULT_PROMPT = (
-    "A capybara wearing a wizard hat, reading a book by candlelight, oil painting"
-)
 
 
 def parse_args(argv=None):
@@ -89,7 +85,15 @@ def parse_args(argv=None):
         default=common.model_ref(),
         help=f"a directory or a hub id; default: ${common.MODEL_ENV} or its fallback",
     )
-    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--prompt",
+        default=prompts.canonical()["prompt"],
+        help=(
+            "default: the canonical prompt in prompts.py, which is also the one "
+            "bench.py measures with; change it here only to reach a surface the "
+            "default does not"
+        ),
+    )
     parser.add_argument(
         "--negative-prompt",
         default=" ",
@@ -442,84 +446,6 @@ def stage_vae(torch, pipe, args):
     return images
 
 
-def phase_timers(torch, pipe, device_kind):
-    """Attribute the pipeline's wall time to its three components.
-
-    A whole-run number cannot say whether the chip is slow in the text encoder,
-    the denoise loop or the decode, and the three fail for different reasons --
-    so every ``--stage full`` run reports them.
-
-    The loop is timed from ``callback_on_step_end``, which the pipeline calls
-    after each step and which nothing else here needs. The text encoder and the
-    VAE are timed by wrapping them rather than by editing the pipeline: the VAE
-    is reached as ``self.vae.decode(...)``, a method call rather than
-    ``__call__``, so a forward hook never fires for it and the bound method has to
-    be wrapped instead. Both are synchronised on the way in and out, so the
-    number is device-attributed rather than merely "the host returned".
-
-    Returns ``(timings, finish)``: the dict is filled as the run proceeds, and
-    ``finish`` removes the hooks and prints the table.
-    """
-    sync = getattr(common.device_module(torch, device_kind), "synchronize")
-    timings = {}
-    marks = []
-    handles = []
-
-    def make_hooks(name):
-        def pre(module, args, kwargs=None):
-            sync()
-            module._phase_t0 = time.perf_counter()
-
-        def post(module, args, output):
-            sync()
-            timings[name] = timings.get(name, 0.0) + (
-                time.perf_counter() - module._phase_t0
-            )
-
-        return pre, post
-
-    encoder = getattr(pipe, "text_encoder", None)
-    if encoder is not None:
-        pre, post = make_hooks("text encoder")
-        handles.append(encoder.register_forward_pre_hook(pre))
-        handles.append(encoder.register_forward_hook(post))
-
-    original_decode = pipe.vae.decode
-
-    def timed_decode(*call_args, **call_kwargs):
-        sync()
-        started = time.perf_counter()
-        out = original_decode(*call_args, **call_kwargs)
-        sync()
-        timings["vae decode"] = timings.get("vae decode", 0.0) + (
-            time.perf_counter() - started
-        )
-        return out
-
-    pipe.vae.decode = timed_decode
-
-    def on_step_end(_pipe, index, _timestep, kwargs):
-        marks.append((index, time.perf_counter()))
-        return kwargs
-
-    def finish():
-        for handle in handles:
-            handle.remove()
-        pipe.vae.decode = original_decode
-        if len(marks) > 1:
-            timings["denoise loop"] = marks[-1][1] - marks[0][1]
-            timings["loop per step"] = timings["denoise loop"] / (len(marks) - 1)
-        print()
-        print("---- phases ----")
-        for name, seconds in timings.items():
-            if name == "loop per step":
-                print(f"  {name:<16}: {seconds * 1e3:8.1f} ms")
-            else:
-                print(f"  {name:<16}: {seconds:8.3f} s")
-
-    return timings, on_step_end, finish
-
-
 def stage_full(torch, pipe, args):
     """The whole pipeline: prompt -> latents -> denoise -> decode."""
     _, transformer_devices, _ = common.resolve_placement(torch, args)
@@ -528,7 +454,11 @@ def stage_full(torch, pipe, args):
     latents = make_latents(torch, pipe, args, latent_device)
     generator = torch.Generator(device=latent_device).manual_seed(args.seed)
 
-    timings, on_step_end, finish = phase_timers(torch, pipe, args.device)
+    # One sample, because this stage exists to localise a failure rather than to
+    # measure: a single full run with its phases is what says which component
+    # broke. Repeating it and reporting a spread is bench.py's job.
+    timer = common.PhaseTimer(torch, pipe, args.device)
+    timer.reset()
 
     with torch.no_grad():
         result = pipe(
@@ -542,10 +472,12 @@ def stage_full(torch, pipe, args):
             generator=generator,
             output_type="pil",
             use_kv_cache=not args.no_kv_cache,
-            callback_on_step_end=on_step_end,
+            callback_on_step_end=timer.on_step_end,
         )
 
-    finish()
+    timings = timer.sample()
+    timer.close()
+    common.print_phases(timings)
     save_images(result.images, args.output)
     return result.images
 

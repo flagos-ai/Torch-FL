@@ -18,11 +18,17 @@ chip should produce are stated so a result can be judged rather than guessed at.
 | File | Role |
 | --- | --- |
 | `infer.py` | The staged runner. Four stages, latents save/load for paired runs. |
+| `bench.py` | The measurement: one JSON of numbers, and `--table` to render several. §7.1. |
 | `sweep.py` | The prompt cohort, one PNG per prompt plus a manifest. |
 | `numerics.py` | Per-operator comparison against a reference backend. §8. |
-| `prompts.py` | The cohort and its provenance. 2.1's card publishes no prompts. |
-| `common.py` | Diffusers checkout, import order, placement, memory reporting. |
+| `prompts.py` | The cohort, its provenance, and the one canonical prompt. §5. |
+| `common.py` | Diffusers checkout, import order, placement, memory reporting, phase timing. |
 | `run.sh` | Wrapper: sets the environment, runs one mode, summarises the log. |
+
+`infer.py` and `sweep.py` answer *whether* a chip runs the pipeline and *where*
+it fails. `bench.py` answers *how fast*, and it is the only thing here that
+produces a number worth quoting — §7.1 states the protocol it has to satisfy for
+the number to mean anything.
 
 `compare.py` and `side_by_side.py` are model-agnostic — they read PNGs and a
 manifest and never import torch — so they live once, in
@@ -208,7 +214,8 @@ number measures Triton, not the chip.
 ## 5. The prompt cohort
 
 `sweep.py` runs the cohort in `prompts.py`, one PNG per prompt plus a
-`manifest.json` carrying each prompt, its timing and the placement used:
+`manifest.json` carrying each prompt, its own sha256, its timing and the
+placement used:
 
 ```bash
 tests/manual/qwen_image_21/run.sh sweep
@@ -225,6 +232,17 @@ rest were written for this flow to reach one operator surface each — fine
 detail, rendered text, countable geometry, a second resolution, a long prompt, a
 compressed dynamic range, and a one-phrase variant of `01`. Pass
 `--prompts-file` (JSON, `[{"id": ..., "prompt": ...}]`) to test a different one.
+
+One entry is also `CANONICAL_ID`, and it is `01`: the prompt every performance
+run uses. `prompts.canonical()` returns it, `infer.py` takes it as its default,
+and `bench.py` has no flag that could replace it — see §7.1.
+
+**The sweep's `seconds` is not a benchmark number.** It is one `time.time()`
+delta per prompt, taken with no warmup, so the first prompt carries the whole
+Triton compile (measured in §4.3 as a 3x difference on the same hardware), and
+the eight prompts are different workloads whose average would not mean anything.
+The manifest records it so a run is describable; §7.1 is where a quotable number
+comes from.
 
 Images land in one directory per backend under `OUT_DIR`, named after the
 backend's device module — `<OUT_DIR>/flagos`, `<OUT_DIR>/cuda` — so the vendor
@@ -319,11 +337,11 @@ first lines; the live output also lists which operators went where. A full
 
 | Reading | Meaning |
 | --- | --- |
-| `cpu_fallback ops` | Operator calls that left the accelerator for the CPU (`FLAGOS_LOG_FALLBACK=1`). Every one is a route to fix; the op names are in the log. |
+| `cpu_fallback ops` | Operator calls that left the accelerator for the CPU (`FLAGOS_LOG` containing `fallback`). Every one is a route to fix; the op names are in the log. |
 | `distinct ATen ops` | How many different operators the workload reached, i.e. the size of the cohort the routing has to cover. |
 | `operator calls by backend` | Which backend each call took. `cuda` is the boxing path to the vendor kernel; `flagos_python` and `flagos` are FlagGems, the first the Python dispatch and the second the C++ one. |
 | `distinct operators by backend` | The same split counted as operators rather than calls — the number to quote as "this workload uses N FlagGems operators". |
-| seconds per image | Whole-pipeline wall time, from the sweep manifest. |
+| seconds per image | Whole-pipeline wall time, from the sweep manifest. One shot, no warmup — see §5, and use §7.1 for a number you intend to quote. |
 | reserved GiB per card | Peak footprint, from `memory_reserved`. |
 
 `census` re-reads a saved log, so a run only has to be done once:
@@ -332,42 +350,176 @@ first lines; the live output also lists which operators went where. A full
 tests/manual/qwen_image_21/run.sh census /path/to/run.log
 ```
 
-**Time a run with the dispatch logging off.** `run.sh` exports
-`FLAGOS_LOG_DISPATCH=1` by default and it is not free: it writes one unbuffered
+**Time a run with the dispatch logging off.** `run.sh` puts `dispatch` in
+`FLAGOS_LOG` for `infer` and `sweep`, and it is not free: it writes one unbuffered
 line per operator call, which on the 2512 workload was ~1.2 M write syscalls per
-image and 12% of the loop. Set `FLAGOS_LOG_DISPATCH=0` for any number you intend
-to quote.
+image and 12% of the loop. `run.sh bench` leaves it out for exactly this reason,
+and records what the environment actually held. Set `FLAGOS_LOG` explicitly for
+any other number you intend to quote. Note that the per-diagnostic variables
+`FLAGOS_LOG_DISPATCH`, `FLAGOS_LOG_FALLBACK` and `FLAGOS_CACHE_STATS` are retired
+— an exported value is inert, so setting one produces no logging at all and a
+summary that reports zero operators as though the workload had not run any.
 
 The per-op census is a measurement of one run, not a property of the routing
 tables. Record it with the log path and the hardware, and re-measure rather than
 reusing the numbers on another chip.
 
-### 7.1 Reference measurement
+### 7.1 Performance measurement
 
-Taken on 2026-09-17, 8x NVIDIA A100-SXM4-40GB, torch 2.10.0+cpu with the external
-CUDA 12.8 assets, the 2.1 checkout at `0.41.0.dev0`, placement one card
-(`flagos:0`), 40 steps, 1024x1024, seed 42, `true_cfg_scale=1.0`, latents injected
-on both sides. The phase table is what `infer.py --stage full` prints.
+`bench.py` is the measurement. `infer.py` reports what happened once; `bench.py`
+repeats it and reports the spread, and it is the only thing in this directory
+whose output is a number a chip's result can be quoted from.
 
-| Phase | torch cuda 2.10.0+cu128 | torch-fl |
+```bash
+run.sh bench --device cuda                                      # -> out/cuda/bench.json
+run.sh bench --device flagos                                    # -> out/flagos/bench.json
+run.sh table out/cuda/bench.json out/flagos/bench.json --baseline cuda
+```
+
+`table` reads JSON and needs no torch and no device, so the two files can be
+carried off the chip and rendered anywhere.
+
+#### The prompt is fixed
+
+`bench.py` has **no `--prompt` flag**. It measures `prompts.canonical()` — entry
+`01`, the only prompt the 2.1 authors published, and the same prompt `infer.py`
+defaults to. Two runs of it are therefore always the same measurement, and the
+JSON records the prompt's sha256 so a number names the exact bytes behind it. To
+reach an operator surface the canonical prompt does not, use `infer.py` or
+`sweep.py`; neither is a benchmark.
+
+The choice is deliberate rather than arbitrary: `01` is 11 words, the same order
+as the COCO captions MLPerf's `text_to_image` benchmark samples, so the text
+encoder's share of the latency is representative instead of an artefact of a
+prompt written for this flow.
+
+#### The metrics, and where they come from
+
+| Metric | Definition | Industry analogue |
 | --- | --- | --- |
-| text encoder | 0.51 s | 2.08 s |
-| denoise loop, 40 steps | 16.53 s (423.9 ms/step) | 20.76 s (532.3 ms/step) |
-| VAE decode | 0.45 s | 0.92 s |
-| **total** | **17.5 s** | **23.8 s (1.36x)** |
-| reserved | 37.63 GiB | 38.60 GiB |
-| `cpu_fallback` ops | — | **0** |
-| distinct ATen operators | — | **62** |
-| — routed to FlagGems (`flagos_python`) | — | **37** |
-| — routed to the boxing path (`cuda`) | — | **25** |
-| paired PSNR / MAE vs cuda | — | **37.82 dB / 1.194** |
+| `latency.per_image_s` | Wall time of one `pipe(...)` call at the run's batch, divided by the batch. Includes the text encoder, the denoise loop, the VAE decode and the postprocess to PIL. Excludes model load, placement and the PNG write. | MLPerf SingleStream latency |
+| `phases["*"]` | The same call split into text encoder / denoise loop / loop per step / VAE decode. | component breakdown |
+| `phases["loop per step"]` | Denoise loop ÷ (steps − 1). Steps-normalised, so two chips at different step counts still compare. | s/iteration |
+| `throughput.images_per_s` | `batch / median per-call time`, reported only when `--batch N` (N > 1) runs. | MLPerf Offline samples/s |
+| `memory.peak_gib` | Peak allocated watermark, reset before each measured call and read after it. Falls back to `memory_reserved`, and names which it used. | diffusers `mem_plain_GB` |
+| `determinism.identical` | Whether the first and last measured calls produced byte-identical images. | prerequisite for §6.1 |
+| `vs <baseline>` (in the table) | Latency ratio against a named column; throughput ratio as its reciprocal. | vendor speedup ratio |
 
-The text encoder and the VAE are one call each, so their numbers move by tens of
-per cent between runs; the loop and the two totals are the stable ones. The
-1.36x is the honest end-to-end figure on this chip, and it is not one effect: the
-loop is 1.26x and the two single-shot components are 4x and 2x, so the ratio
-depends on how many images a run produces — the loop is the only part that scales
-with step count.
+The protocol is the diffusers harness' (`benchmarks/benchmarking_utils.py`):
+discarded warmup rounds, `torch.utils.benchmark.Timer` with `num_threads=1`, and
+peak allocated memory as the memory figure. Two things are deliberately
+different, and both are flags whose used value is recorded:
+
+- `--min-run-time` defaults to **60 s** rather than diffusers' 0.2 s. That
+  default is sized for a ~50 ms component forward; this pipeline is ~26 s, and
+  0.2 s would buy a single sample.
+- `--warmup` defaults to **2** rather than 5. Five rounds of a 26 s pipeline is
+  2.2 minutes spent before any measurement at all, and two still covers the
+  Triton JIT and autotune convergence. At least one is always run even if
+  `--warmup 0` is passed, and the JSON says so.
+
+At batch 1 **no throughput is derived from the latency**. A rate computed from a
+batch-1 latency is the latency restated, and restating it invites a comparison
+against a real throughput number. `--batch N` passes `num_images_per_prompt=N`,
+so the images still come from the canonical prompt; if the batch does not fit,
+the JSON records the allocator's message in `throughput.error` and `null` for the
+number, which is itself the result a 40 GB card gives.
+
+#### Trap: the dispatch log costs 12% of the loop
+
+§7's census is not free. `run.sh bench` therefore leaves `dispatch` out of
+`FLAGOS_LOG` while `infer` and `sweep` keep it in, and the JSON records what the
+environment actually held — a row taken with it on says so, in the table's
+caveats.
+
+#### Trap: a cold compile cache is a different machine
+
+§4.3 measures the same 40-step run at 23.8 s warm and 71.5 s cold. `bench.py`
+never clears the cache; it records `TRITON_CACHE_DIR`. `--cold-cache` points it at
+a fresh directory, which is how "a box that has never run this" is measured, and
+the JSON records that it was used. **Both sides of any cross-chip comparison must
+be warm**, and the recorded cache path is what makes that checkable.
+
+#### What a chip's result should look like
+
+The JSON is the record; `table` is the view. A run is worth quoting when:
+
+- `protocol.runs` is at least 2, so `latency.per_image_s.std_s` means something.
+  The table warns when it is not.
+- `determinism.identical` is true. If it is false the latency still stands, but a
+  paired comparison in §6.1 does not, because the two runs are not sampling the
+  same trajectory.
+- `environment.dispatch_log` is off (or is quoted with the number).
+- `memory.source` is stated, because a peak allocated and a reserved total are
+  not the same measurement and a table that mixes them is worse than one that
+  says which it used.
+
+### 7.2 Reference measurement
+
+The measured pair, taken on 2026-09-18 on 8x NVIDIA A100-SXM4-40GB, one card
+(`flagos:0`), 40 steps, 1024x1024, seed 42, `true_cfg_scale=1.0`, batch 1, warm
+Triton cache, `FLAGOS_LOG=fallback`. Command, for both columns:
+
+```bash
+run.sh bench --device <cuda|flagos> --out <out>.json
+run.sh table out/cuda.json out/flagos.json --baseline cuda
+```
+
+The table below is that command's output, unedited. `torch cuda` is
+2.10.0+cu128 in the vendor environment; `torch-fl` is 2.10.0+cpu with the
+external CUDA 12.8 assets, the 2.1 checkout at `0.41.0.dev0`.
+
+| metric | cuda | flagos |
+| --- | --- | --- |
+| prompt | 01 / `bb383cba` | 01 / `bb383cba` |
+| latency, median s/image | 17.41 | 21.94 |
+| latency, mean s/image | 17.41 | 21.94 |
+| latency, min s/image | 17.41 | 21.93 |
+| latency std, s | 0.003 | 0.012 |
+| measured calls | 4 | 3 |
+| text encoder, median s | 0.04 | 0.21 |
+| denoise loop, median s | 16.61 | 20.72 |
+| loop per step, median ms | 425.9 | 531.4 |
+| vae decode, median s | 0.23 | 0.34 |
+| throughput, images/s | n/a | n/a |
+| peak GiB | 36.80 | 37.81 |
+| memory counter | peak allocated | peak allocated |
+| determinism | identical | identical |
+| `FLAGOS_LOG` | fallback | fallback |
+| triton cache | default | default |
+| **vs cuda, latency** | **1.00x** | **1.26x** |
+
+**1.26x is the end-to-end figure on this chip.** The denoise loop — the only part
+that scales with step count — is 1.25x (16.61 s against 20.72 s); the text encoder
+is 5x and the VAE 1.5x, but those are one call each and a small share of the
+total, so the ratio a chip reports depends on how many images a run produces.
+
+`throughput` is `n/a` on both because both are batch 1, and no rate is derived
+from a batch-1 latency (§7.1). A batch-4 run on this 40 GB card does not fit at
+all — `bench.py --batch 4` writes a record whose `throughput.error` is the
+allocator's own message and whose latency fields are `null`, which is the
+truthful answer rather than an estimate. A real throughput column needs a card
+that holds four images at once; none was available here, and this document does
+not guess at one.
+
+A single-shot run of the same pipeline with injected latents, taken a day earlier
+with `infer.py --stage full`, gave **17.5 s against 23.8 s (1.36x)** with a phase
+split of 0.51 / 16.53 / 0.45 against 2.08 / 20.76 / 0.92. The numbers differ from
+the table above because that run was one sample with no warmup, and because its
+two single-call components (the text encoder at 2.08 s against 0.21 s) had not
+been repeated. That is the difference §7.1 exists to remove, and it is why the
+table above, not that figure, is what this flow quotes.
+
+The per-operator readings that go with this chip were taken on the same 2026-09-17
+run and are unchanged:
+
+| Reading | torch-fl |
+| --- | --- |
+| `cpu_fallback` ops | **0** |
+| distinct ATen operators | **62** |
+| — routed to FlagGems (`flagos_python`) | **37** |
+| — routed to the boxing path (`cuda`) | **25** |
+| paired PSNR / MAE vs cuda | **37.82 dB / 1.194** |
 
 Inside the loop, 1863 of 4067 dispatches per step are FlagGems and the rest are
 the boxing path. The gap to the vendor is mostly host-side: routing those calls
@@ -381,9 +533,15 @@ from 0.9 s to 14.3 s, and the whole 40-step run from 23.8 s to 71.5 s — a 3x
 difference on the same hardware from the cache alone. Warm the cache before
 quoting any timing, and quote the cache state with the number.
 
-The raw log is machine-local; regenerate it with a flagos run of
-`infer.py --stage full` — the phase table above is printed by the run itself, so
-no dispatch logging is needed for it (and it should be off, see §7).
+The raw log is machine-local; regenerate it with a flagos run of `infer.py
+--stage full` or `run.sh bench --device flagos` — both print the phase table
+themselves, so no dispatch logging is needed for it (and it should be off,
+see §7).
+
+The single-shot figure above is kept only as the record of what the staged runner
+reports. For anything quoted, use the `bench.py` pair at the top of this section:
+it runs the same pipeline with a discarded warmup and a self-sizing repeat count,
+so every phase above comes with a spread instead of a point.
 
 ## 8. Per-operator comparison against a reference
 
@@ -457,6 +615,8 @@ drawn on the device: two backends do not share an RNG stream, so a device-side
 | An op is missing entirely | No route for it on this chip | torch_fl: fix the route or the kernel, then re-measure the census. Do not patch `diffusers` or `transformers` — a user must be able to `pip install diffusers` and run this unchanged. |
 | Every op reports `flagos_python` but the run behaves like plain CUDA, and `cumsum` agrees with the vendor exactly | The build has no FlagGems Python path compiled, so every `flaggems` route silently degrades to the boxing kernel — `Dispatcher::GetFn` is documented to do that so one conf stays correct across builds | The build: check `FLAGGEMS_KERNEL=ON` in `build/CMakeCache.txt`. A **stale cache** is the trap: a previous `FLAGGEMS_KERNEL=OFF` build persists in `CMakeCache.txt` and later invocations that do not name the variable keep it off. `rm -rf build` before rebuilding. This is worth knowing because the degradation is silent — the run succeeds, and only the phase timings and the census reveal it. |
 
+| `RuntimeError: Backend doesn't support synchronizing all streams on device.` out of `torch.accelerator.synchronize()` | `GuardImpl` did not implement `DeviceGuardImplInterface::synchronizeDevice`, which the interface's default refuses | torch_fl: `csrc/runtime/guard.h`. Anything built on `torch.utils.benchmark.Timer` reaches it, because the timer synchronises that way around every timed call. |
+
 Attribution is the point of the stages: a failure in `text-encoder` is the
 encoder's operator surface, a failure in `vae` is the 3-D convolution, and only a
 failure in `full` that survives both is a problem with the loop itself.
@@ -472,10 +632,13 @@ failure in `full` that survives both is a problem with the loop itself.
 - The cohort is ours, not the model authors'. §5 says why and what each prompt is
   for.
 - Timing is recorded, not optimised. Nothing here is a performance claim except
-  where §7.1 says so, and that table quotes the vendor beside it.
+  the `bench.py` pair in §7.2, and that table quotes the vendor beside it.
 - Reserved memory is not comparable across backends unless both numbers come from
   the allocator. `nvidia-smi` folds the CUDA context and the cuBLAS/cuDNN
   workspaces into one of the two numbers.
+- §7.2's throughput row is empty on this hardware. Four images do not fit one
+  40 GB card, and no larger part was available; the column needs one, and nothing
+  here estimates it.
 - Image quality is judged by eye. The paired PSNR is a backend-agreement measure,
   and it says nothing about whether the pictures are any good.
 - Nothing under `tests/manual/` is in `.github/configs/*.yml`, so none of this

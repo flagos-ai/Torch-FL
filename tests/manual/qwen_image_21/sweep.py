@@ -169,6 +169,7 @@ def main(argv=None):
         "diffusers": diffusers.__version__,
         "model": args.model,
         "prompts_file": args.prompts_file,
+        "prompts_sha256": {entry["id"]: entry["sha256"] for entry in cohort},
         "negative_prompt": args.negative_prompt,
         "width": args.width,
         "height": args.height,
@@ -207,6 +208,7 @@ def main(argv=None):
         record = {
             "id": entry["id"],
             "prompt": entry["prompt"],
+            "prompt_sha256": entry["sha256"],
             "file": path.name,
             "seconds": seconds,
             "memory": footprint(torch, transformer[0]),
@@ -222,8 +224,13 @@ def main(argv=None):
         release(torch, args.device)
 
     total = round(time.time() - started, 1)
-    mean = round(total / len(cohort), 1)
-    print(f"{len(cohort)} images, {total}s total, {mean}s mean")
+    # The mean of these is not reported: eight heterogeneous prompts whose first
+    # run pays for a cold Triton cache do not have a mean latency, and quoting
+    # one would invite a comparison against a real benchmark number. Each
+    # prompt's own seconds is in the manifest; `run.sh bench` is what produces a
+    # number that can be quoted.
+    print(f"{len(cohort)} images, {total}s total")
+    print("these seconds are recorded, not measured -- see the README, §5")
     common.report_memory(torch, args.device)
     return 0
 
