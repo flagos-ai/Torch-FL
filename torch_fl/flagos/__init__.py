@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import importlib
 import os
 import time
 
@@ -157,6 +158,12 @@ def _lazy_init():
 
     ensure_tle_importable()
 
+    # FlagGems' autotuned kernels ask Triton for their config on the first call
+    # of every process, and Triton's persisted autotune cache is off by default.
+    # The knob is read when the @triton.autotune decorators run, i.e. while the
+    # import below executes. See the function for the measurement.
+    _enable_flaggems_autotune_cache()
+
     # Eagerly import FlagGems to avoid deep import chain during dispatch.
     # FlagGems has a deep lazy import chain (fused → FLA → utils → models → sqlalchemy)
     # that can exceed Python's recursion limit when triggered inside PyTorch dispatch.
@@ -180,6 +187,23 @@ def _lazy_init():
     # the import above, because both the detector singleton and the op modules'
     # module-level copies are fixed by then.
     _align_flaggems_device_identity()
+
+    # Same window, same reason: FlagGems' L2 vector_norm materialises a
+    # transposed copy of its input, and the C++ bridge caches the callable it
+    # resolved, so this has to be in place before the first routed op runs. See
+    # the function for the measurement. No-op outside the vendors it was
+    # measured on.
+    _patch_flaggems_vector_norm()
+
+    # Same window as the two above, and the same requirement: the dispatcher
+    # kernel is claimed before the first routed op can reach it. See the
+    # function for the measurement.
+    _patch_flaggems_index_put()
+
+    # Same window again: these replace the launch path every FlagGems pointwise
+    # op goes through, so they have to be in place before the first one runs.
+    # See the function for the measurement.
+    _patch_flaggems_pointwise_dispatch()
 
     # Monkey-patch Tensor.__getitem__ to work around PyTorch C++ dispatch issue
     # with advanced indexing on custom devices. The C++ __getitem__ fails for
@@ -792,6 +816,717 @@ def _align_flaggems_device_identity():
         from torch_fl.accelerator.cuda._cuda_compat import patch_flaggems_device_name
 
         patch_flaggems_device_name()
+    except Exception:
+        pass
+
+
+def _vector_norm_permutes(x, dims) -> bool:
+    """Whether FlagGems' ``dim_compress`` would materialise a transposed copy.
+
+    ``dim_compress`` (flag_gems/utils/shape_utils.py) builds
+    ``order = batch_dims + sorted(reduced_dims, key=stride, reverse=True)`` and
+    returns ``permute(order).contiguous()``. That only stays a view when ``order``
+    is already the identity, which is the case for a reduction over the
+    innermost dim of a contiguous tensor -- and for a full-tensor reduction,
+    where every dim is in the list.
+    """
+    order = [i for i in range(x.ndim) if i not in dims]
+    order += sorted(dims, key=lambda d: x.stride(d), reverse=True)
+    return order != list(range(x.ndim))
+
+
+def _flaggems_vector_norm_wrapper(original):
+    """Wrap FlagGems' ``vector_norm`` so single-dim L2 avoids the transpose.
+
+    See ``_patch_flaggems_vector_norm`` for why. Everything the fast path does
+    not cover -- any other ``ord``, a multi-dim or full reduction, an explicit
+    ``dtype``, a half input, and every reduction whose dim is already innermost --
+    goes to ``original`` unchanged.
+    """
+
+    def vector_norm(x, ord=2, dim=None, keepdim=False, dtype=None):
+        dims = None
+        if dim is not None and x.ndim:
+            try:
+                # dim is an int for torch.linalg.vector_norm calls that name a
+                # single axis, and a sequence otherwise; the aten schema
+                # (OptionalIntArrayRef) does not say which.
+                dims = [dim] if isinstance(dim, int) else [int(d) for d in dim]
+                dims = [d % x.ndim for d in dims]
+            except Exception:
+                dims = None
+        if (
+            dims is None
+            or len(dims) != 1
+            or ord != 2
+            or dtype is not None
+            # x*x is evaluated in the input dtype, so a half input would round
+            # (and, for fp16 above 256, overflow) before FlagGems' fp32
+            # accumulator ever sees it. FlagGems' own kernel promotes first.
+            or x.dtype not in (torch.float32, torch.float64)
+            or x.numel() == 0
+            or not _vector_norm_permutes(x, dims)
+        ):
+            return original(x, ord, dim, keepdim, dtype)
+        # aten-level spellings, so the conf still decides each sub-op's route:
+        # sum.dim_IntList and sqrt are both FlagGems, and sum's single-dim path
+        # reduces the strided axis in place instead of permuting it.
+        out = torch.sqrt(torch.sum(x * x, dim=dims, keepdim=True))
+        return out if keepdim else out.squeeze(dim=dims)
+
+    vector_norm.__wrapped__ = original
+    vector_norm._torch_fl_composite_l2 = True
+    return vector_norm
+
+
+def _patch_flaggems_vector_norm():
+    """Stop FlagGems' L2 ``vector_norm`` from materialising a transposed copy.
+
+    ``flag_gems.ops.vector_norm`` sends every partial reduction through
+    ``dim_compress``, which permutes the reduced dim to innermost and then calls
+    ``.contiguous()`` on the result. On a strided reduction that permute is not
+    the identity, so the tensor is gathered into a fresh buffer a few hundred
+    bytes at a time. Measured on a DCU bw1000 with ``(1, 144, 1, 2048, 2048)``
+    fp32 (2.42 GB), against the same device's 1.34 TB/s on a plain contiguous
+    copy of the same buffer:
+
+        dim_compress(x, [1])          354869 us    13.6 GB/s
+        x.clone()                       3606 us  1339.8 GB/s
+        flag_gems.vector_norm(x,2,[1]) 357307 us
+        sqrt(sum_dim(x*x, [1]))           5801 us
+
+    So 99.3% of the op is the copy, and the ``l2_norm_kernel`` it was copied for
+    is ~2.4 ms. FlagGems' own ``sum`` does not do this -- its single-dim path
+    reduces the strided axis in place over a plain ``contiguous()`` -- so the
+    same reduction spelled ``sqrt(sum(x*x, dim=dim, keepdim=True))`` is 61x
+    faster and keeps every sub-op on the route the conf already gives it
+    (``sum.dim_IntList`` and ``sqrt`` are both FlagGems). Nothing is rerouted to
+    the CUDA-boxing path: the op still runs FlagGems Triton kernels.
+
+    Scoped to the configuration that was measured -- DCU, L2, one dim -- and
+    gated on the route actually being FlagGems. Upstream workaround rather than
+    a design: remove it once FlagGems' vector_norm stops permuting. Best-effort,
+    like ``_align_flaggems_device_identity``: an unpatched FlagGems is slow here,
+    not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import sys
+
+        import flag_gems.ops as _gems_ops
+
+        # ``flag_gems.ops.__init__`` re-exports the function under the
+        # submodule's own name, so ``from flag_gems.ops import vector_norm``
+        # yields the *function* and ``getattr``-ing ``.vector_norm`` off it
+        # finds nothing. Take the defining module out of sys.modules instead.
+        _gems_module = sys.modules.get("flag_gems.ops.vector_norm")
+        original = getattr(_gems_module, "vector_norm", None)
+        if original is None:
+            original = getattr(_gems_ops, "vector_norm", None)
+        if original is None or getattr(original, "_torch_fl_composite_l2", False):
+            return
+        wrapper = _flaggems_vector_norm_wrapper(original)
+        # The C++ bridge resolves "flag_gems.vector_norm" once and caches the
+        # callable, and every re-export above holds its own reference, so rebind
+        # every module that currently points at the original -- matched by
+        # identity, the way _patch_flaggems_philox does it.
+        for mod in list(sys.modules.values()):
+            try:
+                if getattr(mod, "vector_norm", None) is original:
+                    mod.vector_norm = wrapper
+            except Exception:
+                continue
+        if _gems_module is not None:
+            _gems_module.vector_norm = wrapper
+    except Exception:
+        pass
+
+
+# Dispatcher kernels registered from this module are held by the torch.library
+# Library object that registered them, so the objects are kept for the life of
+# the process rather than left to the garbage collector.
+_PATCH_LIBS = []
+
+
+def _flagos_index_put_roundtrip(self, indices, values, accumulate):
+    """What ``WrapperIndexPut_`` does: scatter on the CPU and copy back.
+
+    The C++ wrapper cannot be code-generated, because its index argument is
+    ``Tensor?[]`` and the FlagGems bridge's ``IValueToPython`` has no conversion
+    for that type -- so ``index_put_`` copies its operands to the CPU, runs the
+    CPU kernel there and copies ``self`` back. This is that path, kept as the
+    fallback for anything the FlagGems kernel does not serve: the two produce
+    the same tensor, so a fallback costs time and nothing else.
+
+    ``torch.ops.aten.index_put_`` rather than ``Tensor.index_put_``: the method
+    form rejects a ``None`` entry in the index list, and ``None`` is what the
+    ``x[:, mask] = v`` spelling the model uses produces.
+    """
+    self_cpu = self.cpu()
+    values_cpu = values.cpu()
+    indices_cpu = [i.cpu() if isinstance(i, torch.Tensor) else i for i in indices]
+    torch.ops.aten.index_put_(self_cpu, indices_cpu, values_cpu, accumulate)
+    self.copy_(self_cpu)
+    return self
+
+
+def _patch_flaggems_index_put():
+    """Run ``index_put_`` on FlagGems' Triton kernel, not on a CPU round-trip.
+
+    ``index_put_``/``_index_put_impl_`` are registered by hand in
+    ``csrc/aten/register.cc`` (``WrapperIndexPut_``) as ``self.cpu() -> CPU
+    index_put_ -> self.copy_(self_cpu)``, and they are in the codegen's
+    ``MANUAL_REGISTERED_OPS`` because the wrapper cannot be expressed otherwise:
+    a ``Tensor?[]`` index list has no ``IValueToPython`` conversion, so no
+    generated kernel can be handed to the bridge. FlagGems ships the op as a
+    Triton kernel, so the round-trip is a per-call cost with no coverage reason
+    behind it.
+
+    Measured on a DCU bw1000, in the Qwen-Image-2.1 denoise loop, where the op
+    is the largest exclusive entry in the steady-state census (24 calls over
+    four steps at 15501.54 us each, ahead of every FlagGems op), against
+    FlagGems' kernel on the same shapes with fresh operands:
+
+        shape                                       round-trip   FlagGems
+        (4122,) <- (4096,)              int            0.140 ms    0.155 ms
+        (4122,) <- (4096,)              bool mask      0.173 ms    0.507 ms
+        (4122,) <- scalar                              0.150 ms    0.153 ms
+        (1,4122) <- (26,)                              0.085 ms    0.180 ms
+        (1,4122,4096) [:, i] <- (4096,4096)      f32   68.583 ms    0.291 ms
+        (1,4122,4096) [:, m] <- (4096,4096)      f32   72.360 ms    0.638 ms
+        (1,4122,4096) [:, m] <- (4096,4096)      bf16  43.442 ms    0.578 ms
+
+    The census mean is over that bimodal set: the model issues six calls a step
+    -- five narrow ones that are a wash either way, and one wide
+    ``joint_hidden_states[:, image_pad_mask] = hidden_states`` that is 70 of
+    the step's ~93 ms. The win is on the wide shapes, and it is 75x-236x there.
+    All of them agree bitwise with the round-trip (``equal=True``,
+    ``max|delta|=0``, the same for ``accumulate=True``); the operand transfers
+    and the CPU scatter are each tens of microseconds when timed on their own,
+    so what the wide shapes cost is the round-trip, not the data.
+
+    End to end, on the same six-step driver, against the run that differs only
+    by this patch: the op falls from 15501.54 to 388.79 us per call on the
+    steady block and from 16720.84 to 381.17 on the last step, the steady step
+    wall from 1.272 to 1.180 s, and the last step's exclusive sum by 0.093 s --
+    against 0.098 s for the op alone, so nothing else moved. The rendered image
+    is byte-identical to the unpatched one (md5 6fc5c62c451ecf5772f11bb0e1652cfd,
+    1875231 bytes, both).
+
+    Narrows to FlagGems rather than away from it: the op keeps Triton kernels
+    and never takes the CUDA-boxing route. Scoped to the configuration that was
+    measured -- DCU, on a conf that routes to FlagGems -- and installed through
+    ``torch.library`` rather than in C++ because the route cannot be stated in
+    the conf: the conf enumerates the generated registration list, which this
+    hand-registered op is deliberately not in. Upstream workaround rather than a
+    design; remove it once the wrapper stops round-tripping. Best-effort, like
+    ``_align_flaggems_device_identity``: an unpatched ``index_put_`` is slow
+    here, not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        gems_index_put = getattr(flag_gems, "index_put_", None)
+        if gems_index_put is None:
+            return
+
+        def _index_put_(self, indices, values, accumulate=False):
+            try:
+                gems_index_put(self, list(indices), values, accumulate)
+            except Exception:
+                # Narrowed to Exception, and only ever to a path that computes
+                # the same tensor: FlagGems' op is the fast path, the round-trip
+                # is the guaranteed one.
+                return _flagos_index_put_roundtrip(self, indices, values, accumulate)
+            return self
+
+        def _index_put_impl_(self, indices, values, accumulate=False, unsafe=False):
+            # FlagGems' index_put_ is the same scatter without the
+            # duplicate-index guard, so it is the implementation for both. Its
+            # _index_put_impl_ is not used: it takes a separate path for the
+            # single-bool-mask case that was never measured here.
+            return _index_put_(self, indices, values, accumulate)
+
+        lib = torch.library.Library("aten", "IMPL")
+        lib.impl("index_put_", _index_put_, "PrivateUse1")
+        lib.impl("_index_put_impl_", _index_put_impl_, "PrivateUse1")
+        _PATCH_LIBS.append(lib)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# FlagGems per-launch host cost
+#
+# The routed ops are limited by their host side, not by their kernels: on a DCU
+# bw1000 a bf16 ``where`` over ``(1, 4096, 1) x (1, 1, 4096)`` enqueues in
+# 11.5 us on the vendor build and 262.4 us through FlagGems, while the device
+# spends 124.2 and 74.0 us per call on the two -- so the vendor op is
+# device-bound and the FlagGems op is Python-bound. The patches below take
+# back the parts of that Python that are recomputed per launch without changing
+# anything a caller can observe; none of them moves an op off FlagGems.
+# ---------------------------------------------------------------------------
+
+# The keyword arguments Triton's ``KernelInterface.__getitem__`` passes down to
+# ``LibEntry.run``. A launch carrying anything else takes the stock path.
+_FLAGGEMS_RUN_KWARGS = frozenset(("grid", "warmup"))
+
+# Distinct from ``None``, so "this entry has no plan" and "no plan computed yet"
+# do not collide in the per-entry plan cache.
+_NO_PLAN = object()
+
+# Enough for every shape a model repeats across a denoise loop, small enough
+# that a cache keyed on shapes cannot grow without bound.
+_BROADCAST_SHAPES_LIMIT = 4096
+
+
+def _memoized_broadcast_shapes(original):
+    """``torch.broadcast_shapes`` computed once per set of shapes.
+
+    ``torch.broadcast_shapes`` is a Python wrapper: it asks
+    ``torch.jit.is_tracing()`` and then delegates to
+    ``torch._refs._broadcast_shapes``, which walks the shapes in Python.
+    Measured on a DCU bw1000, three rank-3 shape tuples cost 21.9 us per call --
+    and the same 21.9 us under this build's vendor torch, so it is a property of
+    the DTK build rather than of the plugin. The vendor path pays none of it
+    because its ``where`` never runs Python.
+
+    FlagGems' ``where_self_out`` calls it once per ``where``
+    (flag_gems/ops/where.py), and Qwen-Image-2.1 issues 130 ``where`` calls per
+    denoise step on shapes that do not change between steps, so 2.8 ms of every
+    step goes to recomputing one shape.
+
+    The function is pure, so the memo cannot change an answer; the cache is
+    dropped wholesale once it is large enough that a live model would have
+    stopped repeating itself.
+    """
+    cache = {}
+    limit = _BROADCAST_SHAPES_LIMIT
+
+    def broadcast_shapes(*shapes):
+        try:
+            hit = cache.get(shapes)
+        except TypeError:
+            # A shape spelled as a list rather than a tuple: hashable callers
+            # only, and this one is not.
+            return original(*shapes)
+        if hit is None:
+            hit = original(*shapes)
+            if len(cache) >= limit:
+                cache.clear()
+            cache[shapes] = hit
+        return hit
+
+    broadcast_shapes.__wrapped__ = original
+    return broadcast_shapes
+
+
+def _hoisted_descriptor_cache_key(descriptor_type):
+    """``flag_gems.utils.libentry._descriptor_cache_key`` without the re-import.
+
+    The stock function imports ``triton.tools.tensor_descriptor`` from inside
+    its own body on every call, and ``LibEntry.key`` calls it once per kernel
+    argument -- 37 times for a rank-3 pointwise kernel whose whole launch is
+    ~350 us of host time. Resolving that import costs a ``sys.modules`` lookup,
+    a ``getattr`` and a function frame each time, for a module that cannot have
+    changed since the last launch.
+
+    Behaviour is untouched: this is still a passthrough for everything that is
+    not a ``TensorDescriptor``.
+    """
+    if descriptor_type is None:
+
+        def descriptor_cache_key(arg):
+            return arg
+
+        return descriptor_cache_key
+
+    def descriptor_cache_key(arg):
+        if not isinstance(arg, descriptor_type):
+            return arg
+        return (
+            "TensorDescriptor",
+            tuple(arg.shape),
+            tuple(arg.strides),
+            tuple(arg.block_shape),
+            getattr(arg, "padding", None),
+        )
+
+    return descriptor_cache_key
+
+
+def _fast_libentry_key(entry, descriptor_cache_key, tensor_specialization):
+    """``LibEntry.key`` with the per-call work it can do once, done once.
+
+    The stock ``key`` defines ``spec_arg`` and ``dns_arg`` as nested functions,
+    so every call builds two closures and pays two Python frames per argument,
+    and ``spec_arg`` additionally re-resolves the vendor's
+    ``get_tensor_specialization`` for every tensor argument. All of that is
+    fixed when the kernel is constructed. What is left is one straight walk over
+    the three argument lists, which is what this is.
+
+    The key it produces is the stock key: same tuple, same order, same values.
+    """
+    divisibility = entry.divisibility
+    specializes = tensor_specialization is not None
+
+    def key(spec_args, dns_args, const_args):
+        spec_key = []
+        append = spec_key.append
+        for arg in spec_args:
+            arg = descriptor_cache_key(arg)
+            if hasattr(arg, "data_ptr"):
+                aligned = arg.data_ptr() % divisibility == 0
+                if specializes:
+                    append((arg.dtype, aligned, tensor_specialization(arg)))
+                else:
+                    append((arg.dtype, aligned))
+            else:
+                append((type(arg), arg))
+
+        dns_key = []
+        append = dns_key.append
+        for arg in dns_args:
+            arg = descriptor_cache_key(arg)
+            if hasattr(arg, "data_ptr"):
+                append(arg.dtype)
+            elif not isinstance(arg, int):
+                append(type(arg))
+            elif -(2**31) <= arg <= 2**31 - 1:
+                append("i32")
+            elif 2**63 <= arg <= 2**64 - 1:
+                append("u64")
+            else:
+                append("i64")
+
+        const_key = [descriptor_cache_key(arg) for arg in const_args]
+        return tuple(spec_key + dns_key + const_key)
+
+    return key
+
+
+def _libentry_run_plan(entry, n_args):
+    """Which of ``args[0:n_args]`` are specialised, not, or constexpr.
+
+    ``LibEntry.run`` decides this by walking ``signature.parameters`` and
+    testing each index against ``specialize_indices`` and
+    ``do_not_specialize_indices``, collecting the result into an
+    ``OrderedDict`` keyed by parameter name, and then walking the whole
+    signature a second time to read the arguments back out in order. Every input
+    to that walk is fixed when the kernel is constructed except ``len(args)``,
+    and every FlagGems pointwise wrapper passes all of its parameters
+    positionally.
+
+    Returns ``None`` for the call shapes this cannot express -- a launch that
+    passes fewer arguments than the kernel has parameters, or a kernel whose
+    constexpr values come from an ``Autotuner``/``Heuristics`` -- which sends
+    the caller back to the stock ``run``.
+    """
+    if n_args != len(entry.jit_function.params) or entry._has_flagtune_tuner:
+        return None
+    specialized = frozenset(entry.specialize_indices)
+    plain = frozenset(entry.do_not_specialize_indices)
+    spec_idx, dns_idx, const_idx = [], [], []
+    for i in range(n_args):
+        if i in specialized:
+            spec_idx.append(i)
+        elif i in plain:
+            dns_idx.append(i)
+        else:
+            const_idx.append(i)
+    return (tuple(spec_idx), tuple(dns_idx), tuple(const_idx))
+
+
+def _cached_libentry_key(entry, key_for_entry):
+    """The entry's fast key function, built on first use and kept on the entry."""
+    key_fn = entry.__dict__.get("_torch_fl_key_fn")
+    if key_fn is None:
+        key_fn = entry.__dict__["_torch_fl_key_fn"] = key_for_entry(entry)
+    return key_fn
+
+
+def _flaggems_fast_run(key_for_entry, torch_device_fn, original_run):
+    """``LibEntry.run`` for the case where it has everything it needs cached.
+
+    See ``_patch_flaggems_pointwise_dispatch`` for why. The stock function
+    rebuilds its per-argument classification and its argument list on every
+    launch and then looks up a cache it will hit. This does the same lookup off
+    a classification computed once, and hands the kernel the argument tuple it
+    was given rather than a list reassembled from a name-keyed dict -- which for
+    an all-positional launch is the same list.
+
+    Anything unexpected -- a keyword launch, a callable grid, an entry whose
+    launch constants came from a tuner, a cache miss -- falls through to the
+    stock function, so the two cannot disagree about what a launch means.
+    """
+
+    def run(self, *args, **kwargs):
+        if kwargs.keys() > _FLAGGEMS_RUN_KWARGS:
+            return original_run(self, *args, **kwargs)
+
+        plans = self.__dict__.get("_torch_fl_run_plans")
+        if plans is None:
+            plans = self.__dict__["_torch_fl_run_plans"] = {}
+        n_args = len(args)
+        plan = plans.get(n_args, _NO_PLAN)
+        if plan is _NO_PLAN:
+            plan = plans[n_args] = _libentry_run_plan(self, n_args)
+        if plan is None:
+            return original_run(self, *args, **kwargs)
+
+        key_fn = _cached_libentry_key(self, key_for_entry)
+        spec_idx, dns_idx, const_idx = plan
+        entry_key = key_fn(
+            [args[i] for i in spec_idx],
+            [args[i] for i in dns_idx],
+            [args[i] for i in const_idx],
+        )
+        device = torch_device_fn.current_device()
+        # The stock function's two spellings of "which cache", kept because
+        # ``current_device()`` answers "cpu" on a platform with a single
+        # process-wide device.
+        cache = self._cpu_cache if device == "cpu" else self.kernel_cache[device]
+        cached = cache.get(entry_key)
+        if cached is None:
+            return original_run(self, *args, **kwargs)
+
+        kernel, constexprs, tune_constexprs, heur_constexprs, launch_hooks = cached
+        grid = kwargs["grid"]
+        # A tuner-produced constant, a launch hook and a callable grid all need
+        # the ``constexprs`` mapping this path does not rebuild, so any of them
+        # means the stock function.
+        if tune_constexprs or heur_constexprs or launch_hooks or callable(grid):
+            return original_run(self, *args, **kwargs)
+
+        kernel[(grid + (1, 1))[0:3]](*args)
+        return kernel, constexprs
+
+    return run
+
+
+def _hygon_tensor_specialization(gems_device):
+    """The vendor hook ``LibEntry.key`` folds into a tensor's key, or ``None``.
+
+    ``spec_arg`` resolves ``triton.backends.hcu.compiler.HIPBackend.get_tensor_specialization``
+    on every call on a hygon build and appends what it returns to that
+    argument's key, which is what turns ``(dtype, aligned)`` into
+    ``(dtype, aligned, 'S')``. The resolution is fixed for the life of the
+    process, so it is done once here instead -- under the stock function's own
+    conditions, the vendor test first so a non-hygon build keeps the
+    two-element key.
+    """
+    if getattr(gems_device, "vendor_name", None) != "hygon":
+        return None
+    try:
+        import triton
+
+        if not hasattr(triton.backends, "hcu"):
+            return None
+        from triton.backends.hcu.compiler import HIPBackend
+    except ImportError:
+        return None
+    specialization = getattr(HIPBackend, "get_tensor_specialization", None)
+    return specialization if callable(specialization) else None
+
+
+def _enable_flaggems_autotune_cache():
+    """Stop Triton from re-benchmarking the same autotune configs every process.
+
+    FlagGems' ``layer_norm_persistent_kernel`` carries a three-way
+    ``@triton.autotune`` (``num_warps`` 4/8/16 from the vendor's
+    ``tune_configs.yaml``). Triton benchmarks all three on the first call for
+    each tuning key and keeps the winner in ``Autotuner.cache``, which is in
+    memory and therefore per process. The kernel itself is compiled once and
+    cached on disk, so a fresh process re-pays for a decision that cannot have
+    changed.
+
+    The knob gates the disk cache in both directions, not just the lookup.
+    ``triton/runtime/autotuner.py:262`` only reaches ``check_disk_cache`` when
+    ``self.cache_results`` was set at construction from
+    ``knobs.autotuning.cache``, and ``check_disk_cache`` is also what *writes*
+    the entry -- with the knob off the benchmarks run and nothing at all is
+    remembered between processes. This is therefore a prerequisite for the
+    cache existing, not a preference for reading it.
+
+    ``torch.native_layer_norm`` on ``(1, 4096, 4096)`` bf16, one fresh process
+    per arm, on a DCU bw1000:
+
+        arm 1  TRITON_CACHE_AUTOTUNING=0, no entry on disk
+               first call                                       454.2 ms
+               :236(run) -> :252(benchmark) -> :132(_bench) x3   0.452 s
+               (no ``check_disk_cache`` frame -- it is never called)
+        arm 2  cache enabled, still no entry on disk
+               first call                                       462.5 ms
+               :236(run) -> :194(check_disk_cache)               0.460 s
+                         -> :252(benchmark) -> :132(_bench) x3   0.446 s
+        arm 3  cache enabled, the entry arm 2 wrote now on disk
+               first call                                        33.6 ms
+               :236(run) 0.032 -> :194(check_disk_cache) 0.014
+               (no benchmark frame)
+        second call, every arm                                   0.3 ms
+
+    The disk lookup hashes the Triton build, the backend target, the tuning key,
+    the config list and the cache-invalidating environment variables, so a stale
+    entry cannot survive a compiler or configuration change.
+
+    Qwen-Image-2.1 issues exactly two tuning keys over a whole run --
+    ``(4122, 4096)`` and ``(4096, 4096)``, measured at 0.38 s and 0.47 s -- so
+    this is 0.85 s paid once per process, on a model whose steady-state denoise
+    step is 1.098 s on the vendor build and 1.173 s on this one. It is a startup
+    cost, not a per-step one: nothing here closes the 6.8% step gap, and the
+    arms above are the whole of the claim.
+
+    Set both ways on purpose. The environment variable is the knob Triton
+    documents and is what a user would set, but ``triton.knobs`` reads it once,
+    when the knob objects are constructed, which has already happened by the
+    time this runs; the constructed knob is therefore written directly as well.
+
+    An explicit ``TRITON_CACHE_AUTOTUNING=0`` -- a user who wants the benchmark
+    back, or who is chasing an autotune that settled on a config they disagree
+    with -- is left alone. It has to be read deliberately rather than left to
+    ``setdefault``: ``env_bool`` is a data descriptor whose ``__set__`` calls
+    ``knobs.setenv``, so assigning the knob *writes the variable*, and a
+    ``setdefault`` followed by that assignment overwrites the user's ``0`` with
+    the ``1`` it just wrote. The existing value is therefore parsed with the same
+    ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
+
+    Scoped to the configuration it was measured on -- DCU, on a conf that routes
+    to FlagGems -- like the patches around it. No op changes route and no kernel
+    changes: the config selected is the one FlagGems' own tuner would have
+    picked. Best-effort, like its neighbours: an unset knob is slow here, not
+    broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+
+        triton_knobs = importlib.import_module("triton.knobs")
+
+        # Default True on purpose: unset is the state this exists to change, and
+        # anything a user did set that does not parse as truthy is a "no".
+        if not triton_knobs.getenv_bool("TRITON_CACHE_AUTOTUNING", True):
+            return
+
+        os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+        triton_knobs.autotuning.cache = True
+    except Exception:
+        pass
+
+
+def _patch_flaggems_pointwise_dispatch():
+    """Take FlagGems' pointwise ops off the host and leave them on FlagGems.
+
+    Every FlagGems elementwise op is a generated wrapper around a Triton kernel
+    launched through ``flag_gems.utils.libentry.LibEntry``, and on a DCU bw1000
+    the host side of that, not the kernel, is what a launch costs. In the
+    Qwen-Image-2.1 denoise loop the FlagGems pointwise ops are 402 ms of the
+    837 ms of exclusive host time across four steady steps -- ``where`` 196 ms
+    over 520 calls, ``pow`` 61, ``tanh`` 58, ``rsqrt`` 56, ``silu`` 31 -- where
+    the vendor build spends 34.94 us on each ``where`` against FlagGems'
+    376.48. The kernels are not what differs: on that shape the FlagGems
+    ``where`` kernel is 74.0 us of device time against 62.1 for the vendor's,
+    while the enqueue is 262.4 us against 11.5 -- a launch cost, not a kernel
+    cost.
+
+    What is left is Python that recomputes per launch what the kernel fixed at
+    construction: ``LibEntry.run`` re-derives which arguments are specialised,
+    not-specialised and constexpr, builds a name-keyed ``OrderedDict`` from that
+    walk and then walks the signature a second time to put the arguments back in
+    order; ``LibEntry.key`` rebuilds two closures per call and re-resolves the
+    vendor's tensor-specialisation hook per argument; and
+    ``_descriptor_cache_key``, which ``key`` calls once per argument, re-imports
+    a module each time. None of it can observe anything that changed between two
+    launches of the same kernel on the same shapes.
+
+    The saving is not confined to the ops named above, because every FlagGems
+    launch in the loop goes through that same ``LibEntry``. The routed
+    composites drop with the elementwise ops -- ``native_layer_norm`` 204.31 to
+    169.88 us per call, ``tanh`` 226.51 to 212.80, ``rsqrt`` 216.23 to 202.41,
+    ``silu`` 220.45 to 204.89 -- and the steady block's exclusive sum with them,
+    0.837 s to 0.767 s.
+
+    That sum is host time, and the steady step on this model is device-bound, so
+    the four-step wall does not move with it (1.179 s to 1.178 s; the vendor
+    build is at 1.098 s). This is a host-budget change, and the host budget is
+    what bounds a launch-bound stretch of the run rather than one already
+    hidden behind the device queue.
+
+    Scoped to the configuration it was measured on -- DCU, on a conf that routes
+    to FlagGems -- and installed the way the patches around it are: by rebinding
+    the functions in the FlagGems modules the C++ bridge and the generated
+    wrappers reach them through. No op changes route; the kernels, the grids and
+    the cache keys stay the ones FlagGems computes. Upstream workaround rather
+    than a design; remove it once FlagGems stops doing this work per launch.
+    Best-effort, like its neighbours: an unpatched dispatch is slow here, not
+    broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+
+        import importlib
+
+        libentry = importlib.import_module("flag_gems.utils.libentry")
+        gems_runtime = importlib.import_module("flag_gems.runtime")
+        gems_device = gems_runtime.device
+        torch_device_fn = gems_runtime.torch_device_fn
+
+        try:
+            from triton.tools.tensor_descriptor import TensorDescriptor
+        except ImportError:
+            TensorDescriptor = None
+
+        # Resolved once rather than per argument per launch; see the helper.
+        tensor_specialization = _hygon_tensor_specialization(gems_device)
+
+        descriptor_cache_key = _hoisted_descriptor_cache_key(TensorDescriptor)
+        if not getattr(libentry._descriptor_cache_key, "_torch_fl_hoisted", False):
+            descriptor_cache_key._torch_fl_hoisted = True
+            descriptor_cache_key.__wrapped__ = libentry._descriptor_cache_key
+            libentry._descriptor_cache_key = descriptor_cache_key
+
+        def key_for_entry(entry):
+            return _fast_libentry_key(
+                entry, descriptor_cache_key, tensor_specialization
+            )
+
+        original_key = libentry.LibEntry.key
+        if not getattr(original_key, "_torch_fl_fast", False):
+
+            def key(self, spec_args, dns_args, const_args):
+                return _cached_libentry_key(self, key_for_entry)(
+                    spec_args, dns_args, const_args
+                )
+
+            key._torch_fl_fast = True
+            key.__wrapped__ = original_key
+            libentry.LibEntry.key = key
+
+        original_run = libentry.LibEntry.run
+        if not getattr(original_run, "_torch_fl_fast", False):
+            fast_run = _flaggems_fast_run(key_for_entry, torch_device_fn, original_run)
+            fast_run._torch_fl_fast = True
+            fast_run.__wrapped__ = original_run
+            libentry.LibEntry.run = fast_run
+
+        # ``where_self_out`` asks for this through the ``torch`` module object,
+        # so rebinding it there is what reaches the call site.
+        if not getattr(torch.broadcast_shapes, "_torch_fl_memoized", False):
+            memo = _memoized_broadcast_shapes(torch.broadcast_shapes)
+            memo.__wrapped__ = torch.broadcast_shapes
+            memo._torch_fl_memoized = True
+            torch.broadcast_shapes = memo
     except Exception:
         pass
 
