@@ -22,6 +22,7 @@ driver, so they need neither a DCU device nor DTK.
 """
 
 import ctypes
+import enum
 import types
 
 import pytest
@@ -502,31 +503,143 @@ def test_memory_shim_is_skipped_without_a_flagos_allocator(shim, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_sdpa_selects_the_one_backend_this_stack_can_execute(shim):
-    """The decoupled wheel can only run the math decomposition.
+class _UpstreamROCmFABackend(enum.IntEnum):
+    """The binding upstream's wheel exposes: DTK's Cutlass is spelled AOTriton."""
 
-    DTK's CUTLASS flash adapter is unreachable: its support probe
-    (at::native::can_use_flash_attention) resolves out of the *CPU* libtorch_cpu
-    and answers False, so pytorch_flash::mha_fwd skips the adapter and falls into
-    its un-compiled aotriton branch -- RuntimeError, not a clean decline.
-    Memory-efficient attention is not compiled at all. Leaving the fused flags
-    on lets aten's composite pick a leaf that then raises, which is what killed
-    every attention call in the Qwen-Image transformer.
+    Default = 0
+    AOTriton = 1
+    Ck = 2
+
+
+class _DtkROCmFABackend(enum.IntEnum):
+    """DTK's own enum, which is what the legacy vendor-core stack binds."""
+
+    Default = 0
+    Cutlass = 1
+    AOTriton = 2
+    Ck = 3
+
+
+def _flash_attn_library(tmp_path):
+    so = tmp_path / "flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so"
+    so.write_bytes(b"")
+    return str(so)
+
+
+def test_flash_attn_library_search_mirrors_the_adapter(monkeypatch, tmp_path):
+    """FA_SO_PATH wins; otherwise the library sits beside DTK's torch package.
+
+    Mirrors get_so_path() in DTK's cutlassfa_adapter.h: three directories above
+    the library that carries the adapter. Getting this wrong either enables the
+    fused backends with nothing to load -- a hard TORCH_CHECK inside the
+    adapter -- or leaves flash off on a stack that has it.
     """
+    hip = tmp_path / "site-packages" / "torch" / "lib" / "libtorch_hip.so"
+    hip.parent.mkdir(parents=True)
+    hip.write_bytes(b"")
+    so = _flash_attn_library(tmp_path / "site-packages")
+    monkeypatch.setattr(_dcu_compat, "_dtk_hip_lib_path", lambda: str(hip))
+    monkeypatch.delenv("FA_SO_PATH", raising=False)
+
+    assert _dcu_compat._dtk_flash_attn_lib() == so
+
+    # FA_SO_PATH short-circuits the search, and a path that is not there is not
+    # reported as a usable library.
+    monkeypatch.setenv("FA_SO_PATH", str(tmp_path / "absent.so"))
+    assert _dcu_compat._dtk_flash_attn_lib() is None
+    monkeypatch.setenv("FA_SO_PATH", so)
+    assert _dcu_compat._dtk_flash_attn_lib() == so
+
+
+@pytest.mark.parametrize(
+    "enum_cls",
+    [
+        pytest.param(_UpstreamROCmFABackend, id="upstream-enum"),
+        pytest.param(_DtkROCmFABackend, id="dtk-enum"),
+    ],
+)
+def test_cutlass_is_written_as_dtks_ordinal(monkeypatch, enum_cls):
+    """The value DTK's hipified headers compare against is its own ordinal.
+
+    The member lives on the at::Context singleton, which the official CPU wheel
+    constructs on a decoupled install, so upstream's enum is what the setter
+    accepts -- and the slot DTK reads as Cutlass is ordinal 1 either way.
+    """
+    written = []
+    monkeypatch.setattr(
+        torch._C, "_set_rocm_fa_preferred_backend", written.append, raising=False
+    )
+    monkeypatch.setattr(torch._C, "_ROCmFABackend", enum_cls, raising=False)
+
+    assert _dcu_compat._prefer_dtk_cutlass_flash() is True
+    assert written == [1]
+
+
+def test_sdpa_uses_dtks_flash_adapter_when_it_is_present(shim, monkeypatch, tmp_path):
+    """The CUTLASS adapter is the only fused leaf DTK compiled.
+
+    Reaching it needs the ROCm FA backend written to DTK's Cutlass ordinal;
+    leaving it at Default sends every fused call into the aotriton branch DTK
+    did not build ("Non't compile aotrition fa"). Measured against the math
+    decomposition on flagos:7 at (1, 24, 12576, 128) bf16: 6.1 ms/iter and
+    463 MiB against 102.1 ms/iter and 33,865 MiB, agreeing to 4.9e-4.
+    """
+    so = _flash_attn_library(tmp_path)
+    written = []
+    monkeypatch.setattr(_dcu_compat, "_dtk_flash_attn_lib", lambda: so)
+    monkeypatch.setattr(
+        torch._C, "_set_rocm_fa_preferred_backend", written.append, raising=False
+    )
+    monkeypatch.setattr(
+        torch._C, "_ROCmFABackend", _UpstreamROCmFABackend, raising=False
+    )
+
     _dcu_compat.patch_torch_cuda_for_dcu()
+
+    assert written == [1]
+    assert torch.backends.cuda.flash_sdp_enabled() is True
+    # Not compiled in DTK at all, and math is what catches every shape flash
+    # declines -- keeping it on is what makes the fused choice safe.
+    assert torch.backends.cuda.mem_efficient_sdp_enabled() is False
+    assert torch.backends.cuda.math_sdp_enabled() is True
+
+
+def test_sdpa_falls_back_to_math_without_the_adapter(shim, monkeypatch):
+    """No flash-attn library means no fused backend, not a hard failure.
+
+    DTK ships flash_attn separately from the torch wheel, so a stack can have
+    the hipified kernels and still have nothing for the adapter to dlopen.
+    """
+    written = []
+    monkeypatch.setattr(_dcu_compat, "_dtk_flash_attn_lib", lambda: None)
+    monkeypatch.setattr(
+        torch._C, "_set_rocm_fa_preferred_backend", written.append, raising=False
+    )
+
+    _dcu_compat.patch_torch_cuda_for_dcu()
+
+    assert written == []
     assert torch.backends.cuda.flash_sdp_enabled() is False
     assert torch.backends.cuda.mem_efficient_sdp_enabled() is False
     assert torch.backends.cuda.math_sdp_enabled() is True
 
 
-def test_sdpa_keeps_the_fused_backends_when_flagged(shim, monkeypatch):
-    """FLAGOS_DCU_SDPA_FLASH=1 is the escape hatch for a stack where they work."""
-    monkeypatch.setenv("FLAGOS_DCU_SDPA_FLASH", "1")
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
+def test_sdpa_can_be_pinned_to_the_math_decomposition(shim, monkeypatch, tmp_path):
+    """FLAGOS_DCU_SDPA_FLASH=0 is the escape hatch back to the old behaviour."""
+    written = []
+    monkeypatch.setenv("FLAGOS_DCU_SDPA_FLASH", "0")
+    monkeypatch.setattr(
+        _dcu_compat, "_dtk_flash_attn_lib", lambda: _flash_attn_library(tmp_path)
+    )
+    monkeypatch.setattr(
+        torch._C, "_set_rocm_fa_preferred_backend", written.append, raising=False
+    )
+
     _dcu_compat.patch_torch_cuda_for_dcu()
-    assert torch.backends.cuda.flash_sdp_enabled() is True
-    assert torch.backends.cuda.mem_efficient_sdp_enabled() is True
+
+    assert written == []
+    assert torch.backends.cuda.flash_sdp_enabled() is False
+    assert torch.backends.cuda.math_sdp_enabled() is True
 
 
 def test_sdpa_switch_does_not_take_the_whole_shim_down(shim, monkeypatch):

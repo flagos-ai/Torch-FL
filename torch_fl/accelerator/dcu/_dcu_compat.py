@@ -43,6 +43,8 @@ Two entry points:
 """
 
 import ctypes
+import glob
+import os
 from dataclasses import dataclass, field
 
 from torch_fl import _env
@@ -342,6 +344,99 @@ def is_dcu_available() -> bool:
         return False
 
 
+def _dtk_hip_lib_path():
+    """Path of the DTK ``libtorch_hip.so`` this process mapped, or None."""
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 6 and fields[-1].endswith("/libtorch_hip.so"):
+                    return fields[-1]
+    except OSError:
+        pass
+    return None
+
+
+def _dtk_flash_attn_lib():
+    """The flash-attn library DTK's CUTLASS adapter would dlopen, if present.
+
+    Mirrors ``get_so_path()`` in DTK's ``cutlassfa_adapter.h``: ``FA_SO_PATH``
+    wins, otherwise ``flash_attn_2_cuda*.so`` is looked up three directories
+    above the library that carries the adapter, which for DTK's
+    ``torch/lib/libtorch_hip.so`` means the parent of the ``torch`` package.
+    The adapter's own ``dlopen`` is a hard ``TORCH_CHECK`` rather than a
+    decline, so a stack without this file must not enable the fused backends.
+    """
+    explicit = os.environ.get("FA_SO_PATH")
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+
+    hip_lib = _dtk_hip_lib_path()
+    if not hip_lib:
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.dirname(hip_lib)))
+    matches = sorted(glob.glob(os.path.join(root, "flash_attn_2_cuda*.so")))
+    return matches[0] if matches else None
+
+
+def _prefer_dtk_cutlass_flash():
+    """Point DTK's SDPA selector at its CUTLASS flash adapter.
+
+    Returns True when the ROCm FA backend was written. ``at::ROCmFABackend`` is
+    DTK's to define and it does not match upstream's: DTK's is
+    ``{Default, Cutlass, AOTriton, Ck}`` while upstream's is
+    ``{Default, AOTriton, Ck}``. The member lives on the ``at::Context``
+    singleton, which the official CPU wheel constructs here, so what DTK's
+    hipified ``flash_api.h`` compares against is DTK's ordinal -- the literal 1,
+    which upstream's enum happens to spell ``AOTriton``. Resolve by ordinal when
+    the binding is upstream's, and by name when it is DTK's own (legacy
+    vendor-core mode, where the name means what DTK's headers mean by it).
+    """
+    import torch
+
+    setter = getattr(torch._C, "_set_rocm_fa_preferred_backend", None)
+    enum = getattr(torch._C, "_ROCmFABackend", None)
+    if setter is None or enum is None:
+        return False
+    _CUTLASS_ORDINAL = 1
+    value = getattr(enum, "Cutlass", None)
+    if value is None:
+        try:
+            value = enum(_CUTLASS_ORDINAL)
+        except ValueError:
+            return False
+    try:
+        setter(value)
+    except Exception:
+        return False
+    return True
+
+
+def _configure_dcu_sdpa_backends():
+    """Select which SDPA backends the boxed composite may use.
+
+    Called from ``patch_torch_cuda_for_dcu()``; see the comment there for the
+    measurement behind the choice.
+    """
+    import torch
+
+    if _env.flag("FLAGOS_DCU_SDPA_FLASH", default=True):
+        fused = _dtk_flash_attn_lib() is not None and _prefer_dtk_cutlass_flash()
+    else:
+        fused = False
+    try:
+        torch.backends.cuda.enable_flash_sdp(fused)
+        # Not compiled in DTK at all: "USE_MEM_EFF_ATTENTION was not enabled for
+        # build." Leaving it on costs a warning and nothing else, but the
+        # selector is easier to reason about with only the working backends on.
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        # Kept as the fallback for every shape and dtype flash declines; with a
+        # single fused backend available this is what makes the choice robust.
+        torch.backends.cuda.enable_math_sdp(True)
+    except Exception:
+        pass
+
+
 def patch_torch_cuda_for_dcu() -> bool:
     """Make the official wheel's ``torch.cuda`` usable on DCU.
 
@@ -514,26 +609,36 @@ def patch_torch_cuda_for_dcu() -> bool:
         torch.cuda.reset_max_memory_allocated = torch.cuda.reset_peak_memory_stats
 
     # SDPA fused backends. aten's composite scaled_dot_product_attention picks a
-    # fused backend, then routes to that backend's leaf. On this stack the only
-    # leaf DTK could serve for these shapes is its CUTLASS flash adapter, and the
-    # adapter is unreachable from a decoupled wheel: DTK's own support probe
-    # (at::native::can_use_flash_attention) resolves out of the *CPU* libtorch_cpu
-    # here and answers False, so pytorch_flash::mha_fwd skips the adapter and
-    # falls into its un-compiled aotriton branch --
+    # backend through DTK's own selector (at::cuda::_fused_sdp_choice, reached by
+    # the boxing path in csrc/aten/sdp_choice_stub.cc), and the only fused leaf
+    # DTK compiled is its CUTLASS flash adapter. DTK's hipified flash_api.h
+    # reaches that adapter only when
+    # at::globalContext().getROCmFAPreferredBackend() == at::ROCmFABackend::Cutlass,
+    # and the member belongs to the Context singleton -- which on a decoupled
+    # wheel the *official* libtorch_cpu.so constructs, without DTK's enum, so it
+    # initialises to Default. Every fused call then lands in the aotriton branch
+    # DTK did not compile:
     #   RuntimeError: Non't compile aotrition fa, please compile aotriton fa
-    # -- rather than declining the backend cleanly. Memory-efficient attention is
-    # not compiled at all ("Torch was not compiled with memory efficient
-    # attention"). The math decomposition is therefore the only SDPA path this
-    # stack both selects and can execute, so state that up front and let the
-    # composite's choice agree with it. FLAGOS_DCU_SDPA_FLASH=1 keeps the fused
-    # backends enabled for a stack where DTK's adapter does resolve.
-    if not _env.flag("FLAGOS_DCU_SDPA_FLASH"):
-        try:
-            torch.backends.cuda.enable_flash_sdp(False)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-            torch.backends.cuda.enable_math_sdp(True)
-        except Exception:
-            pass
+    # Writing DTK's ordinal for Cutlass into that one member is the whole fix.
+    #
+    # Measured on DTK 2604 / torch 2.10.0, flagos:7, bf16 (1, 24, 12576, 128) --
+    # the shape Qwen-Image's 1664x928 pass runs:
+    #   math            102.1 ms/iter    33,865 MiB
+    #   CUTLASS flash     6.1 ms/iter       463 MiB
+    # with max|diff| 4.9e-4 against max|ref| 0.109, i.e. bf16 rounding. Peak VRAM
+    # is the card's own figure, sampled off the device with rocm-smi: the
+    # allocator's reserved/peak counters do not cover everything mapped there.
+    #
+    # torch.backends.cuda.is_flash_attention_available() and
+    # torch._C._can_use_flash_attention() both answer False here and are not part
+    # of the decision -- they are the official wheel's CPU-only bindings, while
+    # the selector inside the composite is DTK's. Both were observed False in the
+    # same process that ran the CUTLASS adapter and warned from
+    # cutlassfa_adapter.h, so neither is worth patching.
+    #
+    # FLAGOS_DCU_SDPA_FLASH=0 forces the previous math-only behaviour; a stack
+    # without DTK's flash-attn library gets it automatically.
+    _configure_dcu_sdpa_backends()
 
     # Seeding. With is_available()=True, torch.manual_seed() now calls
     # torch.cuda.manual_seed_all(), which walks torch.cuda.default_generators --

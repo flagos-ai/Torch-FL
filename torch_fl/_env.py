@@ -461,10 +461,10 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     ),
     "FLAGOS_DCU_SDPA_FLASH": (
         SCOPE_RUNTIME,
-        "0 (off)",
-        "Keep the fused SDPA backends enabled on DCU. The default disables "
-        "flash/mem-efficient SDPA so scaled_dot_product_attention's own choice "
-        "agrees with the only kernel this stack can execute",
+        "1 (on)",
+        "Point DTK's SDPA selector at its CUTLASS flash adapter when a stack "
+        "has one. Set 0 to force the math decomposition, which is what a stack "
+        "without DTK's flash-attn library falls back to anyway",
     ),
     "FLAGOS_DISABLE_APEX_COMPAT": (
         SCOPE_RUNTIME,

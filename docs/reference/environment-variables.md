@@ -125,7 +125,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for the DCU runtime |
 | `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence), for deliberately testing a non-matching wheel pair |
-| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `0` (off) | Keep the fused SDPA backends enabled on DCU. The default disables flash/mem-efficient SDPA so `scaled_dot_product_attention`'s own choice agrees with the only kernel this stack can execute |
+| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | On DCU, point DTK's SDPA selector at its CUTLASS flash adapter when the stack has one, instead of forcing the math decomposition. A stack without DTK's flash-attn library falls back to math on its own. Set `0` to force math everywhere. This is a capability switch, not a route switch: `scaled_dot_product_attention` stays a `cuda` route in `backends_dcu.conf`, and `FLAGOS_OP_scaled_dot_product_attention=flaggems` is the (measured-slower) FlagGems alternative |
 | `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable the optional Apex multi-tensor compatibility layer; see the Apex note below |
 | `FLAGOS_DIST_FORCE_NCCL` | Test | `0` (off) | In the manual MetaX distributed tests, skip FlagCX and use NCCL |
 | `FLAGOS_DCU_SKIP_LEGACY_SMOKE` | Test | `0` (off) | In `.github/scripts/set_env_dcu.sh`, skip the legacy-mode smoke path (`FLAGOS_DCU_VENDOR_CORE=1`) after the decoupled gates have run |
