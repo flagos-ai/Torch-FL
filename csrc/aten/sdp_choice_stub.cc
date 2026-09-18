@@ -28,6 +28,25 @@
 // never taken. Nothing about the composite is hardcoded here: shapes the vendor
 // selector refuses fall back to its own math path exactly as on the CUDA route.
 //
+// That boxed route is what every conf gets by default. A platform whose conf
+// routes scaled_dot_product_attention to flaggems takes FlagGems' Triton fused
+// attention instead, for the calls that kernel implements -- see
+// FlagGemsEligible() for the bounds and METAX_COMPOSITE_FLAGGEMS in
+// scripts/codegen/gen_vendor_confs.py for the MetaX measurement behind the one
+// conf that asks for it. Everything else keeps the boxed route: the calls
+// outside those bounds, the other boxing confs (which name the op `cuda`), and
+// the confs that do not name it at all (backends_cuda.conf, TsingMicro).
+// HasBackendForOp() is what keeps that last case out of the route, because an
+// unlisted op reads as flaggems -- the right default for the generated leaf
+// kernels, the wrong reading of silence for a route that has to be measured on
+// each platform. Turning it off is FLAGOS_OP_scaled_dot_product_attention=cuda
+// at runtime or one line of the generator's measured set at build time.
+//
+// Like every other hand-written wrapper in this tree (register.cc's
+// WrapperMatmul), this one reads the conf and not FLAGOS_FORCE_BACKEND: that
+// variable is the Dispatcher's cohort switch, and a wrapper that never dispatches
+// is not covered by it.
+//
 // Scope: inference only. Under grad mode with a grad-requiring input the wrapper
 // falls through to the composite on the flagos tensors (the pre-change math
 // decomposition over autograd-aware leaf kernels), because a boxed CUDA forward
@@ -48,13 +67,94 @@
 
 #include <optional>
 
+#include "common.h"
 #include "device_boxing.h"
+
+#ifdef FLAGOS_FLAGGEMS_PYTHON
+#include "backends/flagos/python_op_caller.h"
+#endif
 
 #if !defined(USE_ASCEND) && !defined(USE_GCU) && !defined(USE_MUSA) && \
     !defined(USE_BPU)
 
 namespace at::flagos {
 namespace {
+
+#ifdef FLAGOS_FLAGGEMS_PYTHON
+// The route below exists only when the FlagGems Python path is compiled in, so
+// the guard goes around the helpers as well: on a build without it there is no
+// route for them to describe, and an unguarded definition would be an unused
+// function rather than dead code the compiler can see through.
+//
+// Whether a call is inside the class the FlagGems route was measured on. The two
+// groups are kept apart because they fail differently: outside the requirements
+// the kernel returns the wrong answer or raises, outside the envelope it is
+// merely unmeasured -- and an unmeasured call keeps the boxing path rather than
+// acquiring a new one.
+//
+// Requirements. scaled_dot_product_attention_forward reads stride(0..3) of all
+// three operands, so they must be 4-D; it walks one kv length, so key and value
+// must have the same shape; it asserts equal head dims, equal q/kv head counts
+// and dropout_p == 0; and it takes a mask to be 4-D when one is present, so an
+// ATen-legal broadcast 2-D mask would index past the end.
+//
+// Envelope. The class .sdpaend.py patched in Python to take the MetaX
+// measurement this route exists for: bf16, head_dim 128, query seq >= 1024,
+// non-causal, no mask, no gqa, no dropout, no explicit scale -- Qwen-Image-2512's
+// joint attention (q(1, 24, 4114, 128), 120 calls/step), which is what
+// METAX_COMPOSITE_FLAGGEMS records. The clauses are the probe's predicate one for
+// one, so the two can be diffed; nothing else about the call is asserted, and
+// widening any clause is a measurement rather than an edit. head_dim in
+// particular: an _attn_fwd tile's shared-memory block grows with BLOCK_DMODEL,
+// and the autotune set keep() admits (flag_gems/ops/attention.py:173) is capped
+// at BLOCK_N <= 32, so the tile cannot be traded down to fit. At head_dim 128
+// some admitted configurations already exceed this part's 65536 B limit -- one
+// asks for 98304 B, which is the number the compiler's OutOfResources names --
+// while a legal tile remains, so the op runs there; at the VAE's head_dim 512 the
+// same code path reports 294912 B and nothing in the set fits, so the kernel has
+// no configuration to compile on this part and the call keeps the boxing route.
+// The clause is drawn where the route was measured, not where the kernel could be
+// argued to fit.
+//
+// No grad clause, unlike the probe's predicate: the fall-through above already
+// sends grad-requiring calls to the composite, and under grad mode with no input
+// requiring grad both routes return the same tensor, because autograd builds no
+// node for either.
+constexpr int64_t kRoutedHeadDim = 128;
+constexpr int64_t kRoutedMinQuerySeq = 1024;
+
+bool FlagGemsEligible(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const std::optional<at::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    std::optional<double> scale,
+    bool enable_gqa) {
+  // Requirements.
+  if (query.dim() != 4 || key.sizes() != value.sizes()) {
+    return false;
+  }
+  if (query.size(3) != key.size(3) || query.size(1) != key.size(1)) {
+    return false;
+  }
+  if (attn_mask.has_value() || dropout_p != 0.0 || enable_gqa) {
+    return false;
+  }
+  // Envelope.
+  if (query.size(3) != kRoutedHeadDim || is_causal || scale.has_value() ||
+      query.size(2) < kRoutedMinQuerySeq) {
+    return false;
+  }
+  if (query.scalar_type() != at::kBFloat16 ||
+      key.scalar_type() != at::kBFloat16 ||
+      value.scalar_type() != at::kBFloat16) {
+    return false;
+  }
+  return true;
+}
+#endif // FLAGOS_FLAGGEMS_PYTHON
 
 at::Tensor WrapperScaledDotProductAttention(
     const at::Tensor& query,
@@ -80,6 +180,45 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#ifdef FLAGOS_FLAGGEMS_PYTHON
+  // FlagGems route, when the conf asks for it (see the file header). Both halves
+  // are load-bearing: HasBackendForOp() keeps a conf that never names this op on
+  // the boxing path -- an unlisted op reads as kFlagGems, which is the right
+  // default for the generated leaf kernels and would be the wrong reading of
+  // silence here -- and FlagGemsEligible() keeps the calls the Triton kernel was
+  // not measured on there as well.
+  if (at::native::flagos::HasBackendForOp("scaled_dot_product_attention") &&
+      at::native::flagos::GetBackendForOp("scaled_dot_product_attention") ==
+          at::native::flagos::Backend::kFlagGems &&
+      FlagGemsEligible(query, key, value, attn_mask, dropout_p, is_causal,
+                       scale, enable_gqa)) {
+    // Pass every argument rather than only those that differ from FlagGems'
+    // defaults: the guard above is this route's contract, so relaxing it later
+    // must not leave the old constants being forwarded silently.
+    at::Tensor result = at::native::flagos::CallPythonOp_GenericKw(
+        "flag_gems.scaled_dot_product_attention",
+        {query, key, value},
+        {
+            at::native::flagos::PyKwarg{"attn_mask",
+                                        c10::IValue(),
+                                        /*is_dtype=*/false,
+                                        /*is_none=*/true},
+            at::native::flagos::PyKwarg{"dropout_p", c10::IValue(dropout_p)},
+            at::native::flagos::PyKwarg{"is_causal", c10::IValue(is_causal)},
+            at::native::flagos::PyKwarg{
+                "scale",
+                scale.has_value() ? c10::IValue(*scale) : c10::IValue(),
+                /*is_dtype=*/false,
+                /*is_none=*/!scale.has_value()},
+            at::native::flagos::PyKwarg{"enable_gqa", c10::IValue(enable_gqa)},
+        });
+    // Same contract as the generated FlagGems kernels
+    // (csrc/aten/generated/flaggems_python_kernels.cc): a tensor crossing back
+    // from Python is unboxed explicitly, whatever device it claims.
+    at::native::flagos::UnboxToFlagos(result);
+    return result;
+  }
+#endif
   // DeviceBoxingGuard records raw TensorImpl* and must only be handed named
   // lvalues that outlive the guard, so the optional mask is bound to a local
   // first. An undefined mask Tensor is left untouched by the guard (matching the

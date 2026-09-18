@@ -257,7 +257,9 @@ outside a FlagTree environment.
 
 ## FlagGems on MetaX
 
-The MetaX boxing wheel compiles the FlagGems Python dispatch slot by default, and `backends_metax.conf` is FlagGems-first and is the only conf a MetaX boxing build ships. `import torch_fl` therefore routes 592 of the conf's 2036 ops to the FlagGems Python path and 12 to the FlagGems C++ path on its own; the rest fall back to the CUDA boxing kernel (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and other ops `triton-metax` cannot compile — FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects).
+The MetaX boxing wheel compiles the FlagGems Python dispatch slot by default, and `backends_metax.conf` is FlagGems-first and is the only conf a MetaX boxing build ships. `import torch_fl` therefore routes 592 of the conf's 2037 ops to the FlagGems Python path and 12 to the FlagGems C++ path on its own; the rest fall back to the CUDA boxing kernel (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and other ops `triton-metax` cannot compile — FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects).
+
+One of the 592 is not a leaf op: `scaled_dot_product_attention` is a composite, and its conf key is read by the private-use kernel itself rather than by the dispatcher, so the route is taken only for the shapes `FlagGemsEligible` in `csrc/aten/sdp_choice_stub.cc` admits — bf16, 4-D, head_dim 128, sequence length 1024 or more, and no mask, causal flag or `scale`. Every other shape falls through to the boxing kernel under the same conf key. Set `FLAGOS_OP_scaled_dot_product_attention=cuda` to take the boxing route everywhere.
 
 There is no switch that turns this on: routing is a property of the build (`torch_fl/__init__.py:_select_backend_config`), not of an environment variable. The practical consequence is that FlagGems is a runtime **dependency** rather than an option — an op routed to a FlagGems backend whose callable is absent raises at dispatch instead of falling back to boxing.
 
@@ -340,7 +342,7 @@ is involved any more.
 
 ### FlagGems: `ModuleNotFoundError: No module named 'flag_gems'`
 
-**Cause:** `backends_metax.conf` routes 592 ops to the FlagGems Python path by default, and `csrc/aten/backends/flagos/python_op_caller.cc:GetFunc` resolves each kernel by `getattr` on `flag_gems` at dispatch time. Without the package those routes raise rather than fall back to boxing.
+**Cause:** `backends_metax.conf` routes 592 ops to the FlagGems Python path by default — 591 leaf ops plus the `scaled_dot_product_attention` composite described in *FlagGems on MetaX* — and `csrc/aten/backends/flagos/python_op_caller.cc:GetFunc` resolves each kernel by `getattr` on `flag_gems` at dispatch time. Without the package those routes raise rather than fall back to boxing. The composite is the one route that can be turned off without the package: `FLAGOS_OP_scaled_dot_product_attention=cuda` returns it to the CUDA boxing kernel and leaves every other route alone.
 
 **Fix:** Install FlagGems and a MetaX FlagTree Triton as shown in *FlagGems on MetaX* above. When reusing a copy that is already on the machine, check that it resolves the names rather than that it reports a version: an editable source tree reports `flag_gems.__version__ == "0.0.0"`.
 

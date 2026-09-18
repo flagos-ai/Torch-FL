@@ -468,6 +468,11 @@ Backend GetBackendForOp(const std::string& op_name) {
   return it != table.end() ? it->second : Backend::kFlagGems;
 }
 
+bool HasBackendForOp(const std::string& op_name) {
+  const auto& table = BackendTable();
+  return table.find(op_name) != table.end();
+}
+
 bool FlagGemsRejectsDtype(at::ScalarType dtype) {
 #if defined(USE_ASCEND)
   // See the declaration in common.h for the measurement. float64 is the only

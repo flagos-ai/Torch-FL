@@ -149,6 +149,17 @@ VENDORS = {
 # entry has to be here or the fused kernel is unreachable.
 EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}}
 
+# Ops a hand-written wrapper claims for every platform, so they appear in no
+# .inc at all. Same cause as EXTRA_NATIVE, different owner:
+# csrc/aten/sdp_choice_stub.cc registers aten::scaled_dot_product_attention on
+# PrivateUse1 for the CUDA-boxing builds, and that override reads this conf to
+# choose between the FlagGems path and the boxing path -- so the entry has to be
+# here or the choice is unreachable. It cannot be routed as its leaf ops like
+# every other entry: scaled_dot_product_attention is a composite whose
+# fused-backend selection runs *inside* the composite and then branches on
+# query.device().type(), so on PrivateUse1 the leaves are never consulted.
+EXTRA_ROUTED = {"scaled_dot_product_attention"}
+
 # CUDA-boxing platforms use the same four-key shape. Their fallback kernel is the
 # CUDA boxing kernel, so the `<vendor>` slot is spelled "cuda" and it covers
 # every op -- which is why a boxing conf has no `none` entries while a
@@ -1213,6 +1224,21 @@ METAX_FLAGGEMS_MEASURED = {
     "unsqueeze_",
 }
 
+# The hand-registered composite (EXTRA_ROUTED), on the platform that measured
+# it. Unlike METAX_FLAGGEMS_MEASURED these ops are not held from the shared
+# ceiling -- they are not in it at all, because they are not leaves any
+# generated kernel calls. The route is a whole-op override in
+# csrc/aten/sdp_choice_stub.cc, and MetaX is the only platform it has been run
+# on: measured on Qwen-Image-2512's joint attention (bf16, mask=None,
+# q(1,24,4114,128), 120 calls/step) as 78.49 s against 184.02 s for the boxing
+# route over a 50-step denoise loop, against a route-off control pair that is
+# bit-identical (0.0000/255) and a route-on image delta of 2.0461/255 -- the
+# same order as the 1.2575/255 the flagos wheel already differs from vendor
+# torch by. Every other platform keeps the boxing route, which is what the stub
+# does when the conf does not name FlagGems. See the stub's header for why the
+# composite has to be overridden whole rather than routed leaf by leaf.
+METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
+
 # FlagGems coverage that arrived from a discovery widening rather than from a
 # measurement on the native-kernel vendors, and the vendors that therefore keep
 # the routes their own last FlagGems run measured.
@@ -1475,13 +1501,17 @@ def boxing_measured_python_ops(filename: str) -> set:
     platform -- a cohort claim that only the platform holding the matching
     FlagGems build can discharge. MetaX has, so it routes them; see
     METAX_FLAGGEMS_MEASURED for the measurement and for why the hold stays
-    elsewhere.
+    elsewhere. METAX_COMPOSITE_FLAGGEMS is outside the ceiling for a different
+    reason -- it is a composite no coverage scan could see -- but it is a
+    measurement held the same way.
 
     Returning them from here rather than widening the coverage set is what keeps
-    the other platforms' confs byte-identical: a platform not named below gains
-    nothing from a measurement taken on this one.
+    a measurement taken on one platform from becoming a route on another: a
+    platform not named below gains nothing from it.
     """
-    return METAX_FLAGGEMS_MEASURED if filename == "backends_metax.conf" else set()
+    if filename != "backends_metax.conf":
+        return set()
+    return METAX_FLAGGEMS_MEASURED | METAX_COMPOSITE_FLAGGEMS
 
 
 def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
@@ -1659,6 +1689,10 @@ def build_all(conf_dir: Path) -> dict:
             file=sys.stderr,
         )
         all_ops |= extra
+
+    # Same argument as the vendor-only widening above, for an op a hand-written
+    # wrapper owns on every platform; see EXTRA_ROUTED.
+    all_ops |= EXTRA_ROUTED
 
     out = {}
     for vendor in VENDORS:

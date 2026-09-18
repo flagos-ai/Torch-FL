@@ -16,7 +16,7 @@
 Real MetaX coverage for the MetaX FlagGems hybrid path.
 
 ``backends_metax.conf`` is FlagGems-first: 12 of the ops torch_fl can route go
-to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 591 go to
+to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 592 go to
 ``flaggems`` (the FlagGems Python/Triton path, ``Backend::kFlagGems``), and only
 the ops measured not to work there fall back to the cuda boxing kernel (maca
 ``libtorch_cuda``). This file pins both halves of that decision on hardware, the
@@ -103,6 +103,7 @@ Usage:
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -142,7 +143,7 @@ _PRELUDE = (
 # names: `flagos_python` is the Python/Triton path (``flag_gems.<fn>``, conf key
 # `flaggems`) and `flagos` is the C++ path (conf key `flaggems_cpp`). Embedding
 # is in `_ROUTED_TO_FLAGGEMS` on the C++ slot; the other 30 are on the Python
-# one, which is the path whose 591 routes this file exists to guard. Seven of
+# one, which is the path whose 592 routes this file exists to guard. Seven of
 # the 30 -- the ones below the tensor-factory group -- come from
 # METAX_FLAGGEMS_MEASURED rather than the shared coverage set; see the module
 # docstring.
@@ -356,8 +357,11 @@ _FORCED_OFF_DISPATCH = {
 
 # Measured number of `flaggems` routes in backends_metax.conf. A regression guard
 # rather than an exact contract: the count only moves when an op is added,
-# removed, or re-measured, and each of those is a deliberate change.
-_MEASURED_FLAGGEMS_ROUTES = 591
+# removed, or re-measured, and each of those is a deliberate change. The 592nd is
+# `scaled_dot_product_attention`, the only composite in the count and the only
+# entry whose route the dispatcher does not take on its own -- the kernel that
+# serves the conf key reads the key itself. See TestMetaXFlaggemsSdpaRoute.
+_MEASURED_FLAGGEMS_ROUTES = 592
 
 _DISPATCH_LINE = re.compile(r"\[flagos dispatch\] (\S+) -> (\S+)")
 
@@ -683,3 +687,226 @@ class TestMetaXFlaggemsExclusions:
             f"{op} dispatched to {routes[op]}; it is pinned to the boxing kernel "
             "because the FlagGems kernel raises on a flagos tensor"
         )
+
+
+# The FlagGems SDPA route is the one conf entry the dispatcher does not select
+# for itself. `csrc/aten/sdp_choice_stub.cc` registers one PrivateUse1 kernel for
+# the composite under every conf, and that kernel reads `GetBackendForOp` to
+# decide between the FlagGems callable and the boxing kernel -- so the conf text
+# cannot say which arm a call took (both arms are served by the same key) and
+# neither can the dispatch log (there is no route to print; the kernel *is* the
+# route).
+#
+# The oracle is therefore the callable the FlagGems arm calls.
+# `PythonOpCache::GetFunc` resolves `flag_gems.scaled_dot_product_attention` with
+# a package import plus a `getattr`, memoized per qualname for the life of the
+# process, so a counter installed on the package before the first call is the
+# callable the route calls -- and a fresh interpreter is what makes "before the
+# first call" true, for the same reason `_run_logged` runs one.
+_SDPA_ORACLE = (
+    "import flag_gems\n"
+    "_sdpa_calls = []\n"
+    "_sdpa_real = flag_gems.scaled_dot_product_attention\n"
+    "def _sdpa_counting(*args, **kwargs):\n"
+    "    _sdpa_calls.append(tuple(tuple(t.shape) for t in args))\n"
+    "    return _sdpa_real(*args, **kwargs)\n"
+    "flag_gems.scaled_dot_product_attention = _sdpa_counting\n"
+    "\n"
+    # The host reference moves the arguments back rather than rebuilding them, so
+    # both arms of every case see the same values, and an additive mask moves
+    # with them (a bool mask would have to keep its dtype to keep its meaning).
+    "def host_ref(q, k, v, kw):\n"
+    "    moved = {n: (t.cpu().float() if torch.is_tensor(t) else t)\n"
+    "             for n, t in kw.items()}\n"
+    "    return torch.nn.functional.scaled_dot_product_attention(\n"
+    "        q.float().cpu(), k.float().cpu(), v.float().cpu(), **moved)\n"
+    "\n"
+    "def run_case(tag, build, kw):\n"
+    "    q, k, v = build()\n"
+    "    ref = host_ref(q, k, v, kw)\n"
+    "    before = len(_sdpa_calls)\n"
+    "    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, **kw)\n"
+    "    routed = len(_sdpa_calls) - before\n"
+    "    diff = (out.float().cpu() - ref).abs().max().item()\n"
+    "    print(f'RESULT {tag} routed={routed} maxdiff={diff:.6f} "
+    "device={out.device}')\n"
+)
+
+# The cases, and what each one is. `joint()` is the shape Qwen-Image-2512's joint
+# attention has -- bf16, 4-D, head_dim 128, seq 1024, no mask -- and it is the one
+# shape in the set the envelope admits. Every other case differs from it in
+# exactly one respect, so a failing assertion names the clause that let a call
+# through. The mask is additive and all-zero, i.e. numerically a no-op: what the
+# case checks is that a mask *at all* keeps the call off the route, not that the
+# mask is honoured.
+_SDPA_CASES = (
+    "def joint():\n"
+    "    return tuple(\n"
+    "        torch.randn(1, 2, 1024, 128, device=DEVICE).to(torch.bfloat16)\n"
+    "        for _ in range(3))\n"
+    'run_case("eligible", joint, {})\n'
+    'run_case("head_dim64", lambda: tuple(\n'
+    "    torch.randn(1, 2, 1024, 64, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {})\n"
+    'run_case("seq512", lambda: tuple(\n'
+    "    torch.randn(1, 2, 512, 128, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {})\n"
+    'run_case("float32", lambda: tuple(\n'
+    "    torch.randn(1, 2, 1024, 128, device=DEVICE) for _ in range(3)), {})\n"
+    'run_case("float16", lambda: tuple(\n'
+    "    torch.randn(1, 2, 1024, 128, device=DEVICE).to(torch.float16)\n"
+    "    for _ in range(3)), {})\n"
+    'run_case("rank2", lambda: tuple(\n'
+    "    torch.randn(1024, 128, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {})\n"
+    'run_case("causal", joint, {"is_causal": True})\n'
+    'run_case("mask", joint,\n'
+    '         {"attn_mask": torch.zeros(1024, 1024, device=DEVICE,\n'
+    "                                   dtype=torch.bfloat16)})\n"
+    "print(f'SHAPES {_sdpa_calls}')\n"
+)
+
+# Case tag -> (calls that may reach the FlagGems kernel, the clause that decides
+# it). The count is per case, so a run where an ineligible case reaches the
+# kernel fails at that case rather than moving a global total.
+_SDPA_CASES_EXPECTED = {
+    "eligible": (1, "bf16, 4-D, head_dim 128, seq 1024, no mask"),
+    "head_dim64": (0, "head_dim 64, which `_attn_fwd` tiles differently"),
+    "seq512": (0, "seq 512, under the 1024 the route requires"),
+    "float32": (0, "float32, and the route is bf16-only"),
+    "float16": (0, "float16, and the route is bf16-only"),
+    "rank2": (0, "2-D input, and the route requires the 4-D call form"),
+    "causal": (0, "is_causal, which the FlagGems entry point does not take"),
+    "mask": (0, "an attn_mask, which the FlagGems entry point does not take"),
+}
+
+# Max |device - host| for the bf16 route against a float32 host reference. The
+# bf16 rounding of the inputs already moves the logits by ~2e-2; softmax turns
+# that into far less on an output of magnitude ~3e-2.
+_SDPA_DIFF_BOUND = 2e-2
+
+_SDPA_RESULT = re.compile(
+    r"^RESULT (\S+) routed=(\d+) maxdiff=([0-9.eE+-]+) device=(\S+)$",
+    re.MULTILINE,
+)
+_SDPA_SHAPES = re.compile(r"^SHAPES (.+)$", re.MULTILINE)
+
+
+def _run_sdpa_cases(
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run every case in one fresh interpreter and print a parseable report."""
+    code = (
+        "import torch\n"
+        "import torch_fl\n"
+        f"DEVICE = {DEVICE!r}\n"
+        "torch.manual_seed(1729)\n"
+        f"{_SDPA_ORACLE}"
+        f"{_SDPA_CASES}"
+    )
+    env = os.environ.copy()
+    # The shipped conf is the arm without an override; an inherited value would
+    # silently make every case the other arm.
+    env.pop("FLAGOS_OP_scaled_dot_product_attention", None)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+
+
+def _sdpa_report(result: subprocess.CompletedProcess):
+    """(per-case (routed, maxdiff, device), the shapes the kernels saw)."""
+    report = {
+        tag: (int(routed), float(diff), device)
+        for tag, routed, diff, device in _SDPA_RESULT.findall(result.stdout)
+    }
+    assert set(report) == set(_SDPA_CASES_EXPECTED), (
+        "the probe did not report every case: "
+        f"{sorted(report)} against {sorted(_SDPA_CASES_EXPECTED)}\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    shapes = _SDPA_SHAPES.findall(result.stdout)
+    assert len(shapes) == 1, f"expected one SHAPES line\n{result.stdout}"
+    return report, ast.literal_eval(shapes[0])
+
+
+@pytest.fixture(scope="module")
+def sdpa_shipped():
+    """The shipped ``backends_metax.conf``, with no environment override."""
+    _require_metax_flaggems()
+    result = _run_sdpa_cases()
+    assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
+    return _sdpa_report(result)
+
+
+@pytest.fixture(scope="module")
+def sdpa_switched_off():
+    """The same cases with the documented runtime switch set."""
+    _require_metax_flaggems()
+    result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "cuda"})
+    assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
+    return _sdpa_report(result)
+
+
+class TestMetaXFlaggemsSdpaRoute:
+    """``scaled_dot_product_attention`` is routed on the envelope, not the key.
+
+    The route exists because the MetaX boxing kernel has no memory-efficient
+    attention to fall back on (``Torch was not compiled with memory efficient
+    attention``), so the composite materialises the full attention matrix. The
+    FlagGems ``_attn_fwd`` kernel does not, which is what the route buys; the
+    envelope in ``FlagGemsEligible`` is what bounds the risk of taking it. The
+    two things asserted here are the two that can go wrong: a call the envelope
+    admits must take the route, and a call it refuses must not.
+    """
+
+    @pytest.mark.parametrize("tag", sorted(_SDPA_CASES_EXPECTED))
+    def test_route_follows_the_envelope(self, sdpa_shipped, tag):
+        report, _ = sdpa_shipped
+        want, why = _SDPA_CASES_EXPECTED[tag]
+        routed, diff, device = report[tag]
+        assert routed == want, (
+            f"{tag} ({why}): {routed} call(s) reached the FlagGems kernel, "
+            f"expected {want}. Either FlagGemsEligible in "
+            "csrc/aten/sdp_choice_stub.cc admits this shape, or it admits "
+            "nothing and the conf does not route the op"
+        )
+        assert diff <= _SDPA_DIFF_BOUND, (
+            f"{tag} ({why}): the result differs from the host reference by "
+            f"{diff:.6f}, over the {_SDPA_DIFF_BOUND} bound"
+        )
+        assert device == DEVICE, f"{tag}: the result is on {device}, not {DEVICE}"
+
+    def test_only_the_joint_attention_shape_reaches_the_kernel(self, sdpa_shipped):
+        """The shapes the FlagGems kernel saw, in order, across all eight cases.
+
+        The count above says how many calls took the route; this says they were
+        the calls that were meant to, on the arguments the envelope is written
+        around.
+        """
+        _, shapes = sdpa_shipped
+        # One call, on its own q, k and v: the probe records each call as a
+        # three-tuple of argument shapes, so the eligible case contributes a
+        # single three-tuple to the list.
+        expected = [((1, 2, 1024, 128),) * 3]
+        assert shapes == expected, (
+            f"the FlagGems SDPA kernel was called with {shapes}; only the "
+            "eligible case may reach it, and only with its own q, k, v"
+        )
+
+    def test_off_switch_returns_every_call_to_the_boxing_route(self, sdpa_switched_off):
+        """``FLAGOS_OP_scaled_dot_product_attention=cuda`` is the whole switch.
+
+        The same conf is in use in both arms -- only this variable differs -- so
+        this is also the check that the eligible case's route came from the conf
+        key and not from the shape alone.
+        """
+        report, shapes = sdpa_switched_off
+        assert shapes == [], f"the FlagGems kernel ran with the switch off: {shapes}"
+        off = {tag: row[0] for tag, row in report.items()}
+        assert set(off.values()) == {0}, f"routes with the switch off: {off}"

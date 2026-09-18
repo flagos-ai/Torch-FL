@@ -54,6 +54,18 @@ enum class Backend {
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);
 
+// True when the conf names `op_name` at all, i.e. whether the value above is
+// the file's routing decision or the unlisted default. Most callers do not need
+// this: for a generated leaf kernel the two are equivalent, because the
+// default and the absence of an override lead to the same kernel. It matters
+// for an op whose FlagGems support is per-platform and opt-in by measurement --
+// a conf that predates that route, or a third party's, has not asked for it, so
+// "unlisted" has to keep the pre-existing path instead of silently acquiring a
+// new one. A caller that reads false must therefore do what the op did before
+// the FlagGems route existed, not pick a default of its own; see
+// csrc/aten/sdp_choice_stub.cc.
+bool HasBackendForOp(const std::string& op_name);
+
 // Record the conf path Python resolved at import time. Must be called before
 // the first op dispatch, which is when the table is built. It is not written to
 // os.environ: the wheel's own selection has to stay distinguishable from a

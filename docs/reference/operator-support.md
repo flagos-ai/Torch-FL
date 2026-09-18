@@ -72,12 +72,16 @@ configuration activates 546 as `flagos_python` and forces 26 to CUDA fallback,
 which explains the 546-route survey denominator.
 
 **The shipped tree has moved on from this cohort.** The harness in
-`tests/manual/flaggems_overload_survey.py` is now version 5 (SHA-256
-`cfd09e50b915700cc39d2a78e7076e8008e3f24d1c16187529d4dc40e2b201bd`), and the
+`tests/manual/flaggems_overload_survey.py` is version 6 (SHA-256
+`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`), and the
 shared coverage set has been widened to 639 overloads on the FlagGems master
 cohort (`5a58df410`), which is what the MetaX configuration below is measured
 against. The four hardware rows in this section were **not** re-measured against
 that cohort and remain the `fe2272b5` / `7fb49bad` baseline, as the table says.
+The harness version and hash above are the ones this tree ships; every measurement
+recorded against "harness version 5, SHA-256 `cfd09e50…`" by an earlier revision
+of this report was taken with the same version 6 file, because no version 5 of
+this harness exists in the repository history.
 
 ## Hardware Summary
 
@@ -157,6 +161,173 @@ not misrepresented as part of the 546-overload FlagGems cohort. A change against
 a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
+
+### MetaX: `scaled_dot_product_attention` routed to FlagGems (2026-09-18, MetaX C550)
+
+`scaled_dot_product_attention` is a `flaggems` route in `backends_metax.conf`,
+which now reads **592 `flaggems` / 12 `flaggems_cpp` / 1433 `cuda`** over a
+**2037**-op list (SHA-256
+`bb1dc5c4550339dcd44ac438b2981e703c882025e477221e86cac37d833f58f2`), superseding
+the 591 / 12 / 1433 over 2036 ops the `slice.Tensor` entry below records. Every
+op in the list is still accelerated. MetaX still routes 584 of the 639 overloads
+in the raised FlagGems ceiling through the Python path and 12 through the C++
+slot, and still holds 43 on the cuda boxing kernel; this op is outside that
+ceiling, so those three numbers do not move.
+
+**Why the op is not a generated kernel.** `aten::scaled_dot_product_attention` is
+a composite, and the generated kernels this report otherwise counts are leaves.
+Its fused-backend selection runs *inside* the composite and then branches on
+`query.device().type()`, so on PrivateUse1 the leaves are never consulted and
+routing them per-op can never reach a fused kernel. The override that fixes that
+is hand-written — `csrc/aten/sdp_choice_stub.cc` registers the composite itself
+on PrivateUse1 and decides inside it — and it is registered only on the
+CUDA-boxing builds, which is why `EXTRA_ROUTED` in
+[`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py)
+exists: the op appears in no `.inc`, so no coverage scan can see it and the op
+list has to be widened by hand. A second hand-written set,
+`METAX_COMPOSITE_FLAGGEMS`, holds it from every other platform's conf exactly the
+way `METAX_FLAGGEMS_MEASURED` holds the measured leaf routes — a measurement
+taken on one platform is not a route for another.
+
+**Measured.** Eight-device C550 host, `flagtree 0.6.1+metax3.6`, MACA 3.8.0 in
+CUDA-boxing mode, `flag_gems 5.4.0rc2.post1+g5a58df410`, Triton 3.6.0 with the
+`metax` backend. Qwen-Image-2512, 1024x1024, 50-step denoise, one seed:
+
+- `run-on.json` / `run-off.json`, `build_pipeline` and placement held constant:
+  steady **78.49 s against 184.02 s**, first step 90.26 s against 189.34 s
+  (**2.34x**, 57.3% off the loop), with `pipeline_load_s` 134.74 in both arms.
+- The same window re-run as three arms that also write latents and pixels:
+  route active **84.46 s**, route off **183.68 s** and **182.39 s**.
+- Op level, `(1, 24, 4114, 128)` bf16, the shape the route serves, min of five
+  calls after warm-up: FlagGems `5.908 ms/call` against the boxing route's
+  `23.313 ms/call` (**3.95x**).
+
+**The envelope is the probe's predicate.** The route serves bf16, 4-D, head_dim
+128 exactly, query seq >= 1024, no mask, no causal, no explicit scale, no dropout,
+no gqa — Qwen-Image-2512's joint attention, 120 calls per denoise step. Nineteen
+calls bracket that shape on each side and every one of them takes the route the
+envelope says it should; `route hits: 6` of 19, the six being the joint shape and
+its seq-4096/2048/1024/non-contiguous variants:
+
+```text
+match q(1,24,4114,128) bf16  gems   gems    ok  out (1, 24, 4114, 128) bfloat16
+head_dim 64                  box    box     ok  out (1, 24, 4114, 64) bfloat16
+head_dim 256                 box    box     ok  out (1, 24, 4114, 256) bfloat16
+head_dim 512 (VAE)           box    box     ok  out (1, 24, 4114, 512) bfloat16
+seq 1023 (just under)        box    box     ok  out (1, 24, 1023, 128) bfloat16
+fp16 / fp32                  box    box     ok
+mask present / is_causal     box    box     ok
+scale given / dropout 0.1    box    box     ok
+gqa 24q/8kv enable_gqa       box    box     ok
+3-D operands                 box    box     ok  out (24, 4114, 128) bfloat16
+```
+
+**head_dim 128 is measured, not argued, in both directions.** At the VAE's
+head_dim 512 the FlagGems kernel has no configuration that compiles on this part:
+
+```text
+triton.runtime.errors.OutOfResources: out of resource: shared memory,
+Required: 294912, Hardware limit: 65536. Reducing block sizes or `num_stages` may help.
+```
+
+`attention.py:173` narrows `_attn_fwd`'s autotune set with `keep()` from
+`flag_gems/ops/flash_kernel.py` — the always-kept tiles `(128, 32, 4)` and
+`(128, 128, 8)` plus the 24 explicit `SMALL_HEAD_DIM_CONFIGS` (`BLOCK_M` in
+{64, 128} × `BLOCK_N` in {16, 32} × `num_stages` in {2, 3, 4} × `num_warps` in
+{4, 8}) — so every surviving configuration is capped at `BLOCK_N <= 32`, and an
+`_attn_fwd` tile's shared-memory block grows with `BLOCK_DMODEL`. At head_dim 128
+some admitted configurations are already over this part's limit (one asks for
+`98304` B against `65536`) while a legal tile remains, so the op runs; at 512 the
+same code path reports `294912` B and the whole surviving set is over the limit,
+so the failure is the tile set rather than one autotuner candidate. At head_dim 128 the same call completes and
+matches the unfused fp32 math path (`max 2.189e-05 mean 2.365e-06` over the same
+`(1, 24, 4114, 128)` operand). The clause is not the kernel's outer boundary: at
+head_dim 64 the same call also completes and matches the fp32 math path
+(`max 2.153e-05 mean 2.421e-06`), at `2.983 ms/call` for a direct
+`flag_gems.scaled_dot_product_attention` against `22.037 ms/call` for the same
+shape through the boxing route in a `FLAGOS_OP_scaled_dot_product_attention=cuda`
+arm, and a second arm at that head_dim, whose conf names `flaggems` while the
+head_dim clause turns the call back to boxing, agrees at `3.010` against
+`21.958 ms/call`. head_dim 128 is therefore the head_dim this route was measured
+at, not the largest the kernel accepts, and widening the clause is a measurement
+rather than an edit.
+
+**Numerics.** The three op-level arms load the same seeded operands — digest
+`37efe866eb24ada5` in all three — and write them out for comparison. The FlagGems
+route against the boxing route differs by `max 9.766e-04 mean 3.274e-05`, the
+delta of a fused bf16 attention against the vendor's own selection. The two
+boxing arms agree **exactly** (`max 0.000e+00 mean 0.000e+00`): one is
+`FLAGOS_OP_scaled_dot_product_attention=cuda` on the shipped conf, the other is a
+conf that never names the op, and a zero delta between them is what shows the
+unlisted op kept the boxing path instead of reading `kFlagGems` from
+`GetBackendForOp`'s table miss. That reading is what the new
+`HasBackendForOp()` in `csrc/aten/common.h` supplies, and it is why the route
+cannot arrive silently on a conf — or a third party's wheel — that predates it.
+Turning the route off is one line, at build time or at runtime
+(`FLAGOS_OP_scaled_dot_product_attention=cuda`).
+
+**Image cost, with its own control.** All three pixel arms share one seed and one
+window, so the two route-off arms bound what the window can resolve at all:
+
+| Comparison | max | mean (/255) | over 1/255 | over 4/255 |
+|---|---:|---:|---:|---:|
+| off#arm1 vs off#arm2 | 0.0000 | 0.00000 | 0 of 3145728 | 0 |
+| off#arm1 vs on#arm1 | 170.3320 | 2.04607 | 1150098 of 3145728 | 312147 |
+
+The measurement floor is exactly zero, so the whole second row is the route
+decision. Both route-off arms give identical numbers against the route-on arm.
+The prototype of this route, on the arms recorded in `sdpaend_img`, measured
+`1.39572` for route-off against route-on and `1.25745` for route-off against
+vendor torch — the same window, a different seed. The route's image cost is
+therefore of the same order as the flagos-vs-vendor difference the wheel already
+carries, which is a property of the route being taken and not of this change;
+the shipped figure is the `2.04607` above.
+
+**Survey.** `tests/manual/flaggems_overload_survey.py` (version 6, SHA-256
+`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`) was rerun on
+the C550 with `backends_metax.conf` and scoped to the changed route:
+`registered 1`, `tested 1`, and the verdict is **`FAILED`** — `basic_executable 0`,
+`strict_support 0`. The report must record that, and the cause is measured: the
+harness synthesizes this op's `dropout_p` as `0.5` — the argument is `float`, and
+`default_for()`'s `base in ("float", "Scalar")` branch ends in a catch-all
+`return 0.5` that names `p` but not `dropout_p` — and a dropout call is
+non-deterministic, so `max_diff` against the CPU reference is not a measurement
+of anything. Rerunning
+the same seven profiles with `dropout_p = 0.0` turns all four `WRONG` verdicts
+into `PASS` — `2d-f32` `1.4507` -> pass, `4d-f32` `3.3939` -> pass, `2d-f16`
+`1.5486` -> pass, `2d-f32-strided` `2.2727` -> pass — and the three
+`INVALID_CASE` profiles (`1d-f32`, `2d-i64`, `2d-bool`) stay CPU-reference
+rejections at either dropout, so they are neither passes nor failures. Every one
+of the four `WRONG` cases is also 2-D or otherwise outside the route's envelope,
+so none of them entered the FlagGems path at all: the `FAILED` verdict is the
+harness's, and it is the same verdict the op would draw on the boxing route. The
+harness defect is not fixed here; it is reported separately.
+
+**Guard tests.** `tests/integration/ops/test_metax_flaggems.py` gains
+`TestMetaXFlaggemsSdpaRoute`, and `_MEASURED_FLAGGEMS_ROUTES` moves 591 -> 592 to
+match the conf. Each arm runs every case in one fresh interpreter — the shipped
+conf, then the shipped conf with the documented switch set — and asserts the
+membership the envelope draws rather than that the op merely runs: one case is
+the joint attention's shape class (bf16, 4-D, head_dim 128, no mask) at the
+smallest seq the route admits, and each of the other seven differs from it in
+exactly one respect — head_dim 64, seq 512, float32, float16, 2-D, `is_causal`,
+an all-zero additive mask — so a case that reaches the kernel names the clause
+that let it through. The class also pins the shapes the kernel saw, bounds every
+case against a float32 host reference at `2e-2`, and checks that with the switch
+off the kernel is never called and no case reaches it. On the C550 that class
+reports **10 passed in 43.28s, 0 failed**, and the whole file reports
+**101 passed in 854.53s, 0 failed** (exit 0) with the route active, against the
+90- and 91-test cohorts the two MetaX entries below record.
+
+`gen_vendor_confs.py` is idempotent: two consecutive runs leave all nine confs
+byte-identical, and `--check` reports `all vendor confs up to date`. Ascend, GCU,
+MUSA, DCU and PPU are **not revalidated** and no route changed for them — each
+gained one line, `scaled_dot_product_attention` as `none` on ascend/gcu/musa and
+`cuda` on dcu/ppu, with SHA-256 `311445fd…`, `9d144ca4…`, `e62cac76…`,
+`dcd7b149…` and `e1f34144…` respectively. `backends_cuda.conf`,
+`backends_bpu.conf` and `backends_tsingmicro.conf` do not carry the op: the CUDA
+conf is written one line per generated wrapper and this op has none, TsingMicro's
+is a copy of CUDA's, and BPU's is intentionally empty.
 
 ### Enflame GCU S60 FlagGems routing (2026-09-15)
 
@@ -2140,11 +2311,14 @@ the MetaX measurement of it.
 **Provenance.** MetaX C550 (eight devices), MACA 3.8.0 in CUDA-boxing mode,
 `flag_gems 5.4.0rc2.post1+g5a58df410`, `flagtree 0.6.1+metax3.6`, Triton 3.6.0
 with the `metax` backend, `tests/manual/flaggems_overload_survey.py` harness
-version 5, SHA-256
-`cfd09e50b915700cc39d2a78e7076e8008e3f24d1c16187529d4dc40e2b201bd` as shipped.
+version 6, SHA-256
+`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7` as shipped.
 (The revision that produced the rows below was identical apart from the
 illustrative route count its module docstring quotes, which is not read by any
-code path; the hash above is the one an auditor can reproduce from this tree.)
+code path; the hash above is the one an auditor can reproduce from this tree.
+An earlier revision of this entry recorded version 5 and a different hash for
+the same file; no version 5 exists in the repository history, and the blob at
+the revision these rows were measured on is the version 6 hash above.)
 
 **Screening survey.** 166 overloads changed route in `backends_metax.conf` when
 the set was widened. All 166 were run through the survey's `2d-f32` profile
@@ -2593,6 +2767,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-18 | MetaX C550 (8 devices) | MetaX composite SDPA routed to FlagGems (hand-written whole-op override, outside the 639-overload ceiling) | `aten::scaled_dot_product_attention` became a `flaggems` route in `backends_metax.conf`, taking the file to **592 `flaggems` / 12 `flaggems_cpp` / 1433 `cuda`** over a **2037**-op list (SHA-256 `bb1dc5c4550339dcd44ac438b2981e703c882025e477221e86cac37d833f58f2`), superseding 591 / 12 / 1433 over 2036. The op cannot be routed leaf by leaf: it is a composite whose fused-backend selection runs *inside* it and then branches on `query.device().type()`, so on PrivateUse1 the generated leaves are never consulted and no per-op route can reach a fused kernel. The override is hand-written — `csrc/aten/sdp_choice_stub.cc` registers the composite itself on PrivateUse1 and decides inside it — and it is registered only on the CUDA-boxing builds, which is why `gen_vendor_confs.py` gains `EXTRA_ROUTED` (an op that appears in no `.inc` is invisible to every coverage scan, so the op list has to be widened by hand) and `METAX_COMPOSITE_FLAGGEMS` to hold it from every other platform's conf the way `METAX_FLAGGEMS_MEASURED` holds the measured leaf routes. It is gated on a new `HasBackendForOp()` in `csrc/aten/common.h`, which tells a conf that names the op from one that is silent about it: without it the op would read `kFlagGems` from `GetBackendForOp`'s table-miss default, and a conf written before this change — including a third party's wheel — would take the route silently. The envelope is bf16, 4-D, head_dim 128 exactly, query seq >= 1024, no mask, no causal, no explicit scale, no dropout, no gqa; every shape outside it falls through to the pre-existing boxing path. Ascend, GCU, MUSA, DCU and PPU are **not revalidated** — each gained exactly one line, `none` on ascend/gcu/musa and `cuda` on dcu/ppu, and no measurement transfers to them. | Qwen-Image-2512, 1024x1024, 50-step denoise, one seed, on the 8-device C550 host with `flagtree 0.6.1+metax3.6`, MACA 3.8.0 in CUDA-boxing mode, `flag_gems 5.4.0rc2.post1+g5a58df410` and Triton 3.6.0 (`metax`). Pipeline, `build_pipeline` and placement held constant: steady **78.49 s against 184.02 s**, first step 90.26 s against 189.34 s (**2.34x**, 57.3% off the loop), `pipeline_load_s` 134.74 in both arms; the same window re-run as three arms that also write latents and pixels gives 84.46 s with the route active against 183.68 s and 182.39 s with it off. Op level at the shape the route serves, `(1, 24, 4114, 128)` bf16, min of five calls after warm-up: FlagGems `5.908 ms/call` against the boxing route's `23.313 ms/call` (**3.95x**). A 19-clause envelope probe reports `route hits: 6` — the joint shape and its seq-4096/2048/1024/non-contiguous variants — while head_dim 64/256/512, seq 1023, fp16, fp32, 2-D, 3-D, mask, `is_causal`, scale, dropout and gqa all box. Head_dim is measured in both directions: at 512 the kernel has no configuration that compiles on this part (`triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 294912, Hardware limit: 65536`, against an autotune set `attention.py:173` caps at `BLOCK_N <= 32`), while 128 and 64 both complete and match the unfused fp32 math path (`max 2.189e-05 mean 2.365e-06` and `max 2.153e-05 mean 2.421e-06`), so 128 is where the route was measured and not the kernel's outer boundary. Numerics over the same seeded operands (digest `37efe866eb24ada5` in all three arms): route against boxing `max 9.766e-04 mean 3.274e-05`, and the two boxing arms — `FLAGOS_OP_scaled_dot_product_attention=cuda` on the shipped conf and a conf that never names the op — agree exactly (`max 0.000e+00 mean 0.000e+00`), which is the measurement of the `HasBackendForOp()` rule. Image cost with its own control in the same window: the two route-off arms differ by `max 0.0000 mean 0.00000`, and route-on against them by `max 170.3320 mean 2.04607 (/255)`, 1150098 of 3145728 pixels over 1/255 and 312147 over 4/255, against the prototype arms' `1.39572` route effect and `1.25745` flagos-vs-vendor. Survey: `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22c…`) scoped to the changed route reports `registered 1`, `tested 1`, verdict **`FAILED`**, `basic_executable 0`, `strict_support 0`; the cause is measured as the harness's `default_for()` catch-all `return 0.5` synthesizing `dropout_p = 0.5` (the argument's name is `dropout_p` but the branch ends on `return 0.5`, which names `p`), and the same seven profiles at `dropout_p = 0.0` turn all four `WRONG` verdicts into `PASS` with the three `INVALID_CASE` profiles unchanged — and none of the four is inside the route's envelope, so the verdict is the harness's and not the route's. Regression coverage: `tests/integration/ops/test_metax_flaggems.py` gains `TestMetaXFlaggemsSdpaRoute` and `_MEASURED_FLAGGEMS_ROUTES` moves 591 -> 592. On the C550 host with the route active the whole file reports **101 passed in 854.53s, 0 failed** (exit 0), the class subset **10 passed in 43.28s**, against 90- and 91-test cohorts on the two entries below. `gen_vendor_confs.py` idempotent (two runs, all nine confs byte-identical; `--check` reports `all vendor confs up to date`). Full detail: "MetaX: `scaled_dot_product_attention` routed to FlagGems" above. |
 | 2026-09-16 | MetaX C550 (8 devices) | FlagGems `slice` dtype assertion, found by Qwen-Image-2512 | `slice.Tensor` moved from `flaggems` to `cuda` in `backends_metax.conf`: 592 `flaggems` / 12 `flaggems_cpp` / 1432 `cuda` -> **591 / 12 / 1433** (SHA-256 `0d6be6d0fb3aff0aa26293ddf8719bb0f811ea50acbba8a62d02a833b8b154a3`), so the measured Python cohort moves 585 -> 584 and the cuda boxing hold 42 -> 43. The entry is held in `metax_triton_fallback` in `scripts/codegen/codegen_ops.py` rather than in the shared `flaggems_runtime_broken` set, the way the `special_bessel_j0` group is, so no other platform moves; it sits next to `slice_backward`, which is already there for an unrelated MetaX fault. At the base commit `slice.Tensor` was already `cuda` in `backends_cuda.conf`, `backends_ppu.conf` and `backends_dcu.conf`, `none` in `backends_musa.conf` and `backends_gcu.conf` and `ascend` in `backends_ascend.conf` (the last three through `FLAGGEMS_PENDING_NATIVE_OPS`), and does not appear at all in `backends_bpu.conf` (intentionally empty) or `backends_tsingmicro.conf`, so MetaX is the one platform whose conf carried it on FlagGems and this is a convergence, not a new exception. Ascend, GCU, MUSA, DCU and PPU are **not revalidated**. | `flag_gems/ops/slice.py::slice` asserts against `complex64`/`complex128` at line 199 while its body is `torch.as_strided(input, size, strides, storage_offset)` and reads no dtype. Qwen-Image-2512 reproduces it at model level: diffusers' `QwenImageTransformer2DModel._compute_video_freqs` (`/diffusers/models/transformers/transformer_qwenimage.py:347`, `freqs_pos[0][idx : idx + frame]`) reaches `flag_gems/ops/slice.py:199` through `torch_fl/flagos/__init__.py:201` and raises `AssertionError: slice: unsupported dtype torch.complex64`, which aborts the transformer step. Per-op A/B on C550 with `flagtree 0.6.1+metax3.6` / `flag_gems 5.4.0rc2.post1+g5a58df410`, one host-built complex `(8, 16)` operand moved with `.to("flagos")`: shipped conf (no override) `ok (4,) torch.complex64`; `FLAGOS_OP_slice__Tensor=flaggems` `AssertionError: slice: unsupported dtype torch.complex64`; float32 the same shape `ok` with storage shared on both routes, so the dtype check inside the route is the failure and not the route. The assertion is not a kernel limit: an in-process probe that deletes only that statement from `inspect.getsource(...)` and compiles the rest of FlagGems' own function returns a `complex64` result equal to `torch.Tensor` slicing with storage shared, and agrees with the shipped function exactly on float32. Regression coverage in `tests/integration/ops/test_metax_flaggems.py`: `slice.Tensor` added to `_FORCED_OFF_FLAGGEMS` and to `_FORCED_OFF_DISPATCH` (complex operand), `_MEASURED_FLAGGEMS_ROUTES` 592 -> 591. `gen_vendor_confs.py` idempotent for MetaX (two runs, byte-identical), `--check` clean for the MetaX file; the out-of-scope configurations were left at their committed state. `tests/integration/ops/test_metax_flaggems.py` on the C550 host reports **91 passed in 751.82s, 0 failed** (the 90-test cohort plus the new dispatch case), including both `slice.Tensor` guards. Filed upstream as FlagGems issue #6356. |
 | 2026-09-16 | MUSA MTT S5000 | MUSA FlagGems RNG bridge | `5e4b78e` (the qualname change above) moved MUSA's generated kernels from `flag_gems.ops.randn.randn` to `flag_gems.randn`, which `SpecOpRegistrar` has rebound to the vendor override `_mthreads.ops.randn.randn`. `_patch_flaggems_philox()` selected the modules to rebind with `mod.__name__.startswith("flag_gems")`, which that module does not match, so the vendor kernel reached the unpatched `philox_backend_seed_offset` and raised `ValueError: too many values to unpack (expected 2)` unpacking the flagos MT19937 state. The loop now matches the bound object's identity instead of the module name. No route changed: `randn`, `randn_like`, `rand`, `rand_like`, `randperm`, `native_dropout` stay `flaggems  # musa`. | `Platform pipeline (musa) / Build and test (MUSA)` on run `35048300960` (push of `5e4b78e`) failed with **14 failed, 99 passed, 28 warnings in 193.65s**; the preceding `main` runs on `35047336702` and `35041546614` were green on MUSA. Both signatures are the same `torch.randn(..., device="flagos:0")` call: 4 in-process failures on `ValueError` at `flag_gems/utils/random_utils.py:75`, and 10 `test_musa_dispatch.py` subprocesses whose first statement is that call. Regression coverage: `tests/unit/test_musa_rng_bridge.py::test_flaggems_philox_reaches_vendor_backend_modules` fails against the pre-fix selector (`999 != -9223372036854775803`) and passes after; `tests/integration/ops/test_musa_flaggems.py::test_flaggems_randn_shares_native_generator_reservations` now drives `flag_gems.randn` rather than the generic module, which the MUSA dispatch never reached. Full detail: "MUSA: the FlagGems RNG bridge reaches the vendor op modules" above. |
 | 2026-09-15 | MetaX C550 (8 devices) | FlagGems entry-point resolution (`5a58df410`) | `_normalize_flaggems_qualname` in `scripts/codegen/codegen_ops.py` now emits `flag_gems.<fn>` instead of `flag_gems.ops.<module>.<fn>`, so a generated kernel reaches the entry point the active backend has rebound rather than the generic module the alias rewrite pinned. 72 of the 666 qualnames in the checked-in kernels resolve to a `_metax.ops.*` override and were running the generic kernel before this. `codegen_ops.py` also becomes the writer of the `FLAGGEMS_PYTHON_OPS` ceiling in `scripts/codegen/backend_coverage.py` (`render_flaggems_coverage`, minus the override-only ops), which was previously a hand-carried literal that capped every conf built from it. Both apply to every FlagGems platform; no route changed on Ascend, GCU, MUSA, DCU or PPU. | Counted over `csrc/aten/generated/flaggems_python_kernels.cc` with `flag_gems 5.4.0rc2.post1+g5a58df410` on the C550 host: 688 call sites, 666 distinct qualnames, 0 that are not two-component `flag_gems.<op>`, 0 unresolvable on the package, 594 resolving inside `flag_gems` and 72 to a `_metax.ops.*` module. `tests/integration/ops/test_flaggems_conf_consistency.py` requires the two-component form and now compares the conf, the override-only routes and the generated kernels as sets (7 passed); `tests/integration/ops/test_metax_flaggems.py` on C550 reports **90 passed in 756.07s**, 0 failed. Full detail: "MetaX: generated FlagGems calls name the package-level entry point" above. |
