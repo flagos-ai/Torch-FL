@@ -26,14 +26,25 @@ from . import meta  # noqa: F401
 
 _initialized = False
 
+# The accelerator marker is written at install time (`csrc/CMakeLists.txt`) and
+# cannot change while the process runs, so it is read once. The stream helpers
+# below consult it on every call, and a call happens once per FlagGems kernel
+# launch -- 483 a step on the Qwen-Image transformer. Each read costs a few
+# hundred microseconds on the repository filesystem, which made this 0.34 s of
+# every step before it was cached.
+_platform_name: str | None = None
+
 
 def _platform() -> str:
-    marker = os.path.join(os.path.dirname(__file__), "..", "lib", "flagos_platform")
-    try:
-        with open(marker) as stream:
-            return stream.read().strip()
-    except OSError:
-        return ""
+    global _platform_name
+    if _platform_name is None:
+        marker = os.path.join(os.path.dirname(__file__), "..", "lib", "flagos_platform")
+        try:
+            with open(marker) as stream:
+                _platform_name = stream.read().strip()
+        except OSError:
+            _platform_name = ""
+    return _platform_name
 
 
 def _has_cuda_runtime() -> bool:
