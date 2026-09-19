@@ -191,8 +191,9 @@ two `view_as_complex`/`view_as_real` calls to `cpu_fallback`, which is 24,000 an
 120,000 host round trips per image at §6.1's layout; on this build they have
 native `gcu` kernels instead (the complex-view entry in
 `docs/reference/operator-support.md`), so the complex path is served on the
-accelerator and the switch is no longer the difference between a fast and a slow
-run.
+accelerator rather than on the host. Serving it there is not the same as serving
+it quickly — see "Why the complex multiply costs what it does" below, where the
+same multiply turns out to be 91x the cost of copying its own operands.
 
 `QWEN_IMAGE_REAL_ROPE=1` turns on the workaround: `common.import_torch` registers
 the running device type in diffusers' own `ROPE_PER_DEVICE` table and points
@@ -204,6 +205,129 @@ It is off by default, and should be reported both ways when it is on, because it
 changes what the run measures — with it off, the census carries the
 `view_as_complex`/`view_as_real` traffic; with it on, the rotation is real-valued
 on the accelerator and those calls disappear.
+
+#### The switch is worth a third of the step
+
+The paragraph above is about *routing*: the complex path no longer leaves the
+card, so the switch is not the difference between a working run and a dead one.
+It is still very much a difference in speed, and an earlier version of this
+section overstated the case by calling it "no longer the difference between a
+fast and a slow run". Measured on an S60 (2026-09-20), one transformer forward,
+1024x1024 (4096 image tokens and 18 text tokens, 24 heads of head_dim 128, 60
+blocks), transformer on `flagos:1`, the rope entry point wrapped at the call site
+so each call is timed the way the model's own drain times it:
+
+| | `QWEN_IMAGE_REAL_ROPE=0` | `QWEN_IMAGE_REAL_ROPE=1` |
+| --- | --- | --- |
+| forward | 6.629 / 6.639 s | 4.236 / 4.278 s |
+| rope calls per forward | 240 | 240 |
+| rope total | 3812.6 / 3852.8 ms | 1441.4 / 1469.6 ms |
+| — mean | 15.886 / 16.053 ms | 6.006 / 6.123 ms |
+| — share of the forward | 57.5 / 58.0 % | 34.0 / 34.3 % |
+| `freqs` dtype at the call | `complex64` | `float32` |
+
+So the rotation alone is 57.5 % of the forward on the complex path and 34.0 % on
+the angle path, and turning it on takes the forward down by 36 %. The two rows
+that identify the leg are the `freqs` dtype and the `ROPE_PER_DEVICE` keys
+(`['cuda', 'neuron']` against `['cuda', 'flagos', 'neuron']`); a leg that reports
+the wrong dtype was instrumented in the wrong place, which is easy to do because
+the call site reads `ROPE_PER_DEVICE.get(img_query.device.type, ROPE_PER_DEVICE["cuda"])`
+and only one of those two entries is live.
+
+Do not measure this by registering the angle path *after* the pipeline is loaded.
+The rotation is cached per device, so a late registration measures the complex
+path under an angle-path label — an early attempt at exactly that A/B reported
+the angle path 4.6x *slower* and its output checksum did not match the one a
+fresh `QWEN_IMAGE_REAL_ROPE=1` process produced. The table above is two fresh
+processes, each with the registration ordered as `common.import_torch` does it.
+
+#### What the switch costs in image quality, and what it is worth end to end
+
+A third of the step is worth taking only if two things hold: the rotation has to be
+the same rotation, and a real 50-step run has to be shorter and not merely a
+wrapped forward.
+
+**It is the same rotation.** On the model's own frequency table
+(`QwenEmbedRope(theta=10000, axes_dim=[16, 56, 56])`, `pos_freqs` `(4096, 64)`
+`complex64`, its `torch.angle` `(4096, 64)` `float32`) and the model's own shape
+`(1, 4096, 24, 128)` bf16 on `flagos:0`, both spellings measured against a
+float64 reference of `(xr + i.xi)(cos + i.sin)`:
+
+| | max abs delta | mean abs delta |
+| --- | --- | --- |
+| complex (default) | `1.561453e-02` | `1.121671e-03` |
+| real (`QWEN_IMAGE_REAL_ROPE=1`) | `1.561453e-02` | `1.121671e-03` |
+
+Identical to six digits against `|ref|max 5.429e+00`, so neither side is the more
+accurate one. Against each other the two agree **bit for bit on 12,582,343 of
+12,582,912 elements (99.9955 %)**, differ by at most one bf16 ulp (`1.5625e-02`
+at magnitude ~5, which is 2^-6) and have mean abs delta `3.2e-08`; on the 569
+elements that differ at all, the complex side is closer to the float64 rotation
+on 178 of them and the angle side on 391. The switch is therefore not a numerical
+shortcut — it is the same rotation reached through a different spelling, which is
+what makes the residue below the size it is.
+
+**And the loop is shorter.** Both legs of a 50-step `--stage full` run,
+1024x1024, true CFG, seed 0, laid out as the vendor baseline is — encoder and VAE
+on the third visible card, transformer blocks 0..29 and 30..59 on the first two —
+one environment variable apart, back to back on the same cards:
+
+| | `QWEN_IMAGE_REAL_ROPE=0` | `QWEN_IMAGE_REAL_ROPE=1` |
+| --- | --- | --- |
+| denoise loop | 50/50 in 11:15, **13.51 s/it** | 50/50 in 06:58, **8.38 s/it** |
+| output | `/tmp/full_rope0.png` | `/tmp/full_rope1.png` |
+| the two outputs against each other | `MAE 3.637/255`, `PSNR 28.58 dB`, 69.61 % of bytes differing | |
+| the vendor baseline's `4.01 s/it` | 3.37x | **2.09x** |
+
+That is 38 % off the whole run, the same order as the 36 % the wrapped forward
+measured, so the wrapper was not manufacturing it. The two images are not
+bit-identical and should not be: a one-ulp difference on 0.0045 % of one op's
+elements is amplified by 50 steps of a chaotic loop. For scale, the same pair of
+spellings over 8 steps is `PSNR 33.86 dB` (the 2026-09-18 table above), and a
+paired A100 run over 50 steps is 35.4 dB (§5) — so the two spellings differ by
+about as much as two backends differ at all, and the number that moves with the
+rollout length is the amplification, not the arithmetic.
+
+The vendor baseline's `perf/gcu_full.png` is *not* a usable anchor for either leg:
+it differs from both by `MAE ~47/255` (`PSNR 11.97` and `11.91 dB`), which is an
+image-level difference and not a rounding one, so it is an independently seeded
+generation. §5 says to read two independently seeded runs as a quality check on
+the images and not as a number, and that is what this is.
+
+#### Why the complex multiply costs what it does
+
+On this build a `complex64` multiply does dispatch to `gcu` — `FLAGOS_LOG=dispatch`
+prints `mul.Tensor -> gcu` and `FLAGOS_LOG=fallback` prints nothing at all, so it
+is not a host round trip. It is simply very slow, and the cost is the arithmetic
+rather than the bytes. Same card, same shapes, ten calls each, minimum reported:
+
+| op | operands | ms/call |
+| --- | --- | --- |
+| `complex64` mul, `(1,4096,24,64)` x itself | 50.3 MB each | 50.166 |
+| `complex64` mul, `(1,4096,24,64)` x `(4096,1,64)` | 50.3 MB | 36.412 |
+| `complex64` `clone` | 50.3 MB in, 50.3 MB out | 0.547 |
+| `complex64` `copy_` | 50.3 MB in, 50.3 MB out | 0.583 |
+| `float32` mul, `(1,4096,24,128)` x itself | 25.2 MB each | 0.495 |
+| `out_real = ar*wr - ai*wi` | 25.2 MB | 1.557 |
+| `out_imag = ar*wi + ai*wr` | 25.2 MB | 1.571 |
+| `torch.angle(complex64)` | 50.3 MB | 134.091 |
+
+Copying the identical bytes takes 0.55 ms and the same rotation written as two
+real multiplies takes 3.1 ms, so the complex multiply is about 91x a copy of the
+same size and about 16x the equivalent real arithmetic. That ratio is what the
+angle path collects, and it is a property of this build's complex kernel rather
+than of the rotation: a real-valued rewrite of it is *cheaper*, not merely
+equivalent. The `torch.angle` row is why `_get_device_freqs` matters — it is
+called once per forward and its result is reused by all 240 rotations, so its
+134 ms is amortised; a version of the wrapper that dropped the original
+`lru_cache` would call it far more often and would measure the host rather than
+the kernel.
+
+Per-op CPU time from `torch.profiler` does not show any of this. The same step
+profiled with `record_shapes=True` reports `aten::mul` at 2.6 ms a call on the
+complex path, because a GCU kernel's wait is attributed to
+`topsStreamSynchronize` rather than to the op that launched it. Time this branch
+at the call site, or with a profiler that reports wall time per op.
 
 Measured on an S60 (2026-09-18), flagos transformer over `flagos:6,7`, encoder and
 VAE on `flagos:3`, 1024x1024, 3 steps, seed 42, and the same paired prompt embeds
@@ -227,8 +351,8 @@ ones, so they are close but not bit-identical, and a diffusion loop amplifies th
 residue; at 50 steps that is the same order as the difference between two
 backends at all (§5). Neither side reached `cpu_fallback`: on this build
 `view_as_complex` and `view_as_real` have native `gcu` kernels of their own, so
-the complex path no longer costs host round trips either — the switch now buys
-call count, not a fallback.
+the complex path no longer costs host round trips either. What the switch buys on
+this build is the ratio priced below — 36 % of the forward — and not a fallback.
 
 A vendor run takes the same switch, because the registration is keyed on
 `--device` rather than on the flagos backend: `torch_gcu` renames PrivateUse1 to
@@ -307,6 +431,47 @@ steps at 1024x1024 is the paired A100 number.
 
 Comparing two independently seeded runs is still worth doing, but read it as a
 quality check on the images, not as a number.
+
+### 5.1 Three legs on the S60: one kernel, measured end to end
+
+The S60 workstream rerouted `_scaled_dot_product_efficient_attention` from ATen's
+math decomposition to the vendor flash op. The route is fixed at build time — no
+runtime flag can move it — so this is the shape of the measurement: **three legs,
+two builds of the same tree**, and the paired inputs from this section carrying
+between them.
+
+| Leg | Configuration | `s/it` at 8 steps | vs the vendor |
+| --- | --- | --- | --- |
+| before | the math decomposition (op out of `HANDWRITTEN_OPS`) | **19.33** | 5.07x |
+| after | the vendor flash op (shipped) | **8.48**, and 8.81 on a repeat | **2.23x** |
+| reference | `torch_gcu` + diffusers | **3.81** | 1.00x |
+
+Leg 1 wrote its latents and prompt embeds with `--save-latents` / `--save-inputs`
+and legs 2 and 3 read them back, so all three consumed identical inputs. Every leg
+set `QWEN_IMAGE_REAL_ROPE=1` (the vendor leg cannot run without it: `topsaten` has
+no complex kernel) and every leg had encoder and VAE on the third visible card
+with transformer blocks 0..29 and 30..59 on the first two, `TOPS_VISIBLE_DEVICES=
+0,1,2`.
+
+**19.33 -> 8.48 is 2.28x, and 56.1 % off the denoising loop**; against the repeat,
+2.19x and 54.4 %. The repeat is the same build run a second time and it produced a
+byte-identical image (`md5 d47974b1…`), which is the evidence that the leg is
+deterministic and the first number is a reading rather than a lucky one.
+
+The two `torch_fl` images differ by `MAE 3.568/255` (`PSNR 30.10 dB`), and both sit
+about the same distance from the vendor — 26.96 dB for the shipped leg, 26.91 dB
+for the math path, differing by 0.05 dB in the shipped leg's favour. So the flash
+kernel is a real numerical change at the image level (eight steps amplify a bf16
+noise floor into 30 dB), and it is not a step away from the reference; the ~27 dB
+that remains to `torch_gcu` is the rest of its graph.
+
+For the record, the route cannot be A/B'd at runtime and two attempts to do so are
+worth not repeating: `FLAGOS_OP__scaled_dot_product_efficient_attention=none` is
+refused outright because the conf route and the PrivateUse1 registration must
+agree, and `torch.nn.attention.sdpa_kernel([SDPBackend.MATH])` is a silent no-op
+here — that run returned a byte-identical image to the shipped leg and still
+logged 960 `-> gcu` dispatches, since torch_fl's `__torch_function__` picks the
+route before ATen's backend pin is consulted.
 
 ## 6. Readings to record
 

@@ -30,6 +30,7 @@
   m.impl("_foreach_sub_.List", WrapperForeachSubInplaceList);
   m.impl("_foreach_sub_.Scalar", WrapperForeachSubInplaceScalar);
   m.impl("_sample_dirichlet", WrapperPrivSampleDirichlet);
+  m.impl("_scaled_dot_product_efficient_attention", WrapperPrivScaledDotProductEfficientAttention);
   m.impl("_softmax", WrapperPrivSoftmax);
   m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
   m.impl("_standard_gamma", WrapperPrivStandardGamma);
