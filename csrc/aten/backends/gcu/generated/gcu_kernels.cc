@@ -1741,6 +1741,9 @@ at::Tensor CatKernelGcu(const at::ITensorListRef& tensors, int64_t dim) {
   out_shape[d] = total;
   auto out = at::empty(out_shape, inputs[0].options());
 
+  // Only a negative stride needs a copy: topsatenCat refuses it, and the
+  // stride predicate is what keeps the copy off the path the model actually
+  // takes (see the note above T_CAT in the generator).
   std::vector<at::Tensor> contig;
   contig.reserve(inputs.size());
   std::vector<std::unique_ptr<gcu::TopsatenTensorWrapper>> keep;
@@ -1748,9 +1751,11 @@ at::Tensor CatKernelGcu(const at::ITensorListRef& tensors, int64_t dim) {
   std::vector<topsatenTensor> tops_in;
   tops_in.reserve(inputs.size());
   for (const auto& t : inputs) {
-    contig.push_back(t.contiguous());
-    keep.push_back(
-        std::make_unique<gcu::TopsatenTensorWrapper>(contig.back()));
+    const bool negative = std::any_of(t.strides().begin(), t.strides().end(),
+                                      [](int64_t s) { return s < 0; });
+    if (negative) contig.push_back(t.contiguous());
+    keep.push_back(std::make_unique<gcu::TopsatenTensorWrapper>(
+        negative ? contig.back() : t));
     tops_in.push_back(keep.back()->get());
   }
   gcu::TopsatenTensorWrapper t_out(out);

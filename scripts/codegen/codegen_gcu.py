@@ -1320,6 +1320,21 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # cat: topsaten takes a std::vector<topsatenTensor>, so the wrappers are held in
 # a vector to keep each one's sizes/strides alive for the duration of the call.
 # An empty tensor is skipped, matching PyTorch's treatment of it as absent.
+#
+# The inputs are handed over as they are, strides included. topsatenCat reads a
+# strided input directly and correctly -- verified on S60 against a host-side
+# gather for a last-dim split of a contiguous buffer (what the Qwen-Image rope's
+# rotate_half produces), a middle-dim split, offset views, a stride-0 dimension on
+# and off the cat dim, a transpose and two overlapping views. The one description
+# it refuses is a negative stride (BAD_PARAM), so only those are materialised.
+#
+# This is not a speedup, and the numbers say so: materialising every input cost
+# 780 topsatenCopy calls in one Qwen-Image transformer step and fell to 540 here,
+# and the step wall did not move (3.627 s -> 3.645 s). A stream drain waits for
+# whatever the device has queued rather than paying a fixed cost of its own, so
+# removing work in front of one drain only moves where the same device time is
+# observed. It is kept because it stops describing the inputs as something they
+# are not, and because it removes redundant device work and round trips.
 T_CAT = """\
 at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   std::vector<at::Tensor> inputs;
@@ -1345,6 +1360,9 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   out_shape[d] = total;
   auto out = at::empty(out_shape, inputs[0].options());
 
+  // Only a negative stride needs a copy: topsatenCat refuses it, and the
+  // stride predicate is what keeps the copy off the path the model actually
+  // takes (see the note above T_CAT in the generator).
   std::vector<at::Tensor> contig;
   contig.reserve(inputs.size());
   std::vector<std::unique_ptr<gcu::TopsatenTensorWrapper>> keep;
@@ -1352,9 +1370,11 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   std::vector<topsatenTensor> tops_in;
   tops_in.reserve(inputs.size());
   for (const auto& t : inputs) {{
-    contig.push_back(t.contiguous());
-    keep.push_back(
-        std::make_unique<gcu::TopsatenTensorWrapper>(contig.back()));
+    const bool negative = std::any_of(t.strides().begin(), t.strides().end(),
+                                      [](int64_t s) {{ return s < 0; }});
+    if (negative) contig.push_back(t.contiguous());
+    keep.push_back(std::make_unique<gcu::TopsatenTensorWrapper>(
+        negative ? contig.back() : t));
     tops_in.push_back(keep.back()->get());
   }}
   gcu::TopsatenTensorWrapper t_out(out);
