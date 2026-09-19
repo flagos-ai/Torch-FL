@@ -222,6 +222,14 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         internally and mudnn's CAST has no UInt16/32/64 case, so the cast raises
         before the sort runs. mudnn's own sort is correct here; argsort and
         msort decompose onto sort.
+      - where.self_out: added 2026-09-19 from the MUSA CI run (flag_gems
+        5.4.0rc2.post1+g437ba3938), not from a MTT S5000 sweep like the entries
+        above -- the wrapper computes the broadcast shape only when `out is
+        None` and hands a caller-supplied destination straight to
+        `pointwise_dynamic.prepare_args`, which validates instead of resizing,
+        so ATen's out= contract (grow a wrong-sized `out`) raises. This is a
+        contract gap rather than a failure of the kernel's arithmetic, and
+        mudnn's ternary SELECT serves the overload.
 
     index_add/index_add_ and randn/randn_like were removed from this set on
     2026-09-15: re-measured on MTT S5000 against both the current FlagGems and
@@ -284,6 +292,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         "sort.stable",
         "sub.Tensor",
         "sub_.Tensor",
+        "where.self_out",
     }
 
     # Known failures should NOT be routed to flaggems or be registered

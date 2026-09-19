@@ -2970,6 +2970,65 @@ at::Tensor WhereSelfKernelMusa(
 
 REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMusa, WhereSelfKernelMusa)
 
+at::Tensor& WhereSelfOutKernelMusa(
+    const at::Tensor& condition,
+    const at::Tensor& self,
+    const at::Tensor& other,
+    at::Tensor& out) {
+  // The `out=` contract pins the destination's dtype as well as its shape, and
+  // ATen's rule is equality rather than castability: with an f32 result a
+  // destination of any other dtype raises, `Expected out type to be Float but
+  // got Double`, and the same for Half, Int, Long, Bool and Byte -- measured on
+  // CPU, for every dtype other than the result's. It is checked here rather
+  // than left to the branch below for the same reason: that branch writes the
+  // result with `out.copy_(host)`, which for a f16 destination narrows an f32
+  // result silently instead of raising. Keeping the check ahead of the
+  // unsupported-dtype fallback means the fallback cannot become a silent cast
+  // either.
+  auto result_dtype = at::result_type(self, other);
+  TORCH_CHECK(
+      out.scalar_type() == result_dtype,
+      "Expected out type to be ", result_dtype, " but got ",
+      out.scalar_type());
+  if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
+      !musa_ops::MudnnSupportsDtype(other.scalar_type()) ||
+      condition.scalar_type() != at::kBool) {
+    auto host = at::where(condition.cpu(), self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {
+      out.resize_(host.sizes());
+    }
+    out.copy_(host);
+    return out;
+  }
+  auto self_c = self.to(condition.device(), result_dtype);
+  auto other_c = other.to(condition.device(), result_dtype);
+  auto out_shape = at::infer_size(condition.sizes(), self_c.sizes());
+  out_shape = at::infer_size(out_shape, other_c.sizes());
+  if (!out.sizes().equals(out_shape)) {
+    out.resize_(out_shape);
+  }
+  // mudnn rejects zero-element operands (NOT_SUPPORTED); an empty
+  // output holds no elements, so the allocation above is already the
+  // answer. Return it on-device without launching.
+  if (out.numel() == 0) return out;
+  auto cond_b = condition.expand(out_shape);
+  auto self_b = self_c.expand(out_shape);
+  auto other_b = other_c.expand(out_shape);
+  musa_ops::MudnnTensorWrapper t_cond(cond_b);
+  musa_ops::MudnnTensorWrapper t_self(self_b);
+  musa_ops::MudnnTensorWrapper t_other(other_b);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  musa_ops::mudnn::Ternary op;
+  op.SetMode(musa_ops::mudnn::Ternary::Mode::SELECT);
+  EXEC_MUDNN_CMD(
+      "where", self,
+      op.Run(_mudnn_h, t_out.get(), t_cond.get(), t_self.get(),
+             t_other.get()));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kMusa, WhereSelfOutKernelMusa)
+
 at::Tensor AddmmKernelMusa(
     const at::Tensor& self,
     const at::Tensor& mat1,

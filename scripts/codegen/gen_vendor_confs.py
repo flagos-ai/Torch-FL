@@ -1231,6 +1231,23 @@ NATIVE_TRITON_GAPS = {
         "sort.stable",
         "sub.Tensor",
         "sub_.Tensor",
+        # The out= spelling is gapped for ATen's out= contract and not for a
+        # throughput one. FlagGems' `where_self_out` computes the broadcast
+        # shape only when `out is None`; handed a destination it passes it
+        # straight to `where_inner(..., out0=out)`, whose `prepare_args`
+        # validates rather than resizes, so `torch.where(c, a, b, out=out)`
+        # raises where ATen's own overload grows `out`. Measured on the MUSA CI
+        # runner with flag_gems 5.4.0rc2.post1+g437ba3938:
+        # `RuntimeError: out tensor at index 0 shape is invalid, should be
+        # (2, 4) but is torch.Size([0])!` from flag_gems/utils/
+        # pointwise_dynamic.py, raised through flag_gems/ops/where.py:81 for
+        # tests/integration/ops/test_where_dispatch.py::TestWhereOutCorrectness::
+        # test_out_grows_from_empty -- the only failing case of that group's
+        # 508. `where.self` is unaffected and stays on FlagGems, because the
+        # wrapper sizes its own destination. The native kernel that takes the
+        # overload over is T_WHERE_OUT in codegen_mudnn.py; the route and this
+        # entry are two halves of one claim.
+        "where.self_out",
     },
 }
 

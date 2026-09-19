@@ -229,6 +229,7 @@ OPS = {
     "addcmul": ("ternary_value", "ADDCMUL_ALPHA"),
     "addcdiv": ("ternary_value", "ADDCDIV_ALPHA"),
     "where.self": ("where", "SELECT"),
+    "where.self_out": ("where_out", "SELECT"),
     # ---- P1: addmm family (three-branch, see T_ADDMM) ----
     "addmm": ("addmm", "MatMul"),
     "baddbmm": ("addmm", "BatchMatMul"),
@@ -1805,6 +1806,74 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 """
 
+# where.self_out is the out= variant. MUSA does not route it to FlagGems: that
+# wrapper computes the broadcast shape only when `out is None` and otherwise
+# hands the caller's destination straight to `pointwise_dynamic.prepare_args`,
+# which raises rather than resizing -- `torch.where(cond, a, b, out=empty(0))`
+# therefore fails in the wrapper where ATen's own out= overload grows the
+# destination. The body follows T_WHERE plus the two steps that contract needs,
+# the same ones GCU's T_WHERE_SELF_OUT takes: infer the broadcast shape and
+# resize `out` if it differs, then check the destination's dtype before running
+# the ternary SELECT through mudnn. The route and this template are two halves
+# of one claim -- see the NATIVE_TRITON_GAPS["musa"] entry in
+# gen_vendor_confs.py.
+T_WHERE_OUT = """\
+at::Tensor& {kernel}(
+    const at::Tensor& condition,
+    const at::Tensor& self,
+    const at::Tensor& other,
+    at::Tensor& out) {{
+  // The `out=` contract pins the destination's dtype as well as its shape, and
+  // ATen's rule is equality rather than castability: with an f32 result a
+  // destination of any other dtype raises, `Expected out type to be Float but
+  // got Double`, and the same for Half, Int, Long, Bool and Byte -- measured on
+  // CPU, for every dtype other than the result's. It is checked here rather
+  // than left to the branch below for the same reason: that branch writes the
+  // result with `out.copy_(host)`, which for a f16 destination narrows an f32
+  // result silently instead of raising. Keeping the check ahead of the
+  // unsupported-dtype fallback means the fallback cannot become a silent cast
+  // either.
+  auto result_dtype = at::result_type(self, other);
+  TORCH_CHECK(
+      out.scalar_type() == result_dtype,
+      "Expected out type to be ", result_dtype, " but got ",
+      out.scalar_type());
+  if (!musa_ops::{dtype_pred}(self.scalar_type()) ||
+      !musa_ops::{dtype_pred}(other.scalar_type()) ||
+      condition.scalar_type() != at::kBool) {{
+    auto host = at::{at_op}(condition.cpu(), self.cpu(), other.cpu());
+    if (!out.sizes().equals(host.sizes())) {{
+      out.resize_(host.sizes());
+    }}
+    out.copy_(host);
+    return out;
+  }}
+  auto self_c = self.to(condition.device(), result_dtype);
+  auto other_c = other.to(condition.device(), result_dtype);
+  auto out_shape = at::infer_size(condition.sizes(), self_c.sizes());
+  out_shape = at::infer_size(out_shape, other_c.sizes());
+  if (!out.sizes().equals(out_shape)) {{
+    out.resize_(out_shape);
+  }}
+{empty_guard}  auto cond_b = condition.expand(out_shape);
+  auto self_b = self_c.expand(out_shape);
+  auto other_b = other_c.expand(out_shape);
+  musa_ops::MudnnTensorWrapper t_cond(cond_b);
+  musa_ops::MudnnTensorWrapper t_self(self_b);
+  musa_ops::MudnnTensorWrapper t_other(other_b);
+  musa_ops::MudnnTensorWrapper t_out(out);
+  musa_ops::mudnn::Ternary op;
+  op.SetMode(musa_ops::mudnn::Ternary::Mode::{mode});
+  EXEC_MUDNN_CMD(
+      "{at_op}", self,
+      op.Run(_mudnn_h, t_out.get(), t_cond.get(), t_self.get(),
+             t_other.get()));
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+"""
+
 # addmm/baddbmm: out = beta*self + alpha*(mat1 @ mat2).
 #
 # mudnn computes d = alpha*a@b + beta*c + gamma*bias, and which slot `self`
@@ -2648,6 +2717,7 @@ CATEGORIES = {
     "leaky_relu_bw": T_LEAKY_RELU_BW,
     "ternary_value": T_TERNARY_VALUE,
     "where": T_WHERE,
+    "where_out": T_WHERE_OUT,
     "addmm": T_ADDMM,
     "softmax_bwd": T_SOFTMAX_BWD,
     "reduce_dims_plain": T_REDUCE_DIMS_PLAIN,
@@ -2760,6 +2830,7 @@ CATEGORY_CLASS = {
     "leaky_relu_bw": "Binary",
     "ternary_value": "Ternary",
     "where": "Ternary",
+    "where_out": "Ternary",
     "addmm": None,  # mode names the class itself (MatMul / BatchMatMul)
     "softmax_bwd": "Softmax",
     "reduce_dims_plain": "Reduce",
