@@ -443,7 +443,7 @@ between them.
 | Leg | Configuration | `s/it` at 8 steps | vs the vendor |
 | --- | --- | --- | --- |
 | before | the math decomposition (op out of `HANDWRITTEN_OPS`) | **19.33** | 5.07x |
-| after | the vendor flash op (shipped) | **8.48**, and 8.81 on a repeat | **2.23x** |
+| after | the vendor flash op (the state at `486db58`) | **8.48**, and 8.81 on a repeat | **2.23x** |
 | reference | `torch_gcu` + diffusers | **3.81** | 1.00x |
 
 Leg 1 wrote its latents and prompt embeds with `--save-latents` / `--save-inputs`
@@ -472,6 +472,39 @@ agree, and `torch.nn.attention.sdpa_kernel([SDPBackend.MATH])` is a silent no-op
 here — that run returned a byte-identical image to the shipped leg and still
 logged 960 `-> gcu` dispatches, since torch_fl's `__torch_function__` picks the
 route before ATen's backend pin is consulted.
+
+### 5.2 Four more commits on the same tree
+
+The branch then added four commits, none of which moves a route: each one changes
+how an operand is described, or reads a marker file once instead of once per
+stream-helper call. Measured the same way as §5.1 — one build pair at a time,
+control and patched legs back to back on the same cards, the paired inputs
+carrying through:
+
+| Leg | Configuration | `s/it` at 8 steps |
+| --- | --- | --- |
+| control | clean at `486db58` | 8.80, 8.85 |
+| + | the accelerator marker read once per process | 8.05, 8.07 |
+| + | the addmm weight handed over as a transpose view | 7.44, 7.55 |
+| + | the `cat` inputs handed over as they are | 7.50, 7.51 |
+| + | the addmm bias handed over as a rank-1 vector | **7.13, 7.15, 7.10** |
+
+The `cat` commit is a null result and is kept as one: it removes 240 of the 780
+`topsatenCopy` calls a step issues and the step wall does not move (3.627 s ->
+3.645 s), because a drain waits for whatever the device has queued rather than
+paying a fixed cost of its own. That is also why its row reads 0.03 s/it *higher*
+than the row above it: the two are inside the same spread.
+
+Every leg except the last writes `md5 d47974b1…` byte for byte, at every repeat.
+The last writes `0e262317…`, `PSNR 26.93 dB` from its own control, and it is the
+one leg in this document whose image moves. It moves toward the vendor: `29.85 dB`
+from `torch_gcu` against the control's `26.96 dB`. Against a float64 reference at
+the model's mlp shape the maximum error falls from 0.95 ulp to 0.49 ulp, better
+at 25.6 % of elements and worse at 0.0 % of them, because the bias now takes the
+route the vendor's own `addmm` takes instead of a zero-stride `(M, N)` view that
+costs a second pass over the output. The per-op probe sees the same thing from the
+other side: the fused call drops from 2643.2 us to 1575.5 us of device time at
+(4096,3072)x(3072,12288) bf16, which is exactly what a bare `mm` costs there.
 
 ## 6. Readings to record
 
