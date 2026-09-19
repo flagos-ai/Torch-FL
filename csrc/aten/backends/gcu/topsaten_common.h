@@ -453,6 +453,48 @@ inline at::Device TopsatenComputeDevice(
   return at::Device(at::kCPU);
 }
 
+// Brings an operand to the common shape of an elementwise call without
+// materialising it when it does not have to be.
+//
+// The generated kernels used to do this with `tensor.expand(shape).contiguous()`
+// on the premise that "topsaten does not broadcast for us". The vendor disagrees
+// in its own documentation:
+//
+//   "1. Load input (L3->L1) or (L3->L2->L1 for broadcast), if lhs or rhs needs to
+//    broadcast, it will be processed in this step."
+//                    -- /opt/tops/include/gcu/topsaten/topsaten_ops.h:491
+//
+// and the materialisation is not free: `.contiguous()` on an expanded view
+// allocates and fills the whole common shape, so `x * 2.0` -- whose operand is a
+// 0-dim tensor -- pays an allocator round trip plus a full elementwise copy
+// before the multiply starts. Measured on S60 at (4096, 2560) bf16, per call:
+// `a * a` 0.212 ms, `a * 0-dim device` 0.322 ms, `a * 0-dim host` 0.416 ms, while
+// `.contiguous()` on an already-contiguous tensor is 0.004 ms. The gap between
+// the first two is the materialisation of a 21 MB copy.
+//
+// Handing over the view is safe because `expand()` over contiguous storage
+// produces zero strides only on the dims it actually broadcasts, and a torch-free
+// probe at the rank-4 attention shapes has checked every spelling of interest --
+// all-zero strides, the mixed (0,0,1,0) per-token form, a rank-1 (1) with stride
+// 0, a rank-2/rank-3 operand against a rank-4 one, and the small base buffer such
+// a view really points into -- against the same op run on the materialised
+// operand: bit-identical output in fp32 and in bf16, no form refused. A stride
+// walk that ignored the descriptor would have landed on a different value,
+// because the base buffer is filled per-offset rather than with a repeated
+// constant.
+//
+// A non-contiguous operand still goes through `.contiguous()`: that is not a
+// broadcast of contiguous storage, and the vendor's handling of an arbitrary
+// strided layout is a separate question from broadcast. It costs nothing for the
+// operands that are contiguous already, which is every operand these kernels
+// receive after the `.to(device, dtype)` casts in their prologues.
+inline at::Tensor BroadcastTo(const at::Tensor& tensor, at::IntArrayRef shape) {
+  if (tensor.is_contiguous()) {
+    return tensor.expand(shape);
+  }
+  return tensor.expand(shape).contiguous();
+}
+
 // A tops device pointer resolves only against the *current* device, so an op
 // on flagos:1 must run with device 1 selected. Restores the previous device.
 class TopsDeviceGuard {

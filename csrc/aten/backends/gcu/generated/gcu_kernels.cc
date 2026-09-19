@@ -403,8 +403,8 @@ at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -425,8 +425,8 @@ at::Tensor DivTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -447,8 +447,8 @@ at::Tensor MaximumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -469,8 +469,8 @@ at::Tensor MinimumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -491,8 +491,8 @@ at::Tensor RemainderTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -513,8 +513,8 @@ at::Tensor FmodTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) 
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -535,8 +535,8 @@ at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -557,8 +557,8 @@ at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
   auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
 
@@ -580,8 +580,8 @@ at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
   auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
 
@@ -615,8 +615,8 @@ at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at:
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
   }
@@ -659,8 +659,8 @@ at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
   }
@@ -704,8 +704,8 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   if (!out.sizes().equals(out_shape)) {
     out.resize_(out_shape);
   }
@@ -737,8 +737,8 @@ at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -759,8 +759,8 @@ at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -781,8 +781,8 @@ at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -803,8 +803,8 @@ at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -825,8 +825,8 @@ at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -847,8 +847,8 @@ at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -869,8 +869,8 @@ at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) 
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -891,8 +891,8 @@ at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self.options().dtype(at::kBool));
 
   gcu::TopsatenTensorWrapper t_self(self_b);
@@ -1652,7 +1652,7 @@ at::Tensor AddmmKernelGcu(
         .to(self.device());
   }
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
-  auto self_b = self.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
   auto mat2_c = mat2.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
@@ -1693,7 +1693,7 @@ at::Tensor& AddmmOutKernelGcu(
     return out;
   }
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
-  auto self_b = self.expand(out_shape).contiguous();
+  auto self_b = gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
   auto mat2_c = mat2.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
@@ -3072,14 +3072,15 @@ at::Tensor WhereSelfKernelGcu(
   auto cond_c = condition.to(dev, at::kBool);
   auto self_c = self.to(dev, result_dtype);
   auto other_c = other.to(dev, result_dtype);
-  // All three operands are expanded, not just the two values: the vendor does not
-  // broadcast, and ATen broadcasts the condition against the values' common
-  // shape, which is not the same thing when the condition is the wider one.
+  // All three operands are expanded, not just the two values: ATen broadcasts
+  // the condition against the values' common shape, which is not the same thing
+  // when the condition is the wider one. The expansion is a view, not a copy --
+  // the vendor broadcasts in its load step, see gcu::BroadcastTo.
   auto out_shape = at::infer_size(
       at::infer_size(cond_c.sizes(), self_c.sizes()), other_c.sizes());
-  auto cond_b = cond_c.expand(out_shape).contiguous();
-  auto self_b = self_c.expand(out_shape).contiguous();
-  auto other_b = other_c.expand(out_shape).contiguous();
+  auto cond_b = gcu::BroadcastTo(cond_c, out_shape);
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
   auto out = at::empty(out_shape, self_b.options());
   if (out.numel() == 0) {
     return out;
@@ -3128,9 +3129,10 @@ at::Tensor& WhereSelfOutKernelGcu(
     out.copy_(host);
     return out;
   }
-  // All three operands are expanded, not just the two values: the vendor does not
-  // broadcast, and ATen broadcasts the condition against the values' common
-  // shape, which is not the same thing when the condition is the wider one.
+  // All three operands are expanded, not just the two values: ATen broadcasts
+  // the condition against the values' common shape, which is not the same thing
+  // when the condition is the wider one. The expansion is a view, not a copy --
+  // the vendor broadcasts in its load step, see gcu::BroadcastTo.
   auto out_shape = at::infer_size(
       at::infer_size(condition.sizes(), self.sizes()), other.sizes());
   if (!out.sizes().equals(out_shape)) {
@@ -3139,9 +3141,12 @@ at::Tensor& WhereSelfOutKernelGcu(
   if (out.numel() == 0) {
     return out;
   }
-  auto cond_b = condition.to(dev, at::kBool).expand(out_shape).contiguous();
-  auto self_b = self.to(dev, result_dtype).expand(out_shape).contiguous();
-  auto other_b = other.to(dev, result_dtype).expand(out_shape).contiguous();
+  auto cond_c = condition.to(dev, at::kBool);
+  auto self_c = self.to(dev, result_dtype);
+  auto other_c = other.to(dev, result_dtype);
+  auto cond_b = gcu::BroadcastTo(cond_c, out_shape);
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
 
   gcu::TopsatenTensorWrapper t_cond(cond_b);
   gcu::TopsatenTensorWrapper t_self(self_b);
