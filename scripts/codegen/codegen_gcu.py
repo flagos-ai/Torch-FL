@@ -1214,11 +1214,24 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # zero-stride (M, N) view, and as a bare rank-1 (N,) operand, against a base
 # buffer holding exactly N entries so a stride-blind load would leave it: all
 # three agreed bit for bit in fp32 and bf16.
+#
+# `mat2` is deliberately handed over as given, the way the matmul template above
+# already does. The operand that ships is nn.Linear's `weight.t()`: `at::linear`
+# decomposes to `addmm(bias, input, weight.t())`, so `mat2` is a transpose *view*
+# over a contiguous storage. Materialising it copied the whole weight on every
+# call -- at the Qwen-Image shapes (4096,3072)x(3072,3072), one step issued 841
+# `aten::contiguous` calls, 481 of them [3072,3072] and 120 each of [12288,3072],
+# [3072,18432] and [3072,12288] -- for data that never changes. A dedicated probe
+# (`topsatenAddmm` and `topsatenMm` at (4096,3072)x(3072,3072)^T bf16, against the
+# materialised operand and against a double-precision host reference) showed the
+# vendor serves the view bit for bit identically and at no time penalty
+# (0.493 ms materialised vs 0.498 ms as a view); the copy it replaces costs
+# 0.126 ms. `mat1` keeps its `.contiguous()`: an activation can arrive with an
+# arbitrary layout and that case is not what the probe measured.
 _ADDMM_PROLOGUE = """\
   std::vector<int64_t> out_shape{{mat1.size(0), mat2.size(1)}};
   auto self_b = gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
-  auto mat2_c = mat2.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
 """
@@ -1244,7 +1257,7 @@ at::Tensor {kernel}(
 
   gcu::TopsatenTensorWrapper t_self(self_b);
   gcu::TopsatenTensorWrapper t_mat1(mat1_c);
-  gcu::TopsatenTensorWrapper t_mat2(mat2_c);
+  gcu::TopsatenTensorWrapper t_mat2(mat2);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       {tops}, self, t_out.get(), t_self.get(), t_mat1.get(), t_mat2.get(),
@@ -1292,7 +1305,7 @@ at::Tensor& {kernel}(
 
   gcu::TopsatenTensorWrapper t_self(self_b);
   gcu::TopsatenTensorWrapper t_mat1(mat1_c);
-  gcu::TopsatenTensorWrapper t_mat2(mat2_c);
+  gcu::TopsatenTensorWrapper t_mat2(mat2);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       {tops}, self, t_out.get(), t_self.get(), t_mat1.get(), t_mat2.get(),

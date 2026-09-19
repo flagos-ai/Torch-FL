@@ -1654,14 +1654,13 @@ at::Tensor AddmmKernelGcu(
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
   auto self_b = gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
-  auto mat2_c = mat2.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
   auto out = at::empty(out_shape, self.options());
 
   gcu::TopsatenTensorWrapper t_self(self_b);
   gcu::TopsatenTensorWrapper t_mat1(mat1_c);
-  gcu::TopsatenTensorWrapper t_mat2(mat2_c);
+  gcu::TopsatenTensorWrapper t_mat2(mat2);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       topsatenAddmm, self, t_out.get(), t_self.get(), t_mat1.get(), t_mat2.get(),
@@ -1695,7 +1694,6 @@ at::Tensor& AddmmOutKernelGcu(
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
   auto self_b = gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
-  auto mat2_c = mat2.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
   if (!out.sizes().equals(out_shape)) {
@@ -1709,7 +1707,7 @@ at::Tensor& AddmmOutKernelGcu(
 
   gcu::TopsatenTensorWrapper t_self(self_b);
   gcu::TopsatenTensorWrapper t_mat1(mat1_c);
-  gcu::TopsatenTensorWrapper t_mat2(mat2_c);
+  gcu::TopsatenTensorWrapper t_mat2(mat2);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       topsatenAddmm, self, t_out.get(), t_self.get(), t_mat1.get(), t_mat2.get(),
