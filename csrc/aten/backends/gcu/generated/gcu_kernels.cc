@@ -1652,7 +1652,15 @@ at::Tensor AddmmKernelGcu(
         .to(self.device());
   }
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
-  auto self_b = gcu::BroadcastTo(self, out_shape);
+  // nn.Linear's bias goes over as the rank-1 vector it is. topsatenAddmm
+  // broadcasts that itself, in the epilogue; the zero-stride (M, N) view
+  // BroadcastTo builds for it costs ~1.1 ms more at the Qwen-Image mlp shape,
+  // which is an extra pass over the 101 MB output. See the note above T_ADDMM.
+  // Any other bias keeps the old description, a one-element rank-1 bias among
+  // them (the vendor would accept it, but no caller pays for the narrow case).
+  auto self_b = (self.dim() == 1 && self.size(0) == mat2.size(1))
+                    ? self
+                    : gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
@@ -1692,7 +1700,15 @@ at::Tensor& AddmmOutKernelGcu(
     return out;
   }
   std::vector<int64_t> out_shape{mat1.size(0), mat2.size(1)};
-  auto self_b = gcu::BroadcastTo(self, out_shape);
+  // nn.Linear's bias goes over as the rank-1 vector it is. topsatenAddmm
+  // broadcasts that itself, in the epilogue; the zero-stride (M, N) view
+  // BroadcastTo builds for it costs ~1.1 ms more at the Qwen-Image mlp shape,
+  // which is an extra pass over the 101 MB output. See the note above T_ADDMM.
+  // Any other bias keeps the old description, a one-element rank-1 bias among
+  // them (the vendor would accept it, but no caller pays for the narrow case).
+  auto self_b = (self.dim() == 1 && self.size(0) == mat2.size(1))
+                    ? self
+                    : gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());

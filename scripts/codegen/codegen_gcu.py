@@ -1205,15 +1205,26 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
 
 # addmm: out = beta * self + alpha * (mat1 @ mat2). `self` (the bias) broadcasts
-# in PyTorch, and in topsaten too: the operand is handed over as a view rather
-# than a materialised copy, for the reasons in gcu::BroadcastTo. The case that
-# matters is nn.Linear's bias, a contiguous (N,) vector, which used to be
-# expanded *and copied* into the full (M, N) product shape on every call -- an
-# allocator round trip plus a same-size-as-the-output copy in front of the
-# matmul. A dedicated probe ran addmm with the bias materialised, with the
-# zero-stride (M, N) view, and as a bare rank-1 (N,) operand, against a base
-# buffer holding exactly N entries so a stride-blind load would leave it: all
-# three agreed bit for bit in fp32 and bf16.
+# in PyTorch, and in topsaten too. The case that matters is nn.Linear's bias, a
+# contiguous rank-1 (N,) vector, and that goes over as it is: topsatenAddmm
+# broadcasts it in the epilogue, at no measurable cost. Handing it a zero-stride
+# (M, N) expand view instead -- what gcu::BroadcastTo builds for a rank-1 input --
+# was measured on S60 at (4096,3072)x(3072,12288) bf16 to cost 1156 us more than a
+# bare mm, against 118 us on the vendor's own addmm path: the library treats the
+# view as a second full operand and makes another pass over the 101 MB output
+# rather than folding the bias into the epilogue. A dedicated probe ran addmm
+# with the bias materialised, with the zero-stride (M, N) view, and as a bare
+# rank-1 (N,) operand, against a base buffer holding exactly N entries so a
+# stride-blind load would leave it: all three agreed bit for bit in fp32 and
+# bf16. Only the timing argument changed here, not the correctness one.
+#
+# The predicate admits a rank-1 bias of exactly the width the product has. The
+# vendor's own argument check accepts `rhs.dims[1] or 1` ("when bias.rank is 1,
+# bias.dims[0] should be equal to rhs.dims[1] or 1"), so a one-element rank-1
+# bias could take the cheap route too; it stays on the BroadcastTo path, which is
+# unchanged and still correct, because the case that pays for this change is
+# nn.Linear's full-width bias and the narrower predicate is the one the probe
+# pins.
 #
 # `mat2` is deliberately handed over as given, the way the matmul template above
 # already does. The operand that ships is nn.Linear's `weight.t()`: `at::linear`
@@ -1230,7 +1241,15 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # arbitrary layout and that case is not what the probe measured.
 _ADDMM_PROLOGUE = """\
   std::vector<int64_t> out_shape{{mat1.size(0), mat2.size(1)}};
-  auto self_b = gcu::BroadcastTo(self, out_shape);
+  // nn.Linear's bias goes over as the rank-1 vector it is. topsatenAddmm
+  // broadcasts that itself, in the epilogue; the zero-stride (M, N) view
+  // BroadcastTo builds for it costs ~1.1 ms more at the Qwen-Image mlp shape,
+  // which is an extra pass over the 101 MB output. See the note above T_ADDMM.
+  // Any other bias keeps the old description, a one-element rank-1 bias among
+  // them (the vendor would accept it, but no caller pays for the narrow case).
+  auto self_b = (self.dim() == 1 && self.size(0) == mat2.size(1))
+                    ? self
+                    : gcu::BroadcastTo(self, out_shape);
   auto mat1_c = mat1.contiguous();
   auto t_beta = gcu::ToTopsatenScalar(beta, self.scalar_type());
   auto t_alpha = gcu::ToTopsatenScalar(alpha, self.scalar_type());
