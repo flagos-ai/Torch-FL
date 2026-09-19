@@ -40,6 +40,16 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# The GitHub Actions container job mounts /github/home from the host; on this
+# image it is owned by a uid that differs from the runtime user, so pip disables
+# its download cache there ("not owned or is not writable by the current user")
+# and the actions/cache post step then finds an empty path. Route pip's cache to
+# RUNNER_TEMP, which the container always owns. This path must stay aligned with
+# the cache step in the platform integration workflow.
+export PIP_CACHE_DIR="${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache"
+mkdir -p "$PIP_CACHE_DIR"
+
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
@@ -263,7 +273,7 @@ pip_retry() {
     # Raise pip's own retry limit and timeout for large wheels on unstable
     # networks: the flagtree wheel is ~200 MB, and the default timeout (15s) and
     # retries (5) are not enough when the mirror link drops mid-download.
-    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 "$@"; then
       return 0
     fi
     if (( attempt >= 5 )); then
@@ -446,7 +456,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME \
+    PIP_CACHE_DIR PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME \
     FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TRITON_ENABLE_TASKQUEUE \
     PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \

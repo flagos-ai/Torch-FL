@@ -24,6 +24,15 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Pin pip's download cache to RUNNER_TEMP for cross-platform consistency. On
+# several sibling platforms the container's /github/home mount is owned by a
+# different uid and pip silently disables its cache there; RUNNER_TEMP is
+# always owned by the container. This path must stay aligned with the cache
+# step in integration-test-cuda.yml.
+export PIP_CACHE_DIR="${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache"
+mkdir -p "$PIP_CACHE_DIR"
+
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 # FlagTree provides Triton support. The source-free 0.6.2a2 wheel pairs with
@@ -203,7 +212,10 @@ bootstrap_vendor_python() {
   "$base_python" -m venv "$vendor_venv"
   local vendor_python="$vendor_venv/bin/python"
   "$vendor_python" -m pip install --upgrade pip
-  pip_retry "$vendor_python" --index-url "$VENDOR_TORCH_INDEX_URL" \
+  # --no-cache-dir keeps the giant CUDA torch + nvidia wheels (~3.4GB) out of
+  # the actions/cache archive; they download fast from pytorch.org and the
+  # cache's value is the small venv-side wheels (FlagGems/flagtree) below.
+  pip_retry "$vendor_python" --no-cache-dir --index-url "$VENDOR_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
   VENDOR_PYTHON="$vendor_python"
 }
@@ -414,7 +426,11 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 "$VENV_PYTHON" -m pip install --upgrade pip "setuptools>=64,<77" "setuptools-scm>=8,<10" "wheel==0.46.2" cmake build
-"$VENV_PYTHON" -m pip install \
+# --no-cache-dir mirrors the vendor-torch install above: the CPU torch wheel
+# is ~800 MB and would dominate the cache archive, pushing the upload past the
+# self-hosted runner's capacity. It downloads quickly from pytorch.org; the
+# cache's value is the smaller wheels (transformers, flagtree, pytest).
+"$VENV_PYTHON" -m pip install --no-cache-dir \
   --index-url "$CPU_TORCH_INDEX_URL" \
   "torch==$CPU_TORCH_VERSION"
 
@@ -517,13 +533,13 @@ if [[ "$VENDOR_SOURCE" == "bootstrap" ]]; then
   # parent repository through that provider, and cmake is needed because a CUDA
   # development image ships a compiler, not a build system. The versions mirror
   # what the isolated environment installs so both halves of the build agree.
-  pip_retry "$VENDOR_PYTHON" \
+  pip_retry "$VENDOR_PYTHON" --no-cache-dir \
     "setuptools>=64,<77" "setuptools-scm>=8,<10" cmake \
     "scikit-build-core==0.12.2" "pybind11==3.0.3" "ninja==1.13.0"
   # Configuring the cpp package probes `import triton` in the building
   # interpreter and aborts without it, so this environment carries the same
   # Triton provider the isolated one runs on.
-  pip_retry "$VENDOR_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+  pip_retry "$VENDOR_PYTHON" --no-cache-dir --no-deps --index-url "$FLAGTREE_INDEX_URL" \
     "flagtree===$FLAGTREE_VERSION"
   # PEP 621 requires a static project name, so the per-vendor suffix is injected
   # into cpp/pyproject.toml before building (flag-gems-cpp-cuda).
@@ -702,7 +718,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
+    PIP_CACHE_DIR PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
     FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGTREE_VERSION GEMS_VENDOR \
     USE_FLAGTUNE \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do

@@ -25,13 +25,22 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# The GitHub Actions container job mounts /github/home from the host; on this
+# image it is owned by a uid that differs from the runtime user, so pip disables
+# its download cache there ("not owned or is not writable by the current user")
+# and the actions/cache post step then finds an empty path. Route pip's cache to
+# RUNNER_TEMP, which the container always owns. This path must stay aligned with
+# the cache step in the platform integration workflow.
+export PIP_CACHE_DIR="${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache"
+mkdir -p "$PIP_CACHE_DIR"
+
 # Retries are deliberate: the flagtree wheel is ~180MB and the shared mirror can
 # close a large-wheel response early (IncompleteRead) even though the package is
 # there. Retrying just the failed package beats restarting all of setup.
 pip_retry() {
   local attempt=1
   while true; do
-    if python -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+    if python -m pip install --retries 10 --timeout 300 "$@"; then
       return 0
     fi
     if (( attempt >= 5 )); then
@@ -444,7 +453,7 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
   for name in \
-    VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME \
+    PIP_CACHE_DIR VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME \
     FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM \
     FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL \

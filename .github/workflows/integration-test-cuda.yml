@@ -70,6 +70,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Self-hosted runners accumulate stale wheels in ~/.cache/pip across
+      # runs (pip no longer passes --no-cache-dir); wipe before restore so
+      # the uploaded archive stays bounded to this run's downloads.
+      - name: Reset pip cache dir
+        shell: bash
+        run: rm -rf "${RUNNER_TEMP}/pip-cache"
+
+      # Restore pip downloads from a previous run so the smaller venv-side
+      # wheels (transformers, flagtree, pytest) are fetched once and reused.
+      # The giant CUDA and CPU torch wheels are excluded via --no-cache-dir in
+      # set_env_cuda.sh (they download fast from pytorch.org and would bloat
+      # the archive past the self-hosted runner's upload capacity). The cache
+      # only skips the download, not the install, so the isolated venv is still
+      # rebuilt fresh each run. PIP_CACHE_DIR is persisted to $GITHUB_ENV by
+      # set_env_cuda.sh so every step shares the cache directory.
+      #
+      # Save is split out to an explicit actions/cache/save step at the end of
+      # the job (see "Save pip downloads") so it can carry a timeout-minutes:
+      # the actions/cache@v4 post-run save hook ignores step timeout-minutes,
+      # and on the CUDA runner an upload stall would otherwise hold the
+      # torch-fl-nv runner indefinitely and block queued jobs.
+      #
+      # set_env_cuda.sh is hashed because the real version pins (torch,
+      # flagtree, FlagGems revision) live there; without it a pin bump leaves
+      # the key unchanged, the exact-hit skips the save, and the new wheels are
+      # discarded every run.
+      - name: Restore pip downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pip-cache
+          key: cuda-pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'setup.py', '.github/scripts/set_env_cuda.sh') }}
+          restore-keys: |
+            cuda-pip-${{ runner.os }}-py312-
+        timeout-minutes: 5
+
       - name: Prepare CUDA build environment
         env:
           CI_STAGE: integration
@@ -92,3 +127,19 @@ jobs:
           INTEGRATION_TESTS: ${{ needs.load-tests.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.load-tests.outputs.integration_environment }}
         run: python .github/scripts/run_integration_tests.py
+
+      # Explicit save (split from actions/cache/restore above) so a stuck
+      # upload on the CUDA runner is cancelled by timeout-minutes instead of
+      # holding torch-fl-nv indefinitely and blocking queued jobs. The
+      # actions/cache@v4 post-run save hook ignores step timeout-minutes,
+      # which is why restore+save are split here rather than using the
+      # combined action. if: always() so a cache entry is still produced when
+      # an earlier step fails; the save action no-ops when the key already
+      # exists (exact restore hit), so there is no redundant upload.
+      - name: Save pip downloads
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/pip-cache
+          key: cuda-pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'setup.py', '.github/scripts/set_env_cuda.sh') }}
+        timeout-minutes: 10

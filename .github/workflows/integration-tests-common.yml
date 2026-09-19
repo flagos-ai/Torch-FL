@@ -67,6 +67,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Self-hosted runners accumulate stale wheels across runs (pip no longer
+      # passes --no-cache-dir); wipe before restore so the uploaded archive stays
+      # bounded to this run's downloads. The GCU container's /github/home mount
+      # is not writable by the runtime user, so the pip cache lives under
+      # RUNNER_TEMP (see PIP_CACHE_DIR in set_env_gcu.sh); wipe that path here.
+      - name: Reset pip cache dir
+        shell: bash
+        run: rm -rf "${RUNNER_TEMP}/pip-cache"
+
+      # Cache pip downloads across runs. The cache only skips the download,
+      # not the install, so the environment prepared by the setup script is
+      # still rebuilt fresh each run. PIP_CACHE_DIR is persisted to
+      # $GITHUB_ENV by the setup script, so pip invocations in later steps
+      # (install wheel, pytest) share the cache directory, not just the
+      # set_env step's shell.
+      #
+      # The key carries an -integration- stage suffix: this job and the build
+      # job share display_name via all-tests-common, so without the suffix an
+      # exact hit on the build cache would skip the save and discard the
+      # integration-only downloads (pytest, test deps). restore-keys fall back
+      # to the build prefix so the build cache is reused, then to the legacy
+      # unsuffixed key for migration. The setup script is hashed because the
+      # real version pins live there, not in pyproject/setup.py.
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pip-cache
+          key: ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/scripts/set_env_*.sh') }}
+          restore-keys: |
+            ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-
+            ${{ inputs.display_name }}-build-pip-${{ runner.os }}-
+            ${{ inputs.display_name }}-pip-${{ runner.os }}-
+
       - name: Prepare platform environment
         env:
           CI_STAGE: integration

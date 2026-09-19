@@ -59,6 +59,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Self-hosted runners accumulate stale wheels in ~/.cache/pip across
+      # runs (pip no longer passes --no-cache-dir); wipe before restore so
+      # the uploaded archive stays bounded to this run's downloads.
+      - name: Reset pip cache dir
+        shell: bash
+        run: rm -rf "${RUNNER_TEMP}/pip-cache"
+
+      # Cache pip downloads across runs. The cache only skips the download,
+      # not the install, so the environment prepared by set_env_metax.sh is
+      # still rebuilt fresh each run. PIP_CACHE_DIR is persisted to
+      # $GITHUB_ENV by the setup script and points at RUNNER_TEMP, which the
+      # container owns; /github/home is not writable by the runtime user on
+      # this image, so without that redirect pip disables its cache there.
+      #
+      # set_env_metax.sh is hashed because the real version pins live there;
+      # without it a pin bump leaves the key unchanged, the exact-hit skips the
+      # save, and the newly downloaded wheels are discarded every run.
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pip-cache
+          key: metax-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/scripts/set_env_metax.sh') }}
+          restore-keys: |
+            metax-pip-${{ runner.os }}-
+
       - name: Prepare MetaX build environment
         env:
           CI_STAGE: integration
