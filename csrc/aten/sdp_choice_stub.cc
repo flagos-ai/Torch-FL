@@ -33,9 +33,14 @@
 // attention instead, for the calls that kernel implements -- see
 // FlagGemsEligible() for the bounds and METAX_COMPOSITE_FLAGGEMS in
 // scripts/codegen/gen_vendor_confs.py for the MetaX measurement behind the one
-// conf that asks for it. Everything else keeps the boxed route: the calls
-// outside those bounds, the other boxing confs (which name the op `cuda`), and
-// the confs that do not name it at all (backends_cuda.conf, TsingMicro).
+// conf that asks for it. Those calls include the ones a caller passes an
+// explicit key-valid mask to, which this file converts twice: FlagGems reads a
+// bool mask with the opposite polarity to torch and indexes the mask with
+// unbound strides, so the bool row becomes an fp32 additive with stride 0 on its
+// broadcast axes before the call (RouteMask). Everything else keeps the boxed
+// route: the calls outside those bounds, the other boxing confs (which name the
+// op `cuda`), and the confs that do not name it at all (backends_cuda.conf,
+// TsingMicro).
 // HasBackendForOp() is what keeps that last case out of the route, because an
 // unlisted op reads as flaggems -- the right default for the generated leaf
 // kernels, the wrong reading of silence for a route that has to be measured on
@@ -62,7 +67,10 @@
 
 #include <ATen/core/Tensor.h>
 #include <ATen/core/grad_mode.h>
+#include <ATen/ops/full_like.h>
 #include <ATen/ops/scaled_dot_product_attention_native.h>
+#include <ATen/ops/where.h>
+#include <ATen/ops/zeros_like.h>
 #include <torch/library.h>
 
 #include <optional>
@@ -100,7 +108,7 @@ namespace {
 //
 // Envelope. The class .sdpaend.py patched in Python to take the MetaX
 // measurement this route exists for: bf16, head_dim 128, query seq >= 1024,
-// non-causal, no mask, no gqa, no dropout, no explicit scale -- Qwen-Image-2512's
+// non-causal, no gqa, no dropout, no explicit scale -- Qwen-Image-2512's
 // joint attention (q(1, 24, 4114, 128), 120 calls/step), which is what
 // METAX_COMPOSITE_FLAGGEMS records. The clauses are the probe's predicate one for
 // one, so the two can be diffed; nothing else about the call is asserted, and
@@ -120,8 +128,26 @@ namespace {
 // sends grad-requiring calls to the composite, and under grad mode with no input
 // requiring grad both routes return the same tensor, because autograd builds no
 // node for either.
+//
+// The mask clause (added 2026-09-19) is what brings Qwen-Image-2.1's joint
+// attention onto this route. 2.1's prefill processor builds one call per prefix
+// segment and passes the joint key-valid row -- (1,1,1,KV) bool, True for the
+// keys attention may read -- as an explicit mask on every one of them
+// (transformer_qwenimage21.py:478-560), so a route that only knows "no mask"
+// leaves the whole 4096-query attention on the boxing path: measured in the
+// pipeline at 40.239 ms/call boxed against 11.730 ms/call through this route.
+// The clause is deliberately narrow: 4-D bool with one entry per key, i.e.
+// (1,1,1,KV) once the size-1 axes are pinned. A materialized (B,H,Q,KV) mask is
+// 1 GiB at this shape and is not what any caller here passes.
 constexpr int64_t kRoutedHeadDim = 128;
 constexpr int64_t kRoutedMinQuerySeq = 1024;
+
+// The additive the mask route writes on the keys the caller dropped, replacing
+// the bool the kernel cannot read as-is. Finite on purpose: a fully dropped
+// block would take -inf as its running max and then divide 0 by 0, while -1e6
+// underflows to a zero weight after exp2 against any logit this model produces
+// and stays comparable as a maximum.
+constexpr double kRoutedMaskFill = -1.0e6;
 
 bool FlagGemsEligible(
     const at::Tensor& query,
@@ -139,7 +165,17 @@ bool FlagGemsEligible(
   if (query.size(3) != key.size(3) || query.size(1) != key.size(1)) {
     return false;
   }
-  if (attn_mask.has_value() || dropout_p != 0.0 || enable_gqa) {
+  // The mask requirement. size(3) == KV together with numel == KV is what pins
+  // the shape to (1,1,1,KV), which is the only mask shape the route's
+  // reshape({1,1,1,-1}).expand(...) can build from a view (see RouteMask).
+  if (attn_mask.has_value()) {
+    const at::Tensor& mask = *attn_mask;
+    if (mask.dim() != 4 || mask.scalar_type() != at::kBool ||
+        mask.size(3) != key.size(2) || mask.numel() != key.size(2)) {
+      return false;
+    }
+  }
+  if (dropout_p != 0.0 || enable_gqa) {
     return false;
   }
   // Envelope.
@@ -153,6 +189,43 @@ bool FlagGemsEligible(
     return false;
   }
   return true;
+}
+
+// The `attn_mask` kwarg this route hands FlagGems, built from the caller's row.
+//
+// The kernel cannot read a bool mask as-is: flag_gems converts one itself at
+// attention.py:928-929 with `attn_mask.to(query.dtype) * -1.0e6`, which maps True
+// to -1e6 -- the inverse of torch's convention, where True is the key that
+// attends -- and that conversion is skipped for a float mask, so supplying the
+// additive is this route's job. Measured on this part against
+// F.scaled_dot_product_attention on a materialized (1,2,1024,1024) bool mask:
+// `as-is bool` and `-1e6 where True` both land at max|d| 5.840e-01, while
+// `0 where True` lands at 1.953e-03 -- the bf16 floor the unfused reference
+// itself sits at (4.883e-04 against an fp64 CPU reference over the same rows).
+//
+// The spelling below is the one that measurement checked byte-for-byte against
+// the reference row, fp32 rather than the query's bf16 because the kernel adds
+// this onto an fp32 accumulator. Three FlagGems routes in backends_metax.conf
+// (zeros_like, full_like, where.self), so nothing here falls back to the vendor:
+// measured on this part at KV 4122, 0.024 + 0.037 + 0.105 ms of submit time per
+// call, 0.010 ms more for the reshape and expand, so 0.18 ms against the 28.5 ms
+// per call the route saves on the shape it was measured for. All three land on
+// flagos_python in a FLAGOS_LOG=dispatch census of a masked call; none of them
+// reports a fallback.
+//
+// The reshape before the expand is the other load-bearing detail. The caller's
+// (1,1,1,KV) tensor carries a real stride on both size-1 axes, while the kernel
+// indexes the mask by batch_id*stride(0) + head_id*stride(1) + offs_m*stride(2)
+// + offs_n*stride(3) with nothing bounding the first three (attention.py:240,
+// 262-272), so all three strides have to be 0 -- and expand alone would keep the
+// real ones, because the axes are size 1 either way.
+at::Tensor RouteMask(const at::Tensor& mask, const at::Tensor& query,
+                     const at::Tensor& key) {
+  const auto f32 = mask.options().dtype(at::kFloat);
+  at::Tensor additive = at::where(
+      mask, at::zeros_like(mask, f32), at::full_like(mask, kRoutedMaskFill, f32));
+  return additive.reshape({1, 1, 1, -1}).expand(
+      {query.size(0), query.size(1), query.size(2), key.size(2)});
 }
 #endif // FLAGOS_FLAGGEMS_PYTHON
 
@@ -194,15 +267,20 @@ at::Tensor WrapperScaledDotProductAttention(
                        scale, enable_gqa)) {
     // Pass every argument rather than only those that differ from FlagGems'
     // defaults: the guard above is this route's contract, so relaxing it later
-    // must not leave the old constants being forwarded silently.
+    // must not leave the old constants being forwarded silently. The mask is the
+    // one argument that is converted rather than forwarded -- FlagGems' own
+    // reading of a bool mask is the inverse of torch's, and the kernel indexes
+    // the mask with unbound strides (RouteMask).
+    at::Tensor routed_mask =
+        attn_mask.has_value() ? RouteMask(*attn_mask, query, key) : at::Tensor();
     at::Tensor result = at::native::flagos::CallPythonOp_GenericKw(
         "flag_gems.scaled_dot_product_attention",
         {query, key, value},
         {
             at::native::flagos::PyKwarg{"attn_mask",
-                                        c10::IValue(),
+                                        c10::IValue(routed_mask),
                                         /*is_dtype=*/false,
-                                        /*is_none=*/true},
+                                        /*is_none=*/!attn_mask.has_value()},
             at::native::flagos::PyKwarg{"dropout_p", c10::IValue(dropout_p)},
             at::native::flagos::PyKwarg{"is_causal", c10::IValue(is_causal)},
             at::native::flagos::PyKwarg{
