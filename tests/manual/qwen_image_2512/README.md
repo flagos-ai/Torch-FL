@@ -622,7 +622,7 @@ on `flagos`, 156.3 s and 153.7 s on the vendor), which is larger than the decode
 and moves more between repeats than the decode is worth. The `s/it` line of the
 `full` stage is the only timing these two arms can contribute.
 
-Logs: `/tmp/rope_ab_{on,off,vendor}.log`, driver `/tmp/run_rope_ab.sh`; the two
+Logs: `/tmp/rope_ab_{rope_on,rope_off,vendor}.log`, driver `/tmp/run_rope_ab.sh`; the two
 discarded arms are `/tmp/decomp_{flagos,vendor}.log`, driver
 `/tmp/run_stage_decomp.sh`. `TOPS_VISIBLE_DEVICES=0,1,2` on the vendor leg, and
 the vendor leg runs through its own interpreter as §4 describes. No leg sets
