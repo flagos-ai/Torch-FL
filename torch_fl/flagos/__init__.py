@@ -1027,20 +1027,26 @@ def _patch_flaggems_index_put():
     is byte-identical to the unpatched one (md5 6fc5c62c451ecf5772f11bb0e1652cfd,
     1875231 bytes, both).
 
+    Measured again on an H100, same op, same shape: the round-trip is 7.96 ms
+    against FlagGems' 0.22 ms -- 36x -- on ``(1, 4160, 3072)`` bf16 assigned
+    through a ``(4160,)`` bool mask, which is the shape the 2.1 forward issues
+    before its block stack. The H100 figure for the same assignment on the
+    vendor route is 0.10 ms, so this is the round-trip's 26 MB host copy each
+    way and not a kernel difference.
+
     Narrows to FlagGems rather than away from it: the op keeps Triton kernels
-    and never takes the CUDA-boxing route. Scoped to the configuration that was
-    measured -- DCU, on a conf that routes to FlagGems -- and installed through
-    ``torch.library`` rather than in C++ because the route cannot be stated in
-    the conf: the conf enumerates the generated registration list, which this
-    hand-registered op is deliberately not in. Upstream workaround rather than a
-    design; remove it once the wrapper stops round-tripping. Best-effort, like
+    and never takes the CUDA-boxing route. Scoped by the shared
+    ``_flagos_launch_patches_apply`` gate -- see
+    ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- and installed through ``torch.library``
+    rather than in C++ because the route cannot be stated in the conf: the conf
+    enumerates the generated registration list, which this hand-registered op is
+    deliberately not in. Upstream workaround rather than a design; remove it once
+    the wrapper stops round-tripping. Best-effort, like
     ``_align_flaggems_device_identity``: an unpatched ``index_put_`` is slow
     here, not broken, so this must not be able to take down device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
         import flag_gems
 
@@ -1083,7 +1089,44 @@ def _patch_flaggems_index_put():
 # device-bound and the FlagGems op is Python-bound. The patches below take
 # back the parts of that Python that are recomputed per launch without changing
 # anything a caller can observe; none of them moves an op off FlagGems.
+#
+# Measured again on an H100 in the Qwen-Image-2.1 denoise loop, where the same
+# reading holds and the kernels are not the difference either: the FlagGems
+# ``mul`` kernel launched directly on (1, 4160, 3072) bf16 runs at 28.2 us and
+# 2.72 TB/s, against the vendor's 28.7 us and 2.68 TB/s, while the *call*
+# through ``torch.mul`` on that shape takes 85.4 us -- the kernel is at the
+# memory roofline and 57 us of the call is Python around it. The patches below
+# are therefore not a DCU-specific workaround; they are the fix for the shape
+# of the FlagGems Python launch path, and every boxing build that routes to
+# FlagGems has it.
 # ---------------------------------------------------------------------------
+
+# The builds whose routed ops are FlagGems Python/Triton launches reached through
+# the generated bridge, which is the configuration these patches were written and
+# measured on. ``dcu`` was the first; ``cuda`` is the CUDA-boxing build, where the
+# same measurement was taken on an H100 (see the section header) -- an external
+# libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
+# not how FlagGems launches its own.
+_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
+
+
+def _flagos_launch_patches_apply():
+    """Whether the per-launch host patches below apply to this build and conf.
+
+    Both halves are load-bearing and are the two the individual functions used to
+    spell out separately: the build has to be one whose routed ops go through the
+    FlagGems Python launch path (a native or C++ vendor backend has its own, and
+    patching FlagGems' ``LibEntry`` there would be dead weight), and the conf has
+    to route to FlagGems at all -- a conf that does not has no launches to make
+    cheaper.
+    """
+    from .. import _build_accelerator, _conf_routes_to_flaggems
+
+    return (
+        _build_accelerator() in _FLAGGEMS_LAUNCH_PATCH_BUILDS
+        and _conf_routes_to_flaggems()
+    )
+
 
 # The keyword arguments Triton's ``KernelInterface.__getitem__`` passes down to
 # ``LibEntry.run``. A launch carrying anything else takes the stock path.
@@ -1263,6 +1306,41 @@ def _cached_libentry_key(entry, key_for_entry):
     return key_fn
 
 
+def _memoized_type_promotion(original):
+    """``pointwise_dynamic.type_promotion`` for the dtype tuples it has seen.
+
+    Every FlagGems pointwise op asks its ``prepare_args`` for the result dtype on
+    every call, and that runs ``torch._prims_common.elementwise_dtypes`` -- a
+    pure table over the operands' *dtypes*. The answer cannot depend on values,
+    shapes or device, so a process recomputes the same handful of keys for its
+    whole life. Profiled on an H100 in the Qwen-Image-2.1 denoise loop, with the
+    other patches in this section already applied, it is the largest single entry
+    left inside ``prepare_args``.
+
+    Keyed on each operand's dtype (or the argument itself when it is not a
+    tensor, so a scalar or ``None`` keys its own entry) plus the promotion kind.
+    A key that will not hash falls through to the original rather than raising.
+    Verified bitwise neutral against the unmemoized function over 81 cases --
+    nine ops across three shapes and three dtypes, outputs and dtypes compared.
+    """
+    cache = {}
+
+    def type_promotion(*args, type_promotion):
+        key = []
+        for arg in args:
+            key.append(arg.dtype if isinstance(arg, torch.Tensor) else arg)
+        try:
+            lookup = (tuple(key), type_promotion)
+            hit = cache.get(lookup)
+            if hit is None:
+                hit = cache[lookup] = original(*args, type_promotion=type_promotion)
+        except TypeError:
+            return original(*args, type_promotion=type_promotion)
+        return hit
+
+    return type_promotion
+
+
 def _flaggems_fast_run(key_for_entry, torch_device_fn, original_run):
     """``LibEntry.run`` for the case where it has everything it needs cached.
 
@@ -1408,16 +1486,15 @@ def _enable_flaggems_autotune_cache():
     the ``1`` it just wrote. The existing value is therefore parsed with the same
     ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
 
-    Scoped to the configuration it was measured on -- DCU, on a conf that routes
-    to FlagGems -- like the patches around it. No op changes route and no kernel
-    changes: the config selected is the one FlagGems' own tuner would have
-    picked. Best-effort, like its neighbours: an unset knob is slow here, not
-    broken, so this must not be able to take down device init.
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
+    changes route and no kernel changes: the config selected is the one
+    FlagGems' own tuner would have picked. Best-effort, like its neighbours: an
+    unset knob is slow here, not broken, so this must not be able to take down
+    device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
 
         triton_knobs = importlib.import_module("triton.knobs")
@@ -1471,19 +1548,18 @@ def _patch_flaggems_pointwise_dispatch():
     what bounds a launch-bound stretch of the run rather than one already
     hidden behind the device queue.
 
-    Scoped to the configuration it was measured on -- DCU, on a conf that routes
-    to FlagGems -- and installed the way the patches around it are: by rebinding
-    the functions in the FlagGems modules the C++ bridge and the generated
-    wrappers reach them through. No op changes route; the kernels, the grids and
-    the cache keys stay the ones FlagGems computes. Upstream workaround rather
-    than a design; remove it once FlagGems stops doing this work per launch.
-    Best-effort, like its neighbours: an unpatched dispatch is slow here, not
-    broken, so this must not be able to take down device init.
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS``; installed the way the patches
+    around it are: by rebinding the functions in the FlagGems modules the C++
+    bridge and the generated wrappers reach them through. No op changes route;
+    the kernels, the grids and the cache keys stay the ones FlagGems computes.
+    Upstream workaround rather than a design; remove it once FlagGems stops
+    doing this work per launch. Best-effort, like its neighbours: an unpatched
+    dispatch is slow here, not broken, so this must not be able to take down
+    device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
 
         import importlib
@@ -1523,6 +1599,16 @@ def _patch_flaggems_pointwise_dispatch():
             key._torch_fl_fast = True
             key.__wrapped__ = original_key
             libentry.LibEntry.key = key
+
+        # The result dtype is a pure function of the operand dtypes and the
+        # promotion kind, and every pointwise launch asks for it; see the helper.
+        pointwise = importlib.import_module("flag_gems.utils.pointwise_dynamic")
+        original_promotion = pointwise.type_promotion
+        if not getattr(original_promotion, "_torch_fl_memo", False):
+            memoized = _memoized_type_promotion(original_promotion)
+            memoized._torch_fl_memo = True
+            memoized.__wrapped__ = original_promotion
+            pointwise.type_promotion = memoized
 
         original_run = libentry.LibEntry.run
         if not getattr(original_run, "_torch_fl_fast", False):
