@@ -31,9 +31,10 @@
 // That boxed route is what every conf gets by default. A platform whose conf
 // routes scaled_dot_product_attention to flaggems takes FlagGems' Triton fused
 // attention instead, for the calls that kernel implements -- see
-// FlagGemsEligible() for the bounds and METAX_COMPOSITE_FLAGGEMS in
-// scripts/codegen/gen_vendor_confs.py for the MetaX measurement behind the one
-// conf that asks for it. Those calls include the ones a caller passes an
+// FlagGemsEligible() for the bounds and METAX_COMPOSITE_FLAGGEMS /
+// DCU_COMPOSITE_FLAGGEMS in scripts/codegen/gen_vendor_confs.py for the
+// measurements behind the confs that ask for it. Those calls include the ones a
+// caller passes an
 // explicit key-valid mask to, which this file converts twice: FlagGems reads a
 // bool mask with the opposite polarity to torch and indexes the mask with
 // unbound strides, so the bool row becomes an fp32 additive with stride 0 on its
@@ -110,8 +111,12 @@ namespace {
 // measurement this route exists for: bf16, head_dim 128, query seq >= 1024,
 // non-causal, no gqa, no dropout, no explicit scale -- Qwen-Image-2512's
 // joint attention (q(1, 24, 4114, 128), 120 calls/step), which is what
-// METAX_COMPOSITE_FLAGGEMS records. The clauses are the probe's predicate one for
-// one, so the two can be diffed; nothing else about the call is asserted, and
+// METAX_COMPOSITE_FLAGGEMS records. DCU measured the same class on
+// Qwen-Image-2.1's joint attention (q(1, 32, 4096, 128) x kv(1, 32, 4122, 128),
+// 32 calls/forward), which is what DCU_COMPOSITE_FLAGGEMS records and which
+// arrives carrying the mask the clause below is for. The clauses are the probes'
+// predicates one for one, so the two can be diffed; nothing else about the call
+// is asserted, and
 // widening any clause is a measurement rather than an edit. head_dim in
 // particular: an _attn_fwd tile's shared-memory block grows with BLOCK_DMODEL,
 // and the autotune set keep() admits (flag_gems/ops/attention.py:173) is capped
@@ -139,6 +144,13 @@ namespace {
 // The clause is deliberately narrow: 4-D bool with one entry per key, i.e.
 // (1,1,1,KV) once the size-1 axes are pinned. A materialized (B,H,Q,KV) mask is
 // 1 GiB at this shape and is not what any caller here passes.
+//
+// DCU passes the same mask from the same model, and its conf asks for this route
+// for that call. The clause is shared rather than duplicated: the mask is read by
+// the backend's own copy of the kernel there
+// (flag_gems/runtime/backend/_hygon/ops/attention.py), which indexes it the same
+// unguarded way -- see RouteMask -- so what makes the call safe is the same
+// stride contract, not a per-platform exception.
 constexpr int64_t kRoutedHeadDim = 128;
 constexpr int64_t kRoutedMinQuerySeq = 1024;
 
@@ -194,7 +206,9 @@ bool FlagGemsEligible(
 // The `attn_mask` kwarg this route hands FlagGems, built from the caller's row.
 //
 // The kernel cannot read a bool mask as-is: flag_gems converts one itself at
-// attention.py:928-929 with `attn_mask.to(query.dtype) * -1.0e6`, which maps True
+// flag_gems/ops/attention.py:928-929 (the backend copy DCU reads spells the same
+// two lines at _hygon/ops/attention.py:816-817) with
+// `attn_mask.to(query.dtype) * -1.0e6`, which maps True
 // to -1e6 -- the inverse of torch's convention, where True is the key that
 // attends -- and that conversion is skipped for a float mask, so supplying the
 // additive is this route's job. Measured on this part against
@@ -213,12 +227,20 @@ bool FlagGemsEligible(
 // flagos_python in a FLAGOS_LOG=dispatch census of a masked call; none of them
 // reports a fallback.
 //
-// The reshape before the expand is the other load-bearing detail. The caller's
-// (1,1,1,KV) tensor carries a real stride on both size-1 axes, while the kernel
-// indexes the mask by batch_id*stride(0) + head_id*stride(1) + offs_m*stride(2)
-// + offs_n*stride(3) with nothing bounding the first three (attention.py:240,
-// 262-272), so all three strides have to be 0 -- and expand alone would keep the
-// real ones, because the axes are size 1 either way.
+// The stride contract the kernel's indexing needs. It forms the block pointer as
+// batch_id*stride(0) + head_id*stride(1) + offs_m*stride(2) + offs_n*stride(3)
+// with nothing bounding the first three (flag_gems/ops/attention.py:262-272 in
+// the shared copy MetaX reads, _hygon/ops/attention.py:251-259 in the backend
+// copy DCU reads), so what has
+// to hold is that the last index each of them can reach contributes no offset:
+// stride(i) * (size(i) - 1) == 0. expand() gives that for free -- an axis that
+// grows from 1 takes stride 0, and an axis that stays at 1 is only ever indexed
+// at 0 -- which is why all three are not required to be 0. Measured on a DCU
+// bw1000, a (1,1,1,KV) mask leaves expand as (KV, 0, 0, 1) at batch 1, the batch
+// stride surviving because that axis was never expanded, and as (0, 0, 0, 1)
+// above it; both satisfy the condition. where() has already materialised a
+// contiguous tensor, so the reshape is a shape no-op on every mask this clause
+// admits; it is kept as the statement of the shape the expand relies on.
 at::Tensor RouteMask(const at::Tensor& mask, const at::Tensor& query,
                      const at::Tensor& key) {
   const auto f32 = mask.options().dtype(at::kFloat);

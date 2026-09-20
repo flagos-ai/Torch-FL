@@ -15,6 +15,7 @@
 import contextlib
 import importlib
 import os
+import sys
 import time
 
 import torch
@@ -190,6 +191,12 @@ def _lazy_init():
     except Exception:
         pass  # FlagGems unavailable or undetectable here, skip
 
+    # Triton has to hash its own build before it can read a single compiled
+    # kernel out of its on-disk cache, and that hash is the last thing that
+    # cannot be warmed by the patches below. Start it here, while the caller is
+    # still materialising weights. See the function for the measurement.
+    _prewarm_triton_key()
+
     # FlagGems locates itself in the device namespace by the vendor's own device
     # string ("cuda" for nvidia), while torch_fl registers this accelerator as
     # "flagos". Its ops compare the two and hand the call back to ATen when they
@@ -205,6 +212,12 @@ def _lazy_init():
     # the function for the measurement. No-op outside the vendors it was
     # measured on.
     _patch_flaggems_vector_norm()
+
+    # Same window and the same caching rule: these two pick a better FlagGems
+    # kernel for a square and for a short last-dim mean, which is what the q/k
+    # RMSNorm is made of. See each function for the measurement.
+    _patch_flaggems_pow_scalar_square()
+    _patch_flaggems_mean_last_dim()
 
     # Same window as the two above, and the same requirement: the dispatcher
     # kernel is claimed before the first routed op can reach it. See the
@@ -890,6 +903,39 @@ def _flaggems_vector_norm_wrapper(original):
     return vector_norm
 
 
+def _rebind_flag_gems_name(name, original, wrapper):
+    """Point every module that *holds* ``name`` at ``wrapper`` instead.
+
+    The C++ bridge resolves ``"flag_gems.<name>"`` once and caches the callable,
+    and each re-export on the way down (``flag_gems``, ``flag_gems.ops``, and
+    the submodule that defines it) holds its own reference, so all of them have
+    to move. Matched by identity, so a module that happens to export a
+    different callable under the same name is left alone.
+
+    The test is ``__dict__`` membership rather than ``getattr``. On this
+    interpreter the two are not the same question: ``transformers`` installs a
+    ``_LazyModule`` for every model it ships, and ``getattr`` on one of those
+    imports the submodule behind the name and warns about the alias it hands
+    back. Sweeping several thousand of them costs seconds of load time and
+    materialises hundreds of image-processing modules that nothing asked for.
+    A module that only computes the name in ``__getattr__`` was never holding
+    the reference that has to move, so ``__dict__`` is also the right test.
+
+    ``sys`` is a module-level import here, not one of the function-local ones the
+    patch functions use for their own imports: a local ``import sys`` binds a
+    local name and leaves this function's ``sys`` unbound, which is a
+    ``NameError`` on the dispatch path -- and every caller of this helper wraps
+    it in ``except Exception: pass``, so the patch installs nothing and says
+    nothing.
+    """
+    for mod in list(sys.modules.values()):
+        try:
+            if mod.__dict__.get(name) is original:
+                mod.__dict__[name] = wrapper
+        except Exception:
+            continue
+
+
 def _patch_flaggems_vector_norm():
     """Stop FlagGems' L2 ``vector_norm`` from materialising a transposed copy.
 
@@ -925,8 +971,6 @@ def _patch_flaggems_vector_norm():
 
         if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
             return
-        import sys
-
         import flag_gems.ops as _gems_ops
 
         # ``flag_gems.ops.__init__`` re-exports the function under the
@@ -942,16 +986,288 @@ def _patch_flaggems_vector_norm():
         wrapper = _flaggems_vector_norm_wrapper(original)
         # The C++ bridge resolves "flag_gems.vector_norm" once and caches the
         # callable, and every re-export above holds its own reference, so rebind
-        # every module that currently points at the original -- matched by
-        # identity, the way _patch_flaggems_philox does it.
-        for mod in list(sys.modules.values()):
-            try:
-                if getattr(mod, "vector_norm", None) is original:
-                    mod.vector_norm = wrapper
-            except Exception:
-                continue
+        # every module that currently points at the original.
+        _rebind_flag_gems_name("vector_norm", original, wrapper)
         if _gems_module is not None:
             _gems_module.vector_norm = wrapper
+    except Exception:
+        pass
+
+
+def _pow_exponent_is_two(exponent) -> bool:
+    """Whether a ``Scalar`` exponent is exactly 2, without trusting its type."""
+    try:
+        return float(exponent) == 2.0
+    except Exception:
+        return False
+
+
+def _flaggems_pow_scalar_square_wrapper(original, square):
+    """Wrap FlagGems' ``pow_tensor_scalar`` so an exponent of 2 is a multiply.
+
+    See ``_patch_flaggems_pow_scalar_square`` for why. Every other exponent, and
+    every input that is not floating point, goes to ``original`` unchanged.
+    ``square`` is the value of ``flag_gems.mul`` seen when the patch was
+    installed; it is only a fallback, because the patch can run before that name
+    exists (see below).
+    """
+
+    def pow_tensor_scalar(A, exponent):
+        try:
+            fast = A.dtype.is_floating_point and _pow_exponent_is_two(exponent)
+        except Exception:
+            fast = False
+        if fast:
+            import flag_gems
+
+            mul = getattr(flag_gems, "mul", None) or square
+            if mul is not None:
+                return mul(A, A)
+        return original(A, exponent)
+
+    pow_tensor_scalar.__wrapped__ = original
+    pow_tensor_scalar._torch_fl_square_via_mul = True
+    return pow_tensor_scalar
+
+
+def _patch_flaggems_pow_scalar_square():
+    """Compute ``x.pow(2)`` as ``x * x`` instead of one ``powf`` each.
+
+    ``pow.Tensor_Scalar`` reaches ``flag_gems.pow_tensor_scalar``, which on this
+    backend is not upstream's ``flag_gems/ops/pow.py`` at all: the backend
+    registrar swaps in ``flag_gems/runtime/backend/_hygon/ops/pow.py``, and that
+    copy evaluates ``_pow(x.to(tl.float64), exponent.to(tl.float64))`` for every
+    non-half input -- an fp64 libdevice ``powf`` per element. The exponent is a
+    runtime operand, so the kernel is the same whether it was handed 2.0 or
+    1.37. Measured on a DCU bw1000, fp32 ``(1, 4122, 32, 128)`` (16.9M elements,
+    67.6 MB), pair of device events around a back-to-back launch loop against
+    the same loop's host time:
+
+        pow_tensor_scalar(z, 2.0)   host  185.6 us   device  418.3 us
+        flag_gems.mul(z, z)         host   20.1 us   device  104.8 us
+
+    and on bf16, where the same two ops are 384.6/169.7 and 56.5/20.1. The
+    replacement is also at least as accurate: ``x * x`` is correctly rounded,
+    whereas ``exp2(2 * log2(x))`` is not, and the two agree bit for bit at 0,
+    -0, inf and nan.
+
+    It is spelled with FlagGems' own ``mul`` rather than ``torch.mul`` so the
+    whole op stays on FlagGems Triton kernels. That is a deliberate ~50 us: the
+    conf routes ``mul.Tensor`` to the CUDA-boxing path, whose kernel is about
+    twice as fast on fp32, and taking it would move a routed op off FlagGems,
+    which is what this patch exists to avoid.
+
+    ``flag_gems.mul`` is read at call time rather than captured here, because
+    this function can run in the middle of ``import flag_gems``. Triton asks for
+    the active device while ``flag_gems/__init__.py`` is still importing
+    ``flag_gems.fused``, that query goes through the PrivateUse1 lazy init back
+    into ``_lazy_init``, and the top-level names -- ``mul`` among them -- are not
+    bound until ``from flag_gems.ops import *`` a few lines later, so on that
+    first pass there is nothing to capture. By the time anything is dispatched
+    ``flag_gems.mul`` is the function the bridge would have called, so binding it
+    late costs a dict lookup and removes the ordering question entirely.
+
+    Reached through ``flag_gems.pow_tensor_scalar`` rather than through the
+    defining module, because those are two different functions here: the
+    backend override is what the C++ bridge resolves, and upstream's copy is
+    left alone only if nothing else calls it. Both are rebound if both are
+    present.
+
+    Scoped to the configuration that was measured -- DCU, on a conf that routes
+    to FlagGems, exponent exactly 2, floating-point input -- and gated on the
+    route actually being FlagGems. Best-effort, like
+    ``_align_flaggems_device_identity``: an unpatched ``pow`` is slow here, not
+    broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+        import flag_gems.ops as _gems_ops
+
+        # The backend-resolved name first: that is the one the bridge calls.
+        # The defining module can hold a different function, the way
+        # ``_hygon/ops/pow.py`` shadows ``flag_gems/ops/pow.py``, so take it
+        # too and let the identity sweep below find every reference to each.
+        candidates = []
+        resolved = getattr(flag_gems, "pow_tensor_scalar", None)
+        if resolved is not None:
+            candidates.append(resolved)
+        _gems_module = sys.modules.get("flag_gems.ops.pow")
+        upstream = getattr(_gems_module, "pow_tensor_scalar", None)
+        if upstream is None:
+            upstream = getattr(_gems_ops, "pow_tensor_scalar", None)
+        if upstream is not None and upstream is not resolved:
+            candidates.append(upstream)
+
+        # And the vendor's own copy, which is the one that ends up in the
+        # registry: this runs from inside ``import flag_gems``, while
+        # ``SpecOpRegistrar.apply`` is a few lines further down the same file,
+        # and that registrar reads its functions out of ``_{vendor}.ops`` with
+        # ``inspect.getmembers`` at that later moment. Rebinding the vendor
+        # package now is therefore what decides what gets published -- the name
+        # the sweep above fixes on ``flag_gems`` is overwritten either way.
+        try:
+            from flag_gems import runtime as _gems_runtime
+
+            vendor = _gems_runtime.device.vendor_name
+        except Exception:
+            vendor = None
+        if vendor:
+            try:
+                vendor_ops = importlib.import_module(f"_{vendor}.ops")
+            except Exception:
+                vendor_ops = None
+            vendor_pow = getattr(vendor_ops, "pow_tensor_scalar", None)
+            if vendor_pow is not None and all(vendor_pow is not c for c in candidates):
+                candidates.append(vendor_pow)
+
+        if not candidates:
+            return
+        square = getattr(flag_gems, "mul", None)
+        # The C++ bridge resolves "flag_gems.pow_tensor_scalar" once and caches
+        # the callable, and every re-export above holds its own reference, so
+        # rebind every module that currently points at an original -- matched
+        # by identity, the way _patch_flaggems_vector_norm does it.
+        for original in candidates:
+            if getattr(original, "_torch_fl_square_via_mul", False):
+                continue
+            wrapper = _flaggems_pow_scalar_square_wrapper(original, square)
+            _rebind_flag_gems_name("pow_tensor_scalar", original, wrapper)
+    except Exception:
+        pass
+
+
+# A contiguous last-dim reduction at or below this width is short enough that
+# one CTA per row is the wrong shape for it; see the patch for the measurement.
+_MEAN_TILED_MAX_N = 1024
+
+
+def _mean_is_last_dim(inp, dim) -> bool:
+    """Whether ``mean_dim`` is reducing a contiguous tensor's last axis."""
+    if not isinstance(inp, torch.Tensor) or inp.ndim < 1:
+        return False
+    if not inp.dtype.is_floating_point or not inp.is_contiguous() or inp.numel() == 0:
+        return False
+    if dim is None:
+        return False
+    try:
+        # dim is an int for calls that name a single axis and a sequence
+        # otherwise; the aten schema (OptionalIntArrayRef) does not say which.
+        dims = [dim] if isinstance(dim, int) else [int(d) for d in dim]
+    except Exception:
+        return False
+    if len(dims) != 1 or not -inp.ndim <= dims[0] < inp.ndim:
+        # The range test is not redundant with the modulo below: ``%`` normalises
+        # a negative dim, it does not reject an out-of-range one, and an
+        # out-of-range dim would otherwise read as the last axis (dim 3 on a 2-D
+        # input) and return a mean over the wrong axis instead of raising the way
+        # the composite it replaces does.
+        return False
+    return dims[0] % inp.ndim == inp.ndim - 1 and inp.shape[-1] <= _MEAN_TILED_MAX_N
+
+
+def _flaggems_mean_last_dim_wrapper(original, kernel, cdiv, device_ctx):
+    """Wrap FlagGems' ``mean_dim`` so a row mean goes to the tiled kernel.
+
+    See ``_patch_flaggems_mean_last_dim`` for why. Everything the fast path does
+    not cover -- an explicit ``dtype``, a non-float or non-contiguous input, a
+    reduction that is not over the last axis, a wide row -- goes to ``original``
+    unchanged.
+    """
+
+    def mean_dim(inp, dim=None, keepdim=False, *, dtype=None):
+        if dtype is None and _mean_is_last_dim(inp, dim):
+            n = inp.shape[-1]
+            m = inp.numel() // n
+            # mean_dim_kernel writes one value per row, so its out is (M, 1)
+            # regardless of the input's rank.
+            out = torch.empty((m, 1), dtype=inp.dtype, device=inp.device)
+            grid = lambda meta: (cdiv(m, meta["BLOCK_M"]),)  # noqa: E731
+            with device_ctx(inp.device):
+                kernel[grid](inp, out, m, n)
+            out = out.view(list(inp.shape[:-1]) + [1])
+            return out if keepdim else out.squeeze(-1)
+        return original(inp, dim, keepdim, dtype=dtype)
+
+    mean_dim.__wrapped__ = original
+    mean_dim._torch_fl_tiled_row_mean = True
+    return mean_dim
+
+
+def _patch_flaggems_mean_last_dim():
+    """Send a short last-dim ``mean`` to FlagGems' tiled reduction kernel.
+
+    ``flag_gems.ops.mean.mean_dim_comm`` picks its kernel by ``K = numel/M/N``,
+    the length of the *unreduced* slice: ``K >= 1024`` gets the vectorised
+    kernel, ``K > 1`` the tiled one, and ``K == 1`` -- a reduction over the last
+    axis of a contiguous tensor -- gets ``mean_dim_kernel_inner``, which is one
+    CTA per row. On a short row that is a CTA per 512 bytes, and the launch cost
+    of 131904 of them swamps the reduction. Measured on a DCU bw1000, fp32
+    ``(1, 4122, 32, 128)`` (131904 rows of 128), the same event-pair split as
+    the pow patch:
+
+        mean_dim(z, -1, True)   [shipped]        host   77.7 us   device  443.5 us
+        mean_dim_kernel tiled                    host   47.8 us   device   59.8 us
+
+    and on bf16 the shipped kernel is the same 443.5 us. Both kernels sum in
+    fp32 and divide by N, so bf16 agrees bit for bit; fp32 differs by fp
+    reassociation only (max |delta| 1.5e-8 on unit-variance input, which is
+    below the bf16 rounding the model then applies). The tiled kernel is the
+    one ``mean_dim_comm`` already uses for multi-dim reductions and for
+    ``sum``/``amax``/``prod``, so this is a dispatch fix, not a new kernel.
+
+    Measured flat across M -- 46 us against 76 us at M=1 as well as at M=16384
+    -- so it needs no lower bound on the row count, only an upper bound on the
+    row width. Scoped to the configuration that was measured -- DCU, on a conf
+    that routes to FlagGems -- and gated on the route actually being FlagGems.
+    Best-effort, like ``_align_flaggems_device_identity``: an unpatched ``mean``
+    is slow here, not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+        import flag_gems.ops as _gems_ops
+
+        # Resolve the way the bridge does -- off the top level -- so a backend
+        # that ships its own mean_dim is patched where it actually is, and take
+        # the kernel and helpers from whichever module defines that function.
+        original = getattr(flag_gems, "mean_dim", None)
+        if original is None:
+            original = getattr(_gems_ops, "mean_dim", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_tiled_row_mean", False):
+            return
+        _gems_module = sys.modules.get(getattr(original, "__module__", ""))
+        kernel = getattr(_gems_module, "mean_dim_kernel", None)
+        if kernel is None:
+            # Same re-export trap as the vector_norm patch: ``flag_gems.ops``
+            # binds the *function* under the submodule's name, so the defining
+            # module has to come out of sys.modules.
+            _gems_module = sys.modules.get("flag_gems.ops.mean")
+            kernel = getattr(_gems_module, "mean_dim_kernel", None)
+        if kernel is None:
+            return
+        # mean_dim_comm wraps its launches in this context; keep the same
+        # ordering against any pending device switch. cdiv comes off the same
+        # module so the wrapper does not need its own triton import.
+        device_ctx = getattr(_gems_module, "torch_device_fn", None)
+        device_ctx = getattr(device_ctx, "device", None) or contextlib.nullcontext
+        cdiv = getattr(getattr(_gems_module, "triton", None), "cdiv", None)
+        if cdiv is None:
+            import triton
+
+            cdiv = triton.cdiv
+        wrapper = _flaggems_mean_last_dim_wrapper(original, kernel, cdiv, device_ctx)
+        _rebind_flag_gems_name("mean_dim", original, wrapper)
+        if _gems_module is not None:
+            _gems_module.mean_dim = wrapper
     except Exception:
         pass
 
@@ -1429,6 +1745,64 @@ def _enable_flaggems_autotune_cache():
 
         os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
         triton_knobs.autotuning.cache = True
+    except Exception:
+        pass
+
+
+def _prewarm_triton_key():
+    """Hash Triton's own build on a thread instead of inside the first compile.
+
+    ``triton.runtime.cache.triton_key`` is ``functools.lru_cache``d and is the
+    first thing ``get_cache_key`` asks for, so it runs inside whichever kernel
+    compiles first -- for Qwen-Image-2.1 that is FlagGems' embedding, in the
+    text encoder, or the layer-norm autotune in the denoise loop, depending on
+    which side is reached first. It sha256s every file under ``triton/compiler``,
+    ``triton/backends`` and ``triton/language`` and then the whole of
+    ``libtriton.<ext>`` in 1 MiB chunks.
+
+    On the DTK 6.3 wheel that .so is 900,284,304 bytes. Measured with the venv's
+    own python, importing only ``triton.runtime.cache``:
+
+        import triton.runtime.cache    0.196 s
+        triton_key()                   1.013 s   (1694 characters later)
+
+    and the same second shows up inside the model: the loop's first step is
+    3030.0 ms of enqueue against 254.0 ms on the second, and ``get_cache_key``
+    accounts for 1.325 s of a first-step profile in which one ``triton_key``
+    call is 1.085 s. The lru_cache makes it a once-per-process cost, so it is
+    paid in full by every run.
+
+    Nothing about the value depends on this process -- it is a function of the
+    installed files and ``triton.__version__`` alone, with no environment term
+    in it -- so it can be computed at any point, and there is nothing to
+    invalidate if it is computed early. It is started here, at device init,
+    because the caller still has tens of seconds of work in front of it: the
+    pipeline materialises ~33 GB of weights before the first Triton kernel is
+    reached. ``hashlib`` releases the GIL for buffers this size and so do the
+    reads, so the thread overlaps that load rather than serialising with it.
+
+    Scoped like its neighbours -- DCU, on a conf that routes to FlagGems -- so
+    the only processes that start a thread are the ones that were measured.
+    Best-effort: an un-warmed cache is slow here, not broken, so a failure to
+    start the thread must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+
+        import threading
+
+        from triton.runtime.cache import triton_key
+
+        def warm():
+            try:
+                triton_key()
+            except Exception:
+                pass
+
+        threading.Thread(target=warm, name="torch_fl-triton-key", daemon=True).start()
     except Exception:
         pass
 

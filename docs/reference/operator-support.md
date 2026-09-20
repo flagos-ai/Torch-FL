@@ -5214,6 +5214,324 @@ The generic FlagGems route cohort is unchanged and was **not revalidated** by
 this work. The AMP result does not establish support for the legacy handwritten
 MetaX kernel mode or for additional MACA releases and devices.
 
+### DCU: `scaled_dot_product_attention` routed to FlagGems, converting the Qwen-Image-2.1 key-valid mask (2026-09-20, Hygon DCU bw1000)
+
+`scaled_dot_product_attention` is a `flaggems` route in `backends_dcu.conf`, which
+now reads **459 `flaggems` / 1578 `cuda`** over a **2037**-op list (SHA-256
+`8849ce31ca6e517b6e7f71057f90dfa917f1b76068501554f40b7806d5600369`), superseding
+the 458 / 1579 over 2037 (SHA-256
+`7b82cb492de80f3dc2dcb93deeba14764a986368460a63cae9d1deb90fee9163`) recorded
+below. The active route set moves with it, from SHA-256
+`ededd42387eef3b74473eef358515a1848c153b3d83896c13168676332c3f69c` to
+`b646c47b5d6643ed7a0ef753af24f402cf741d598ca3dca662946b89977288e6`. One line
+changes -- `scaled_dot_product_attention = cuda` becomes `flaggems` -- no op loses
+a route and every op in the list is still accelerated.
+
+**Why the op cannot be routed leaf by leaf.** `aten::scaled_dot_product_attention`
+is a composite, and the generated kernels this report otherwise counts are
+leaves. Its fused-backend selection runs *inside* the composite and then branches
+on `query.device().type()`, so on PrivateUse1 the leaves are never consulted and
+routing them per-op can never reach a fused kernel. The override that fixes that
+is hand-written -- `csrc/aten/sdp_choice_stub.cc` registers the composite itself
+on PrivateUse1 and decides inside it -- and it is registered only on the
+CUDA-boxing builds, which is why `EXTRA_ROUTED` in
+[`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py)
+exists: the op appears in no `.inc`, so no coverage scan can see it and the op
+list has to be widened by hand. A second hand-written set,
+`DCU_COMPOSITE_FLAGGEMS`, holds it from every other platform's conf exactly the
+way `METAX_COMPOSITE_FLAGGEMS` does -- a measurement taken on one platform is not
+a route for another, and `tests/unit/test_gen_vendor_confs.py` pins the
+containment in both directions.
+
+**What DCU adds to the MetaX measurement: a mask.** MetaX's Qwen-Image-2512
+arrives maskless, so its clause is "no mask". Qwen-Image-2.1 does not:
+`build_token_metadata` fills the joint sequence's `key_valid` with `torch.ones`
+over the padded length whenever the caller supplies no
+`encoder_hidden_states_mask`, as the text-to-image bench does, and every one of
+the model's 32 blocks is handed that same `(1, 1, 1, 4122)` all-true bool mask.
+Read as "a mask, keep the boxing route" the model's largest attention call --
+`q(1, 32, 4096, 128) x kv(1, 32, 4122, 128)` -- lands on the composite's math
+decomposition, which materialises the fp32 score matrix: 32 x 4096 x 4122 x 4 B
+is **2.16 GB per call, 32 calls per forward**, where the Triton kernel keeps its
+tiles in shared memory and never does. So the clause admits the mask and the
+route converts it.
+
+The clause is a shape test and nothing else: 4-D, `torch.bool`, one entry per
+key. `size(3) == key.size(2)` together with `numel() == key.size(2)` is what pins
+it to `(1,1,1,KV)`. That is deliberate -- no reduction runs over the mask and no
+value in it is read on the host, so admitting a call costs no device sync. An
+additive float mask is refused for the mirror-image reason: the kernel reads one
+as `scores + mask` (`attention.py:102`, `113`), so "all zeros" would be a value
+claim the route could only establish by a pass over it.
+
+**The caller's row cannot be forwarded as it stands.** Two independent reasons,
+both in the DCU backend's own copy of the kernel
+(`flag_gems/runtime/backend/_hygon/ops/attention.py`):
+
+- **The shape carries unbounded strides.** The mask block pointer is
+  `attn_mask + batch_id*stride(0) + head_id*stride(1) + offs_m*stride(2) +
+  offs_n*stride(3)` (`attention.py:251-259`), guarded against the *scores*
+  extents and not the mask's own. A mask broadcast along any of those axes reads
+  past its buffer. Measured on a DCU bw1000, `q(1, 4, 256, 64) x kv(1, 4, 320,
+  64)` bf16 against an fp32 no-mask reference:
+
+  ```
+  attn_mask=None                 sum  105.7207   max|err| 0.001875
+  attn_mask=(1, 1, 1, 320) bool  sum  nan        max|err| 3.195073
+  attn_mask=(1, 4, 256, 320)     sum  105.9962   max|err| 0.007508
+  ```
+
+  At the model's own shape the same read is far enough past the allocation to
+  take the process down rather than return NaN: a `(1, 1, 1, 4122)` mask against
+  `(1, 32, 4096, 4122)` scores is a reproducibly fatal kernel VMFault on the
+  first call.
+
+- **A bool mask means the opposite of what torch means by it.** The kernel folds
+  one in as `attn_mask.to(query.dtype) * -1.0e6` (`attention.py:816-817`), so
+  `True` -- torch's "this key may be attended to" -- becomes the additive that
+  removes the key. Only a non-bool mask is taken as the additive itself.
+
+**What the route forwards instead.** `RouteMask()` builds that additive from the
+caller's row and nothing else: `0 where True`, `kRoutedMaskFill` (`-1.0e6`) where
+False, in fp32, reshaped to `(1,1,1,KV)` and expanded to the call's `(B,H,Q,KV)`.
+Two properties do the work:
+
+- **The expansion is what makes it safe.** What the kernel's first three strides
+  have to satisfy is that the last index each of them can reach contributes no
+  offset, i.e. `stride(i) * (size(i) - 1) == 0`; `expand` gives that for free,
+  because an axis that grows from 1 takes stride 0 and an axis that stays at 1 is
+  only ever indexed at 0. Measured on this part, a `(1,1,1,KV)` mask leaves
+  `expand` as `(KV, 0, 0, 1)` at batch 1 -- the batch stride surviving because
+  that axis was never expanded -- and as `(0, 0, 0, 1)` above it. `where()`
+  already returns a contiguous tensor, so the `reshape` in front of the `expand`
+  is a shape no-op on every mask this clause admits.
+- **fp32, and finite.** The kernel adds this onto an fp32 accumulator
+  (`attention.py:102`), so the additive is built in fp32 rather than the query's
+  bf16. `-1.0e6` rather than `-inf` for the dropped keys: a fully dropped block
+  would take `-inf` as its running max and then divide 0 by 0, while `-1e6`
+  underflows to a zero weight after `exp2` against any logit this model produces
+  and stays comparable as a maximum. MetaX measured the three spellings against
+  `F.scaled_dot_product_attention` on a materialised bool mask: `as-is bool` and
+  `-1e6 where True` both at max|d| 5.840e-01, `0 where True` at 1.953e-03 -- the
+  bf16 floor the unfused reference itself sits at.
+
+**The converted mask does not move the answer.** Measured on a DCU bw1000 at the
+model's class of shape, `q(1, 2, 1024, 128) x kv(1, 2, 1040, 128)` bf16, against
+the same call with no mask at all:
+
+```
+all-true row (1,1,1,1040)   max|d| 0.0001220703125
+half the row dropped        max|d| 0.249023
+```
+
+The all-true row does not return the maskless call's tensor bit for bit, and it
+cannot: the two calls are handed different arguments -- `attn_mask=None` against
+a 1040-wide fp32 additive -- the entry point branches on that, and the same
+reduction comes back reassociated. 0.0001220703125 is 2^-13, one bf16 ulp just
+under the output's 0.287 peak, over 8 elements of 2.1M, and both arms land on the
+same 0.000694 against an fp64 reference. Dropping half the row moves the answer
+2000x further, which is what says the additive is read rather than only built.
+
+**The envelope is the probes' predicates one for one.** bf16, 4-D, head_dim 128
+exactly, query seq >= 1024, non-causal, no gqa, no dropout, no explicit scale, and
+a mask the clause above admits. Widening any clause is a measurement rather
+than an edit. Head_dim in particular is bounded below by the kernel, not by the
+route: `_attn_fwd`'s shared-memory block grows with `BLOCK_DMODEL` and the
+autotune set `keep()` admits (`flag_gems/ops/attention.py:173`) is capped at
+`BLOCK_N <= 32`, so the tile cannot be traded down; at head_dim 128 some admitted
+configurations already ask for 98304 B against this part's 65536 B limit while a
+legal tile remains, and at the VAE's head_dim 512 the same path reports 294912 B
+with nothing in the set fitting, so that call keeps the boxing route. The route
+is drawn where it was measured, not where the kernel could be argued to fit.
+
+**Four changes to the FlagGems Python path**, none of which moves an operator
+between routes. All live in `torch_fl/flagos/__init__.py`, are gated on both
+`_build_accelerator() == "dcu"` and the conf actually routing the op to FlagGems,
+and are no-ops elsewhere.
+
+1. `_patch_flaggems_pow_scalar_square` -- `pow.Tensor_Scalar` reaches
+   `flag_gems.pow_tensor_scalar`, which on this backend is not upstream's
+   `flag_gems/ops/pow.py` but the backend registrar's swap-in
+   `flag_gems/runtime/backend/_hygon/ops/pow.py`, where every non-half input goes
+   through `_pow(x.to(tl.float64), exponent.to(tl.float64))` -- an fp64 libdevice
+   `powf` per element, for an exponent that is a runtime operand and so decides
+   nothing at compile time. The Qwen-Image RMSNorm squares its input. Measured on
+   a DCU bw1000 at fp32 `(1, 4122, 32, 128)`, 16.9M elements, 67.6 MB, events
+   around a back-to-back launch loop:
+
+   | op | host | device |
+   |---|---|---|
+   | `pow_tensor_scalar(z, 2.0)` | 185.6 us | 418.3 us |
+   | `flag_gems.mul(z, z)` | 20.1 us | 104.8 us |
+
+   and on bf16, 384.6/169.7 us against 56.5/20.1 us. The replacement is at least
+   as accurate rather than merely close: `x * x` is correctly rounded where
+   `exp2(2 * log2(x))` is not, and the two agree bit for bit at 0, -0, inf and
+   nan. It is spelled with FlagGems' own `mul` rather than `torch.mul` to keep the
+   whole op on FlagGems Triton kernels -- a deliberate ~50 us, because
+   `mul.Tensor` is a `cuda` route in this conf and taking it would move a routed
+   op off FlagGems.
+
+2. `_patch_flaggems_mean_last_dim` -- `flag_gems.ops.mean.mean_dim_comm` picks its
+   kernel by `K = numel/M/N`, the length of the *unreduced* slice, and `K == 1`
+   (a reduction over the last axis of a contiguous tensor) gets
+   `mean_dim_kernel_inner`, one CTA per row. At the RMSNorm's shape that is a CTA
+   per 512 bytes and the launch cost dominates. Measured on the same host at fp32
+   `(1, 4122, 32, 128)`, 131904 rows of 128:
+
+   | op | host | device |
+   |---|---|---|
+   | `mean_dim(z, -1, True)`, shipped dispatch | 77.7 us | 443.5 us |
+   | `mean_dim_kernel`, tiled | 47.8 us | 59.8 us |
+
+   and on bf16 the shipped path is the same 443.5 us. Both kernels sum in fp32 and
+   divide by N, so bf16 agrees bit for bit; fp32 differs by reassociation only
+   (max |delta| 1.5e-8 on unit-variance input, below the bf16 rounding the model
+   then applies). The tiled kernel is the one `mean_dim_comm` already uses for
+   multi-dim reductions and for `sum`/`amax`/`prod`, so this is a dispatch fix,
+   not a new kernel. Measured flat across M -- 46 us against 76 us at M=1 as well
+   as at M=16384 -- so it needs only an upper bound on the row width, which is
+   `_MEAN_TILED_MAX_N = 1024`; `_mean_is_last_dim` also rejects an out-of-range
+   `dim` rather than let `%` normalise it into a mean over the wrong axis.
+
+3. `_prewarm_triton_key` -- `triton.runtime.cache.triton_key` is `lru_cache`d and
+   is the first thing `get_cache_key` asks for, so it runs inside whichever kernel
+   compiles first. It sha256s every file under `triton/compiler`,
+   `triton/backends` and `triton/language` and then the whole of
+   `libtriton.<ext>`, which on the DTK 6.3 wheel is **900,284,304 bytes**.
+   Measured with the venv's own interpreter, importing only
+   `triton.runtime.cache`: `import triton.runtime.cache` 0.196 s, `triton_key()`
+   **1.013 s**. In the model the same second shows up as a first denoise step of
+   3030.0 ms of enqueue against 254.0 ms on the second, with `get_cache_key` at
+   1.325 s of a first-step profile and one `triton_key` call at 1.085 s. Nothing
+   about the value depends on this process -- it is a function of the installed
+   files and `triton.__version__` -- so it is computed on a daemon thread at
+   device init, while the caller still has ~33 GB of weights to materialise, and
+   `hashlib` releases the GIL for buffers this size.
+
+4. **The defect this branch's own refactor introduced, and its fix.** Changes 1
+   and 3 route their rebinding through a new shared helper,
+   `_rebind_flag_gems_name`, and so does `_patch_flaggems_vector_norm`, which
+   `#352` merged with its sweep inlined. The helper reads the module-global `sys`,
+   while each patch function carried its own function-local `import sys` for its
+   other imports -- and a local `import sys` binds a local name, leaving the
+   helper's global unbound. The helper raised `NameError` on every call, and every
+   caller wraps it in `except Exception: pass`, so **all three patches installed
+   nothing and said nothing**. The end-to-end arm labelled *patches inert* below
+   is this branch measured in that state; it is a control, not a released
+   revision. `import sys` is now a module-level import, the redundant function-local
+   ones are gone, and `tests/unit/test_flaggems_dcu_costs.py` covers the helper
+   directly -- including that a `_LazyModule` which only computes the name in
+   `__getattr__` is never asked, and that a `sys.modules` entry of `None` is
+   skipped rather than fatal.
+
+**Measured end to end.** Eight-device DCU bw1000 host, DTK 6.3.26113 in
+CUDA-boxing mode, torch 2.10.0+cpu decoupled, `flag_gems`
+5.4.0rc2.post1+g437ba3938, Triton 3.6.0 with the `hcu` backend. Qwen-Image-2.1,
+6-step denoise, batch 1, seed 42, `true_cfg_scale=1.0`, initial latents injected,
+`torch.utils.benchmark.Timer.blocked_autorange` with two discarded warm-up calls;
+median of the calls the timer's 60 s budget fits:
+
+| arm | 1024x1024 | 1664x928 |
+|---|---|---|
+| DTK's own torch (vendor) | **6.998 s** (n=3) | **14.938 s** (n=2) |
+| torch_fl, route off | 7.899 s (n=3) | 16.167 s (n=4) |
+| torch_fl, route on, patches inert | 3.772 s (n=6) | 5.713 s (n=4) |
+| torch_fl, route on, shipped | **3.197 s** (n=19) | **4.979 s** (n=13) |
+
+**2.19x** and **3.00x** against the vendor build. The `n` differs per arm because
+the timer sizes the call count from its own budget, not from the protocol: the
+faster the arm, the more calls fit, and every arm ran at least two. Per phase, the
+denoise loop is where the two builds separate -- 1095.8 ms/step against 436.3 ms
+at 1024x1024 and 2389.2 against 699.0 at 1664x928 (**2.51x** and **3.42x**) --
+while the text encoder stays the vendor's (0.057 s against 0.146 s) and VAE decode
+lands at 0.292 against 0.352 s, the width the `mean_dim` patch closes most of. The
+route-off arm is the control that makes this the route's doing and not the build's:
+with the op boxed, this build is *slower* than the vendor's at both resolutions
+(7.899 against 6.998, 16.167 against 14.938), which is the pre-existing per-op
+launch overhead recorded in the entry below.
+
+**The image does not move with the route.** One 1024x1024 image per arm from the
+same injected latents, seed and 6-step schedule, so build and route are the only
+variables, each arm bit-reproducible against itself (`determinism.identical` true,
+one `image_sha256` per arm, `min_run_time` so short only the fast arm fits more
+than one call):
+
+| pair | max abs d | mean abs d | pixels over 1/255 | over 4 | over 16 |
+|---|---|---|---|---|---|
+| vendor vs route off | 48/255 | 0.790 | 22.67% | 4.21% | 0.18% |
+| vendor vs route on | 43/255 | 0.684 | 19.48% | 1.66% | 0.07% |
+| route off vs route on | 45/255 | 0.587 | 15.56% | 3.36% | 0.17% |
+
+The route's own contribution is the same order as the build's, and the shipped arm
+is the *closest* of the three to the vendor image on every threshold past 1/255 --
+1.66% of pixels differ by more than 4/255 where the same build with the op boxed
+shows 4.21%. Six bf16 steps amplify a one-ulp reassociation in either direction;
+what the difference tracks is kernel selection on both sides, not a route that
+computes something else. Peak allocation is the same 36.6 GiB in all three arms:
+the score matrix the route avoids is traffic, not footprint.
+
+**Survey.** `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22c...`) scoped
+to the changed route reports `registered 1`, `tested 1`, verdict **`FAILED`**,
+`basic_executable 0`, `strict_support 0`, over 7 cases: 4 `WRONG` and 3
+`INVALID_CASE`. The cause is the harness's `default_for()` catch-all, which ends
+in `return 0.5` for a `float`/`Scalar` argument whose name it does not recognise,
+and the SDPA schema's argument is named `dropout_p` -- so the harness
+synthesizes `dropout_p = 0.5`, both arms of every profile draw from their own
+dropout RNG, and a deterministic reference reports all four executable profiles
+as wrong. Re-run with the catch-all's `0.5` changed to `0.0`, which is the value
+that names `dropout_p`, the same seven profiles report **`STRICT`, 1 of 1, four
+PASS and the same three `INVALID_CASE`** -- the verdict was the harness's
+synthetic argument, not the route. The three `INVALID_CASE` profiles are the
+harness's synthesis too, and are identical under both runs: 1-D input
+(`Expected query, key, and value to all be at least 2 dimensional`), and int64 and
+bool operands (`expected m1 and m2 to have the same dtype`), which ATen rejects
+before any device kernel is reached. None of the seven profiles is inside the
+route's envelope, so the verdict is the harness's either way. The full 459-overload
+DCU survey over the shipped conf reports **459 registered, 382 tested, 342
+`basic_executable`, 297 `strict_support`** -- 74.5% and 64.7% -- over 3213
+cases (1850 `PASS`, 1062 `INVALID_CASE`, 147 `ERROR`, 140 `WRONG`, 14 `CRASH`).
+The previous revision measured 458/381/342/297 (74.7% / 64.8%) over 3206 cases.
+The one route added is `scaled_dot_product_attention`, and its `FAILED` is the
+harness's synthetic `dropout_p` described above, not the route. The only other
+records that differ between the two runs are `index_copy` and `index_copy_`,
+each of which moved one profile between `PASS` and `WRONG` and stayed `FAILED`
+in both: both synthesize their index argument as `randint(0, 2, ...)`, so
+duplicate indices are guaranteed and which of them wins is undefined. Neither
+moves a cohort total. The run was sharded -- eight processes over disjoint
+`--ops` slices, merged with the harness's own `summarize()` over the same
+459-route list -- which is sound because `run_overload()` measures every
+overload in a fresh child process, so a per-overload verdict does not depend on
+which process ran it or on run order.
+
+**Regression coverage.** `tests/integration/ops/test_dcu_flaggems_sdpa.py` runs 15
+call shapes through the shipped conf in a fresh interpreter, each differing from
+the model's own in exactly one clause, and asserts the number of calls that
+reached `flag_gems.scaled_dot_product_attention` against the clause that decides
+it: `routed=1` for `eligible`, `joint`, `mask_bcast_true` and `mask_false`, and
+`routed=0` for the eleven refusals (`mask_full_true`, whose `numel` is not KV;
+`mask_float_zeros`; `head_dim64`; `seq512`; `float32`; `float16`; `rank2`;
+`causal`; `scale`; `dropout`; `gqa`). **19 passed** on the hardware described
+above. The mask each of the seven routed calls carried is checked too -- four
+carried `RouteMask`'s fp32 `(B,H,Q,KV)` additive and three carried none -- and
+every mask the kernel was handed is checked to satisfy `stride(i) * (size(i) - 1)
+== 0` on the batch, head and query axes, the condition that keeps the block
+pointer inside the KV-long buffer. Max deviation against a float32 host reference
+is `0.001007` at the model's shape and `0.005810` at the worst of the fifteen, all
+inside the file's `5e-2` bound; on one set of operands the all-true-row call stays
+within `0.000122` of the maskless one while a half-dropped row moves it
+`0.249023`. With `FLAGOS_OP_scaled_dot_product_attention=cuda` the same shapes
+reach the kernel 0 times, which is what pins the route to the conf key and not to
+the shape alone. Host-side, `tests/unit/test_flaggems_dcu_costs.py` (66 tests)
+covers the three patched callables and the rebinding helper without a device, and
+`tests/unit/test_gen_vendor_confs.py` (37 tests) gains the two-platform
+containment pin for the composite set.
+
+**Not revalidated.** Nothing outside DCU moves: `backends_metax.conf`,
+`backends_cuda.conf`, TsingMicro and the remaining vendor confs are byte-identical
+to the previous revision of this report, and no measurement transfers to them.
+Their rows are carried over unchanged and are **not revalidated** by this change.
+
 ## Update History
 
 Dated records of work already done, newest first. The environment variable names
@@ -5224,6 +5542,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-20 | Hygon DCU bw1000 (8 devices) | The DCU full-coverage configuration (459 active routes, harness v6) and the Qwen-Image-2.1 6-step flow it serves | Routed `scaled_dot_product_attention` from `cuda` to `flaggems` in `backends_dcu.conf` — one line, taking the file to **459 `flaggems` / 1578 `cuda`** over the same **2037** entries (SHA-256 `8849ce31ca6e517b6e7f71057f90dfa917f1b76068501554f40b7806d5600369`, from `7b82cb492de80f3dc2dcb93deeba14764a986368460a63cae9d1deb90fee9163`) with the active route set moving from SHA-256 `ededd42387eef3b74473eef358515a1848c153b3d83896c13168676332c3f69c` to `b646c47b5d6643ed7a0ef753af24f402cf741d598ca3dca662946b89977288e6` — and widened the `attn_mask` clause of the shared hand-written override (`csrc/aten/sdp_choice_stub.cc`) from "no mask" to the one class Qwen-Image-2.1 passes: 4-D bool with `size(3) == key.size(2)` and `numel == key.size(2)`, which the size-1 axes pin to `(1,1,1,KV)`. The clause stayed a shape test — no reduction runs over the mask and no value in it is read on the host, so admitting a call costs no device sync — and a materialized float mask is still refused, because the kernel reads one as `scores + mask` and "all zeros" would be a value claim the route could only establish with a pass over it. The kernel cannot take the caller's row as it stands for two independent reasons, both in the backend's own copy at `flag_gems/runtime/backend/_hygon/ops/attention.py`: it forms the mask block pointer as `batch_id*stride(0) + head_id*stride(1) + offs_m*stride(2) + offs_n*stride(3)` (lines 251-259) guarded against the *scores* extents and not the mask's own, so a mask broadcast along any of those axes reads past its buffer — measured as `sum nan` / `max|err| 3.195073` against `0.001875` for no mask at all, and at the model's own shape a fatal kernel VMFault on the first call — and it folds a bool mask in as `attn_mask.to(query.dtype) * -1.0e6` (lines 816-817), the inverse of torch's convention, so `True` becomes the additive that *removes* the key. `RouteMask()` therefore builds the additive itself in fp32 — `0 where True`, `kRoutedMaskFill` (`-1.0e6`) where False, reshaped to `(1,1,1,KV)` and expanded to the call's `(B,H,Q,KV)` — and the contract that makes it safe is `stride(i) * (size(i) - 1) == 0` on each axis, **not** `stride(i) == 0`: an axis that stays at size 1 is only ever indexed at 0, which is what `expand` supplies and what a measured `(1,1,1,KV)` mask shows, leaving `(KV, 0, 0, 1)` at batch 1 (the batch stride surviving because that axis was never expanded) and `(0, 0, 0, 1)` above it. Three Python-side patches cut the per-op host cost that had this build *slower* than the vendor's with the route off: `pow.Tensor_Scalar` on this backend runs an fp64 libdevice `powf` per element for a runtime exponent, `mean_dim_comm` sends a last-dim reduction to one CTA per row, and `triton_key()` sha256s 900,284,304 bytes inside whichever kernel compiles first. Every route the additive needs (`zeros_like`, `full_like`, `where.self`) is a `flaggems` route in this conf, so nothing falls back to the vendor, and **no operator leaves FlagGems for CUDA boxing**. `DCU_COMPOSITE_FLAGGEMS` in `scripts/codegen/gen_vendor_confs.py` holds the route from every other platform's conf the way `METAX_COMPOSITE_FLAGGEMS` does, and `tests/unit/test_gen_vendor_confs.py` pins the containment in both directions. The full 459-overload DCU re-survey over this configuration's own route set ran to completion: **459 registered, 382 tested, 342 `basic_executable`, 297 `strict_support`** (74.5% / 64.7%) over 3213 cases (1850 `PASS`, 1062 `INVALID_CASE`, 147 `ERROR`, 140 `WRONG`, 14 `CRASH`), against the previous revision's 458/381/342/297 (74.7% / 64.8%) over 3206; the one route added is `scaled_dot_product_attention`, whose `FAILED` is the harness's synthetic `dropout_p` recorded in this entry, and the only other records that moved (`index_copy`, `index_copy_`) each flipped one profile between `PASS` and `WRONG` while staying `FAILED`, which the duplicate indices their synthesized `randint(0, 2, ...)` argument guarantees; the run was sharded across eight processes over disjoint `--ops` slices and merged with the harness's own `summarize()`. **Ascend, GCU, MUSA, MetaX, PPU and TsingMicro are not revalidated** — except for the two `backends_metax.conf` / `backends_dcu.conf` divergences this entry records, every other conf is byte-identical to the previous revision of this report and no measurement transfers to them. | Measured on the Qwen-Image-2.1 1024x1024 6-step flow (batch 1, seed 42, `true_cfg_scale=1.0`, injected initial latents) on a Hygon DCU bw1000 with DTK 6.3.26113 in CUDA-boxing mode, torch 2.10.0+cpu decoupled, `flag_gems` `5.4.0rc2.post1+g437ba3938` and Triton 3.6.0 (`hcu`), `torch.utils.benchmark.Timer.blocked_autorange` with two discarded warm-up calls, one process per arm: vendor DTK torch **6.998 s** (n=3) / **14.938 s** (n=2) at 1024x1024 / 1664x928, this build with the op boxed **7.899 s** (n=3) / **16.167 s** (n=4), this build with the route on and the patches inert **3.772 s** (n=6) / **5.713 s** (n=4), and this build shipped **3.197 s** (n=19) / **4.979 s** (n=13) — **2.19x** and **3.00x** against the vendor, where the route-off arm is the control that makes this the route's doing and not the build's. Per phase the denoise loop is where the builds separate, 1095.8 against 436.3 ms/step at 1024x1024 and 2389.2 against 699.0 at 1664x928 (**2.51x** / **3.42x**). Per op, all on one card: `pow_tensor_scalar(z, 2.0)` at fp32 `(1, 4122, 32, 128)` — 16.9M elements, 67.6 MB — **185.6 us host / 418.3 us device** against `flag_gems.mul(z, z)` at **20.1 / 104.8**, and on bf16 384.6/169.7 against 56.5/20.1; `mean_dim(z, -1, True)` at the same shape, 131904 rows of 128, **77.7 / 443.5** shipped against the tiled kernel's **47.8 / 59.8**, flat across M so it needs only `_MEAN_TILED_MAX_N = 1024` as a row-width bound; `triton_key()` measured alone with the venv's own interpreter **1.013 s** after a 0.196 s import, showing up in the model as a first denoise step of 3030.0 ms of enqueue against 254.0 ms on the second. The route's own cost is measured rather than assumed: all three ops the additive calls are `flaggems` routes in this same conf (`zeros_like`, `full_like`, `where.self`; `RouteMask` calls the out-of-place `where`, and the `zeros_like.out` / `full_like.out` spellings it does not call are `cuda`), so the conversion adds no boxed launch, and a `FLAGOS_LOG=dispatch` census of a masked call on the MetaX sibling of this route shows all three on `flagos_python` with no `fallback` line. The converted mask does not move the answer: on `q(1,2,1024,128) x kv(1,2,1040,128)` bf16 against the same call with no mask, an all-true row reads `max|d| 0.0001220703125` — one bf16 ulp just under the output's 0.287 peak, over 8 elements of 2.1M, with both arms landing on the same `0.000694` against an fp64 reference — while dropping half the row moves it `0.249023`, 2000x further, which is what says the additive is read rather than only built. The image moves no further than the build does: one 1024x1024 image per arm from the same latents, seed and schedule, vendor against route-off `48/255` max / `0.790` mean / 22.67% of pixels over 1/255, vendor against route-on `43/255` / `0.684` / 19.48%, route-off against route-on `45/255` / `0.587` / 15.56% — the shipped arm is the closest of the three to the vendor image at every threshold past 1/255 (1.66% of pixels over 4/255 against the boxed build's 4.21%), and peak allocation is the same 36.6 GiB in all three, since the score matrix the route avoids is traffic and not footprint. Re-surveyed because a route moved: `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22c...`) scoped to the changed route reports `registered 1`, `tested 1`, verdict **`FAILED`**, `basic_executable 0`, `strict_support 0` over 7 cases (4 `WRONG`, 3 `INVALID_CASE`) — and the cause is the harness, not the route: its `default_for()` catch-all ends in `return 0.5` for a `float` argument whose name it does not recognise, and the SDPA schema's argument is named `dropout_p`, so both arms of every profile draw from their own dropout RNG and a deterministic reference reports all four executable profiles wrong; with the catch-all changed to `0.0`, which is the value that names `dropout_p`, the same seven profiles report **`STRICT`** with four `PASS` and the same three `INVALID_CASE` (1-D input, int64 and bool operands — calls ATen rejects before any device kernel is reached). None of the seven profiles is inside the route's envelope either way. Regression coverage: `tests/integration/ops/test_dcu_flaggems_sdpa.py` runs 15 call shapes through the shipped conf in a fresh interpreter, each differing from the model's own in exactly one clause, asserting the count that reached `flag_gems.scaled_dot_product_attention` against the clause that decides it (`routed=1` for `eligible`, `joint`, `mask_bcast_true`, `mask_false`; `routed=0` for `mask_full_true`, `mask_float_zeros`, `head_dim64`, `seq512`, `float32`, `float16`, `rank2`, `causal`, `scale`, `dropout`, `gqa`), the form of the mask each routed call carried, the `stride(i) * (size(i) - 1) == 0` condition on every mask the kernel was handed, and that the additive is informative — **19 passed in 79.51s**, and with `FLAGOS_OP_scaled_dot_product_attention=cuda` the same shapes reach the kernel 0 times, which pins the route to the conf key and not to the shape alone. Host-side, `tests/unit/test_flaggems_dcu_costs.py` (66 tests) covers the three patched callables and the rebinding helper without a device and `tests/unit/test_gen_vendor_confs.py` (37 tests) the two-platform containment pin — **103 passed in 24.92s** together. `ruff check` — "All checks passed!"; `ruff format --check` — 285 files already formatted; `gen_vendor_confs.py --check` — `all vendor confs up to date`. **Evidence gaps:** the mask conversion is measured on the class of shape the route admits and not on a prompt cohort; the three per-op figures are one shape and one dtype pair each rather than a sweep; the `pow` and `mean_dim` patches are silent no-ops if a FlagGems upgrade renames what they rebind, which is the same failure mode as the `NameError` this branch itself introduced and fixed; the survey harness cannot measure this op at all through `active_routes()`, which enumerates the ops a conf *file* spells `flaggems`, so the verdict above is the harness's synthetic `dropout_p`; and no vendor-side 1664x928 repeat was taken in the same session as the route-on arm. |
 | 2026-09-20 | Enflame GCU S60 (8 `flagos` devices) | The Qwen-Image-2512 transformer's 240 rotary-embedding applications per forward pass, priced at the call site and again as full model outputs | Registered the `flagos` device in `diffusers`' Qwen-Image rope table from `torch_fl`'s GCU branch, which turns the angle path the entry above measured through a manual switch into the default and replaces the expansion it used. `diffusers` keys the rotation on device type in two places that must agree — `ROPE_PER_DEVICE` selects the rotation at the attention call site, while `QwenEmbedRope._get_device_freqs` produces the operand and returns **complex** frequencies for every device but `neuron` — so both halves are installed together, the operand half delegating to the stock method for every other device and both guarded by a module flag so a second call is a no-op. The consumer is the same rotation as `apply_rotary_emb_qwen_neuron` but expands each angle with `stack`/`flatten` instead of `repeat_interleave(2, dim=-1)`, whose composite lowering (`unsqueeze(-1).expand(..., 2).reshape(...)`) materialises a stride-0 view through `StridedCopy` and reaches the drained copy path 480 times per forward — 2.249 ms per call while those calls are the ones paying the drain, against 25.596 us once they are not. Three legs, one process each, warm-up 1 and 3 timed forwards, transformer on `flagos`, 1024x1024: complex (old default) 5.411 s forward with 3818.7 ms of rope (70.6 %), neuron via `QWEN_IMAGE_REAL_ROPE=1` 3.392 s with 1448.2 ms (42.7 %), shipped 2.455 s with 546.8 ms (22.3 %). **2.956 s per forward (54.6 %) against the fallback it removes and 0.937 s (27.6 %) against the angle path it replaces**, of which the harness switch alone was worth 2.019 s. **On the leg that ships**, where a step is two forwards under true CFG, the same registration is worth **6.80 s per step, 57.6 % of the loop**: one session, three legs one environment variable apart, 8-step 1024x1024 `--stage full` at the harness's default seed -- `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` **11.81 s/it** (3.10x), shipped **5.01 s/it** (**1.31x**), `torch_gcu` + `diffusers` **3.81 s/it** (1.00x), with the shipped leg reproducing at `5.00`. That is the configuration a user gets: the `8.48 s/it` / `2.23x` on the entry below and the `8.38 s/it` / `2.09x` in the rotation section above both ran the `QWEN_IMAGE_REAL_ROPE=1` harness switch instead, and are not the shipped state. The shipped and neuron legs are **bit-identical end to end** (`torch.equal` true on `(1, 4096, 64)` bf16, 0 of 262144 elements differing); the complex leg differs from both by `3.125e-02` at `absmax 5.3125`, two bf16 ulps from a different product ordering accumulated over 60 blocks. No conf file or generated registration is touched, so no route moves — the shipped conf stays 1605 `none` / 254 `flaggems` / 178 `gcu` over 2037 routable ops. `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` leaves the table as `diffusers` ships it. Evidence: [the rotation entry](#enflame-gcu-s60-forward-sdpa-on-the-vendor-flash-op-and-the-broadcast-materialisation-2026-09-20) above, `tests/unit/test_gcu_qwenimage_rope.py` (19 tests: bit-for-bit against a pinned copy of the neuron expansion and against the installed `diffusers` copy, `allclose` against the complex path at a documented one-ulp tolerance, and the registration's idempotence, disable switch and operand/consumer split), `tests/unit/test_env_registry.py`, and `/tmp/probe_rope_shipped.py` with `/tmp/rope_out_{complex,neuron,shipped}.pt` as the saved evidence; `/tmp/run_rope_ab.sh` with `/tmp/rope_ab_{rope_on,rope_off,vendor}.log` for the 8-step shipped-leg reading and `/tmp/run_stage_decomp.sh` with `/tmp/decomp_{flagos,vendor}.log` for the discarded stage-split arm, the reference leg of both on `TOPS_VISIBLE_DEVICES=0,1,2` through its own interpreter. **Evidence gaps:** the shipped-leg A/B carries the harness's default inputs and seed rather than the paired latents the SDPA entry's 8-step runs use, so the two runs are comparable through the reference leg's reproduced `3.81 s/it` and not through identical inputs; `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` returns before installing either half, so the opt-out leg prices the consumer and the operand producer together and not separately; and the stage-split arm's walls are recorded as a discarded result rather than as evidence about the decode. |
 | 2026-09-20 | Enflame GCU S60 (8 `flagos` devices) | The Qwen-Image-2512 transformer's own 60 `F.scaled_dot_product_attention` calls per forward pass, measured on the model's envelope rather than on a stand-in shape | Routed `_scaled_dot_product_efficient_attention` from `none` to `gcu` so the composite stops serving every attention call with the math decomposition. That decomposition runs on the device — there was no `cpu_fallback` line for it — but at the model's shape it is 90.71 ms per call against 1.39 ms for the vendor flash op, and it was the largest single term left in the transformer step after #351. `F.scaled_dot_product_attention` selects a backend by asking ATen's `_fused_sdp_choice` **DispatchStub**, which only a `REGISTER_PRIVATEUSE1_DISPATCH` registrar fills: registering the leaf, or an ATen op of the same name, leaves `is_device_supported(PrivateUse1)` false and the composite on the math branch. The stub's return value *is* the backend selection, so it also serves as the decline mechanism — a mask, `is_causal`, GQA, fp16, `q_len != kv_len` or any grad-mode call returns `math` and keeps today's behaviour with no host round trip and no CPU fallback, and the predicate behind the stub and the kernel's `TORCH_CHECK` is one function. FlagGems carries an SDPA route and it was measured rather than assumed: 133.84 ms per call against the math path's 90.54 ms, so it is not the route taken and `_scaled_dot_product_efficient_attention_backward` stays on FlagGems. The kernel is a hand-written translation unit, which CLAUDE.md allows only for a concrete codegen limitation and with explicit human approval (both met): `codegen_gcu.py` cannot express a `REGISTER_PRIVATEUSE1_DISPATCH` registrar into an ATen DispatchStub, nor a kernel body returning a 4-tuple. Everything else stays generated — the `m.impl` line and the `= gcu` route come from listing the op in `HANDWRITTEN_OPS`. The same commit stops the generated elementwise kernels materialising broadcasts with `expand().contiguous()`, which the vendor documents it does not need. Route delta: `gcu` 177 -> **178**, `none` 1606 -> **1605**, `flaggems` **254** unchanged, accelerated 431 -> **432** (21.2 %); `gcu_register.inc` 184 -> **185** `m.impl` lines, so the reconciliations read `254 = 247 + 7` and `178 = 185 - 7`. No route moves *from* FlagGems and the FlagGems route set is byte-identical, so the S60-wide survey below is a provenance re-run rather than a new cohort — and it reproduces the base cohort's **1778 verdicts with 0 differing cases** (`/tmp/gcu-overloads-post.json` `6d1120be…` against `/tmp/flaggems_gcu_survey.json` `1ee7ea4f…`). | Within-process A/B on one card, same 60 calls and operands, sentinel-planted output buffer read back per run (`sentinel-left 0` of 12 638 208 every run): math leaf **11.637 s** (60/60, 5442.9 ms, 90.71 ms/call) -> vendor leaf **7.240 s** with the pre/post drain (60/60, 331.3 ms, 5.52 ms/call) -> **7.356 s** with drains suppressed (83.1 ms, 1.39 ms/call), i.e. **4.397 s of 11.637 s = 37.8 %**, with the drain costing 248 ms/step (3.4 %). The two vendor runs are byte-identical in their outputs (`max|d| 3.125e-02`, `mean|d| 2.743e-03` against `|math|max 5.750e+00`). Against an independent float64 reference on the model's envelope the kernel reads `max|d| 1.555e-02`, `mean|d| 1.005e-03` against `|ref|max 5.315e+00`, and every declined case — fp16, `attn_mask`, `is_causal`, GQA, `q_len != kv_len`, grad enabled — reaches the leaf **0** times while staying correct on the math path; the direct `compute_log_sumexp=True` call returns `out (1,24,4114,128)`, `lse (1,24,4114,4114)` bf16, seed and offset `(0,)`, which is ATen's own convention for that slot and is delegated to the math op rather than re-derived. Shipped route in the real graph: warm-up 9.51 s, profiled **7.83 s**, summed **7.50 s/step over 64 ops**, leaf **170.813 ms / 60 calls**, `_fused_sdp_choice REACHED -> 2` before every batch. **End to end, paired, two builds of one tree:** 8-step 1024x1024 `--stage full`, seed 42, `QWEN_IMAGE_REAL_ROPE=1` on every leg, `TOPS_VISIBLE_DEVICES=0,1,2`, and the same latents and prompt embeds carried between the legs by `--save-latents`/`--save-inputs` then `--load-latents`/`--load-inputs` — math leaf **19.33 s/it**, vendor leaf **8.48 s/it** (8.81 on a repeat that produced a byte-identical image, `md5 d47974b1…`), `torch_gcu + diffusers` **3.81 s/it**. So the reroute is **2.28x** and **56.1 % off the denoising loop** (2.19x / 54.4 % against the slower repeat, which is 2.31x the vendor against the faster leg's 2.23x), and the loop delta is larger than the 37.8 % the per-call table projects because the projection priced the 60 leaf calls of one forward shape while the math decomposition also materialises intermediates the flash leaf never builds. The three output images: shipped against reverted `MAE 3.568/255`, `PSNR 30.10 dB`; shipped against `torch_gcu` `5.089/255`, `26.96 dB`; reverted against `torch_gcu` `5.102/255`, `26.91 dB` — the shipped leg is marginally the closer of the two to the reference, so the flash kernel is a real image-level change and not a step away from it. The route cannot be A/B'd at runtime and two attempts are recorded so they are not repeated: `FLAGOS_OP__scaled_dot_product_efficient_attention=none` is refused with *"routed to 'none' … but the op is registered on PrivateUse1"*, and `torch.nn.attention.sdpa_kernel([SDPBackend.MATH])` is a silent no-op — that leg returned a byte-identical image to the shipped leg while still logging 960 `-> gcu` dispatches, because `__torch_function__` selects the route before ATen's backend pin is consulted. `ruff check .` — "All checks passed!"; `ruff format --check .` — 272 files already formatted. Generator idempotency: two runs leave the three moving artifacts byte-identical (`md5sum -c` -> `OK`). Artifact SHA-256 before -> after: `backends_gcu.conf` `476825db…` -> `28f4656c…`; `gcu_kernels.cc` `57e6edc9…` -> `f3cb0ee8…`; `gcu_register.inc` `dc88d5bc…` -> `dcab7a4e…`; `gcu_flaggems_register.inc` unchanged at `be843180…`. **Evidence gaps:** the broadcast half is measured per call (`a * a` 0.212 ms, `a * 0-dim device` 0.322 ms, `a * 0-dim host` 0.416 ms, `.contiguous()` on a contiguous tensor 0.004 ms at `(4096, 2560)` bf16) and not end-to-end — deliberately and not by omission, since the paired run above carries it in **both** legs, which is what makes that run's 2.19x attributable to the SDPA reroute alone; partitioning it out would need a third build. The 8-step paired run is one prompt and one seed and not the 12-prompt cohort; the two `torch_fl` legs are the same tree built twice rather than a runtime switch, since no runtime switch exists; the residual-gap table's two columns are not a controlled comparison (different card sets, profiler on, and it inflates runtime calls — 7.24 s unprofiled against 7.83 s profiled); and the device run uses card 0, with card 5 defective and excluded. |
 | 2026-09-19 | MetaX C550 (8 devices) | MetaX `scaled_dot_product_attention` composite route | Widened the `attn_mask` clause of the MetaX `scaled_dot_product_attention` composite override (`csrc/aten/sdp_choice_stub.cc`) from "no mask" to the one class Qwen-Image-2.1 passes: 4-D bool with `size(3) == key.size(2)` and `numel == key.size(2)`, which pins the shape to `(1,1,1,KV)` once the size-1 axes are. The kernel cannot read a bool mask as-is — FlagGems converts one itself at `attention.py:928-929` with `attn_mask.to(query.dtype) * -1.0e6`, the inverse of torch's convention, and skips that for a float mask — so `RouteMask()` builds the additive itself in fp32, `where(mask, 0, -1e6)`, and reshapes to `(1,1,1,KV)` before expanding because the caller's tensor carries a real stride on both size-1 axes and `_attn_fwd` indexes the mask by stride with nothing bounding batch, head or query row. **No routing configuration changed**: the clause lives in the hand-written override, so `backends_metax.conf` still reads 592 `flaggems` / 12 `flaggems_cpp` / 1433 `cuda` over 2037 entries (SHA-256 `bb1dc5c4550339dcd44ac438b2981e703c882025e477221e86cac37d833f58f2`) and no other platform's conf or route moves. Nothing falls back to the vendor: `zeros_like`, `full_like` and `where.self` are `flaggems` routes in that conf, and a `FLAGOS_LOG=dispatch` census of both spellings the route serves shows all three on `flagos_python` with no `fallback` line in the log. Ascend, GCU, MUSA, DCU, PPU, CUDA and TsingMicro are **not revalidated**. | Qwen-Image-2.1, 1024x1024, 40 steps, batch 1, seed 42, `--warmup 1`, card 0 on every arm: flagos with this route **776.9 ms/step / 31.62 s/image** against vendor MACA torch's **1661.1 ms/step / 66.96 s/image** and the same wheel with the clause unemployed (`FLAGOS_OP_scaled_dot_product_attention=cuda`) at **1702.8 ms/step** — **2.13x** and **2.19x**; a second window at `--min-run-time 50` reproduces all three (773.1 / 1660.2 / 1687.5 ms). Paired-latents arms (`--load-latents`, 774.8 / 1661.0 / 1687.4 ms/step): route vs boxed **49.05 dB / MAE 0.43833**, cuda vs boxed **46.58 dB / 0.56115** (the bring-up figure, reproducing as a control), cuda vs route **46.47 dB / 0.55726** — so the route's own image cost is below the flagos-vs-vendor difference the wheel already carries. Op level in the pipeline at `q(1,4096,32,128)` / `kv(1,4122,32,128)` / `mask(1,1,1,4122)`: **11.808 ms/call over 96 calls** against the boxing arm's **40.239 ms/call**, at `max|d| 0.000e+00` / `rel 0.00e+00` and NaN `0/0/0/0` against a direct `flag_gems.scaled_dot_product_attention` over the same operands; the mask's logged stride is `(4122, 4122, 4122, 1)`. The additive costs, on this part at KV 4122, `zeros_like 0.024 + full_like 0.037 + where.self 0.105` ms plus `0.010` ms of views — about 0.18 ms per routed call. `pytest tests/integration/ops/test_metax_flaggems.py -k SdpaRoute -x -q`: **13 passed, 91 deselected in 41.19s**; whole file **104 passed in 795.16s, 0 failed** (exit 0). `flaggems_overload_survey.py` v6 (SHA-256 `7b01c22c…`) rerun against the changed route: `registered 1` / `tested 1` / **`FAILED`**, unchanged from the entry above — its cause is the harness's synthesized `dropout_p = 0.5` in a non-deterministic call, and every case it synthesizes is outside the new mask clause as well. Every figure is a measurement from the shipped conf on the built wheel; none is inferred from the routing table. |

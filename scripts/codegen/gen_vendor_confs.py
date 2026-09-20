@@ -1378,6 +1378,21 @@ METAX_FLAGGEMS_MEASURED = {
 # composite has to be overridden whole rather than routed leaf by leaf.
 METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 
+# The same override on the second platform that has now measured it, and the
+# first whose call carries a mask. DCU's Qwen-Image-2.1 prefill hands
+# scaled_dot_product_attention a `(1,1,1,4122)` all-true bool mask -- the joint
+# sequence's `key_valid`, which build_token_metadata fills with torch.ones --
+# and a mask, any mask, sent the composite to its math decomposition, which
+# materializes the fp32 score matrix (32 x 4096 x 4122 x 4 B, 2.16 GB per call,
+# 32 calls per forward). csrc/aten/sdp_choice_stub.cc now admits that row -- a
+# 4-D bool mask with one entry per key, which the caller's shape pins to
+# (1,1,1,KV) -- and converts it to the fp32 additive the kernel reads, which is
+# what lets this route reach the model's largest attention. A mask of any other
+# shape still keeps the boxing route.
+# See the DCU entry in docs/reference/operator-support.md for the measurement and
+# for what is still unmeasured on the shapes this route does not take.
+DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
+
 # FlagGems coverage that arrived from a discovery widening rather than from a
 # measurement on the native-kernel vendors, and the vendors that therefore keep
 # the routes their own last FlagGems run measured.
@@ -1640,17 +1655,20 @@ def boxing_measured_python_ops(filename: str) -> set:
     platform -- a cohort claim that only the platform holding the matching
     FlagGems build can discharge. MetaX has, so it routes them; see
     METAX_FLAGGEMS_MEASURED for the measurement and for why the hold stays
-    elsewhere. METAX_COMPOSITE_FLAGGEMS is outside the ceiling for a different
-    reason -- it is a composite no coverage scan could see -- but it is a
-    measurement held the same way.
+    elsewhere. METAX_COMPOSITE_FLAGGEMS and DCU_COMPOSITE_FLAGGEMS are outside
+    the ceiling for a different reason -- they are composites no coverage scan
+    could see -- but they are measurements held the same way, each on its own
+    platform.
 
     Returning them from here rather than widening the coverage set is what keeps
     a measurement taken on one platform from becoming a route on another: a
     platform not named below gains nothing from it.
     """
-    if filename != "backends_metax.conf":
-        return set()
-    return METAX_FLAGGEMS_MEASURED | METAX_COMPOSITE_FLAGGEMS
+    if filename == "backends_metax.conf":
+        return METAX_FLAGGEMS_MEASURED | METAX_COMPOSITE_FLAGGEMS
+    if filename == "backends_dcu.conf":
+        return DCU_COMPOSITE_FLAGGEMS
+    return set()
 
 
 def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
