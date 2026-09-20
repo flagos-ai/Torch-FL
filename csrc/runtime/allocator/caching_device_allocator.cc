@@ -502,14 +502,27 @@ AllocatorStats CachingDeviceAllocator::get_stats(int device) {
   return state.stats;
 }
 
-void CachingDeviceAllocator::reset_stats(int device) {
+void CachingDeviceAllocator::reset_peak_stats(int device) {
   if (backend_->provides_caching()) {
     backend_->caching_reset_peak_stats(device);
     return;
   }
   auto& state = get_device_state(device);
   std::lock_guard<std::recursive_mutex> lock(state.mutex);
-  state.stats = AllocatorStats{};
+  // Peaks only, and re-based on the live totals rather than zeroed. This is what
+  // the delegating path above gets from the platform allocator's resetPeakStats,
+  // and what torch.cuda.reset_peak_memory_stats documents, so both paths now
+  // answer the same question: "how much has been live at once since the reset".
+  //
+  // Zeroing the whole struct instead (the previous behaviour) dropped
+  // bytes_allocated/bytes_reserved too, so the next peak read measured only what
+  // the call allocated on top of an allocator that reported itself empty -- a
+  // resident model's weights simply vanished from the number. The num_* counters
+  // in the same struct are cumulative and belong to no watermark, so they are
+  // left alone; a reset that restarted them would break every caller that takes
+  // a delta across it.
+  state.stats.peak_allocated = state.stats.bytes_allocated;
+  state.stats.peak_reserved = state.stats.bytes_reserved;
 }
 
 // Static deleter invoked by DataPtr when a tensor is freed. The context is the

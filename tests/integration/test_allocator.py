@@ -171,3 +171,70 @@ class TestCachingAllocatorOps:
         x_dev = x_cpu.to(device)
         x_back = x_dev.to("cpu")
         assert torch.allclose(x_cpu, x_back, atol=1e-6)
+
+
+class TestCachingAllocatorPeakStats:
+    """reset_peak_memory_stats must drop the watermarks and nothing else.
+
+    Regression cover for the self-managed (non-delegating) allocator path, which
+    used to zero its whole stats struct on a reset. The live totals went with it,
+    so the peak read afterwards counted only what the *next* call allocated: a
+    resident model's weights disappeared from the number and the reported peak
+    was off by exactly the live footprint (6.87 GiB instead of 37.09 GiB on a
+    Qwen-Image-2.1 benchmark). The delegating CUDA/DCU path never had the bug --
+    it forwards to the platform allocator's resetPeakStats, which re-bases the
+    peak on the live total -- and these tests pin the self-managed path to the
+    same semantics.
+    """
+
+    def test_reset_keeps_live_allocation(self):
+        """A held tensor survives the reset and becomes the new peak floor."""
+        device = torch.device("flagos", 0)
+        torch_fl.flagos.empty_cache()
+
+        x = torch.randn(1024 * 1024, device=device)  # 4MB float32, kept alive
+        live = torch_fl.flagos.memory_allocated(0)
+        assert live > 0
+
+        torch_fl.flagos.reset_peak_memory_stats(0)
+
+        assert torch_fl.flagos.memory_allocated(0) == live
+        stats = torch_fl.flagos.memory_stats(0)
+        assert stats["allocated_bytes"] == live
+        # Re-based on the live total rather than zeroed, so the next peak read is
+        # a maximum over what is live from here on.
+        assert stats["peak_allocated_bytes"] == live
+        assert stats["peak_reserved_bytes"] == stats["reserved_bytes"]
+        del x
+
+    def test_reset_drops_the_watermark(self):
+        """A peak above the live total must come back down to the live total."""
+        device = torch.device("flagos", 0)
+        torch_fl.flagos.empty_cache()
+
+        x = torch.randn(1024 * 1024, device=device)
+        assert torch_fl.flagos.memory_stats(0)["peak_allocated_bytes"] > 0
+        del x
+        torch_fl.flagos.empty_cache()
+
+        torch_fl.flagos.reset_peak_memory_stats(0)
+
+        stats = torch_fl.flagos.memory_stats(0)
+        assert stats["peak_allocated_bytes"] == stats["allocated_bytes"]
+        assert stats["peak_reserved_bytes"] == stats["reserved_bytes"]
+
+    def test_reset_keeps_cumulative_counters(self):
+        """The call counters are cumulative and must not restart at the reset."""
+        device = torch.device("flagos", 0)
+        torch_fl.flagos.empty_cache()
+
+        torch.randn(1024, device=device)  # warm the pool, then drop it
+        before = torch_fl.flagos.memory_stats(0)
+
+        torch_fl.flagos.reset_peak_memory_stats(0)
+
+        x = torch.randn(1024, device=device)
+        after = torch_fl.flagos.memory_stats(0)
+        assert after["num_alloc_calls"] > before["num_alloc_calls"]
+        assert after["num_device_malloc"] >= before["num_device_malloc"]
+        del x

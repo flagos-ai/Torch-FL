@@ -592,6 +592,12 @@ def peak_memory(torch, device_kind, device):
         Last resort. It is a different measurement -- the allocator's whole pool
         rather than what was live -- so the source is returned alongside and a
         table that mixes the two says so.
+
+    A peak read after ``reset_peak_memory`` is a maximum over what is live at
+    the reset plus whatever the call added, so a resident model's weights are in
+    the number. That is what ``torch.cuda`` reports and what makes the two legs
+    comparable; a backend whose reset also drops the live total reports the
+    call's own activations instead, smaller by the size of the model.
     """
     module = getattr(torch, device_kind, None)
     if module is None:

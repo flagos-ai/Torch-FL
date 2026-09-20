@@ -462,7 +462,7 @@ PyObject* _reset_peak_memory_stats(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   int device = THPUtils_unpackInt(arg);
   if (c10::flagos::CachingDeviceAllocator::is_enabled()) {
-    c10::flagos::GetCachingAllocator()->reset_stats(device);
+    c10::flagos::GetCachingAllocator()->reset_peak_stats(device);
   }
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS

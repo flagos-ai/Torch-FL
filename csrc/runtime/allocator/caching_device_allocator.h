@@ -50,8 +50,11 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
   // Get statistics for a device.
   AllocatorStats get_stats(int device);
 
-  // Reset accumulated statistics for a device.
-  void reset_stats(int device);
+  // Reset the peak watermarks for a device, keeping the live totals: the next
+  // peak read is a maximum over what is live from here on, not an empty-struct
+  // count. Matches the platform allocator's resetPeakStats, which is what the
+  // delegating path uses, and torch.cuda.reset_peak_memory_stats.
+  void reset_peak_stats(int device);
 
   // Whether caching is enabled (controlled by env var).
   static bool is_enabled();
