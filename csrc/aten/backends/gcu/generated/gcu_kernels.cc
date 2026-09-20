@@ -25,6 +25,9 @@
 #include <ATen/ops/nonzero.h>
 #include <ATen/ops/nonzero_static.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/stack.h>
+#include <ATen/ops/view_as_complex.h>
+#include <ATen/ops/view_as_real.h>
 #include <ATen/ops/where.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/ops/_upsample_nearest_exact2d.h>
@@ -396,6 +399,22 @@ REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kGcu, SignKernelGc
 
 at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
+  if (result_dtype == at::kComplexFloat) {
+    auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+    auto rhs = other.to(self.device(), result_dtype);
+    if (lhs.is_contiguous() && rhs.is_contiguous()) {
+      // (ar + i ai)(br + i bi) = (ar*br - ai*bi) + i(ar*bi + ai*br), in the
+      // real views of the promoted operands. The views are free, the four
+      // multiplies and the stack are topsaten kernels, and view_as_complex is
+      // metadata over the stack's own buffer.
+      auto a = at::view_as_real(lhs);
+      auto b = at::view_as_real(rhs);
+      auto ar = a.select(-1, 0), ai = a.select(-1, 1);
+      auto br = b.select(-1, 0), bi = b.select(-1, 1);
+      return at::view_as_complex(
+          at::stack({ar * br - ai * bi, ar * bi + ai * br}, -1));
+    }
+  }
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::mul(self.cpu(), other.cpu()).to(self.device());

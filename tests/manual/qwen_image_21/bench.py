@@ -466,6 +466,11 @@ class Caller:
     def __call__(self):
         """Make the call and record it. Raises ``Unrunnable`` if it cannot run."""
         self.timer.reset()
+        # Start every call -- warmup and measured alike -- from a released pool.
+        # A backend whose allocator keeps its pool across calls and cannot carve
+        # a large block back out of it cannot run a second call at all; see
+        # ``common.release_memory`` for the GCU measurement.
+        common.release_memory(self.torch, self.device_kind, self.device)
         # Reset before, read after: without this the reading is the run's
         # high-water mark, which the warmup or the model load may have set, and
         # it would say nothing about the calls being measured.

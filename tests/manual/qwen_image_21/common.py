@@ -29,6 +29,7 @@ can be overridden from the command line.
 would take that decision away from the caller.
 """
 
+import functools
 import os
 import sys
 import time
@@ -128,7 +129,136 @@ def import_torch(device_kind):
         import torch_fl  # noqa: F401  - must precede `import torch`
     import torch
 
+    _select_real_valued_rope(torch, device_kind)
+    _pin_vendor_vae_attention(torch, device_kind)
+
     return torch
+
+
+def _select_real_valued_rope(torch, device_kind):
+    """Point the 2.1 transformer at a real-valued rotation.
+
+    ``apply_rotary_emb_qwen`` in ``transformer_qwenimage21`` carries both
+    rotations and picks between them with ``use_real``. The forward pass hardcodes
+    ``use_real=False`` in ``_qwenimage21_prepare_qkv``, and
+    ``QwenImage21Rope.rope_params`` builds the operand with ``torch.polar``, so
+    the shipped path is a complex multiply of the reshaped query/key against a
+    complex exponential.
+
+    A chip without a complex dtype cannot take that path. Enflame GCU is the
+    measured case: ``topsaten`` has no complex kernel at all, so the vendor run
+    reaches the multiply with a ``ComplexFloat`` operand and the process aborts on
+    ``TOPSATEN_STATUS_NOT_SUPPORT`` -- not a Python exception:
+
+        dtype: ComplexFloat
+        sizes: [1, 4122, 32, 64]
+
+    This is not a numerical shortcut. ``freqs_cis`` is ``polar(1, a)``, so its
+    ``.real`` and ``.imag`` *are* ``cos a`` and ``sin a``, and the rotation is the
+    same four products in the same order the complex branch's real and imaginary
+    parts carry::
+
+        real:  xr*cos - xi*sin
+        imag:  xi*cos + xr*sin
+
+    The shipped ``use_real=True`` branch cannot be reused to express this: it
+    shapes the operand ``cos[None, None]``, which broadcasts against a
+    heads-before-sequence activation (flux's layout) and not against 2.1's
+    ``[B, S, H, D]``. So the wrapper writes the rotation itself, and only rewrites
+    a call that is both real-seeking and complex-operand -- a call already on the
+    real branch, or one handed angles, is passed through untouched.
+
+    Unlike the 2512 flow, which selects a *consumer* by device type through
+    diffusers' ``ROPE_PER_DEVICE`` table, the 2.1 transformer has no such table
+    to extend: the call site names ``use_real=False`` outright. So this wraps the
+    module-level function that call site looks up.
+
+    Off by default, and reported both ways when it is on, because it changes what
+    the run measures: with it off, a chip without complex RoPE cannot run the
+    shipped path at all. Set ``QWEN_IMAGE_REAL_ROPE=1`` to turn it on.
+    """
+    if os.environ.get("QWEN_IMAGE_REAL_ROPE", "0") in ("", "0"):
+        return
+
+    try:
+        from diffusers.models.transformers import transformer_qwenimage21 as qwenimage21
+    except ImportError:
+        return
+
+    if getattr(qwenimage21, "flagos_real_rope_installed", False):
+        return
+
+    original = qwenimage21.apply_rotary_emb_qwen
+
+    def wrapped(x, freqs_cis, use_real=True, use_real_unbind_dim=-1):
+        if use_real or not torch.is_complex(freqs_cis):
+            return original(
+                x, freqs_cis, use_real=use_real, use_real_unbind_dim=use_real_unbind_dim
+            )
+
+        cos = freqs_cis.real.contiguous().unsqueeze(1)
+        sin = freqs_cis.imag.contiguous().unsqueeze(1)
+        x_real, x_imag = x.float().reshape(*x.shape[:-1], -1, 2).unbind(-1)
+        out = torch.stack(
+            [x_real * cos - x_imag * sin, x_imag * cos + x_real * sin], dim=-1
+        )
+        return out.flatten(-2).type_as(x)
+
+    qwenimage21.apply_rotary_emb_qwen = wrapped
+    qwenimage21.flagos_real_rope_installed = True
+
+
+def _pin_vendor_vae_attention(torch, device_kind):
+    """Decode the latents on the math SDPA backend where the vendor's is refused.
+
+    Qwen-Image-2.1's VAE self-attention is a single 1152-channel head over 4096
+    spatial positions. ``autoencoder_kl_qwenimage21`` builds q, k and v as three
+    ``[1, 1, 4096, 1152]`` views of one ``[1, 3C, H*W]`` buffer -- strides
+    ``[14155776, 14155776, 3456, 1]``, so the row stride is ``3C`` and the three
+    share a base pointer.
+
+    The vendor's flash op takes that shape and then refuses it *inside* the
+    kernel, which is an abort rather than a decline::
+
+        op_aten_sdp_efficient_attention.cc:318: add check args err: 3
+        status id : 3, status name : TOPSATEN_STATUS_NOT_SUPPORT
+        gcu_utils.cpp:74 : Check failed: 0            (exit 134)
+
+    ``_fused_sdp_choice`` had already picked the efficient backend by then, so
+    nothing falls back and the leg cannot decode at all -- ``infer.py --stage
+    vae`` reproduces it in a minute. Pinning ``SDPBackend.MATH`` around the block
+    moves the call to the decomposition the flagos leg already uses: its SDPA
+    route declines the same call, which is why that leg decodes as ``bmm`` +
+    ``_softmax`` and completes.
+
+    This is the vendor leg's own limitation being worked around, not a change to
+    what is measured, and it is scoped accordingly. The pin covers the VAE
+    attention block only -- the denoise loop's attention is untouched, so the two
+    legs still differ there and nowhere else. It is applied only for ``gcu``,
+    the device module whose kernel this is; on any other device the shipped path
+    is left alone.
+    """
+    if device_kind != "gcu":
+        return
+
+    try:
+        from diffusers.models.autoencoders import autoencoder_kl_qwenimage21 as vae21
+    except ImportError:
+        return
+
+    if getattr(vae21, "flagos_vendor_sdpa_pinned", False):
+        return
+
+    block = vae21.QwenImage21AttentionBlock
+    original = block.forward
+
+    @functools.wraps(original)
+    def forward(self, x):
+        with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
+            return original(self, x)
+
+    block.forward = forward
+    vae21.flagos_vendor_sdpa_pinned = True
 
 
 def device_module(torch, device_kind):
@@ -491,6 +621,31 @@ def peak_memory(torch, device_kind, device):
         except Exception:  # noqa: BLE001
             pass
     return None, None
+
+
+def release_memory(torch, device_kind, device):
+    """Hand this card's cached blocks back, so the next call starts cold.
+
+    Best effort, and separate from ``reset_peak_memory``: that one drops a
+    watermark, this one drops the pool. The two are not interchangeable -- a
+    backend that releases but does not report still gets the release.
+
+    Needed because a backend's allocator is allowed to keep its pool across
+    calls and some of them cannot carve a large block back out of it. On the GCU
+    flagos backend the second decode of a 2.1 run asks the driver for 576 MiB
+    with 9.1 GiB already reserved and cannot get it, so a leg that repeats a call
+    (every bench leg, by construction) dies after the first one. Releasing
+    between calls makes each call start from the same state, which is also the
+    more honest reading of a per-call latency.
+    """
+    module = getattr(torch, device_kind, None)
+    if module is None or not hasattr(module, "empty_cache"):
+        return False
+    try:
+        module.empty_cache()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def reset_peak_memory(torch, device_kind, device):

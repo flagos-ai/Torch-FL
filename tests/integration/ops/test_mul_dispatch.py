@@ -183,3 +183,154 @@ class TestMulTensorAscendDispatch:
         """Verify mul.Tensor on ascend backend matches CPU reference."""
         result = _run_mul_subprocess({"FLAGOS_OP_mul__Tensor": "ascend"})
         assert result.returncode == 0
+
+
+def _decompose(a, b):
+    """The real-view product, spelled out on the host."""
+    ar, ai = a.real.contiguous(), a.imag.contiguous()
+    br, bi = b.real.contiguous(), b.imag.contiguous()
+    return torch.complex(ar * br - ai * bi, ar * bi + ai * br)
+
+
+def _run_complex64_subprocess(transposed: bool) -> subprocess.CompletedProcess:
+    """A complex64 multiply in a fresh interpreter, with the dispatch log on.
+
+    The log is the oracle because a Python ``TorchDispatchMode`` cannot be one
+    here: a routed GCU kernel re-enters the dispatcher below the mode, so the
+    nested ``at::view_as_real`` the generated kernel takes never reaches
+    ``__torch_dispatch__`` -- only the outermost ``mul.Tensor`` does.
+
+    The script prints nothing, so the only ``view_as_real`` lines in the log are
+    the ones the kernel took: reading ``out.real`` would add one of its own.
+    """
+    env = os.environ.copy()
+    env["FLAGOS_LOG"] = "dispatch"
+    code = (
+        "import torch_fl, torch; "
+        "a = torch.randn(64, 64, dtype=torch.complex64, device='flagos:0'); "
+        "b = torch.randn(64, 64, dtype=torch.complex64, device='flagos:0'); "
+        + ("a = a.t(); " if transposed else "")
+        + "out = torch.mul(a, b); "
+        "assert out.shape == (64, 64) and out.dtype == torch.complex64; "
+        "ref = a.cpu() * b.cpu(); "
+        "assert torch.allclose(out.cpu().float(), ref.float(), rtol=1e-5, atol=1e-5), "
+        "'the device product differs from the host product'"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+
+
+def _log_lines(result: subprocess.CompletedProcess, op: str) -> int:
+    return result.stderr.count(f"[flagos dispatch] {op} -> ")
+
+
+class TestMulTensorComplex64:
+    """A complex64 multiply is decomposed into real multiplies before the vendor
+    op sees it.
+
+    ``topsatenMul`` accepts a complex64 pair and computes it on the device, but at
+    a cost that is not the kernel's: the promotion and the argument marshalling
+    behind ``topsaten_common.h`` run on the host, so a complex64 multiply of two
+    ``(1, 4096, 24, 64)`` operands was measured at 50.166 ms against 2.27 ms for
+    the two real multiplies that carry the same arithmetic. The generated kernel
+    therefore takes ``view_as_real`` of both operands and rebuilds the product
+    from four real multiplies, which is bit-identical to what it replaced -- and
+    only when the promoted result is ``complex64`` and both operands are
+    contiguous after the cast, since the decomposition is a view and cannot be
+    taken of a strided operand.
+
+    The values are asserted because the decomposition is where a sign error would
+    show up, and the *route* is asserted because the values alone cannot tell the
+    two apart: the path this replaced also computes a correct complex64 product.
+    The route is read from the dispatch log in a subprocess, because a Python
+    ``TorchDispatchMode`` only ever sees the outermost ``mul.Tensor``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gcu_only(self):
+        from torch_fl._build_config import ACCELERATOR
+
+        if ACCELERATOR != "gcu":
+            pytest.skip("GCU build required")
+
+    @pytest.mark.parametrize(
+        "shape",
+        [(1, 4096, 24, 64), (64, 64), (1, 8, 1, 32), (3, 5, 7)],
+    )
+    def test_complex64_matches_cpu(self, shape):
+        torch.manual_seed(0)
+        a = torch.randn(*shape, dtype=torch.complex64, device=DEVICE)
+        b = torch.randn(*shape, dtype=torch.complex64, device=DEVICE)
+        out = torch.mul(a, b)
+        assert out.dtype == torch.complex64
+        torch.testing.assert_close(out.cpu(), a.cpu() * b.cpu(), rtol=1e-5, atol=1e-5)
+
+    def test_complex64_broadcast_matches_cpu(self):
+        torch.manual_seed(1)
+        a = torch.randn(4, 8, dtype=torch.complex64, device=DEVICE)
+        b = torch.randn(8, dtype=torch.complex64, device=DEVICE)
+        out = torch.mul(a, b)
+        assert out.shape == (4, 8)
+        torch.testing.assert_close(out.cpu(), a.cpu() * b.cpu(), rtol=1e-5, atol=1e-5)
+
+    def test_real_times_complex64_promotes_and_matches_cpu(self):
+        """A mixed pair promotes to complex64 and takes the same branch."""
+        torch.manual_seed(2)
+        a = torch.randn(64, 64, device=DEVICE)
+        b = torch.randn(64, 64, dtype=torch.complex64, device=DEVICE)
+        out = torch.mul(a, b)
+        assert out.dtype == torch.complex64
+        torch.testing.assert_close(out.cpu(), a.cpu() * b.cpu(), rtol=1e-5, atol=1e-5)
+
+    def test_complex64_is_bit_identical_to_the_real_view_product(self):
+        """The branch's own arithmetic, spelled out on the host."""
+        torch.manual_seed(3)
+        a = torch.randn(1, 4096, 24, 64, dtype=torch.complex64, device=DEVICE)
+        b = torch.randn(1, 4096, 24, 64, dtype=torch.complex64, device=DEVICE)
+        out = torch.mul(a, b).cpu()
+        ref = _decompose(a.cpu(), b.cpu())
+        assert torch.equal(out, ref), (
+            "the real-view decomposition is not the product that was computed: "
+            f"max|d| {(out - ref).abs().max().item():.3e}"
+        )
+
+    def test_complex64_takes_the_real_views(self):
+        """Route: the decomposition is visible in the dispatch log.
+
+        Two ``view_as_real`` for the operands and one ``view_as_complex`` to
+        rebuild the product; the native multiply this replaced issues none of
+        them, so their presence is what pins the branch.
+        """
+        result = _run_complex64_subprocess(transposed=False)
+        assert result.returncode == 0, f"the multiply failed:\n{result.stderr}"
+        assert _log_lines(result, "mul.Tensor") >= 5, (
+            f"the multiply did not run on the card:\n{result.stderr}"
+        )
+        assert _log_lines(result, "view_as_real") == 2, (
+            "the decomposition did not view both operands as real: "
+            f"{_log_lines(result, 'view_as_real')} views\n{result.stderr}"
+        )
+        assert _log_lines(result, "view_as_complex") == 1, (
+            f"the product was not rebuilt as a complex value:\n{result.stderr}"
+        )
+
+    def test_a_transposed_complex64_operand_declines_the_decomposition(self):
+        """A strided operand cannot be viewed as real, so the branch stands down.
+
+        The values must still be right -- this only pins that the branch's
+        contiguity test is what it says it is. The ``mul.Tensor`` line is
+        asserted too, so that the absence of the views means the branch
+        declined rather than that nothing ran.
+        """
+        result = _run_complex64_subprocess(transposed=True)
+        assert result.returncode == 0, f"the multiply failed:\n{result.stderr}"
+        assert _log_lines(result, "mul.Tensor") >= 1, (
+            f"the multiply did not run on the card:\n{result.stderr}"
+        )
+        assert _log_lines(result, "view_as_real") == 0, (
+            f"a strided operand was viewed as real:\n{result.stderr}"
+        )
+        assert _log_lines(result, "view_as_complex") == 0, (
+            f"a strided operand was rebuilt as a complex value:\n{result.stderr}"
+        )

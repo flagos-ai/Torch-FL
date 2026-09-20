@@ -486,14 +486,19 @@ _BINARY_PROLOGUE = """\
 # Both helpers below emit braces, and their output is concatenated into a
 # template that `CATEGORIES[cat].format(...)` expands later, so every brace is
 # doubled here -- the same convention the templates themselves use.
-def _binary_dtype_guard(host_body: str) -> str:
-    """Emit `result_dtype` and the unsupported-dtype fallback for a binary op.
+def _binary_dtype_guard(host_body: str, complex_body: str = "{complex}") -> str:
+    """Emit `result_dtype`, the complex decomposition, and the unsupported-dtype
+    fallback for a binary op.
 
     `host_body` is the fallback itself, indented for the `if` body, and may use
-    `result_dtype`.
+    `result_dtype`. `complex_body` is the placeholder `COMPLEX_ARITHMETIC`
+    supplies for the ops that have a real-valued spelling of their complex
+    arithmetic; it is left as a literal `{complex}` for the final `format()` to
+    expand, so the same template body serves every binary op.
     """
     return (
         "  auto result_dtype = at::result_type(self, other);\n"
+        f"{complex_body}"
         "  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||\n"
         "      !gcu::TopsatenSupportsDtype(result_dtype)) {{\n" + host_body + "  }}\n"
     )
@@ -512,6 +517,66 @@ def _binary_host_fallback(at_op: str, alpha: bool = False, out: bool = False) ->
         "    out.copy_(host);\n"
         "    return out;\n"
     )
+
+
+# Complex operands have no topsaten kernel at all: `TopsatenSupportsDtype`
+# excludes every complex type, so the guard below hands them to the host. For an
+# op whose result is the size of one operand that is a wasted copy; for
+# `mul.Tensor` it is the largest single term in the Qwen-Image 2.1 transformer
+# forward, because the guard's body moves *both* operands down, multiplies on the
+# CPU and moves the result back -- 137 MB per call for the model's rotary
+# embedding tables, and the round trip is invisible to `FLAGOS_LOG=fallback`
+# because it happens inside a kernel that is registered on PrivateUse1.
+#
+# Measured on S60, a (1,4122,32,64) x (4122,1,64) complex64 multiply, one
+# synchronize before and after each call, six repeats:
+#
+#   as captured          a * b                             57897.6 us
+#   the guard's body     (a.cpu() * b.cpu()).to(dev)       58057.5 us
+#   host only            a.cpu() * b.cpu()                 31591.1 us
+#   download             a.cpu()                            20579.4 us
+#   decomposition        four real muls + stack              5615.1 us
+#
+# and the decomposition is not an approximation: the four multiplies are the
+# same arithmetic in the same f32 lanes that ATen's complex64 kernel performs, so
+# the result is bit-identical (max|d| 0.000e+00, bitwise equal: True).
+#
+# The branch is keyed on `result_dtype == at::kComplexFloat` rather than on the
+# operands, so a mixed real x complex64 call takes it as well: both operands are
+# promoted to complex64 first, the way `_BINARY_PROLOGUE` promotes them, so the
+# four multiplies see the values ATen's own complex64 kernel sees. A complex128
+# call is left alone -- its real parts are f64, which topsaten also lacks, so the
+# host path stays the only correct one.
+#
+# The contiguity test is `view_as_real`'s own requirement on the innermost axis.
+# A strided complex operand falls through to the host path rather than raising,
+# which is the behaviour it had before this branch existed.
+#
+# Only `mul.Tensor` is listed. `div.Tensor` needs a different formula (a shared
+# real denominator), `add`/`sub` are trivial but were not what the forward
+# spends its time in, and `mul.out` / `mul._Tensor` would need a complex `copy_`
+# on top of this -- no model in this tree reaches any of them, and each one
+# would be a new thing to test.
+COMPLEX_ARITHMETIC = {
+    "mul.Tensor": """\
+  if (result_dtype == at::kComplexFloat) {
+    auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+    auto rhs = other.to(self.device(), result_dtype);
+    if (lhs.is_contiguous() && rhs.is_contiguous()) {
+      // (ar + i ai)(br + i bi) = (ar*br - ai*bi) + i(ar*bi + ai*br), in the
+      // real views of the promoted operands. The views are free, the four
+      // multiplies and the stack are topsaten kernels, and view_as_complex is
+      // metadata over the stack's own buffer.
+      auto a = at::view_as_real(lhs);
+      auto b = at::view_as_real(rhs);
+      auto ar = a.select(-1, 0), ai = a.select(-1, 1);
+      auto br = b.select(-1, 0), bi = b.select(-1, 1);
+      return at::view_as_complex(
+          at::stack({ar * br - ai * bi, ar * bi + ai * br}, -1));
+    }
+  }
+""",
+}
 
 
 # Every `*_out` kernel below may grow a caller-supplied `out`, and that resize
@@ -3229,6 +3294,9 @@ FILE_HEADER = """\
 #include <ATen/ops/nonzero.h>
 #include <ATen/ops/nonzero_static.h>
 #include <ATen/ops/result_type.h>
+#include <ATen/ops/stack.h>
+#include <ATen/ops/view_as_complex.h>
+#include <ATen/ops/view_as_real.h>
 #include <ATen/ops/where.h>
 #include <ATen/ops/zeros.h>
 #include <ATen/ops/_upsample_nearest_exact2d.h>
@@ -3377,6 +3445,7 @@ def main():
                 params=params,
                 bind=bind,
                 dtype_infer=dtype_infer,
+                complex=COMPLEX_ARITHMETIC.get(op, ""),
             )
         )
         covered.append((op, tops, cat))
