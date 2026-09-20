@@ -337,6 +337,11 @@ one environment variable apart, back to back on the same cards:
 | the two outputs against each other | `MAE 3.637/255`, `PSNR 28.58 dB`, 69.61 % of bytes differing | |
 | the vendor baseline's `4.01 s/it` | 3.37x | **2.09x** |
 
+The `1` column is the harness switch, not what ships. Neither `QWEN_IMAGE_REAL_ROPE`
+is set by default and the plugin's own registration is faster than that switch, so
+the shipped leg reads **`5.01 s/it` against the vendor's `3.81` — `1.31x`**; see
+§5.3, which supersedes the `2.09x` on this row.
+
 That is 38 % off the whole run, the same order as the 36 % the wrapped forward
 measured, so the wrapper was not manufacturing it. The two images are not
 bit-identical and should not be: a one-ulp difference on 0.0045 % of one op's
@@ -521,6 +526,12 @@ no complex kernel) and every leg had encoder and VAE on the third visible card
 with transformer blocks 0..29 and 30..59 on the first two, `TOPS_VISIBLE_DEVICES=
 0,1,2`.
 
+The `after` row is the state at `486db58` and the `8.48`/`2.23x` on it are no
+longer what a user gets: it is the harness switch, and §3.3's registration is
+faster than that switch. **For the shipped configuration read §5.3's `5.01 s/it`
+and `1.31x` instead** — this table is kept because the two legs below it are a
+build pair and the shape of that measurement is the point.
+
 **19.33 -> 8.48 is 2.28x, and 56.1 % off the denoising loop**; against the repeat,
 2.19x and 54.4 %. The repeat is the same build run a second time and it produced a
 byte-identical image (`md5 d47974b1…`), which is the evidence that the leg is
@@ -573,6 +584,50 @@ route the vendor's own `addmm` takes instead of a zero-stride `(M, N)` view that
 costs a second pass over the output. The per-op probe sees the same thing from the
 other side: the fused call drops from 2643.2 us to 1575.5 us of device time at
 (4096,3072)x(3072,12288) bf16, which is exactly what a bare `mm` costs there.
+
+### 5.3 The rotation registration, measured on the shipped leg
+
+§3.3 times the rope registration on a single warm forward, because that is the
+only way to see the operand and the expansion separately. What the harness ships
+is the 50-step loop, where a step is two forwards under true CFG, so the same
+change should be worth about twice as much per step. Three legs, one session,
+back to back on the same cards with a warm page cache, one environment variable
+apart, 8 steps at 1024x1024, seed 0:
+
+| Leg | Configuration | `s/it` at 8 steps | stage wall | vs the vendor |
+| --- | --- | --- | --- | --- |
+| opt out | `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` | **11.81** | 267.0 s | 3.10x |
+| shipped | registration installed at import, nothing set | **5.01** | 212.4 s | **1.31x** |
+| reference | `torch_gcu` + diffusers | **3.81** | 197.0 s | 1.00x |
+
+The registration is worth **6.80 s per step, 57.6 % of the loop**, or 3.40 s per
+forward. §3.3 measured 2.956 s for the same change with each rope call timed
+against its own drain, so the step-level gain is larger than twice the isolated
+one. That is the direction §5.2's `cat` row already reports: per-copy cost does
+not project linearly onto a step, because a drain waits for whatever the device
+has queued rather than paying a fixed cost per operation. `5.01` reproduced as
+`5.00` on a separate run in the same session, so the reading is stable to 0.2 %.
+
+**This supersedes the `8.38 s/it` / `2.09x` headline in §3.3 and the `8.48 s/it` /
+`2.23x` "after" row in §5.1 for the configuration a user actually gets.** Both of
+those legs were the harness switch — `QWEN_IMAGE_REAL_ROPE=1`, which selects
+diffusers' `apply_rotary_emb_qwen_neuron` — and the shipped registration is
+faster than that switch by the 0.937 s per forward §3.3 records.
+
+A companion run tried to split the step further, by timing `text-encoder` and
+`vae` on their own so that `wall(vae) - wall(text-encoder)` would isolate the
+1024x1024 decode. That subtraction carries no signal and the arm is best not
+repeated: both stages pay the same ~155-165 s pipeline load (164.1 s and 161.2 s
+on `flagos`, 156.3 s and 153.7 s on the vendor), which is larger than the decode
+and moves more between repeats than the decode is worth. The `s/it` line of the
+`full` stage is the only timing these two arms can contribute.
+
+Logs: `/tmp/rope_ab_{on,off,vendor}.log`, driver `/tmp/run_rope_ab.sh`; the two
+discarded arms are `/tmp/decomp_{flagos,vendor}.log`, driver
+`/tmp/run_stage_decomp.sh`. `TOPS_VISIBLE_DEVICES=0,1,2` on the vendor leg, and
+the vendor leg runs through its own interpreter as §4 describes. No leg sets
+`QWEN_IMAGE_REAL_ROPE`: the opt-out leg uses the switch the change itself ships,
+so both `flagos` legs run diffusers' table unless the plugin replaces it.
 
 ## 6. Readings to record
 
