@@ -1037,12 +1037,22 @@ def _patch_flaggems_codegen_config():
     if _build_accelerator() == "gcu" and os.environ.get("GEMS_VENDOR") != "ascend":
         from torch_fl.accelerator.gcu._gcu_compat import (
             install_gcu_rng_generators,
+            patch_diffusers_qwenimage_rope,
             patch_gcu_triton_for_flagos,
         )
 
         install_gcu_rng_generators()
         if patch_gcu_triton_for_flagos():
             _env.set_foreign("GEMS_VENDOR", "enflame")
+        # diffusers keys the Qwen-Image rotation on device type, so without this a
+        # flagos tensor multiplies by a complex exponential the topsaten stack
+        # serves slowly -- 57.5% of a transformer forward against 34.0% for the
+        # real-valued entry diffusers provides for a device with no complex dtype.
+        # It has to run here rather than at the call site: the operand half is
+        # cached per device on first use, and this is the last point that is
+        # reliably before the pipeline exists. Costs a diffusers import -- the
+        # call is a no-op when diffusers is not installed.
+        patch_diffusers_qwenimage_rope()
         return
 
     # --- Generic NVIDIA CUDA branch (default) ---

@@ -471,6 +471,14 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "0 (off)",
         "Disable the optional Apex multi-tensor compatibility layer",
     ),
+    "FLAGOS_DISABLE_QWENIMAGE_ROPE": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Leave diffusers' Qwen-Image rotary-embedding table alone. On GCU torch_fl "
+        "registers the flagos device there, which is what keeps the rotation off "
+        "the complex exponential diffusers would otherwise fall back to; set 1 to "
+        "measure that difference. A capability switch, not a route switch",
+    ),
     "FLAGOS_DIST_FORCE_NCCL": (
         SCOPE_TEST,
         "0 (off)",

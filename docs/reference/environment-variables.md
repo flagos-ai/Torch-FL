@@ -127,6 +127,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence), for deliberately testing a non-matching wheel pair |
 | `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | On DCU, point DTK's SDPA selector at its CUTLASS flash adapter when the stack has one, instead of forcing the math decomposition. A stack without DTK's flash-attn library falls back to math on its own. Set `0` to force math everywhere. This is a capability switch, not a route switch: `scaled_dot_product_attention` stays a `cuda` route in `backends_dcu.conf`, and `FLAGOS_OP_scaled_dot_product_attention=flaggems` is the (measured-slower) FlagGems alternative |
 | `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable the optional Apex multi-tensor compatibility layer; see the Apex note below |
+| `FLAGOS_DISABLE_QWENIMAGE_ROPE` | Runtime | `0` (off) | On GCU, leave `diffusers`' Qwen-Image rotary-embedding table alone. `torch_fl` registers the `flagos` device there at import, which is what keeps the rotation off the complex exponential `diffusers` would otherwise fall back to; set `1` to measure that difference. This is a capability switch, not a route switch: it changes which rotation `diffusers` calls, not which backend serves any operator — see the Qwen-Image note below |
 | `FLAGOS_DIST_FORCE_NCCL` | Test | `0` (off) | In the manual MetaX distributed tests, skip FlagCX and use NCCL |
 | `FLAGOS_DCU_SKIP_LEGACY_SMOKE` | Test | `0` (off) | In `.github/scripts/set_env_dcu.sh`, skip the legacy-mode smoke path (`FLAGOS_DCU_VENDOR_CORE=1`) after the decoupled gates have run |
 
@@ -135,6 +136,23 @@ common `MultiTensorApply` entry point when Apex is imported. The patch converts
 flagos tensors to zero-copy CUDA views for direct `amp_C` calls and converts CUDA
 results back to flagos views. It is optional and does not apply to native
 non-CUDA backends. Set `FLAGOS_DISABLE_APEX_COMPAT=1` to disable it.
+
+**Qwen-Image rotation on GCU.** `diffusers` keys the Qwen-Image rotary embedding
+on device type, in two places that have to agree: `ROPE_PER_DEVICE` picks the
+rotation at the attention call site, and each rope module's `_get_device_freqs`
+produces the operand it is handed — a complex exponential for a device with a
+complex dtype, rotation angles for one without. A `flagos` tensor is in neither
+table entry, so it takes the `cuda` fallback and multiplies by the complex
+exponential, which the topsaten stack serves slowly enough to be the dominant
+cost of a transformer forward. `torch_fl` therefore registers the `flagos` device
+in both halves at import: angles for the operand, and a rotation that writes the
+same values as `diffusers`' `apply_rotary_emb_qwen_neuron` without the stride-0
+`repeat_interleave` broadcast it uses. `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` leaves
+the table as `diffusers` ships it, which is the off leg of the measurement in
+`tests/manual/qwen_image_2512/README.md`. The patch is confined to `diffusers`;
+no operator route in `backends_gcu.conf` changes, and the tokens it removes
+(`repeat_interleave.self_int`, and the complex multiply) are not routed anywhere
+else by this switch.
 
 ### Assets and libraries
 
