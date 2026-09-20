@@ -21,12 +21,21 @@
 # Usage:
 #   tests/manual/qwen_image_21/run.sh infer  [--stage ... --device ...]
 #   tests/manual/qwen_image_21/run.sh sweep  [--device ... --only ...]
-#   tests/manual/qwen_image_21/run.sh bench  [--device ... --batch ... --out ...]
+#   tests/manual/qwen_image_21/run.sh bench  [--device ... --batch N [N ...] ...]
 #   tests/manual/qwen_image_21/run.sh table  JSON... [--baseline LABEL]
 #   tests/manual/qwen_image_21/run.sh numerics      run the per-op comparison
 #   tests/manual/qwen_image_21/run.sh side-by-side --left cuda --right flagos
 #   tests/manual/qwen_image_21/run.sh compare --a REF.png --b OUT.png
 #   tests/manual/qwen_image_21/run.sh census [LOG]  re-read a saved log
+#
+# bench with one --batch value writes the one record it always did. With several
+# it writes one record per value -- bench-b1.json, bench-b2.json, ... -- and this
+# script summarises every one of them, because a throughput is a curve rather
+# than a point: whether a card saturates, and at what batch, is the difference
+# between arithmetic-bound and host-bound. --peak-tflops and
+# --peak-bandwidth-gbs add the two achievement ratios (MFU for the denoise loop,
+# MBU for the elementwise probe). Both are recorded, and without them the FLOPs
+# and the GB/s are still measured while the ratios read n/a.
 #
 # Images land in one directory per backend under OUT_DIR -- <OUT_DIR>/flagos,
 # <OUT_DIR>/musa, <OUT_DIR>/cuda -- so the vendor run and the flagos run of the
@@ -173,9 +182,12 @@ summarise_bench() {
         echo "no JSON was written; the run's own output above is the record"
         return
     fi
-    "$PYTHON" - "$json" <<'PY'
+    "$PYTHON" - "$json" "$ROOT/$SUBDIR" <<'PY'
 import json
 import sys
+
+sys.path.insert(0, sys.argv[2])
+import cost
 
 record = json.load(open(sys.argv[1], encoding="utf-8"))
 
@@ -190,12 +202,27 @@ def show(label, *keys, fmt="{:.2f}", suffix=""):
     print(f"{label:<20} : {'n/a' if value is None else fmt.format(value)}{suffix}")
 
 
+show("batch              ", "config", "batch", fmt="{}")
 show("latency            ", "latency", "per_image_s", "median_s", suffix=" s/image (median)")
 show("latency mean       ", "latency", "per_image_s", "mean_s", suffix=" s/image")
 show("latency std        ", "latency", "per_image_s", "std_s", fmt="{:.3f}", suffix=" s")
+show("latency p90        ", "latency", "per_image_s", "p90_s", suffix=" s/image")
+show("latency p99        ", "latency", "per_image_s", "p99_s", suffix=" s/image")
 show("measured calls     ", "protocol", "runs", fmt="{:.0f}")
 show("loop per step      ", "phases", "loop per step", "median_s", fmt="{:.3f}", suffix=" s")
 show("throughput         ", "throughput", "images_per_s", fmt="{:.4f}", suffix=" images/s")
+show("transformer FLOPs  ", "compute", "flops_per_image", fmt="{:.4e}", suffix=" FLOP/image")
+show("loop per image     ", "compute", "loop", "seconds_per_image", suffix=" s/image (loop)")
+show("achieved           ", "compute", "loop", "tflops", suffix=" TFLOP/s (loop)")
+show("MFU                ", "compute", "loop", "mfu", fmt="{:.1%}")
+gbs = cost.probe_summary((record.get("compute") or {}).get("bandwidth"))
+print(
+    f"{'probe bandwidth    ':<20} : "
+    + ("n/a" if gbs is None else f"{gbs['op']} {gbs['median_gb_per_s']:.0f} GB/s")
+    + ("" if gbs is None or gbs["mbu"] is None else f"  MBU {gbs['mbu']:.1%}")
+)
+if gbs is not None:
+    print(f"{'probe spread       ':<20} : {cost.probe_spread(gbs)}")
 show("peak memory        ", "memory", "peak_gib", suffix=" GiB")
 show("memory counter     ", "memory", "source", fmt="{}")
 print(f"{'determinism        ':<20} : {record['determinism']['identical']}")
@@ -303,7 +330,21 @@ echo
 STATUS=${PIPESTATUS[0]}
 
 if [ "$MODE" = "bench" ]; then
-    summarise_bench "$(value_of_flag --out "$DEVICE_DIR/bench.json" ${ARGS[@]+"${ARGS[@]}"})"
+    # bench prints one "wrote <path>" line per record, which is a list whenever
+    # --batch named several values. Reading them back out of this run's own log is
+    # what keeps the summary and the artifact from disagreeing: deriving the names
+    # here would be a second opinion about where bench.py put them, and the two
+    # would drift the first time the naming changed.
+    WROTE=$(grep -o '^wrote .*' "$LOG" 2>/dev/null | awk '{print $2}')
+    if [ -n "$WROTE" ]; then
+        for JSON in $WROTE; do
+            summarise_bench "$JSON"
+        done
+    else
+        # Nothing was written -- the run died before its first record -- so report
+        # where it would have gone rather than nothing at all.
+        summarise_bench "$(value_of_flag --out "$DEVICE_DIR/bench.json" ${ARGS[@]+"${ARGS[@]}"})"
+    fi
 else
     summarise
 fi

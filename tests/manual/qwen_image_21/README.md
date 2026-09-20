@@ -415,10 +415,14 @@ prompt written for this flow.
 
 | Metric | Definition | Industry analogue |
 | --- | --- | --- |
-| `latency.per_image_s` | Wall time of one `pipe(...)` call at the run's batch, divided by the batch. Includes the text encoder, the denoise loop, the VAE decode and the postprocess to PIL. Excludes model load, placement and the PNG write. | MLPerf SingleStream latency |
+| `latency.per_image_s` | Wall time of one `pipe(...)` call at the run's batch, divided by the batch. Includes the text encoder, the denoise loop, the VAE decode and the postprocess to PIL. Excludes model load, placement and the PNG write. Carries mean, median, min, max, std, p90 and p99 over the measured calls. | MLPerf SingleStream latency |
+| `latency.per_image_s.p90_s`, `p99_s` | The same samples at the 90th and 99th percentile, linearly interpolated. | MLPerf's reported percentile |
 | `phases["*"]` | The same call split into text encoder / denoise loop / loop per step / VAE decode. Every edge is synchronised, so each is device time rather than host-return time. | component breakdown |
 | `phases["loop per step"]` | Denoise loop ÷ the number of steps in it. Steps-normalised, so two chips at different step counts still compare. | s/iteration |
-| `throughput.images_per_s` | `batch / median per-call time`, reported only when `--batch N` (N > 1) runs. | MLPerf Offline samples/s |
+| `throughput.images_per_s` | `batch / median per-call time`, reported only when the run's batch is above 1. | MLPerf Offline samples/s |
+| `compute.loop` | The transformer's modelled FLOPs per image and per call, the loop's own time per image and per call, achieved TFLOP/s, and MFU against `--peak-tflops`. §7.1.2. | achieved FLOPs and MFU |
+| `compute.bandwidth` | GB/s moved by each probe op at this workload's activation shape, and MBU against `--peak-bandwidth-gbs`. The table shows the cohort's median op and its range; every op's own number is in the JSON. §7.1.2. | achieved bandwidth, MBU |
+| `compute.flops_per_image`, `compute.loop.seconds_per_image` | The model's arithmetic and the loop's time, both divided by the batch. The FLOPs one is constant across a batch sweep by construction; the time one is not, and it is the input MFU actually varies with. §7.1.2. | normalised FLOPs and latency |
 | `memory.peak_gib` | Peak allocated watermark, reset before each measured call and read after it. Falls back to `memory_reserved`, and names which it used. | diffusers `mem_plain_GB` |
 | `determinism.identical` | Whether the first and last measured calls produced byte-identical images. | prerequisite for §6.1 |
 | `vs <baseline>` (in the table) | Latency ratio against a named column; throughput ratio as its reciprocal. | vendor speedup ratio |
@@ -443,6 +447,160 @@ so the images still come from the canonical prompt; if the batch does not fit,
 the JSON records the allocator's message in `throughput.error` and `null` for the
 number, which is itself the result a 40 GB card gives.
 
+A latency is not a utilisation, and on this workload the gap between the two is
+large enough to matter: the H100 pair in §7.3 reads 42% MFU on the vendor's torch
+against 26% on flagos at the same FLOPs, which is a difference no `s/image` number
+shows. The next two subsections are how that is measured.
+
+##### 7.1.1 A throughput is a curve, not a point
+
+`--batch` takes several values and measures each into its own record:
+
+```bash
+run.sh bench --device flagos --batch 1 2 4 8 --peak-tflops 989 \
+    --peak-bandwidth-gbs 3350 --out out/flagos/bench.json
+# -> out/flagos/bench-b1.json ... bench-b8.json, one record per batch
+run.sh table out/flagos/bench-b*.json
+```
+
+One record per batch rather than one record holding several, because `table`
+already renders one column per file: a curve is a table whose columns differ in
+the batch, and the `config` row says which. A single `--batch` value writes the
+single record it always did, so nothing that worked before changes.
+
+What the curve answers is where the card saturates. `latency.per_image_s` falls
+as the batch grows until it stops falling; where it stops is the batch at which
+the card is doing arithmetic instead of waiting on the host, and
+`throughput.images_per_s` is that rate. A chip whose per-image latency never falls
+is host-bound at every batch it can hold — which is a different result from a slow
+one, and the two want different fixes.
+
+A batch that does not fit is recorded, not skipped: its JSON carries the
+allocator's own message in `throughput.error` with the latency fields null. That
+is the truthful answer, and it is a reading in its own right — the largest batch
+that fits is a property of the chip's memory, and it shows up in the table's
+`peak GiB` row.
+
+Each batch is warmed up separately. The Triton autotuner keys on shape, so batch
+4's kernels are not warmed by batch 1's calls, and a sweep that warmed up once
+would time batch 4's compiles. The allocator's cached blocks are released between
+batches for the same reason in reverse, where the backend offers it: without that,
+a batch-4 record inherits whatever batch 1 left pooled, and a batch that would fit
+fails to find room.
+
+##### 7.1.2 Achievement: MFU and MBU
+
+Both ratios divide by a peak the caller supplies, because a peak is a property of
+the part number and not of the run:
+
+```bash
+run.sh bench --device flagos --peak-tflops 989 --peak-bandwidth-gbs 3350 --out ...
+```
+
+Neither has a default. A ratio against a guessed peak is worse than no ratio,
+because it reads like a result; without them the FLOPs and the GB/s are still
+measured and `mfu`/`mbu` are null, and the table says why.
+
+**MFU** is the loop's achieved TFLOP/s over `--peak-tflops`. The FLOPs come from
+an analytic model of the transformer (`cost.py`), whose inputs are the
+checkpoint's own `config.json` and the two sequence lengths the model actually
+saw. The lengths are read off a hook during the warmup calls and the hook is
+removed before the timer starts, so nothing is instrumented on a call that is
+being measured. The model counts matmuls and attention scores and ignores
+elementwise work, normalisations and the modulation MLP — the usual convention
+for a FLOPs figure quoted as an MFU.
+
+At 1024x1024 and 40 steps it comes to **2.642 PFLOP per image**, and a reader can
+check it against the checkpoint:
+
+| Term | Per image, 40 steps |
+| --- | --- |
+| attention projections (q, k, v, out) | 13.28 TFLOP |
+| attention, scores and weighted sum | 8.91 TFLOP |
+| feed-forward, SwiGLU | 39.83 TFLOP |
+| `img_in`, `txt_in`, `proj_out` | 0.006 TFLOP |
+
+The per-layer total is 2.08 TFLOP for the prefill, which is 218 M parameters per
+block at `2 x params x tokens` plus the attention's quadratic term; 32 blocks at
+that width is 7.0 B parameters, which is the 14.0 GB the transformer's bf16
+weights occupy (§1). One prefill at 4122 queries is 66.45 TFLOP and each of the
+39 cached decodes is 66.03 — the two differ by the query count in every projection
+and in the score matmul, which is why they are carried separately rather than
+averaged. `--no-kv-cache` makes every step a prefill and the total 2.658 PFLOP.
+
+The model was checked against a hook-based count of a real call: summing every
+`Linear` and `Conv` in the transformer plus the attention matmuls that
+`torch.nn.functional.scaled_dot_product_attention` actually ran, over the same two
+steps, agrees with the analytic figure to **0.02%**.
+
+MFU is taken against the phase the FLOPs belong to — the denoise loop — and not
+against the whole call. The model covers the transformer only: the text encoder
+and the VAE are one call each at completely different shapes (a 17.5 GB language
+model over 26 tokens; a causal 3-D convolutional decoder) and are measured but not
+modelled. Dividing the loop's FLOPs by a time that also contains them would
+produce a ratio that is low for a reason that is not about utilisation. For the
+record, the same hook count puts the VAE at 16.95 TFLOP per decode against the
+transformer's 2.642 PFLOP per image, and the text encoder at 0.60 TFLOP — the
+scoping is not what makes the number look good.
+
+**MFU carries no information the per-image loop time does not, within one table.**
+Every matmul in the model is `2 x batch x rows x inner x columns` with no term
+coupling one sample to another, so the FLOPs are linear in the batch and
+`flops_per_image` is a constant — 2.642 PFLOP at this configuration, for every
+record of the §7.3 sweep. Dividing that constant by the loop's per-image time and
+then by the peak gives back the same ordering as the time alone:
+
+```
+achieved = flops_per_call / seconds_per_call
+         = (batch * flops_per_image) / (batch * seconds_per_image)
+         = flops_per_image / seconds_per_image
+```
+
+So the `loop per image` row and the `MFU` row move together by construction, and
+§7.3's cuda column reading 42.3% / 42.6% / 42.5% is the same statement as its
+6.31 / 6.27 / 6.29 s of loop per image. Both rows are in the table rather than one
+because they are useful in different comparisons: **the ratio is what compares
+across configurations** — another step count or another resolution changes
+`flops_per_image`, at which point a wall time is no longer comparable and an MFU
+is — while **the time is what compares within this one**, and unlike the
+`latency` row it has no text encoder and no VAE mixed into it.
+
+`flops_per_image`'s constancy is also the one check a reader can run on the model
+without instrumenting anything: if a batch sweep showed that row changing, the
+model would be wrong.
+
+**MBU** is the memory-bound half, and it is a separate probe rather than a
+derivation, because no FLOPs figure can see the ~40-operator elementwise cohort
+this model runs between its matmuls. The probe streams `copy_`, `mul`, `add`,
+`rsqrt` and `silu` over `(1, 4096, 4096)` bf16 — 32 MiB a tensor, the size of this
+workload's activations — and reports GB/s moved against `--peak-bandwidth-gbs`.
+The shape is fixed and documented rather than derived: the probe is a reference
+point for the cohort, not a model of it.
+
+The table's MBU row is the cohort's **median** op, with the range beside it. Every
+op in the probe moves the same bytes at the same traffic, so a spread across the
+five is a difference in how each operator is launched and routed — and a headline
+that took the best op would hide exactly the slow one that is worth knowing
+about, while also flipping between `mul` and `add` from run to run on noise that
+is inside the timer's own error. Every op's own number is in the JSON.
+
+Read together, the two ratios say where the time went, and §7.3's pair is the
+worked example. There, the vendor's torch sits at 42.3% MFU and 79.2% MBU — near
+enough to the card's behaviour that the loop is doing arithmetic — while flagos
+sits at 25.4% MFU and 31.2% MBU, which is neither arithmetic-bound nor
+bandwidth-bound. Something else is paying, and the probe says what: on that route
+the four FlagGems ops move their bytes in 82-96 µs per call where the same traffic
+takes 24-37 µs at the vendor's rate, and a per-call cost that does not grow with
+the bytes is a cost of issuing the call. A chip reading 26% MFU and 80% MBU would
+be a different diagnosis again — bandwidth-bound in its pointwise ops, and better
+served by fewer, larger kernels than by a faster matmul.
+
+A probe op that the backend cannot run is recorded with its error rather than
+taking the probe down: which elementwise ops a chip routes is a question this
+file has no business deciding, and one operator failing does not invalidate the
+other four.
+
+
 #### Trap: the dispatch log costs 12% of the loop
 
 §7's census is not free. `run.sh bench` therefore leaves `dispatch` out of
@@ -450,20 +608,29 @@ number, which is itself the result a 40 GB card gives.
 environment actually held — a row taken with it on says so, in the table's
 caveats.
 
+The 12% above is the 2512 workload's figure. On the 2.1 workload on an H100 it is
+far larger, and it is worth knowing before quoting anything taken with it on: the
+same forty-step flagos run measured **474.1 ms/step with `dispatch` on against
+255.8 ms/step with it off**, 85% more. The reason is that the flagos path issues
+its work from the host, so an unbuffered write per operator call sits on the same
+thread that is already the bottleneck (§7.1.2).
+
 #### Trap: a cold compile cache is a different machine
 
 §4.3 measures the same 40-step run at 23.8 s warm and 71.5 s cold. `bench.py`
 never clears the cache; it records `TRITON_CACHE_DIR`. `--cold-cache` points it at
 a fresh directory, which is how "a box that has never run this" is measured, and
 the JSON records that it was used. **Both sides of any cross-chip comparison must
-be warm**, and the recorded cache path is what makes that checkable.
+be warm**, and the recorded cache path is what makes that checkable. A batch sweep
+warms up per batch for the same reason; see §7.1.1.
 
 #### What a chip's result should look like
 
 The JSON is the record; `table` is the view. A run is worth quoting when:
 
 - `protocol.runs` is at least 2, so `latency.per_image_s.std_s` means something.
-  The table warns when it is not.
+  The table warns when it is not, and says separately when the sample count is too
+  low for the p90/p99 rows to be tails rather than the largest call measured.
 - `determinism.identical` is true. If it is false the latency still stands, but a
   paired comparison in §6.1 does not, because the two runs are not sampling the
   same trajectory.
@@ -471,6 +638,19 @@ The JSON is the record; `table` is the view. A run is worth quoting when:
 - `memory.source` is stated, because a peak allocated and a reserved total are
   not the same measurement and a table that mixes them is worse than one that
   says which it used.
+- `compute.sequence` is present and matches the run: it is what the FLOPs model
+  was fed, and 26 + 4096 = 4122 is checkable against the joint width `infer.py`
+  prints. If it is absent the hook saw no forward and the FLOPs are null rather
+  than estimated.
+- `hardware` records the peaks the ratios were taken against, or they are null
+  and the table says why. An MFU without its peak is not a reading.
+- The batch column is quoted with the number: `throughput` is a rate at one
+  batch, and §7.1.1's curve is what says whether that batch is where the card
+  saturates.
+- `compute.flops_per_image` is the same in every record of a sweep. It is constant
+  by construction (§7.1.2), so a sweep that shows it changing means the model or
+  the config is wrong — it is the one row of that section a reader can check
+  against the checkpoint without instrumenting anything.
 
 ### 7.2 Reference measurement
 
@@ -486,6 +666,11 @@ run.sh table out/cuda.json out/flagos.json --baseline cuda
 The table below is that command's output, unedited. `torch cuda` is
 2.10.0+cu128 in the vendor environment; `torch-fl` is 2.10.0+cpu with the
 external CUDA 12.8 assets, the 2.1 checkout at `0.41.0.dev0`.
+
+It was taken with the `bench.py` of that date, which had no batch sweep, no
+percentiles and no FLOPs or probe sections — so the rows §7.1 added are **absent
+from it rather than zero**, and it cannot be re-rendered into them: the numbers
+were never measured. §7.3 is the pair taken with all of them, on another chip.
 
 | metric | cuda | flagos |
 | --- | --- | --- |
@@ -584,6 +769,150 @@ The single-shot figure above is kept only as the record of what the staged runne
 reports. For anything quoted, use the `bench.py` pair at the top of this section:
 it runs the same pipeline with a discarded warmup and a self-sizing repeat count,
 so every phase above comes with a spread instead of a point.
+
+### 7.3 The H100 pair, with the new rows
+
+Taken on 2026-09-20 on one NVIDIA H100 80GB HBM3 (SM90) of an eight-card host, one
+card per run (`CUDA_VISIBLE_DEVICES` picks it), 40 steps, 1024x1024, seed 42,
+`true_cfg_scale=1.0`, warm Triton cache, `FLAGOS_LOG=fallback`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The peaks are the part's
+datasheet: 989 TFLOP/s dense bf16 and 3.35 TB/s of HBM3.
+
+```bash
+run.sh bench --device cuda --batch 1 2 4 8 \
+    --peak-tflops 989 --peak-bandwidth-gbs 3350 --out out/cuda/bench.json
+run.sh bench --device flagos --batch 1 2 4 8 \
+    --peak-tflops 989 --peak-bandwidth-gbs 3350 --out out/flagos/bench.json
+run.sh table out/cuda/bench-b1.json out/flagos/bench-b1.json --baseline cuda-b1
+```
+
+`torch cuda` is 2.10.0+cu130 in the vendor environment; `torch-fl` is 2.10.0+cpu
+with the external CUDA 13 assets, the 2.1 checkout at `0.41.0.dev0`, torch_fl at
+flagos-ai/main `da64814`. The table below is that command's output, unedited.
+
+| metric | cuda-b1 | flagos-b1 |
+| --- | --- | --- |
+| prompt | 01 / `bb383cba` | 01 / `bb383cba` |
+| config | 1024x1024, 40 steps, batch 1, kv=True | 1024x1024, 40 steps, batch 1, kv=True |
+| latency, median s/image | 6.51 | 10.96 |
+| latency, mean s/image | 6.51 | 10.95 |
+| latency, min s/image | 6.48 | 10.90 |
+| latency std, s | 0.017 | 0.036 |
+| latency, p90 s/image | 6.53 | 10.98 |
+| latency, p99 s/image | 6.53 | 11.00 |
+| measured calls | 10 | 6 |
+| text encoder, median s | 0.03 | 0.23 |
+| denoise loop, median s | 6.31 | 10.51 |
+| loop per step, median ms | 157.8 | 262.7 |
+| vae decode, median s | 0.13 | 0.18 |
+| throughput, images/s | n/a | n/a |
+| peak GiB | 36.82 | 37.81 |
+| memory counter | peak allocated | peak allocated |
+| transformer FLOPs/image, PFLOP | 2.642 | 2.642 |
+| loop, achieved TFLOP/s | 418.5 | 251.4 |
+| MFU (denoise loop) | 42.3% | 25.4% |
+| bandwidth probe, median op | rsqrt 2654 GB/s | add 1046 GB/s |
+| MBU (that op) | 79.2% | 31.2% |
+| probe spread | 2621-2789 GB/s over 5 ops | 819-2627 GB/s over 5 ops |
+| peaks supplied | 989 TFLOPS + 3350 GB/s | 989 TFLOPS + 3350 GB/s |
+| determinism | identical | identical |
+| `FLAGOS_LOG` | fallback | fallback |
+| triton cache | default | /public-nvme/lvyufeng/work/triton-cache |
+| **vs cuda-b1, latency** | **1.00x** | **1.68x** |
+
+The phases add up on both sides — 0.03 + 6.31 + 0.13 = 6.47 against 6.51, and
+0.23 + 10.51 + 0.18 = 10.92 against 10.96 — the remainder being the latent
+preparation and the postprocess, which no phase claims. **1.68x is the end-to-end
+figure on this chip**, and the loop is 1.67x of it (6.31 s against 10.51 s, 157.8
+against 262.7 ms/step); the text encoder is 7.7x and the VAE 1.4x, but those are
+one call each.
+
+**Why 1.68x here and 1.28x on the A100 (§7.2).** The ratio is a property of the
+pair of chips, not of the backend alone. The vendor's loop is 2.7x faster on the
+H100 than on the A100 (157.8 against 427.5 ms/step) because the H100's arithmetic
+is what that loop wants, while flagos' loop is only 2.1x faster (262.7 against
+540.6) because most of what flagos adds is host-side and does not speed up with
+the device. A faster card therefore makes the *ratio* worse even though both
+numbers improved.
+
+#### The curve: cuda is saturated at batch 1, flagos is not
+
+The rows that carry §7.1.1's reading, from the four records each side wrote. The
+commands are the ones above; each record is a file.
+
+| | cuda b1 | cuda b2 | cuda b4 | cuda b8 |
+| --- | --- | --- | --- | --- |
+| latency, median s/image | 6.51 | 6.43 | 6.44 | **OOM** |
+| throughput, images/s | n/a | 0.1555 | 0.1552 | **OOM** |
+| loop per image, median s | 6.31 | 6.27 | 6.29 | **OOM** |
+| loop, achieved TFLOP/s | 418.5 | 421.6 | 420.0 | **OOM** |
+| MFU (denoise loop) | 42.3% | 42.6% | 42.5% | **OOM** |
+| peak GiB | 36.82 | 42.84 | 55.43 | **OOM** |
+
+| | flagos b1 | flagos b2 | flagos b4 | flagos b8 |
+| --- | --- | --- | --- | --- |
+| latency, median s/image | 10.96 | 8.87 | 8.74 | **OOM** |
+| throughput, images/s | n/a | 0.1127 | 0.1145 | **OOM** |
+| loop per image, median s | 10.51 | 8.54 | 8.47 | **OOM** |
+| loop, achieved TFLOP/s | 251.4 | 309.3 | 311.9 | **OOM** |
+| MFU (denoise loop) | 25.4% | 31.3% | 31.5% | **OOM** |
+| peak GiB | 37.81 | 45.40 | 60.58 | **OOM** |
+
+`OOM` is the allocator's own message in that record's `throughput.error`; batch 8
+does not fit on either backend — 4.50 GiB short on cuda and 9.00 GiB short on
+flagos, both requested by a warmup call — so the largest batch this card holds at
+1024x1024 is 4, and that is a reading rather than a missing row. Note the peaks:
+flagos' batch-4 call allocates 60.58 GiB against cuda's 55.43 for the same work,
+which is the dispatch layer's extra intermediates showing up in memory as well as
+in time.
+
+The two curves answer different questions and say different things:
+
+- **cuda is arithmetic-bound at batch 1.** Its per-image latency is flat from
+  batch 1 to 4 (6.51 → 6.44, 1%), its throughput is flat (0.1536 → 0.1552, 1%) and
+  its loop per image is flat (6.31 → 6.29 s). Batching this model on this card
+  buys nothing: at batch 1 the H100 already has all the work it can use, and four
+  images at once cost four times as much.
+- **flagos is host-bound at batch 1, and stops being so at batch 2.** Its
+  loop per image falls 19% (10.51 → 8.47 s) — the purest form of the reading,
+  since the text encoder and the VAE are not in it — and MFU rises a quarter (25.4%
+  → 31.5%), then flattens between 2 and 4: the host's per-call cost is divided by
+  more device work per call, and past batch 2 the device work is what binds. This
+  is the shape §7.1.1 describes, and it is why a single batch-1 number cannot say
+  which side of the line a chip is on.
+
+#### The probe, per op
+
+Five elementwise ops over `(1, 4096, 4096)` bf16, 32 MiB a tensor, from the same
+two records. GB/s moved, and MBU against 3.35 TB/s.
+
+| op | cuda | flagos | its route in §7's census |
+| --- | --- | --- | --- |
+| `copy_` | 2621 GB/s (78.2%) | **2627 GB/s (78.4%)** | not named — the 2.1 workload never issues it |
+| `mul` | 2788 GB/s (83.2%) | 1204 GB/s (35.9%) | `flagos_python` |
+| `add` | 2789 GB/s (83.2%) | 1046 GB/s (31.2%) | `flagos_python` |
+| `rsqrt` | 2654 GB/s (79.2%) | 822 GB/s (24.5%) | `flagos_python` |
+| `silu` | 2634 GB/s (78.6%) | 819 GB/s (24.4%) | `flagos_python` |
+
+Read the copy_ row first: **the same card, in the same process, streaming the same
+32 MiB through the flagos backend reaches 78.4% of peak** — within half a per cent
+of the vendor's 78.2%. The memory system is not what is slow, and neither is the
+backend's device path.
+
+Now read what separates the two columns. Every op that falls below the vendor's
+rate is one of the 40 the census in §7 shows on `flagos_python`; `copy_` is not in
+that census at all — the 2.1 workload never issues it — and it is the only op of
+the five that matches the vendor exactly. The cohort's own spread (819 to 2627
+GB/s) is therefore not a property of the shapes; all five move the same bytes.
+
+What makes it a *host* reading rather than a kernel one is the implied time per
+call. 100.7 MB for a three-pass binary op at 1204 GB/s is 83.6 µs, and 67.1 MB for
+a two-pass unary at 822 GB/s is 81.6 µs; the same traffic at the vendor's 2.7 TB/s
+is 24-37 µs. A per-call cost of 82-96 µs that does not depend on the bytes moved
+is the cost of issuing the call, not of executing it, which is the reading §7's
+census and the batch curve both point at. **The probe's flagos column is a floor
+on this route, not the kernel's bandwidth**: it says how fast these calls can be
+driven, and at batch 1 that is what bounds the loop.
 
 ## 8. Per-operator comparison against a reference
 
@@ -693,13 +1022,19 @@ failure in `full` that survives both is a problem with the loop itself.
 - The cohort is ours, not the model authors'. §5 says why and what each prompt is
   for.
 - Timing is recorded, not optimised. Nothing here is a performance claim except
-  the `bench.py` pair in §7.2, and that table quotes the vendor beside it.
+  the `bench.py` pairs in §7.2 and §7.3, and each quotes the vendor beside it.
 - Reserved memory is not comparable across backends unless both numbers come from
   the allocator. `nvidia-smi` folds the CUDA context and the cuBLAS/cuDNN
   workspaces into one of the two numbers.
 - §7.2's throughput row is empty on this hardware. Four images do not fit one
-  40 GB card, and no larger part was available; the column needs one, and nothing
-  here estimates it.
+  40 GB card, and no larger part was available. §7.3 fills the column on an 80 GB
+  part, where four fit and eight do not; nothing here estimates either.
+- The achievement ratios are only for the denoise loop, and their FLOPs cover the
+  transformer only. A pipeline-level MFU would need the text encoder and the VAE
+  modelled too; §7.1.2 says why they are not.
+- The bandwidth probe is five ops at one shape, and on a route that issues from
+  the host it reads the issue rate rather than the kernel's bandwidth — §7.3
+  shows both, and the spread is the reading.
 - Image quality is judged by eye. The paired PSNR is a backend-agreement measure,
   and it says nothing about whether the pictures are any good.
 - Nothing under `tests/manual/` is in `.github/configs/*.yml`, so none of this

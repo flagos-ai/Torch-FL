@@ -397,3 +397,57 @@ reported that was not what the flow did.**
 
 None. The two decisions left open during design were settled: `--warmup`
 defaults to 2, and Qwen-Image-2512 is not covered by this change.
+
+## 12. Addendum, 2026-09-20: the curve, the percentiles, the ratios
+
+Added after the first measured pair on a chip this design had not seen. What
+prompted it: the H100 pair reported 1.68x end-to-end and nothing in the record
+could say *why* — which side was bound, or whether either was. Everything below is
+additive; every invocation that worked before produces the same record it did.
+
+**`--batch` takes a list.** One value behaves exactly as before. Several measure a
+throughput curve, one record per value (`bench-b1.json`, `bench-b2.json`, ...),
+which `--table` renders as one column each. The reason is §5's own premise: a
+throughput at one batch is a point, and the batch at which `latency_s_per_image`
+stops falling is the difference between a card doing arithmetic and a card waiting
+on the host. §7.1.1 of the README; measured in §7.3, where cuda is flat from batch
+1 and flagos falls 20% by batch 2.
+
+**`latency.per_image_s` gains `p90_s` and `p99_s`.** This revises the non-goal in
+§2 that said MLPerf's percentile requirements are not reproduced: the percentiles
+are now reported, linearly interpolated, with the sample count beside them and a
+table caveat whenever the count is too low for p99 to be anything but the largest
+call measured. The rest of that non-goal stands unchanged — no CLIP-score gate, no
+5000-caption cohort, no 600 s minimum duration.
+
+**A `compute` section, and `cost.py` to derive it.** `--peak-tflops` and
+`--peak-bandwidth-gbs` are new flags, with no defaults (a ratio against a guessed
+peak reads like a result). With them, the record carries MFU for the denoise loop
+against an analytic FLOPs model of the transformer, and MBU for a five-op
+elementwise probe at the workload's activation shape. The model's inputs are the
+checkpoint's `config.json` and the two sequence lengths read off a hook during
+warmup — nothing is instrumented on a measured call — and its total was checked
+against a hook-based count of a real call to 0.02%. The text encoder and the VAE
+are measured but not modelled, so every ratio is scoped to the loop.
+
+The section carries both per-call and per-image forms of the two inputs to that
+ratio, because they answer different questions. `flops_per_image` is constant
+across a batch sweep by construction — every matmul is `2 x batch x rows x inner x
+columns` with nothing coupling one sample to another — so its constancy is the
+model's own consistency check, and it is the figure that compares across step
+counts and resolutions. `loop.seconds_per_image` is not constant, and it is the
+only input that varies: `MFU = flops_per_image / (seconds_per_image x peak)`, so
+within one table the ratio is the per-image loop time in different units. Both are
+reported so a reader can see that rather than discover it, and the loop time
+doubles as the discriminating reading in the curve.
+
+**What is still not covered**, and is now the honest open list:
+
+- Goodput and the Server scenario: no concurrency, no arrival process, no SLO.
+- Energy per image (MLPerf Power). NVML would supply it; nothing here reads it.
+- A CLIP-score accuracy gate, so a fast-but-wrong result still cannot be detected
+  by this flow. §6.1's paired PSNR remains the only quality check, and it measures
+  backend agreement rather than image quality.
+- Elementwise FLOPs, which is why MBU is a probe rather than a derivation.
+- Qwen-Image-2512, unchanged from §2.
+
