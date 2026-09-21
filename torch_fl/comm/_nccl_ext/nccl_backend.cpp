@@ -17,9 +17,9 @@
 //
 // Why this exists: the pip `torch==2.10.0+cpu` wheel is compiled WITHOUT
 // USE_C10D_NCCL, so its Python bindings never expose `ProcessGroupNCCL`
-// (torch.distributed.is_nccl_available() == False). But the externally
-// preloaded libtorch_cuda.so (a standard cu128 build) DOES contain the full
-// c10d::ProcessGroupNCCL implementation (all 173 symbols, ctor is defined).
+// (torch.distributed.is_nccl_available() == False). An externally supplied
+// vendor libtorch -- libtorch_cuda.so for NVIDIA or libtorch_hip.so for Hygon
+// DCU -- can still contain the full c10d::ProcessGroupNCCL implementation.
 //
 // We only need to *construct* a ProcessGroupNCCL and hand it back as an
 // intrusive_ptr<Backend>. The c10d.Backend base class already exposes every
@@ -28,9 +28,9 @@
 // virtuals -> calling them on the returned object dispatches to the NCCL impl.
 // So ProcessGroupFlagOS can use it as an inner backend with zero extra binding.
 //
-// Build: compiled with -DUSE_C10D_NCCL so the ProcessGroupNCCL.hpp header (and
-// the NCCL_HAS_* feature macros derived from nccl.h) matches the ABI the
-// external libtorch_cuda.so was built with (both target nccl 2.28 / cu12).
+// Build: compiled with -DUSE_C10D_NCCL so ProcessGroupNCCL.hpp and the
+// NCCL_HAS_* feature macros are derived from the NCCL/RCCL headers matching the
+// external vendor libtorch.
 
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
@@ -63,7 +63,7 @@ c10::intrusive_ptr<c10d::Backend> make_nccl_backend(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "flagos internal: expose ProcessGroupNCCL for CPU-torch + external "
-            "libtorch_cuda";
+            "vendor libtorch";
   m.def("make_nccl_backend", &make_nccl_backend,
         pybind11::arg("store"),
         pybind11::arg("rank"),
