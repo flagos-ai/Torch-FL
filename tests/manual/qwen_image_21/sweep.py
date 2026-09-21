@@ -152,7 +152,8 @@ def main(argv=None):
     print(f"diffusers {diffusers.__version__}")
     print(f"model: {args.model}")
     print(
-        f"placement: encoder/vae -> {encoder}   transformer -> {' '.join(transformer)}"
+        f"placement: encoder -> {encoder}   transformer -> "
+        f"{' '.join(transformer)}   vae -> {vae}"
     )
     print(
         f"{len(cohort)} prompts, {args.width}x{args.height}, {args.steps} steps, "
@@ -168,6 +169,8 @@ def main(argv=None):
     _, placement = common.place_components(
         torch, pipe, encoder, transformer, vae, args.blocks_per_device
     )
+    if args.omit_all_valid_prompt_mask:
+        common.enable_all_valid_prompt_mask_elision(pipe)
 
     manifest = {
         "device": args.device,
@@ -182,7 +185,9 @@ def main(argv=None):
         "height": args.height,
         "num_inference_steps": args.steps,
         "true_cfg_scale": args.true_cfg_scale,
+        "omit_all_valid_prompt_mask": args.omit_all_valid_prompt_mask,
         "seed": args.seed,
+        "placement": {"encoder": encoder, "transformer": transformer, "vae": vae},
         "images": [],
     }
 
