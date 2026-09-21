@@ -34,6 +34,73 @@ pg = pytest.importorskip("torch_fl.comm.process_group")
 
 
 # ---------------------------------------------------------------------------
+# NCCL extension loading
+# ---------------------------------------------------------------------------
+
+
+def _new_nccl_process_group(monkeypatch):
+    monkeypatch.setattr(pg.torch.distributed, "ProcessGroupNCCL", None, raising=False)
+    return pg.ProcessGroupFlagOS.__new__(pg.ProcessGroupFlagOS)
+
+
+def test_nccl_extension_none_sentinel_falls_back_cleanly(monkeypatch):
+    import torch_fl.comm._nccl_ext as nccl_ext
+
+    monkeypatch.setattr(nccl_ext, "_flagos_nccl", None)
+    monkeypatch.setitem(sys.modules, "_flagos_nccl", None)
+
+    obj = _new_nccl_process_group(monkeypatch)
+    assert obj._try_build_nccl(None, 0, 1, None) is False
+
+
+def test_nccl_extension_none_sentinel_uses_loose_module(monkeypatch):
+    import torch_fl.comm._nccl_ext as nccl_ext
+
+    sentinel = object()
+    seen = {}
+
+    def make_nccl_backend(store, rank, world_size, timeout_ms, high_priority):
+        seen["args"] = (store, rank, world_size, timeout_ms, high_priority)
+        return sentinel
+
+    loose_extension = types.ModuleType("_flagos_nccl")
+    loose_extension.make_nccl_backend = make_nccl_backend
+    monkeypatch.setattr(nccl_ext, "_flagos_nccl", None)
+    monkeypatch.setitem(sys.modules, "_flagos_nccl", loose_extension)
+
+    obj = _new_nccl_process_group(monkeypatch)
+    assert obj._try_build_nccl("store", 2, 8, 123) is True
+    assert obj._inner is sentinel
+    assert seen["args"] == ("store", 2, 8, 123, False)
+
+
+def test_nccl_extension_prefers_packaged_module(monkeypatch):
+    import torch_fl.comm._nccl_ext as nccl_ext
+
+    sentinel = object()
+    seen = {}
+
+    def make_nccl_backend(store, rank, world_size, timeout_ms, high_priority):
+        seen["args"] = (store, rank, world_size, timeout_ms, high_priority)
+        return sentinel
+
+    packaged_extension = types.SimpleNamespace(make_nccl_backend=make_nccl_backend)
+    loose_extension = types.ModuleType("_flagos_nccl")
+
+    def fail_if_called(*args):
+        raise AssertionError("loose extension must not be used")
+
+    loose_extension.make_nccl_backend = fail_if_called
+    monkeypatch.setattr(nccl_ext, "_flagos_nccl", packaged_extension)
+    monkeypatch.setitem(sys.modules, "_flagos_nccl", loose_extension)
+
+    obj = _new_nccl_process_group(monkeypatch)
+    assert obj._try_build_nccl("store", 1, 4, None) is True
+    assert obj._inner is sentinel
+    assert seen["args"] == ("store", 1, 4, 0, False)
+
+
+# ---------------------------------------------------------------------------
 # Profile table
 # ---------------------------------------------------------------------------
 

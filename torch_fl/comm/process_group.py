@@ -436,6 +436,9 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         try:
             from torch_fl.comm._nccl_ext import _flagos_nccl
         except ImportError:
+            _flagos_nccl = None
+
+        if _flagos_nccl is None:
             try:
                 import _flagos_nccl  # loose build layout
             except ImportError:
