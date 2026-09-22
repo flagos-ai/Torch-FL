@@ -67,9 +67,14 @@ jobs:
     needs: lint
     uses: ./.github/workflows/agnostic-checks.yml
 
+  codegen-checks:
+    name: Codegen checks
+    needs: lint
+    uses: ./.github/workflows/codegen-checks.yml
+
   discover-platforms:
     name: Discover platforms
-    needs: [lint, agnostic-checks]
+    needs: [lint, agnostic-checks, codegen-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

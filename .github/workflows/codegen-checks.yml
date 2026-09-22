@@ -1,0 +1,85 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Codegen staleness and conf/registration consistency gates.
+#
+# Runs every generator's ``--check`` mode that works without a vendor toolkit
+# or a built torch_fl, plus the pure-text consistency tests. A stale generated
+# file or a conf route with no registration behind it fails this job with the
+# regen command in the log, so drift surfaces in seconds on ubuntu-latest
+# instead of as a "backend not registered" raise on a hardware runner.
+#
+# Generators that need vendor ATen headers (codegen_ascend, codegen_gcu,
+# codegen_mudnn) or an importable built torch_fl (codegen_ops, codegen_autograd,
+# codegen_tileops) are NOT run here -- see scripts/README.md for the manual
+# regen contract on those.
+
+name: Codegen checks
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  codegen-checks:
+    name: Codegen staleness and conf consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CPU torch and codegen deps
+        run: |
+          # The FlagGems register generators import codegen_mudnn -> codegen_ops,
+          # which needs torchgen (shipped with torch) at import time. Stock CPU
+          # torch is enough: no built torch_fl._C and no vendor toolkit.
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0"
+          pip install pyyaml pytest
+
+      - name: Run generator --check modes
+        run: |
+          set -euo pipefail
+          echo "=== gen_vendor_confs.py --check ==="
+          python3 scripts/codegen/gen_vendor_confs.py --check
+          echo "=== codegen_gcu_flaggems.py --check ==="
+          python3 scripts/codegen/codegen_gcu_flaggems.py --check
+          echo "=== codegen_musa_flaggems.py --check ==="
+          python3 scripts/codegen/codegen_musa_flaggems.py --check
+
+      - name: Run conf/registration consistency tests
+        run: |
+          set -euo pipefail
+          python3 -m pytest \
+            tests/unit/test_conf_registration_consistency.py \
+            tests/unit/test_gen_vendor_confs.py \
+            -v --tb=short -p no:cacheprovider
+
+      - name: Run FlagGems conf/codegen consistency tests
+        run: |
+          set -euo pipefail
+          # --noconftest: the tests are pure text/parse and the integration
+          # conftest imports torch_fl at configure time, which needs a built
+          # wheel. These tests read only committed sources.
+          python3 -m pytest \
+            tests/integration/ops/test_flaggems_conf_consistency.py \
+            --noconftest -v --tb=short -p no:cacheprovider
