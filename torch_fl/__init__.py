@@ -502,6 +502,17 @@ import torch  # noqa: E402
 # confirm the DTK device libraries actually bound to the official core.
 _validate_dcu_decoupled_runtime()
 
+# A self-contained PPU build may front its bundled CUDA-enabled libtorch with
+# the official torch+cpu Python wheel. The actual runtime then supports CUDA
+# dispatch while torch/version.py still reports cuda=None. Restore that build
+# metadata before optional packages inspect it and select a native library.
+if _is_ppu_build():
+    from torch_fl.accelerator.ppu._ppu_libtorch_link import (  # noqa: E402
+        restore_ppu_cuda_version,
+    )
+
+    restore_ppu_cuda_version()
+
 if sys.platform == "win32":
     from ._utils import _load_dll_libraries
 

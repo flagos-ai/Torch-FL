@@ -116,6 +116,57 @@ def ensure_ppu_libtorch_links():
     )
 
 
+def _cuda_version_string(compiled_version):
+    """Convert PyTorch's integer CUDA ABI code (for example 13000) to 13.0."""
+    try:
+        value = int(compiled_version)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"PPU libtorch reported an invalid compiled CUDA version: "
+            f"{compiled_version!r}"
+        ) from exc
+    if value < 1000 or value % 10:
+        raise RuntimeError(
+            f"PPU libtorch reported an invalid compiled CUDA version: {value}"
+        )
+    major = value // 1000
+    minor = (value % 1000) // 10
+    return f"{major}.{minor}"
+
+
+def restore_ppu_cuda_version():
+    """Reconcile stock ``torch+cpu`` metadata with the loaded PPU runtime.
+
+    ``torch.version.cuda`` comes from the Python wheel's generated version.py.
+    Relinking that wheel to PPU's CUDA-enabled libtorch changes the actual C++
+    runtime but cannot update the Python constant, leaving third-party packages
+    such as bitsandbytes to mis-detect the live PPU as a CPU-only runtime.
+
+    Query the version from the loaded C++ runtime instead of hard-coding an SDK
+    release or carrying a second version file. A real vendor Torch already has
+    the correct value and is left unchanged.
+    """
+    import torch
+
+    current = getattr(torch.version, "cuda", None)
+    if current:
+        return current
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "PPU libtorch is active but torch.cuda.is_available() is false; "
+            "the vendor runtime was not loaded before importing torch"
+        )
+    getter = getattr(torch._C, "_cuda_getCompiledVersion", None)
+    if not callable(getter):
+        raise RuntimeError(
+            "PPU libtorch does not expose torch._C._cuda_getCompiledVersion; "
+            "cannot reconcile the CPU wheel's CUDA metadata"
+        )
+    version = _cuda_version_string(getter())
+    torch.version.cuda = version
+    return version
+
+
 def restore_original_libtorch():
     """Undo ensure_ppu_libtorch_links(): remove links, restore backups."""
     _restore(_CORE_SO, _CUDA_SO, bundle_dirname=_BUNDLE_DIR)
