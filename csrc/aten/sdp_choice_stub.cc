@@ -59,6 +59,11 @@
 // would leave backward with PrivateUse1 tensors where the autograd graph
 // recorded CUDA. See WrapperScaledDotProductAttention below.
 //
+// The wrapper is registered on two dispatch keys: PrivateUse1 for the calls that
+// arrive without an autograd key, and AutogradPrivateUse1 for the ones that carry
+// a graph. A Python TorchDispatchMode is what forces the second registration --
+// it is measured and explained at the registrations at the end of this file.
+//
 // Registered only on CUDA-boxing builds. Ascend (USE_ASCEND) keeps its own
 // PrivateUse1 _fused_sdp_choice stub (returns efficient_attention for its
 // aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc; MUSA, GCU
@@ -341,6 +346,80 @@ at::Tensor WrapperScaledDotProductAttention(
 } // namespace at::flagos
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+  m.impl(
+      "scaled_dot_product_attention",
+      TORCH_FN(at::flagos::WrapperScaledDotProductAttention));
+}
+
+// The same body one key higher, for the calls that carry an autograd graph.
+//
+// A TorchDispatchMode is claimed at the Python key, which sits below every
+// autograd key and above every backend key, and the region a mode redispatches
+// into (`func(*args, **kwargs)`) is below autograd: the Python key kernel
+// installs the autograd exclusion for the call it hands back. So a mode takes
+// over before a kernel on the plain device key runs, and every op dispatched from
+// inside that kernel then loses the autograd key -- including the composite this
+// body re-runs for the grad case, which builds no graph at all. The output comes
+// back detached (requires_grad=False, grad_fn=None) and its backward raises
+// "element 0 of tensors does not require grad and does not have a grad_fn". No
+// mode, no exclusion: the composite's leaf ops dispatch with the autograd key
+// available and the graph is the one this override replaced.
+//
+// Measured with one synthetic op per dispatch key (torch.library.Library, the
+// same at::mm body in each), grad mode on, a grad-requiring input and the call
+// made twice, inside the mode and without it, so the two rows of a pair differ
+// only in registration key. The table reproduces on CPU, so this is upstream
+// dispatch semantics rather than a flagos autograd defect:
+//
+//   device | kernel key           | at::mm inside a mode       | backward
+//   -------+----------------------+----------------------------+-------------------
+//   cpu    | CPU    (device)      | rg=True, empty CppFunction | ok, no grad to in
+//   cpu    | AutogradCPU          | MmBackward0                | ok
+//   flagos | PrivateUse1 (device) | rg=False, grad_fn=None     | RuntimeError
+//   flagos | AutogradPrivateUse1  | MmBackward0                | ok
+//
+// What is flagos-specific is that this op's grad path lives inside a device-key
+// kernel body; every other op the same sweep covered has its formula at the
+// autograd key and is immune. Claiming the op at AutogradPrivateUse1 moves the
+// body above the mode, which is the fix this tree already applies to the same
+// class of bug: contiguous and narrow (csrc/aten/register.cc:534-562) and
+// non-Ascend matmul (:564-572). It is also worse here than on CPU, where the
+// device-key body still produces a node -- an empty CppFunction whose backward
+// reaches no input and reports no error, so a training step silently loses the
+// attention gradient instead of failing: AutogradPrivateUse1 is a fallthrough
+// (csrc/aten/register.cc:517-518) and this op has no Autograd[alias] kernel to
+// fall through to, so nothing above the writer attaches a node at all.
+//
+// Both registrations are load-bearing, and the body is unchanged, so no route
+// moves. Which one runs is decided by the key set, and either one then picks the
+// branch itself. Measured key sets for a flagos tensor, plain, requires_grad_ and
+// inside torch.no_grad() alike: DispatchKeySet(PrivateUse1, ADInplaceOrView,
+// AutogradPrivateUse1, AutocastPrivateUse1) -- grad mode is a TLS flag, not a
+// key-set bit -- so the AutogradPrivateUse1 kernel runs for inference as well,
+// and its own GradMode::is_enabled() && requires_grad test sends inference down
+// the same boxing/FlagGems branch it took before. The exception is a tensor
+// created inside torch.inference_mode(), which loses the key
+// (DispatchKeySet(PrivateUse1, AutocastPrivateUse1)); that call is served by the
+// PrivateUse1 registration, visible from a mode, which sits below the autograd
+// keys: it observes aten::scaled_dot_product_attention inside inference_mode and
+// in no other grad mode. The grad branch still calls
+// at::native::scaled_dot_product_attention -- the native composite body, not a
+// dispatch -- so no registration can re-enter this wrapper.
+//
+// One consequence is intended and matches the other AutogradPrivateUse1 wrappers
+// in this tree: wherever the autograd registration serves the call, a mode no
+// longer observes aten::scaled_dot_product_attention itself, it observes the leaf
+// ops of the branch that ran -- the composite's for the grad case, which is where
+// the graph it has to keep now lives.
+//
+// No AutoDispatchBelowADInplaceOrView guard and no after_autograd_keyset
+// redispatch, unlike the Ascend matmul wrapper
+// (csrc/aten/generated/variable_type.cc:96-97): that body redispatches down to a
+// fused backend kernel, this one calls the composite directly, so the view and
+// inplace metadata still comes from the composite's own leaf ops as it did
+// before (tests/integration/ops/test_matmul_backward_dispatch.py covers the
+// no-mode graph; tests/integration/ops/test_sdpa_dispatch_mode.py covers this).
+TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
   m.impl(
       "scaled_dot_product_attention",
       TORCH_FN(at::flagos::WrapperScaledDotProductAttention));
