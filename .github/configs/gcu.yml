@@ -89,7 +89,7 @@ integration_tests:
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # This group is a contract check on the ops that select a FlagGems route
@@ -108,7 +108,7 @@ integration_tests:
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
 
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short

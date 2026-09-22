@@ -88,10 +88,13 @@ integration_tests:
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
+  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
+  # cases are measured by the group below, not here (no switch exists any more
+  # to skip them -- see ops/conftest.py).
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
@@ -104,7 +107,7 @@ integration_tests:
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
   - name: Unified AMP contract
