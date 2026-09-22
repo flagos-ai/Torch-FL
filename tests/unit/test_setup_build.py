@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import re
 import runpy
 from pathlib import Path
@@ -206,3 +207,74 @@ def test_impossible_kernel_switch_raises_instead_of_being_ignored(
     # And a platform with no pin has no such objection.
     monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS_CPP", "1")
     assert namespace["_kernel_switches"]("ppu")["FLAGOS_BUILD_FLAGGEMS_CPP"] is True
+
+
+def _platform_table() -> dict:
+    return json.loads((ROOT / "cmake" / "flagos_platforms.json").read_text())
+
+
+def test_platform_table_is_internally_consistent():
+    """Every accelerator row is complete, and each pin agrees with its default.
+
+    cmake/flagos_platforms.json is the single source setup.py and CMake read; a
+    missing default, or a pin that disagrees with the default, would resolve
+    differently on the two sides -- the drift the table exists to prevent.
+    """
+    table = _platform_table()
+    switches = table["kernel_switches"]
+    assert len(switches) == 5 and len(set(switches)) == 5
+    assert set(table["kernel_set_names"]) == set(switches)
+
+    required = (
+        "project_languages",
+        "runtime_dir",
+        "bundle_libdir",
+        "wheel_local",
+        "use_macro",
+        "writes_platform_marker",
+        "c10_cuda_no_cmake_configure",
+        "kernel_defaults",
+        "pins",
+    )
+    for accelerator, row in table["accelerators"].items():
+        for field in required:
+            assert field in row, (accelerator, field)
+        assert set(row["kernel_defaults"]) == set(switches), accelerator
+        assert all(
+            isinstance(value, bool) for value in row["kernel_defaults"].values()
+        ), accelerator
+        for name, pin in row["pins"].items():
+            assert name in switches, (accelerator, name)
+            assert pin["value"] is row["kernel_defaults"][name], (accelerator, name)
+            assert pin["reason"], (accelerator, name)
+        assert "CUDA" in row["project_languages"] or row["project_languages"] == [
+            "CXX",
+            "C",
+        ], accelerator
+
+
+def test_cmake_declares_every_kernel_switch():
+    """Root and csrc CMakeLists option() cover exactly the table's switches.
+
+    A switch in the table but not declared with option() -- or the reverse -- is
+    exactly the drift this fixed: FLAGOS_BUILD_TILEOPS was missing from the root
+    explicit-request loop, so a contradictory -D was not rejected there.
+    """
+    switches = set(_platform_table()["kernel_switches"])
+    for relative in ("CMakeLists.txt", "csrc/CMakeLists.txt"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        declared = set(re.findall(r"^option\((FLAGOS_BUILD_\w+)", text, re.M))
+        assert declared == switches, (relative, declared ^ switches)
+
+
+def test_setup_resolves_the_table_defaults(monkeypatch, clean_kernel_env):
+    """setup.py's resolved defaults are the table's, for every accelerator.
+
+    Ties the Python consumer to the shared source directly, rather than through
+    the hand-written expected sets above.
+    """
+    namespace, _ = _load_setup(monkeypatch)
+    for accelerator, row in _platform_table()["accelerators"].items():
+        assert namespace["_kernel_switches"](accelerator) == row["kernel_defaults"], (
+            accelerator
+        )

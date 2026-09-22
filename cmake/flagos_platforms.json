@@ -1,0 +1,272 @@
+{
+  "_comment": [
+    "Single source of truth for the flagos platform/build matrix.",
+    "Consumed by setup.py (via json) and by CMake (via string(JSON), see",
+    "cmake/FlagosPlatforms.cmake). Editing this file is how a platform's",
+    "build switches, runtime source dir, project languages, USE_* macro,",
+    "bundled-libtorch dir and wheel local-version tag are changed.",
+    "",
+    "Only genuinely platform-specific SDK path resolution (which env vars,",
+    "which default install dir) stays in the CMakeLists files; that is the",
+    "SDK-roots phase of issue #376, tracked separately."
+  ],
+
+  "default_accelerator": "cuda",
+
+  "kernel_switches": [
+    "FLAGOS_BUILD_VENDOR",
+    "FLAGOS_BUILD_FLAGGEMS",
+    "FLAGOS_BUILD_BOXING",
+    "FLAGOS_BUILD_FLAGGEMS_CPP",
+    "FLAGOS_BUILD_TILEOPS"
+  ],
+
+  "kernel_set_names": {
+    "FLAGOS_BUILD_VENDOR": "vendor",
+    "FLAGOS_BUILD_FLAGGEMS": "flaggems",
+    "FLAGOS_BUILD_BOXING": "boxing",
+    "FLAGOS_BUILD_FLAGGEMS_CPP": "flaggems_cpp",
+    "FLAGOS_BUILD_TILEOPS": "tileops"
+  },
+
+  "_accelerators_comment": [
+    "kernel_defaults: what the platform builds before any explicit FLAGOS_BUILD_*",
+    "environment value. Every platform starts from all-ON; the entries below are",
+    "the resolved defaults. setup.py owns this resolution at build time and CMake",
+    "applies the same values when a switch was not passed as -D.",
+    "",
+    "pins: values an explicit -D/environment variable may not contradict, because",
+    "the platform cannot produce the other answer at all. The reason is shown in",
+    "the CMake FATAL_ERROR and mirrors setup.py's ValueError.",
+    "",
+    "pins must equal kernel_defaults for the same switch (a pin states the only",
+    "possible value; the default already is it)."
+  ],
+
+  "accelerators": {
+    "cuda": {
+      "project_languages": ["CUDA", "CXX", "C"],
+      "runtime_dir": "cuda",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": true,
+        "FLAGOS_BUILD_TILEOPS": true
+      },
+      "pins": {}
+    },
+
+    "ppu": {
+      "_comment": "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel dir.",
+      "project_languages": ["CUDA", "CXX", "C"],
+      "runtime_dir": "cuda",
+      "bundle_libdir": "lib_ppu",
+      "wheel_local": "ppu",
+      "use_macro": "",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {}
+    },
+
+    "metax": {
+      "_comment": [
+        "MetaX is a CUDA-boxing build: the generated CUDA boxing kernels",
+        "re-dispatch PrivateUse1 -> CUDA into maca's libtorch_cuda.so; the",
+        "hand-written mxcc kernels under backends/metax/ are retired. No",
+        "MACA-built liboperators exists by default, so the FlagGems C++ wrappers",
+        "stay off (an explicit FLAGGEMS_CPP=1 with FLAGGEMS_DIR still wins -- the",
+        "MACA case is a documented opt-in). FlagGems Python stays on so the boxing",
+        "wheel can route to the python path."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "metax",
+      "bundle_libdir": "lib_maca",
+      "wheel_local": "metax",
+      "use_macro": "USE_MACA",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": false,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {}
+    },
+
+    "ascend": {
+      "_comment": [
+        "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",
+        "default (FlagTree Triton), boxing is off (the conf routes nothing to the",
+        "CUDA boxing kernels)."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "ascend",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "USE_ASCEND",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": false,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_VENDOR": {
+          "value": true,
+          "reason": "ACLNN is the only operator library the CANN toolkit provides"
+        }
+      }
+    },
+
+    "tsingmicro": {
+      "_comment": [
+        "TsingMicro Kuiper: no vendor backend directory exists, so FLAGOS_BUILD_VENDOR",
+        "is a no-op, and boxing plus FlagGems Python and C++ stay on by default."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "tsingmicro",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "USE_TSINGMICRO",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": true,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {}
+    },
+
+    "dcu": {
+      "_comment": [
+        "Hygon DTK: the vendor torch is a hipified build registering its HIP",
+        "kernels under the CUDA key, so the generated boxing kernels dispatch into",
+        "libtorch_hip.so unchanged. No FlagGems liboperators exists for DTK."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "cuda",
+      "bundle_libdir": "lib_dcu",
+      "wheel_local": "dtk",
+      "use_macro": "USE_DCU",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for DTK"
+        }
+      }
+    },
+
+    "gcu": {
+      "_comment": [
+        "Enflame GCU: no CUDA runtime, topsaten provides the native compute ops",
+        "(FLAGOS_BUILD_VENDOR), ops without a topsaten kernel fall back to CPU.",
+        "FlagGems Python shares the same dispatcher; boxing is off."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "gcu",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "USE_GCU",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {}
+    },
+
+    "musa": {
+      "_comment": [
+        "Moore Threads MUSA: native operator route (mudnn), no CUDA runtime, so",
+        "boxing is off and the vendor kernels are mandatory. FlagGems Python is on",
+        "for the hybrid path."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "musa",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "USE_MUSA",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_VENDOR": {
+          "value": true,
+          "reason": "mudnn is the only kernel source this toolchain can build"
+        },
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for MUSA"
+        }
+      }
+    },
+
+    "bpu": {
+      "_comment": [
+        "D-Robotics RDK BPU: no per-op kernels, only the runtime layer (UCP",
+        "allocator, device/stream stubs) is native. FLAGOS_BUILD_VENDOR stays at the",
+        "ON default but compiles nothing (backends/bpu/ does not exist)."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "bpu",
+      "bundle_libdir": "lib",
+      "wheel_local": "",
+      "use_macro": "USE_BPU",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": false,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "the BPU executes compiled graphs and has no per-operator kernels at all"
+        }
+      }
+    }
+  }
+}

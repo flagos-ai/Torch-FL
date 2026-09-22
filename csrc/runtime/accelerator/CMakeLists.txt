@@ -12,35 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
-  project(FLAGOS_RUNTIME CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
-  project(FLAGOS_RUNTIME CXX C)
-else()
-  project(FLAGOS_RUNTIME CUDA CXX C)
-endif()
+# project() languages and the source subdir come from the shared platform table
+# (cmake/flagos_platforms.json, loaded by the top-level CMakeLists): CUDA CXX C
+# for the CUDA-toolchain platforms, CXX C otherwise.
+project(FLAGOS_RUNTIME ${FLAGOS_PLATFORM_LANGUAGES})
 
 set(LIBRARY_NAME flagos)
 
+# The runtime sources live under <runtime_dir>/, except DCU which reuses the CUDA
+# runtime sources (DTK's CUDA compatibility toolkit provides cuda_runtime.h and a
+# libcudart shim over libgalaxyhip, so they build unchanged) and adds its own
+# DTK-core ABI shim below.
+file(GLOB_RECURSE SOURCE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/*.cc"
+)
+
+add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
+
+# The platform's USE_* macro (USE_ASCEND, USE_DCU, ...), from the table: the
+# runtime sources gate their per-platform headers on it.
+if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
+endif()
+
 if(FLAGOS_ACCELERATOR STREQUAL "ascend")
-  file(GLOB_RECURSE SOURCE_FILES
-      "${CMAKE_CURRENT_SOURCE_DIR}/ascend/*.cc"
-  )
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   find_path(CANN_INCLUDE_DIR acl/acl.h
       PATHS $ENV{ASCEND_HOME}/include
             /usr/local/Ascend/ascend-toolkit/latest/include)
@@ -64,33 +61,18 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   target_include_directories(${LIBRARY_NAME} PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${CANN_INCLUDE_DIR})
   # memory.cc drains the shared default ACL stream (acl_stream.h) before any
-  # host-visible memcpy now that ops dispatch asynchronously; acl_stream.h is
-  # guarded by USE_ASCEND, so this target must define it.
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_ASCEND=1)
+  # host-visible memcpy now that ops dispatch asynchronously.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${ACL_LIB})
 elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/metax/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tsingmicro/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} /usr/local/kuiper/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE /usr/local/kuiper/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE hpgr)
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
-  # DTK's CUDA compatibility toolkit provides cuda_runtime.h and a libcudart
-  # shim over libgalaxyhip, so the CUDA runtime sources build unchanged --
-  # no nvcc (plain host g++). dcu/ contains only the DTK-core ABI shim below.
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
+  # dcu/ contains only the DTK-core ABI shim below; the runtime sources themselves
+  # are the CUDA ones (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda").
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 
@@ -102,10 +84,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   install(TARGETS flagos_dtk_core_compat
       LIBRARY DESTINATION lib_dcu)
 elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gcu/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${TOPS_ROOT}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${TOPS_ROOT}/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE topsrt)
@@ -114,10 +92,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   # so musa/ holds a native port of the CUDA runtime sources onto the musa* API.
   # musa_runtime.h is plain C, so host g++ compiles it -- no mcc, no CUDA
   # language, and libmusart.so.5 is the only runtime dependency.
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/musa/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   target_include_directories(${LIBRARY_NAME} PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${MUSA_HOME}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${MUSA_HOME}/lib)
@@ -126,10 +100,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
   # D-Robotics RDK BPU. The UCP allocator (libhbucp) provides device memory and
   # libbpu the core/task API; both ship in the board image under /usr/hobot/lib
   # with headers at /usr/include/hobot, so there is no SDK root to configure.
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/bpu/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   find_library(HBUCP_LIB hbucp PATHS ${HOBOT_LIB_DIR} /usr/hobot/lib)
   find_library(LIBBPU_LIB bpu PATHS ${HOBOT_LIB_DIR} /usr/hobot/lib)
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
@@ -148,10 +118,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
       ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${HBUCP_LIB} ${LIBBPU_LIB})
 else()
-  file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cc")
-
-  add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
-
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
 
   find_package(CUDAToolkit REQUIRED)

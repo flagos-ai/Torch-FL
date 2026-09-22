@@ -400,9 +400,15 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 # c10/cuda/impl/cuda_cmake_macros.h. cuda_memory.h includes CUDACachingAllocator.h
 # to delegate flagos allocation to the CUDA caching allocator; this macro tells
 # CUDAMacros.h to skip that generated configure file. Not needed for Ascend
-# (which does not include c10/cuda headers).
-if(NOT FLAGOS_ACCELERATOR STREQUAL "ascend")
+# (which does not include c10/cuda headers) -- the flag is per platform in the table.
+if(FLAGOS_PLATFORM_C10_CUDA_CONFIGURE)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
+endif()
+
+# The platform's USE_* macro (USE_ASCEND, USE_DCU, USE_MUSA, ...), from the table.
+# Selects the per-platform runtime/ATen headers in the C++ sources.
+if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
 endif()
 
 if(FLAGOS_ACCELERATOR STREQUAL "metax")
@@ -410,7 +416,6 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax")
   # Context.h allow_tf32_cudnn). Without it the headers hit static_assert(0).
   # MCPTI callback ids use a different namespace from NVIDIA CUPTI ids.
   target_compile_definitions(${LIBRARY_NAME} PRIVATE
-    USE_MACA=1
     FLAGOS_METAX_MCPTI=1
     FLAGOS_SOFT_LOWP=1)
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
@@ -441,7 +446,6 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
 endif()
 
 if(FLAGOS_ACCELERATOR STREQUAL "ascend")
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_ASCEND=1)
   find_library(OPAPI_LIB opapi
       PATHS $ENV{ASCEND_HOME}/lib64
             /usr/local/Ascend/ascend-toolkit/latest/lib64)
@@ -456,19 +460,16 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${NNOPBASE_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_TSINGMICRO=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   # Selects backends/dcu_memory.h (CUDA-compat runtime, no c10::cuda caching
   # delegation -- the DCU wheel exports c10::hip, not c10::cuda).
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_DCU=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   # Link roctracer library for profiler support
   if(ROCTRACER_LIBRARY)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${ROCTRACER_LIBRARY})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_MUSA_KERNEL gates the m.impl subset in register.cc, mirroring
@@ -486,7 +487,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
   # PrivateUse1 op registrations: the BPU executes whole compiled graphs, so
   # there is no per-op kernel to register and every aten call reaches
   # cpu_fallback. Acceleration comes from the torch.compile backend instead.
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_BPU=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
@@ -495,7 +495,6 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
         ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_GCU=1)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_GCU_KERNEL gates the m.impl subset in register.cc: without the
@@ -547,8 +546,7 @@ install(TARGETS ${LIBRARY_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-if(FLAGOS_ACCELERATOR STREQUAL "gcu" OR FLAGOS_ACCELERATOR STREQUAL "musa"
-   OR FLAGOS_ACCELERATOR STREQUAL "bpu" OR FLAGOS_ACCELERATOR STREQUAL "ascend")
+if(FLAGOS_PLATFORM_WRITES_MARKER)
   # torch_fl/__init__.py pins backends_cuda.conf by default, which on
   # GCU/MUSA/BPU/Ascend would route every op to the (absent) CUDA kernels.
   # Record the platform next to the libs so the Python side can pick

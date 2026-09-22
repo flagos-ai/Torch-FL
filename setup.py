@@ -15,6 +15,7 @@
 import glob
 import importlib.machinery
 import importlib.util
+import json
 import multiprocessing
 import os
 import platform
@@ -37,21 +38,57 @@ IS_WINDOWS = platform.system() == "Windows"
 # "tsingmicro", "dcu", "gcu", "musa", or "bpu"
 FLAGOS_ACCELERATOR = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
 
-# Directory inside the wheel holding a bundled forked libtorch, for the backends
-# that ship one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate
-# bundle dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
-# Must match FLAGOS_BUNDLE_LIBDIR in CMakeLists.txt -- _C.so's RUNPATH has to
-# reach the bundle or its auditwheel-mangled deps (libglog-*.so.0) go missing.
-_BUNDLE_LIBDIR = {"metax": "lib_maca", "dcu": "lib_dcu", "ppu": "lib_ppu"}.get(
-    FLAGOS_ACCELERATOR, "lib"
-)
-
 # Where the sources live. Distinct from BASE_DIR, which is repointed at a
 # scratch tree when the generated files are redirected somewhere else -- the
-# files this build reads back (torch_fl/_env.py) do not move with them.
+# files this build reads back (torch_fl/_env.py, cmake/flagos_platforms.json) do
+# not move with them.
 SOURCE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 BASE_DIR = SOURCE_DIR
+
+_PLATFORM_TABLE = None
+
+
+def _platform_table() -> dict:
+    """cmake/flagos_platforms.json: the platform/build matrix shared with CMake.
+
+    CMakeLists.txt reads the same file, so the kernel switches, the
+    bundled-libtorch dir, the platform list and the pins have one definition.
+    """
+    global _PLATFORM_TABLE
+    if _PLATFORM_TABLE is None:
+        path = os.path.join(SOURCE_DIR, "cmake", "flagos_platforms.json")
+        with open(path, encoding="utf-8") as handle:
+            _PLATFORM_TABLE = json.load(handle)
+    return _PLATFORM_TABLE
+
+
+def _platform_entry(accelerator: str) -> dict:
+    """One accelerator's row from the shared table (raises on an unknown id)."""
+    table = _platform_table()
+    try:
+        return table["accelerators"][accelerator]
+    except KeyError:
+        known = ", ".join(sorted(table["accelerators"]))
+        raise ValueError(
+            f"Unknown FLAGOS_ACCELERATOR '{accelerator}'. Expected one of: {known}"
+        ) from None
+
+
+# The kernel sets a build can compile in, and their build-record names, from the
+# shared table. Each name is simultaneously an environment variable, a CMake
+# option() and one entry of the generated build_config.KERNELS, so no
+# env-name -> -D-name -> record-name translation exists to fall out of sync.
+KERNEL_SWITCHES = tuple(_platform_table()["kernel_switches"])
+KERNEL_SET_NAME = dict(_platform_table()["kernel_set_names"])
+
+# Directory inside the wheel holding a bundled forked libtorch, for the backends
+# that ship one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate
+# bundle dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
+# From the table -- the same value CMake's FLAGOS_BUNDLE_LIBDIR gets. _C.so's
+# RUNPATH has to reach the bundle or its auditwheel-mangled deps
+# (libglog-*.so.0) go missing.
+_BUNDLE_LIBDIR = _platform_entry(FLAGOS_ACCELERATOR)["bundle_libdir"]
 
 # Only run cmake build for actual build commands, not metadata collection
 BUILD_COMMANDS = {
@@ -306,52 +343,25 @@ def _dtk_root() -> str:
     return default
 
 
-# The kernel sets a build can compile in. Each name is simultaneously an
-# environment variable, a CMake option() and one entry of the generated
-# build_config.KERNELS, so no env-name -> -D-name -> record-name translation
-# exists to fall out of sync. csrc/CMakeLists.txt declares the same five.
-KERNEL_SWITCHES = (
-    "FLAGOS_BUILD_VENDOR",
-    "FLAGOS_BUILD_FLAGGEMS",
-    "FLAGOS_BUILD_BOXING",
-    "FLAGOS_BUILD_FLAGGEMS_CPP",
-    "FLAGOS_BUILD_TILEOPS",
-)
-
-# What the build record calls the same five sets. The accelerator alone cannot
-# answer "was the FlagGems C++ wrapper compiled into this wheel?" -- two MetaX
-# wheels built with different kernel-set flags share a FLAGOS_ACCELERATOR and
-# are not the same wheel.
-KERNEL_SET_NAME = {
-    "FLAGOS_BUILD_VENDOR": "vendor",
-    "FLAGOS_BUILD_FLAGGEMS": "flaggems",
-    "FLAGOS_BUILD_BOXING": "boxing",
-    "FLAGOS_BUILD_FLAGGEMS_CPP": "flaggems_cpp",
-    "FLAGOS_BUILD_TILEOPS": "tileops",
-}
-
-# The values an explicit environment variable may not contradict, because the
-# platform cannot produce the other answer at all. Each entry mirrors a
-# set(... CACHE BOOL ... FORCE) in CMakeLists.txt: the FORCE would win over the
-# -D silently, so a build record derived from the requested value would describe
-# a wheel that was never built. Asking for one is an error rather than a silent
-# override, on both sides (here and in CMakeLists.txt).
+# The values an explicit environment variable may not contradict, from the
+# shared table's per-platform "pins". Each pin is a set(... CACHE BOOL ... FORCE)
+# in CMakeLists.txt: the FORCE would win over the -D silently, so a build record
+# derived from the requested value would describe a wheel that was never built.
+# Asking for the other value is an error rather than a silent override, on both
+# sides (here and in CMakeLists.txt).
 #
-# Only genuinely impossible combinations are listed. metax, gcu, ppu and
-# tsingmicro are absent because FLAGOS_BUILD_FLAGGEMS_CPP=OFF there is a default
-# that an explicit FLAGOS_BUILD_FLAGGEMS_CPP=1 (with a vendor-built
-# liboperators.so) may replace -- MetaX's MACA build is the documented case.
-# DCU, MUSA and BPU pin it off for the opposite reason: no FlagGems C++ build
-# exists for DTK, for the MUSA toolkit or for the BPU at all, so there is nothing
-# an explicit 1 could link against. Ascend/musa FLAGOS_BUILD_VENDOR is pinned
-# because their whole kernel story is the vendor library: Ascend has no CUDA
-# boxing runtime to fall back to, and MUSA's toolbox ships no CUDA runtime.
-_PINNED_KERNEL_SWITCHES: dict[str, dict[str, bool]] = {
-    "ascend": {"FLAGOS_BUILD_VENDOR": True},
-    "musa": {"FLAGOS_BUILD_VENDOR": True, "FLAGOS_BUILD_FLAGGEMS_CPP": False},
-    "dcu": {"FLAGOS_BUILD_FLAGGEMS_CPP": False},
-    "bpu": {"FLAGOS_BUILD_FLAGGEMS_CPP": False},
-}
+# Only genuinely impossible combinations are pinned. metax, gcu, ppu and
+# tsingmicro are not, because FLAGOS_BUILD_FLAGGEMS_CPP=OFF there is a default an
+# explicit =1 (with a vendor-built liboperators.so) may replace -- MetaX's MACA
+# build is the documented case. DCU, MUSA and BPU pin it off for the opposite
+# reason: no FlagGems C++ build exists for DTK, the MUSA toolkit or the BPU at
+# all, so there is nothing an explicit 1 could link against. Ascend/musa
+# FLAGOS_BUILD_VENDOR is pinned because their whole kernel story is the vendor
+# library.
+def _pinned_kernel_switches(accelerator: str) -> dict[str, bool]:
+    pins = _platform_entry(accelerator).get("pins", {})
+    return {name: spec["value"] for name, spec in pins.items()}
+
 
 _ENV_MODULE = None
 
@@ -380,139 +390,12 @@ def _vendor_kernel_switches(accelerator: str) -> dict[str, bool]:
     """What one accelerator builds by default, before any explicit environment value.
 
     The middle of the three layers in _kernel_switches, and the only one that
-    differs per vendor. The comments here are the whole build-side policy: there
-    is no mode variable, because what a wheel can run follows from what it
-    compiled in.
+    differs per vendor. The values -- and the per-platform rationale (why MetaX
+    has no native kernels, why Ascend/GCU/MUSA turn boxing off, why BPU drops
+    FlagGems, ...) -- live in cmake/flagos_platforms.json, next to the CMake side
+    that consumes the same table.
     """
-    vendor: dict[str, bool] = {}
-
-    if accelerator != "cuda":
-        # TileOPs is TileLang on SM90 (Hopper) NVIDIA parts only. Its stubs are
-        # harmless on other vendors -- the shims fall back to aten -- but there
-        # is nothing for them to reach, so keep them out of vendor wheels. An
-        # explicit FLAGOS_BUILD_TILEOPS=1 still wins.
-        vendor["FLAGOS_BUILD_TILEOPS"] = False
-
-    if accelerator not in ("cuda", "tsingmicro"):
-        # The FlagGems C++ wrappers link a liboperators.so built for the vendor;
-        # upstream's CUDA/ROCm build is the only one that exists by default, so
-        # every other platform keeps them off and links cleanly without it. An
-        # explicit FLAGOS_BUILD_FLAGGEMS_CPP=1 with FLAGGEMS_DIR=<vendor build>
-        # still wins -- MetaX's MACA build is the documented case. TsingMicro is
-        # exempt because it has no vendor branch at all and has always taken the
-        # CUDA default here.
-        vendor["FLAGOS_BUILD_FLAGGEMS_CPP"] = False
-
-    if accelerator == "metax":
-        # MetaX is a CUDA-boxing build: no native mxcc kernels compile in, the
-        # generated boxing kernels provide acceleration, and the FlagGems C++
-        # wrappers stay off (no MACA-built liboperators). The hand-written
-        # kernels under backends/metax/ are not built -- the dead native path is
-        # retired.
-        #
-        # FLAGOS_BUILD_FLAGGEMS stays at the CUDA default: the boxing wheel also
-        # compiles the FlagGems Python-path kernels (flagos_python backend) so
-        # the conf can route to them. python_op_caller links torch_python_library
-        # (already in the metax link set) and adds nothing to the bundled wheel
-        # size. FLAGOS_BUILD_FLAGGEMS=0 gives a slim pure-boxing build.
-        #
-        # FLAGOS_BUILD_FLAGGEMS_CPP needs a FlagGems built for MACA, which is a separate
-        # build:
-        #     cd FlagGems/cpp && cmake -B build-maca -DFLAGGEMS_BUILD_C_EXTENSIONS=ON \
-        #         -DFLAGGEMS_BACKEND=MACA -DMACA_PATH=/opt/maca
-        # Opt in with FLAGOS_BUILD_FLAGGEMS_CPP=1 FLAGGEMS_DIR=<that build dir>. The C++
-        # kernels reach the device via the same DeviceBoxingGuard as the boxing
-        # path, so they need the boxing kernels.
-        vendor["FLAGOS_BUILD_VENDOR"] = False
-    elif accelerator == "ascend":
-        # Ascend uses ACLNN as the native fallback, with the FlagGems Python path
-        # enabled by default. FlagGems runs on FlagTree (the vendor's Triton 3.5
-        # build), not on triton-ascend: torch_fl imports before triton and carries
-        # a torch_npu-free backend policy for it, so nothing here links torch_npu.
-        # The generated Ascend conf is FlagGems-first for measured routes, while
-        # unsupported or unregistered operators remain on ACLNN/CPU fallback.
-        #
-        # FLAGOS_BUILD_BOXING=OFF: Ascend is not a CUDA-compatible vendor, and its conf
-        # routes nothing to the boxing kernel (0 `= cuda` entries), so compiling
-        # the generated CUDA wrappers was pure dead weight -- the same reason
-        # gcu/musa exclude them.
-        vendor.update(
-            {
-                "FLAGOS_BUILD_BOXING": False,
-                "FLAGOS_BUILD_FLAGGEMS": True,
-                "FLAGOS_BUILD_VENDOR": True,
-            }
-        )
-    # tsingmicro needs no branch: no vendor backend directory exists, so
-    # FLAGOS_BUILD_VENDOR is a no-op, and boxing plus FlagGems Python stay on by
-    # default.
-    elif accelerator == "dcu":
-        # Boxing build. The DCU torch wheel is a hipified build whose HIP kernels
-        # are registered under the CUDA dispatch key, so the generated
-        # PrivateUse1 -> CUDA boxing kernels reach them with no hand-written
-        # kernels of our own.
-        #
-        # FLAGOS_BUILD_FLAGGEMS stays on, same as metax/cuda: DTK ships a working
-        # triton (hcu backend) that flag_gems runs on, so the choice becomes a
-        # runtime one (backends_dcu.conf). python_op_caller links
-        # torch_python_library, already in the link set, so this adds nothing to
-        # the wheel size. FLAGOS_BUILD_FLAGGEMS=0 gives a slim pure-boxing build.
-        pass
-    elif accelerator == "ppu":
-        # PPU (T-Head) builds against PPU_SDK/CUDA_SDK and reuses the CUDA
-        # boxing kernels, but its libtorch is a local PPU build bundled into
-        # lib_ppu/. FLAGOS_BUILD_TILEOPS is already off by the non-cuda rule above
-        # (TileOps is SM90).
-        pass
-    elif accelerator == "bpu":
-        # D-Robotics RDK BPU. The BPU's unit of execution is a whole compiled
-        # graph (a .hbm produced by hbdk4), not an individual operator, so there
-        # are no FlagGems kernels to build: eager ops reach cpu_fallback, and
-        # acceleration comes from the torch.compile backend in
-        # torch_fl/accelerator/bpu/. Only the runtime layer (UCP allocator,
-        # device/stream stubs) is native.
-        #
-        # FLAGOS_BUILD_VENDOR stays at the ON default, as it always has for this
-        # platform, but compiles nothing: csrc/aten/backends/bpu/ does not
-        # exist, so the vendor block at the top of csrc/CMakeLists.txt finds no
-        # directory to add. The resulting "vendor" entry in the build record is
-        # therefore a switch that is on, not a kernel set that is present.
-        vendor["FLAGOS_BUILD_FLAGGEMS"] = False
-    elif accelerator == "gcu":
-        # Enflame GCU has no CUDA runtime: the tops runtime provides the device
-        # layer and libtopsaten the operators, so CUDA/vendor kernel sets stay
-        # off and FLAGOS_BUILD_VENDOR (topsaten) provides the native compute ops. Ops
-        # without a topsaten kernel fall back to CPU.
-        #
-        # Keep the FlagGems Python kernels in the same C++ dispatcher as the
-        # topsaten kernels. This mirrors the CUDA unified-RNG design: one
-        # PrivateUse1 wrapper owns an exact ATen overload, while the backend
-        # config chooses kGcu or kFlagOsPython at runtime. GCU initialization
-        # prepares triton_gcu but does not call flag_gems.enable(), so the
-        # Python layer cannot register a second PrivateUse1 implementation.
-        vendor.update(
-            {
-                "FLAGOS_BUILD_BOXING": False,
-                "FLAGOS_BUILD_FLAGGEMS": True,
-                "FLAGOS_BUILD_VENDOR": True,
-            }
-        )
-    elif accelerator == "musa":
-        # Moore Threads MUSA has no CUDA runtime: the musa* API provides the
-        # device layer, and mudnn provides the native operators (FLAGOS_BUILD_VENDOR).
-        # Compile the FlagGems Python callers into the same wheel so the conf
-        # can route the hybrid path at runtime. Kernel execution still requires a
-        # compatible MUSA Triton backend; without one, native routing remains the
-        # default and unaffected.
-        vendor.update(
-            {
-                "FLAGOS_BUILD_BOXING": False,
-                "FLAGOS_BUILD_FLAGGEMS": True,
-                "FLAGOS_BUILD_VENDOR": True,
-            }
-        )
-
-    return vendor
+    return dict(_platform_entry(accelerator)["kernel_defaults"])
 
 
 def _kernel_switches(accelerator: str) -> dict[str, bool]:
@@ -535,7 +418,7 @@ def _kernel_switches(accelerator: str) -> dict[str, bool]:
     # here for the same reason it does at run time, instead of the build
     # reading it as "on" and compiling a set the user never asked for.
     env = _env_module()
-    pinned = _PINNED_KERNEL_SWITCHES.get(accelerator, {})
+    pinned = _pinned_kernel_switches(accelerator)
     for name in KERNEL_SWITCHES:
         requested = env.flag(name, resolved[name])
         if name in pinned and requested != pinned[name]:
@@ -583,7 +466,7 @@ def build_deps():
     # reads, so the -D list and the KERNELS record cannot disagree.
     #
     # The per-vendor rationale (why MetaX has no native kernels, why Ascend
-    # turns boxing off, ...) lives in _vendor_kernel_switches().
+    # turns boxing off, ...) lives in cmake/flagos_platforms.json.
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     for switch in KERNEL_SWITCHES:
         cmake_args.append(f"-D{switch}={'ON' if kernels[switch] else 'OFF'}")
@@ -904,9 +787,7 @@ def _get_setup_kwargs():
     # better than leaving two incompatible wheels both called 0.1.0. Override
     # with FLAGOS_WHEEL_LOCAL to pin the exact SDK, e.g.
     # FLAGOS_WHEEL_LOCAL=metax3.8.1 / FLAGOS_WHEEL_LOCAL=dtk2604.
-    _default_local = {"metax": "metax", "dcu": "dtk", "ppu": "ppu"}.get(
-        FLAGOS_ACCELERATOR
-    )
+    _default_local = _platform_entry(FLAGOS_ACCELERATOR)["wheel_local"] or None
     local = os.environ.get("FLAGOS_WHEEL_LOCAL", _default_local)
     if local:
         version = f"{version}+{local}"

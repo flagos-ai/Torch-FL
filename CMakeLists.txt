@@ -12,30 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
 set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, or bpu")
 
-# Directory inside the wheel holding a bundled forked libtorch, when the backend
-# ships one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate bundle
-# dir": the CUDA backend drops its extra .so straight into torch_fl/lib/.
-# Set per backend below; consumed by cmake/FlagosRpath.cmake.
-set(FLAGOS_BUNDLE_LIBDIR "lib")
 # Vendor driver/runtime dirs to embed in RUNPATH. Never bundled into the wheel
 # (a machine with the card has the driver), mirroring MetaX's /opt/maca.
 set(FLAGOS_VENDOR_RPATH_DIRS "")
+
+# The platform/build matrix, shared with setup.py: cmake/flagos_platforms.json.
+# Publishes FLAGOS_KERNEL_SWITCHES, FLAGOS_PLATFORM_LANGUAGES, the runtime source
+# dir, the USE_* macro, the platform-marker flag, the C10_CUDA flag and
+# FLAGOS_BUNDLE_LIBDIR -- the dir inside the wheel holding a bundled forked
+# libtorch when the backend ships one (see scripts/vendor/bundle_*_libtorch.sh);
+# "lib" means no separate bundle dir, the CUDA backend drops its extra .so
+# straight into torch_fl/lib/. Consumed by cmake/FlagosRpath.cmake. Also rejects
+# an unknown FLAGOS_ACCELERATOR.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FlagosPlatforms.cmake)
 
 # Kernel build options (can be overridden via -D flags from setup.py).
 # Chip selection is FLAGOS_ACCELERATOR's job alone -- there are no per-chip switches.
 #
 # A -D on the command line lands in the cache before option() runs, so this loop
 # is the last point at which an explicit request can still be told apart from the
-# option() default. The per-accelerator blocks below use it to refuse a
-# contradictory -D instead of force-set()ting it away: setup.py resolves the same
-# combination into the build record, so a switch quietly overridden here would
-# ship a wheel describing a kernel set it does not contain.
-foreach(_switch
-    FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS FLAGOS_BUILD_BOXING FLAGOS_BUILD_FLAGGEMS_CPP)
+# option() default. flagos_apply_platform_kernel_policy() below uses it to refuse
+# a contradictory -D instead of force-set()ting it away: setup.py resolves the
+# same combination into the build record, so a switch quietly overridden here
+# would ship a wheel describing a kernel set it does not contain.
+foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
   if(DEFINED ${_switch})
     set(${_switch}_EXPLICIT TRUE)
   endif()
@@ -46,13 +50,14 @@ option(FLAGOS_BUILD_VENDOR "Build the FLAGOS_ACCELERATOR vendor's native kernels
 option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
 option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
+option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 
 # Pin one kernel build switch for the accelerator selected below.
 #
 # A pin is a property of the platform, not a default, so an explicit -D asking
 # for the other value is a hard error rather than something to override: there is
 # nothing in this toolchain an "on" could link against, and setup.py refuses the
-# same combination (see _PINNED_KERNEL_SWITCHES there).
+# same combination (the pins live in cmake/flagos_platforms.json).
 function(flagos_pin_build_switch name value doc reason)
   if(${name}_EXPLICIT)
     if(NOT "${${name}}" STREQUAL "${value}")
@@ -89,83 +94,21 @@ function(flagos_resolve_sdk_root out_var default_path)
   set(${out_var} "${default_path}" PARENT_SCOPE)
 endfunction()
 
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
+# Apply the table's per-accelerator kernel defaults and pins. Done after
+# option() so the *_EXPLICIT loop above can still tell a -D from a default.
+flagos_apply_platform_kernel_policy()
+
+# Pre-project accelerator setup: the SDK/toolchain roots a project() call needs
+# before it runs nvcc, plus MetaX's MACA_PATH (reported in the SDK block below).
+if(FLAGOS_ACCELERATOR STREQUAL "metax")
   flagos_resolve_sdk_root(MACA_PATH "/opt/maca" MACA_PATH MACA_HOME)
-  # MetaX is a CUDA-boxing build: the generated CUDA boxing kernels
-  # (csrc/aten/generated/cuda_kernels.cc, host g++, no mxcc) re-dispatch
-  # PrivateUse1 -> CUDA into maca's libtorch_cuda.so. The hand-written mxcc
-  # kernels under backends/metax/ are not built -- the dead native path is
-  # retired, so there is no boxing/native mode variable at all.
-  #
-  # "Which kernel set compiles" is stated by the inclusion switches alone:
-  # setup.py passes FLAGOS_BUILD_VENDOR=OFF (no native kernels) plus FLAGOS_BUILD_FLAGGEMS_CPP=OFF.
-  # The routing that follows from that is a runtime concern -- torch_fl derives
-  # the conf from the accelerator record -- so no mode belongs to the build.
-  #
-  # No MACA-built liboperators by default: keep the C++ wrappers off unless
-  # explicitly requested, or a plain metax configure dies looking for them.
-  if(NOT FLAGOS_BUILD_FLAGGEMS_CPP_EXPLICIT)
-    set(FLAGOS_BUILD_FLAGGEMS_CPP OFF CACHE BOOL "Build FlagGems C++ kernel wrappers" FORCE)
-  endif()
-  # Self-contained wheel: forked libtorch bundled by
-  # scripts/vendor/bundle_maca_libtorch.sh (the maca runtime stays on the target).
-  set(FLAGOS_BUNDLE_LIBDIR "lib_maca")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
-  # Hygon DCU (DTK). The vendor torch wheel is a hipified build that registers
-  # its HIP kernels under the CUDA dispatch key (tensors report device type
-  # kCUDA), so the generated PrivateUse1 -> CUDA boxing kernels dispatch into
-  # libtorch_hip.so unchanged. DTK also ships a CUDA compatibility toolkit whose
-  # libcudart.so.12 is a thin shim over libgalaxyhip.so, so the runtime sources
-  # under csrc/runtime/accelerator/cuda/ compile as-is against host g++.
-  # No nvcc and no CUDA language: nothing outside backends/metax/ is a .cu.
-  flagos_pin_build_switch(FLAGOS_BUILD_FLAGGEMS_CPP OFF
-    "Build FlagGems C++ kernel wrappers"
-    "no FlagGems liboperators.so exists for DTK")
-  # Self-contained wheel: DTK's forked libtorch (libtorch_cpu.so carries hip
-  # symbols and needs libgalaxyhip.so.5) is bundled here by
-  # scripts/vendor/bundle_dcu_libtorch.sh. The DTK driver itself stays on the target.
-  set(FLAGOS_BUNDLE_LIBDIR "lib_dcu")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
-  # Moore Threads MUSA takes the native operator route (like Ascend/GCU), not
-  # CUDA boxing: the MUSA toolkit ships no CUDA runtime, so there is no vendor
-  # dispatch key to box into. The generated kernels call mudnn -- the vendor's
-  # torch-independent kernel library -- directly. FLAGOS_BUILD_FLAGGEMS remains a
-  # caller-controlled option so the same build can include the optional hybrid
-  # dispatchers without requiring the FlagGems C++ runtime.
-  flagos_pin_build_switch(FLAGOS_BUILD_VENDOR ON
-    "Build the FLAGOS_ACCELERATOR vendor's native kernels"
-    "mudnn is the only kernel source this toolchain can build")
-  flagos_pin_build_switch(FLAGOS_BUILD_FLAGGEMS_CPP OFF
-    "Build FlagGems C++ kernel wrappers"
-    "no FlagGems liboperators.so exists for MUSA")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
-  # D-Robotics RDK BPU. No CUDA runtime and no per-op kernels: the BPU executes
-  # whole compiled graphs, so eager ops fall back to CPU and acceleration comes
-  # from the torch.compile backend. Only the runtime layer (UCP allocator,
-  # device/stream stubs) is native, all plain host C++.
-  flagos_pin_build_switch(FLAGOS_BUILD_FLAGGEMS_CPP OFF
-    "Build FlagGems C++ kernel wrappers"
-    "the BPU executes compiled graphs and has no per-operator kernels at all")
-  project(TORCH_FLAGOS CXX C)
-elseif(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "ppu")
+endif()
+
+if(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "ppu")
   # PPU builds against PPU_SDK/CUDA_SDK, so it rides the CUDA toolchain (CUDA
   # boxing kernels, project(CUDA)); it differs only in the libtorch it bundles
-  # -- a local PPU build, not upstream's. Its own FLAGOS_ACCELERATOR value makes it a
-  # first-class chip like every other vendor (previously it was told apart from
-  # cuda by the PPU_SDK environment, i.e. env-based chip detection).
-  if(FLAGOS_ACCELERATOR STREQUAL "ppu")
-    set(FLAGOS_BUNDLE_LIBDIR "lib_ppu")
-    message(STATUS "PPU build: CUDA toolchain + bundled PPU libtorch (lib_ppu)")
-  endif()
+  # -- a local PPU build, not upstream's (FLAGOS_BUNDLE_LIBDIR from the table).
+  #
   # project(... CUDA) runs nvcc compiler-id before find_package(CUDAToolkit); conda
   # layouts need CUDAToolkit_ROOT (headers under targets/x86_64-linux/include).
   #
@@ -189,12 +132,15 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "ppu")
       set(CMAKE_CUDA_COMPILER "${CUDAToolkit_ROOT}/bin/nvcc" CACHE FILEPATH "")
     endif()
   endif()
-  project(TORCH_FLAGOS CUDA CXX C)
-else()
-  message(FATAL_ERROR
-    "Unknown FLAGOS_ACCELERATOR '${FLAGOS_ACCELERATOR}'. Expected one of: cuda, ppu, metax, "
-    "ascend, dcu, gcu, musa, bpu, tsingmicro.")
+  if(FLAGOS_ACCELERATOR STREQUAL "ppu")
+    message(STATUS "PPU build: CUDA toolchain + bundled PPU libtorch (${FLAGOS_BUNDLE_LIBDIR})")
+  endif()
 endif()
+
+# Per-platform kernel policy (why MetaX has no native kernels, why Ascend/GCU/MUSA
+# turn boxing off, why MUSA pins the vendor on, ...) is documented in the table,
+# cmake/flagos_platforms.json, next to the values it explains.
+project(TORCH_FLAGOS ${FLAGOS_PLATFORM_LANGUAGES})
 
 include(GNUInstallDirs)
 include(CheckCXXCompilerFlag)
@@ -203,10 +149,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_ACCELERATOR STREQUAL "ascend"
-   AND NOT FLAGOS_ACCELERATOR STREQUAL "tsingmicro" AND NOT FLAGOS_ACCELERATOR STREQUAL "dcu"
-   AND NOT FLAGOS_ACCELERATOR STREQUAL "gcu" AND NOT FLAGOS_ACCELERATOR STREQUAL "musa"
-   AND NOT FLAGOS_ACCELERATOR STREQUAL "bpu")
+if("CUDA" IN_LIST FLAGOS_PLATFORM_LANGUAGES)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
@@ -235,10 +178,6 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   # Huawei CANN SDK
   flagos_resolve_sdk_root(ASCEND_HOME "/usr/local/Ascend/ascend-toolkit/latest" ASCEND_HOME)
   message(STATUS "Huawei CANN SDK path: ${ASCEND_HOME}")
-
-  flagos_pin_build_switch(FLAGOS_BUILD_VENDOR ON
-    "Build the FLAGOS_ACCELERATOR vendor's native kernels"
-    "ACLNN is the only operator library the CANN toolkit provides")
 
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
   set_target_properties(cuda_runtime_compat PROPERTIES
