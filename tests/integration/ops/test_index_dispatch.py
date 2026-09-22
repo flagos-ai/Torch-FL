@@ -110,10 +110,14 @@ class TestIndexTensor:
         torch.testing.assert_close(actual, expected)
 
     @pytest.mark.anyplatform
+    @pytest.mark.ascend
     def test_nonleading_tensor_index(self):
         # The spelling a Python-level `__getitem__` workaround used to
         # intercept: a tuple whose only Tensor index is not in the leading
         # dimension. It has to reach the same kernel through the dispatcher.
+        # Marked `ascend` as well: the C++ dispatcher pads the skipped leading
+        # dimension with an engaged-but-undefined tensor, which the Ascend
+        # kernel has to ignore exactly like a `None` placeholder.
         q_cpu = torch.arange(24, dtype=torch.float32).reshape(4, 6)
         q = q_cpu.to(DEVICE)
         index_cpu = torch.tensor([1, 3, 5])
