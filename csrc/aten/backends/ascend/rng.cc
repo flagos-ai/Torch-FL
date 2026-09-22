@@ -140,6 +140,10 @@ at::Tensor RandnGeneratorKernelAscend(
     ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto out = make_empty(size, dtype, layout, device, pin_memory);
   inplace_normal_(out, 0.0, 1.0, next_seed(out, generator));
   return out;
@@ -150,6 +154,10 @@ at::Tensor RandnKernelAscend(at::IntArrayRef size,
                              ::std::optional<at::Layout> layout,
                              ::std::optional<at::Device> device,
                              ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return RandnGeneratorKernelAscend(
       size, std::nullopt, dtype, layout, device, pin_memory);
 }
@@ -162,6 +170,10 @@ at::Tensor RandGeneratorKernelAscend(
     ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto out = make_empty(size, dtype, layout, device, pin_memory);
   inplace_uniform_(out, 0.0, 1.0, next_seed(out, generator));
   return out;
@@ -172,6 +184,10 @@ at::Tensor RandKernelAscend(at::IntArrayRef size,
                             ::std::optional<at::Layout> layout,
                             ::std::optional<at::Device> device,
                             ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return RandGeneratorKernelAscend(
       size, std::nullopt, dtype, layout, device, pin_memory);
 }
@@ -185,6 +201,10 @@ at::Tensor RandintLowGeneratorKernelAscend(
     ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto out = make_empty(
       size, dtype.value_or(at::kLong), layout, device, pin_memory);
   return random_with_range(out, low, high, generator);
@@ -195,6 +215,10 @@ at::Tensor RandintLowKernelAscend(int64_t low, int64_t high, at::IntArrayRef siz
                                   ::std::optional<at::Layout> layout,
                                   ::std::optional<at::Device> device,
                                   ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return RandintLowGeneratorKernelAscend(
       low, high, size, std::nullopt, dtype, layout, device, pin_memory);
 }
@@ -206,6 +230,10 @@ at::Tensor RandintGeneratorKernelAscend(
     ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return RandintLowGeneratorKernelAscend(
       0, high, size, generator, dtype, layout, device, pin_memory);
 }
@@ -217,6 +245,10 @@ at::Tensor RandintKernelAscend(int64_t high, at::IntArrayRef size,
                                ::std::optional<at::Layout> layout,
                                ::std::optional<at::Device> device,
                                ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return RandintGeneratorKernelAscend(
       high, size, std::nullopt, dtype, layout, device, pin_memory);
 }
@@ -237,6 +269,10 @@ REGISTER_IMPL_TO_DISPATCHER(RandintLowGeneratorFn, randint_low_generator_dispatc
 // normal_(Tensor(a!) self, float mean=0, float std=1, *, Generator? generator=None)
 at::Tensor& NormalInplaceKernelAscend(at::Tensor& self, double mean, double std,
                                       ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   inplace_normal_(self, mean, std, next_seed(self, generator));
   return self;
 }
@@ -244,6 +280,10 @@ at::Tensor& NormalInplaceKernelAscend(at::Tensor& self, double mean, double std,
 // uniform_(Tensor(a!) self, float from=0, float to=1, *, Generator? generator=None)
 at::Tensor& UniformInplaceKernelAscend(at::Tensor& self, double from, double to,
                                        ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   inplace_uniform_(self, from, to, next_seed(self, generator));
   return self;
 }
@@ -251,12 +291,20 @@ at::Tensor& UniformInplaceKernelAscend(at::Tensor& self, double from, double to,
 // random_(Tensor(a!) self, *, Generator? generator=None) -> [0, dtype.max]
 at::Tensor& RandomInplaceKernelAscend(at::Tensor& self,
                                       ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return random_default(self, generator);
 }
 
 // random_(Tensor(a!) self, int to, *, Generator? generator=None) -> [0, to)
 at::Tensor& RandomInplaceToKernelAscend(at::Tensor& self, int64_t to,
                                         ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return random_with_range(self, 0, to, generator);
 }
 
@@ -264,6 +312,10 @@ at::Tensor& RandomInplaceToKernelAscend(at::Tensor& self, int64_t to,
 at::Tensor& RandomInplaceFromKernelAscend(at::Tensor& self, int64_t from,
                                           ::std::optional<int64_t> to,
                                           ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return random_from(self, from, to, generator);
 }
 
@@ -284,6 +336,10 @@ at::Tensor NormalFloatFloatKernelAscend(double mean, double std, at::IntArrayRef
                                         ::std::optional<at::Layout> layout,
                                         ::std::optional<at::Device> device,
                                         ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto out = make_empty(size, dtype, layout, device, pin_memory);
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_out(out);
@@ -299,6 +355,10 @@ at::Tensor NormalFloatFloatKernelAscend(double mean, double std, at::IntArrayRef
 // normal.Tensor_float(Tensor mean, float std, *, Generator?) -> Tensor
 at::Tensor NormalTensorFloatKernelAscend(const at::Tensor& mean, double std,
                                          ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(mean));
   auto out = at::empty_like(mean);
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_mean(mean), acl_out(out);
@@ -314,6 +374,10 @@ at::Tensor NormalTensorFloatKernelAscend(const at::Tensor& mean, double std,
 // normal.Tensor_Tensor(Tensor mean, Tensor std, *, Generator?) -> Tensor
 at::Tensor NormalTensorTensorKernelAscend(const at::Tensor& mean, const at::Tensor& std,
                                           ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(mean));
   auto out = at::empty_like(mean);
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_mean(mean), acl_std(std), acl_out(out);
@@ -335,6 +399,10 @@ REGISTER_IMPL_TO_DISPATCHER(NormalTensorTensorFn, normal_tensor_tensor_dispatche
 // bernoulli(Tensor self, *, Generator?) -> Tensor (self is probability)
 at::Tensor BernoulliKernelAscend(const at::Tensor& self,
                                  ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto out = at::empty_like(self);
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self), acl_out(out);
@@ -349,6 +417,10 @@ at::Tensor BernoulliKernelAscend(const at::Tensor& self,
 // bernoulli_.float(Tensor(a!) self, float p=0.5, *, Generator?) -> Tensor
 at::Tensor& BernoulliInplaceFloatKernelAscend(at::Tensor& self, double p,
                                               ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_p(at::Scalar(p), at::kFloat);
@@ -363,6 +435,10 @@ at::Tensor& BernoulliInplaceFloatKernelAscend(at::Tensor& self, double p,
 // bernoulli_.Tensor(Tensor(a!) self, Tensor p, *, Generator?) -> Tensor
 at::Tensor& BernoulliInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& p,
                                                ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self), acl_p(p);
   EXEC_ASCEND_CMD(aclnnInplaceBernoulliTensor,
@@ -385,6 +461,10 @@ at::Tensor RandpermKernelAscend(int64_t n,
                                 ::std::optional<at::Layout> layout,
                                 ::std::optional<at::Device> device,
                                 ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto out = make_empty({n}, dtype.value_or(at::kLong), layout, device, pin_memory);
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_out(out);
@@ -395,6 +475,10 @@ at::Tensor RandpermKernelAscend(int64_t n,
 
 // randperm.out(int n, *, Tensor(a!) out) -> Tensor
 at::Tensor& RandpermOutKernelAscend(int64_t n, at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_out(out);
   EXEC_ASCEND_CMD(aclnnRandperm, n, next_seed(out), static_cast<int64_t>(0),
@@ -416,6 +500,10 @@ at::Tensor RandLikeGeneratorKernelAscend(
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory,
     ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto out = at::empty_like(
       self, dtype, layout, device, pin_memory, memory_format);
   inplace_uniform_(out, 0.0, 1.0, next_seed(out, generator));
@@ -428,6 +516,10 @@ at::Tensor RandLikeKernelAscend(const at::Tensor& self,
                                 ::std::optional<at::Device> device,
                                 ::std::optional<bool> pin_memory,
                                 ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return RandLikeGeneratorKernelAscend(
       self, std::nullopt, dtype, layout, device, pin_memory, memory_format);
 }
@@ -439,6 +531,10 @@ at::Tensor RandnLikeGeneratorKernelAscend(
     ::std::optional<at::Device> device,
     ::std::optional<bool> pin_memory,
     ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto out = at::empty_like(
       self, dtype, layout, device, pin_memory, memory_format);
   inplace_normal_(out, 0.0, 1.0, next_seed(out, generator));
@@ -451,6 +547,10 @@ at::Tensor RandnLikeKernelAscend(const at::Tensor& self,
                                  ::std::optional<at::Device> device,
                                  ::std::optional<bool> pin_memory,
                                  ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return RandnLikeGeneratorKernelAscend(
       self, std::nullopt, dtype, layout, device, pin_memory, memory_format);
 }
@@ -467,6 +567,10 @@ at::Tensor RandintLikeKernelAscend(const at::Tensor& self, int64_t high,
                                    ::std::optional<at::Device> device,
                                    ::std::optional<bool> pin_memory,
                                    ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto out = at::empty_like(self, dtype.value_or(at::kLong), layout, device, pin_memory, memory_format);
   inplace_random_(out, 0, high, next_seed(out));
   return out;
@@ -481,6 +585,10 @@ at::Tensor RandintLikeLowDtypeKernelAscend(const at::Tensor& self, int64_t low, 
                                            ::std::optional<at::Device> device,
                                            ::std::optional<bool> pin_memory,
                                            ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto out = at::empty_like(self, dtype.value_or(at::kLong), layout, device, pin_memory, memory_format);
   inplace_random_(out, low, high, next_seed(out));
   return out;
@@ -497,47 +605,79 @@ REGISTER_IMPL_TO_DISPATCHER(RandintLikeLowDtypeFn, randint_like_low_dtype_dispat
 // =========================================================================
 
 at::Tensor& RandOutKernelAscend(at::IntArrayRef, at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_uniform_(out, 0.0, 1.0, next_seed(out));
   return out;
 }
 
 at::Tensor& RandNamesOutKernelAscend(at::IntArrayRef, ::std::optional<at::DimnameList>,
                                      at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_uniform_(out, 0.0, 1.0, next_seed(out));
   return out;
 }
 
 at::Tensor& RandnNamesOutKernelAscend(at::IntArrayRef, ::std::optional<at::DimnameList>,
                                       at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_normal_(out, 0.0, 1.0, next_seed(out));
   return out;
 }
 
 at::Tensor& RandLikeOutKernelAscend(const at::Tensor&, ::std::optional<at::MemoryFormat>,
                                     at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_uniform_(out, 0.0, 1.0, next_seed(out));
   return out;
 }
 
 at::Tensor& RandnLikeOutKernelAscend(const at::Tensor&, ::std::optional<at::MemoryFormat>,
                                      at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_normal_(out, 0.0, 1.0, next_seed(out));
   return out;
 }
 
 at::Tensor& RandintLowOutKernelAscend(int64_t low, int64_t high,
                                       at::IntArrayRef size, at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   out.resize_(size);
   return random_with_range(out, low, high, std::nullopt);
 }
 
 at::Tensor& RandintOutKernelAscend(int64_t high, at::IntArrayRef size,
                                    at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   return RandintLowOutKernelAscend(0, high, size, out);
 }
 
 at::Tensor& RandintLikeOutKernelAscend(const at::Tensor&, int64_t high,
                                        ::std::optional<at::MemoryFormat>, at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_random_(out, 0, high, next_seed(out));
   return out;
 }
@@ -545,6 +685,10 @@ at::Tensor& RandintLikeOutKernelAscend(const at::Tensor&, int64_t high,
 at::Tensor& RandintLikeLowDtypeOutKernelAscend(const at::Tensor&, int64_t low, int64_t high,
                                                ::std::optional<at::MemoryFormat>,
                                                at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
   inplace_random_(out, low, high, next_seed(out));
   return out;
 }
@@ -588,6 +732,10 @@ double interval_eps(at::ScalarType dtype) {
 // exponential_(Tensor(a!) self, float lambd=1, *, Generator?) -> Tensor
 at::Tensor& ExponentialInplaceKernelAscend(at::Tensor& self, double lambd,
                                            ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(lambd > 0, "exponential_ expects lambd > 0, got ", lambd);
   auto eps = interval_eps(self.scalar_type());
   // U in [0, 1-eps] so that log1p(-U) stays finite.
@@ -603,6 +751,10 @@ at::Tensor& ExponentialInplaceKernelAscend(at::Tensor& self, double lambd,
 // log_normal_(Tensor(a!) self, float mean=1, float std=2, *, Generator?) -> Tensor
 at::Tensor& LogNormalInplaceKernelAscend(at::Tensor& self, double mean, double std,
                                          ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(std > 0, "log_normal_ expects std > 0, got ", std);
   inplace_normal_(self, mean, std, next_seed(self, generator));
   auto r = at::exp(self);
@@ -613,6 +765,10 @@ at::Tensor& LogNormalInplaceKernelAscend(at::Tensor& self, double mean, double s
 // cauchy_(Tensor(a!) self, float median=0, float sigma=1, *, Generator?) -> Tensor
 at::Tensor& CauchyInplaceKernelAscend(at::Tensor& self, double median, double sigma,
                                       ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto eps = interval_eps(self.scalar_type());
   // U in (0, 1): tan(pi*(U-0.5)) diverges at both endpoints.
   inplace_uniform_(self, eps, 1.0 - eps, next_seed(self, generator));
@@ -627,6 +783,10 @@ at::Tensor& CauchyInplaceKernelAscend(at::Tensor& self, double median, double si
 // support is {1, 2, ...} -- matching ATen, not the {0, 1, ...} convention.
 at::Tensor& GeometricInplaceKernelAscend(at::Tensor& self, double p,
                                          ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(p > 0 && p < 1, "geometric_ expects 0 < p < 1, got ", p);
   auto eps = interval_eps(self.scalar_type());
   // U in (0, 1]: log(U) is -inf at U=0.
@@ -653,6 +813,10 @@ REGISTER_IMPL_TO_DISPATCHER(GeometricInplaceFn, geometric_inplace_dispatcher, Ba
 // native_dropout_backward consumes anyway.
 ::std::tuple<at::Tensor, at::Tensor> NativeDropoutKernelAscend(
     const at::Tensor& input, double p, ::std::optional<bool> train) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   // Inference, or p==0: identity with an all-true mask.
   if (!train.value_or(true) || p == 0.0) {
     return {input.clone(), at::ones_like(input, input.options().dtype(at::kBool))};
@@ -701,24 +865,40 @@ REGISTER_IMPL_TO_DISPATCHER(NativeDropoutFn, native_dropout_dispatcher, Backend:
 
 at::Tensor PoissonKernelAscend(const at::Tensor& self,
                                ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto cpu_generator = cpu_generator_for(self, generator);
   return at::poisson(self.cpu(), cpu_generator).to(self.device());
 }
 
 at::Tensor StandardGammaKernelAscend(const at::Tensor& self,
                                      ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto cpu_generator = cpu_generator_for(self, generator);
   return at::_standard_gamma(self.cpu(), cpu_generator).to(self.device());
 }
 
 at::Tensor SampleDirichletKernelAscend(const at::Tensor& self,
                                        ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto cpu_generator = cpu_generator_for(self, generator);
   return at::_sample_dirichlet(self.cpu(), cpu_generator).to(self.device());
 }
 
 at::Tensor BinomialKernelAscend(const at::Tensor& count, const at::Tensor& prob,
                                 ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(count));
   auto cpu_generator = cpu_generator_for(count, generator);
   return at::binomial(count.cpu(), prob.cpu(), cpu_generator).to(count.device());
 }

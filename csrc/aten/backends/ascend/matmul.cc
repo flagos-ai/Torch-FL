@@ -69,6 +69,10 @@ static std::vector<int64_t> matmul_output_shape(
 
 at::Tensor MatmulKernelAscend(const at::Tensor& self,
                                const at::Tensor& other) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
       self.scalar_type() != other.scalar_type()) {
@@ -220,6 +224,10 @@ std::tuple<at::Tensor, at::Tensor> MatmulBackwardKernelAscend(
     const at::Tensor& self,
     const at::Tensor& other,
     ::std::array<bool, 2> mask) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   if (!grad.defined()) {
     return std::make_tuple(at::Tensor(), at::Tensor());
   }

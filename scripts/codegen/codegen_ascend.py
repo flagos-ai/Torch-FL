@@ -4681,6 +4681,117 @@ namespace at::native::flagos {
 FILE_FOOTER = "\n} // namespace at::native::flagos\n"
 
 
+# ---------------------------------------------------------------------------
+# Device-context injection (issue #326)
+# ---------------------------------------------------------------------------
+#
+# Every generated kernel opens by making its primary tensor's device current for
+# the rest of the call (OpDeviceGuard in ../device_guard.h). Nothing below the
+# kernel boundary sees the tensors: the aclnn workspace is allocated from an
+# index-less TensorOptions, EXEC_ASCEND_CMD takes its launch stream from
+# GetCurrentAclStream(), ExecAscendCached keys its executor cache on ::GetDevice,
+# and OpPreparation used to drop the device index outright. So all of them read
+# the *ambient* device, and an op whose inputs all lived on flagos:0 still
+# returned its result on whatever device the caller last made current.
+#
+# The guard argument is the first tensor-typed parameter, preferring the
+# conventional `self` (then `tensors`) so the choice does not depend on
+# parameter order -- several kernels take a scalar or `out` first. The factories
+# have no tensor operand at all and carry an explicit `optional<at::Device>`
+# instead, which is what the guard is built from for them.
+
+
+# Matches a kernel definition's parameter list, anchored at the start of a line
+# so an indented call site cannot match. The return-type run excludes `(){};=`,
+# so it cannot span backwards across an earlier definition.
+def _kernel_def(kernel: str) -> "re.Pattern":
+    return re.compile(
+        r"^[A-Za-z_:][\w:<>,\s&*]*?\s+" + re.escape(kernel) + r"\s*\(",
+        re.MULTILINE,
+    )
+
+
+# Tensor-ish parameter types. `\b` keeps `at::TensorOptions` (which has a
+# `at::Tensor` prefix) from matching.
+_TENSOR_PARAM = re.compile(r"\b(?:at::Tensor|at::TensorList|at::ITensorListRef)\b")
+_OPTIONAL_PARAM = re.compile(r"\b(?:std)?optional\s*<")
+
+# `::std::optional<at::Device> device` -- the only device source a factory has.
+_DEVICE_PARAM = re.compile(r"\b(?:std)?optional\s*<\s*at::Device\s*>")
+
+
+def _split_params(params: str):
+    """Split a parameter list on top-level commas only.
+
+    Template arguments carry commas of their own (`std::array<bool, 3>`), and
+    the multi-line signatures wrap in the middle of a parameter.
+    """
+    depth = 0
+    parts, cur = [], []
+    for ch in params:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts]
+
+
+def _guard_arg(params: str):
+    """Name of the parameter OpDeviceGuard should be built from, or None."""
+    tensors, devices = [], []
+    for param in _split_params(params):
+        # The parameter name is the trailing identifier; the type never ends in
+        # one, since `at::Tensor& self` and `at::Tensor out` both end `name`.
+        name = re.search(r"([A-Za-z_]\w*)\s*$", param.replace("&", " & "))
+        if not name:
+            continue
+        if _DEVICE_PARAM.search(param):
+            devices.append(name.group(1))
+        elif _TENSOR_PARAM.search(param) and not _OPTIONAL_PARAM.search(param):
+            tensors.append(name.group(1))
+    for preferred in ("self", "tensors"):
+        if preferred in tensors:
+            return preferred
+    # Tensor arguments first: a factory's explicit device is a weaker signal
+    # than an actual operand, and no kernel carries both.
+    return tensors[0] if tensors else (devices[0] if devices else None)
+
+
+def inject_device_guard(body: str, kernel: str) -> str:
+    """Open a rendered kernel body with its OpDeviceGuard declaration.
+
+    Returns the body unchanged when the definition offers neither a tensor
+    parameter nor an explicit device to derive one from.
+    """
+    m = _kernel_def(kernel).search(body)
+    if not m:
+        return body
+    start = m.end()
+    depth = 1
+    i = start
+    while i < len(body) and depth:
+        depth += (body[i] == "(") - (body[i] == ")")
+        i += 1
+    arg = _guard_arg(body[start : i - 1])
+    if arg is None:
+        return body
+    # The signature's closing paren is followed by the body's opening brace.
+    brace = body.index("{", i) + 1
+    decl = (
+        "\n  // Issue #326: make the primary tensor's device current, so the\n"
+        "  // workspace, launch stream and executor cache below all agree on it.\n"
+        f"  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(\n"
+        f"      ::at::native::flagos::ascend::DeviceOf({arg}));"
+    )
+    return body[:brace] + decl + body[brace:]
+
+
 def aclnn_name(op_base: str, override) -> str:
     if override:
         return "aclnn" + override
@@ -4852,7 +4963,7 @@ def main():
                         sf = tmpl.format(aclnn_s=acl_s)
                         scalar_fastpath_ops.append(op)
                 fmt["scalar_fastpath"] = sf
-        bodies.append(template.format(**fmt))
+        bodies.append(inject_device_guard(template.format(**fmt), kernel))
         covered.append((op, acl, cat))
 
     OUT_CC.parent.mkdir(parents=True, exist_ok=True)

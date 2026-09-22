@@ -48,6 +48,10 @@ PrivScaledDotProductEfficientAttentionKernelAscend(
     double dropout_p,
     bool is_causal,
     std::optional<double> scale) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(query));
 
   namespace ascend = at::native::flagos::ascend;
 
@@ -248,6 +252,10 @@ PrivScaledDotProductEfficientAttentionBackwardKernelAscend(
     std::array<bool, 4> grad_input_mask,
     bool is_causal,
     std::optional<double> scale) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_out));
 
   namespace ascend = at::native::flagos::ascend;
 

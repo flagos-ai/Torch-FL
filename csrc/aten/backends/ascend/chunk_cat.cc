@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include "device_guard.h"
 
 #include <ATen/ops/cat.h>
 #include <ATen/ops/constant_pad_nd.h>
@@ -83,6 +84,10 @@ at::Tensor PrivChunkCatKernelAscend(
     at::TensorList tensors,
     int64_t dim,
     int64_t num_chunks) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(tensors));
   auto prepared = PrepareChunkCatInputs(tensors, dim, num_chunks);
   return at::cat(prepared, dim + 1);
 }
@@ -92,6 +97,10 @@ at::Tensor& PrivChunkCatOutKernelAscend(
     int64_t dim,
     int64_t num_chunks,
     at::Tensor& out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(tensors));
   auto prepared = PrepareChunkCatInputs(tensors, dim, num_chunks);
   // Concatenate straight into `out`. Going through the functional kernel and
   // then out.copy_() would allocate a second full-size buffer and re-copy every

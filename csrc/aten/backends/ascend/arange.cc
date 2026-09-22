@@ -35,6 +35,10 @@ at::Tensor ArangeStartStepKernelAscend(
     const at::Scalar& start, const at::Scalar& end, const at::Scalar& step,
     ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   namespace ascend = at::native::flagos::ascend;
 
   // Default dtype: long if all args integral, else the default float type
@@ -70,6 +74,10 @@ at::Tensor ArangeStartKernelAscend(
     const at::Scalar& start, const at::Scalar& end,
     ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return ArangeStartStepKernelAscend(start, end, at::Scalar(1), dtype, layout,
                                      device, pin_memory);
 }
@@ -79,6 +87,10 @@ at::Tensor ArangeKernelAscend(
     const at::Scalar& end,
     ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout,
     ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   return ArangeStartStepKernelAscend(at::Scalar(0), end, at::Scalar(1), dtype,
                                      layout, device, pin_memory);
 }

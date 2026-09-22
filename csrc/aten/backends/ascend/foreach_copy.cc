@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include "device_guard.h"
 #include <ATen/core/Tensor.h>
 
 namespace at::native::flagos {
@@ -15,6 +16,10 @@ void ForeachCopyKernelAscend(
     at::TensorList self,
     at::TensorList src,
     bool non_blocking) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(
       self.size() == src.size(),
       "_foreach_copy_: self and src must have the same length, got ",

@@ -20,6 +20,10 @@ namespace at::native::flagos {
 // the broadcast mask, count its true entries on host (one device->host sync via
 // .item()), allocate the 1-D output, then run the kernel.
 at::Tensor MaskedSelectKernelAscend(const at::Tensor& self, const at::Tensor& mask) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   // Broadcast self and mask to a common shape (aclnn wants matching, contiguous

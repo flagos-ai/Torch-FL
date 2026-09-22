@@ -90,6 +90,10 @@ at::Tensor IndexBoolMaskAscend(const at::Tensor& self,
 
 at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
                                    const c10::List<::std::optional<at::Tensor>>& indices) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   // Collect defined index tensors and their positions.

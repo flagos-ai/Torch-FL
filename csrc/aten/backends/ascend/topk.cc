@@ -15,6 +15,10 @@ namespace at::native::flagos {
 // input with the reduced dim resized to k; indices are int64.
 std::tuple<at::Tensor, at::Tensor> TopkKernelAscend(
     const at::Tensor& self, int64_t k, int64_t dim, bool largest, bool sorted) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   int64_t d = dim < 0 ? dim + self.dim() : dim;

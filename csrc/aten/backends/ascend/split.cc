@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include "device_guard.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/narrow.h>
 
@@ -22,6 +23,10 @@ namespace at::native::flagos {
     const at::Tensor& self,
     int64_t split_size,
     int64_t dim) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(
       self.dim() != 0, "split: cannot split a 0-dimensional tensor");
   TORCH_CHECK(split_size > 0, "split: split_size must be > 0, got ", split_size);
@@ -49,6 +54,10 @@ namespace at::native::flagos {
     const at::Tensor& self,
     at::IntArrayRef split_sizes,
     int64_t dim) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(
       self.dim() != 0, "split_with_sizes: cannot split a 0-dimensional tensor");
 
@@ -87,6 +96,10 @@ void SplitWithSizesCopyOutKernelAscend(
     at::IntArrayRef split_sizes,
     int64_t dim,
     at::TensorList out) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto splits = SplitWithSizesKernelAscend(self, split_sizes, dim);
   TORCH_CHECK(
       splits.size() == out.size(),

@@ -11,6 +11,10 @@ std::tuple<at::Tensor, at::Tensor> NllLossForwardKernelAscend(
     const at::Tensor& self, const at::Tensor& target,
     const std::optional<at::Tensor>& weight,
     int64_t reduction, int64_t ignore_index) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   at::Tensor output;
@@ -54,6 +58,10 @@ at::Tensor NllLossBackwardKernelAscend(
     const at::Tensor& grad_output, const at::Tensor& self,
     const at::Tensor& target, const std::optional<at::Tensor>& weight,
     int64_t reduction, int64_t ignore_index, const at::Tensor& total_weight) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(

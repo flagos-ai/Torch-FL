@@ -19,6 +19,10 @@ namespace at::native::flagos {
 at::Tensor MultinomialKernelAscend(const at::Tensor& self, int64_t num_samples,
                                    bool replacement,
                                    ::std::optional<at::Generator> generator) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   auto out_shape = self.sizes().vec();

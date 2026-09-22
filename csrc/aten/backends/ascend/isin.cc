@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include "device_guard.h"
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/isin.h>
 #include <ATen/ops/eq.h>
@@ -27,6 +28,10 @@ namespace at::native::flagos {
 at::Tensor IsinTensorTensorKernelAscend(const at::Tensor& elements,
                                         const at::Tensor& test_elements,
                                         bool assume_unique, bool invert) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(elements));
   (void)assume_unique;  // no fast-path distinction on device
   const int64_t n_test = test_elements.numel();
 

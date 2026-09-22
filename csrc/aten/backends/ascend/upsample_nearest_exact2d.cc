@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "../../generated/ops.h"
+#include "device_guard.h"
 #include <ATen/ATen.h>
 #include <algorithm>
 #include <cmath>
@@ -39,6 +40,10 @@ at::Tensor PrivUpsampleNearestExact2dKernelAscend(
     at::IntArrayRef output_size,
     ::std::optional<double> scales_h,
     ::std::optional<double> scales_w) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(self.dim() == 4,
               "_upsample_nearest_exact2d: expected a 4D input, got ",
               self.dim(), "D");

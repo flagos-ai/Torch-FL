@@ -34,6 +34,10 @@ std::tuple<at::Tensor, at::Tensor> SortImpl(
 // sort(Tensor self, int dim=-1, bool descending=False) -> (values, indices)
 std::tuple<at::Tensor, at::Tensor> SortKernelAscend(
     const at::Tensor& self, int64_t dim, bool descending) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return SortImpl(self, /*stable=*/false, dim, descending);
 }
 
@@ -43,6 +47,10 @@ std::tuple<at::Tensor, at::Tensor> SortKernelAscend(
 std::tuple<at::Tensor, at::Tensor> SortStableKernelAscend(
     const at::Tensor& self, ::std::optional<bool> stable, int64_t dim,
     bool descending) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   return SortImpl(self, stable.value_or(false), dim, descending);
 }
 

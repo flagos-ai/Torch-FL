@@ -20,6 +20,10 @@ std::tuple<at::Tensor, at::Tensor> PrivFusedRmsNormKernelAscend(
     at::IntArrayRef normalized_shape,
     const std::optional<at::Tensor>& weight,
     std::optional<double> eps) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   namespace ascend = at::native::flagos::ascend;
 
   const double epsilon = eps.value_or(1e-6);
@@ -100,6 +104,10 @@ std::tuple<at::Tensor, at::Tensor> PrivFusedRmsNormBackwardKernelAscend(
     const at::Tensor& rstd,
     const std::optional<at::Tensor>& weight,
     std::array<bool, 2> output_mask) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_out));
   namespace ascend = at::native::flagos::ascend;
 
   const int64_t norm_ndim = static_cast<int64_t>(normalized_shape.size());

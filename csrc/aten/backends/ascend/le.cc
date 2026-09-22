@@ -58,6 +58,10 @@ LeApiAddrs GetLeApiAddrs() {
 } // namespace
 
 at::Tensor LeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   auto out_shape = at::infer_size(self.sizes(), other.sizes());

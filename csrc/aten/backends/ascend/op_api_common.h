@@ -18,6 +18,12 @@
 #include <unordered_map>
 #include <functional>
 #include <initializer_list>
+#include <optional>
+
+// The device context a kernel runs in — see device_guard.h. The guard is what
+// makes every ambient-device read below (workspace allocation,
+// GetCurrentAclStream, the repeatable-executor cache) see the right device.
+#include "device_guard.h"
 
 #include <acl/acl_base_rt.h>
 #include <acl/acl_rt.h>

@@ -14,6 +14,10 @@ namespace at::native::flagos {
 // semantics). The output is int64 (torch always returns Long indices).
 at::Tensor ArgmaxKernelAscend(const at::Tensor& self,
                               ::std::optional<int64_t> dim, bool keepdim) {
+  // Issue #326: aclnn reads the ambient device, so make the one
+  // this kernel actually operates on current.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
 
   at::Tensor input;

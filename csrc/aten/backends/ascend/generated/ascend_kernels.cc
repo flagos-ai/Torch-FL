@@ -58,6 +58,10 @@
 namespace at::native::flagos {
 
 at::Tensor SqrtKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sqrt(self.cpu());
@@ -82,6 +86,10 @@ at::Tensor SqrtKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kAscend, SqrtKernelAscend)
 
 at::Tensor ExpKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::exp(self.cpu());
@@ -106,6 +114,10 @@ at::Tensor ExpKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kAscend, ExpKernelAscend)
 
 at::Tensor TanhKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::tanh(self.cpu());
@@ -130,6 +142,10 @@ at::Tensor TanhKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kAscend, TanhKernelAscend)
 
 at::Tensor SigmoidKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sigmoid(self.cpu());
@@ -154,6 +170,10 @@ at::Tensor SigmoidKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kAscend, SigmoidKernelAscend)
 
 at::Tensor ReciprocalKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::reciprocal(self.cpu());
@@ -178,6 +198,10 @@ at::Tensor ReciprocalKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kAscend, ReciprocalKernelAscend)
 
 at::Tensor LogKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::log(self.cpu());
@@ -202,6 +226,10 @@ at::Tensor LogKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kAscend, LogKernelAscend)
 
 at::Tensor FloorKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::floor(self.cpu());
@@ -226,6 +254,10 @@ at::Tensor FloorKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kAscend, FloorKernelAscend)
 
 at::Tensor CeilKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::ceil(self.cpu());
@@ -250,6 +282,10 @@ at::Tensor CeilKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kAscend, CeilKernelAscend)
 
 at::Tensor ErfKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::erf(self.cpu());
@@ -274,6 +310,10 @@ at::Tensor ErfKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kAscend, ErfKernelAscend)
 
 at::Tensor ErfcKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::erfc(self.cpu());
@@ -298,6 +338,10 @@ at::Tensor ErfcKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ErfcFn, erfc_dispatcher, Backend::kAscend, ErfcKernelAscend)
 
 at::Tensor Expm1KernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::expm1(self.cpu());
@@ -322,6 +366,10 @@ at::Tensor Expm1KernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kAscend, Expm1KernelAscend)
 
 at::Tensor Log2KernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::log2(self.cpu());
@@ -346,6 +394,10 @@ at::Tensor Log2KernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kAscend, Log2KernelAscend)
 
 at::Tensor Log10KernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::log10(self.cpu());
@@ -370,6 +422,10 @@ at::Tensor Log10KernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kAscend, Log10KernelAscend)
 
 at::Tensor Log1pKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::log1p(self.cpu());
@@ -394,6 +450,10 @@ at::Tensor Log1pKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log1pFn, log1p_dispatcher, Backend::kAscend, Log1pKernelAscend)
 
 at::Tensor RoundKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::round(self.cpu());
@@ -418,6 +478,10 @@ at::Tensor RoundKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(RoundFn, round_dispatcher, Backend::kAscend, RoundKernelAscend)
 
 at::Tensor TruncKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::trunc(self.cpu());
@@ -442,6 +506,10 @@ at::Tensor TruncKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kAscend, TruncKernelAscend)
 
 at::Tensor FracKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::frac(self.cpu());
@@ -466,6 +534,10 @@ at::Tensor FracKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(FracFn, frac_dispatcher, Backend::kAscend, FracKernelAscend)
 
 at::Tensor SignKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sign(self.cpu());
@@ -490,6 +562,10 @@ at::Tensor SignKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kAscend, SignKernelAscend)
 
 at::Tensor ReluKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::relu(self.cpu());
@@ -514,6 +590,10 @@ at::Tensor ReluKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kAscend, ReluKernelAscend)
 
 at::Tensor CoshKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::cosh(self.cpu());
@@ -538,6 +618,10 @@ at::Tensor CoshKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CoshFn, cosh_dispatcher, Backend::kAscend, CoshKernelAscend)
 
 at::Tensor SinhKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sinh(self.cpu());
@@ -562,6 +646,10 @@ at::Tensor SinhKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SinhFn, sinh_dispatcher, Backend::kAscend, SinhKernelAscend)
 
 at::Tensor AsinKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::asin(self.cpu());
@@ -586,6 +674,10 @@ at::Tensor AsinKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AsinFn, asin_dispatcher, Backend::kAscend, AsinKernelAscend)
 
 at::Tensor AtanKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::atan(self.cpu());
@@ -610,6 +702,10 @@ at::Tensor AtanKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kAscend, AtanKernelAscend)
 
 at::Tensor TanKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::tan(self.cpu());
@@ -634,6 +730,10 @@ at::Tensor TanKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TanFn, tan_dispatcher, Backend::kAscend, TanKernelAscend)
 
 at::Tensor AsinhKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::asinh(self.cpu());
@@ -658,6 +758,10 @@ at::Tensor AsinhKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AsinhFn, asinh_dispatcher, Backend::kAscend, AsinhKernelAscend)
 
 at::Tensor AcoshKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::acosh(self.cpu());
@@ -682,6 +786,10 @@ at::Tensor AcoshKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AcoshFn, acosh_dispatcher, Backend::kAscend, AcoshKernelAscend)
 
 at::Tensor AtanhKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::atanh(self.cpu());
@@ -706,6 +814,10 @@ at::Tensor AtanhKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AtanhFn, atanh_dispatcher, Backend::kAscend, AtanhKernelAscend)
 
 at::Tensor LogicalNotKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::logical_not(self.cpu());
@@ -730,6 +842,10 @@ at::Tensor LogicalNotKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(LogicalNotFn, logical_not_dispatcher, Backend::kAscend, LogicalNotKernelAscend)
 
 at::Tensor BitwiseNotKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::bitwise_not(self.cpu());
@@ -754,6 +870,10 @@ at::Tensor BitwiseNotKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(BitwiseNotFn, bitwise_not_dispatcher, Backend::kAscend, BitwiseNotKernelAscend)
 
 at::Tensor AbsKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::abs(self.cpu());
@@ -778,6 +898,10 @@ at::Tensor AbsKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kAscend, AbsKernelAscend)
 
 at::Tensor AcosKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::acos(self.cpu());
@@ -802,6 +926,10 @@ at::Tensor AcosKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kAscend, AcosKernelAscend)
 
 at::Tensor CosKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::cos(self.cpu());
@@ -826,6 +954,10 @@ at::Tensor CosKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kAscend, CosKernelAscend)
 
 at::Tensor SinKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sin(self.cpu());
@@ -850,6 +982,10 @@ at::Tensor SinKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kAscend, SinKernelAscend)
 
 at::Tensor NegKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::neg(self.cpu());
@@ -874,6 +1010,10 @@ at::Tensor NegKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kAscend, NegKernelAscend)
 
 at::Tensor RsqrtKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::rsqrt(self.cpu());
@@ -898,6 +1038,10 @@ at::Tensor RsqrtKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kAscend, RsqrtKernelAscend)
 
 at::Tensor SiluKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::silu(self.cpu());
@@ -922,6 +1066,10 @@ at::Tensor SiluKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kAscend, SiluKernelAscend)
 
 at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -977,6 +1125,10 @@ at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
 REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kAscend, DivTensorKernelAscend)
 
 at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1032,6 +1184,10 @@ at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
 REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kAscend, MulTensorKernelAscend)
 
 at::Tensor BitwiseAndTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnBitwiseAndTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1070,6 +1226,10 @@ at::Tensor BitwiseAndTensorKernelAscend(const at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(BitwiseAndTensorFn, bitwise_and_tensor_dispatcher, Backend::kAscend, BitwiseAndTensorKernelAscend)
 
 at::Tensor PowTensorTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnPowTensorTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1108,6 +1268,10 @@ at::Tensor PowTensorTensorKernelAscend(const at::Tensor& self, const at::Tensor&
 REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kAscend, PowTensorTensorKernelAscend)
 
 at::Tensor Atan2KernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnAtan2", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1146,6 +1310,10 @@ at::Tensor Atan2KernelAscend(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(Atan2Fn, atan2_dispatcher, Backend::kAscend, Atan2KernelAscend)
 
 at::Tensor MaximumKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnMaximum", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1184,6 +1352,10 @@ at::Tensor MaximumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kAscend, MaximumKernelAscend)
 
 at::Tensor MinimumKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnMinimum", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1222,6 +1394,10 @@ at::Tensor MinimumKernelAscend(const at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kAscend, MinimumKernelAscend)
 
 at::Tensor BitwiseOrTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnBitwiseOrTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1260,6 +1436,10 @@ at::Tensor BitwiseOrTensorKernelAscend(const at::Tensor& self, const at::Tensor&
 REGISTER_IMPL_TO_DISPATCHER(BitwiseOrTensorFn, bitwise_or_tensor_dispatcher, Backend::kAscend, BitwiseOrTensorKernelAscend)
 
 at::Tensor BitwiseXorTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnBitwiseXorTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1298,6 +1478,10 @@ at::Tensor BitwiseXorTensorKernelAscend(const at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(BitwiseXorTensorFn, bitwise_xor_tensor_dispatcher, Backend::kAscend, BitwiseXorTensorKernelAscend)
 
 at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1356,6 +1540,10 @@ at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
 REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kAscend, SubTensorKernelAscend)
 
 at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1414,6 +1602,10 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kAscend, AddTensorKernelAscend)
 
 at::Tensor MulScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1429,6 +1621,10 @@ at::Tensor MulScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
 REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kAscend, MulScalarKernelAscend)
 
 at::Tensor DivScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1444,6 +1640,10 @@ at::Tensor DivScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
 REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kAscend, DivScalarKernelAscend)
 
 at::Tensor EqTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnEqTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1482,6 +1682,10 @@ at::Tensor EqTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
 REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kAscend, EqTensorKernelAscend)
 
 at::Tensor NeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnNeTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1520,6 +1724,10 @@ at::Tensor NeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
 REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kAscend, NeTensorKernelAscend)
 
 at::Tensor GtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnGtTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1558,6 +1766,10 @@ at::Tensor GtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
 REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kAscend, GtTensorKernelAscend)
 
 at::Tensor LtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnLtTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1596,6 +1808,10 @@ at::Tensor LtTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
 REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kAscend, LtTensorKernelAscend)
 
 at::Tensor GeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnGeTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1634,6 +1850,10 @@ at::Tensor GeTensorKernelAscend(const at::Tensor& self, const at::Tensor& other)
 REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kAscend, GeTensorKernelAscend)
 
 at::Tensor LogicalAndKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnLogicalAnd", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1672,6 +1892,10 @@ at::Tensor LogicalAndKernelAscend(const at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kAscend, LogicalAndKernelAscend)
 
 at::Tensor LogicalOrKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnLogicalOr", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -1710,6 +1934,10 @@ at::Tensor LogicalOrKernelAscend(const at::Tensor& self, const at::Tensor& other
 REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kAscend, LogicalOrKernelAscend)
 
 at::Tensor AddScalarKernelAscend(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1726,6 +1954,10 @@ at::Tensor AddScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
 REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kAscend, AddScalarKernelAscend)
 
 at::Tensor SubScalarKernelAscend(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1742,6 +1974,10 @@ at::Tensor SubScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
 REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kAscend, SubScalarKernelAscend)
 
 at::Tensor RsubScalarKernelAscend(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1758,6 +1994,10 @@ at::Tensor RsubScalarKernelAscend(const at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kAscend, RsubScalarKernelAscend)
 
 at::Tensor EqScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1773,6 +2013,10 @@ at::Tensor EqScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kAscend, EqScalarKernelAscend)
 
 at::Tensor NeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1788,6 +2032,10 @@ at::Tensor NeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kAscend, NeScalarKernelAscend)
 
 at::Tensor GtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1803,6 +2051,10 @@ at::Tensor GtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kAscend, GtScalarKernelAscend)
 
 at::Tensor LtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1818,6 +2070,10 @@ at::Tensor LtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kAscend, LtScalarKernelAscend)
 
 at::Tensor GeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1833,6 +2089,10 @@ at::Tensor GeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kAscend, GeScalarKernelAscend)
 
 at::Tensor LeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1848,6 +2108,10 @@ at::Tensor LeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
 REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kAscend, LeScalarKernelAscend)
 
 at::Tensor AmaxKernelAscend(const at::Tensor& self, at::IntArrayRef dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t ndim = self.dim();
   std::vector<int64_t> norm_dims;
@@ -1877,6 +2141,10 @@ at::Tensor AmaxKernelAscend(const at::Tensor& self, at::IntArrayRef dim, bool ke
 REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kAscend, AmaxKernelAscend)
 
 at::Tensor AminKernelAscend(const at::Tensor& self, at::IntArrayRef dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t ndim = self.dim();
   std::vector<int64_t> norm_dims;
@@ -1906,6 +2174,10 @@ at::Tensor AminKernelAscend(const at::Tensor& self, at::IntArrayRef dim, bool ke
 REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kAscend, AminKernelAscend)
 
 at::Tensor AnyDimKernelAscend(const at::Tensor& self, int64_t dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   std::vector<int64_t> dims{d};
@@ -1927,6 +2199,10 @@ at::Tensor AnyDimKernelAscend(const at::Tensor& self, int64_t dim, bool keepdim)
 REGISTER_IMPL_TO_DISPATCHER(AnyDimFn, any_dim_dispatcher, Backend::kAscend, AnyDimKernelAscend)
 
 at::Tensor CumsumKernelAscend(const at::Tensor& self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out_dtype = dtype.value_or(
@@ -1947,6 +2223,10 @@ at::Tensor CumsumKernelAscend(const at::Tensor& self, int64_t dim, ::std::option
 REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kAscend, CumsumKernelAscend)
 
 at::Tensor CumprodKernelAscend(const at::Tensor& self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out_dtype = dtype.value_or(
@@ -1968,6 +2248,10 @@ at::Tensor CumprodKernelAscend(const at::Tensor& self, int64_t dim, ::std::optio
 REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kAscend, CumprodKernelAscend)
 
 at::Tensor IsinfKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -1982,6 +2266,10 @@ at::Tensor IsinfKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(IsinfFn, isinf_dispatcher, Backend::kAscend, IsinfKernelAscend)
 
 at::Tensor LeakyReluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2004,6 +2292,10 @@ at::Tensor LeakyReluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(LeakyReluFn, leaky_relu_dispatcher, Backend::kAscend, LeakyReluKernelAscend)
 
 at::Tensor ClampMinKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2026,6 +2318,10 @@ at::Tensor ClampMinKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(ClampMinFn, clamp_min_dispatcher, Backend::kAscend, ClampMinKernelAscend)
 
 at::Tensor ClampMaxKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2048,6 +2344,10 @@ at::Tensor ClampMaxKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(ClampMaxFn, clamp_max_dispatcher, Backend::kAscend, ClampMaxKernelAscend)
 
 at::Tensor FmodScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2070,6 +2370,10 @@ at::Tensor FmodScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kAscend, FmodScalarKernelAscend)
 
 at::Tensor PowTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2092,6 +2396,10 @@ at::Tensor PowTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar&
 REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kAscend, PowTensorScalarKernelAscend)
 
 at::Tensor SoftplusKernelAscend(const at::Tensor& self, const at::Scalar& s1, const at::Scalar& s2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2108,6 +2416,10 @@ at::Tensor SoftplusKernelAscend(const at::Tensor& self, const at::Scalar& s1, co
 REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kAscend, SoftplusKernelAscend)
 
 at::Tensor ThresholdKernelAscend(const at::Tensor& self, const at::Scalar& s1, const at::Scalar& s2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2124,6 +2436,10 @@ at::Tensor ThresholdKernelAscend(const at::Tensor& self, const at::Scalar& s1, c
 REGISTER_IMPL_TO_DISPATCHER(ThresholdFn, threshold_dispatcher, Backend::kAscend, ThresholdKernelAscend)
 
 at::Tensor TrilKernelAscend(const at::Tensor& self, int64_t i) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2138,6 +2454,10 @@ at::Tensor TrilKernelAscend(const at::Tensor& self, int64_t i) {
 REGISTER_IMPL_TO_DISPATCHER(TrilFn, tril_dispatcher, Backend::kAscend, TrilKernelAscend)
 
 at::Tensor TriuKernelAscend(const at::Tensor& self, int64_t i) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2152,6 +2472,10 @@ at::Tensor TriuKernelAscend(const at::Tensor& self, int64_t i) {
 REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kAscend, TriuKernelAscend)
 
 at::Tensor FlipKernelAscend(const at::Tensor& self, at::IntArrayRef dims) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2168,6 +2492,10 @@ at::Tensor FlipKernelAscend(const at::Tensor& self, at::IntArrayRef dims) {
 REGISTER_IMPL_TO_DISPATCHER(FlipFn, flip_dispatcher, Backend::kAscend, FlipKernelAscend)
 
 at::Tensor AddcmulKernelAscend(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto opts = self.options();
   auto t1 = tensor1.is_privateuseone() ? tensor1.to(opts.dtype(tensor1.scalar_type())) : tensor1.to(opts);
@@ -2191,6 +2519,10 @@ at::Tensor AddcmulKernelAscend(const at::Tensor& self, const at::Tensor& tensor1
 REGISTER_IMPL_TO_DISPATCHER(AddcmulFn, addcmul_dispatcher, Backend::kAscend, AddcmulKernelAscend)
 
 at::Tensor AddcdivKernelAscend(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto opts = self.options();
   auto t1 = tensor1.is_privateuseone() ? tensor1.to(opts.dtype(tensor1.scalar_type())) : tensor1.to(opts);
@@ -2214,6 +2546,10 @@ at::Tensor AddcdivKernelAscend(const at::Tensor& self, const at::Tensor& tensor1
 REGISTER_IMPL_TO_DISPATCHER(AddcdivFn, addcdiv_dispatcher, Backend::kAscend, AddcdivKernelAscend)
 
 at::Tensor FmodTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnFmodTensor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -2252,6 +2588,10 @@ at::Tensor FmodTensorKernelAscend(const at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kAscend, FmodTensorKernelAscend)
 
 at::Tensor FloorDivideKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnFloorDivide", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -2290,6 +2630,10 @@ at::Tensor FloorDivideKernelAscend(const at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(FloorDivideFn, floor_divide_dispatcher, Backend::kAscend, FloorDivideKernelAscend)
 
 at::Tensor LogicalXorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnLogicalXor", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -2328,6 +2672,10 @@ at::Tensor LogicalXorKernelAscend(const at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(LogicalXorFn, logical_xor_dispatcher, Backend::kAscend, LogicalXorKernelAscend)
 
 at::Tensor TanhBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& output) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       output.sizes(), output.options());
@@ -2343,6 +2691,10 @@ at::Tensor TanhBackwardKernelAscend(const at::Tensor& grad_output, const at::Ten
 REGISTER_IMPL_TO_DISPATCHER(TanhBackwardFn, tanh_backward_dispatcher, Backend::kAscend, TanhBackwardKernelAscend)
 
 at::Tensor SigmoidBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& output) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       output.sizes(), output.options());
@@ -2358,6 +2710,10 @@ at::Tensor SigmoidBackwardKernelAscend(const at::Tensor& grad_output, const at::
 REGISTER_IMPL_TO_DISPATCHER(SigmoidBackwardFn, sigmoid_backward_dispatcher, Backend::kAscend, SigmoidBackwardKernelAscend)
 
 at::Tensor ThresholdBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& threshold) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2374,6 +2730,10 @@ at::Tensor ThresholdBackwardKernelAscend(const at::Tensor& grad_output, const at
 REGISTER_IMPL_TO_DISPATCHER(ThresholdBackwardFn, threshold_backward_dispatcher, Backend::kAscend, ThresholdBackwardKernelAscend)
 
 at::Tensor HardshrinkBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2390,6 +2750,10 @@ at::Tensor HardshrinkBackwardKernelAscend(const at::Tensor& grad_output, const a
 REGISTER_IMPL_TO_DISPATCHER(HardshrinkBackwardFn, hardshrink_backward_dispatcher, Backend::kAscend, HardshrinkBackwardKernelAscend)
 
 at::Tensor SoftshrinkBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2406,6 +2770,10 @@ at::Tensor SoftshrinkBackwardKernelAscend(const at::Tensor& grad_output, const a
 REGISTER_IMPL_TO_DISPATCHER(SoftshrinkBackwardFn, softshrink_backward_dispatcher, Backend::kAscend, SoftshrinkBackwardKernelAscend)
 
 at::Tensor SoftplusBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& a, const at::Scalar& b) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2423,6 +2791,10 @@ at::Tensor SoftplusBackwardKernelAscend(const at::Tensor& grad_output, const at:
 REGISTER_IMPL_TO_DISPATCHER(SoftplusBackwardFn, softplus_backward_dispatcher, Backend::kAscend, SoftplusBackwardKernelAscend)
 
 at::Tensor HardtanhBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& a, const at::Scalar& b) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2440,6 +2812,10 @@ at::Tensor HardtanhBackwardKernelAscend(const at::Tensor& grad_output, const at:
 REGISTER_IMPL_TO_DISPATCHER(HardtanhBackwardFn, hardtanh_backward_dispatcher, Backend::kAscend, HardtanhBackwardKernelAscend)
 
 at::Tensor LeakyReluBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& negative_slope, bool self_is_result) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2457,6 +2833,10 @@ at::Tensor LeakyReluBackwardKernelAscend(const at::Tensor& grad_output, const at
 REGISTER_IMPL_TO_DISPATCHER(LeakyReluBackwardFn, leaky_relu_backward_dispatcher, Backend::kAscend, LeakyReluBackwardKernelAscend)
 
 at::Tensor EluBackwardKernelAscend(const at::Tensor& grad_output, const at::Scalar& alpha, const at::Scalar& scale, const at::Scalar& input_scale, bool is_result, const at::Tensor& self_or_result) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self_or_result.sizes(), self_or_result.options());
@@ -2476,6 +2856,10 @@ at::Tensor EluBackwardKernelAscend(const at::Tensor& grad_output, const at::Scal
 REGISTER_IMPL_TO_DISPATCHER(EluBackwardFn, elu_backward_dispatcher, Backend::kAscend, EluBackwardKernelAscend)
 
 at::Tensor NativeDropoutBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& mask, double scale) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   auto m = mask.scalar_type() == grad_output.scalar_type()
       ? mask : mask.to(grad_output.scalar_type());
   return grad_output * m * scale;
@@ -2484,6 +2868,10 @@ at::Tensor NativeDropoutBackwardKernelAscend(const at::Tensor& grad_output, cons
 REGISTER_IMPL_TO_DISPATCHER(NativeDropoutBackwardFn, native_dropout_backward_dispatcher, Backend::kAscend, NativeDropoutBackwardKernelAscend)
 
 at::Tensor PrivPreluKernelKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto result_dtype = ascend::BinaryResultType("aclnnPrelu", self, other);
   auto self_c = self.scalar_type() == result_dtype
@@ -2522,6 +2910,10 @@ at::Tensor PrivPreluKernelKernelAscend(const at::Tensor& self, const at::Tensor&
 REGISTER_IMPL_TO_DISPATCHER(PrivPreluKernelFn, priv_prelu_kernel_dispatcher, Backend::kAscend, PrivPreluKernelKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> PrivPreluKernelBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& weight) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto grad_self = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2561,6 +2953,10 @@ REGISTER_IMPL_TO_DISPATCHER(PrivPreluKernelFn, priv_prelu_kernel_dispatcher, Bac
 REGISTER_IMPL_TO_DISPATCHER(PrivPreluKernelBackwardFn, priv_prelu_kernel_backward_dispatcher, Backend::kAscend, PrivPreluKernelBackwardKernelAscend)
 
 at::Tensor PowScalarKernelAscend(const at::Scalar& self, const at::Tensor& exponent) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(exponent));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       exponent.sizes(), exponent.options());
@@ -2576,6 +2972,10 @@ at::Tensor PowScalarKernelAscend(const at::Scalar& self, const at::Tensor& expon
 REGISTER_IMPL_TO_DISPATCHER(PowScalarFn, pow_scalar_dispatcher, Backend::kAscend, PowScalarKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> MaxDimKernelAscend(const at::Tensor& self, int64_t dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out_shape = self.sizes().vec();
@@ -2598,6 +2998,10 @@ REGISTER_IMPL_TO_DISPATCHER(PowScalarFn, pow_scalar_dispatcher, Backend::kAscend
 REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kAscend, MaxDimKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> MinDimKernelAscend(const at::Tensor& self, int64_t dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out_shape = self.sizes().vec();
@@ -2620,6 +3024,10 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kAscend, MaxD
 REGISTER_IMPL_TO_DISPATCHER(MinDimFn, min_dim_dispatcher, Backend::kAscend, MinDimKernelAscend)
 
 at::Tensor CeluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2642,6 +3050,10 @@ at::Tensor CeluKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(CeluFn, celu_dispatcher, Backend::kAscend, CeluKernelAscend)
 
 at::Tensor SoftshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2664,6 +3076,10 @@ at::Tensor SoftshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(SoftshrinkFn, softshrink_dispatcher, Backend::kAscend, SoftshrinkKernelAscend)
 
 at::Tensor HardshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2686,6 +3102,10 @@ at::Tensor HardshrinkKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 REGISTER_IMPL_TO_DISPATCHER(HardshrinkFn, hardshrink_dispatcher, Backend::kAscend, HardshrinkKernelAscend)
 
 at::Tensor HardtanhKernelAscend(const at::Tensor& self, const at::Scalar& s1, const at::Scalar& s2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2702,6 +3122,10 @@ at::Tensor HardtanhKernelAscend(const at::Tensor& self, const at::Scalar& s1, co
 REGISTER_IMPL_TO_DISPATCHER(HardtanhFn, hardtanh_dispatcher, Backend::kAscend, HardtanhKernelAscend)
 
 at::Tensor EluKernelAscend(const at::Tensor& self, const at::Scalar& alpha, const at::Scalar& scale, const at::Scalar& input_scale) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2719,6 +3143,10 @@ at::Tensor EluKernelAscend(const at::Tensor& self, const at::Scalar& alpha, cons
 REGISTER_IMPL_TO_DISPATCHER(EluFn, elu_dispatcher, Backend::kAscend, EluKernelAscend)
 
 at::Tensor MseLossKernelAscend(const at::Tensor& self, const at::Tensor& target, int64_t reduction) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> out_shape;   // scalar for Mean/Sum
   if (reduction == 0) out_shape = self.sizes().vec();
@@ -2735,6 +3163,10 @@ at::Tensor MseLossKernelAscend(const at::Tensor& self, const at::Tensor& target,
 REGISTER_IMPL_TO_DISPATCHER(MseLossFn, mse_loss_dispatcher, Backend::kAscend, MseLossKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> CummaxKernelAscend(const at::Tensor& self, int64_t dim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto values = ascend::OpPreparation::apply_tensor_without_format(
@@ -2753,6 +3185,10 @@ REGISTER_IMPL_TO_DISPATCHER(MseLossFn, mse_loss_dispatcher, Backend::kAscend, Ms
 REGISTER_IMPL_TO_DISPATCHER(CummaxFn, cummax_dispatcher, Backend::kAscend, CummaxKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> CumminKernelAscend(const at::Tensor& self, int64_t dim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto values = ascend::OpPreparation::apply_tensor_without_format(
@@ -2771,6 +3207,10 @@ REGISTER_IMPL_TO_DISPATCHER(CummaxFn, cummax_dispatcher, Backend::kAscend, Cumma
 REGISTER_IMPL_TO_DISPATCHER(CumminFn, cummin_dispatcher, Backend::kAscend, CumminKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> AminmaxKernelAscend(const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> dims;
   std::vector<int64_t> out_shape;
@@ -2798,6 +3238,10 @@ REGISTER_IMPL_TO_DISPATCHER(CumminFn, cummin_dispatcher, Backend::kAscend, Cummi
 REGISTER_IMPL_TO_DISPATCHER(AminmaxFn, aminmax_dispatcher, Backend::kAscend, AminmaxKernelAscend)
 
 at::Tensor ProdKernelAscend(const at::Tensor& self, ::std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.value_or(self.scalar_type());
   std::vector<int64_t> out_shape;   // scalar
@@ -2815,6 +3259,10 @@ at::Tensor ProdKernelAscend(const at::Tensor& self, ::std::optional<at::ScalarTy
 REGISTER_IMPL_TO_DISPATCHER(ProdFn, prod_dispatcher, Backend::kAscend, ProdKernelAscend)
 
 at::Tensor MmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -2837,6 +3285,10 @@ at::Tensor MmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kAscend, MmKernelAscend)
 
 at::Tensor& MmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
 
@@ -2851,6 +3303,10 @@ at::Tensor& MmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, at
 REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kAscend, MmOutKernelAscend)
 
 at::Tensor BmmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -2873,6 +3329,10 @@ at::Tensor BmmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kAscend, BmmKernelAscend)
 
 at::Tensor& BmmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
 
@@ -2887,6 +3347,10 @@ at::Tensor& BmmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, a
 REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kAscend, BmmOutKernelAscend)
 
 at::Tensor CatKernelAscend(const at::ITensorListRef& tensors, int64_t dim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(tensors));
   namespace ascend = at::native::flagos::ascend;
 
   auto materialized = tensors.materialize();
@@ -2947,6 +3411,10 @@ at::Tensor& CatOutKernelAscend(
     const at::ITensorListRef& tensors,
     int64_t dim,
     at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(tensors));
   namespace ascend = at::native::flagos::ascend;
 
   auto materialized = tensors.materialize();
@@ -2998,6 +3466,10 @@ at::Tensor& CatOutKernelAscend(
 REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kAscend, CatOutKernelAscend)
 
 at::Tensor StackKernelAscend(at::TensorList tensors, int64_t dim) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(tensors));
   namespace ascend = at::native::flagos::ascend;
   TORCH_CHECK(!tensors.empty(), "stack: expected a non-empty list of tensors");
 
@@ -3037,6 +3509,10 @@ at::Tensor StackKernelAscend(at::TensorList tensors, int64_t dim) {
 REGISTER_IMPL_TO_DISPATCHER(StackFn, stack_dispatcher, Backend::kAscend, StackKernelAscend)
 
 at::Tensor ZerosKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(at::kFloat))
     .layout(layout.value_or(at::kStrided))
@@ -3050,6 +3526,10 @@ at::Tensor ZerosKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarTyp
 REGISTER_IMPL_TO_DISPATCHER(ZerosFn, zeros_dispatcher, Backend::kAscend, ZerosKernelAscend)
 
 at::Tensor OnesKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(at::kFloat))
     .layout(layout.value_or(at::kStrided))
@@ -3063,6 +3543,10 @@ at::Tensor OnesKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarType
 REGISTER_IMPL_TO_DISPATCHER(OnesFn, ones_dispatcher, Backend::kAscend, OnesKernelAscend)
 
 at::Tensor ScalarTensorKernelAscend(const at::Scalar& s, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(at::ScalarType::Float))
     .layout(layout.value_or(at::kStrided))
@@ -3076,6 +3560,10 @@ at::Tensor ScalarTensorKernelAscend(const at::Scalar& s, ::std::optional<at::Sca
 REGISTER_IMPL_TO_DISPATCHER(ScalarTensorFn, scalar_tensor_dispatcher, Backend::kAscend, ScalarTensorKernelAscend)
 
 at::Tensor OnesLikeKernelAscend(const at::Tensor& self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(self.scalar_type()))
     .layout(layout.value_or(self.layout()))
@@ -3095,6 +3583,10 @@ at::Tensor OnesLikeKernelAscend(const at::Tensor& self, ::std::optional<at::Scal
 REGISTER_IMPL_TO_DISPATCHER(OnesLikeFn, ones_like_dispatcher, Backend::kAscend, OnesLikeKernelAscend)
 
 at::Tensor ZerosLikeKernelAscend(const at::Tensor& self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(self.scalar_type()))
     .layout(layout.value_or(self.layout()))
@@ -3114,6 +3606,10 @@ at::Tensor ZerosLikeKernelAscend(const at::Tensor& self, ::std::optional<at::Sca
 REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kAscend, ZerosLikeKernelAscend)
 
 at::Tensor EmptyLikeKernelAscend(const at::Tensor& self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(self.scalar_type()))
     .layout(layout.value_or(self.layout()))
@@ -3132,6 +3628,10 @@ at::Tensor EmptyLikeKernelAscend(const at::Tensor& self, ::std::optional<at::Sca
 REGISTER_IMPL_TO_DISPATCHER(EmptyLikeFn, empty_like_dispatcher, Backend::kAscend, EmptyLikeKernelAscend)
 
 at::Tensor FullKernelAscend(at::IntArrayRef size, const at::Scalar& fill, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(at::kFloat))
     .layout(layout.value_or(at::kStrided))
@@ -3145,6 +3645,10 @@ at::Tensor FullKernelAscend(at::IntArrayRef size, const at::Scalar& fill, ::std:
 REGISTER_IMPL_TO_DISPATCHER(FullFn, full_dispatcher, Backend::kAscend, FullKernelAscend)
 
 at::Tensor FullLikeKernelAscend(const at::Tensor& self, const at::Scalar& fill, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(self.scalar_type()))
     .layout(layout.value_or(self.layout()))
@@ -3162,6 +3666,10 @@ at::Tensor FullLikeKernelAscend(const at::Tensor& self, const at::Scalar& fill, 
 REGISTER_IMPL_TO_DISPATCHER(FullLikeFn, full_like_dispatcher, Backend::kAscend, FullLikeKernelAscend)
 
 at::Tensor NewOnesKernelAscend(const at::Tensor& self, at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   auto options = at::TensorOptions()
     .dtype(dtype.value_or(self.scalar_type()))
     .layout(layout.value_or(self.layout()))
@@ -3175,6 +3683,10 @@ at::Tensor NewOnesKernelAscend(const at::Tensor& self, at::IntArrayRef size, ::s
 REGISTER_IMPL_TO_DISPATCHER(NewOnesFn, new_ones_dispatcher, Backend::kAscend, NewOnesKernelAscend)
 
 at::Tensor AddmmKernelAscend(const at::Tensor& self, const at::Tensor& mat1, const at::Tensor& mat2, const at::Scalar& beta, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   std::vector<int64_t> out_shape = {mat1.size(0), mat2.size(1)};
@@ -3194,6 +3706,10 @@ at::Tensor AddmmKernelAscend(const at::Tensor& self, const at::Tensor& mat1, con
 REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kAscend, AddmmKernelAscend)
 
 at::Tensor BaddbmmKernelAscend(const at::Tensor& self, const at::Tensor& batch1, const at::Tensor& batch2, const at::Scalar& beta, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   std::vector<int64_t> out_shape = {batch1.size(0), batch1.size(1), batch2.size(2)};
@@ -3213,6 +3729,10 @@ at::Tensor BaddbmmKernelAscend(const at::Tensor& self, const at::Tensor& batch1,
 REGISTER_IMPL_TO_DISPATCHER(BaddbmmFn, baddbmm_dispatcher, Backend::kAscend, BaddbmmKernelAscend)
 
 at::Tensor MvKernelAscend(const at::Tensor& self, const at::Tensor& vec) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   std::vector<int64_t> out_shape = {self.size(0)};
@@ -3229,6 +3749,10 @@ at::Tensor MvKernelAscend(const at::Tensor& self, const at::Tensor& vec) {
 REGISTER_IMPL_TO_DISPATCHER(MvFn, mv_dispatcher, Backend::kAscend, MvKernelAscend)
 
 at::Tensor DotKernelAscend(const at::Tensor& self, const at::Tensor& tensor) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> out_shape;   // scalar
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
@@ -3244,6 +3768,10 @@ at::Tensor DotKernelAscend(const at::Tensor& self, const at::Tensor& tensor) {
 REGISTER_IMPL_TO_DISPATCHER(DotFn, dot_dispatcher, Backend::kAscend, DotKernelAscend)
 
 at::Tensor AddmvKernelAscend(const at::Tensor& self, const at::Tensor& mat, const at::Tensor& vec, const at::Scalar& beta, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   std::vector<int64_t> out_shape = {mat.size(0)};
@@ -3263,6 +3791,10 @@ at::Tensor AddmvKernelAscend(const at::Tensor& self, const at::Tensor& mat, cons
 REGISTER_IMPL_TO_DISPATCHER(AddmvFn, addmv_dispatcher, Backend::kAscend, AddmvKernelAscend)
 
 at::Tensor AddrKernelAscend(const at::Tensor& self, const at::Tensor& vec1, const at::Tensor& vec2, const at::Scalar& beta, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> out_shape = {vec1.size(0), vec2.size(0)};
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
@@ -3281,6 +3813,10 @@ at::Tensor AddrKernelAscend(const at::Tensor& self, const at::Tensor& vec1, cons
 REGISTER_IMPL_TO_DISPATCHER(AddrFn, addr_dispatcher, Backend::kAscend, AddrKernelAscend)
 
 at::Tensor MaxPool2dWithIndicesBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode, const at::Tensor& indices) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> k(kernel_size.begin(), kernel_size.end());
   std::vector<int64_t> s = stride.empty() ? k : std::vector<int64_t>(stride.begin(), stride.end());
@@ -3312,6 +3848,10 @@ at::Tensor MaxPool2dWithIndicesBackwardKernelAscend(const at::Tensor& grad_outpu
 REGISTER_IMPL_TO_DISPATCHER(MaxPool2dWithIndicesBackwardFn, max_pool2d_with_indices_backward_dispatcher, Backend::kAscend, MaxPool2dWithIndicesBackwardKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeBatchNormKernelAscend(const at::Tensor& input, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& bias, const ::std::optional<at::Tensor>& running_mean, const ::std::optional<at::Tensor>& running_var, bool training, double momentum, double eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   namespace ascend = at::native::flagos::ascend;
   int64_t rank = input.dim();
   int64_t C = input.size(1);
@@ -3347,6 +3887,10 @@ REGISTER_IMPL_TO_DISPATCHER(MaxPool2dWithIndicesBackwardFn, max_pool2d_with_indi
 REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kAscend, NativeBatchNormKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeBatchNormBackwardKernelAscend(const at::Tensor& grad_out, const at::Tensor& input, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& running_mean, const ::std::optional<at::Tensor>& running_var, const ::std::optional<at::Tensor>& save_mean, const ::std::optional<at::Tensor>& save_invstd, bool train, double eps, ::std::array<bool, 3> output_mask) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_out));
   namespace ascend = at::native::flagos::ascend;
   int64_t rank = input.dim();
   int64_t C = input.size(1);
@@ -3387,6 +3931,10 @@ REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Bac
 REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormBackwardFn, native_batch_norm_backward_dispatcher, Backend::kAscend, NativeBatchNormBackwardKernelAscend)
 
 at::Tensor AvgPool2dBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> k(kernel_size.begin(), kernel_size.end());
   std::vector<int64_t> s = stride.empty() ? k : std::vector<int64_t>(stride.begin(), stride.end());
@@ -3413,6 +3961,10 @@ at::Tensor AvgPool2dBackwardKernelAscend(const at::Tensor& grad_output, const at
 REGISTER_IMPL_TO_DISPATCHER(AvgPool2dBackwardFn, avg_pool2d_backward_dispatcher, Backend::kAscend, AvgPool2dBackwardKernelAscend)
 
 at::Tensor PrivAdaptiveAvgPool2dBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -3429,6 +3981,10 @@ at::Tensor PrivAdaptiveAvgPool2dBackwardKernelAscend(const at::Tensor& grad_outp
 REGISTER_IMPL_TO_DISPATCHER(PrivAdaptiveAvgPool2dBackwardFn, priv_adaptive_avg_pool2d_backward_dispatcher, Backend::kAscend, PrivAdaptiveAvgPool2dBackwardKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormBackwardKernelAscend(const at::Tensor& grad_out, const at::Tensor& input, at::IntArrayRef normalized_shape, const at::Tensor& mean, const at::Tensor& rstd, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& bias, ::std::array<bool, 3> output_mask) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_out));
   namespace ascend = at::native::flagos::ascend;
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(
       input.sizes(), input.options());
@@ -3462,6 +4018,10 @@ REGISTER_IMPL_TO_DISPATCHER(PrivAdaptiveAvgPool2dBackwardFn, priv_adaptive_avg_p
 REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormBackwardFn, native_layer_norm_backward_dispatcher, Backend::kAscend, NativeLayerNormBackwardKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeGroupNormBackwardKernelAscend(const at::Tensor& grad_out, const at::Tensor& input, const at::Tensor& mean, const at::Tensor& rstd, const ::std::optional<at::Tensor>& weight, int64_t N, int64_t C, int64_t HxW, int64_t group, ::std::array<bool, 3> output_mask) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_out));
   namespace ascend = at::native::flagos::ascend;
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(
       input.sizes(), input.options());
@@ -3491,6 +4051,10 @@ REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormBackwardFn, native_layer_norm_backwar
 REGISTER_IMPL_TO_DISPATCHER(NativeGroupNormBackwardFn, native_group_norm_backward_dispatcher, Backend::kAscend, NativeGroupNormBackwardKernelAscend)
 
 at::Tensor MaskedFillScalarKernelAscend(const at::Tensor& self, const at::Tensor& mask, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = at::infer_size(self.sizes(), mask.sizes());
   // avoid clone()/empty_like (not registered for ascend): alloc + copy_.
@@ -3511,6 +4075,10 @@ at::Tensor MaskedFillScalarKernelAscend(const at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kAscend, MaskedFillScalarKernelAscend)
 
 at::Tensor MaskedFillTensorKernelAscend(const at::Tensor& self, const at::Tensor& mask, const at::Tensor& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = at::infer_size(self.sizes(), mask.sizes());
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -3533,6 +4101,10 @@ at::Tensor MaskedFillTensorKernelAscend(const at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(MaskedFillTensorFn, masked_fill_tensor_dispatcher, Backend::kAscend, MaskedFillTensorKernelAscend)
 
 at::Tensor GatherKernelAscend(const at::Tensor& self, int64_t dim, const at::Tensor& index, bool sparse_grad) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -3549,6 +4121,10 @@ at::Tensor GatherKernelAscend(const at::Tensor& self, int64_t dim, const at::Ten
 REGISTER_IMPL_TO_DISPATCHER(GatherFn, gather_dispatcher, Backend::kAscend, GatherKernelAscend)
 
 at::Tensor IndexSelectKernelAscend(const at::Tensor& self, int64_t dim, const at::Tensor& index) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   std::vector<int64_t> out_shape(self.sizes().begin(), self.sizes().end());
@@ -3567,6 +4143,10 @@ at::Tensor IndexSelectKernelAscend(const at::Tensor& self, int64_t dim, const at
 REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kAscend, IndexSelectKernelAscend)
 
 at::Tensor& ZeroInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceZero, const_cast<aclTensor*>(acl_self.get()));
@@ -3576,6 +4156,10 @@ at::Tensor& ZeroInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kAscend, ZeroInplaceKernelAscend)
 
 at::Tensor& FillInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_value(value, self.scalar_type());
@@ -3586,6 +4170,10 @@ at::Tensor& FillInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& va
 REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kAscend, FillInplaceScalarKernelAscend)
 
 at::Tensor& FillInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto value_c = value.is_privateuseone()
       ? (value.scalar_type() == self.scalar_type() ? value : value.to(self.scalar_type()))
@@ -3599,6 +4187,10 @@ at::Tensor& FillInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& va
 REGISTER_IMPL_TO_DISPATCHER(FillInplaceTensorFn, fill_inplace_tensor_dispatcher, Backend::kAscend, FillInplaceTensorKernelAscend)
 
 at::Tensor& AddInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3614,6 +4206,10 @@ at::Tensor& AddInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kAscend, AddInplaceTensorKernelAscend)
 
 at::Tensor& AddInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -3626,6 +4222,10 @@ at::Tensor& AddInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
 REGISTER_IMPL_TO_DISPATCHER(AddInplaceScalarFn, add_inplace_scalar_dispatcher, Backend::kAscend, AddInplaceScalarKernelAscend)
 
 at::Tensor& MulInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3639,6 +4239,10 @@ at::Tensor& MulInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(MulInplaceTensorFn, mul_inplace_tensor_dispatcher, Backend::kAscend, MulInplaceTensorKernelAscend)
 
 at::Tensor& MulInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -3649,6 +4253,10 @@ at::Tensor& MulInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
 REGISTER_IMPL_TO_DISPATCHER(MulInplaceScalarFn, mul_inplace_scalar_dispatcher, Backend::kAscend, MulInplaceScalarKernelAscend)
 
 at::Tensor& DivInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3662,6 +4270,10 @@ at::Tensor& DivInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorFn, div_inplace_tensor_dispatcher, Backend::kAscend, DivInplaceTensorKernelAscend)
 
 at::Tensor& BitwiseAndInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3675,6 +4287,10 @@ at::Tensor& BitwiseAndInplaceTensorKernelAscend(at::Tensor& self, const at::Tens
 REGISTER_IMPL_TO_DISPATCHER(BitwiseAndInplaceTensorFn, bitwise_and_inplace_tensor_dispatcher, Backend::kAscend, BitwiseAndInplaceTensorKernelAscend)
 
 at::Tensor& BitwiseOrInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3688,6 +4304,10 @@ at::Tensor& BitwiseOrInplaceTensorKernelAscend(at::Tensor& self, const at::Tenso
 REGISTER_IMPL_TO_DISPATCHER(BitwiseOrInplaceTensorFn, bitwise_or_inplace_tensor_dispatcher, Backend::kAscend, BitwiseOrInplaceTensorKernelAscend)
 
 at::Tensor& BitwiseXorInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -3701,6 +4321,10 @@ at::Tensor& BitwiseXorInplaceTensorKernelAscend(at::Tensor& self, const at::Tens
 REGISTER_IMPL_TO_DISPATCHER(BitwiseXorInplaceTensorFn, bitwise_xor_inplace_tensor_dispatcher, Backend::kAscend, BitwiseXorInplaceTensorKernelAscend)
 
 at::Tensor& AddcmulInplaceKernelAscend(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto t1 = tensor1.scalar_type() == self.scalar_type() ? tensor1 : tensor1.to(self.scalar_type());
   auto t2 = tensor2.scalar_type() == self.scalar_type() ? tensor2 : tensor2.to(self.scalar_type());
@@ -3716,6 +4340,10 @@ at::Tensor& AddcmulInplaceKernelAscend(at::Tensor& self, const at::Tensor& tenso
 REGISTER_IMPL_TO_DISPATCHER(AddcmulInplaceFn, addcmul_inplace_dispatcher, Backend::kAscend, AddcmulInplaceKernelAscend)
 
 at::Tensor& AddcdivInplaceKernelAscend(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto t1 = tensor1.scalar_type() == self.scalar_type() ? tensor1 : tensor1.to(self.scalar_type());
   auto t2 = tensor2.scalar_type() == self.scalar_type() ? tensor2 : tensor2.to(self.scalar_type());
@@ -3731,6 +4359,10 @@ at::Tensor& AddcdivInplaceKernelAscend(at::Tensor& self, const at::Tensor& tenso
 REGISTER_IMPL_TO_DISPATCHER(AddcdivInplaceFn, addcdiv_inplace_dispatcher, Backend::kAscend, AddcdivInplaceKernelAscend)
 
 at::Tensor& SqrtInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceSqrt, const_cast<aclTensor*>(acl_self.get()));
@@ -3740,6 +4372,10 @@ at::Tensor& SqrtInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SqrtInplaceFn, sqrt_inplace_dispatcher, Backend::kAscend, SqrtInplaceKernelAscend)
 
 at::Tensor& LerpInplaceScalarKernelAscend(at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto end_c = end.scalar_type() == self.scalar_type() ? end : end.to(self.scalar_type());
   ascend::AclTensorWrapper acl_self(self);
@@ -3753,6 +4389,10 @@ at::Tensor& LerpInplaceScalarKernelAscend(at::Tensor& self, const at::Tensor& en
 REGISTER_IMPL_TO_DISPATCHER(LerpInplaceScalarFn, lerp_inplace_scalar_dispatcher, Backend::kAscend, LerpInplaceScalarKernelAscend)
 
 at::Tensor& AcosInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAcos, const_cast<aclTensor*>(acl_self.get()));
@@ -3762,6 +4402,10 @@ at::Tensor& AcosInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AcosInplaceFn, acos_inplace_dispatcher, Backend::kAscend, AcosInplaceKernelAscend)
 
 at::Tensor& AcoshInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAcosh, const_cast<aclTensor*>(acl_self.get()));
@@ -3771,6 +4415,10 @@ at::Tensor& AcoshInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AcoshInplaceFn, acosh_inplace_dispatcher, Backend::kAscend, AcoshInplaceKernelAscend)
 
 at::Tensor& AsinInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAsin, const_cast<aclTensor*>(acl_self.get()));
@@ -3780,6 +4428,10 @@ at::Tensor& AsinInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AsinInplaceFn, asin_inplace_dispatcher, Backend::kAscend, AsinInplaceKernelAscend)
 
 at::Tensor& AsinhInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAsinh, const_cast<aclTensor*>(acl_self.get()));
@@ -3789,6 +4441,10 @@ at::Tensor& AsinhInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AsinhInplaceFn, asinh_inplace_dispatcher, Backend::kAscend, AsinhInplaceKernelAscend)
 
 at::Tensor& AtanInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAtan, const_cast<aclTensor*>(acl_self.get()));
@@ -3798,6 +4454,10 @@ at::Tensor& AtanInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AtanInplaceFn, atan_inplace_dispatcher, Backend::kAscend, AtanInplaceKernelAscend)
 
 at::Tensor& AtanhInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceAtanh, const_cast<aclTensor*>(acl_self.get()));
@@ -3807,6 +4467,10 @@ at::Tensor& AtanhInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AtanhInplaceFn, atanh_inplace_dispatcher, Backend::kAscend, AtanhInplaceKernelAscend)
 
 at::Tensor& CeilInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceCeil, const_cast<aclTensor*>(acl_self.get()));
@@ -3816,6 +4480,10 @@ at::Tensor& CeilInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CeilInplaceFn, ceil_inplace_dispatcher, Backend::kAscend, CeilInplaceKernelAscend)
 
 at::Tensor& CosInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceCos, const_cast<aclTensor*>(acl_self.get()));
@@ -3825,6 +4493,10 @@ at::Tensor& CosInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CosInplaceFn, cos_inplace_dispatcher, Backend::kAscend, CosInplaceKernelAscend)
 
 at::Tensor& CoshInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceCosh, const_cast<aclTensor*>(acl_self.get()));
@@ -3834,6 +4506,10 @@ at::Tensor& CoshInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CoshInplaceFn, cosh_inplace_dispatcher, Backend::kAscend, CoshInplaceKernelAscend)
 
 at::Tensor& ErfInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceErf, const_cast<aclTensor*>(acl_self.get()));
@@ -3843,6 +4519,10 @@ at::Tensor& ErfInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ErfInplaceFn, erf_inplace_dispatcher, Backend::kAscend, ErfInplaceKernelAscend)
 
 at::Tensor& ErfcInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceErfc, const_cast<aclTensor*>(acl_self.get()));
@@ -3852,6 +4532,10 @@ at::Tensor& ErfcInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ErfcInplaceFn, erfc_inplace_dispatcher, Backend::kAscend, ErfcInplaceKernelAscend)
 
 at::Tensor& ErfinvInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceErfinv, const_cast<aclTensor*>(acl_self.get()));
@@ -3861,6 +4545,10 @@ at::Tensor& ErfinvInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ErfinvInplaceFn, erfinv_inplace_dispatcher, Backend::kAscend, ErfinvInplaceKernelAscend)
 
 at::Tensor& ExpInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceExp, const_cast<aclTensor*>(acl_self.get()));
@@ -3870,6 +4558,10 @@ at::Tensor& ExpInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ExpInplaceFn, exp_inplace_dispatcher, Backend::kAscend, ExpInplaceKernelAscend)
 
 at::Tensor& Exp2InplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceExp2, const_cast<aclTensor*>(acl_self.get()));
@@ -3879,6 +4571,10 @@ at::Tensor& Exp2InplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Exp2InplaceFn, exp2_inplace_dispatcher, Backend::kAscend, Exp2InplaceKernelAscend)
 
 at::Tensor& Expm1InplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceExpm1, const_cast<aclTensor*>(acl_self.get()));
@@ -3888,6 +4584,10 @@ at::Tensor& Expm1InplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Expm1InplaceFn, expm1_inplace_dispatcher, Backend::kAscend, Expm1InplaceKernelAscend)
 
 at::Tensor& FloorInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceFloor, const_cast<aclTensor*>(acl_self.get()));
@@ -3897,6 +4597,10 @@ at::Tensor& FloorInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(FloorInplaceFn, floor_inplace_dispatcher, Backend::kAscend, FloorInplaceKernelAscend)
 
 at::Tensor& FracInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceFrac, const_cast<aclTensor*>(acl_self.get()));
@@ -3906,6 +4610,10 @@ at::Tensor& FracInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(FracInplaceFn, frac_inplace_dispatcher, Backend::kAscend, FracInplaceKernelAscend)
 
 at::Tensor& HardsigmoidInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceHardsigmoid, const_cast<aclTensor*>(acl_self.get()));
@@ -3915,6 +4623,10 @@ at::Tensor& HardsigmoidInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(HardsigmoidInplaceFn, hardsigmoid_inplace_dispatcher, Backend::kAscend, HardsigmoidInplaceKernelAscend)
 
 at::Tensor& HardswishInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceHardswish, const_cast<aclTensor*>(acl_self.get()));
@@ -3924,6 +4636,10 @@ at::Tensor& HardswishInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(HardswishInplaceFn, hardswish_inplace_dispatcher, Backend::kAscend, HardswishInplaceKernelAscend)
 
 at::Tensor& LogInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceLog, const_cast<aclTensor*>(acl_self.get()));
@@ -3933,6 +4649,10 @@ at::Tensor& LogInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(LogInplaceFn, log_inplace_dispatcher, Backend::kAscend, LogInplaceKernelAscend)
 
 at::Tensor& Log10InplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceLog10, const_cast<aclTensor*>(acl_self.get()));
@@ -3942,6 +4662,10 @@ at::Tensor& Log10InplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log10InplaceFn, log10_inplace_dispatcher, Backend::kAscend, Log10InplaceKernelAscend)
 
 at::Tensor& Log1pInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceLog1p, const_cast<aclTensor*>(acl_self.get()));
@@ -3951,6 +4675,10 @@ at::Tensor& Log1pInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log1pInplaceFn, log1p_inplace_dispatcher, Backend::kAscend, Log1pInplaceKernelAscend)
 
 at::Tensor& Log2InplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceLog2, const_cast<aclTensor*>(acl_self.get()));
@@ -3960,6 +4688,10 @@ at::Tensor& Log2InplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(Log2InplaceFn, log2_inplace_dispatcher, Backend::kAscend, Log2InplaceKernelAscend)
 
 at::Tensor& LogicalNotInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceLogicalNot, const_cast<aclTensor*>(acl_self.get()));
@@ -3969,6 +4701,10 @@ at::Tensor& LogicalNotInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(LogicalNotInplaceFn, logical_not_inplace_dispatcher, Backend::kAscend, LogicalNotInplaceKernelAscend)
 
 at::Tensor& MishInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceMish, const_cast<aclTensor*>(acl_self.get()));
@@ -3978,6 +4714,10 @@ at::Tensor& MishInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(MishInplaceFn, mish_inplace_dispatcher, Backend::kAscend, MishInplaceKernelAscend)
 
 at::Tensor& NegInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceNeg, const_cast<aclTensor*>(acl_self.get()));
@@ -3987,6 +4727,10 @@ at::Tensor& NegInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(NegInplaceFn, neg_inplace_dispatcher, Backend::kAscend, NegInplaceKernelAscend)
 
 at::Tensor& ReciprocalInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceReciprocal, const_cast<aclTensor*>(acl_self.get()));
@@ -3996,6 +4740,10 @@ at::Tensor& ReciprocalInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ReciprocalInplaceFn, reciprocal_inplace_dispatcher, Backend::kAscend, ReciprocalInplaceKernelAscend)
 
 at::Tensor& ReluInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceRelu, const_cast<aclTensor*>(acl_self.get()));
@@ -4005,6 +4753,10 @@ at::Tensor& ReluInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ReluInplaceFn, relu_inplace_dispatcher, Backend::kAscend, ReluInplaceKernelAscend)
 
 at::Tensor& RoundInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceRound, const_cast<aclTensor*>(acl_self.get()));
@@ -4014,6 +4766,10 @@ at::Tensor& RoundInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(RoundInplaceFn, round_inplace_dispatcher, Backend::kAscend, RoundInplaceKernelAscend)
 
 at::Tensor& RsqrtInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceRsqrt, const_cast<aclTensor*>(acl_self.get()));
@@ -4023,6 +4779,10 @@ at::Tensor& RsqrtInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(RsqrtInplaceFn, rsqrt_inplace_dispatcher, Backend::kAscend, RsqrtInplaceKernelAscend)
 
 at::Tensor& SigmoidInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceSigmoid, const_cast<aclTensor*>(acl_self.get()));
@@ -4032,6 +4792,10 @@ at::Tensor& SigmoidInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SigmoidInplaceFn, sigmoid_inplace_dispatcher, Backend::kAscend, SigmoidInplaceKernelAscend)
 
 at::Tensor& SinInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceSin, const_cast<aclTensor*>(acl_self.get()));
@@ -4041,6 +4805,10 @@ at::Tensor& SinInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SinInplaceFn, sin_inplace_dispatcher, Backend::kAscend, SinInplaceKernelAscend)
 
 at::Tensor& SinhInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceSinh, const_cast<aclTensor*>(acl_self.get()));
@@ -4050,6 +4818,10 @@ at::Tensor& SinhInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SinhInplaceFn, sinh_inplace_dispatcher, Backend::kAscend, SinhInplaceKernelAscend)
 
 at::Tensor& TanInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTan, const_cast<aclTensor*>(acl_self.get()));
@@ -4059,6 +4831,10 @@ at::Tensor& TanInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TanInplaceFn, tan_inplace_dispatcher, Backend::kAscend, TanInplaceKernelAscend)
 
 at::Tensor& TanhInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTanh, const_cast<aclTensor*>(acl_self.get()));
@@ -4068,6 +4844,10 @@ at::Tensor& TanhInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TanhInplaceFn, tanh_inplace_dispatcher, Backend::kAscend, TanhInplaceKernelAscend)
 
 at::Tensor& TruncInplaceKernelAscend(at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTrunc, const_cast<aclTensor*>(acl_self.get()));
@@ -4077,6 +4857,10 @@ at::Tensor& TruncInplaceKernelAscend(at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(TruncInplaceFn, trunc_inplace_dispatcher, Backend::kAscend, TruncInplaceKernelAscend)
 
 at::Tensor& RoundInplaceDecimalsKernelAscend(at::Tensor& self, int64_t n) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceRoundDecimals, const_cast<aclTensor*>(acl_self.get()), n);
@@ -4086,6 +4870,10 @@ at::Tensor& RoundInplaceDecimalsKernelAscend(at::Tensor& self, int64_t n) {
 REGISTER_IMPL_TO_DISPATCHER(RoundInplaceDecimalsFn, round_inplace_decimals_dispatcher, Backend::kAscend, RoundInplaceDecimalsKernelAscend)
 
 at::Tensor& DivInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4096,6 +4884,10 @@ at::Tensor& DivInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
 REGISTER_IMPL_TO_DISPATCHER(DivInplaceScalarFn, div_inplace_scalar_dispatcher, Backend::kAscend, DivInplaceScalarKernelAscend)
 
 at::Tensor& FloorDivideInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4106,6 +4898,10 @@ at::Tensor& FloorDivideInplaceScalarKernelAscend(at::Tensor& self, const at::Sca
 REGISTER_IMPL_TO_DISPATCHER(FloorDivideInplaceScalarFn, floor_divide_inplace_scalar_dispatcher, Backend::kAscend, FloorDivideInplaceScalarKernelAscend)
 
 at::Tensor& FmodInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4116,6 +4912,10 @@ at::Tensor& FmodInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& ot
 REGISTER_IMPL_TO_DISPATCHER(FmodInplaceScalarFn, fmod_inplace_scalar_dispatcher, Backend::kAscend, FmodInplaceScalarKernelAscend)
 
 at::Tensor& EqInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4126,6 +4926,10 @@ at::Tensor& EqInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(EqInplaceScalarFn, eq_inplace_scalar_dispatcher, Backend::kAscend, EqInplaceScalarKernelAscend)
 
 at::Tensor& NeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4136,6 +4940,10 @@ at::Tensor& NeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(NeInplaceScalarFn, ne_inplace_scalar_dispatcher, Backend::kAscend, NeInplaceScalarKernelAscend)
 
 at::Tensor& LtInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4146,6 +4954,10 @@ at::Tensor& LtInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(LtInplaceScalarFn, lt_inplace_scalar_dispatcher, Backend::kAscend, LtInplaceScalarKernelAscend)
 
 at::Tensor& GtInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4156,6 +4968,10 @@ at::Tensor& GtInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(GtInplaceScalarFn, gt_inplace_scalar_dispatcher, Backend::kAscend, GtInplaceScalarKernelAscend)
 
 at::Tensor& LeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4166,6 +4982,10 @@ at::Tensor& LeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(LeInplaceScalarFn, le_inplace_scalar_dispatcher, Backend::kAscend, LeInplaceScalarKernelAscend)
 
 at::Tensor& GeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4176,6 +4996,10 @@ at::Tensor& GeInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(GeInplaceScalarFn, ge_inplace_scalar_dispatcher, Backend::kAscend, GeInplaceScalarKernelAscend)
 
 at::Tensor& BitwiseAndInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4186,6 +5010,10 @@ at::Tensor& BitwiseAndInplaceScalarKernelAscend(at::Tensor& self, const at::Scal
 REGISTER_IMPL_TO_DISPATCHER(BitwiseAndInplaceScalarFn, bitwise_and_inplace_scalar_dispatcher, Backend::kAscend, BitwiseAndInplaceScalarKernelAscend)
 
 at::Tensor& BitwiseOrInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4196,6 +5024,10 @@ at::Tensor& BitwiseOrInplaceScalarKernelAscend(at::Tensor& self, const at::Scala
 REGISTER_IMPL_TO_DISPATCHER(BitwiseOrInplaceScalarFn, bitwise_or_inplace_scalar_dispatcher, Backend::kAscend, BitwiseOrInplaceScalarKernelAscend)
 
 at::Tensor& BitwiseXorInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4206,6 +5038,10 @@ at::Tensor& BitwiseXorInplaceScalarKernelAscend(at::Tensor& self, const at::Scal
 REGISTER_IMPL_TO_DISPATCHER(BitwiseXorInplaceScalarFn, bitwise_xor_inplace_scalar_dispatcher, Backend::kAscend, BitwiseXorInplaceScalarKernelAscend)
 
 at::Tensor& CeluInplaceKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4216,6 +5052,10 @@ at::Tensor& CeluInplaceKernelAscend(at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(CeluInplaceFn, celu_inplace_dispatcher, Backend::kAscend, CeluInplaceKernelAscend)
 
 at::Tensor& LeakyReluInplaceKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4226,6 +5066,10 @@ at::Tensor& LeakyReluInplaceKernelAscend(at::Tensor& self, const at::Scalar& oth
 REGISTER_IMPL_TO_DISPATCHER(LeakyReluInplaceFn, leaky_relu_inplace_dispatcher, Backend::kAscend, LeakyReluInplaceKernelAscend)
 
 at::Tensor& EqInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4239,6 +5083,10 @@ at::Tensor& EqInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(EqInplaceTensorFn, eq_inplace_tensor_dispatcher, Backend::kAscend, EqInplaceTensorKernelAscend)
 
 at::Tensor& NeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4252,6 +5100,10 @@ at::Tensor& NeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(NeInplaceTensorFn, ne_inplace_tensor_dispatcher, Backend::kAscend, NeInplaceTensorKernelAscend)
 
 at::Tensor& LtInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4265,6 +5117,10 @@ at::Tensor& LtInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(LtInplaceTensorFn, lt_inplace_tensor_dispatcher, Backend::kAscend, LtInplaceTensorKernelAscend)
 
 at::Tensor& GtInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4278,6 +5134,10 @@ at::Tensor& GtInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(GtInplaceTensorFn, gt_inplace_tensor_dispatcher, Backend::kAscend, GtInplaceTensorKernelAscend)
 
 at::Tensor& LeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4291,6 +5151,10 @@ at::Tensor& LeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(LeInplaceTensorFn, le_inplace_tensor_dispatcher, Backend::kAscend, LeInplaceTensorKernelAscend)
 
 at::Tensor& GeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4304,6 +5168,10 @@ at::Tensor& GeInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& othe
 REGISTER_IMPL_TO_DISPATCHER(GeInplaceTensorFn, ge_inplace_tensor_dispatcher, Backend::kAscend, GeInplaceTensorKernelAscend)
 
 at::Tensor& FmodInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4317,6 +5185,10 @@ at::Tensor& FmodInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(FmodInplaceTensorFn, fmod_inplace_tensor_dispatcher, Backend::kAscend, FmodInplaceTensorKernelAscend)
 
 at::Tensor& FloorDivideInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4330,6 +5202,10 @@ at::Tensor& FloorDivideInplaceTensorKernelAscend(at::Tensor& self, const at::Ten
 REGISTER_IMPL_TO_DISPATCHER(FloorDivideInplaceTensorFn, floor_divide_inplace_tensor_dispatcher, Backend::kAscend, FloorDivideInplaceTensorKernelAscend)
 
 at::Tensor& LogicalAndInplaceKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4343,6 +5219,10 @@ at::Tensor& LogicalAndInplaceKernelAscend(at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(LogicalAndInplaceFn, logical_and_inplace_dispatcher, Backend::kAscend, LogicalAndInplaceKernelAscend)
 
 at::Tensor& LogicalOrInplaceKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4356,6 +5236,10 @@ at::Tensor& LogicalOrInplaceKernelAscend(at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(LogicalOrInplaceFn, logical_or_inplace_dispatcher, Backend::kAscend, LogicalOrInplaceKernelAscend)
 
 at::Tensor& Atan2InplaceKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4369,6 +5253,10 @@ at::Tensor& Atan2InplaceKernelAscend(at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(Atan2InplaceFn, atan2_inplace_dispatcher, Backend::kAscend, Atan2InplaceKernelAscend)
 
 at::Tensor& SubInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4384,6 +5272,10 @@ at::Tensor& SubInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
 REGISTER_IMPL_TO_DISPATCHER(SubInplaceTensorFn, sub_inplace_tensor_dispatcher, Backend::kAscend, SubInplaceTensorKernelAscend)
 
 at::Tensor& SubInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4396,6 +5288,10 @@ at::Tensor& SubInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
 REGISTER_IMPL_TO_DISPATCHER(SubInplaceScalarFn, sub_inplace_scalar_dispatcher, Backend::kAscend, SubInplaceScalarKernelAscend)
 
 at::Tensor& ThresholdInplaceKernelAscend(at::Tensor& self, const at::Scalar& a, const at::Scalar& b) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_a(a, self.scalar_type());
@@ -4408,6 +5304,10 @@ at::Tensor& ThresholdInplaceKernelAscend(at::Tensor& self, const at::Scalar& a, 
 REGISTER_IMPL_TO_DISPATCHER(ThresholdInplaceFn, threshold_inplace_dispatcher, Backend::kAscend, ThresholdInplaceKernelAscend)
 
 at::Tensor& HardtanhInplaceKernelAscend(at::Tensor& self, const at::Scalar& a, const at::Scalar& b) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_a(a, self.scalar_type());
@@ -4420,6 +5320,10 @@ at::Tensor& HardtanhInplaceKernelAscend(at::Tensor& self, const at::Scalar& a, c
 REGISTER_IMPL_TO_DISPATCHER(HardtanhInplaceFn, hardtanh_inplace_dispatcher, Backend::kAscend, HardtanhInplaceKernelAscend)
 
 at::Tensor& TrilInplaceKernelAscend(at::Tensor& self, int64_t n) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTril, const_cast<aclTensor*>(acl_self.get()), n);
@@ -4429,6 +5333,10 @@ at::Tensor& TrilInplaceKernelAscend(at::Tensor& self, int64_t n) {
 REGISTER_IMPL_TO_DISPATCHER(TrilInplaceFn, tril_inplace_dispatcher, Backend::kAscend, TrilInplaceKernelAscend)
 
 at::Tensor& TriuInplaceKernelAscend(at::Tensor& self, int64_t n) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTriu, const_cast<aclTensor*>(acl_self.get()), n);
@@ -4438,6 +5346,10 @@ at::Tensor& TriuInplaceKernelAscend(at::Tensor& self, int64_t n) {
 REGISTER_IMPL_TO_DISPATCHER(TriuInplaceFn, triu_inplace_dispatcher, Backend::kAscend, TriuInplaceKernelAscend)
 
 at::Tensor& EluInplaceKernelAscend(at::Tensor& self, const at::Scalar& alpha, const at::Scalar& scale, const at::Scalar& input_scale) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_alpha(alpha, self.scalar_type());
@@ -4451,6 +5363,10 @@ at::Tensor& EluInplaceKernelAscend(at::Tensor& self, const at::Scalar& alpha, co
 REGISTER_IMPL_TO_DISPATCHER(EluInplaceFn, elu_inplace_dispatcher, Backend::kAscend, EluInplaceKernelAscend)
 
 at::Tensor& MaskedFillInplaceScalarKernelAscend(at::Tensor& self, const at::Tensor& mask, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto mask_b = mask.sizes().equals(self.sizes())
       ? mask.contiguous()
@@ -4466,6 +5382,10 @@ at::Tensor& MaskedFillInplaceScalarKernelAscend(at::Tensor& self, const at::Tens
 REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceScalarFn, masked_fill_inplace_scalar_dispatcher, Backend::kAscend, MaskedFillInplaceScalarKernelAscend)
 
 at::Tensor& MaskedFillInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& mask, const at::Tensor& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto mask_b = mask.sizes().equals(self.sizes())
       ? mask.contiguous()
@@ -4484,6 +5404,10 @@ at::Tensor& MaskedFillInplaceTensorKernelAscend(at::Tensor& self, const at::Tens
 REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tensor_dispatcher, Backend::kAscend, MaskedFillInplaceTensorKernelAscend)
 
 at::Tensor& ClampInplaceKernelAscend(at::Tensor& self, const ::std::optional<at::Scalar>& min, const ::std::optional<at::Scalar>& max) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto tmp = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -4505,6 +5429,10 @@ at::Tensor& ClampInplaceKernelAscend(at::Tensor& self, const ::std::optional<at:
 REGISTER_IMPL_TO_DISPATCHER(ClampInplaceFn, clamp_inplace_dispatcher, Backend::kAscend, ClampInplaceKernelAscend)
 
 at::Tensor& ClampInplaceTensorKernelAscend(at::Tensor& self, const ::std::optional<at::Tensor>& min, const ::std::optional<at::Tensor>& max) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto tmp = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -4531,6 +5459,10 @@ at::Tensor& ClampInplaceTensorKernelAscend(at::Tensor& self, const ::std::option
 REGISTER_IMPL_TO_DISPATCHER(ClampInplaceTensorFn, clamp_inplace_tensor_dispatcher, Backend::kAscend, ClampInplaceTensorKernelAscend)
 
 at::Tensor& ClampMinInplaceKernelAscend(at::Tensor& self, const at::Scalar& bound) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto tmp = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -4547,6 +5479,10 @@ at::Tensor& ClampMinInplaceKernelAscend(at::Tensor& self, const at::Scalar& boun
 REGISTER_IMPL_TO_DISPATCHER(ClampMinInplaceFn, clamp_min_inplace_dispatcher, Backend::kAscend, ClampMinInplaceKernelAscend)
 
 at::Tensor& ClampMaxInplaceKernelAscend(at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4557,6 +5493,10 @@ at::Tensor& ClampMaxInplaceKernelAscend(at::Tensor& self, const at::Scalar& othe
 REGISTER_IMPL_TO_DISPATCHER(ClampMaxInplaceFn, clamp_max_inplace_dispatcher, Backend::kAscend, ClampMaxInplaceKernelAscend)
 
 at::Tensor& ClampMinInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4570,6 +5510,10 @@ at::Tensor& ClampMinInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(ClampMinInplaceTensorFn, clamp_min_inplace_tensor_dispatcher, Backend::kAscend, ClampMinInplaceTensorKernelAscend)
 
 at::Tensor& ClampMaxInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4583,6 +5527,10 @@ at::Tensor& ClampMaxInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor
 REGISTER_IMPL_TO_DISPATCHER(ClampMaxInplaceTensorFn, clamp_max_inplace_tensor_dispatcher, Backend::kAscend, ClampMaxInplaceTensorKernelAscend)
 
 at::Tensor ClampMinTensorKernelAscend(const at::Tensor& self, const at::Tensor& bound) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto bound_c = bound.is_privateuseone()
       ? (bound.scalar_type() == self.scalar_type() ? bound : bound.to(self.scalar_type()))
@@ -4602,6 +5550,10 @@ at::Tensor ClampMinTensorKernelAscend(const at::Tensor& self, const at::Tensor& 
 REGISTER_IMPL_TO_DISPATCHER(ClampMinTensorFn, clamp_min_tensor_dispatcher, Backend::kAscend, ClampMinTensorKernelAscend)
 
 at::Tensor ClampMaxTensorKernelAscend(const at::Tensor& self, const at::Tensor& bound) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto bound_c = bound.is_privateuseone()
       ? (bound.scalar_type() == self.scalar_type() ? bound : bound.to(self.scalar_type()))
@@ -4621,6 +5573,10 @@ at::Tensor ClampMaxTensorKernelAscend(const at::Tensor& self, const at::Tensor& 
 REGISTER_IMPL_TO_DISPATCHER(ClampMaxTensorFn, clamp_max_tensor_dispatcher, Backend::kAscend, ClampMaxTensorKernelAscend)
 
 at::Tensor LinspaceKernelAscend(const at::Scalar& start, const at::Scalar& end, int64_t steps, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
   namespace ascend = at::native::flagos::ascend;
   auto options = at::TensorOptions()
       .dtype(dtype.value_or(at::get_default_dtype_as_scalartype()))
@@ -4641,6 +5597,10 @@ at::Tensor LinspaceKernelAscend(const at::Scalar& start, const at::Scalar& end, 
 REGISTER_IMPL_TO_DISPATCHER(LinspaceFn, linspace_dispatcher, Backend::kAscend, LinspaceKernelAscend)
 
 at::Tensor MseLossBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& target, int64_t reduction) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto target_c = target.scalar_type() == self.scalar_type()
       ? target : target.to(self.scalar_type());
@@ -4684,6 +5644,10 @@ static void ForeachMulInplaceScalarKernelAscendChunk(at::TensorList self, const 
 }
 
 void ForeachMulInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& scalar) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_mul_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -4718,6 +5682,10 @@ static void ForeachAddInplaceScalarKernelAscendChunk(at::TensorList self, const 
 }
 
 void ForeachAddInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& scalar) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_add_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -4729,6 +5697,10 @@ REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scala
 
 
 void ForeachAddInplaceListKernelAscend(at::TensorList self, at::TensorList other, const at::Scalar& alpha) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(self.size() == other.size(), "foreach_add_inplace_list_dispatcher: tensor lists must match in length");
   for (size_t i = 0; i < self.size(); ++i) {
     at::Tensor dst = self[i];
@@ -4765,6 +5737,10 @@ static void ForeachLerpInplaceScalarKernelAscendChunk(at::TensorList self, at::T
 }
 
 void ForeachLerpInplaceScalarKernelAscend(at::TensorList self, at::TensorList tensors1, const at::Scalar& weight) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_lerp_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensors1.size(), "foreach_lerp_inplace_scalar_dispatcher: tensor lists must match in length");
   for (size_t off = 0; off < self.size(); off += 32) {
@@ -4808,6 +5784,10 @@ static void ForeachAddcmulInplaceScalarKernelAscendChunk(at::TensorList self, at
 }
 
 void ForeachAddcmulInplaceScalarKernelAscend(at::TensorList self, at::TensorList tensor1, at::TensorList tensor2, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_addcmul_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensor1.size() && self.size() == tensor2.size(),
       "foreach_addcmul_inplace_scalar_dispatcher: tensor lists must match in length");
@@ -4844,6 +5824,10 @@ static void ForeachSqrtKernelAscendChunk(at::TensorList self, at::TensorList out
 }
 
 ::std::vector<at::Tensor> ForeachSqrtKernelAscend(at::TensorList self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_sqrt_dispatcher: expected a non-empty list of tensors");
   std::vector<at::Tensor> outs;
   outs.reserve(self.size());
@@ -4887,6 +5871,10 @@ static void ForeachDivInplaceScalarlistKernelAscendChunk(at::TensorList self, at
 }
 
 void ForeachDivInplaceScalarlistKernelAscend(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_div_inplace_scalarlist_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == scalars.size(), "foreach_div_inplace_scalarlist_dispatcher: scalars must match tensor list length");
   for (size_t off = 0; off < self.size(); off += 32) {
@@ -4944,6 +5932,10 @@ static void ForeachAddcdivInplaceScalarlistKernelAscendChunk(at::TensorList self
 }
 
 void ForeachAddcdivInplaceScalarlistKernelAscend(at::TensorList self, at::TensorList tensor1, at::TensorList tensor2, at::ArrayRef<at::Scalar> scalars) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_addcdiv_inplace_scalarlist_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensor1.size() && self.size() == tensor2.size() && self.size() == scalars.size(),
       "foreach_addcdiv_inplace_scalarlist_dispatcher: tensor/scalar lists must match in length");
@@ -4982,6 +5974,10 @@ static void ForeachNormScalarKernelAscendChunk(at::TensorList self, at::TensorLi
 }
 
 ::std::vector<at::Tensor> ForeachNormScalarKernelAscend(at::TensorList self, const at::Scalar& ord, ::std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_norm_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(ord.toDouble() == 2.0,
       "foreach_norm_scalar_dispatcher: only ord=2 is supported on Ascend (aclnnForeachNorm), got ", ord.toDouble());
@@ -5024,6 +6020,10 @@ static void ForeachClampMinInplaceScalarKernelAscendChunk(at::TensorList self, c
 }
 
 void ForeachClampMinInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& scalar) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_clamp_min_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -5056,6 +6056,10 @@ static void ForeachClampMaxInplaceScalarKernelAscendChunk(at::TensorList self, c
 }
 
 void ForeachClampMaxInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& scalar) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_clamp_max_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -5066,6 +6070,10 @@ void ForeachClampMaxInplaceScalarKernelAscend(at::TensorList self, const at::Sca
 REGISTER_IMPL_TO_DISPATCHER(ForeachClampMaxInplaceScalarFn, foreach_clamp_max_inplace_scalar_dispatcher, Backend::kAscend, ForeachClampMaxInplaceScalarKernelAscend)
 
 at::Tensor LinalgVectorNormKernelAscend(const at::Tensor& self, const at::Scalar& ord, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.value_or(
       at::isFloatingType(self.scalar_type()) ? self.scalar_type() : at::kFloat);
@@ -5135,6 +6143,10 @@ static void ForeachMulInplaceTensorKernelAscendChunk(at::TensorList self, const 
 }
 
 void ForeachMulInplaceTensorKernelAscend(at::TensorList self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(!self.empty(), "foreach_mul_inplace_tensor_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -5145,6 +6157,10 @@ void ForeachMulInplaceTensorKernelAscend(at::TensorList self, const at::Tensor& 
 REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceTensorFn, foreach_mul_inplace_tensor_dispatcher, Backend::kAscend, ForeachMulInplaceTensorKernelAscend)
 
 at::Tensor EmbeddingKernelAscend(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(weight));
   namespace ascend = at::native::flagos::ascend;
   auto out_sizes = indices.sizes().vec();
   out_sizes.push_back(weight.size(1));
@@ -5162,6 +6178,10 @@ at::Tensor EmbeddingKernelAscend(const at::Tensor& weight, const at::Tensor& ind
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kAscend, EmbeddingKernelAscend)
 
 at::Tensor EmbeddingDenseBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto grad_weight = ascend::OpPreparation::apply_tensor_without_format(
       {num_weights, grad_output.size(-1)}, grad_output.options());
@@ -5178,6 +6198,10 @@ at::Tensor EmbeddingDenseBackwardKernelAscend(const at::Tensor& grad_output, con
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kAscend, EmbeddingDenseBackwardKernelAscend)
 
 at::Tensor ConstantPadNdKernelAscend(const at::Tensor& self, at::IntArrayRef pad, const at::Scalar& value) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto input_sizes = self.sizes().vec();
   auto ndim = input_sizes.size();
@@ -5203,6 +6227,10 @@ at::Tensor ConstantPadNdKernelAscend(const at::Tensor& self, at::IntArrayRef pad
 REGISTER_IMPL_TO_DISPATCHER(ConstantPadNdFn, constant_pad_nd_dispatcher, Backend::kAscend, ConstantPadNdKernelAscend)
 
 at::Tensor BinaryCrossEntropyKernelAscend(const at::Tensor& self, const at::Tensor& target, const ::std::optional<at::Tensor>& weight, int64_t reduction) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> out_shape;   // scalar for mean/sum
   if (reduction == 0) out_shape = self.sizes().vec();
@@ -5221,6 +6249,10 @@ at::Tensor BinaryCrossEntropyKernelAscend(const at::Tensor& self, const at::Tens
 REGISTER_IMPL_TO_DISPATCHER(BinaryCrossEntropyFn, binary_cross_entropy_dispatcher, Backend::kAscend, BinaryCrossEntropyKernelAscend)
 
 at::Tensor BinaryCrossEntropyBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& target, const ::std::optional<at::Tensor>& weight, int64_t reduction) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(self.sizes(), self.options());
 
@@ -5238,6 +6270,10 @@ at::Tensor BinaryCrossEntropyBackwardKernelAscend(const at::Tensor& grad_output,
 REGISTER_IMPL_TO_DISPATCHER(BinaryCrossEntropyBackwardFn, binary_cross_entropy_backward_dispatcher, Backend::kAscend, BinaryCrossEntropyBackwardKernelAscend)
 
 at::Tensor BinaryCrossEntropyWithLogitsKernelAscend(const at::Tensor& self, const at::Tensor& target, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& pos_weight, int64_t reduction) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> out_shape;   // scalar for mean/sum
   if (reduction == 0) out_shape = self.sizes().vec();
@@ -5258,6 +6294,10 @@ at::Tensor BinaryCrossEntropyWithLogitsKernelAscend(const at::Tensor& self, cons
 REGISTER_IMPL_TO_DISPATCHER(BinaryCrossEntropyWithLogitsFn, binary_cross_entropy_with_logits_dispatcher, Backend::kAscend, BinaryCrossEntropyWithLogitsKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelAscend(const at::Tensor& input, at::IntArrayRef normalized_shape, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& bias, double eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   namespace ascend = at::native::flagos::ascend;
   int64_t begin_axis = input.dim() - static_cast<int64_t>(normalized_shape.size());
   auto stat_shape = input.sizes().vec();
@@ -5290,6 +6330,10 @@ REGISTER_IMPL_TO_DISPATCHER(BinaryCrossEntropyWithLogitsFn, binary_cross_entropy
 REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kAscend, NativeLayerNormKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeGroupNormKernelAscend(const at::Tensor& input, const ::std::optional<at::Tensor>& weight, const ::std::optional<at::Tensor>& bias, int64_t N, int64_t C, int64_t HxW, int64_t group, double eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       input.sizes(), input.options());
@@ -5315,6 +6359,10 @@ REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Bac
 REGISTER_IMPL_TO_DISPATCHER(NativeGroupNormFn, native_group_norm_dispatcher, Backend::kAscend, NativeGroupNormKernelAscend)
 
 at::Tensor GeluKernelAscend(const at::Tensor& self, c10::string_view approximate) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   int64_t approx = (approximate == "tanh") ? 1 : 0;
   TORCH_CHECK(approximate == "none" || approximate == "tanh",
@@ -5332,6 +6380,10 @@ at::Tensor GeluKernelAscend(const at::Tensor& self, c10::string_view approximate
 REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kAscend, GeluKernelAscend)
 
 at::Tensor GeluBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self, c10::string_view approximate) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   TORCH_CHECK(approximate == "none" || approximate == "tanh",
       "gelu_backward: unsupported approximate='", approximate, "'");
@@ -5350,6 +6402,10 @@ at::Tensor GeluBackwardKernelAscend(const at::Tensor& grad_output, const at::Ten
 REGISTER_IMPL_TO_DISPATCHER(GeluBackwardFn, gelu_backward_dispatcher, Backend::kAscend, GeluBackwardKernelAscend)
 
 at::Tensor PrivLogSoftmaxKernelAscend(const at::Tensor& self, int64_t dim, bool half_to_float) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = half_to_float ? at::kFloat : self.scalar_type();
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -5365,6 +6421,10 @@ at::Tensor PrivLogSoftmaxKernelAscend(const at::Tensor& self, int64_t dim, bool 
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kAscend, PrivLogSoftmaxKernelAscend)
 
 at::Tensor PrivSoftmaxBackwardDataKernelAscend(const at::Tensor& grad_output, const at::Tensor& output, int64_t dim, at::ScalarType input_dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       grad_output.sizes(), grad_output.options().dtype(input_dtype));
@@ -5380,6 +6440,10 @@ at::Tensor PrivSoftmaxBackwardDataKernelAscend(const at::Tensor& grad_output, co
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kAscend, PrivSoftmaxBackwardDataKernelAscend)
 
 at::Tensor PrivLogSoftmaxBackwardDataKernelAscend(const at::Tensor& grad_output, const at::Tensor& output, int64_t dim, at::ScalarType input_dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       grad_output.sizes(), grad_output.options().dtype(input_dtype));
@@ -5395,6 +6459,10 @@ at::Tensor PrivLogSoftmaxBackwardDataKernelAscend(const at::Tensor& grad_output,
 REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kAscend, PrivLogSoftmaxBackwardDataKernelAscend)
 
 at::Tensor SiluBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto grad_input = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -5410,6 +6478,10 @@ at::Tensor SiluBackwardKernelAscend(const at::Tensor& grad_output, const at::Ten
 REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kAscend, SiluBackwardKernelAscend)
 
 at::Tensor WhereSelfKernelAscend(const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = at::infer_size(self.sizes(), other.sizes());
   out_shape = at::infer_size(condition.sizes(), out_shape);
@@ -5433,6 +6505,10 @@ at::Tensor WhereSelfKernelAscend(const at::Tensor& condition, const at::Tensor& 
 REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kAscend, WhereSelfKernelAscend)
 
 at::Tensor PrivSoftmaxKernelAscend(const at::Tensor& self, int64_t dim, bool half_to_float) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = half_to_float ? at::kFloat : self.scalar_type();
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -5455,6 +6531,10 @@ at::Tensor PrivSoftmaxKernelAscend(const at::Tensor& self, int64_t dim, bool hal
 REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kAscend, PrivSoftmaxKernelAscend)
 
 at::Tensor AllKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto input = self.contiguous().reshape({-1});
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -5474,6 +6554,10 @@ at::Tensor AllKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kAscend, AllKernelAscend)
 
 at::Tensor AnyKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto input = self.contiguous().reshape({-1});
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -5493,6 +6577,10 @@ at::Tensor AnyKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AnyFn, any_dispatcher, Backend::kAscend, AnyKernelAscend)
 
 at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
   int64_t ndim = self.dim();
@@ -5535,6 +6623,10 @@ at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArra
 REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kAscend, SumDimIntlistKernelAscend)
 
 at::Tensor SumKernelAscend(const at::Tensor& self, std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   // Integral/bool inputs promote to int64 when no dtype given (matches torch).
   at::ScalarType out_dtype = dtype.has_value()
@@ -5558,6 +6650,10 @@ at::Tensor SumKernelAscend(const at::Tensor& self, std::optional<at::ScalarType>
 REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kAscend, SumKernelAscend)
 
 at::Tensor MaxKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       {}, self.options());
@@ -5571,6 +6667,10 @@ at::Tensor MaxKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(MaxFn, max_dispatcher, Backend::kAscend, MaxKernelAscend)
 
 at::Tensor MinKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       {}, self.options());
@@ -5584,6 +6684,10 @@ at::Tensor MinKernelAscend(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(MinFn, min_dispatcher, Backend::kAscend, MinKernelAscend)
 
 at::Tensor MeanDimKernelAscend(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
   int64_t ndim = self.dim();
@@ -5626,6 +6730,10 @@ at::Tensor MeanDimKernelAscend(const at::Tensor& self, at::OptionalIntArrayRef d
 REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kAscend, MeanDimKernelAscend)
 
 at::Tensor MeanKernelAscend(const at::Tensor& self, std::optional<at::ScalarType> dtype) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   at::ScalarType out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
   int64_t ndim = self.dim();
@@ -5645,6 +6753,10 @@ at::Tensor MeanKernelAscend(const at::Tensor& self, std::optional<at::ScalarType
 REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kAscend, MeanKernelAscend)
 
 at::Tensor ClampKernelAscend(const at::Tensor& self, const ::std::optional<at::Scalar>& min, const ::std::optional<at::Scalar>& max) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -5665,6 +6777,10 @@ at::Tensor ClampKernelAscend(const at::Tensor& self, const ::std::optional<at::S
 REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kAscend, ClampKernelAscend)
 
 at::Tensor ClampTensorKernelAscend(const at::Tensor& self, const ::std::optional<at::Tensor>& min, const ::std::optional<at::Tensor>& max) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = self.sizes().vec();
   if (min.has_value()) out_shape = at::infer_size(out_shape, min.value().sizes());
@@ -5684,6 +6800,10 @@ at::Tensor ClampTensorKernelAscend(const at::Tensor& self, const ::std::optional
 REGISTER_IMPL_TO_DISPATCHER(ClampTensorFn, clamp_tensor_dispatcher, Backend::kAscend, ClampTensorKernelAscend)
 
 at::Tensor PrivAdaptiveAvgPool2dKernelAscend(const at::Tensor& self, at::IntArrayRef output_size) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = self.sizes().vec();
   int64_t r = out_shape.size();
@@ -5706,6 +6826,10 @@ at::Tensor PrivAdaptiveAvgPool2dKernelAscend(const at::Tensor& self, at::IntArra
 REGISTER_IMPL_TO_DISPATCHER(PrivAdaptiveAvgPool2dFn, priv_adaptive_avg_pool2d_dispatcher, Backend::kAscend, PrivAdaptiveAvgPool2dKernelAscend)
 
 at::Tensor AvgPool2dKernelAscend(const at::Tensor& self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> k(kernel_size.begin(), kernel_size.end());
   std::vector<int64_t> s = stride.empty() ? k : std::vector<int64_t>(stride.begin(), stride.end());
@@ -5741,6 +6865,10 @@ at::Tensor AvgPool2dKernelAscend(const at::Tensor& self, at::IntArrayRef kernel_
 REGISTER_IMPL_TO_DISPATCHER(AvgPool2dFn, avg_pool2d_dispatcher, Backend::kAscend, AvgPool2dKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor> MaxPool2dWithIndicesKernelAscend(const at::Tensor& self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
   std::vector<int64_t> k(kernel_size.begin(), kernel_size.end());
   std::vector<int64_t> s = stride.empty() ? k : std::vector<int64_t>(stride.begin(), stride.end());
@@ -5779,6 +6907,10 @@ REGISTER_IMPL_TO_DISPATCHER(AvgPool2dFn, avg_pool2d_dispatcher, Backend::kAscend
 REGISTER_IMPL_TO_DISPATCHER(MaxPool2dWithIndicesFn, max_pool2d_with_indices_dispatcher, Backend::kAscend, MaxPool2dWithIndicesKernelAscend)
 
 at::Tensor ConvolutionKernelAscend(const at::Tensor& input, const at::Tensor& weight, const ::std::optional<at::Tensor>& bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(input));
   namespace ascend = at::native::flagos::ascend;
   TORCH_CHECK(!transposed, "convolution codegen kernel: transposed not supported");
   int64_t rank = input.dim();
@@ -5814,6 +6946,10 @@ at::Tensor ConvolutionKernelAscend(const at::Tensor& input, const at::Tensor& we
 REGISTER_IMPL_TO_DISPATCHER(ConvolutionFn, convolution_dispatcher, Backend::kAscend, ConvolutionKernelAscend)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> ConvolutionBackwardKernelAscend(const at::Tensor& grad_output, const at::Tensor& input, const at::Tensor& weight, at::OptionalIntArrayRef bias_sizes, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups, ::std::array<bool, 3> output_mask) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(grad_output));
   namespace ascend = at::native::flagos::ascend;
   TORCH_CHECK(!transposed, "convolution_backward codegen kernel: transposed not supported");
   int64_t rank = input.dim();
@@ -5866,6 +7002,10 @@ REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardFn, convolution_backward_dispatch
 
 
 void PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelAscend(at::TensorList self, at::Tensor& found_inf, const at::Tensor& inv_scale) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   std::vector<at::Tensor> cpu_self;
   cpu_self.reserve(self.size());
   for (const auto& tensor : self) {
@@ -5885,6 +7025,10 @@ REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleInplaceFn, pri
 
 
 void PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelAscend(at::TensorList self, at::Tensor& found_inf, const at::Tensor& inv_scale, at::TensorList out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
   TORCH_CHECK(self.size() == out.size(), "priv_amp_foreach_non_finite_check_and_unscale_out_dispatcher: tensor lists must match in length");
   std::vector<at::Tensor> cpu_self;
   cpu_self.reserve(self.size());
