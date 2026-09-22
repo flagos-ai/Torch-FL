@@ -18,6 +18,18 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
     return true;  // nothing to copy
   }
 
+  // Issue #326: `contiguous()` / `copy_` reach this from platform-shared code
+  // that carries no device, so the ambient current device is whatever ran last.
+  // `EXEC_ASCEND_CMD` submits to that device's stream and allocates any scratch
+  // from an index-less `at::kPrivateUse1` TensorOptions, i.e. also on it. Unlike
+  // DtypeCast below this one is not cached, so the executor itself is rebuilt
+  // from the operands' own descriptors every call -- measured on CANN 9.0.0,
+  // that is enough to keep the result correct across every combination of
+  // operand and ambient device (including a cross-device `copy_`), which
+  // `test_contiguous_matches_same_device_result` pins. The guard is kept for
+  // the stream (and any future workspace), the two ambient reads left here.
+  OpDeviceGuard device_guard_(DeviceOf(dst));
+
   // aclnnInplaceCopy(selfRef, src): writes src into selfRef, honoring the
   // strides/offset recorded on each aclTensor. AclTensorWrapper preserves the
   // tensor's sizes/strides/offset, so a non-contiguous src is copied correctly
@@ -34,6 +46,18 @@ at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   if (!src.defined() || !src.is_privateuseone()) {
     return {};
   }
+  // Issue #326: `_to_copy` reaches this from platform-shared code that carries
+  // no device, so the ambient current device is whatever ran last. That matters
+  // more here than in StridedCopy above, because the aclnn call goes through
+  // `ExecAscendCached`: the cached executor and its scratch are both *keyed* on
+  // `::GetDevice`, so an unguarded call builds them on the other device and
+  // reuses them for every later call it is handed. Measured on CANN 9.0.0: a
+  // `randperm(50, device="flagos:1")` cast to float32 with flagos:0 current
+  // came back holding the *previous* draw -- the allocator had recycled the
+  // output block, so the stale read looked like a plausible answer rather than
+  // like garbage. That is the failure
+  // `test_dtype_cast_matches_same_device_result` reproduces.
+  OpDeviceGuard device_guard_(DeviceOf(src));
   // aclnnCast expects a dense input; make src contiguous first (cheap, and the
   // callers in _to_copy already pass a contiguous tensor).
   at::Tensor src_c = src.is_contiguous() ? src : src.contiguous();

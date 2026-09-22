@@ -199,6 +199,69 @@ def test_factory_device_argument():
 
 
 # ---------------------------------------------------------------------------
+# Entries reached through the copy machinery rather than through a generated
+# kernel: `_to_copy`'s dtype cast and `contiguous()`.
+#
+# These are the ones the per-kernel guard does not cover by itself, because
+# their callers (`copy_ops.cc`, `contiguous_ops.cc`) are shared with the other
+# backends and carry no device of their own. Both allocate their result from the
+# operand's TensorOptions, so they land on the right device even unguarded --
+# what the cast got wrong was the *value*, because it also goes through the
+# device-keyed `ExecAscendCached` and read its input before the producer had
+# written it. The strided copy was measured correct either way; it is checked
+# here so the path stays covered.
+# ---------------------------------------------------------------------------
+
+
+def test_dtype_cast_matches_same_device_result():
+    """``.float()`` on an int64 operand must not depend on the current device.
+
+    The guard is what makes this reachable at all: once `randperm` lands its
+    result on flagos:1 while flagos:0 stays current, the cast below is the first
+    device-less entry to consume it. Unguarded, its cached aclnn executor is
+    built on the wrong device and the cast reads the freshly written permutation
+    back as the *previous* draw -- the allocator has recycled the output block,
+    so the stale contents look like a plausible answer rather than like garbage,
+    and a seed-based reproducibility check cannot tell the two apart.
+    """
+    torch.manual_seed(1234)
+    x = torch.randperm(50, device=DEVICE)
+    expected = x.cpu()
+
+    torch_fl.flagos.set_device(INDEX)  # ambient == operand device
+    same = x.float()
+    torch_fl.flagos.set_device(OTHER)  # ambient != operand device
+    cross = x.float()
+
+    assert cross.device.index == INDEX, f"cast on flagos:{cross.device.index}"
+    assert torch.equal(cross.cpu(), same.cpu()), (
+        "the cross-device cast differs from the same-device one: "
+        f"{cross.cpu()[:8].tolist()} vs {same.cpu()[:8].tolist()}"
+    )
+    # And the cast has to read the *current* contents of x, not a recycled
+    # buffer: comparing against x itself is what the seed-based check above
+    # cannot see when both draws return the same stale block.
+    assert cross.cpu().tolist() == expected.tolist()
+
+
+def test_contiguous_matches_same_device_result():
+    """``contiguous()`` on a transposed flagos:1 tensor, different device current."""
+    torch.manual_seed(0)
+    x = torch.randn(16, 32, device=DEVICE).t()
+
+    torch_fl.flagos.set_device(INDEX)
+    same = x.contiguous()
+    torch_fl.flagos.set_device(OTHER)
+    cross = x.contiguous()
+
+    assert cross.device.index == INDEX, f"contiguous on flagos:{cross.device.index}"
+    assert torch.equal(cross.cpu(), same.cpu()), (
+        "the cross-device contiguous() differs from the same-device one"
+    )
+    assert torch.equal(cross.cpu(), x.cpu())
+
+
+# ---------------------------------------------------------------------------
 # The current device must be left as it was found
 # ---------------------------------------------------------------------------
 
