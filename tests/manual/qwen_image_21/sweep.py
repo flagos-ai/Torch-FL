@@ -187,7 +187,6 @@ def main(argv=None):
         "true_cfg_scale": args.true_cfg_scale,
         "omit_all_valid_prompt_mask": args.omit_all_valid_prompt_mask,
         "seed": args.seed,
-        "placement": {"encoder": encoder, "transformer": transformer, "vae": vae},
         "images": [],
     }
 

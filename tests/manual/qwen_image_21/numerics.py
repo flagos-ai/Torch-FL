@@ -380,9 +380,7 @@ def compare(paths):
         got = candidate["views"].get(name)
         if got is None:
             view_bad.append(name)
-            print(
-                f"view {name:<21}{'':>12}{'':>12}   MISSING on candidate"
-            )
+            print(f"view {name:<21}{'':>12}{'':>12}   MISSING on candidate")
             continue
 
         want_error = want.get("error")

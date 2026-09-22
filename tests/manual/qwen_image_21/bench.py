@@ -675,9 +675,7 @@ def measure(torch, pipe, args, prompt, device, shape=None):
     samples = [sample for batch in batches for sample in batch["samples"]]
     peaks = [peak for batch in batches for peak in batch["peaks"]]
     hashes = [digest for batch in batches for digest in batch["hashes"]]
-    latency_times = [
-        value for batch in batches for value in batch["measurement"].times
-    ]
+    latency_times = [value for batch in batches for value in batch["measurement"].times]
     # One source for the latency: the timer's own per-call times. Its mean,
     # median, min and max are computed from exactly these, so computing them here
     # from the same list keeps one arithmetic in play rather than two. Note that

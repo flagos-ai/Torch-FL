@@ -580,9 +580,7 @@ def enable_all_valid_prompt_mask_elision(pipe):
             *args, **kwargs
         )
         if prompt_mask is not None:
-            all_valid = bool(
-                prompt_mask.detach().to("cpu").bool().all().item()
-            )
+            all_valid = bool(prompt_mask.detach().to("cpu").bool().all().item())
             if all_valid:
                 if not reported:
                     print(

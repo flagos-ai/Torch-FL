@@ -366,8 +366,6 @@ BOXING_TRITON_GAPS = {
         # case: the FlagGems route aborts at step 2 with that assertion; boxing
         # completes the same slice contract. --
         "slice.Tensor",
-
-
         # -- FlagGems' reflection-padding wrappers reject a flagos operand before
         # they reach a kernel, and the overload survey cannot see it: the harness
         # derives `padding` from the tensor rank, so ATen's arity check fails
