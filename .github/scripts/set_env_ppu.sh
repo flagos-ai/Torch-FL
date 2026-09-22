@@ -46,6 +46,15 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Pin pip's download cache to RUNNER_TEMP for cross-platform consistency. On
+# several sibling platforms the container's /github/home mount is owned by a
+# different uid and pip silently disables its cache there; RUNNER_TEMP is
+# always owned by the container. This path must stay aligned with the cache
+# step in integration-test-ppu.yml.
+export PIP_CACHE_DIR="${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache"
+mkdir -p "$PIP_CACHE_DIR"
+
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 # Use the official indexes by default: the PPU runner pod's HTTP proxy returns
 # 500 on HTTPS CONNECT to *.tuna.tsinghua.edu.cn, so the Tsinghua PyPI and
@@ -255,7 +264,7 @@ export PIP_DEFAULT_TIMEOUT=120
 pip_retry() {
   local attempt=1
   while true; do
-    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
+    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 "$@"; then
       return 0
     fi
     if ((attempt >= 5)); then
@@ -681,7 +690,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
+    PIP_CACHE_DIR PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
     PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
     FLAGOS_WHEEL_LOCAL FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do

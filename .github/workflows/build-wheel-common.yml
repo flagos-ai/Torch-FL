@@ -62,6 +62,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Self-hosted runners accumulate stale wheels in ~/.cache/pip across
+      # runs (pip no longer passes --no-cache-dir); wipe before restore so
+      # the uploaded archive stays bounded to this run's downloads.
+      - name: Reset pip cache dir
+        shell: bash
+        run: rm -rf "${RUNNER_TEMP}/pip-cache"
+
+      # Cache pip downloads across runs. The cache only skips the download,
+      # not the install, so the environment prepared by the setup script is
+      # still rebuilt fresh each run. PIP_CACHE_DIR is persisted to
+      # $GITHUB_ENV by the setup script so every pip invocation in this job
+      # (build, verify wheel) writes to the cache directory.
+      #
+      # The key carries a -build- stage suffix so this build job's cache stays
+      # separate from the integration job's (they share display_name via
+      # all-tests-common); the integration job's restore-keys fall back to this
+      # build prefix. The setup script is hashed because the real version pins
+      # (torch, flagtree, FlagGems) live there, not in pyproject/setup.py;
+      # without it a pin bump leaves the key unchanged, the exact-hit skips the
+      # save, and the newly downloaded wheels are discarded every run.
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pip-cache
+          key: ${{ inputs.display_name }}-build-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/scripts/set_env_*.sh') }}
+          restore-keys: |
+            ${{ inputs.display_name }}-build-pip-${{ runner.os }}-
+            ${{ inputs.display_name }}-pip-${{ runner.os }}-
+
       - name: Prepare platform environment
         env:
           CI_STAGE: build
