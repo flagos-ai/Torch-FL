@@ -56,8 +56,9 @@ dynamic = ["version", "dependencies"]
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "black",
-    "isort",
+    # Pinned to the version CI installs in .github/workflows/lint.yml so a local
+    # `ruff` behaves identically to the gate.
+    "ruff==0.15.12",
 ]
 # FlagCX enables the heterogeneous unified-comm inner backend for distributed
 # (ProcessGroupFlagOS tries it first, then falls back to the vendor-native
@@ -88,3 +89,22 @@ py-modules = []
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.ruff]
+# Repo-owned baseline. The values below reproduce ruff's built-in defaults,
+# which is what CI ran before this config existed, so committing it is
+# behavior-neutral for the existing tree. A stricter profile lands separately.
+line-length = 88
+# Inferred from requires-python; stated explicitly so local runs and CI agree
+# even if the interpreter or ruff default changes.
+target-version = "py38"
+
+[tool.ruff.lint]
+# ruff's default rule set, spelled out so a future ruff release cannot silently
+# change what this repository checks.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# Defaults, made explicit for the same reason.
+quote-style = "double"
+indent-style = "space"
