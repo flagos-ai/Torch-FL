@@ -1504,14 +1504,7 @@ def is_flaggems_enabled():
 # Auto-register FlagGems operators on import
 _register_flaggems_operators()
 
-# Re-export integration utilities
 from . import quantization  # noqa: E402
-
-from torch_fl.integration import (  # noqa: E402
-    is_flaggems_available,
-    enable_flaggems_for_flagos,
-    use_flaggems,
-)
 
 # ---------------------------------------------------------------------------
 # Distributed: register "flagos" ProcessGroup backend for privateuseone
@@ -1709,8 +1702,5 @@ __all__ = [
     "distributed",
     "get_registered_ops",
     "is_flaggems_enabled",
-    "is_flaggems_available",
-    "enable_flaggems_for_flagos",
-    "use_flaggems",
     "quantization",
 ]

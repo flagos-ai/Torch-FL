@@ -129,25 +129,18 @@ endif()
 # switches, which could never be meaningfully combined anyway -- exactly one
 # vendor is ever enabled per build.
 #
-# MetaX's directory is retired: the hand-written mxcc kernels are no longer
-# built (MetaX is a CUDA-boxing vendor now), so the whole dir is excluded even
-# when FLAGOS_BUILD_VENDOR is ON. The sources stay on disk for a future move away
-# from boxing; cmake/MetaxKernels.cmake, the mxcc build driver they needed, is
-# gone.
+# MetaX has no native kernel directory: it is a CUDA-boxing vendor, so the
+# hand-written mxcc kernels were removed (git history retains them).
 if(NOT FLAGOS_BUILD_VENDOR)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(metax|ascend|gcu|musa)/.*")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|gcu|musa)/.*")
   message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
 else()
-  foreach(_vendor_dir metax ascend gcu musa)
+  foreach(_vendor_dir ascend gcu musa)
     if(NOT FLAGOS_ACCELERATOR STREQUAL _vendor_dir)
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
   endforeach()
   message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR}")
-endif()
-
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/metax/.*")
 endif()
 
 # Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
@@ -514,8 +507,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax")
   target_include_directories(${LIBRARY_NAME} PRIVATE
     "${MACA_PATH}/tools/cu-bridge/include"
     "${MACA_PATH}/include"
-    "${MACA_PATH}/include/mcr"
-    "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/metax")
+    "${MACA_PATH}/include/mcr")
 
   find_library(MCBLAS_LIB mcblas
       PATHS "${MACA_PATH}/lib"

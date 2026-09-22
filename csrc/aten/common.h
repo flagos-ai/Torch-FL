@@ -43,7 +43,7 @@ enum class Backend {
 // Config file path, in order of precedence:
 //   1. SetBackendConfigPath(), called by torch_fl._select_backend_config()
 //   2. $FLAGOS_BACKEND_CONFIG
-//   3. torch_fl/configs/backends.conf, located from this library's own path
+//   3. torch_fl/configs/backends_cuda.conf, located from this library's own path
 // Format: "op_name = backend"
 //   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
 //            "flaggems"     -- FlagGems Python (Triton) path

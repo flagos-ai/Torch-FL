@@ -610,8 +610,8 @@ def _unary(op_cls, dtypes, aten_fn):
 ### 3.6 Gates
 
 `is_tileops_available()` is consulted per route by `resolve_impl()`, which
-**falls back to aten** if any condition is unmet (consistent with
-`is_flaggems_available()`, leaving `import torch_fl` unaffected):
+**falls back to aten** if any condition is unmet (consistent with how torch_fl
+treats any missing optional backend, leaving `import torch_fl` unaffected):
 
 1. `import tileops` succeeds;
 2. `torch.cuda.get_device_capability() == (9, 0)` (TileOPs is SM_90 only; on

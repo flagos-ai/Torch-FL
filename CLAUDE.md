@@ -310,6 +310,14 @@ If affected hardware is unavailable, mark its data as **not revalidated** and
 record the evidence gap in both the support report and the PR. Do not silently
 retain old results as though they were measured against the new cohort.
 
+### Transient agent worktrees
+
+Parallel agent sessions may create git worktrees under `.claude/worktrees/`.
+That directory is gitignored and is scratch state, not source. Prune it when the
+sessions that created it are done (`rm -rf .claude/worktrees`) so it does not
+pollute recursive searches, globs, or code metrics run over the source tree, and
+never commit anything from it.
+
 ## Related Documentation
 
 - **CONTRIBUTING.md** - Detailed contribution workflow

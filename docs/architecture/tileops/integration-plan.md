@@ -424,7 +424,8 @@ That work should be a separate PR, after the Stage A skeleton lands.
 
 - TileOPs and TileLang are both **optional dependencies**. When missing,
   `enable_tileops_for_flagos()` silently returns 0, consistent with how
-  `is_flaggems_available()` behaves, and `import torch_fl` is unaffected.
+  torch_fl treats any missing optional backend, and `import torch_fl` is
+  unaffected.
 - Dependencies are pinned per 2.1: `tilelang==0.1.11`, `apache-tvm-ffi==0.1.11`,
   `z3-solver==4.15.4.0`. Record these in the docs and the CI install script; do
   not use version ranges.

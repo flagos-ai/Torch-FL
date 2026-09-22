@@ -56,19 +56,21 @@ std::string DefaultConfigPath() {
         if (test.is_open()) return candidate;
       }
 
-      // Try package-relative: <dir>/../configs/backends.conf
-      std::string candidate = dir + "/../configs/backends.conf";
+      // No platform-specific conf (cuda/metax/dcu/ppu): the CUDA conf is the
+      // base list those builds inherit. Python normally sets the path via
+      // SetBackendConfigPath(); this is only the last-resort default.
+      std::string candidate = dir + "/../configs/backends_cuda.conf";
       std::ifstream test(candidate);
       if (test.is_open()) return candidate;
-      // Try: <dir>/configs/backends.conf
-      candidate = dir + "/configs/backends.conf";
+      // Try: <dir>/configs/backends_cuda.conf
+      candidate = dir + "/configs/backends_cuda.conf";
       test.open(candidate);
       if (test.is_open()) return candidate;
     }
   }
 #endif
   // Fallback to build-time path
-  return FLAGOS_SOURCE_ROOT "/torch_fl/configs/backends.conf";
+  return FLAGOS_SOURCE_ROOT "/torch_fl/configs/backends_cuda.conf";
 }
 
 std::string TrimStr(std::string s) {
