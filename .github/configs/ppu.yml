@@ -93,14 +93,13 @@ integration_tests:
       ppu_bundle = torch_fl_path.parent / "lib_ppu"
 
       # PPU runs in an isolated venv with stock +cpu torch (the link target).
-      # Core replacement swaps the .so only, not torch/version.py, so
-      # __version__ / version.cuda still read as stock +cpu / None -- same as
-      # the cuda line. The PPU-takeover signal is torch.cuda.is_available() +
-      # device_count(): the PPU libtorch_cuda.so is bundled in lib_ppu/ (not
-      # torch_fl/lib/ like the cuda line's external asset) and loaded at import
-      # via ensure_ppu_libtorch_links + _preload_global.
+      # Core replacement cannot change __version__, so it remains stock +cpu.
+      # Importing torch_fl loads the bundled PPU libtorch and reconciles the
+      # stale torch/version.py CUDA value with that live runtime, which is 13.0
+      # in this pinned environment. The other PPU-takeover signals remain
+      # torch.cuda availability and the device counts below.
       assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
+      assert torch.version.cuda == "13.0", torch.version.cuda
       assert "/opt/conda/" not in str(torch_path), torch_path
       assert (ppu_bundle / "libtorch_cuda.so").is_file(), ppu_bundle
       assert torch.cuda.is_available(), "PPU devices are unavailable"
