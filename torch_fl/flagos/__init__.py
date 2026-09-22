@@ -229,52 +229,21 @@ def _lazy_init():
     # See the function for the measurement.
     _patch_flaggems_pointwise_dispatch()
 
-    # Monkey-patch Tensor.__getitem__ to work around PyTorch C++ dispatch issue
-    # with advanced indexing on custom devices. The C++ __getitem__ fails for
-    # patterns like x[:, tensor_idx] but torch.ops.aten.index.Tensor works.
-    import torch
-
-    _original_getitem = torch.Tensor.__getitem__
-
-    _Tensor = torch.Tensor
-    _full_slice = slice(None, None, None)
-    _aten_index = torch.ops.aten.index.Tensor
-
-    def _patched_getitem(self, indices):
-        # Fast path: the workaround only applies to a tuple of indices that
-        # contains at least one Tensor. Anything else (the vast majority of
-        # __getitem__ calls, e.g. x[:, -1:]) returns immediately, avoiding the
-        # device property access and any tuple scan.
-        if type(indices) is not tuple:
-            return _original_getitem(self, indices)
-
-        has_tensor = False
-        for idx in indices:
-            if isinstance(idx, _Tensor):
-                has_tensor = True
-                break
-        if not has_tensor:
-            return _original_getitem(self, indices)
-
-        # Only patch for our device
-        if self.device.type not in ("privateuseone", "flagos"):
-            return _original_getitem(self, indices)
-
-        # Convert to list for aten.index.Tensor
-        indices_list = []
-        for idx in indices:
-            if isinstance(idx, _Tensor):
-                indices_list.append(idx)
-            elif idx is _full_slice or idx == _full_slice:
-                indices_list.append(None)
-            else:
-                # Non-trivial slice / int / other — fall back to original
-                return _original_getitem(self, indices)
-
-        # Use aten.index.Tensor which works correctly
-        return _aten_index(self, indices_list)
-
-    torch.Tensor.__getitem__ = _patched_getitem
+    # Advanced indexing on this device takes the C++ dispatcher and needs no
+    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
+    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
+    # reach `IndexTensorKernelCuda` directly.
+    #
+    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
+    # CPython special method, so assigning to it also populates the type's
+    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
+    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
+    # takes the sequence-protocol branch in
+    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
+    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
+    # including for CPU tensors, in a process that merely touched a non-CPU
+    # device. Restoring the attribute afterwards does not undo it; only never
+    # assigning it does.
 
 
 from .random import *  # noqa: F403, E402
