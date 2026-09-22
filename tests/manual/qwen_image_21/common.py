@@ -535,6 +535,52 @@ def add_placement_args(parser):
             "default: an even split"
         ),
     )
+    parser.add_argument(
+        "--omit-all-valid-prompt-mask",
+        action="store_true",
+        help=(
+            "replace an all-valid prompt attention mask with None after prompt "
+            "encoding. This is semantically a no-op, keeps padded masks, and can "
+            "make the denoising attention eligible for Flash SDPA"
+        ),
+    )
+
+
+def enable_all_valid_prompt_mask_elision(pipe):
+    """Drop only prompt masks whose every entry is valid.
+
+    Qwen-Image-2.1 removes padding from the encoded prompt, but still returns an
+    all-one mask. Carrying that no-op mask into the transformer makes PyTorch's
+    SDPA selector reject Flash attention on some backends. The small mask check
+    happens once per prompt encoding, before denoising. Any mask containing a
+    padded entry is returned unchanged.
+    """
+    marker = "_qwen21_all_valid_prompt_mask_elision"
+    if getattr(pipe, marker, False):
+        return
+
+    original_encode_prompt = pipe.encode_prompt
+    reported = False
+
+    def encode_prompt(*args, **kwargs):
+        nonlocal reported
+        prompt_embeds, prompt_mask, image_pad_mask = original_encode_prompt(
+            *args, **kwargs
+        )
+        if prompt_mask is not None:
+            all_valid = bool(prompt_mask.detach().to("cpu").bool().all().item())
+            if all_valid:
+                if not reported:
+                    print(
+                        "prompt mask: all entries valid; omitting the no-op mask "
+                        "to permit Flash SDPA"
+                    )
+                    reported = True
+                prompt_mask = None
+        return prompt_embeds, prompt_mask, image_pad_mask
+
+    pipe.encode_prompt = encode_prompt
+    setattr(pipe, marker, True)
 
 
 def report_memory(torch, device_kind):

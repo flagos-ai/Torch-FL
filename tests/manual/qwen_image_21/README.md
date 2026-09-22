@@ -1,5 +1,11 @@
 # Qwen-Image-2.1 manual test flow
 
+Pass `--omit-all-valid-prompt-mask` to `infer`, `bench`, or `sweep` to replace
+an all-valid prompt attention mask with `None`. This opt-in leaves masks that
+contain padding unchanged and can make denoising attention eligible for Flash
+SDPA. Because selecting a different SDPA kernel can change bf16 rounding, the
+optimization is intentionally disabled by default.
+
 `Qwen/Qwen-Image-2.1` is a text-to-image diffusion model: a Qwen3-VL text
 encoder, a 32-block single-stream MMDiT transformer with a causal KV cache, and a
 causal-Conv3d VAE, driven by `QwenImage21Pipeline`. Running it on an accelerator

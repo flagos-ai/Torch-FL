@@ -745,6 +745,7 @@ def record_for(
             "true_cfg_scale": args.true_cfg_scale,
             "negative_prompt": args.negative_prompt,
             "use_kv_cache": not args.no_kv_cache,
+            "omit_all_valid_prompt_mask": args.omit_all_valid_prompt_mask,
             "latents": "loaded" if args.load_latents else "sampled",
             "placement": placement,
         },
@@ -922,6 +923,8 @@ def run(argv=None):
     _, placement = common.place_components(
         torch, pipe, encoder, transformer, vae, args.blocks_per_device
     )
+    if args.omit_all_valid_prompt_mask:
+        common.enable_all_valid_prompt_mask_elision(pipe)
 
     # The card's own reading, taken before the model is measured and off the
     # measured path: which elementwise ops a chip streams well is a property of

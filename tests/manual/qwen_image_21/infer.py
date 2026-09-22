@@ -504,6 +504,8 @@ def main(argv=None):
     print(f"  encoder/vae -> {encoder}   transformer -> {' '.join(transformer)}")
     pipe = load_pipeline(torch, args)
     place_pipeline(torch, pipe, args)
+    if args.omit_all_valid_prompt_mask:
+        common.enable_all_valid_prompt_mask_elision(pipe)
 
     STAGE_FUNCS[args.stage](torch, pipe, args)
     common.report_memory(torch, args.device)

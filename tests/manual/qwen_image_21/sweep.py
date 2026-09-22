@@ -168,6 +168,8 @@ def main(argv=None):
     _, placement = common.place_components(
         torch, pipe, encoder, transformer, vae, args.blocks_per_device
     )
+    if args.omit_all_valid_prompt_mask:
+        common.enable_all_valid_prompt_mask_elision(pipe)
 
     manifest = {
         "device": args.device,
@@ -182,6 +184,7 @@ def main(argv=None):
         "height": args.height,
         "num_inference_steps": args.steps,
         "true_cfg_scale": args.true_cfg_scale,
+        "omit_all_valid_prompt_mask": args.omit_all_valid_prompt_mask,
         "seed": args.seed,
         "images": [],
     }
