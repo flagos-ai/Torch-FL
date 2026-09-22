@@ -22,6 +22,7 @@ import sys
 # FLAGOS_LOG_DISPACH is ever noticed -- the misspelled variable is simply never
 # read and the setting silently does nothing.
 from torch_fl import _env  # noqa: F401
+from torch_fl import _vendor
 
 
 def _build_accelerator() -> str:
@@ -969,13 +970,23 @@ def _patch_flaggems_codegen_config():
       GEMS_VENDOR=ascend -- which also breaks the comm layer, since that vendor
       selects the HCCL profile (see comm/process_group.py _VENDOR_PROFILES).
 
-    - Ascend (fallback): set GEMS_VENDOR=ascend so FlagGems uses the ASCEND
-      codegen config (prefer_block_pointer=False, avoiding the Ascend Triton
-      backend's tl.make_block_ptr bug), and register torch.flagos as a torch.npu
-      shim so FlagGems' gen_torch_device_object('ascend') resolves correctly.
+    - Ascend: set GEMS_VENDOR=ascend so FlagGems uses the ASCEND codegen
+      config (prefer_block_pointer=False, avoiding the Ascend Triton backend's
+      tl.make_block_ptr bug), and register torch.flagos as a torch.npu shim so
+      FlagGems' gen_torch_device_object('ascend') resolves correctly. This
+      branch is taken only for an Ascend build or an explicit
+      GEMS_VENDOR=ascend; any other accelerator reaching this point had vendor
+      detection fail, which raises rather than silently selecting Ascend.
     """
     import os
     import sys
+
+    # An explicitly exported GEMS_VENDOR that torch_fl cannot configure is a
+    # mistake to surface now, not to hand to FlagGems and the comm layer: the
+    # branches below would leave it in place (set_foreign never overrides an
+    # explicit export) and the failure would appear as a wrong-vendor crash
+    # later. Unknown values raise; unset/blank returns None.
+    _explicit_vendor = _vendor.validate_explicit(os.environ.get("GEMS_VENDOR"))
 
     # --- Moore Threads MUSA branch ---
     if _build_accelerator() == "musa":
@@ -1087,7 +1098,33 @@ def _patch_flaggems_codegen_config():
             patch_torch_cuda_for_flagos()
             return
 
-    # --- Ascend fallback branch ---
+    # --- Ascend branch, or the detection-failure guard ---
+    # An explicit GEMS_VENDOR that reached this far names a vendor none of the
+    # branches above claimed. Honor it (set_foreign could not override it) and
+    # do not install the Ascend shims for a vendor that is not Ascend.
+    if _explicit_vendor is not None and _explicit_vendor != "ascend":
+        return
+
+    # BPU has no FlagGems path at all (its kernels are whole compiled graphs),
+    # and FLAGOS_DISABLE_CUDA_SHIM=1 is an explicit opt-out of vendor shimming:
+    # both leave GEMS_VENDOR unset rather than claiming the Ascend config.
+    if _build_accelerator() == "bpu" or _env.flag("FLAGOS_DISABLE_CUDA_SHIM"):
+        return
+
+    # Ascend is the only remaining legitimate user of the Ascend codegen config.
+    # Any other accelerator here means vendor detection failed with GEMS_VENDOR
+    # unset -- the silent-ascend fallback this replaces. Fail loud: the previous
+    # behavior handed FlagGems the wrong vendor and surfaced the breakage far
+    # from its cause (a CUDA wheel with no reachable GPU, a MetaX wheel with no
+    # card). An explicit GEMS_VENDOR=ascend still selects this branch.
+    if _build_accelerator() != "ascend" and _explicit_vendor != "ascend":
+        raise RuntimeError(
+            f"FlagGems vendor detection failed for FLAGOS_ACCELERATOR="
+            f"{_build_accelerator()!r}: no vendor runtime was reachable and "
+            f"GEMS_VENDOR is unset. Set GEMS_VENDOR to one of "
+            f"{sorted(_vendor.KNOWN_VENDORS)} to select a vendor explicitly."
+        )
+
     # Set vendor before FlagGems runtime initializes
     _env.set_foreign("GEMS_VENDOR", "ascend")
 

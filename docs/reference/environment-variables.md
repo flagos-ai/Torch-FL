@@ -212,7 +212,7 @@ project's own spelling.
 
 | Variable | Owner | Direction | Purpose |
 |----------|-------|-----------|---------|
-| `GEMS_VENDOR` | FlagGems | Set if unset | FlagGems' own vendor selector (`cuda`, `metax`, `ascend`, `musa`, …). torch_fl fills it from the detected hardware or the build record so FlagGems does not have to guess |
+| `GEMS_VENDOR` | FlagGems | Set if unset | FlagGems' own vendor selector (`nvidia`, `metax`, `hygon`, `ascend`, `mthreads`, `enflame`, …). torch_fl fills it from the detected hardware or the build record so FlagGems does not have to guess. An explicit value torch_fl cannot configure raises `RuntimeError` at `import torch_fl` instead of being silently passed on |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD` | PyTorch | Set if unset | torch's device-backend entry-point autoload. torch_fl sets it to `0` on MUSA builds so vendor plugins (e.g. `torch_musa`) do not claim `PrivateUse1` during `import torch` |
 | `FLAGCX_TORCH_BACKEND` | FlagCX | Set if unset | FlagCX's torch plugin selector; torch_fl sets `flagos` |
 | `TILELANG_DISABLE_CACHE` | tilelang | Set if unset | tilelang's kernel cache. `FLAGOS_TILEOPS_DISABLE_ALL_CACHE=1` sets it to `1` |
@@ -244,6 +244,12 @@ explicit export — including an empty one, which is how a user says "not this
 vendor". torch_fl writes to the environment rather than passing a value down
 because the consumer is another library that reads `os.environ` itself, and two
 of these have to be in place before that library is imported.
+
+`GEMS_VENDOR` is validated at import. A value outside the set torch_fl and its
+comm layer can route (`torch_fl/_vendor.py:KNOWN_VENDORS`) raises `RuntimeError`
+naming the valid values, and a vendor-detection failure with `GEMS_VENDOR` unset
+also raises instead of silently selecting `ascend`. Set it explicitly to select
+a vendor on a host where detection cannot succeed.
 
 ## Worker count
 
