@@ -3429,57 +3429,75 @@ at::Tensor & WrapperIm2colOut(const at::Tensor & self, at::IntArrayRef kernel_si
   return at::native::flagos::im2col_out_dispatcher(self, kernel_size, dilation, padding, stride, out);
 }
 at::Tensor WrapperIndexTensor(const at::Tensor & self, const c10::List<::std::optional<at::Tensor>> & indices) {
+  at::native::flagos::CheckIndexListInRange(self, indices);
   return at::native::flagos::index_tensor_dispatcher(self, indices);
 }
 at::Tensor WrapperIndexAdd(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_add_dispatcher(self, dim, index, source, alpha);
 }
 at::Tensor & WrapperIndexAddOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_add_out_dispatcher(self, dim, index, source, alpha, out);
 }
 at::Tensor & WrapperIndexAddInplace(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_add_inplace_dispatcher(self, dim, index, source, alpha);
 }
 at::Tensor WrapperIndexCopy(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_copy_dispatcher(self, dim, index, source);
 }
 at::Tensor & WrapperIndexCopyOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_copy_out_dispatcher(self, dim, index, source, out);
 }
 at::Tensor & WrapperIndexCopyInplace(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_copy_inplace_dispatcher(self, dim, index, source);
 }
 at::Tensor WrapperIndexFillIntScalar(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Scalar & value) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_int_scalar_dispatcher(self, dim, index, value);
 }
 at::Tensor & WrapperIndexFillIntScalarOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Scalar & value, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_int_scalar_out_dispatcher(self, dim, index, value, out);
 }
 at::Tensor WrapperIndexFillIntTensor(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & value) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_int_tensor_dispatcher(self, dim, index, value);
 }
 at::Tensor & WrapperIndexFillIntTensorOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & value, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_int_tensor_out_dispatcher(self, dim, index, value, out);
 }
 at::Tensor & WrapperIndexFillInplaceIntScalar(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Scalar & value) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_inplace_int_scalar_dispatcher(self, dim, index, value);
 }
 at::Tensor & WrapperIndexFillInplaceIntTensor(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & value) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_fill_inplace_int_tensor_dispatcher(self, dim, index, value);
 }
 at::Tensor WrapperIndexReduce(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, c10::string_view reduce, bool include_self) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_reduce_dispatcher(self, dim, index, source, reduce, include_self);
 }
 at::Tensor & WrapperIndexReduceOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, c10::string_view reduce, bool include_self, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_reduce_out_dispatcher(self, dim, index, source, reduce, include_self, out);
 }
 at::Tensor & WrapperIndexReduceInplace(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, c10::string_view reduce, bool include_self) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_reduce_inplace_dispatcher(self, dim, index, source, reduce, include_self);
 }
 at::Tensor WrapperIndexSelect(const at::Tensor & self, int64_t dim, const at::Tensor & index) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_select_dispatcher(self, dim, index);
 }
 at::Tensor & WrapperIndexSelectOut(const at::Tensor & self, int64_t dim, const at::Tensor & index, at::Tensor & out) {
+  at::native::flagos::CheckIndexTensorInRange(self, dim, index);
   return at::native::flagos::index_select_out_dispatcher(self, dim, index, out);
 }
 at::Tensor & WrapperIndicesCopyOut(const at::Tensor & self, at::Tensor & out) {

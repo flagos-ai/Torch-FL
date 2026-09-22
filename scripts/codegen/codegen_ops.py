@@ -125,6 +125,74 @@ _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
 }
 
 
+# Ops whose index argument holds *positions* into `self`, mapped to the name of
+# the argument that names the dimension those positions address. The generated
+# PrivateUse1 wrapper validates the values against that dimension before the
+# backend kernel runs. The wrapper, not the kernel, because the wrapper is the
+# layer every route passes through (CUDA boxing, FlagGems, vendor-native), and
+# because the check has to run before the index tensor is boxed -- see
+# csrc/aten/index_bounds.h.
+#
+# index.Tensor is absent because its dimensions come from the position of each
+# entry in the indices list rather than from a `dim` argument; it is covered by
+# _INDEX_RANGE_CHECKED_LIST_OPS below. _unsafe_index.Tensor is absent on
+# purpose: it is ATen's explicitly unchecked variant, emitted by the compiler
+# only where bounds are already proven, so a check there would add a device sync
+# to compiled code and buy nothing.
+_INDEX_RANGE_CHECKED_OPS = {
+    "index_add": "dim",
+    "index_add.out": "dim",
+    "index_add_": "dim",
+    "index_copy": "dim",
+    "index_copy.out": "dim",
+    "index_copy_": "dim",
+    "index_fill.int_Scalar": "dim",
+    "index_fill.int_Scalar_out": "dim",
+    "index_fill.int_Tensor": "dim",
+    "index_fill.int_Tensor_out": "dim",
+    "index_fill_.int_Scalar": "dim",
+    "index_fill_.int_Tensor": "dim",
+    "index_reduce": "dim",
+    "index_reduce.out": "dim",
+    "index_reduce_": "dim",
+    "index_select": "dim",
+    "index_select.out": "dim",
+}
+
+_INDEX_RANGE_CHECKED_LIST_OPS = {
+    "index.Tensor",
+}
+
+
+def _index_bounds_prelude(op, args):
+    """Range-check prelude for the index family, emitted into the wrapper.
+
+    Empty for every other op. The argument names come from torchgen and are
+    stable for these schemas; a schema change that renames them fails
+    generation here rather than emitting a wrapper that does not compile.
+    """
+    arg_types = {n: t for t, n in args}
+    if op in _INDEX_RANGE_CHECKED_LIST_OPS:
+        list_args = [n for t, n in args if "List<::std::optional<at::Tensor>>" in t]
+        if len(list_args) != 1:
+            raise SystemExit(
+                f"{op}: index range check needs exactly one optional-Tensor "
+                f"list argument, found {list_args}"
+            )
+        return f"  at::native::flagos::CheckIndexListInRange(self, {list_args[0]});\n"
+
+    dim_arg = _INDEX_RANGE_CHECKED_OPS.get(op)
+    if dim_arg is None:
+        return ""
+    for name in ("self", "index", dim_arg):
+        if name not in arg_types:
+            raise SystemExit(
+                f"{op}: index range check needs a `{name}` argument; "
+                f"the schema has {sorted(arg_types)}"
+            )
+    return f"  at::native::flagos::CheckIndexTensorInRange(self, {dim_arg}, index);\n"
+
+
 def _contiguous_prelude(op, args):
     """Return (prelude_lines, rename_map) for op args listed in
     _CONTIGUOUS_TENSOR_ARGS_BY_OP. prelude_lines declares `<arg>_contiguous`
@@ -2160,7 +2228,14 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
             'CPU fallback is disabled");\n'
             "#endif\n" + body
         )
-    return f"{ret_type} {wname}({args_decl(args)}) {{\n{body}\n}}", wname
+    # Runs before the dispatcher call, so on a platform that compiles the check
+    # in the backend kernel never sees an out-of-range index. See
+    # csrc/aten/index_bounds.h.
+    prelude = _index_bounds_prelude(op, args)
+    return (
+        f"{ret_type} {wname}({args_decl(args)}) {{\n{prelude}{body}\n}}",
+        wname,
+    )
 
 
 # ============================================================================

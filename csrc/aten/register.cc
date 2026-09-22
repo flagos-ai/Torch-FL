@@ -23,6 +23,7 @@
 #include <c10/core/ScalarType.h>
 #include <c10/util/Optional.h>
 #include "common.h"
+#include "index_bounds.h"
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
 #include "runtime/allocator/caching_device_allocator.h"

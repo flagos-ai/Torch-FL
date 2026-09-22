@@ -420,6 +420,14 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax")
     FLAGOS_SOFT_LOWP=1)
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
+  # DTK's libtorch_hip.so carries no index-value bounds check: index.Tensor,
+  # index_select, index_fill, index_add, index_copy and index_reduce all accept
+  # an out-of-range index and read or write outside the tensor (silently wrong
+  # data, or a VMFault that aborts the process -- issue #381). The check cannot
+  # be added back to ATen, so the generated PrivateUse1 wrappers run it instead.
+  # See csrc/aten/index_bounds.h; the call sites cost nothing where this macro
+  # is absent.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_INDEX_BOUNDS_CHECK=1)
 endif()
 
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
