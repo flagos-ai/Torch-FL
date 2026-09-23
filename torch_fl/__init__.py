@@ -1615,6 +1615,142 @@ def _patch_ddp_for_flagos():
 _patch_ddp_for_flagos()
 
 
+def _patch_dataparallel_for_flagos():
+    """Patch DataParallel to transparently support flagos (privateuseone) models.
+
+    ``DataParallel.__init__`` resolves its device type via
+    ``torch._utils._get_available_device_type()``, which checks
+    ``torch.cuda.is_available()`` *first*. On MetaX we force that to ``True``
+    (for the FlagGems triton path), so DataParallel picks device type "cuda" and
+    builds ``src_device_obj = torch.device("cuda", 0)``. But ``model.to(0)``
+    places parameters on the privateuseone backend "flagos" (the integer index
+    resolves to flagos), so the forward guard
+    ``t.device != self.src_device_obj`` trips on ``flagos:0 != cuda:0``.
+
+    When the wrapped module's parameters live on a flagos/privateuseone device,
+    bypass the cuda-first device resolution and build the DataParallel state from
+    ``torch.flagos`` instead (and skip the CUDA-only ``_check_balance``).
+    """
+    import functools
+    from torch._utils import _get_device_index
+    from torch.nn.parallel import DataParallel as _DP
+
+    _orig_init = _DP.__init__
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, module, device_ids=None, output_device=None, dim=0):
+        device_types = {p.device.type for p in module.parameters()}
+        if not device_types & {"flagos", "privateuseone"}:
+            return _orig_init(
+                self,
+                module,
+                device_ids=device_ids,
+                output_device=output_device,
+                dim=dim,
+            )
+
+        flagos = torch.flagos if hasattr(torch, "flagos") else None
+        if flagos is None or not flagos.is_available():
+            return _orig_init(
+                self,
+                module,
+                device_ids=device_ids,
+                output_device=output_device,
+                dim=dim,
+            )
+
+        torch._C._log_api_usage_once("torch.nn.parallel.DataParallel")
+        torch.nn.Module.__init__(self)
+
+        if device_ids is None:
+            device_ids = list(range(flagos.device_count()))
+        if device_ids is None:
+            raise RuntimeError("no available devices were found")
+        if output_device is None:
+            output_device = device_ids[0]
+
+        self.dim = dim
+        self.module = module
+        self.device_ids = [_get_device_index(x, True) for x in device_ids]
+        self.output_device = _get_device_index(output_device, True)
+        self.src_device_obj = torch.device("flagos", self.device_ids[0])
+
+        if len(self.device_ids) == 1:
+            self.module.to(self.src_device_obj)
+
+    _DP.__init__ = _patched_init
+
+
+_patch_dataparallel_for_flagos()
+
+
+def _patch_comm_scatter_gather_for_flagos():
+    """Patch torch.nn.parallel.comm.{scatter,gather} to support flagos tensors.
+
+    DataParallel's Scatter/Gather autograd functions call ``comm.scatter`` /
+    ``comm.gather``, which delegate to ``torch._C._scatter`` / ``torch._C._gather``.
+    Those C++ kernels are CUDA-only: ``_scatter`` mis-places chunks (a flagos
+    input gets chunks on ``cuda:1``, ``cuda:2``, ...) and ``_gather`` raises
+    ``Expected all input tensors to be CUDA tensors``. Route flagos tensors to a
+    pure-Python split/move/cat fallback instead.
+    """
+    import functools
+    from torch._utils import _get_device_index
+    from torch.nn.parallel import comm as _comm
+
+    _orig_scatter = _comm.scatter
+    _orig_gather = _comm.gather
+
+    @functools.wraps(_orig_scatter)
+    def _scatter(
+        tensor, devices=None, chunk_sizes=None, dim=0, streams=None, *, out=None
+    ):
+        if (
+            out is None
+            and isinstance(tensor, torch.Tensor)
+            and tensor.device.type in ("flagos", "privateuseone")
+        ):
+            devices = [_get_device_index(d) for d in devices]
+            if chunk_sizes is None:
+                chunks = tensor.chunk(len(devices), dim)
+            else:
+                chunks = tensor.split(list(chunk_sizes), dim)
+            return tuple(
+                c.to(torch.device(tensor.device.type, d))
+                for c, d in zip(chunks, devices)
+            )
+        return _orig_scatter(
+            tensor,
+            devices=devices,
+            chunk_sizes=chunk_sizes,
+            dim=dim,
+            streams=streams,
+            out=out,
+        )
+
+    @functools.wraps(_orig_gather)
+    def _gather(tensors, dim=0, destination=None, *, out=None):
+        if (
+            out is None
+            and tensors
+            and all(
+                isinstance(t, torch.Tensor)
+                and t.device.type in ("flagos", "privateuseone")
+                for t in tensors
+            )
+        ):
+            idx = _get_device_index(destination, allow_cpu=True, optional=True)
+            dest = torch.device("cpu" if idx == -1 else tensors[0].device.type, idx)
+            return torch.cat([t.to(dest) for t in tensors], dim)
+        return _orig_gather(tensors, dim=dim, destination=destination, out=out)
+
+    _comm.scatter = _scatter
+    _comm.gather = _gather
+
+
+_patch_comm_scatter_gather_for_flagos()
+
+
 # Register torch.compile backend for flagos device (torch 2.0+)
 def _register_compile_backend():
     """Register the 'flagos' backend with torch._dynamo if available."""

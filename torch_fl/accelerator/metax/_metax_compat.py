@@ -139,19 +139,40 @@ def _query_metax_device_properties(mcruntime, device_index):
         props.major = raw_major
         props.minor = raw_minor
 
-    # Get total memory
+    # Get total memory. mcMemGetInfo reports the *current* device, so we must
+    # mcSetDevice(device_index) first -- but that mutates the MetaX runtime's
+    # current device and never restores it. The flagos backend treats device
+    # index 0 as "current device", so after querying device 7 a later `.to(0)`
+    # would land on flagos:7 instead of flagos:0. Save and restore it.
+    orig_device = ctypes.c_int(-1)
+    mcGetDevice = getattr(mcruntime, "mcGetDevice", None)
+    if mcGetDevice is not None:
+        try:
+            mcGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            mcGetDevice.restype = ctypes.c_int
+            mcGetDevice(ctypes.byref(orig_device))
+        except Exception:
+            orig_device.value = -1
+
     mcruntime.mcSetDevice(device_index)
-    free_mem = ctypes.c_size_t(0)
-    total_mem = ctypes.c_size_t(0)
-    mcMemGetInfo = mcruntime.mcMemGetInfo
-    mcMemGetInfo.argtypes = [
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_size_t),
-    ]
-    mcMemGetInfo.restype = ctypes.c_int
-    ret = mcMemGetInfo(ctypes.byref(free_mem), ctypes.byref(total_mem))
-    if ret == 0:
-        props.total_memory = total_mem.value // (1024 * 1024)  # in MiB
+    try:
+        free_mem = ctypes.c_size_t(0)
+        total_mem = ctypes.c_size_t(0)
+        mcMemGetInfo = mcruntime.mcMemGetInfo
+        mcMemGetInfo.argtypes = [
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        mcMemGetInfo.restype = ctypes.c_int
+        ret = mcMemGetInfo(ctypes.byref(free_mem), ctypes.byref(total_mem))
+        if ret == 0:
+            props.total_memory = total_mem.value // (1024 * 1024)  # in MiB
+    finally:
+        if orig_device.value >= 0:
+            try:
+                mcruntime.mcSetDevice(orig_device.value)
+            except Exception:
+                pass
 
     return props
 
