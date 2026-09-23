@@ -30,13 +30,27 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 
-_PLATFORM_PATH = Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py"
+
+def _platform_path() -> Path:
+    """Locate torch_fl/_platform.py without importing the package.
+
+    From wherever torch_fl resolves: the installed wheel in CI's wheel-only test
+    workspace (which has no source tree), or the repo copy in a source checkout.
+    A unit-test stub torch_fl carries no _platform.py, so fall back to this
+    file's repo copy.
+    """
+    spec = importlib.util.find_spec("torch_fl")
+    if spec is not None and spec.origin:
+        candidate = Path(spec.origin).resolve().parent / "_platform.py"
+        if candidate.is_file():
+            return candidate
+    return Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py"
 
 
 def _load_platform():
     """Load torch_fl/_platform.py by path, without importing the package."""
     loader = importlib.machinery.SourceFileLoader(
-        "torch_fl._platform_under_test", str(_PLATFORM_PATH)
+        "torch_fl._platform_under_test", str(_platform_path())
     )
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
