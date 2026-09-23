@@ -267,7 +267,7 @@ BOXING_GAP_NOTES = {
         "that is add.Tensor(bf16_tensor, 0.0).",
     ),
     "ppu": (
-        "47 of the 482 FlagGems-covered ops are pinned to cuda; the other 435",
+        "49 of the 482 FlagGems-covered ops are pinned to cuda; the other 433",
         "route to flaggems. mm/bmm are the first four (FlagGems issue #6225:",
         "PPU rejects the _hygon kernel's num_ldmatrixes kwarg) and 33 are the",
         "2026-09-15 overload survey's measured route-dependent failures. Four",
@@ -275,10 +275,12 @@ BOXING_GAP_NOTES = {
         "`padding` from the rank, so every profile fails ATen's arity check",
         "before the device guard behind it can fire, and that guard is the",
         "device-name mismatch the CUDA alignment fixes and leaves alone on every",
-        "other vendor. The last six came from the CI steps that survey cannot",
+        "other vendor. The last eight came from checks that survey cannot",
         "see: the addmm family, whose autotune picks a BLOCK_SIZE_K < 16 config",
-        "on small-K shapes that the ppu triton rejects in tl.dot, and _conj,",
-        "which FlagGems materializes instead of setting the Conjugate bit. See",
+        "on small-K shapes that the ppu triton rejects in tl.dot; _conj, which",
+        "FlagGems materializes instead of setting the Conjugate bit; _unsafe_view,",
+        "whose FlagGems reshape can silently return a copy; and slice.Tensor,",
+        "whose FlagGems route rejects complex dtypes. See",
         "BOXING_TRITON_GAPS, which carries each op's failure, and",
         "docs/reference/operator-support.md for the full survey.",
     ),
@@ -347,6 +349,23 @@ BOXING_TRITON_GAPS = {
         # the boxing kernel. The value-level overload survey cannot see this
         # one: eager materialization is numerically indistinguishable. --
         "_conj",
+        # -- ATen's `_unsafe_view` has the same aliasing/error contract as view:
+        # a viewable layout aliases the input, while an incompatible stride
+        # raises RuntimeError. FlagGems implements it as `reshape`, which may
+        # silently allocate a copy for that incompatible stride. Measured on
+        # PPU: a viewable input aliases on both routes, but a non-contiguous
+        # transpose returns a non-aliasing tensor on FlagGems where CUDA boxing
+        # raises "view size is not compatible". Keep the kernel generated for
+        # explicit A/B diagnosis, but preserve the default PyTorch contract. --
+        "_unsafe_view",
+        # -- Qwen-Image-2.1 slices a complex64 rotary-embedding cache from the
+        # second denoising step onward. FlagGems' slice wrapper asserts that
+        # complex64/complex128 are unsupported before reaching its as_strided
+        # implementation, while the CUDA boxing route preserves the complex
+        # dtype and view semantics. Measured on PPU in the PR #342 full 40-step
+        # case: the FlagGems route aborts at step 2 with that assertion; boxing
+        # completes the same slice contract. --
+        "slice.Tensor",
         # -- FlagGems' reflection-padding wrappers reject a flagos operand before
         # they reach a kernel, and the overload survey cannot see it: the harness
         # derives `padding` from the tensor rank, so ATen's arity check fails

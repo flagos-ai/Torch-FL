@@ -310,7 +310,7 @@ def test_conf_route_counts_are_stable():
         "gcu": {"none": 1605, "gcu": 178, "flaggems": 254},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
         "musa": {"flaggems": 467, "none": 1518, "musa": 52},
-        "ppu": {"flaggems": 593, "cuda": 1444},
+        "ppu": {"flaggems": 591, "cuda": 1446},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():
