@@ -303,7 +303,7 @@ def test_conf_route_counts_are_stable():
     moved between routes: update this test deliberately, not silently.
     """
     expected = {
-        "ascend": {"flaggems": 225, "none": 1662, "ascend": 150},
+        "ascend": {"flaggems": 224, "none": 1662, "ascend": 151},
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 459, "cuda": 1578},

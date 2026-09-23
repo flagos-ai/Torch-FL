@@ -620,6 +620,35 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 # exactly these two overloads. matmul is not in the FlagGems coverage this conf
 # is generated from and already routes to `ascend`. Not yet filed upstream.
 #
+# ascend: topk returns all zeros -- both the values and the indices -- and does it
+# silently, for every shape measured. On Ascend910 with CANN 9.0.0, FlagTree
+# 0.6.2a1+ascend3.5 and FlagGems 6d31db9aa, `torch.topk(randn(128, device=...), 5)`
+# answers [0.0, 0.0, 0.0, 0.0, 0.0] / [0, 0, 0, 0, 0] against a CPU reference of
+# [3.4105, 2.5672, 2.3025, 2.3022, 1.9218] / [59, 69, 89, 45, 122]. The FlagGems
+# body is reached -- its `GEMS TOPK` debug line fires -- and calling
+# flag_gems.ops.topk directly on the same operand returns the same zeros in 0.02s,
+# so the shared entry point is what is wrong, not this conf's plumbing.
+#
+# The indices are what identifies the failure. topk_single_stage_kernel stores
+# `sorted_idx`, which is built from `tl.where(mask, cols, mask_index_val)` -- for
+# this shape every element of it is a distinct value in 0..127, and the pad is
+# INT32_MIN. Five zeros cannot be sorted output from that. The values buffer is
+# built the same way, from `x_val` padded with float("-inf"). Neither buffer holds
+# anything the kernel could have put there, so the store never lands: this is an
+# empty output, not a mis-sorted one. (N=128 with k=5 has HAS_TLE False and
+# x.is_cuda False on this backend, so topk.py's radix-TLE fast path is skipped and
+# the single-stage bitonic kernel above is the one that runs.) The compile is also
+# pathological rather than merely wrong at the margin -- bishengir-compile spends
+# minutes on a single (shape, k) pair, and the large-N shape in the same family is
+# already recorded as blowing the unified-buffer budget (`randperm(2000)` through
+# topk.py, "ub overflow, requires 10092544 bits").
+#
+# Ascend implements topk through aclnnTopk (csrc/aten/backends/ascend/topk.cc), so
+# the route back is free -- and it is exact: with FLAGOS_FORCE_BACKEND=vendor the
+# same call returns the CPU reference values and indices, 0 zeros. This is what
+# un-blocks tests/integration/test_compute_device_index.py::test_tuple_returning_op,
+# which is itself blocked from CI by issue #391. Not yet filed upstream.
+#
 # musa: index_add and randn_like/randn were the first entries in this set (#275,
 # 2026-09-15), recorded as "index_add returns all zeros instead of accumulating"
 # and "randn crashes unpacking generator state". Neither signature reproduces.
@@ -852,6 +881,7 @@ NATIVE_TRITON_GAPS = {
         "randperm",
         "sort",
         "sort.stable",
+        "topk",
     },
     "gcu": {
         # Pointwise overloads broken by ATen's float64 wrapped-number boxing.
