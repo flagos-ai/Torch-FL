@@ -84,6 +84,15 @@ integration_tests:
       print(f"flagos logical devices: {n}")
       PY
 
+  # Issue #391: the multi-device contract files sit at the top level of
+  # tests/integration/, where no manifest sweeps by default -- a file added there
+  # reached no CI job at all. Selected by marker rather than by filename so the
+  # same step works on every platform and the 2+-device guard stays in the test.
+  - name: Multi-device contracts
+    command: >-
+      python -m pytest tests/integration/
+      -m "multi_device" -v -s --tb=short
+
   # Exercise the tests authored for the pure ACLNN backend (marked `ascend`),
   # kept separate from the RNG dispatch suite which carries the `main_ops`
   # marker and is driven by its own step below.

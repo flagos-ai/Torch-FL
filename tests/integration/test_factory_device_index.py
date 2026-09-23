@@ -39,10 +39,16 @@ import torch
 import torch_fl
 
 
-pytestmark = pytest.mark.skipif(
-    torch_fl.flagos.device_count() < 2,
-    reason="needs at least 2 flagos devices",
-)
+# `multi_device` is the selection hook for the manifests' shared
+# `Multi-device contracts` step (issue #391); the skipif below stays here so the
+# hardware guard lives with the test rather than in the manifest.
+pytestmark = [
+    pytest.mark.multi_device,
+    pytest.mark.skipif(
+        torch_fl.flagos.device_count() < 2,
+        reason="needs at least 2 flagos devices",
+    ),
+]
 
 # Device 1 specifically: index 0 is what the bug produced, so asserting on it
 # would pass either way.

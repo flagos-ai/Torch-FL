@@ -100,6 +100,14 @@ integration_tests:
       print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
       print(f"torch_fl: {torch_fl.__file__}")
       PY
+  # Issue #391: the multi-device contract files sit at the top level of
+  # tests/integration/, where no manifest sweeps by default -- a file added there
+  # reached no CI job at all. Selected by marker rather than by filename so the
+  # same step works on every platform and the 2+-device guard stays in the test.
+  - name: Multi-device contracts
+    command: >-
+      python -m pytest tests/integration/
+      -m "multi_device" -v -s --tb=short
   # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
   # cases are measured by the group below, not here (no switch exists any more
   # to skip them -- see ops/conftest.py).

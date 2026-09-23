@@ -88,6 +88,15 @@ integration_tests:
       print(f"flagos devices: {torch_fl.flagos.device_count()}")
       PY
 
+  # Issue #391: the multi-device contract files sit at the top level of
+  # tests/integration/, where no manifest sweeps by default -- a file added there
+  # reached no CI job at all. Selected by marker rather than by filename so the
+  # same step works on every platform and the 2+-device guard stays in the test.
+  - name: Multi-device contracts
+    command: >-
+      python -m pytest tests/integration/
+      -m "multi_device" -v -s --tb=short
+
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
