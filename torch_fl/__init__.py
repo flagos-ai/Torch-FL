@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
 import os
 import re
 import sys
@@ -220,9 +221,6 @@ def _select_backend_config() -> None:
         _BACKEND_CONFIG_PATH = conf_path
 
 
-_select_backend_config()
-
-
 def backend_config_path() -> str:
     """Path of the conf the op-routing table is read from ("" if none).
 
@@ -263,13 +261,6 @@ def _conf_routes_to_flaggems() -> bool:
     except OSError:
         return False
     return False
-
-
-# Optional: PyTorch wheels may require libcudart.so.12 version tags on MetaX.
-if _env.flag("FLAGOS_METAX_CUDART_SHIM"):
-    from torch_fl.accelerator.metax._metax_cudart_shim import ensure_cudart_shim
-
-    ensure_cudart_shim()
 
 
 def _relink_vendor_libtorch() -> None:
@@ -326,9 +317,6 @@ def _relink_vendor_libtorch() -> None:
             )
 
             ensure_ppu_libtorch_links()
-
-
-_relink_vendor_libtorch()
 
 
 def _preload_cuda_assets() -> None:
@@ -492,89 +480,6 @@ def _check_privateuse1_unclaimed() -> None:
         "torch` before torch_fl. Either import torch_fl first, or export "
         "TORCH_DEVICE_BACKEND_AUTOLOAD=0 before starting Python."
     )
-
-
-_preload_cuda_assets()
-_disable_vendor_backend_autoload()
-
-import torch  # noqa: E402
-
-# Immediately after `import torch`, and before anything relies on CUDA dispatch:
-# confirm the DTK device libraries actually bound to the official core.
-_validate_dcu_decoupled_runtime()
-
-# A self-contained PPU build may front its bundled CUDA-enabled libtorch with
-# the official torch+cpu Python wheel. The actual runtime then supports CUDA
-# dispatch while torch/version.py still reports cuda=None. Restore that build
-# metadata before optional packages inspect it and select a native library.
-if _is_ppu_build():
-    from torch_fl.accelerator.ppu._ppu_libtorch_link import (  # noqa: E402
-        restore_ppu_cuda_version,
-    )
-
-    restore_ppu_cuda_version()
-
-if sys.platform == "win32":
-    from ._utils import _load_dll_libraries
-
-    _load_dll_libraries()
-    del _load_dll_libraries
-
-
-# Optional FlagGems-on-MetaX compat (does not patch torch.cuda unless enabled).
-if _env.flag("FLAGOS_METAX_COMPAT"):
-    from torch_fl.accelerator.metax._metax_compat import (  # noqa: E402
-        is_metax_available,
-        patch_torch_cuda_for_metax,
-    )
-
-    if is_metax_available():
-        patch_torch_cuda_for_metax()
-
-
-# Expose libtorch symbols globally so the Ascend Triton backend's JIT-compiled
-# launcher .so can resolve c10/ATen symbols (it links implicitly, not via
-# DT_NEEDED). Applies to both FlagTree and the legacy triton-ascend toolchain.
-import ctypes  # noqa: E402
-import os as _os  # noqa: E402
-
-_torch_lib = _os.path.join(_os.path.dirname(torch.__file__), "lib")
-for _lib in ("libc10.so", "libtorch.so", "libtorch_cpu.so"):
-    _p = _os.path.join(_torch_lib, _lib)
-    if _os.path.exists(_p):
-        ctypes.CDLL(_p, mode=ctypes.RTLD_GLOBAL)
-
-# Load libstream_api.so with RTLD_GLOBAL so that liboperators.so (FlagGems)
-# can resolve GetCurrentStream at runtime.
-_stream_api_path = _os.path.join(_os.path.dirname(__file__), "lib", "libstream_api.so")
-if _os.path.exists(_stream_api_path):
-    ctypes.CDLL(_stream_api_path, mode=ctypes.RTLD_GLOBAL)
-
-# Checked *before* loading _C, not just before the rename: libtorch_fl.so
-# registers the AutogradPrivateUse1 fallback at dlopen time, and a vendor plugin
-# that already registered one makes that a std::terminate ("Tried to register
-# multiple backend fallbacks for the same dispatch key") -- an abort we cannot
-# catch or report. Running the check first turns that into the actionable
-# message below.
-_check_privateuse1_unclaimed()
-
-import torch_fl._C  # type: ignore[misc]  # noqa: E402, F401
-
-# Hand the conf _select_backend_config() resolved to the C++ reader, which builds
-# the routing table on the first op dispatch -- still well after this point.
-# This is a call rather than an os.environ write so the wheel's own choice stays
-# distinguishable from the user's FLAGOS_BACKEND_CONFIG; see
-# backend_config_path(). Nothing to hand over when the user set the variable or
-# nothing was found, in which case the C++ reader resolves it itself.
-if _BACKEND_CONFIG_PATH:
-    torch_fl._C._set_backend_config_path(_BACKEND_CONFIG_PATH)
-
-
-from . import flagos  # noqa: E402
-
-torch.utils.rename_privateuse1_backend("flagos")
-torch._register_device_module("flagos", flagos)
-torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
 
 
 _MUSA_MEM_GET_INFO = []
@@ -806,36 +711,6 @@ def _install_musa_flaggems_compat() -> None:
         )
         sys.modules["torch_musa.distributed"] = distributed
         sys.modules["torch_musa"].distributed = distributed
-
-
-_install_musa_flaggems_compat()
-
-# torch::utils::device_lazy_init(PrivateUse1) imports the module named
-# `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
-# library has called set_requires_device_init(PrivateUse1, true) -- which
-# some vendor libraries do, so the very first flagos factory call can raise
-# "No module named 'torch_flagos'". Publishing the device module under that name
-# satisfies the lookup; flagos._lazy_init is the real initializer, so this is a
-# rename, not a stub. Harmless on backends that never trigger lazy init.
-sys.modules.setdefault("torch_flagos", flagos)
-
-
-# Apex's amp_C extension bypasses the ATen dispatcher and therefore cannot use
-# the normal DeviceBoxingGuard. Install an optional, CUDA-alias-only shim at the
-# common MultiTensorApply boundary; it remains lazy when Apex is not installed
-# and supports applications that import Apex either before or after torch_fl.
-try:
-    from torch_fl.compat.apex import install_apex_compat
-
-    install_apex_compat()
-except Exception as exc:  # noqa: BLE001 - Apex compatibility is optional
-    import warnings
-
-    warnings.warn(
-        f"[torch_fl] Apex compatibility setup was skipped: {exc}",
-        RuntimeWarning,
-        stacklevel=2,
-    )
 
 
 # FlagGems operators registered for the flagos device. Always empty: the Python
@@ -1205,11 +1080,6 @@ def _patch_flaggems_codegen_config():
         sys.modules["torch_npu._C"] = _npu_c_shim
 
 
-# Patch FlagGems codegen config before any FlagGems code is imported
-_patch_flaggems_codegen_config()
-_patch_flaggems_philox()
-
-
 def _patch_cuda_device_context():
     """
     Monkey-patch torch.cuda.device to handle flagos devices.
@@ -1229,24 +1099,6 @@ def _patch_cuda_device_context():
         return _original_cuda_device_init(self, device)
 
     torch.cuda.device.__init__ = _patched_cuda_device_init
-
-
-# Patch torch.cuda.device before FlagGems is used
-_patch_cuda_device_context()
-
-# Initialize CUDA runtime only when FlagGems Python path needs it (CUDA backend ops).
-# The check must be against the *build* backend, not torch.cuda.is_available():
-# a DCU self-contained wheel relinks a hipified libtorch into a stock +cpu torch,
-# which makes is_available() return True even though the CUDA runtime libs are
-# absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not found".
-# PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
-# bundled, so the init works and is what its FlagGems/Triton path relies on.
-if (
-    not _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY")
-    and _build_accelerator() in ("cuda", "", "ppu")
-    and torch.cuda.is_available()
-):
-    torch.cuda.init()
 
 
 def _keep_device_identity_checks_working(real_device, shim):
@@ -1442,9 +1294,6 @@ def _alias_cuda_to_flagos():
     torch.cuda.get_device_properties = flagos.get_device_properties
 
 
-_alias_cuda_to_flagos()
-
-
 def _register_flaggems_operators():
     """
     Prepare FlagGems for the flagos dispatch key.
@@ -1501,11 +1350,6 @@ def is_flaggems_enabled():
     return len(_registered_ops) > 0
 
 
-# Auto-register FlagGems operators on import
-_register_flaggems_operators()
-
-from . import quantization  # noqa: E402
-
 # ---------------------------------------------------------------------------
 # Distributed: register "flagos" ProcessGroup backend for privateuseone
 # ---------------------------------------------------------------------------
@@ -1529,9 +1373,6 @@ def _register_distributed_backend():
         import warnings
 
         warnings.warn(f"[torch_fl] Failed to register 'flagos' dist backend: {e}")
-
-
-_register_distributed_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -1612,9 +1453,6 @@ def _patch_ddp_for_flagos():
     _DDP.__init__ = _patched_init
 
 
-_patch_ddp_for_flagos()
-
-
 # Register torch.compile backend for flagos device (torch 2.0+)
 def _register_compile_backend():
     """Register the 'flagos' backend with torch._dynamo if available."""
@@ -1659,9 +1497,6 @@ def _register_compile_backend():
         pass
 
 
-_register_compile_backend()
-
-
 def _register_bpu_compile_backend() -> None:
     """Register torch.compile(backend="bpu") on a BPU build.
 
@@ -1694,7 +1529,226 @@ def _register_bpu_compile_backend() -> None:
         )
 
 
-_register_bpu_compile_backend()
+def _phase_conf() -> None:
+    """Pick the op-routing conf and stage the MetaX cudart shim.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    _select_backend_config()
+
+    # Optional: PyTorch wheels may require libcudart.so.12 version tags on MetaX.
+    if _env.flag("FLAGOS_METAX_CUDART_SHIM"):
+        from torch_fl.accelerator.metax._metax_cudart_shim import ensure_cudart_shim
+
+        ensure_cudart_shim()
+
+
+def _phase_preload() -> None:
+    """Relink/preload the vendor libtorch and CUDA assets before `import torch`.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    _relink_vendor_libtorch()
+
+    _preload_cuda_assets()
+    _disable_vendor_backend_autoload()
+
+
+def _phase_claim() -> None:
+    """Import torch, claim PrivateUse1, load _C and install the device module.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    global torch, flagos
+    import torch  # noqa: E402
+
+    # Immediately after `import torch`, and before anything relies on CUDA dispatch:
+    # confirm the DTK device libraries actually bound to the official core.
+    _validate_dcu_decoupled_runtime()
+
+    # A self-contained PPU build may front its bundled CUDA-enabled libtorch with
+    # the official torch+cpu Python wheel. The actual runtime then supports CUDA
+    # dispatch while torch/version.py still reports cuda=None. Restore that build
+    # metadata before optional packages inspect it and select a native library.
+    if _is_ppu_build():
+        from torch_fl.accelerator.ppu._ppu_libtorch_link import (  # noqa: E402
+            restore_ppu_cuda_version,
+        )
+
+        restore_ppu_cuda_version()
+
+    if sys.platform == "win32":
+        from ._utils import _load_dll_libraries
+
+        _load_dll_libraries()
+        del _load_dll_libraries
+
+    # Optional FlagGems-on-MetaX compat (does not patch torch.cuda unless enabled).
+    if _env.flag("FLAGOS_METAX_COMPAT"):
+        from torch_fl.accelerator.metax._metax_compat import (  # noqa: E402
+            is_metax_available,
+            patch_torch_cuda_for_metax,
+        )
+
+        if is_metax_available():
+            patch_torch_cuda_for_metax()
+
+    # Expose libtorch symbols globally so the Ascend Triton backend's JIT-compiled
+    # launcher .so can resolve c10/ATen symbols (it links implicitly, not via
+    # DT_NEEDED). Applies to both FlagTree and the legacy triton-ascend toolchain.
+    import os as _os  # noqa: E402
+
+    _torch_lib = _os.path.join(_os.path.dirname(torch.__file__), "lib")
+    for _lib in ("libc10.so", "libtorch.so", "libtorch_cpu.so"):
+        _p = _os.path.join(_torch_lib, _lib)
+        if _os.path.exists(_p):
+            ctypes.CDLL(_p, mode=ctypes.RTLD_GLOBAL)
+
+    # Load libstream_api.so with RTLD_GLOBAL so that liboperators.so (FlagGems)
+    # can resolve GetCurrentStream at runtime.
+    _stream_api_path = _os.path.join(
+        _os.path.dirname(__file__), "lib", "libstream_api.so"
+    )
+    if _os.path.exists(_stream_api_path):
+        ctypes.CDLL(_stream_api_path, mode=ctypes.RTLD_GLOBAL)
+
+    # Checked *before* loading _C, not just before the rename: libtorch_fl.so
+    # registers the AutogradPrivateUse1 fallback at dlopen time, and a vendor plugin
+    # that already registered one makes that a std::terminate ("Tried to register
+    # multiple backend fallbacks for the same dispatch key") -- an abort we cannot
+    # catch or report. Running the check first turns that into the actionable
+    # message below.
+    _check_privateuse1_unclaimed()
+
+    import torch_fl._C  # type: ignore[misc]  # noqa: E402, F401
+
+    # Hand the conf _select_backend_config() resolved to the C++ reader, which builds
+    # the routing table on the first op dispatch -- still well after this point.
+    # This is a call rather than an os.environ write so the wheel's own choice stays
+    # distinguishable from the user's FLAGOS_BACKEND_CONFIG; see
+    # backend_config_path(). Nothing to hand over when the user set the variable or
+    # nothing was found, in which case the C++ reader resolves it itself.
+    if _BACKEND_CONFIG_PATH:
+        torch_fl._C._set_backend_config_path(_BACKEND_CONFIG_PATH)
+
+    from . import flagos  # noqa: E402
+
+    torch.utils.rename_privateuse1_backend("flagos")
+    torch._register_device_module("flagos", flagos)
+    torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
+
+
+def _phase_vendor_compat() -> None:
+    """Install the vendor runtime shims and resolve GEMS_VENDOR (fail-loud).
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    _install_musa_flaggems_compat()
+
+    # torch::utils::device_lazy_init(PrivateUse1) imports the module named
+    # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
+    # library has called set_requires_device_init(PrivateUse1, true) -- which
+    # some vendor libraries do, so the very first flagos factory call can raise
+    # "No module named 'torch_flagos'". Publishing the device module under that name
+    # satisfies the lookup; flagos._lazy_init is the real initializer, so this is a
+    # rename, not a stub. Harmless on backends that never trigger lazy init.
+    sys.modules.setdefault("torch_flagos", flagos)
+
+    # Apex's amp_C extension bypasses the ATen dispatcher and therefore cannot use
+    # the normal DeviceBoxingGuard. Install an optional, CUDA-alias-only shim at the
+    # common MultiTensorApply boundary; it remains lazy when Apex is not installed
+    # and supports applications that import Apex either before or after torch_fl.
+    try:
+        from torch_fl.compat.apex import install_apex_compat
+
+        install_apex_compat()
+    except Exception as exc:  # noqa: BLE001 - Apex compatibility is optional
+        import warnings
+
+        warnings.warn(
+            f"[torch_fl] Apex compatibility setup was skipped: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Patch FlagGems codegen config before any FlagGems code is imported
+    _patch_flaggems_codegen_config()
+    _patch_flaggems_philox()
+
+
+def _phase_ecosystem() -> None:
+    """FlagGems prep, CUDA alias, and distributed/DDP/compile/BPU registration.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    # Patch torch.cuda.device before FlagGems is used
+    _patch_cuda_device_context()
+
+    # Initialize CUDA runtime only when FlagGems Python path needs it (CUDA backend ops).
+    # The check must be against the *build* backend, not torch.cuda.is_available():
+    # a DCU self-contained wheel relinks a hipified libtorch into a stock +cpu torch,
+    # which makes is_available() return True even though the CUDA runtime libs are
+    # absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not found".
+    # PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
+    # bundled, so the init works and is what its FlagGems/Triton path relies on.
+    if (
+        not _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY")
+        and _build_accelerator() in ("cuda", "", "ppu")
+        and torch.cuda.is_available()
+    ):
+        torch.cuda.init()
+
+    _alias_cuda_to_flagos()
+
+    # Auto-register FlagGems operators on import
+    _register_flaggems_operators()
+
+    from . import quantization  # noqa: E402, F401
+
+    _register_distributed_backend()
+
+    _patch_ddp_for_flagos()
+
+    _register_compile_backend()
+
+    _register_bpu_compile_backend()
+
+
+# ===========================================================================
+# Import-time phase pipeline.
+#
+# torch_fl runs a fixed sequence of side effects at import. The order is
+# load-bearing -- a wrong order produces a dlopen abort or a wrong-vendor build,
+# not a Python exception -- so it lives in exactly one place here instead of
+# being implied by where each statement happens to sit in the file.
+#
+#   1. conf          pick the op-routing config and stage the MetaX shim
+#   2. preload       relink/preload the vendor libtorch and CUDA assets
+#   3. claim         import torch, free PrivateUse1, load _C, install the device
+#   4. vendor_compat install the vendor runtime shims and resolve GEMS_VENDOR
+#   5. ecosystem     FlagGems prep, CUDA alias, distributed/DDP/compile/BPU
+#
+# Constraints, each next to the phase it constrains:
+#   * preload before claim: the vendor libtorch has to be in place before
+#     `import torch`, and the CUDA assets before _C is dlopened.
+#   * within claim, the PrivateUse1 check precedes `import torch_fl._C`: the .so
+#     registers the AutogradPrivateUse1 fallback at dlopen time, and a vendor
+#     plugin that already claimed the key turns that into an uncatchable abort.
+#   * claim before vendor_compat: FlagGems reads GEMS_VENDOR at its import, so
+#     the shims and the vendor resolution must precede the ecosystem hooks.
+#   * vendor_compat before ecosystem: the FlagGems/dist/compile hooks act on the
+#     vendor surface the previous phase installed.
+# ===========================================================================
+_phase_conf()
+_phase_preload()
+_phase_claim()
+_phase_vendor_compat()
+_phase_ecosystem()
 
 
 __all__ = [
