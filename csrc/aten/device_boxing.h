@@ -28,8 +28,19 @@ inline void SetTensorImplDevice(c10::TensorImpl* impl, c10::DeviceType type) {
   auto idx = impl->device().index();
   auto new_device = c10::Device(type, idx);
   impl->_change_backend_component_keys(new_device);
-  impl->unsafe_storage().unsafeGetStorageImpl()
-      ->_mutable_data_ptr_no_checks().unsafe_set_device(new_device);
+  // Retag the buffer, but only if the impl has one. A sparse compressed tensor
+  // (SparseCsrTensorImpl) is built without a Storage -- it carries its device
+  // in device_opt_ and holds three dense member tensors instead of a buffer of
+  // its own -- so unsafe_storage() there returns a default-constructed Storage
+  // and the deref below would be a null walk. has_storage() is exactly
+  // "storage_ is non-null", which separates the two cases; the key rewrite
+  // above is still correct for the sparse tensor because remove_backend() only
+  // clears the backend bit, leaving the SparseCsr functionality bit set, so
+  // re-adding the CUDA backend bit yields SparseCsrCUDA as intended.
+  if (impl->has_storage()) {
+    impl->unsafe_storage().unsafeGetStorageImpl()
+        ->_mutable_data_ptr_no_checks().unsafe_set_device(new_device);
+  }
   // CRITICAL: Also update device_opt_ so device() returns the new device.
   // device_opt_ is protected, but we can access it via pointer offset.
   // TensorImpl layout: device_opt_ is at a known offset from the base.
