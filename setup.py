@@ -676,11 +676,38 @@ def _verify_built_native_libs() -> None:
         )
 
 
+def _build_nccl_extension():
+    """Build and return the DCU ProcessGroupNCCL extension artifacts."""
+    if FLAGOS_ACCELERATOR != "dcu":
+        return ()
+
+    script = os.path.join(BASE_DIR, "torch_fl", "comm", "_nccl_ext", "build.py")
+    env = os.environ.copy()
+    env["FLAGOS_ACCELERATOR"] = "dcu"
+    subprocess.check_call([sys.executable, script], cwd=BASE_DIR, env=env)
+
+    pattern = os.path.join(
+        BASE_DIR,
+        "torch_fl",
+        "comm",
+        "_nccl_ext",
+        "_flagos_nccl*.so",
+    )
+    artifacts = tuple(sorted(glob.glob(pattern)))
+    if len(artifacts) != 1:
+        raise RuntimeError(
+            "DCU _flagos_nccl build must produce exactly one extension, "
+            f"found {len(artifacts)} matching {pattern!r}: {artifacts}"
+        )
+    return artifacts
+
+
 class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
     def run(self):
         build_deps()
+        _build_nccl_extension()
         _write_compatibility_manifest(self.distribution.get_version())
         # ``build`` runs build_py before build_ext, but CMake installs package
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
@@ -701,7 +728,13 @@ class BuildExtWithCmake(_build_ext):
             # build_ext. build_py has already cached its file list by then, so
             # copy it (and any pre-bundled device assets) into wheel staging just
             # like the native libs under lib/.
-            patterns.extend(("lib_dcu/*.so*", "lib_dcu/vendor_version.py"))
+            patterns.extend(
+                (
+                    "lib_dcu/*.so*",
+                    "lib_dcu/vendor_version.py",
+                    "comm/_nccl_ext/_flagos_nccl*.so",
+                )
+            )
         for pattern in patterns:
             relative_paths.extend(
                 os.path.relpath(path, os.path.join(BASE_DIR, "torch_fl"))
@@ -810,6 +843,10 @@ def _get_setup_kwargs():
             # torch in front does not have. Needed explicitly: the globs above
             # only match *.so*.
             "lib_dcu/vendor_version.py",
+            # Keep the standalone builder usable from an installed source wheel,
+            # and package its generated extension in binary wheels.
+            "comm/_nccl_ext/*.cpp",
+            "comm/_nccl_ext/_flagos_nccl*.so",
             "lib_ppu/*.so*",
             "lib_ppu/vendor_version.py",
             "include/*.h",

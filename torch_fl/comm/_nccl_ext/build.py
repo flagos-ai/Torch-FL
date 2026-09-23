@@ -200,21 +200,26 @@ def _has_link_library(directory: str, name: str) -> bool:
 def _dcu_library_dirs(
     env: Mapping[str, str], repo_root: str, dtk_root: str
 ) -> Tuple[str, ...]:
-    candidates = []
+    # Prefer the wheel's bundled libtorch over the build machine's external
+    # vendor path so the installed extension does not retain a non-portable
+    # absolute RUNPATH. External paths remain available for standalone builds.
+    candidates = [os.path.join(repo_root, "torch_fl", "lib_dcu")]
     vendor_torch_lib = env.get("FLAGOS_VENDOR_TORCH_LIB")
     if vendor_torch_lib:
         candidates.append(vendor_torch_lib)
-    candidates.append(os.path.join(repo_root, "torch_fl", "lib_dcu"))
     candidates.extend([os.path.join(dtk_root, "lib"), os.path.join(dtk_root, "lib64")])
     candidates.extend(_env_paths(env, "LIBRARY_PATH"))
     candidates.extend(_env_paths(env, "LD_LIBRARY_PATH"))
 
     required = ("c10_hip", "torch_hip", "rccl")
-    directories = tuple(
-        directory
-        for directory in _dedupe_existing_dirs(candidates)
-        if any(_has_link_library(directory, name) for name in required)
-    )
+    directories = []
+    found = set()
+    for directory in _dedupe_existing_dirs(candidates):
+        provided = {name for name in required if _has_link_library(directory, name)}
+        if provided - found:
+            directories.append(directory)
+            found.update(provided)
+    directories = tuple(directories)
     missing = [
         name
         for name in required
@@ -353,7 +358,7 @@ def main():
     original_cwd = os.getcwd()
     try:
         os.chdir(_HERE)
-        sys.argv = [sys.argv[0], "build_ext", "--inplace"]
+        sys.argv = [sys.argv[0], "build_ext", "--inplace", "--force"]
         setup(
             name="_flagos_nccl",
             ext_modules=[extension],

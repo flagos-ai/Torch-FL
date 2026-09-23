@@ -167,3 +167,58 @@ def test_dcu_compiler_rejects_gcc_8(monkeypatch):
 
     with pytest.raises(RuntimeError, match="requires GCC 9 or newer"):
         build._validate_dcu_compiler({"CXX": "g++"})
+
+
+def test_dcu_configuration_prefers_bundled_libtorch_over_external_path(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    dtk = tmp_path / "dtk"
+    bundled = repo / "torch_fl" / "lib_dcu"
+    vendor_lib = tmp_path / "vendor-torch" / "lib"
+    _make_dtk(dtk)
+    _make_dcu_torch_lib(bundled)
+    _make_dcu_torch_lib(vendor_lib)
+
+    config = build._build_config(
+        {
+            "FLAGOS_ACCELERATOR": "dcu",
+            "ROCM_PATH": str(dtk),
+            "FLAGOS_VENDOR_TORCH_LIB": str(vendor_lib),
+        },
+        str(repo),
+    )
+
+    assert config.library_dirs == (str(bundled), str(dtk / "lib"))
+    assert str(vendor_lib) not in config.library_dirs
+    assert config.rpaths == (
+        "$ORIGIN/../../lib_dcu",
+        str(dtk / "lib"),
+    )
+
+
+def test_main_forces_relink(monkeypatch):
+    from types import ModuleType
+
+    captured = {}
+    cpp_extension = ModuleType("torch.utils.cpp_extension")
+    cpp_extension.BuildExtension = object
+    cpp_extension.CppExtension = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "torch.utils.cpp_extension", cpp_extension)
+    monkeypatch.setattr(
+        build,
+        "_build_config",
+        lambda: build._BuildConfig("cuda", (), (), (), ()),
+    )
+
+    import setuptools
+
+    def fake_setup(**kwargs):
+        captured["argv"] = sys.argv[:]
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(setuptools, "setup", fake_setup)
+    build.main()
+
+    assert captured["argv"][1:] == ["build_ext", "--inplace", "--force"]
+    assert captured["kwargs"]["name"] == "_flagos_nccl"

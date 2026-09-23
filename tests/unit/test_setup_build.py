@@ -105,6 +105,111 @@ def test_build_ext_stages_generated_build_config(
     assert compatibility["build"]["vendor_torch_version"] is None
 
 
+def test_nccl_extension_build_is_dcu_only(monkeypatch, tmp_path, clean_kernel_env):
+    namespace, _ = _load_setup(monkeypatch)
+    function = namespace["_build_nccl_extension"]
+    globals_ = function.__globals__
+    monkeypatch.setitem(globals_, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "cuda")
+    monkeypatch.setattr(
+        globals_["subprocess"],
+        "check_call",
+        lambda *args, **kwargs: pytest.fail("non-DCU build invoked _flagos_nccl"),
+    )
+
+    assert function() == ()
+
+
+def test_nccl_extension_build_runs_standalone_builder(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    namespace, _ = _load_setup(monkeypatch)
+    function = namespace["_build_nccl_extension"]
+    globals_ = function.__globals__
+    package_dir = tmp_path / "torch_fl" / "comm" / "_nccl_ext"
+    package_dir.mkdir(parents=True)
+    artifact = package_dir / "_flagos_nccl.cpython-310-x86_64-linux-gnu.so"
+    artifact.touch()
+    calls = []
+    monkeypatch.setitem(globals_, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "dcu")
+    monkeypatch.setattr(
+        globals_["subprocess"],
+        "check_call",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    assert function() == (str(artifact),)
+    command, kwargs = calls.pop()
+    assert command == [
+        globals_["sys"].executable,
+        str(package_dir / "build.py"),
+    ]
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["env"]["FLAGOS_ACCELERATOR"] == "dcu"
+
+
+@pytest.mark.parametrize("artifact_count", [0, 2])
+def test_nccl_extension_build_rejects_ambiguous_output(
+    monkeypatch, tmp_path, clean_kernel_env, artifact_count
+):
+    namespace, _ = _load_setup(monkeypatch)
+    function = namespace["_build_nccl_extension"]
+    globals_ = function.__globals__
+    package_dir = tmp_path / "torch_fl" / "comm" / "_nccl_ext"
+    package_dir.mkdir(parents=True)
+    for index in range(artifact_count):
+        (package_dir / f"_flagos_nccl.variant{index}.so").touch()
+    monkeypatch.setitem(globals_, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "dcu")
+    monkeypatch.setattr(
+        globals_["subprocess"], "check_call", lambda *args, **kwargs: None
+    )
+
+    with pytest.raises(RuntimeError, match="exactly one extension"):
+        function()
+
+
+def test_dcu_build_ext_stages_nccl_extension(monkeypatch, tmp_path, clean_kernel_env):
+    _, setup_kwargs = _load_setup(monkeypatch)
+    source_root = tmp_path / "source"
+    package_dir = source_root / "torch_fl" / "comm" / "_nccl_ext"
+    package_dir.mkdir(parents=True)
+    artifact = package_dir / "_flagos_nccl.cpython-310-x86_64-linux-gnu.so"
+    artifact.write_bytes(b"extension")
+
+    command_type = setup_kwargs["cmdclass"]["build_ext"]
+    setup_globals = command_type.run.__globals__
+    calls = []
+    monkeypatch.setitem(setup_globals, "BASE_DIR", str(source_root))
+    monkeypatch.setitem(setup_globals, "FLAGOS_ACCELERATOR", "dcu")
+    monkeypatch.setitem(setup_globals, "build_deps", lambda: None)
+    monkeypatch.setitem(
+        setup_globals, "_build_nccl_extension", lambda: calls.append("built")
+    )
+    monkeypatch.setitem(
+        setup_globals, "_write_compatibility_manifest", lambda version: None
+    )
+    monkeypatch.setattr(build_ext, "run", lambda self: None)
+
+    command = command_type(Distribution(setup_kwargs))
+    command.ensure_finalized()
+    command.build_lib = str(tmp_path / "wheel")
+    command.run()
+
+    assert calls == ["built"]
+    staged = tmp_path / "wheel" / "torch_fl" / "comm" / "_nccl_ext" / artifact.name
+    assert staged.read_bytes() == b"extension"
+
+
+def test_setup_packages_nccl_source_and_binary(monkeypatch, clean_kernel_env):
+    _, setup_kwargs = _load_setup(monkeypatch)
+    package_data = setup_kwargs["package_data"]["torch_fl"]
+
+    assert "comm/_nccl_ext/*.cpp" in package_data
+    assert "comm/_nccl_ext/_flagos_nccl*.so" in package_data
+
+
 def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_env):
     """The generated file is imported by torch_fl._env.build_kernels()."""
     namespace, _ = _load_setup(monkeypatch)
