@@ -88,6 +88,8 @@ jobs:
             tests/unit/test_integration_workdir.py \
             tests/unit/test_ops_conftest_platform.py \
             tests/unit/test_patch_triton_ascend.py \
+            tests/unit/test_platform_capability_matrix.py \
+            tests/unit/test_platform_detect.py \
             tests/unit/test_platform_support_detect.py \
             tests/unit/test_run_integration_tests.py \
             tests/unit/test_run_unit_tests.py \

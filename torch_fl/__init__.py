@@ -23,29 +23,23 @@ import sys
 # FLAGOS_LOG_DISPACH is ever noticed -- the misspelled variable is simply never
 # read and the setting silently does nothing.
 from torch_fl import _env  # noqa: F401
+from torch_fl import _platform
 from torch_fl import _vendor
 
 
 def _build_accelerator() -> str:
     """Accelerator this wheel was built for, lowercased ("" if unknown).
 
-    Read from the _build_config.py that setup.py writes at build time, and never
-    from the environment. The generated file is what makes a DCU wheel
-    self-describing: _select_backend_config() runs before `import torch`, so it
-    cannot inspect torch.version.hip to detect DCU on its own.
-
-    The environment used to win over it, which meant a stale FLAGOS_ACCELERATOR
-    left over from an earlier build -- or exported by a script written for
-    another machine -- silently selected a conf the wheel was not built for.
-    FLAGOS_ACCELERATOR is a build input; the wheel it produced is the only thing
-    that can say what that build was. To route through a different conf on
-    purpose, FLAGOS_BACKEND_CONFIG names the file directly.
+    Thin alias for torch_fl._platform.build_accelerator(), which the integration
+    test trees read too (loaded by path). Read from the _build_config.py setup.py
+    writes at build time, and never from the environment. The generated file is
+    what makes a DCU wheel self-describing: _select_backend_config() runs before
+    `import torch`, so it cannot inspect torch.version.hip to detect DCU on its
+    own. A stale FLAGOS_ACCELERATOR from another build must not select a conf the
+    wheel was not built for; to route through a different conf on purpose,
+    FLAGOS_BACKEND_CONFIG names the file directly.
     """
-    try:
-        from torch_fl._build_config import ACCELERATOR as built
-    except ImportError:
-        return ""
-    return str(built).strip().lower()
+    return _platform.build_accelerator()
 
 
 def _is_ppu_build() -> bool:

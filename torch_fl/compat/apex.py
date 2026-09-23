@@ -39,6 +39,7 @@ from typing import Any
 import torch
 
 from torch_fl import _env
+from torch_fl import _platform
 from torch_fl.comm.process_group import is_cuda_alias_vendor
 
 
@@ -62,17 +63,13 @@ def _is_disabled() -> bool:
 
 
 def _build_accelerator() -> str:
-    """Return the build accelerator without importing torch_fl.__init__.
+    """Return the build accelerator via the shared detector.
 
-    From the build record alone, like torch_fl._build_accelerator() -- see that
-    function for why the environment is not consulted. Duplicated rather than
-    imported because importing torch_fl there would pull in torch.
+    torch_fl._platform.build_accelerator() reads the build record alone -- see it
+    for why the environment is not consulted. This used to keep a private copy;
+    it now delegates, so there is one read of the record.
     """
-    try:
-        from torch_fl._build_config import ACCELERATOR
-    except ImportError:
-        return ""
-    return str(ACCELERATOR).strip().lower()
+    return _platform.build_accelerator()
 
 
 def _active_vendor() -> str:

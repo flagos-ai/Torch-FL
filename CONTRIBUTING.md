@@ -71,7 +71,7 @@ pytest tests/integration/ops/test_<operator>.py -v
 pytest tests/integration/ops/ -m <platform> -v
 
 # Model tests (if you changed runtime behavior)
-pytest tests/integration/test_inference.py --model <model-path> -v
+pytest tests/integration/test_qwen3_infer.py --model <model-path> -v
 ```
 
 ### 5. Run Lint and Diff Checks

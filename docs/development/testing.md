@@ -228,23 +228,30 @@ Model integration tests accept command-line options for model path and hyperpara
 **Inference test**:
 
 ```bash
-pytest tests/integration/test_inference.py --model <model-path> --max-new-tokens 128 -v
+pytest tests/integration/test_qwen3_infer.py --model <model-path> --max-new-tokens 128 -v
 ```
 
 **Training test**:
 
 ```bash
-pytest tests/integration/test_train.py --model <model-path> --steps 10 --batch-size 2 -v
+pytest tests/integration/test_qwen3_train.py --model <model-path> --steps 10 --batch-size 2 -v
 ```
 
 Replace `<model-path>` with a Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`) or a local directory containing model weights.
 
 ### Distributed Tests
 
-Distributed tests require multi-GPU hardware and a collective communication backend (NCCL, FlagCX, or HCCL).
+Distributed tests require multi-GPU hardware and a collective communication
+backend (NCCL, FlagCX, or HCCL). They are manual scripts, not pytest tests --
+each spawns processes and binds multiple devices -- and live under
+`tests/manual/`:
 
 ```bash
-pytest tests/integration/test_distributed.py -v
+# ProcessGroupFlagOS all_reduce / broadcast / all_gather + DDP on N devices
+LD_LIBRARY_PATH=... python tests/manual/test_flagos_dist_live.py --world-size 2
+
+# Qwen3 DistributedDataParallel training steps on N devices
+HF_HOME=<hf-cache> python tests/manual/test_qwen3_ddp_live.py
 ```
 
 ### torch.compile Tests
