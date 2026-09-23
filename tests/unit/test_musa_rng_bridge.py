@@ -104,3 +104,54 @@ def test_flaggems_philox_reaches_vendor_backend_modules(monkeypatch):
     torch_fl._patch_flaggems_philox()
 
     assert vendor_randn.philox_backend_seed_offset(128) == (-(1 << 63) + 5, 0)
+
+
+class _LazyModule(types.ModuleType):
+    """A module whose module-level ``__getattr__`` runs a failing import.
+
+    transformers generates one of these per fast image processor. Looking up any
+    name the module does not define runs ``import torchvision`` and propagates
+    the resulting ``ModuleNotFoundError``; a ``getattr(obj, name, default)``
+    default does not suppress it, because only ``AttributeError`` is.
+    """
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        raise ModuleNotFoundError("No module named 'torchvision'")
+
+
+def test_flaggems_philox_survives_modules_that_raise_on_getattr(monkeypatch):
+    """A hostile ``sys.modules`` entry must cost one module, not the whole bridge.
+
+    Whether such an entry is present when torch_fl's import runs depends on the
+    host: a bare interpreter has no transformers lazy modules loaded and the
+    sweep completes, while a process that imported transformers first does and
+    the sweep used to die at the first of them — leaving the canonical module
+    bound to the unpatched function, whose ``state_copy.view(torch.int64)``
+    unpacks the flagos generator's MT19937 state into two variables and raises
+    ``ValueError: too many values to unpack (expected 2)`` on every ``randn``.
+    """
+    # Insertion order is sweep order, so the hostile entries go in first: a
+    # sweep that dies on either of them never reaches the flag_gems modules
+    # below it, which is exactly the shape that left the bridge uninstalled.
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.models.aria.image_processing_aria_fast",
+        _LazyModule("transformers.models.aria.image_processing_aria_fast"),
+    )
+    # A non-module entry has no ``__dict__`` to read at all.
+    monkeypatch.setitem(sys.modules, "not_a_module", object())
+    random_utils = _install_fake_flag_gems(monkeypatch)
+    vendor_randn = types.ModuleType("_mthreads.ops.randn")
+    vendor_randn.philox_backend_seed_offset = random_utils.philox_backend_seed_offset
+    monkeypatch.setitem(sys.modules, "_mthreads.ops.randn", vendor_randn)
+
+    torch_fl._patch_flaggems_philox()
+
+    assert random_utils.philox_backend_seed_offset is not _fallback_seed_offset
+    assert vendor_randn.philox_backend_seed_offset is not _fallback_seed_offset
+    assert (
+        vendor_randn.philox_backend_seed_offset
+        is random_utils.philox_backend_seed_offset
+    )

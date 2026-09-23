@@ -759,6 +759,12 @@ def _patch_flaggems_philox():
                 seed -= 1 << 64
             return seed, 0
 
+        # Bind the canonical module first. The sweep below is best-effort; every
+        # module it fails to reach still falls back to this one through
+        # `random_utils`, so the bridge must never be skipped because the sweep
+        # was interrupted.
+        random_utils.philox_backend_seed_offset = _patched
+
         # RNG modules bind this function with ``from ... import`` at import time,
         # so update every already-loaded copy as well as the canonical module.
         # Match on the bound object rather than on the module name: FlagGems
@@ -768,10 +774,29 @@ def _patch_flaggems_philox():
         # silently skips them and the vendor kernel reaches the unpatched
         # function, whose `state_copy.view(torch.int64)` unpacks the flagos
         # generator's MT19937 state into two variables and raises ValueError.
+        #
+        # Nothing about foreign modules may abort the sweep. ``sys.modules``
+        # holds modules with a module-level ``__getattr__`` that runs arbitrary
+        # code and raises on a missing optional dependency — transformers'
+        # lazy image-processor modules raise ``ModuleNotFoundError: No module
+        # named 'torchvision'`` — and it also holds non-module entries such as
+        # ``torch.ops``. The namespace is therefore read from ``__dict__``,
+        # which neither consults ``__getattr__`` nor depends on the entry being
+        # a module, and every step is isolated so one bad entry costs one module
+        # rather than the whole bridge. Which modules are loaded when torch_fl's
+        # import runs depends on the host's installed packages: a bare
+        # interpreter has no lazy transformers modules loaded and the sweep
+        # completes, while a pytest process that imported transformers first does
+        # and the sweep used to die at the first of them, leaving every
+        # ``randn``/``rand``/``randperm`` on the failure path above.
         for mod in list(sys.modules.values()):
-            if getattr(mod, "philox_backend_seed_offset", None) is _orig:
-                mod.philox_backend_seed_offset = _patched
-        random_utils.philox_backend_seed_offset = _patched
+            try:
+                namespace = vars(mod)
+                if namespace.get("philox_backend_seed_offset") is not _orig:
+                    continue
+                namespace["philox_backend_seed_offset"] = _patched
+            except Exception:
+                continue
     except Exception:
         # FlagGems remains optional; native MUSA kernels stay available.
         pass
