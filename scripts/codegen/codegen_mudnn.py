@@ -1107,6 +1107,16 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 # `half_to_float` asks for a float output from a half input, which mudnn's
 # Softmax does not express (out dtype must match in), so that combination runs
 # on the host. ACCURATE is the max-subtracting algorithm, matching aten.
+#
+# Unlike Reduce, Softmax reads its input through the *index* arithmetic that
+# mudnn derives from the stride descriptor, and its validation rejects anything
+# that is not dense C-contiguous -- `SoftmaxRun only support contiguous tensor`,
+# INVALID_PARAMETER -- rather than falling back to a strided read. So a strided
+# input (a slice, a transpose, an expanded broadcast) has to be materialized
+# here. `is_contiguous()` is the right test even though MudnnTensorWrapper
+# already normalizes size-1 strides: the predicate only ignores size-1 dims,
+# whose stride the wrapper rewrites to the C-contiguous value, so anything it
+# reports as non-contiguous is genuinely strided and would be rejected.
 T_SOFTMAX_FWD = """\
 at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   if (!musa_ops::{dtype_pred}(self.scalar_type()) || half_to_float) {{
@@ -1114,8 +1124,9 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   }}
   int64_t d = dim < 0 ? dim + self.dim() : dim;
   auto out = at::empty(self.sizes(), self.options());
-{empty_guard}
-  musa_ops::MudnnTensorWrapper t_self(self);
+{empty_guard}  auto self_c = self.contiguous();
+
+  musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::{mode});
@@ -1133,6 +1144,14 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
 # y*(g - sum(g*y)) exactly. `input_dtype` only tells us what the forward input
 # was; when it differs from the gradient's dtype aten wants a converting
 # backward, which mudnn does not express, so that combination goes to the host.
+#
+# RunBwd enforces the same dense-contiguity validation as Run, on both of its
+# operands. `grad_output` is the one that genuinely arrives strided: autograd
+# hands the backward a broadcasted `ones` whenever the softmax output is summed
+# (`y.sum().backward()` gives a grad_output of stride 0 everywhere), which is
+# how the qwen3 tests reach this. `output` is the forward's own dense
+# allocation in every path we dispatch, but the same guard is applied so a
+# direct `_softmax_backward_data` call with a strided output cannot trip it.
 T_SOFTMAX_BWD = """\
 at::Tensor {kernel}(
     const at::Tensor& grad_output,
@@ -1148,8 +1167,10 @@ at::Tensor {kernel}(
   int64_t d = dim < 0 ? dim + output.dim() : dim;
   auto grad_input = at::empty(output.sizes(), output.options());
 
-  musa_ops::MudnnTensorWrapper t_go(grad_output);
-  musa_ops::MudnnTensorWrapper t_out(output);
+  auto grad_output_c = grad_output.contiguous();
+  auto output_c = output.contiguous();
+  musa_ops::MudnnTensorWrapper t_go(grad_output_c);
+  musa_ops::MudnnTensorWrapper t_out(output_c);
   musa_ops::MudnnTensorWrapper t_gi(grad_input);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::{mode});

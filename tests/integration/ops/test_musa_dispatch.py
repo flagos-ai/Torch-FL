@@ -835,6 +835,179 @@ class TestMusaDegenerateStride:
         assert loss.device.type == "flagos"
 
 
+# A view of a (4, 3, 512) tensor, once against the device tensor and once
+# against the CPU one, plus why the layout matters. Each is non-contiguous in a
+# different way, so a predicate that only special-cased one of them would show
+# up as a failure on the others.
+_STRIDED_SOFTMAX_VIEWS = [
+    (
+        "slice_last",
+        "x[:, -1, :]",
+        "x_cpu[:, -1, :]",
+        "stride over the leading dim, dense inner",
+    ),
+    (
+        "transpose",
+        "x[0].t()",
+        "x_cpu[0].t()",
+        "the reduced dim is the strided one",
+    ),
+    (
+        "expand",
+        "x[0, 0:1].expand(8, 512)",
+        "x_cpu[0, 0:1].expand(8, 512)",
+        "0-stride broadcast dim",
+    ),
+    (
+        "step_slice",
+        "x[0, 0, ::2]",
+        "x_cpu[0, 0, ::2]",
+        "1-D with a step of 2",
+    ),
+]
+
+
+def _run_strided_softmax_probe(body: str) -> subprocess.CompletedProcess:
+    """Run `body` with both softmax kernels pinned to mudnn.
+
+    Pinning matters: `_softmax` is routed to FlagGems by default, so an
+    unpinned run would pass whether or not the mudnn kernel can handle the
+    layout. The table is read once and cached, so the env has to be in place
+    before the interpreter loads it -- hence a subprocess rather than an
+    in-process `monkeypatch.setenv`.
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "FLAGOS_LOG": "dispatch",
+            "FLAGOS_OP__softmax": "musa",
+            "FLAGOS_OP__log_softmax": "musa",
+            "FLAGOS_OP__softmax_backward_data": "musa",
+            "FLAGOS_OP__log_softmax_backward_data": "musa",
+        }
+    )
+    code = (
+        "import torch, torch.nn.functional as F, torch_fl\n"
+        "torch.manual_seed(0)\n"
+        f"x_cpu = torch.randn(4, 3, 512, requires_grad=True)\n"
+        f"x = x_cpu.detach().to('{DEVICE}').requires_grad_(True)\n"
+        f"{body}\n"
+        "torch.flagos.synchronize()\n"
+        "print('PROBE OK')\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
+
+
+def _assert_ran_on_musa(result: subprocess.CompletedProcess, ops: tuple) -> None:
+    assert result.returncode == 0, f"probe failed:\n{result.stdout}{result.stderr}"
+    assert "PROBE OK" in result.stdout, result.stdout
+    for op in ops:
+        assert f"[flagos dispatch] {op} -> musa" in result.stderr, (
+            f"{op} did not reach the mudnn backend, so this proves nothing:\n"
+            f"{result.stderr}"
+        )
+
+
+class TestMusaSoftmaxStrided:
+    """Softmax must materialize a strided operand before handing it to mudnn.
+
+    mudnn's ``Softmax::Run``/``RunBwd`` derive their index arithmetic from the
+    stride descriptor and validate it up front, rejecting anything that is not
+    dense C-contiguous (``SoftmaxRun only support contiguous tensor``,
+    INVALID_PARAMETER) instead of falling back to a strided read the way
+    ``Reduce`` does. ``MudnnTensorWrapper``'s size-1 stride rewrite (issue #240)
+    does not help here: these layouts are genuinely strided on a dim of extent
+    greater than one, so only a copy can satisfy the check.
+
+    The backward is what makes this reachable in practice rather than
+    theoretical. ``y.sum().backward()`` hands the kernel an ``ones``-broadcast
+    gradient whose strides are all 0 -- autograd needs one element, not 512, to
+    describe it -- so the forward's own ``output`` operand is dense while
+    ``grad_output`` is not, and only one of the two operands trips the
+    validation. That is the path Qwen3's ``test_custom_4d_attention_mask``
+    takes (issue #262), and the forward-input half of it is issue #268.
+    """
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize(
+        "dev_view,cpu_view,reason",
+        [case[1:] for case in _STRIDED_SOFTMAX_VIEWS],
+        ids=[case[0] for case in _STRIDED_SOFTMAX_VIEWS],
+    )
+    def test_strided_forward_matches_cpu(self, dev_view, cpu_view, reason):
+        """A strided input gives the same answer as its dense copy."""
+        result = _run_strided_softmax_probe(
+            f"y = F.softmax({dev_view}, -1)\n"
+            f"y_ref = F.softmax({cpu_view}, -1)\n"
+            "torch.testing.assert_close(y.cpu(), y_ref, rtol=1e-4, atol=1e-4)"
+        )
+        _assert_ran_on_musa(result, ("_softmax",))
+
+    @pytest.mark.musa
+    def test_broadcast_gradient_matches_cpu(self):
+        """`logits[:, -1, :].softmax(-1).sum().backward()` -- the #262 repro.
+
+        The gradient of the strided view has to be scattered back into the
+        dense input, so a wrong answer here would also mean a wrong answer for
+        every causal-LM attention weight.
+        """
+        result = _run_strided_softmax_probe(
+            "view, view_cpu = x[:, -1, :], x_cpu[:, -1, :]\n"
+            "F.softmax(view, -1).sum().backward()\n"
+            "F.softmax(view_cpu, -1).sum().backward()\n"
+            "torch.testing.assert_close(x.grad.cpu(), x_cpu.grad, rtol=1e-4, atol=1e-4)"
+        )
+        _assert_ran_on_musa(result, ("_softmax", "_softmax_backward_data"))
+
+    @pytest.mark.musa
+    def test_strided_transpose_gradient_matches_cpu(self):
+        """The gradient itself arrives strided, not just non-broadcast.
+
+        `y.t()` reverses which dim the reduction ran over, so autograd's
+        grad_output is a transpose of the forward input rather than a
+        broadcast of a single element -- a different stride pattern reaching
+        the same validation.
+        """
+        result = _run_strided_softmax_probe(
+            "F.softmax(x[0], -1).t().sum().backward()\n"
+            "F.softmax(x_cpu[0], -1).t().sum().backward()\n"
+            "torch.testing.assert_close(x.grad.cpu(), x_cpu.grad, rtol=1e-4, atol=1e-4)"
+        )
+        _assert_ran_on_musa(result, ("_softmax", "_softmax_backward_data"))
+
+    @pytest.mark.musa
+    def test_strided_log_softmax_matches_cpu(self):
+        """log_softmax shares both templates, so it shares the fix."""
+        result = _run_strided_softmax_probe(
+            "F.log_softmax(x[:, -1, :], -1).sum().backward()\n"
+            "F.log_softmax(x_cpu[:, -1, :], -1).sum().backward()\n"
+            "torch.testing.assert_close(x.grad.cpu(), x_cpu.grad, rtol=1e-4, atol=1e-4)"
+        )
+        _assert_ran_on_musa(result, ("_log_softmax", "_log_softmax_backward_data"))
+
+    @pytest.mark.musa
+    def test_contiguous_input_still_matches_cpu(self):
+        """The dense forward is unchanged, and pays no copy.
+
+        `Tensor::contiguous()` on an already dense tensor returns the same
+        tensor, so the guard is a branch rather than a materialization and the
+        kernel still reads the caller's storage.
+
+        The backward half of this case failed before the fix as well: autograd
+        builds `sum()`'s gradient as a broadcast no matter how the forward
+        input was laid out, so a dense forward input does not exempt the
+        backward from the copy.
+        """
+        result = _run_strided_softmax_probe(
+            "F.softmax(x, -1).sum().backward()\n"
+            "F.softmax(x_cpu, -1).sum().backward()\n"
+            "torch.testing.assert_close(x.grad.cpu(), x_cpu.grad, rtol=1e-4, atol=1e-4)"
+        )
+        _assert_ran_on_musa(result, ("_softmax", "_softmax_backward_data"))
+
+
 class TestMusaAutograd:
     """Autograd works through the mudnn kernels.
 

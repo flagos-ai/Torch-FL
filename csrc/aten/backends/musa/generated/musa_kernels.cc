@@ -2102,8 +2102,9 @@ at::Tensor PrivSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool half_
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return out;
+  auto self_c = self.contiguous();
 
-  musa_ops::MudnnTensorWrapper t_self(self);
+  musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::SOFTMAX);
@@ -3179,8 +3180,9 @@ at::Tensor PrivLogSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool ha
   // output holds no elements, so the allocation above is already the
   // answer. Return it on-device without launching.
   if (out.numel() == 0) return out;
+  auto self_c = self.contiguous();
 
-  musa_ops::MudnnTensorWrapper t_self(self);
+  musa_ops::MudnnTensorWrapper t_self(self_c);
   musa_ops::MudnnTensorWrapper t_out(out);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::LOGSOFTMAX);
@@ -3206,8 +3208,10 @@ at::Tensor PrivSoftmaxBackwardDataKernelMusa(
   int64_t d = dim < 0 ? dim + output.dim() : dim;
   auto grad_input = at::empty(output.sizes(), output.options());
 
-  musa_ops::MudnnTensorWrapper t_go(grad_output);
-  musa_ops::MudnnTensorWrapper t_out(output);
+  auto grad_output_c = grad_output.contiguous();
+  auto output_c = output.contiguous();
+  musa_ops::MudnnTensorWrapper t_go(grad_output_c);
+  musa_ops::MudnnTensorWrapper t_out(output_c);
   musa_ops::MudnnTensorWrapper t_gi(grad_input);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::SOFTMAX);
@@ -3236,8 +3240,10 @@ at::Tensor PrivLogSoftmaxBackwardDataKernelMusa(
   int64_t d = dim < 0 ? dim + output.dim() : dim;
   auto grad_input = at::empty(output.sizes(), output.options());
 
-  musa_ops::MudnnTensorWrapper t_go(grad_output);
-  musa_ops::MudnnTensorWrapper t_out(output);
+  auto grad_output_c = grad_output.contiguous();
+  auto output_c = output.contiguous();
+  musa_ops::MudnnTensorWrapper t_go(grad_output_c);
+  musa_ops::MudnnTensorWrapper t_out(output_c);
   musa_ops::MudnnTensorWrapper t_gi(grad_input);
   musa_ops::mudnn::Softmax op;
   op.SetMode(musa_ops::mudnn::Softmax::Mode::LOGSOFTMAX);
