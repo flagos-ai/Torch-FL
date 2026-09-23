@@ -226,6 +226,15 @@ VIEW_OPS = {
     "squeeze.dim": lambda torch, dev: (lambda a: (a, a.unsqueeze(0).squeeze(0)))(
         torch.arange(32, device=dev).reshape(8, 4)
     ),
+    "_unsafe_view.alias": lambda torch, dev: (
+        lambda a: (a, torch.ops.aten._unsafe_view.default(a, [4, 2, 4]))
+    )(torch.arange(32, device=dev).reshape(8, 4).t()),
+    # ATen rejects flattening this transpose because no strided view can express
+    # it. An implementation backed by reshape may instead materialise a copy;
+    # comparing the error contract is what catches that semantic difference.
+    "_unsafe_view.error": lambda torch, dev: (
+        lambda a: (a, torch.ops.aten._unsafe_view.default(a, [32]))
+    )(torch.arange(32, device=dev).reshape(8, 4).t()),
 }
 
 
@@ -369,23 +378,29 @@ def compare(paths):
     view_compared = 0
     for name, want in reference["views"].items():
         got = candidate["views"].get(name)
-        if "error" in want:
-            # The reference could not run it -- on the CPU a complex view, say --
-            # so there is nothing to compare against and the candidate is not at
-            # fault. Same rule as the ops above.
-            view_skipped += 1
-            print(f"view {name:<21}{'':>12}{'':>12}   (reference errored, skipped)")
+        if got is None:
+            view_bad.append(name)
+            print(f"view {name:<21}{'':>12}{'':>12}   MISSING on candidate")
             continue
-        # An entry that is missing, or that carries an error instead of an
-        # `aliases` flag, is a view the candidate could not do. It is a failure,
-        # not agreement: an `and` chain that only compares when both sides have
-        # the key reports a backend whose `permute` raises as "all agree".
-        if got is None or "error" in got or got.get("aliases") != want["aliases"]:
+
+        want_error = want.get("error")
+        got_error = got.get("error")
+        if want_error or got_error:
+            want_type = want_error.split(":", 1)[0] if want_error else None
+            got_type = got_error.split(":", 1)[0] if got_error else None
+            if want_type != got_type:
+                view_bad.append(name)
+                print(
+                    f"view {name:<21}{'':>12}{'':>12}   ERROR CONTRACT "
+                    f"{want_type} vs {got_type}"
+                )
+            continue
+
+        if want.get("aliases") != got.get("aliases"):
             view_bad.append(name)
             print(
                 f"view {name:<21}{'':>12}{'':>12}   ALIASING "
-                f"{want['aliases']} vs "
-                f"{got.get('aliases') if got and 'error' not in got else got}"
+                f"{want.get('aliases')} vs {got.get('aliases')}"
             )
         else:
             view_compared += 1

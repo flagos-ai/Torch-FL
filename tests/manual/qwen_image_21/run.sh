@@ -37,6 +37,10 @@
 # MBU for the elementwise probe). Both are recorded, and without them the FLOPs
 # and the GB/s are still measured while the ratios read n/a.
 #
+# All device runs also accept wrapper-only `--run-dir DIR` and `--log FILE`.
+# They are removed before the remaining arguments are passed to Python, so callers
+# do not need to export OUT_DIR or LOG merely to choose the artifact paths.
+#
 # Images land in one directory per backend under OUT_DIR -- <OUT_DIR>/flagos,
 # <OUT_DIR>/musa, <OUT_DIR>/cuda -- so the vendor run and the flagos run of the
 # same sweep do not overwrite each other, and side-by-side pairs them into
@@ -59,8 +63,9 @@
 #             and pointing it at an empty directory looks exactly like a
 #             missing model.
 #   QWEN_IMAGE_21_MODEL     the weights: a directory or a hub id
-#   QWEN_IMAGE_21_DIFFUSERS the diffusers source checkout that defines the 2.1
-#                           classes, which no release does
+#   QWEN_IMAGE_21_DIFFUSERS optional diffusers source checkout that defines the
+#                           2.1 classes; not needed when the installed package
+#                           contains a compatible backport
 #   OUT_DIR   where images and logs land (default: ./qwen-image-21-out)
 #   LOG       log path override (default: $OUT_DIR/<mode>-<timestamp>.log)
 #
@@ -292,6 +297,39 @@ if [ "$MODE" = "table" ]; then
     exec "$PYTHON" "$ROOT/$SCRIPT" --table "$@"
 fi
 
+# `--run-dir` and `--log` belong to this wrapper rather than to the individual
+# Python tools. Accept both spellings and forward every other argument unchanged.
+FORWARDED=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --log)
+        [ "$#" -ge 2 ] || { echo "--log requires a path" >&2; exit 2; }
+        LOG=$2
+        shift 2
+        ;;
+    --log=*)
+        LOG=${1#*=}
+        shift
+        ;;
+    --run-dir)
+        [ "$#" -ge 2 ] || { echo "--run-dir requires a path" >&2; exit 2; }
+        OUT_DIR=$2
+        shift 2
+        ;;
+    --run-dir=*)
+        OUT_DIR=${1#*=}
+        shift
+        ;;
+    *)
+        FORWARDED+=("$1")
+        shift
+        ;;
+    esac
+done
+# `${FORWARDED[@]+...}` rather than a bare expansion, matching ARGS below: an
+# empty array under `set -u` is an unbound variable before bash 4.4.
+set -- ${FORWARDED[@]+"${FORWARDED[@]}"}
+
 # Each backend writes its own directory, so the vendor run and the flagos run of
 # the same sweep sit next to each other instead of overwriting one another.
 DEVICE=$(value_of_flag --device flagos "$@")
@@ -329,7 +367,11 @@ echo
 (cd "$ROOT" && "$PYTHON" "$SCRIPT" ${ARGS[@]+"${ARGS[@]}"}) 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 
+# Compute the summary completely before appending it.  summarise reads LOG, so
+# piping it directly through `tee -a "$LOG"` would make its later grep calls
+# observe a file that is changing underneath them.
 if [ "$MODE" = "bench" ]; then
+    SUMMARY=
     # bench prints one "wrote <path>" line per record, which is a list whenever
     # --batch named several values. Reading them back out of this run's own log is
     # what keeps the summary and the artifact from disagreeing: deriving the names
@@ -338,15 +380,22 @@ if [ "$MODE" = "bench" ]; then
     WROTE=$(grep -o '^wrote .*' "$LOG" 2>/dev/null | awk '{print $2}')
     if [ -n "$WROTE" ]; then
         for JSON in $WROTE; do
-            summarise_bench "$JSON"
+            RECORD_SUMMARY=$(summarise_bench "$JSON")
+            if [ -n "$SUMMARY" ]; then
+                SUMMARY="$SUMMARY
+$RECORD_SUMMARY"
+            else
+                SUMMARY=$RECORD_SUMMARY
+            fi
         done
     else
         # Nothing was written -- the run died before its first record -- so report
         # where it would have gone rather than nothing at all.
-        summarise_bench "$(value_of_flag --out "$DEVICE_DIR/bench.json" ${ARGS[@]+"${ARGS[@]}"})"
+        SUMMARY=$(summarise_bench "$(value_of_flag --out "$DEVICE_DIR/bench.json" ${ARGS[@]+"${ARGS[@]}"})")
     fi
 else
-    summarise
+    SUMMARY=$(summarise)
 fi
-echo "exit status        : $STATUS"
+printf '%s\n' "$SUMMARY" | tee -a "$LOG"
+printf 'exit status        : %s\n' "$STATUS" | tee -a "$LOG"
 exit "$STATUS"

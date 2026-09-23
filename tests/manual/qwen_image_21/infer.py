@@ -29,10 +29,10 @@ Three things about 2.1 are not obvious and each has bitten:
 
 **Its diffusers classes are in no release.** ``QwenImage21Pipeline``,
 ``QwenImage21Transformer2DModel`` and ``AutoencoderKLQwenImage21`` exist only in
-a 0.41.0.dev0 source checkout -- PyPI's 0.40.0 is the newest release and has
-none of them. ``common.import_diffusers()`` therefore prepends that checkout to
-``sys.path`` (``QWEN_IMAGE_21_DIFFUSERS``, see ``common``), which leaves any
-installed diffusers untouched.
+an unreleased source tree -- PyPI's 0.40.0 is the newest release and has none of
+them. ``common.import_diffusers()`` accepts an installed package with a
+compatible backport; otherwise it prepends ``QWEN_IMAGE_21_DIFFUSERS`` to
+``sys.path``, which leaves the installed diffusers untouched.
 
 **The prompt embeddings cannot be injected.** ``__call__`` has no
 ``image_pad_mask`` parameter, and the local ``append_target_slots`` that builds
@@ -142,7 +142,7 @@ def parse_args(argv=None):
 
 
 def load_pipeline(torch, args):
-    """The 2.1 pipeline, from the source checkout that defines it."""
+    """The 2.1 pipeline, from a compatible install or source checkout."""
     diffusers = common.import_diffusers()
     print(f"diffusers {diffusers.__version__} from {diffusers.__file__}")
     print(f"loading {args.model} (this materialises ~33 GB on the host)")
@@ -501,7 +501,10 @@ def main(argv=None):
 
     print(f"stage: {args.stage}   device: {args.device}   torch: {torch.__version__}")
     encoder, transformer, vae = common.resolve_placement(torch, args)
-    print(f"  encoder/vae -> {encoder}   transformer -> {' '.join(transformer)}")
+    print(
+        f"  encoder -> {encoder}   transformer -> "
+        f"{' '.join(transformer)}   vae -> {vae}"
+    )
     pipe = load_pipeline(torch, args)
     place_pipeline(torch, pipe, args)
     if args.omit_all_valid_prompt_mask:

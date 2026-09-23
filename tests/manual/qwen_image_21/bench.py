@@ -154,6 +154,22 @@ def parse_args(argv=None):
         "--out", default=None, help="where the JSON lands; required to measure"
     )
     parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help=(
+            "cache directory for both Triton and FlagGems; sets "
+            "TRITON_CACHE_DIR and FLAGGEMS_CACHE_DIR before torch is imported"
+        ),
+    )
+    parser.add_argument(
+        "--disable-backend-autoload",
+        action="store_true",
+        help=(
+            "set TORCH_DEVICE_BACKEND_AUTOLOAD=0 before torch is imported; use "
+            "this when a vendor plugin would otherwise claim PrivateUse1"
+        ),
+    )
+    parser.add_argument(
         "--batch",
         nargs="+",
         type=int,
@@ -247,6 +263,8 @@ def parse_args(argv=None):
         parser.error(f"--batch lists {args.batch}, which repeats a value")
     if not args.table and args.warmup < 0:
         parser.error("--warmup cannot be negative")
+    if args.cold_cache and args.cache_dir:
+        parser.error("--cold-cache and --cache-dir are mutually exclusive")
     return args
 
 
@@ -276,6 +294,19 @@ def out_paths(out, batches):
     if len(batches) == 1:
         return [path]
     return [path.with_name(f"{path.stem}-b{batch}{path.suffix}") for batch in batches]
+
+
+def apply_runtime_environment(args):
+    """Apply CLI-owned environment before importing torch or the backend."""
+    import os
+
+    if args.disable_backend_autoload:
+        os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    if args.cache_dir:
+        cache = Path(args.cache_dir).expanduser()
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = str(cache)
+        os.environ["FLAGGEMS_CACHE_DIR"] = str(cache)
 
 
 def revision():
@@ -536,6 +567,38 @@ def measured_calls(measurement):
     return measurement.number_per_run * len(measurement.raw_times)
 
 
+def ensure_minimum_measured_calls(caller, primary, supplement, minimum=2):
+    """Capture timed calls and supplement a one-call autorange result.
+
+    ``blocked_autorange`` may return one call when that call alone exceeds its
+    target duration. The benchmark promises at least two measured calls, so
+    request the missing calls explicitly. Capture each measurement before the
+    next one starts: Timer may issue untimed block-size probes, and selecting
+    from the caller only after all measurements would mix those probes into the
+    phase, memory and determinism receipts.
+    """
+    batches = []
+
+    def capture(measurement):
+        runs = measured_calls(measurement)
+        samples, peaks, hashes = caller.measured(runs)
+        batches.append(
+            {
+                "measurement": measurement,
+                "runs": runs,
+                "samples": list(samples),
+                "peaks": list(peaks),
+                "hashes": list(hashes),
+            }
+        )
+
+    capture(primary)
+    while sum(batch["runs"] for batch in batches) < minimum:
+        missing = minimum - sum(batch["runs"] for batch in batches)
+        capture(supplement(missing))
+    return batches
+
+
 def measure(torch, pipe, args, prompt, device, shape=None):
     """Warm up, then measure. Returns the record's measurement sections.
 
@@ -596,17 +659,29 @@ def measure(torch, pipe, args, prompt, device, shape=None):
     measurement = benchmark.Timer(
         stmt="timed_call()", globals={"timed_call": timed_call}, num_threads=1
     ).blocked_autorange(min_run_time=args.min_run_time)
+    batches = ensure_minimum_measured_calls(
+        caller,
+        measurement,
+        lambda missing: benchmark.Timer(
+            stmt="timed_call()",
+            globals={"timed_call": timed_call},
+            num_threads=1,
+        ).timeit(missing),
+    )
 
     timer.close()
 
-    runs = measured_calls(measurement)
-    samples, peaks, hashes = caller.measured(runs)
+    runs = sum(batch["runs"] for batch in batches)
+    samples = [sample for batch in batches for sample in batch["samples"]]
+    peaks = [peak for batch in batches for peak in batch["peaks"]]
+    hashes = [digest for batch in batches for digest in batch["hashes"]]
+    latency_times = [value for batch in batches for value in batch["measurement"].times]
     # One source for the latency: the timer's own per-call times. Its mean,
     # median, min and max are computed from exactly these, so computing them here
     # from the same list keeps one arithmetic in play rather than two. Note that
     # ``times`` has one entry per *block* of calls, not per call; see the note
     # below when the block size is not 1.
-    per_call = statistics(measurement.times)
+    per_call = statistics(latency_times)
     latency = {
         "per_call_s": per_call,
         "per_image_s": {
@@ -614,12 +689,17 @@ def measure(torch, pipe, args, prompt, device, shape=None):
             for key, value in per_call.items()
         },
     }
-    if measurement.number_per_run != 1:
+    block_sizes = [batch["measurement"].number_per_run for batch in batches]
+    if any(size != 1 for size in block_sizes):
         notes.append(
-            f"the timer measured in blocks of {measurement.number_per_run} calls, "
-            f"so {runs} calls gave {len(measurement.times)} latency samples: the "
+            f"the timer measured in blocks of {block_sizes} calls, "
+            f"so {runs} calls gave {len(latency_times)} latency samples: the "
             "latency spread is over blocks, while the phases are per call. Quote "
             "`latency.per_image_s.runs` as the latency sample count."
+        )
+    if len(batches) > 1:
+        notes.append(
+            "autorange produced one timed call; one explicit timed call was added"
         )
 
     memory = memory_summary(peaks)
@@ -888,6 +968,7 @@ def report_batch(record, measured, args, path, error=None):
 
 def run(argv=None):
     args = parse_args(argv)
+    apply_runtime_environment(args)
 
     if args.cold_cache:
         cache = cold_cache_dir()

@@ -36,13 +36,10 @@ import time
 
 DEFAULT_DEVICE = "flagos"
 
-# Where the Qwen-Image-2.1 pipeline classes live. They are in no released
-# diffusers -- 0.40.0 is the newest on PyPI and its QwenImage21* names do not
-# exist -- so this flow reads them out of a source checkout supplied from
-# outside. The default is this development host's; a chip brings its own with
-# the environment variable below.
+# An optional source tree for environments whose installed diffusers does not
+# provide the Qwen-Image-2.1 classes. A compatible backport package is equally
+# valid and does not need a second source checkout.
 DIFFUSERS_SRC_ENV = "QWEN_IMAGE_21_DIFFUSERS"
-DIFFUSERS_SRC_DEFAULT = "/nfs/lvyufeng/Qwen-Image-2.1-ref-qwen-image-2.1/src"
 
 # Where the weights are. A directory, not a hub id: the published model is on
 # ModelScope under Qwen/Qwen-Image-2.1 and the copy used here was fetched to
@@ -74,14 +71,18 @@ def model_ref():
 
 
 def diffusers_src():
-    """The Qwen-Image-2.1 diffusers checkout, or a fatal error naming the variable."""
-    src = os.environ.get(DIFFUSERS_SRC_ENV, DIFFUSERS_SRC_DEFAULT)
+    """The explicitly supplied Qwen-Image-2.1 diffusers checkout."""
+    src = os.environ.get(DIFFUSERS_SRC_ENV)
+    if not src:
+        raise SystemExit(
+            f"the installed diffusers has no QwenImage21Pipeline. Set "
+            f"{DIFFUSERS_SRC_ENV} to a source tree containing "
+            "diffusers/pipelines/qwenimage21/."
+        )
     if not os.path.isdir(src):
         raise SystemExit(
-            f"Qwen-Image-2.1's diffusers classes are not in any released diffusers, "
-            f"so this flow needs a source checkout. Set {DIFFUSERS_SRC_ENV} to one "
-            f"(it must contain diffusers/pipelines/qwenimage21/); "
-            f"{src!r} has no such directory."
+            f"{DIFFUSERS_SRC_ENV}={src!r} is not a directory; it must contain "
+            "diffusers/pipelines/qwenimage21/."
         )
     if not os.path.isdir(os.path.join(src, "diffusers", "pipelines", "qwenimage21")):
         raise SystemExit(
@@ -92,23 +93,34 @@ def diffusers_src():
 
 
 def import_diffusers():
-    """Import diffusers from the 2.1 checkout, whatever the interpreter has installed.
+    """Import a diffusers build that provides the Qwen-Image-2.1 classes.
 
-    Prepending to ``sys.path`` rather than installing: the checkout is a
-    0.41.0.dev0 tree, and installing it over an environment's diffusers 0.40.0
-    would replace the version every other test in this repository runs against.
-    Prepending also means the checkout wins over an installed 0.40.0 without
-    touching it, so one interpreter can serve both.
+    A compatible installed package wins unless ``QWEN_IMAGE_21_DIFFUSERS`` is
+    explicitly set. If the installed package lacks the classes, retry from that
+    source tree without installing it over the environment's stable diffusers.
     """
+    if os.environ.get(DIFFUSERS_SRC_ENV):
+        import_diffusers_src()
+    import diffusers
+
+    if hasattr(diffusers, "QwenImage21Pipeline"):
+        return diffusers
+
+    # The package was imported before discovering that it lacks the required
+    # class. Remove that module tree before prepending the explicit checkout;
+    # otherwise Python returns the cached, incompatible package on the retry.
+    for name in tuple(sys.modules):
+        if name == "diffusers" or name.startswith("diffusers."):
+            del sys.modules[name]
     import_diffusers_src()
     import diffusers
 
-    if not hasattr(diffusers, "QwenImage21Pipeline"):
-        raise SystemExit(
-            f"diffusers imported from {os.path.dirname(diffusers.__file__)} has no "
-            f"QwenImage21Pipeline. {DIFFUSERS_SRC_ENV} must precede it on sys.path."
-        )
-    return diffusers
+    if hasattr(diffusers, "QwenImage21Pipeline"):
+        return diffusers
+    raise SystemExit(
+        f"diffusers imported from {os.path.dirname(diffusers.__file__)} has no "
+        f"QwenImage21Pipeline. {DIFFUSERS_SRC_ENV} must precede it on sys.path."
+    )
 
 
 def import_diffusers_src():
@@ -724,22 +736,14 @@ class PhaseTimer:
     the denoise loop or the decode, and the three fail for different reasons --
     so every full run reports them.
 
-    The loop is timed from ``callback_on_step_end``, which the pipeline calls
-    after each step and which nothing else here needs, bracketed at the front by
-    the transformer forward that begins it. Every edge is synchronised: the text
-    encoder and the VAE by wrapping them -- the VAE is reached as
+    The denoise interval starts at the first transformer pre-hook and ends at
+    the synchronized boundary immediately before VAE decode.  If decode is not
+    reached, :meth:`sample` closes the same boundary.  Step callbacks count the
+    completed iterations but do not synchronize each one, avoiding a timing
+    probe that would serialize the loop.  The text encoder and VAE remain timed
+    by wrapping their boundaries -- the VAE is reached as
     ``self.vae.decode(...)``, a method call rather than ``__call__``, so a
-    forward hook never fires for it and the bound method has to be wrapped
-    instead -- and the step callback by synchronising inside it.
-
-    Both of the loop's edges need saying explicitly, because the denoise loop is
-    asynchronous: nothing in the pipeline blocks the host between steps, so a
-    callback that only reads the clock stamps when work was *enqueued*, not when
-    it finished. On this workload the two agree to 0.15% -- 20.88 s against
-    20.91 s measured on A100 -- but only because the 40 GB card's allocator is
-    nearly full and blocks the host on every step. That is a property of the
-    chip's memory pressure, not of the measurement, so the synchronise is what
-    makes the number device-attributed rather than incidentally so.
+    forward hook never fires for it and the bound method has to be wrapped.
 
     One sample per ``reset``/``sample`` pair, rather than one accumulator for the
     whole run, because a benchmark needs each measured call's own phases: only
@@ -764,10 +768,11 @@ class PhaseTimer:
     def __init__(self, torch, pipe, device_kind):
         self._pipe = pipe
         self._sync = lambda: sync(torch, device_kind)
+        self._loop_start = None
+        self._loop_end = None
         self._marks = []
         self._timings = {}
         self._handles = []
-        self._loop_start = None
 
         encoder = getattr(pipe, "text_encoder", None)
         if encoder is not None:
@@ -777,13 +782,13 @@ class PhaseTimer:
         transformer = getattr(pipe, "transformer", None)
         if transformer is not None:
             self._handles.append(
-                transformer.register_forward_pre_hook(self._loop_begins)
+                transformer.register_forward_pre_hook(self._before_denoise)
             )
 
         self._original_decode = pipe.vae.decode
 
         def timed_decode(*call_args, **call_kwargs):
-            self._sync()
+            self._finish_denoise()
             started = time.perf_counter()
             out = self._original_decode(*call_args, **call_kwargs)
             self._sync()
@@ -804,68 +809,48 @@ class PhaseTimer:
             time.perf_counter() - module._phase_t0
         )
 
-    def _loop_begins(self, module, args, kwargs=None):
-        """The first transformer forward after a reset is where the loop starts.
-
-        The step callbacks alone bound N-1 intervals for an N-step loop, so
-        without this the loop total is one step short of the loop -- 2.5% of it
-        at 40 steps, and enough to make the phases visibly fail to add up to the
-        end-to-end latency. Recorded once; the second forward of a step (true CFG
-        runs the transformer twice per step) does not move it.
-        """
+    def _before_denoise(self, _module, _args):
         if self._loop_start is None:
             self._sync()
             self._loop_start = time.perf_counter()
 
+    def _finish_denoise(self):
+        if self._loop_start is not None and self._loop_end is None:
+            self._sync()
+            self._loop_end = time.perf_counter()
+
     def reset(self):
         """Begin a new sample: forget the previous one's marks and totals."""
+        self._loop_start = None
+        self._loop_end = None
         self._marks = []
         self._timings = {}
-        self._loop_start = None
 
     def on_step_end(self, _pipe, index, _timestep, kwargs):
-        """The ``callback_on_step_end`` the pipeline calls between steps.
-
-        Synchronised before the stamp, for the reason in the class docstring:
-        the pipeline queues each step and returns to the host immediately, so an
-        unsynchronised stamp is a launch time.
-        """
-        self._sync()
-        self._marks.append((index, time.perf_counter()))
+        """The ``callback_on_step_end`` the pipeline calls between steps."""
+        self._marks.append(index)
         return kwargs
 
     def sample(self):
         """This sample's phases, all in seconds.
 
         A phase that did not run is absent rather than zero: a stage that never
-        reached the VAE must not read as a 0.000 s decode.
-
-        ``denoise loop`` spans the whole loop and ``loop per step`` divides that
-        span by the number of steps in it, so the two always agree. Which numbers
-        those are depends on whether the loop's start was seen -- the transformer
-        hook in :meth:`_loop_begins` records it, and a run that never calls the
-        transformer has no loop to report:
-
-        - with it, the span covers all N steps, so the divisor is N;
-        - without it, only the N-1 intervals between callbacks remain, so the
-          divisor is N-1 and the total is one step short.
+        reached the VAE must not read as a 0.000 s decode. ``loop per step``
+        divides by the number of completed step callbacks.  The start is captured
+        by the first transformer pre-hook and the end is synchronized immediately
+        before VAE decode, so the interval includes both the first and final
+        denoising steps without synchronizing every step.
 
         Seconds for every phase, including the one that is *printed* in
         milliseconds: the unit a measurement is stored in should not depend on
         how it is rendered, and ``print_phases`` owns the rendering.
         """
         timings = dict(self._timings)
-        if self._loop_start is not None and self._marks:
-            span = self._marks[-1][1] - self._loop_start
-            steps = len(self._marks)
-        elif len(self._marks) > 1:
-            span = self._marks[-1][1] - self._marks[0][1]
-            steps = len(self._marks) - 1
-        else:
-            span = None
-        if span is not None:
-            timings["denoise loop"] = span
-            timings["loop per step"] = span / steps
+        self._finish_denoise()
+        if self._loop_start is not None and self._loop_end is not None and self._marks:
+            elapsed = self._loop_end - self._loop_start
+            timings["denoise loop"] = elapsed
+            timings["loop per step"] = elapsed / len(self._marks)
         return timings
 
     def close(self):

@@ -152,7 +152,8 @@ def main(argv=None):
     print(f"diffusers {diffusers.__version__}")
     print(f"model: {args.model}")
     print(
-        f"placement: encoder/vae -> {encoder}   transformer -> {' '.join(transformer)}"
+        f"placement: encoder -> {encoder}   transformer -> "
+        f"{' '.join(transformer)}   vae -> {vae}"
     )
     print(
         f"{len(cohort)} prompts, {args.width}x{args.height}, {args.steps} steps, "

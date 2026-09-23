@@ -46,7 +46,7 @@ would drift.
 | Requirement | Detail |
 | --- | --- |
 | torch_fl | Built for the chip and importable. The device is always `flagos` — `rename_privateuse1_backend("flagos")` is not vendor-dependent. |
-| A diffusers source checkout | **A release will not do.** See §2. |
+| Qwen-Image-2.1 diffusers classes | A compatible backport package, or an explicit source checkout. See §2. |
 | Python packages | `huggingface-hub>=1.26,<2`, `torchvision`, `accelerate` (only for a split), `pillow`. |
 | Model | ~33 GB of bf16 weights over 7 files, in a directory or the Hub cache. |
 | Host RAM | ~35 GB free. `from_pretrained` materialises the pipeline on the host before any component moves to a card. |
@@ -98,16 +98,17 @@ a CPU-wheel-plus-external-`libtorch_cuda.so` setup.
 | all 900 diffusers branches | none |
 
 The model declares `_diffusers_version: "0.37.0.dev0"` — an unreleased internal
-tree. Point `QWEN_IMAGE_21_DIFFUSERS` at a checkout of it (any `src/` directory
-containing `diffusers/pipelines/qwenimage21/`); `common.import_diffusers()`
-prepends it to `sys.path`, which is a prepend rather than an install precisely so
-that an environment's diffusers 0.40.0 is left alone and one interpreter can
-serve both this flow and every other test in the repository.
+tree. An environment may either install a compatible backport package or point
+`QWEN_IMAGE_21_DIFFUSERS` at a checkout of that tree (any `src/` directory
+containing `diffusers/pipelines/qwenimage21/`). `common.import_diffusers()` first
+accepts an installed package that exposes `QwenImage21Pipeline`; otherwise it
+prepends the explicit checkout to `sys.path`. The source route is a prepend
+rather than an install so the environment's stable diffusers remains untouched.
 
-If the variable is unset or wrong, the run stops with a message naming the
-variable and the missing directory rather than an `ImportError` from deep inside
-diffusers. If diffusers is importable but has no `QwenImage21Pipeline` — a
-prepend that did not take — it says so.
+If the installed package lacks `QwenImage21Pipeline` and the variable is unset or
+wrong, the run stops with a message naming the variable and the missing directory
+rather than an `ImportError` from deep inside diffusers. If a prepend did not
+take, it reports the package that was actually imported.
 
 ## 3. Placement
 
@@ -374,6 +375,10 @@ first lines; the live output also lists which operators went where. A full
 tests/manual/qwen_image_21/run.sh census /path/to/run.log
 ```
 
+For device runs, the runner computes this summary after the Python process exits
+and appends both the summary and its exit status to the same `--log` file.  The
+saved log is therefore the raw dispatch evidence and its terminal summary.
+
 **Time a run with the dispatch logging off.** `run.sh` puts `dispatch` in
 `FLAGOS_LOG` for `infer` and `sweep`, and it is not free: it writes one unbuffered
 line per operator call, which on the 2512 workload was ~1.2 M write syscalls per
@@ -399,6 +404,25 @@ run.sh bench --device cuda                                      # -> out/cuda/be
 run.sh bench --device flagos                                    # -> out/flagos/bench.json
 run.sh table out/cuda/bench.json out/flagos/bench.json --baseline cuda
 ```
+
+The same run can be fully parameterised without exporting environment variables:
+
+```bash
+run.sh bench --device flagos --devices flagos:0 \
+    --disable-backend-autoload \
+    --model /models/Qwen-Image-2.1 \
+    --run-dir /runs/qwen-image-21 \
+    --cache-dir /runs/qwen-image-21/cache \
+    --out /runs/qwen-image-21/flagos.json \
+    --log /runs/qwen-image-21/bench-flagos.log
+```
+
+`--run-dir` replaces `OUT_DIR` for the wrapper's default artifacts. `--cache-dir`
+sets both the Triton and FlagGems cache directories before torch
+is imported. `--disable-backend-autoload` likewise applies before torch import,
+which is early enough to prevent another PrivateUse1 backend from autoloading.
+`--run-dir` and `--log` are consumed by `run.sh`; the other options belong to
+`bench.py`.
 
 `table` reads JSON and needs no torch and no device, so the two files can be
 carried off the chip and rendered anywhere.
@@ -759,6 +783,29 @@ the boxing path. The gap to the vendor is mostly host-side: routing those calls
 costs about 44 ms/step and the boxing hop another 67 ms/step, against 424 ms of
 device work on the vendor side.
 
+**All-valid prompt-mask optimization.** Qwen-Image-2.1 removes padding from the
+encoded prompt but still carries an all-one key mask into the denoising
+transformer. On backends whose SDPA selector requires `attn_mask=None` for the
+Flash path, that semantically empty mask can select a slower kernel. Test the
+optimized route explicitly with:
+
+```bash
+run.sh bench --device flagos --omit-all-valid-prompt-mask --out optimized.json
+```
+
+The option checks the actual mask after every prompt encoding and replaces it
+with `None` only when every entry in every batch row is valid. If any padding is
+present, the original mask is passed through unchanged. The small mask copy and
+check occur before denoising. The benchmark JSON records the option as
+`config.omit_all_valid_prompt_mask`, so optimized and default receipts cannot be
+silently mixed.
+
+This changes the selected attention kernel and can therefore change bf16
+rounding even though the mask is mathematically a no-op. Treat it as an opt-in
+performance profile: compare paired latents and complete the platform's image
+quality checks before making it a deployment default. A speedup on one backend
+and sequence length is not evidence for another.
+
 **Cold compile cache.** The FlagGems path JIT-compiles Triton kernels, so a box
 whose cache is empty pays for it once. Measured by pointing `TRITON_CACHE_DIR` at
 an empty directory: the text encoder went from 2.0 s to 12.6 s, the VAE decode
@@ -999,7 +1046,7 @@ drawn on the device: two backends do not share an RNG stream, so a device-side
 | `Cannot get CUDA generator without ATen_cuda library` | `import torch` ran before `import torch_fl` | The script: call `common.import_torch` first. |
 | `ImportError: cannot import name 'resolve_revision' from 'huggingface_hub'` | `huggingface-hub` is older than 1.26 | The environment: upgrade it. |
 | `Qwen3VLVideoProcessor requires the Torchvision library` | `torchvision` is not installed | The environment: install the build matching the installed torch, `--no-deps`. |
-| `ImportError: cannot import name 'QwenImage21Pipeline' from 'diffusers'` | `QWEN_IMAGE_21_DIFFUSERS` is unset or points at the wrong directory | The environment: point it at the checkout's `src/`. |
+| `ImportError: cannot import name 'QwenImage21Pipeline' from 'diffusers'` | Neither the installed package nor `QWEN_IMAGE_21_DIFFUSERS` provides the class | Install a compatible backport or point the variable at the checkout's `src/`. |
 | `'NoneType' object has no attribute 'new_ones'` | Something passed `prompt_embeds` to the pipeline directly | Upstream: 2.1 cannot take injected embeddings. Inject latents instead. |
 | `mat2 is on cuda:0, different from other tensors on cpu`, from a `linear` in `timestep_embedder` | The timestep schedule was built on the CPU while the weights are on a card | The script: build the schedule on the pipeline's execution device. |
 | `mat2 is on cuda:1, different from other tensors on cuda:0`, from `img_in` | The transformer is on another card without accelerate hooks | The script: place it through `common.split_transformer`. |
@@ -1045,5 +1092,5 @@ failure in `full` that survives both is a problem with the loop itself.
   and it says nothing about whether the pictures are any good.
 - Nothing under `tests/manual/` is in `.github/configs/*.yml`, so none of this
   runs in CI. Adding it would mean mounting a ~33 GB model into the test
-  container, installing `diffusers` from a source checkout, and providing a
-  GPU runner.
+  container, providing the unreleased Qwen-Image-2.1 diffusers classes, and
+  providing a GPU runner.
