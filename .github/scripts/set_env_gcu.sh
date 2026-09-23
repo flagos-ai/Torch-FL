@@ -36,9 +36,13 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
-PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
+
+# Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
+# shellcheck source=.github/version-pins.env
+source "${REPO_ROOT}/.github/version-pins.env"
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
 discover_tops_root() {
   local candidate found
@@ -319,8 +323,8 @@ done
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which a Triton 3.1 build does not have -- that pair fails at
 # import, so the flagtree and FlagGems pins move together.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.1+enflame3.6}"
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_gcu}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
 # flagtree may bring torch_gcu as a dependency or bundle it in the wheel.
@@ -333,15 +337,8 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERS
 # measured against the old 3c6f7537d pin is recorded in
 # docs/vendors/gcu/flaggems-test-results.md.
 #
-# TEMPORARY PIN -- revert the default to `master` once upstream fixes
-# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
-# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
-# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
-# backend package, so `import flag_gems` raises
-# NameError: name 'argsort_stable' is not defined on every other vendor.
-# 437ba393 is the last good master (d312aa02's parent).
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
 install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead

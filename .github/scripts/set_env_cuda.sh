@@ -24,28 +24,25 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
-CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+
+# Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
+# shellcheck source=.github/version-pins.env
+source "${REPO_ROOT}/.github/version-pins.env"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 # FlagTree provides Triton support. The source-free 0.6.2a2 wheel pairs with
 # Triton 3.6 and is published as cp312 only, so the isolated test environment
 # below has to run on Python 3.12. The accelerator interpreter resolved further
 # down must be the same interpreter: the FlagGems C++ extension it compiles is
 # imported by the test environment.
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2}"
-FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-3.12}"
-FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-2.38}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_cuda}"
+FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-$FLAGTREE_PYTHON_VERSION_DEFAULT}"
+FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-$FLAGTREE_MIN_GLIBC_DEFAULT}"
 # FlagGems currently uses master as its default branch; the repository has no
 # main branch. Keep this overrideable so a tested revision can be pinned by CI.
-FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-https://github.com/flagos-ai/FlagGems.git}"
-# TEMPORARY PIN -- revert the default to `master` once upstream fixes
-# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
-# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
-# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
-# backend package, so `import flag_gems` raises
-# NameError: name 'argsort_stable' is not defined on every other vendor.
-# 437ba393 is the last good master (d312aa02's parent).
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
+FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-$FLAGGEMS_REPO_DEFAULT}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
 # Ninja parallelism for the in-job FlagGems C++ build. The CUDA translation
 # units are the bulk of it, so it is worth leaving headroom on a shared runner.
 FLAGGEMS_CPP_JOBS="${TORCH_FL_FLAGGEMS_CPP_JOBS:-$(nproc 2>/dev/null || echo 4)}"
@@ -57,7 +54,7 @@ FLAGGEMS_CPP_JOBS="${TORCH_FL_FLAGGEMS_CPP_JOBS:-$(nproc 2>/dev/null || echo 4)}
 # produced in the job instead of being copied out of the image. `auto` picks
 # whichever applies.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
-VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
 
 pip_retry() {
   local python_exe="$1"

@@ -40,15 +40,19 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
+
+# Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
+# shellcheck source=.github/version-pins.env
+source "${REPO_ROOT}/.github/version-pins.env"
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
 # CPU torch is installed from CPU_TORCH_INDEX_URL, not this generic PyPI mirror.
 export PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://repo.huaweicloud.com/repository/pypi/simple}"
 export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-300}"
 export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-20}"
 # FlagTree and FlagGems both come from the FlagOS index.
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 
 # --- CANN toolkit root -------------------------------------------------------
 # CANN images ship several layouts; pick the first candidate that actually has
@@ -364,7 +368,7 @@ done
 # moving tag: the FlagGems revision below is validated against this exact wheel,
 # and the Triton minor (3.5) has to match the backend the wheel was built for.
 # From the FlagTree user manual ("ascend", Triton 3.5 row).
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a1+ascend3.5}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
 pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
 
 # FlagGems from the flagos-ai fork, tracking master by policy: every CI run
@@ -372,15 +376,8 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VER
 # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run, e.g.:
 #   TORCH_FL_FLAGGEMS_REVISION=$(git ls-remote https://github.com/flagos-ai/FlagGems.git HEAD | cut -f1)
 #
-# TEMPORARY PIN -- revert the default to `master` once upstream fixes
-# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
-# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
-# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
-# backend package, so `import flag_gems` raises
-# NameError: name 'argsort_stable' is not defined on every other vendor.
-# 437ba393 is the last good master (d312aa02's parent).
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
 install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead

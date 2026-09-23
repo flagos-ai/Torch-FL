@@ -24,8 +24,12 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
+
+# Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
+# shellcheck source=.github/version-pins.env
+source "${REPO_ROOT}/.github/version-pins.env"
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
 # Locate the DTK install root. The image may ship DTK under /opt/dtk,
 # /opt/dtk-26.04, or a versioned directory; honor an explicit ROCM_PATH,
@@ -355,23 +359,16 @@ done
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
 # fails at import, so the two pins move together.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a1+hcu3.6}"
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_dcu}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
 # FlagGems from the flagos-ai fork, tracking master by policy: every CI run
 # measures the current master, not a pinned snapshot. Override with
 # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
 #
-# TEMPORARY PIN -- revert the default to `master` once upstream fixes
-# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
-# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
-# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
-# backend package, so `import flag_gems` raises
-# NameError: name 'argsort_stable' is not defined on every other vendor.
-# 437ba393 is the last good master (d312aa02's parent).
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
 install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead

@@ -70,7 +70,7 @@ jobs:
       - name: Check setup-script syntax
         run: |
           set -euo pipefail
-          for script in .github/scripts/set_env_*.sh; do
+          for script in .github/scripts/set_env_*.sh .github/version-pins.env; do
             bash -n "$script"
             echo "OK $script"
           done
@@ -79,6 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            tests/unit/test_ci_version_pins.py \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
             tests/unit/test_env_registry.py \

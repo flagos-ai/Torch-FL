@@ -46,7 +46,11 @@ case "${CI_STAGE:-}" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
+
+# Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
+# shellcheck source=.github/version-pins.env
+source "${REPO_ROOT}/.github/version-pins.env"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # Use the official indexes by default: the PPU runner pod's HTTP proxy returns
 # 500 on HTTPS CONNECT to *.tuna.tsinghua.edu.cn, so the Tsinghua PyPI and
 # pytorch-wheels mirrors are unreachable from the pod (the proxy whitelists
@@ -54,8 +58,8 @@ CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-2.10.0}"
 # image's own pip.conf points at an internal mirror that 503s, so the explicit
 # index-url here bypasses it. Both stay overridable via env: flip to the
 # Tsinghua mirrors once the pod proxy allows them.
-CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
 # FlagTree is the FlagOS Triton distribution, and its `ppu` variant *is* the
 # `triton` package: the wheel ships triton/ (with triton/FLAGTREE_BACKEND =
@@ -65,8 +69,8 @@ PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-https://pypi.org/simple}"
 # install below reaches it directly -- see prefer_direct_route. Install it as:
 #   python3.12 -m pip install flagtree===0.6.2a2+ppu3.6 \
 #     --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.6.2a2+ppu3.6}"
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/repository/flagos-pypi-hosted/simple}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ppu}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 
 # FlagGems master from the flagos-ai fork, installed into the venv instead of
 # imported from the /workspace/FlagGems bind mount this script used to require:
@@ -74,15 +78,8 @@ FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-https://resource.flagos.net/r
 # job in environment setup (see the install below). `master` by request;
 # override with TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
 #
-# TEMPORARY PIN -- revert the default to `master` once upstream fixes
-# flagos-ai/FlagGems: d312aa02 (2026-09-16) added
-# ("argsort.stable", argsort_stable) to the module-level _FULL_CONFIG in
-# flag_gems/__init__.py, but argsort_stable is only defined by the kunlunxin
-# backend package, so `import flag_gems` raises
-# NameError: name 'argsort_stable' is not defined on every other vendor.
-# 437ba393 is the last good master (d312aa02's parent).
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-437ba39387ddc681dc884259ef9dbf0c1802bccc}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-https://github.com/flagos-ai/FlagGems.git}"
+FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
+FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
 # CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image
