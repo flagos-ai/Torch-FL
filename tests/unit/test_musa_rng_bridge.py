@@ -28,11 +28,36 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
     flag_gems.__path__ = []
     flag_gems.utils = utils
 
-    monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
-    monkeypatch.setitem(sys.modules, "flag_gems.utils", utils)
-    monkeypatch.setitem(sys.modules, "flag_gems.utils.random_utils", random_utils)
+    install_modules(
+        monkeypatch,
+        {
+            "flag_gems": flag_gems,
+            "flag_gems.utils": utils,
+            "flag_gems.utils.random_utils": random_utils,
+        },
+    )
     monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "musa")
     return random_utils
+
+
+def install_modules(monkeypatch, modules):
+    """Insert ``modules`` at the tail of ``sys.modules``, in the given order.
+
+    A plain ``monkeypatch.setitem`` overwrites in place, so a key that some
+    earlier import already claimed keeps that import's position in
+    ``sys.modules`` iteration order. The bridge sweeps that order, and the
+    defect under test is positional: entries appended *after* the flag_gems
+    modules cost nothing, because the sweep has already rebound them by the time
+    it reaches one. The harness reaches the defect through the opposite order --
+    it imports transformers first and torch_fl last, so flag_gems' modules are
+    only loaded once the lazy modules that raise are already in the table.
+    Deleting first reproduces that: every name passed here is swept after
+    everything inserted before this call.
+    """
+    for name in modules:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
 
 
 @pytest.mark.skipif(
@@ -94,7 +119,7 @@ def test_flaggems_philox_reaches_vendor_backend_modules(monkeypatch):
     random_utils = _install_fake_flag_gems(monkeypatch)
     vendor_randn = types.ModuleType("_mthreads.ops.randn")
     vendor_randn.philox_backend_seed_offset = random_utils.philox_backend_seed_offset
-    monkeypatch.setitem(sys.modules, "_mthreads.ops.randn", vendor_randn)
+    install_modules(monkeypatch, {"_mthreads.ops.randn": vendor_randn})
     monkeypatch.setattr(
         torch_fl.flagos._C,
         "_reserve_rng_seed",
@@ -135,17 +160,20 @@ def test_flaggems_philox_survives_modules_that_raise_on_getattr(monkeypatch):
     # Insertion order is sweep order, so the hostile entries go in first: a
     # sweep that dies on either of them never reaches the flag_gems modules
     # below it, which is exactly the shape that left the bridge uninstalled.
-    monkeypatch.setitem(
-        sys.modules,
-        "transformers.models.aria.image_processing_aria_fast",
-        _LazyModule("transformers.models.aria.image_processing_aria_fast"),
+    install_modules(
+        monkeypatch,
+        {
+            "transformers.models.aria.image_processing_aria_fast": _LazyModule(
+                "transformers.models.aria.image_processing_aria_fast"
+            ),
+            # A non-module entry has no ``__dict__`` to read at all.
+            "not_a_module": object(),
+        },
     )
-    # A non-module entry has no ``__dict__`` to read at all.
-    monkeypatch.setitem(sys.modules, "not_a_module", object())
     random_utils = _install_fake_flag_gems(monkeypatch)
     vendor_randn = types.ModuleType("_mthreads.ops.randn")
     vendor_randn.philox_backend_seed_offset = random_utils.philox_backend_seed_offset
-    monkeypatch.setitem(sys.modules, "_mthreads.ops.randn", vendor_randn)
+    install_modules(monkeypatch, {"_mthreads.ops.randn": vendor_randn})
 
     torch_fl._patch_flaggems_philox()
 
