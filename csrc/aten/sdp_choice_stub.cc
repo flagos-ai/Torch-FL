@@ -109,30 +109,146 @@ namespace {
 // Requirements. scaled_dot_product_attention_forward reads stride(0..3) of all
 // three operands, so they must be 4-D; it walks one kv length, so key and value
 // must have the same shape; it asserts equal head dims, equal q/kv head counts
-// and dropout_p == 0; and it takes a mask to be 4-D when one is present, so an
-// ATen-legal broadcast 2-D mask would index past the end.
+// and dropout_p == 0; it allocates its output with
+// torch.empty_like(query, dtype=value.dtype) (attention.py:897) and asserts
+// nothing about the three dtypes themselves, so they have to agree here or a
+// mixed call would quietly come back as value.dtype -- measured on the C550:
+// q and k bf16 with v fp16 at (1,2,512,128) called directly returns float16,
+// while the same operands through this stub raise ATen's own "Expected query,
+// key, and value to have the same dtype" from the boxing route; and it takes a
+// mask to be
+// 4-D when one is present, so an ATen-legal broadcast 2-D mask would index past
+// the end.
 //
-// Envelope. The class .sdpaend.py patched in Python to take the MetaX
-// measurement this route exists for: bf16, head_dim 128, query seq >= 1024,
-// non-causal, no gqa, no dropout, no explicit scale -- Qwen-Image-2512's
-// joint attention (q(1, 24, 4114, 128), 120 calls/step), which is what
-// METAX_COMPOSITE_FLAGGEMS records. DCU measured the same class on
+// Envelope. The class the route has been measured on: 16-bit, 4-D, head_dim 16
+// to 128, non-causal, no explicit scale, no gqa, any query length without a mask
+// and >= 1024 with one, and at most the (1,1,1,KV) bool key row the mask clause
+// below admits. It began as one
+// shape -- Qwen-Image-2512's joint attention (q(1, 24, 4114, 128), 120
+// calls/step, bf16, head_dim 128, query seq >= 1024), which is what
+// METAX_COMPOSITE_FLAGGEMS records; DCU measured the same class on
 // Qwen-Image-2.1's joint attention (q(1, 32, 4096, 128) x kv(1, 32, 4122, 128),
 // 32 calls/forward), which is what DCU_COMPOSITE_FLAGGEMS records and which
-// arrives carrying the mask the clause below is for. The clauses are the probes'
-// predicates one for one, so the two can be diffed; nothing else about the call
-// is asserted, and
-// widening any clause is a measurement rather than an edit. head_dim in
-// particular: an _attn_fwd tile's shared-memory block grows with BLOCK_DMODEL,
-// and the autotune set keep() admits (flag_gems/ops/attention.py:173) is capped
-// at BLOCK_N <= 32, so the tile cannot be traded down to fit. At head_dim 128
-// some admitted configurations already exceed this part's 65536 B limit -- one
-// asks for 98304 B, which is the number the compiler's OutOfResources names --
-// while a legal tile remains, so the op runs there; at the VAE's head_dim 512 the
-// same code path reports 294912 B and nothing in the set fits, so the kernel has
-// no configuration to compile on this part and the call keeps the boxing route.
-// The clause is drawn where the route was measured, not where the kernel could be
-// argued to fit.
+// arrives carrying the mask the clause below is for. head_dim, the dtype and
+// the query-length floor were widened on the C550 for issue #394, each on its
+// own measurement; the query-length floor was removed for unmasked calls only,
+// and why is its own paragraph below. The clauses are the probes' predicates one
+// for one, so the
+// two can be diffed, nothing else about the call is asserted, and widening any
+// clause is a measurement rather than an edit.
+//
+// head_dim. The upper bound is the kernel's, and it is a bound on the tile the
+// kernel compiles rather than on the width the caller passes: _attn_fwd takes
+// HEAD_DIM as a constexpr and the call site hands it
+// triton.next_power_of_2(head_dim) (attention.py:911, the padding lanes retired
+// by hd_mask at :77), so 65 through 128 all compile at the same HEAD_DIM 128 and
+// 129 is the first that rounds up to 256. The autotune set keep() admits
+// (attention.py:173) is the 24 SMALL_HEAD_DIM_CONFIGS at BLOCK_N 16 and 32 plus
+// the always-kept (128,32,4) and (128,128,8), 28 candidates; at HEAD_DIM 128
+// every one of them compiles on this part -- measured one candidate at a time
+// through the tuner -- and at HEAD_DIM 256 none of them does, all 28 reporting
+// OutOfResources at Required: 163840 B against a 65536 B limit. So 128 is the
+// largest head_dim that runs at all, and the VAE's head_dim 512 reports 294912
+// B. The lower bound is the same assert read the other way: _attn_fwd carries
+// tl.static_assert(BLOCK_N <= HEAD_DIM)
+// (attention.py:219) and the smallest BLOCK_N in the tuner set is 16 -- the
+// small-head_dim configurations exist for exactly that reason, "for small
+// head_dim, we need to generate more configs" (attention.py:156) -- so head_dim
+// 16 is the smallest measured case that compiles, head_dim 8 raises
+// CompileTimeAssertionFailure, and 16, 32, 64, 96 and 128 were each measured on
+// (1,2,1024,hd) bf16 against the same call with the conf switched to cuda:
+// 113.6, 111.0, 113.2, 200.6 and 202.9 us on the route against 205.6, 218.9,
+// 247.8, 253.2 and 258.9 us boxed. That is 0.46x to 0.79x, the route ahead at
+// every one of them; the step from 64 to 96 is the tile width and not the
+// route, since 96 pays for the 128-wide tile with 32 lanes dead.
+//
+// dtype. fp16 is the same kernel on the same path and lands at the fp16 floor
+// rather than the bf16 one: 1.3e-04 to 1.8e-04 against an fp64 CPU reference on
+// (1,2,512,128) at head_dim 16/64/128, against 1.5e-03 to 1.8e-03 for the bf16
+// rows beside them. It also costs the route the same: (1,8,512,128) measures
+// 111.0 us routed against 268.5 us boxed, against 111.9 and 268.1 us for the
+// bf16 call at that shape. fp32 is refused because it does not run: it is the
+// same kernel with a doubled element, and at head_dim 128 all 28 candidates are
+// over the limit where the 16-bit ones all fit, each asking OutOfResources for
+// Required: 196608 B. The head_dim ceiling and the dtype refusal are the same
+// measurement taken twice.
+//
+// Query length. The >= 1024 floor was the joint attention's own length, not a
+// property of the kernel: the grid is cdiv(query_seq, BLOCK_M) (attention.py:921)
+// and the tile masks its query rows (q_load_mask, attention.py:240), so a short
+// call is a small grid rather than a refused one. Measured on (1,2,Q,128) bf16,
+// one process per arm, on a CUDA event pair around 30 launches with the median
+// of seven such batches, against the same call with the conf switched to cuda:
+//
+//   Q        1      16     32     64     128    256    512    1000   1024
+//   route    107.3  112.3  111.8  108.4  110.2  109.3  110.7  190.6  202.9
+//   boxed    148.3  155.2  156.3  152.8  151.3  155.5  191.5  261.1  257.5
+//
+// Every length is faster on the route than off it, by 1.27x at the narrowest
+// (Q 1024) to 1.72x at the widest (Q 512). The route's own time is flat to Q
+// 512 because it is the keys the kernel walks and not the queries, and it grows
+// only once the kv length does; the boxing route's math decomposition grows with
+// the query length from the first row.
+// Removing the floor is what closes issue #394: outside this
+// envelope the MetaX boxing route cannot fuse at all -- MACA's fused SDPA is not
+// inside ATen but behind its own Python patch of
+// F.scaled_dot_product_attention -- so the same bf16 (1,8,512,128) call cost
+// 282.2 us boxed against 53.8 us on the vendor's own entry point (5.24x).
+//
+// Masked query length. The floor that removes is still there for a call that
+// carries a mask, at the length it was, 1024. A masked call pays RouteMask on
+// every call -- a where() over zeros_like/full_like operands and the
+// reshape/expand, measured at 0.024 + 0.037 + 0.105 + 0.010 ms of submit time at
+// KV 4122 (see RouteMask) -- and that cost does not shrink with the sequence, so
+// the length at which the route overtakes the boxing route moves out with it.
+// Below the floor the shipped clause refuses the very calls a comparison would
+// be about, so the two arms below are not the same measurement and the
+// difference is stated rather than left in the table: the boxed arm is the
+// shipped route switched off, and the masked arm is the kernel called with the
+// same fp32 additive RouteMask builds, rebuilt once per call. That proxy is the
+// route at the one length where the floor admits both -- at 1024 the stub's own
+// routed arm measures 402.4 us and the proxy arm 404.6 -- and the additive's
+// build is 230 to 243 us of it, flat across the four lengths, which is why the
+// masked route is flat where the boxed one climbs. Measured on the C550 at
+// head_dim 128 bf16 on (2,2,Q,128) carrying the key-valid row:
+//
+//   Q          256     512     768     1024
+//   route      383.2   396.9   399.1   404.6  us
+//   boxed      193.9   252.5   337.8   468.2  us
+//
+// The route is flat because the mask's own cost dominates it, so below 1024 the
+// masked route is the slower one (1.98x at 256, 1.57x at 512, 1.18x at 768) and
+// at 1024 it is the faster one (1.16x), which is where the floor is. Above the
+// floor both arms are through the stub and the gap widens: 2048 reads 458.6
+// against 1239.5 (2.70x) and 4096 reads 1680.5 against 4343.4 (2.58x).
+// The other shapes this widening newly admits to the masked class agree at the
+// length the floor admits them, all through the stub, all at 1024, all slower
+// boxed and all flat against each other:
+//
+//   hd 128 bf16   402.4 vs 469.2    hd 128 fp16   402.1 vs 467.1
+//   hd  64 bf16   409.6 vs 435.8    hd  64 fp16   398.7 vs 433.8
+//
+// So the floor is a floor on the masked class alone, and the widened
+// head_dim and dtype bounds apply to it as well.
+//
+// The one cost the removed floor carries, measured rather than assumed: the
+// autotuner is keyed on (KV_CTX, HEAD_DIM) (attention.py:174), so every new
+// sequence length pays one tuning pass before it pays the route. A steady shape
+// is unaffected; a model that walks many lengths pays it once per length, and
+// both are bounded by the call count the route is for (120 calls per
+// Qwen-Image step at one shape).
+//
+// Still outside, deliberately. is_causal, an explicit scale and enable_gqa were
+// each measured working through this kernel on the C550 (0.54x, 0.73x and
+// 0.50-0.58x) and are left out because each would widen a class that DCU's own
+// copy of the kernel (flag_gems/runtime/backend/_hygon/ops/attention.py) starts
+// serving too, with no DCU available to re-measure it on: the widening lands one
+// measured class at a time. Two of them would also carry a contract of their
+// own -- a causal clause would have to refuse a mask, because the composite this
+// wrapper replaces refuses that pair outright (measured: "RuntimeError:
+// _scaled_dot_product_attention: Explicit attn_mask should not be set when
+// is_causal=True"), and an enable_gqa clause would have to replace the
+// equal-head-counts requirement above with a divisibility one.
 //
 // No grad clause, unlike the probe's predicate: the fall-through above already
 // sends grad-requiring calls to the composite, and under grad mode with no input
@@ -156,8 +272,14 @@ namespace {
 // (flag_gems/runtime/backend/_hygon/ops/attention.py), which indexes it the same
 // unguarded way -- see RouteMask -- so what makes the call safe is the same
 // stride contract, not a per-platform exception.
-constexpr int64_t kRoutedHeadDim = 128;
-constexpr int64_t kRoutedMinQuerySeq = 1024;
+constexpr int64_t kRoutedMinHeadDim = 16;
+constexpr int64_t kRoutedMaxHeadDim = 128;
+
+// The query-length floor, which the widening below removed for unmasked calls
+// and kept for masked ones. It is not a property of the kernel: it is the
+// sequence length at which the route starts to pay for the additive the mask
+// costs it on every call (see the header comment).
+constexpr int64_t kRoutedMaskedMinQuerySeq = 1024;
 
 // The additive the mask route writes on the keys the caller dropped, replacing
 // the bool the kernel cannot read as-is. Finite on purpose: a fully dropped
@@ -182,6 +304,13 @@ bool FlagGemsEligible(
   if (query.size(3) != key.size(3) || query.size(1) != key.size(1)) {
     return false;
   }
+  // The kernel asserts the three head dims are equal and reads one kv length,
+  // but it sizes its output from value and asserts nothing about the dtypes, so
+  // a mixed call would be silently answered in value's dtype.
+  if (query.scalar_type() != key.scalar_type() ||
+      query.scalar_type() != value.scalar_type()) {
+    return false;
+  }
   // The mask requirement. size(3) == KV together with numel == KV is what pins
   // the shape to (1,1,1,KV), which is the only mask shape the route's
   // reshape({1,1,1,-1}).expand(...) can build from a view (see RouteMask).
@@ -196,13 +325,19 @@ bool FlagGemsEligible(
     return false;
   }
   // Envelope.
-  if (query.size(3) != kRoutedHeadDim || is_causal || scale.has_value() ||
-      query.size(2) < kRoutedMinQuerySeq) {
+  if (query.size(3) < kRoutedMinHeadDim || query.size(3) > kRoutedMaxHeadDim ||
+      is_causal || scale.has_value()) {
     return false;
   }
-  if (query.scalar_type() != at::kBFloat16 ||
-      key.scalar_type() != at::kBFloat16 ||
-      value.scalar_type() != at::kBFloat16) {
+  const auto dtype = query.scalar_type();
+  if (dtype != at::kBFloat16 && dtype != at::kHalf) {
+    return false;
+  }
+  // Masked calls keep the floor the widening removed elsewhere. The route builds
+  // RouteMask's additive on every masked call, which the unmasked route does not
+  // pay, so it needs a longer sequence before it beats the boxing route -- see
+  // the header comment for the measurement.
+  if (attn_mask.has_value() && query.size(2) < kRoutedMaskedMinQuerySeq) {
     return false;
   }
   return true;

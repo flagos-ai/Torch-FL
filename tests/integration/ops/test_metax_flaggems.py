@@ -740,17 +740,26 @@ _SDPA_ORACLE = (
 
 # The cases, and what each one is. `joint()` is the shape Qwen-Image-2512's joint
 # attention has -- bf16, 4-D, head_dim 128, seq 1024, no mask -- and it is one of
-# the two shapes in the set the envelope admits. Every other case differs from
-# `joint()` in exactly one respect, so a failing assertion names the clause that
-# let a call through.
+# the five shapes in the set the envelope admits. Every other case differs from
+# `joint()` in one respect, so a failing assertion names the clause that let a
+# call through; the admitted cases are held at different batches, sequence
+# lengths or head dims from each other so the SHAPES line tells them apart.
 #
-# `joint_masked()` is the second admitted shape and the reason the mask clause
-# exists: Qwen-Image-2.1's prefill processor passes the joint key-valid row --
-# 4-D bool, one entry per key -- on every call it makes
-# (transformer_qwenimage21.py:478-560). It is built at a different batch from
-# `joint()` so the two are told apart in the SHAPES line, and it drops keys
-# rather than masking nothing, because an all-True row would exercise the clause
-# without exercising the polarity the conversion has to get right.
+# `joint_masked()` is the reason the mask clause exists: Qwen-Image-2.1's prefill
+# processor passes the joint key-valid row -- 4-D bool, one entry per key -- on
+# every call it makes (transformer_qwenimage21.py:478-560). It is built at a
+# different batch from `joint()` so the two are told apart in the SHAPES line,
+# and it drops keys rather than masking nothing, because an all-True row would
+# exercise the clause without exercising the polarity the conversion has to get
+# right.
+#
+# The other three admitted cases are the widening for issue #394: a head dim
+# other than 128, a sequence shorter than the joint attention's, and fp16. Each
+# is in the probe because `FlagGemsEligible` admits it, and each bound the
+# widening touched is pinned from both sides -- `head_dim8` and `head_dim256`
+# are the first values outside the head-dim bounds, `float32` is the dtype the
+# kernel raises on, and `masked_seq512` is the sequence below the one floor the
+# widening kept.
 #
 # The `mask*` cases below it are the other side of the same clause: each supplies
 # a mask a *caller* may legitimately pass and that the route must refuse. The
@@ -782,15 +791,24 @@ _SDPA_CASES = (
     'run_case("seq512", lambda: tuple(\n'
     "    torch.randn(1, 2, 512, 128, device=DEVICE).to(torch.bfloat16)\n"
     "    for _ in range(3)), {})\n"
+    'run_case("float16", lambda: tuple(\n'
+    "    torch.randn(3, 2, 1024, 128, device=DEVICE).to(torch.float16)\n"
+    "    for _ in range(3)), {})\n"
     'run_case("float32", lambda: tuple(\n'
     "    torch.randn(1, 2, 1024, 128, device=DEVICE) for _ in range(3)), {})\n"
-    'run_case("float16", lambda: tuple(\n'
-    "    torch.randn(1, 2, 1024, 128, device=DEVICE).to(torch.float16)\n"
-    "    for _ in range(3)), {})\n"
     'run_case("rank2", lambda: tuple(\n'
     "    torch.randn(1024, 128, device=DEVICE).to(torch.bfloat16)\n"
     "    for _ in range(3)), {})\n"
+    'run_case("head_dim8", lambda: tuple(\n'
+    "    torch.randn(1, 2, 1024, 8, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {})\n"
+    'run_case("head_dim256", lambda: tuple(\n'
+    "    torch.randn(1, 2, 1024, 256, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {})\n"
     'run_case("causal", joint, {"is_causal": True})\n'
+    'run_case("masked_seq512", lambda: tuple(\n'
+    "    torch.randn(2, 2, 512, 128, device=DEVICE).to(torch.bfloat16)\n"
+    "    for _ in range(3)), {'attn_mask': key_row(512)})\n"
     'run_case("mask_additive", joint,\n'
     '         {"attn_mask": torch.zeros(1024, 1024, device=DEVICE,\n'
     "                                   dtype=torch.bfloat16)})\n"
@@ -808,20 +826,24 @@ _SDPA_CASES = (
 _SDPA_CASES_EXPECTED = {
     "eligible": (1, "bf16, 4-D, head_dim 128, seq 1024, no mask"),
     "masked": (1, "the same class, with the (1,1,1,KV) bool key row 2.1 passes"),
-    "head_dim64": (0, "head_dim 64, which `_attn_fwd` tiles differently"),
-    "seq512": (0, "seq 512, under the 1024 the route requires"),
-    "float32": (0, "float32, and the route is bf16-only"),
-    "float16": (0, "float16, and the route is bf16-only"),
+    "head_dim64": (1, "head_dim 64, inside the route's head_dim bounds"),
+    "seq512": (1, "seq 512, which the route no longer floors"),
+    "float16": (1, "fp16, the second dtype the route was measured on"),
+    "float32": (0, "float32, whose tile the kernel reports OutOfResources on"),
     "rank2": (0, "2-D input, and the route requires the 4-D call form"),
+    "head_dim8": (0, "head_dim 8, under the 16 a tile's BLOCK_N bottoms out at"),
+    "head_dim256": (0, "head_dim 256, over the 128 whose tile still fits"),
     "causal": (0, "is_causal, which the FlagGems entry point does not take"),
+    "masked_seq512": (0, "that key row at seq 512, under the masked route floor"),
     "mask_additive": (0, "an additive mask, which the route does not convert"),
     "mask_4d_bool": (0, "a bool mask with one entry per (query, key) pair"),
     "mask_row_f32": (0, "a per-key row in float32, whose polarity is undefined"),
 }
 
-# Max |device - host| for the bf16 route against a float32 host reference. The
+# Max |device - host| for a 16-bit route against a float32 host reference. The
 # bf16 rounding of the inputs already moves the logits by ~2e-2; softmax turns
-# that into far less on an output of magnitude ~3e-2.
+# that into far less on an output of magnitude ~3e-2. The fp16 case sits an order
+# below this, at its own rounding floor rather than the bf16 one.
 _SDPA_DIFF_BOUND = 2e-2
 
 _SDPA_RESULT = re.compile(
@@ -922,14 +944,15 @@ class TestMetaXFlaggemsSdpaRoute:
         assert device == DEVICE, f"{tag}: the result is on {device}, not {DEVICE}"
 
     def test_only_the_admitted_shapes_reach_the_kernel(self, sdpa_shipped):
-        """The shapes the FlagGems kernel saw, in order, across all eleven cases.
+        """The shapes the FlagGems kernel saw, in order, across all fourteen cases.
 
         The count above says how many calls took the route; this says they were
         the calls that were meant to, on the arguments the envelope is written
-        around. Two shapes are admitted -- the unmasked joint attention and the
-        same class carrying 2.1's key-valid row -- and they differ in batch so
-        that a call which reached the kernel on the wrong case is visible here
-        rather than absorbed into the count.
+        around. Five shapes are admitted -- the unmasked joint attention, the
+        same class carrying 2.1's key-valid row, and the three the widening for
+        issue #394 added -- and no two of them share a shape, so a call that
+        reached the kernel on the wrong case is visible here rather than absorbed
+        into the count.
         """
         _, shapes = sdpa_shipped
         # One call each, on their own q, k and v: the probe records each call as
@@ -938,9 +961,12 @@ class TestMetaXFlaggemsSdpaRoute:
         expected = [
             ((1, 2, 1024, 128),) * 3,
             ((2, 2, 1024, 128),) * 3,
+            ((1, 2, 1024, 64),) * 3,
+            ((1, 2, 512, 128),) * 3,
+            ((3, 2, 1024, 128),) * 3,
         ]
         assert shapes == expected, (
-            f"the FlagGems SDPA kernel was called with {shapes}; only the two "
+            f"the FlagGems SDPA kernel was called with {shapes}; only the five "
             "admitted cases may reach it, and only with their own q, k, v"
         )
 

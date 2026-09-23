@@ -47,6 +47,16 @@ Two things are asserted, because two things can go wrong:
    rounding of the output, as measured below -- and a row with a dropped key
    must move it far outside that.
 
+The envelope behind the gate was widened on a MetaX C550 for issue #394:
+``head_dim`` 16 to 128 rather than 128 exactly, fp16 as well as bf16, and no
+query-length floor for unmasked calls. ``FlagGemsEligible()`` is one clause
+shared by both platforms, so the routing expectations below follow it -- but
+they have not been re-measured on DCU, because no DCU was available for the
+widening. The cases that move are ``head_dim64``, ``seq512`` and ``float16``.
+Their routing is the shared clause and holds by construction; their numerics and
+latency on DCU are not revalidated, and ``docs/reference/operator-support.md``
+records that gap.
+
 Measured on Hygon DCU bw1000, DTK 6.3.26113, torch 2.10.0+cpu decoupled,
 ``flag_gems`` 5.4.0rc2.post1+g437ba3938. The op-level and end-to-end numbers are
 in ``docs/reference/operator-support.md``.
@@ -138,9 +148,9 @@ _SDPA_ORACLE = (
 
 # The cases. `joint()` is the shape the route was measured on -- bf16, 4-D,
 # head_dim 128, query seq 1024, key and value 1040 so the two lengths differ the
-# way the model's 4096 and 4122 do, no mask -- and it is the one shape in the set
-# the envelope admits. Every other case differs from it in exactly one respect,
-# so a failing assertion names the clause that let a call through.
+# way the model's 4096 and 4122 do, no mask -- and it is one of the shapes the
+# envelope admits. Every other case differs from it in exactly one respect, so a
+# failing assertion names the clause that let a call through.
 #
 # The masks are built on the host and moved, so `mask_bcast_true` is exactly what
 # `build_token_metadata` hands the model: `torch.ones` over the padded joint
@@ -228,10 +238,10 @@ _SDPA_CASES_EXPECTED = {
         None,
         "a float mask, which the clause admits as bool only",
     ),
-    "head_dim64": (0, None, "head_dim 64, which `_attn_fwd` tiles differently"),
-    "seq512": (0, None, "query seq 512, under the 1024 the route requires"),
-    "float32": (0, None, "float32, and the route is bf16-only"),
-    "float16": (0, None, "float16, and the route is bf16-only"),
+    "head_dim64": (1, "none", "head_dim 64, inside the shared head_dim bounds"),
+    "seq512": (1, "none", "query seq 512, which the shared clause no longer floors"),
+    "float32": (0, None, "float32, whose tile the kernel reports OutOfResources on"),
+    "float16": (1, "none", "fp16, the second dtype the route was measured on"),
     "rank2": (0, None, "2-D input, and the route requires the 4-D call form"),
     "causal": (0, None, "is_causal, which the flag_gems entry point does not take"),
     "scale": (0, None, "an explicit scale, which the entry point does not take"),
@@ -245,8 +255,9 @@ _SDPA_CASES_EXPECTED = {
 
 # Max |device - host| against a float32 host reference. The bf16 rounding of the
 # operands already moves the logits by ~2e-2, and softmax turns that into far
-# less on an output of order 1; 5e-2 is the bound the four route cases below
-# share, measured well inside it.
+# less on an output of order 1; 5e-2 is the bound the route cases below share,
+# measured well inside it for the four the route had when it was measured. The
+# three the widening added are not revalidated here -- see the module docstring.
 _SDPA_DIFF_BOUND = 5e-2
 
 # Max |device - device| between the all-true-row call and the maskless one, and
