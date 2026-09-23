@@ -19,7 +19,7 @@ The ops gate skips backend-specific tests per detected platform
 value in the wheel's build record like every other chip; wheels built before it
 had one report cuda there and are still recognised through the PPU_SDK
 environment or the lib_ppu/ bundle directory. These tests pin the record
-mapping, the legacy PPU fallbacks, and the skip-set parity with "default" that
+mapping, the legacy PPU fallbacks, and the skip-set parity with cuda that
 keeps those changes behavior-neutral.
 
 Run: pytest tests/unit/test_ops_conftest_platform.py -v
@@ -57,7 +57,7 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture
 def isolated_torch_fl_import():
-    """Temporarily hide the real torch_fl module so _detect_platform()'s
+    """Temporarily hide the real torch_fl module so _platform.detect_platform()'s
     ``import torch_fl`` resolves a throwaway stub instead.
 
     Same pattern as test_platform_support_detect.py: the real torch_fl.__init__
@@ -79,7 +79,7 @@ def _fake_torch_fl(
     """Point ``torch_fl`` at a stub package with the given layout.
 
     ``record`` writes the _build_config.py setup.py would have, which is where
-    _detect_platform() reads the accelerator from. ``resolved_conf`` writes the
+    detect_platform() reads the accelerator from. ``resolved_conf`` writes the
     backend_config_path() accessor -- the conf torch_fl would have selected; a
     stub without it stands for a package that predates the accessor.
     """
@@ -123,13 +123,13 @@ def test_record_values_still_map(
     isolated_torch_fl_import, tmp_path, accelerator, expected
 ):
     for _ in _fake_torch_fl(tmp_path, record=accelerator):
-        assert ops_conftest._detect_platform() == expected
+        assert ops_conftest._platform.detect_platform() == expected
 
 
 def test_ppu_record_identifies_ppu(isolated_torch_fl_import, tmp_path):
     """PPU has its own record value; no SDK probe needed."""
     for _ in _fake_torch_fl(tmp_path, record="ppu"):
-        assert ops_conftest._detect_platform() == "ppu"
+        assert ops_conftest._platform.detect_platform() == "ppu"
 
 
 def test_legacy_ppu_sdk_env_identifies_ppu_under_cuda_record(
@@ -139,7 +139,7 @@ def test_legacy_ppu_sdk_env_identifies_ppu_under_cuda_record(
     carries PPU_SDK; the env signal still tells the gate apart."""
     monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
     for _ in _fake_torch_fl(tmp_path, record="cuda"):
-        assert ops_conftest._detect_platform() == "ppu"
+        assert ops_conftest._platform.detect_platform() == "ppu"
 
 
 def test_ppu_home_env_does_not_identify_ppu(
@@ -148,15 +148,15 @@ def test_ppu_home_env_does_not_identify_ppu(
     """PPU_HOME was an invented alias and is no longer read; only PPU_SDK is."""
     monkeypatch.setenv("PPU_HOME", "/opt/ppu")
     for _ in _fake_torch_fl(tmp_path):
-        assert ops_conftest._detect_platform() == "default"
+        assert ops_conftest._platform.detect_platform() == "cuda"
 
 
-def test_cuda_without_ppu_signals_stays_default(
+def test_cuda_without_ppu_signals_stays_cuda(
     monkeypatch, isolated_torch_fl_import, tmp_path
 ):
     """No PPU signal anywhere: same bucket as before this change."""
     for _ in _fake_torch_fl(tmp_path, record="cuda"):
-        assert ops_conftest._detect_platform() == "default"
+        assert ops_conftest._platform.detect_platform() == "cuda"
 
 
 def test_lib_ppu_bundle_dir_identifies_ppu_without_env(
@@ -165,7 +165,7 @@ def test_lib_ppu_bundle_dir_identifies_ppu_without_env(
     """An installed PPU wheel with no PPU_SDK in the environment
     (dev pod with the baked SDK) is still recognized by its bundle dir."""
     for _ in _fake_torch_fl(tmp_path, record="cuda", bundle_lib_ppu=True):
-        assert ops_conftest._detect_platform() == "ppu"
+        assert ops_conftest._platform.detect_platform() == "ppu"
 
 
 def test_marker_stays_authoritative_over_bundle_dir(
@@ -174,7 +174,7 @@ def test_marker_stays_authoritative_over_bundle_dir(
     """A flagos_platform marker wins even if lib_ppu/ is also present, so the
     native-kernel platforms keep their existing precedence."""
     for _ in _fake_torch_fl(tmp_path, record="cuda", marker="gcu", bundle_lib_ppu=True):
-        assert ops_conftest._detect_platform() == "gcu"
+        assert ops_conftest._platform.detect_platform() == "gcu"
 
 
 def test_resolved_ppu_backend_config_identifies_ppu(
@@ -187,7 +187,7 @@ def test_resolved_ppu_backend_config_identifies_ppu(
     environment."""
     conf = "/opt/venv/lib/torch_fl/configs/backends_ppu.conf"
     for _ in _fake_torch_fl(tmp_path, record="cuda", resolved_conf=conf):
-        assert ops_conftest._detect_platform() == "ppu"
+        assert ops_conftest._platform.detect_platform() == "ppu"
 
 
 def test_explicit_backend_config_identifies_platform_without_the_accessor(
@@ -200,16 +200,16 @@ def test_explicit_backend_config_identifies_platform_without_the_accessor(
         "FLAGOS_BACKEND_CONFIG", "/opt/venv/lib/torch_fl/configs/backends_ppu.conf"
     )
     for _ in _fake_torch_fl(tmp_path, record="cuda"):
-        assert ops_conftest._detect_platform() == "ppu"
+        assert ops_conftest._platform.detect_platform() == "ppu"
 
 
-def test_ppu_skip_set_matches_default():
+def test_ppu_skip_set_matches_cuda():
     """Behavior-neutrality pin: PPU skips exactly what the old implicit
-    "default" bucket skipped. Any future divergence must be a deliberate,
+    cuda bucket skipped. Any future divergence must be a deliberate,
     separately reviewed edit to this tuple."""
     assert (
         ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
-        == ops_conftest._PLATFORM_SKIP_MARKERS["default"]
+        == ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
     )
     assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
 
