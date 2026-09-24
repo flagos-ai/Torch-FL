@@ -82,6 +82,7 @@ jobs:
             tests/unit/test_ci_version_pins.py \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
+            tests/unit/test_device_tracer_selection.py \
             tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_import_phase_order.py \
