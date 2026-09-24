@@ -303,6 +303,9 @@ else
   pip_retry --no-deps --only-binary=:all: --index-url "$HYGON_INDEX_URL" \
     "flagcx===$FLAGCX_VERSION"
 fi
+# Prevent FlagCX's PyTorch entry point from importing torch_fl before build_ext
+# creates torch_fl._C. Later workflow steps do not inherit this script-local gate.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks

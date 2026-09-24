@@ -179,7 +179,14 @@ class TestFloat64ResultsAreCorrect:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        lines = [ln.strip() for ln in result.stdout.strip().splitlines()]
+        # FlagTree's Ascend wheel can print this CANN probe warning while
+        # torch_fl imports. It is unrelated to the arithmetic output below.
+        lines = [
+            ln.strip()
+            for ln in result.stdout.strip().splitlines()
+            if ln.strip()
+            != "[WARNING] triton.backends.ascend.utils not found. CANN version check skipped."
+        ]
         assert lines == [
             "[1.5, 2.25, 4.125]",
             "[1.0, 0.5, 0.25]",

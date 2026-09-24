@@ -271,6 +271,9 @@ PY
     pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
       "flagcx===$FLAGCX_VERSION"
     export FLAGCX_TORCH_BACKEND=flagos
+    # The extension is built after provisioning, so defer PyTorch's FlagCX
+    # entry-point import until later workflow steps.
+    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
   fi
 fi
 

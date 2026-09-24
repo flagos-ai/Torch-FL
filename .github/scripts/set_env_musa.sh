@@ -278,6 +278,11 @@ FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
 pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
   "flagcx===$FLAGCX_VERSION"
 export FLAGCX_TORCH_BACKEND=flagos
+# PyTorch discovers FlagCX's device entry point on import. During this setup
+# step torch_fl._C has not been built yet, so defer auto-loading until the
+# following workflow steps, which run after build_ext and do not inherit this
+# script-local setting through GITHUB_ENV.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks

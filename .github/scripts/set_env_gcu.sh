@@ -248,6 +248,8 @@ if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
     "flagcx===$FLAGCX_VERSION"
   export FLAGCX_TORCH_BACKEND=flagos
+  # torch_fl._C is built after this script provisions the environment.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead

@@ -448,6 +448,9 @@ if [[ "${CUDA_VERSION:-}" == 13.3.* ]]; then
   PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: \
     --index-url "$FLAGGEMS_INDEX_URL" "flagcx===$FLAGCX_VERSION"
   export FLAGCX_TORCH_BACKEND=flagos
+  # The extension is built later in this setup step; defer FlagCX auto-loading
+  # until subsequent workflow steps, after torch_fl._C exists.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
   FLAGCX_COPIED=1
 else
   for package in flagcx; do
