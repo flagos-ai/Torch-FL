@@ -817,11 +817,25 @@ class CuptiDeviceTracer : public DeviceTracer {
     CUpti_Activity* record = nullptr;
     CUpti_Activity* prev_record = nullptr;
     size_t record_count = 0;
-    constexpr size_t kMaxRecordsPerBuffer = 100000;
+    // How many records a buffer holds is a property of the buffer, not a
+    // constant. A CUPTI record is at least one 32-bit word wide and every record
+    // lies inside the buffer, so no well-formed buffer can yield more than
+    // validSize / sizeof(uint32_t) records. That makes this bound a pure
+    // anti-infinite-loop backstop: the loop already ends when the iterator
+    // reports a non-SUCCESS status or stops advancing.
+    //
+    // It used to be a flat 100000, which is not a loop guard but a truncation.
+    // The cost of a record is vendor-specific, not ours: PPU emits an
+    // external-correlation and a driver record per runtime call, so a 3.4 MB
+    // buffer legitimately holds ~108k records. A trace of a 512x512 matmul
+    // tripped the flat cap, processBuffer returned before the tail of the
+    // buffer, and the trace carried no kernel, memcpy or memset activity at all
+    // -- the device records were present in the buffer the whole time.
+    const size_t max_records = validSize / sizeof(uint32_t);
 #if defined(FLAGOS_METAX_MCPTI)
     size_t scan_offset = 0;
 #endif
-    while (record_count < kMaxRecordsPerBuffer) {
+    while (record_count < max_records) {
       CUptiResult status = CUPTI_SUCCESS;
 #if defined(FLAGOS_METAX_MCPTI)
       record = nullptr;
@@ -1122,10 +1136,11 @@ class CuptiDeviceTracer : public DeviceTracer {
         external_correlation_[ext->correlationId] = ext->externalId;
       }
     }
-    if (record_count >= kMaxRecordsPerBuffer) {
-      std::cerr << "[flagos] processBuffer exceeded max record count ("
-                << kMaxRecordsPerBuffer << ") for buffer size " << validSize
-                << " bytes; possible ActivityGetNextRecord infinite loop\n";
+    if (record_count >= max_records) {
+      std::cerr << "[flagos] processBuffer hit the per-buffer record bound ("
+                << max_records << ") for buffer size " << validSize
+                << " bytes; the buffer was not drained, so device activity "
+                   "after the last parsed record is missing from this trace\n";
     }
   }
 
