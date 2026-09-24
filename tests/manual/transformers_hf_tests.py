@@ -79,6 +79,16 @@ SCHEMA_VERSION = 2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = Path(__file__).resolve().parent / "hf_device_spec.py"
+# Loaded into every child as ``-p hf_flagos_shims``. It is a real file rather
+# than a string constant like PLUGIN below, because unlike the report plugin it
+# is ordinary code with a testable contract and benefits from being importable
+# and lintable in place.
+SHIM_PLUGIN = Path(__file__).resolve().parent / "hf_flagos_shims.py"
+# Installed as ``utils/__init__.py`` in every child. HF's ``utils`` helper
+# directory is a namespace portion in the source tree, and the backend's own
+# regular ``utils`` package out-competes it once the backend extends
+# ``sys.path``, which makes collection fail outright; see the file itself.
+UTILS_INIT = Path(__file__).resolve().parent / "hf_utils_init.py"
 
 
 def spec_device() -> str:
@@ -576,6 +586,22 @@ def child_env(source: Path, report: Path | None = None, offline: bool = False) -
     return env
 
 
+def stage_harness_files(workdir: Path, source: Path) -> None:
+    """Lay out the files and links a child process needs to run HF's tests.
+
+    ``tests`` and ``src`` are reachable both as symlinks in the working
+    directory and by name through ``PYTHONPATH``; ``utils`` is a real directory
+    because it must shadow the backend's package of the same name rather than
+    merely be importable.
+    """
+    shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
+    shutil.copyfile(SHIM_PLUGIN, workdir / SHIM_PLUGIN.name)
+    (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+    (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+    (workdir / "utils").mkdir()
+    shutil.copyfile(UTILS_INIT, workdir / "utils" / "__init__.py")
+
+
 # The preflight runs in the child environment, because the failures worth
 # catching here --- a hook the spec does not expose, a device name that does not
 # match the registration, an accelerator the driver cannot see --- appear only
@@ -801,9 +827,7 @@ def collect_all_tests(model: str, source: Path, args: argparse.Namespace) -> dic
     workdir = Path(tempfile.mkdtemp(prefix=f"hf-collect-{model.replace('/', '_')}-"))
     try:
         (workdir / "hf_report_plugin.py").write_text(PLUGIN)
-        shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
-        (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
-        (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+        stage_harness_files(workdir, source)
 
         env = child_env(source, workdir / "dummy.jsonl", args.offline)
         env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
@@ -865,9 +889,7 @@ def run_test_batch(
         report = workdir / "report.jsonl"
         report.touch()
         (workdir / "hf_report_plugin.py").write_text(PLUGIN)
-        shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
-        (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
-        (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+        stage_harness_files(workdir, source)
 
         env = child_env(source, report, args.offline)
         env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
@@ -884,6 +906,8 @@ def run_test_batch(
                 str(source),
                 "-p",
                 "hf_report_plugin",
+                "-p",
+                "hf_flagos_shims",
                 *args.pytest_arg,
             ]
             + batch_nodeids,  # Add nodeids to select specific tests
@@ -1117,9 +1141,7 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     report = workdir / "report.jsonl"
     report.touch()
     (workdir / "hf_report_plugin.py").write_text(PLUGIN)
-    shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
-    (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
-    (workdir / "src").symlink_to(source / "src", target_is_directory=True)
+    stage_harness_files(workdir, source)
     env = child_env(source, report, args.offline)
     env["HF_TEST_SKIP_FLEX_ATTENTION"] = "1"
     env["PYTHONPATH"] = os.pathsep.join([str(workdir), env["PYTHONPATH"]])
@@ -1135,6 +1157,8 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             str(source),
             "-p",
             "hf_report_plugin",
+            "-p",
+            "hf_flagos_shims",
             *args.pytest_arg,
         ],
         args.collect_only,

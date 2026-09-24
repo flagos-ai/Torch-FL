@@ -73,6 +73,30 @@ matched only a standalone ``Fingerprint: `hash` `` line, so a round-trip through
 Separately, an unreachable or failing `gh` was treated as "no duplicate found",
 which filed the same defect again.
 
+### A child where `import utils` resolved to the backend's package
+
+HF's test tree imports its own helper directory as top-level modules, which works
+upstream because pytest runs from the repository root. The FlagGems backend
+appends its architecture directory to `sys.path` and never removes it, and that
+directory holds a regular `utils` package, which wins over the source tree's
+namespace directory even though the source tree is listed first. Collection then
+failed on `utils.fetch_hub_objects_for_ci`: `--model bert` measured 56 offline
+tokenization tests, reported as `ERROR=56 (collected 56)`, and the modeling suite
+was never collected at all.
+
+### Device assumptions in the upstream tests that a non-CUDA device breaks
+
+Two upstream assumptions are false on a `flagos` device and are corrected in the
+child by `tests/manual/hf_flagos_shims.py`. The eager-vs-SDPA tolerance table
+grants a device it does not recognise fp32's tolerances whatever the dtype under
+test, so fp16 SDPA comparisons are held to limits two orders of magnitude
+tighter than CUDA's own. And the flex-attention block mask is built with
+`_compile=True`, whose kernel the GCU300 target cannot legalise: the failed pass
+takes the pytest process down with SIGSEGV instead of raising, so one test ends
+the batch and every test queued behind it loses its result. Both corrections
+stop applying on their own once upstream's assumption no longer holds, and
+`HF_TEST_NO_DEVICE_SHIMS=1` measures the platform uncorrected.
+
 ## Implemented Architecture
 
 ### Official runner
@@ -89,6 +113,10 @@ Important properties are:
 - aggregate output is written incrementally;
 - long tracebacks preserve both their beginning and exception tail;
 - `FLAGOS_LOG=fallback` is enabled and fallback operators are recorded;
+- upstream assumptions that a non-CUDA device breaks are corrected by a child
+  plugin (`hf_flagos_shims.py`), and the child's `utils` package is bound to the
+  source tree (`hf_utils_init.py`) so that the backend's package of the same
+  name cannot claim it;
 - a preflight runs in a child process before the first batch and is recorded
   under `environment.preflight`;
 - the device name is read from the spec with `ast`, so the parent process never
@@ -308,6 +336,8 @@ wrapper does not let the caller override it.
 
 - `tests/manual/transformers_hf_tests.py`
 - `tests/manual/hf_device_spec.py`
+- `tests/manual/hf_flagos_shims.py`
+- `tests/manual/hf_utils_init.py`
 - `tests/manual/transformers_hf_source.py`
 - `tests/unit/test_transformers_hf_tests.py`
 - `tests/unit/test_transformers_automation.py`
@@ -364,17 +394,23 @@ hand-written and had drifted from what the runner emits.
     heading names the hardware a run measured, because two vendors can register
     the same PrivateUse1 device name, and an unscoped read would let one board's
     measurement suppress a finding measured on another.
-16. The version a finding is verified against comes from the run that produced
+16. A correction for an upstream assumption is applied in the child, never in the
+    measured source tree. `hf_flagos_shims.py` and `hf_utils_init.py` are copied
+    into each child's working directory, so the tree a run measures stays
+    byte-identical to the release and a finding can be reproduced against the
+    same source; a correction that edits the cache would make the recorded
+    provenance false.
+17. The version a finding is verified against comes from the run that produced
     it. Triage carries the measured environment through; the newest cached
     source tree is a fallback that announces itself, not the default.
-17. An isolation reproduces the environment that produced the finding. The
+18. An isolation reproduces the environment that produced the finding. The
     verifier reuses the runner's `child_env` ordering --- source tree first, the
     caller's `PYTHONPATH` next, a caller-supplied repository root last --- so
     `hf_device_spec.py` can import `torch_fl` from a checkout that was never
     installed. A child that cannot import the device build dies before it
     collects a test, and that kind of failure must not sit beside genuine
     per-test evidence as one more `ERROR`.
-18. A stage's outcome survives the hand-off to the stage that acts on it. The
+19. A stage's outcome survives the hand-off to the stage that acts on it. The
     sweep exits `1` once it has written drafts for review, because the batch
     driver reads that code and nothing else: reaching the end of the preview
     successfully is not the same measurement as having nothing to report, and a
