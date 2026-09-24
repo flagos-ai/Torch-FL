@@ -303,8 +303,9 @@ else
   pip_retry --no-deps --only-binary=:all: --index-url "$HYGON_INDEX_URL" \
     "flagcx===$FLAGCX_VERSION"
 fi
-# Prevent FlagCX's PyTorch entry point from importing torch_fl before build_ext
-# creates torch_fl._C. Later workflow steps do not inherit this script-local gate.
+# Keep PyTorch from auto-loading FlagCX during this step and the separate wheel
+# build step. The DTK libraries are preloaded by torch_fl before its explicit
+# FlagCX communication import, not by a bare import torch in the build backend.
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
@@ -595,7 +596,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ROCM_PATH \
     FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS \
+    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD \
     CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

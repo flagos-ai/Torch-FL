@@ -278,10 +278,10 @@ FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
 pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
   "flagcx===$FLAGCX_VERSION"
 export FLAGCX_TORCH_BACKEND=flagos
-# PyTorch discovers FlagCX's device entry point on import. During this setup
-# step torch_fl._C has not been built yet, so defer auto-loading until the
-# following workflow steps, which run after build_ext and do not inherit this
-# script-local setting through GITHUB_ENV.
+# PyTorch discovers FlagCX's device entry point on import. Wheel building runs
+# in a separate step and its isolated backend cannot import torch_fl, so keep
+# auto-loading off throughout the job. torch_fl imports FlagCX explicitly when
+# a process group needs it.
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
@@ -359,7 +359,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME \
     FLAGOS_BUILD_VENDOR \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGCX_TORCH_BACKEND \
+    FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD \
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

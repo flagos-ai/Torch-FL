@@ -297,6 +297,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
 fi
 
 cd "$REPO_ROOT"

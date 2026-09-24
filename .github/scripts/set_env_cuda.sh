@@ -448,8 +448,8 @@ if [[ "${CUDA_VERSION:-}" == 13.3.* ]]; then
   PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: \
     --index-url "$FLAGGEMS_INDEX_URL" "flagcx===$FLAGCX_VERSION"
   export FLAGCX_TORCH_BACKEND=flagos
-  # The extension is built later in this setup step; defer FlagCX auto-loading
-  # until subsequent workflow steps, after torch_fl._C exists.
+  # The wheel build runs in a separate step without an importable torch_fl;
+  # keep FlagCX auto-loading off across steps and import it on demand for comm.
   export TORCH_DEVICE_BACKEND_AUTOLOAD=0
   FLAGCX_COPIED=1
 else
@@ -614,4 +614,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
 fi
