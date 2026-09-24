@@ -56,8 +56,13 @@ platform, not a per-build choice.
 - **TsingMicro** has a sparse hand-written conf (53 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job.
-- **PPU** withholds the profiler (its tracer is the unavailable implementation);
-  it also ships no `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
+- **PPU** profiles through the CUPTI tracer but emits no `gpu_memset` activity, which is the
+  capability `tests/integration/profiler_support.py` declares for it: a measured 512x512
+  matmul trace carries the `kernel`, `gpu_memcpy` and `privateuse1_runtime` categories and no
+  `gpu_memset`. That keeps the CUDA-baseline parity group off in `.github/configs/ppu.yml` —
+  two of its tests need the memset category and one needs a `::`-qualified kernel name, which
+  the vendor's `gemm_ktype0_*`/`sum_kernel_*` kernel set does not produce. It also ships no
+  `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
 - **CI covers 7 of 9**: TsingMicro and BPU have no `.github/configs/` entry.
 
 ## Directory inventory

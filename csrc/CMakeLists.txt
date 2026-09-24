@@ -35,7 +35,12 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 # DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms
 # without a supported activity API use the unavailable implementation. Each
 # source defines the same factory.
-if(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "metax")
+#
+# Every accelerator in cmake/flagos_platforms.json must land in exactly one arm;
+# tests/unit/test_device_tracer_selection.py pins the resulting mapping.
+if(FLAGOS_ACCELERATOR STREQUAL "cuda"
+   OR FLAGOS_ACCELERATOR STREQUAL "metax"
+   OR FLAGOS_ACCELERATOR STREQUAL "ppu")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
@@ -230,9 +235,6 @@ find_path(CUPTI_INCLUDE_DIR cupti_activity.h
         /usr/local/cuda/extras/CUPTI/include)
 if(CUPTI_INCLUDE_DIR)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${CUPTI_INCLUDE_DIR})
-  if(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "metax")
-    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_CUPTI=1)
-  endif()
 endif()
 
 # cuda_occupancy.h -- CUDA's occupancy calculator, used by the device tracer to

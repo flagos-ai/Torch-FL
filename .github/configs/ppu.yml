@@ -160,16 +160,40 @@ integration_tests:
       python -m pytest tests/integration/test_math_bits_contract.py
       -v -m math_bits --tb=short
 
+  # GPU profiling on this platform went from nothing to the shared contract:
+  # until issue #411, `ppu` fell through csrc/CMakeLists.txt's tracer selection
+  # into the unavailable implementation, so no device activity was ever
+  # registered and every trace carried CPU records only. The capability table in
+  # tests/integration/profiler_support.py is what makes this step expressible on
+  # a CUDA-ABI platform that emits no memsets -- the memset case skips on its
+  # declared capability instead of failing.
+  #
+  # Measured on a 16x PPU-ZW810E host (torch 2.10.0): 10 passed, 1 skipped, 1
+  # xpassed.
+  - name: Unified profiler contract
+    command: >-
+      python -m pytest tests/integration/test_profiler_contract.py
+      -v -m profiler --tb=short
+
   # ---------------------------------------------------------------------------
-  # Follow-up (not part of first-version acceptance). PPU CUPTI Activity API is
-  # defective: CuptiActivityApi.cpp:298 logs "bufferCompleted called with
-  # unknown buffer", so torch.profiler collects no device-side events. The
-  # flagos trace has only ['Trace','cpu_op'] vs the torch-cuda baseline
-  # ['Trace','cpu_op','cuda_runtime','gpu_memcpy','gpu_memset','kernel'].
-  # test_profiler_parity.py (7 tests) all fail on the missing categories, so
-  # the step is excluded from first-version CI. Re-add once the PPU CUPTI
-  # Activity path emits the expected device/runtime categories.
-  # This may not be unblocked by a CPU fallback or faking a pass.
+  # Deliberately still out: structural comparison against the stock torch+cuda
+  # baseline. Not for the reason recorded here before #411 -- "PPU CUPTI
+  # Activity API is defective ... collects no device-side events" was a symptom
+  # of the tracer never being built, and is now measurably false: with the tracer
+  # selected, a 512x512 matmul trace carries
+  # ['Trace','cpu_op','gpu_memcpy','kernel','privateuse1_runtime'], PPU's real
+  # gemm/sum kernel names, and 73/73 link candidates resolved. The
+  # "bufferCompleted called with unknown buffer" line no longer appears either.
+  #
+  # What is left is platform shape, measured with `-m main_ops`: 3 passed, 1
+  # xpassed, 3 failed, and all three failures want something PPU's vendor kernels
+  # do not produce, so re-adding this step needs a per-platform gate in the test
+  # rather than another tracer fix:
+  #   - test_category_coverage and test_arg_key_supersets need a gpu_memset
+  #     record, and PPU emits none -- the same memset capability the shared
+  #     contract above already declares off for this platform.
+  #   - test_kernel_names_are_demangled needs a '::'-qualified kernel name, and
+  #     this platform's are gemm_ktype0_*/sum_kernel_*.
   # ---------------------------------------------------------------------------
   - name: Run inference tests
     command: >-

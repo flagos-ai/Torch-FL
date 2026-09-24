@@ -91,7 +91,11 @@ this file:
 
 - `CuptiTracerInit` (file-level static) — arms CUPTI at module load; see §3.1
 - `bufferRequested` / `bufferCompleted` — CUPTI activity buffer callbacks
-- `CuptiDeviceTracer::processBuffer()` — decodes CUPTI activity records into `DeviceEvent`s
+- `CuptiDeviceTracer::processBuffer()` — decodes CUPTI activity records into `DeviceEvent`s.
+  Iteration ends on the iterator's own end-of-buffer signal; the per-buffer record bound is
+  `validSize / sizeof(uint32_t)`, the most records a buffer can physically hold, so a vendor
+  whose records are small and numerous (PPU emits a correlation record and a driver record per
+  runtime call) cannot be truncated by a flat record count
 - `cuptiActivityPushExternalCorrelationId` / `Pop...` — correlation push/pop
 - Kernel name demangling (`abi::__cxa_demangle`)
 - The 13 kernel metadata fields, matching torch-cuda exactly:
@@ -127,7 +131,10 @@ type. It does exactly two things — translate `DeviceEvent` into
 2. Add the tracer to the per-accelerator source selection in `csrc/CMakeLists.txt`. The
    build uses `GLOB_RECURSE`, so exactly one tracer factory must be compiled for every
    accelerator: CUPTI/MCPTI for CUDA, MetaX, and PPU; ROCtracer for DCU; and the
-   unavailable tracer for platforms without a supported activity API.
+   unavailable tracer for platforms without a supported activity API. That mapping is pinned
+   accelerator by accelerator in `tests/unit/test_device_tracer_selection.py`, so a new
+   accelerator has to be given a tracer deliberately instead of falling into the `else()`
+   arm — which is how PPU silently built the unavailable tracer until issue #411.
 3. Done. The kineto adaptor needs no vendor-specific changes.
 
 ---
