@@ -271,18 +271,20 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-mthreads/simple}"
 install_flag_gems
 
-# The CI image and wheel both target MUSA 5.2 and Python 3.10. Keep the
-# communication extension in the isolated venv rather than copying a package
-# from the vendor torch environment.
-FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
-pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
-  "flagcx===$FLAGCX_VERSION"
-export FLAGCX_TORCH_BACKEND=flagos
-# PyTorch discovers FlagCX's device entry point on import. Wheel building runs
-# in a separate step and its isolated backend cannot import torch_fl, so keep
-# auto-loading off throughout the job. torch_fl imports FlagCX explicitly when
-# a process group needs it.
-export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+# The published FlagCX RC wheel requires MUSA 5.2. Current CI still uses the
+# working MUSA 5.1 image: its runner reported driver 3.3.5-server, while the
+# 5.2 base image requires 5.2.0-server and took over an hour to pull. Keep the
+# wheel path ready for an explicit image/driver upgrade rather than loading a
+# binary against the wrong toolkit in this job.
+if [[ "${TORCH_FL_MUSA_FLAGCX_WHEEL:-0}" == "1" ]]; then
+  FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+  # Wheel building runs in a separate step whose isolated backend cannot
+  # import torch_fl. torch_fl imports FlagCX explicitly when comm needs it.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
@@ -359,10 +361,15 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME \
     FLAGOS_BUILD_VENDOR \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD \
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
+    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
+  fi
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
 fi
 
 cd "$REPO_ROOT"

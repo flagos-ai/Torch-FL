@@ -45,7 +45,7 @@ jobs:
       - mt-8g-cicd-pytorch
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
     container:
-      image: registry.mthreads.com/mcconline/musa-pytorch-release-public@sha256:d4325301d01d8467fe14cfa63a8f74fe46cfd337c11526aea766d5f2c4d9c7cf
+      image: registry.mthreads.com/mcconline/musa-pytorch-release-public@sha256:13f7375aab77a4ace7084558eb939a977467330f558a3c2a185c6c6d31ec8935
       options: >-
         --privileged
         --ipc=host
