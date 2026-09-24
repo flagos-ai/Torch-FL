@@ -40,6 +40,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
 # shellcheck source=.github/version-pins.env
 source "${REPO_ROOT}/.github/version-pins.env"
+
+# Shared set_env helpers (pip_retry, FlagGems install, path stripping).
+# shellcheck source=.github/scripts/lib/set_env_common.sh
+source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
@@ -149,11 +153,6 @@ else
 fi
 
 VENV_PYTHON="$VENV_ROOT/bin/python"
-venv_is_usable() {
-  [[ -x "$VENV_PYTHON" ]] || return 1
-  "$VENV_PYTHON" -m pip --version >/dev/null 2>&1
-}
-
 if ! venv_is_usable; then
   # The current TopsRider base image does not ship python3.12-venv.  Keep the
   # dependency in the chip-specific setup path so the common workflow remains
@@ -211,102 +210,6 @@ PY
 #
 # --no-deps on both source packages so pip cannot replace the pinned CPU torch
 # 2.10 with something a transitive requirement prefers.
-#
-# Retries are deliberate: the flagtree wheel is large and the shared mirror can
-# close the response early (IncompleteRead) even though the package is there.
-# Retrying just the failed package beats restarting all of setup.
-pip_retry() {
-  local attempt=1
-  while true; do
-    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
-      return 0
-    fi
-    if (( attempt >= 5 )); then
-      echo "::error::pip install failed after $attempt attempts: $*"
-      return 1
-    fi
-    echo "::warning::pip install attempt $attempt failed; retrying: $*"
-    attempt=$((attempt + 1))
-    sleep 10
-  done
-}
-
-# The FlagGems install is a VCS install, and pip reports the exit status of its
-# last step -- the wheel build of whichever tree it managed to fetch. A checkout
-# the runner's proxy truncated therefore still ends in `Successfully installed`,
-# and pip never notices. On 2026-09-18 the Ascend runner's clone spent ten
-# minutes printing
-#   fatal: unable to access 'https://github.com/flagos-ai/FlagGems.git/':
-#   Proxy CONNECT aborted
-# (364 times), alongside `error: unable to read sha1 file of ...` and
-# `error: invalid object 100644 2e574121... for
-# '.github/workflows/rule-check.yaml'` for the blobs it never received, and then
-# reported
-#   Successfully installed flaggems_setup-0.0.0
-# -- a 2.1 MB stub named after the build scaffolding rather than the project,
-# where the same revision produced the 10 MB
-# flag_gems-5.4.0rc2.post1+g437ba3938 on every other platform that ran that
-# morning. Nothing failed until the integration suite took its first FlagGems
-# route, four minutes later.
-#
-# So check the install instead of trusting pip's status, and reinstall when it
-# is wrong: the conf routes this platform's operators to flagos_python, so an
-# unusable flag_gems is not a state this script may leave behind.
-flag_gems_installed() {
-  "$VENV_PYTHON" - "${FLAGGEMS_REVISION:0:9}" <<'PY'
-import importlib.metadata as metadata
-import importlib.util
-import sys
-
-try:
-    version = metadata.version("flag_gems")
-except metadata.PackageNotFoundError:
-    raise SystemExit("flag_gems is not installed")
-
-# A distribution can be installed with no importable package behind it, which
-# is what a truncated checkout produces.
-if importlib.util.find_spec("flag_gems") is None:
-    raise SystemExit(f"flag_gems {version} has no importable package")
-
-print(f"flag_gems {version}")
-if sys.argv[1] not in version:
-    # Not a failure: a revision given as a branch name, or a tarball without
-    # git metadata, lands on a version string that names neither. Only warn --
-    # reinstalling cannot change how the version was written.
-    print(
-        f"::warning::flag_gems {version} does not name the requested revision "
-        f"{sys.argv[1]}; the checkout it was built from may be incomplete",
-        file=sys.stderr,
-    )
-PY
-}
-
-# Three attempts at most, and only for an install pip called successful: a pip
-# failure has already been retried five times by pip_retry, and repeating that
-# spends the job's budget on a link that is down rather than on a bad checkout.
-install_flag_gems() {
-  local attempt=1
-  while true; do
-    if ! pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"; then
-      echo "::error::could not install FlagGems from ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    if flag_gems_installed; then
-      return 0
-    fi
-    if (( attempt >= 3 )); then
-      echo "::error::no usable flag_gems after $attempt installs of ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    echo "::warning::install attempt $attempt left no usable flag_gems; reinstalling"
-    attempt=$((attempt + 1))
-    # A truncated tree installs under the build scaffolding's name, so both
-    # names have to go for the next attempt to be read as a fresh result.
-    "$VENV_PYTHON" -m pip uninstall -y flag_gems flaggems_setup >/dev/null 2>&1 || true
-    sleep 10
-  done
-}
-
 # An NVIDIA triton wheel must not be present: it carries no "enflame" backend,
 # so flag_gems' backend discovery fails and every FlagGems route raises at
 # import. flagtree installs its own `triton` package under the same import name
@@ -336,7 +239,6 @@ pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERS
 # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run. The routing
 # measured against the old 3c6f7537d pin is recorded in
 # docs/vendors/gcu/flaggems-test-results.md.
-#
 FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
 FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
 install_flag_gems

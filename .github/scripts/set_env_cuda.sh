@@ -28,6 +28,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
 # shellcheck source=.github/version-pins.env
 source "${REPO_ROOT}/.github/version-pins.env"
+
+# Shared set_env helpers (pip_retry, FlagGems install, path stripping).
+# shellcheck source=.github/scripts/lib/set_env_common.sh
+source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
+
+# CUDA's pip calls target several interpreters (PIP_RETRY_PYTHON at each call)
+# and reuse the build cache rather than redownloading the ~2 GB wheel set on
+# every retry.
+export PIP_RETRY_TIMEOUT=600
+export PIP_RETRY_NO_CACHE=0
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 # FlagTree provides Triton support. The source-free 0.6.2a2 wheel pairs with
@@ -55,24 +65,6 @@ FLAGGEMS_CPP_JOBS="${TORCH_FL_FLAGGEMS_CPP_JOBS:-$(nproc 2>/dev/null || echo 4)}
 # whichever applies.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
 VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
-
-pip_retry() {
-  local python_exe="$1"
-  shift
-  local attempt=1
-  while true; do
-    if "$python_exe" -m pip install --retries 10 --timeout 600 "$@"; then
-      return 0
-    fi
-    if (( attempt >= 5 )); then
-      echo "::error::pip install failed after $attempt attempts: $*"
-      return 1
-    fi
-    echo "::warning::pip install attempt $attempt failed; retrying: $*"
-    attempt=$((attempt + 1))
-    sleep 10
-  done
-}
 
 find_image_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -200,7 +192,7 @@ bootstrap_vendor_python() {
   "$base_python" -m venv "$vendor_venv"
   local vendor_python="$vendor_venv/bin/python"
   "$vendor_python" -m pip install --upgrade pip
-  pip_retry "$vendor_python" --index-url "$VENDOR_TORCH_INDEX_URL" \
+  PIP_RETRY_PYTHON="$vendor_python" pip_retry --index-url "$VENDOR_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
   VENDOR_PYTHON="$vendor_python"
 }
@@ -446,7 +438,7 @@ if [[ "$(printf '%s\n%s\n' "$FLAGTREE_MIN_GLIBC" "$IMAGE_GLIBC" | sort -V | head
 fi
 echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
-pip_retry "$VENV_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" \
   "flagtree===${FLAGTREE_VERSION}"
 
 # Keep only vendor packages that are not provided by FlagTree. In particular,
@@ -476,7 +468,7 @@ fi
 # branch at present; `master` is its default branch and can be overridden with
 # TORCH_FL_FLAGGEMS_REVISION for reproducible CI experiments. --no-deps keeps
 # the CPU-only torch ABI intact; install its non-torch dependencies explicitly.
-pip_retry "$VENV_PYTHON" packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
 FLAGGEMS_SOURCE_ROOT="${RUNNER_TEMP:-/tmp}/flag-gems-${CI_STAGE}"
 rm -rf "$FLAGGEMS_SOURCE_ROOT"
 git clone --depth 1 --branch master \
@@ -490,7 +482,7 @@ if [[ "$FLAGGEMS_REVISION" != "master" ]]; then
 fi
 FLAGGEMS_COMMIT="$(git -C "$FLAGGEMS_SOURCE_ROOT" rev-parse HEAD)"
 echo "FlagGems source: ${FLAGGEMS_REPOSITORY}@${FLAGGEMS_REVISION} (${FLAGGEMS_COMMIT})"
-pip_retry "$VENV_PYTHON" --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
 
 # The FlagGems C++ operators are the native half of FlagGems support: a prebuilt
 # FlagOS image carries them next to flag_gems, a bootstrapped environment builds
@@ -514,13 +506,13 @@ if [[ "$VENDOR_SOURCE" == "bootstrap" ]]; then
   # parent repository through that provider, and cmake is needed because a CUDA
   # development image ships a compiler, not a build system. The versions mirror
   # what the isolated environment installs so both halves of the build agree.
-  pip_retry "$VENDOR_PYTHON" \
+  PIP_RETRY_PYTHON="$VENDOR_PYTHON" pip_retry \
     "setuptools>=64,<77" "setuptools-scm>=8,<10" cmake \
     "scikit-build-core==0.12.2" "pybind11==3.0.3" "ninja==1.13.0"
   # Configuring the cpp package probes `import triton` in the building
   # interpreter and aborts without it, so this environment carries the same
   # Triton provider the isolated one runs on.
-  pip_retry "$VENDOR_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+  PIP_RETRY_PYTHON="$VENDOR_PYTHON" pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" \
     "flagtree===$FLAGTREE_VERSION"
   # PEP 621 requires a static project name, so the per-vendor suffix is injected
   # into cpp/pyproject.toml before building (flag-gems-cpp-cuda).
@@ -564,7 +556,7 @@ if [[ "$VENDOR_SOURCE" == "bootstrap" ]]; then
 fi
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  pip_retry "$VENV_PYTHON" pytest transformers
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
@@ -576,26 +568,6 @@ assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 PY
 )"
-
-strip_vendor_paths() {
-  local value="${1:-}"
-  local entry
-  local -a entries=()
-  local -a kept=()
-  IFS=: read -ra entries <<< "$value"
-  for entry in "${entries[@]}"; do
-    [[ -z "$entry" ]] && continue
-    case "$entry" in
-      "$VENDOR_TORCH_ROOT"|"$VENDOR_TORCH_ROOT"/*) ;;
-      *) kept+=("$entry") ;;
-    esac
-  done
-  local joined=""
-  for entry in "${kept[@]}"; do
-    joined="${joined:+$joined:}$entry"
-  done
-  printf '%s' "$joined"
-}
 
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
