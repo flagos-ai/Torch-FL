@@ -38,7 +38,7 @@ namespace at::native::flagos {
 
 namespace detail {
 
-// Does this argument alone force the call off the FlagGems route?
+// Does this argument, for this op, force the call off the FlagGems route?
 //
 // Overloads cover only the argument types that carry a dtype -- a Tensor, an
 // optional Tensor, the Tensor-list forms, and an explicit ScalarType. Anything
@@ -49,24 +49,33 @@ namespace detail {
 //
 // Overload resolution rather than SFINAE: a Tensor argument matches the
 // non-template overload exactly, which wins over the catch-all template.
-inline bool FlagGemsRejectsArg(const at::Tensor& t) {
-  return FlagGemsRejectsDtype(t.scalar_type());
+//
+// The op name is threaded through because a gap can be the intersection of one
+// op and one dtype, which neither the conf nor the dtype-wide predicate can
+// state (see FlagGemsRejectsOpDtype). Every overload forwards it unchanged, so
+// a new dtype-carrying argument type is one overload, not a second parameter
+// list.
+inline bool FlagGemsRejectsArg(const char* op_name, const at::Tensor& t) {
+  return FlagGemsRejectsOpDtype(op_name, t.scalar_type());
 }
 
-inline bool FlagGemsRejectsArg(const ::std::optional<at::Tensor>& t) {
-  return t.has_value() && FlagGemsRejectsDtype(t->scalar_type());
+inline bool FlagGemsRejectsArg(const char* op_name,
+                               const ::std::optional<at::Tensor>& t) {
+  return t.has_value() && FlagGemsRejectsOpDtype(op_name, t->scalar_type());
 }
 
-inline bool FlagGemsRejectsArg(const at::ArrayRef<at::Tensor>& l) {
+inline bool FlagGemsRejectsArg(const char* op_name,
+                               const at::ArrayRef<at::Tensor>& l) {
   for (const auto& t : l) {
-    if (FlagGemsRejectsDtype(t.scalar_type())) return true;
+    if (FlagGemsRejectsOpDtype(op_name, t.scalar_type())) return true;
   }
   return false;
 }
 
-inline bool FlagGemsRejectsArg(const at::ITensorListRef& l) {
+inline bool FlagGemsRejectsArg(const char* op_name,
+                               const at::ITensorListRef& l) {
   for (const auto& t : l) {
-    if (FlagGemsRejectsDtype(t.scalar_type())) return true;
+    if (FlagGemsRejectsOpDtype(op_name, t.scalar_type())) return true;
   }
   return false;
 }
@@ -75,25 +84,27 @@ inline bool FlagGemsRejectsArg(const at::ITensorListRef& l) {
 // absent: its ListElementReference has neither has_value() nor ->, so the
 // overload would need an IValue unwrap for a case no Ascend op reaches.
 
-inline bool FlagGemsRejectsArg(const ::std::optional<at::ScalarType>& d) {
-  return d.has_value() && FlagGemsRejectsDtype(*d);
+inline bool FlagGemsRejectsArg(const char* op_name,
+                               const ::std::optional<at::ScalarType>& d) {
+  return d.has_value() && FlagGemsRejectsOpDtype(op_name, *d);
 }
 
 // Covers the factory ops, whose dtype arrives as a bare argument rather than
 // through a tensor: torch.ones(4, dtype=torch.float64) has no operand to
 // inspect.
-inline bool FlagGemsRejectsArg(at::ScalarType d) {
-  return FlagGemsRejectsDtype(d);
+inline bool FlagGemsRejectsArg(const char* op_name, at::ScalarType d) {
+  return FlagGemsRejectsOpDtype(op_name, d);
 }
 
 template <typename T>
-inline bool FlagGemsRejectsArg(const T&) {
+inline bool FlagGemsRejectsArg(const char* op_name, const T&) {
+  (void)op_name;
   return false;
 }
 
 template <typename... Args>
-inline bool FlagGemsRejectsArgs(const Args&... args) {
-  return (... || FlagGemsRejectsArg(args));
+inline bool FlagGemsRejectsArgs(const char* op_name, const Args&... args) {
+  return (... || FlagGemsRejectsArg(op_name, args));
 }
 
 } // namespace detail
@@ -142,7 +153,7 @@ class Dispatcher {
       backend = GetBackendForOp(op_name_);
       cached_backend_ = backend;
     }
-    auto fn = ResolveFn(backend, args...);
+    auto fn = ResolveFn(op_name_, backend, args...);
     LogDispatch(op_name_, backend);
 
     if (!fn) ThrowIfForcedBackendMissing(op_name_, backend);
@@ -161,7 +172,7 @@ class Dispatcher {
   template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
     auto backend = GetBackendForOp(op_name);
-    auto fn = ResolveFn(backend, args...);
+    auto fn = ResolveFn(op_name.c_str(), backend, args...);
     LogDispatch(op_name, backend);
 
     if (!fn) ThrowIfForcedBackendMissing(op_name, backend);
@@ -219,8 +230,11 @@ class Dispatcher {
   //
   // A conf routes per op, so it cannot say "FlagGems, except for float64" --
   // but on Ascend FlagGems' pointwise codegen simply does not compile for
-  // float64, and the vendor kernels do (see FlagGemsRejectsDtype). The
-  // substitution has to happen where the arguments are visible, which is here.
+  // float64, and the vendor kernels do. The same is true of gaps that are the
+  // intersection of one op and one dtype (bool `neg`), which is why the op
+  // name is part of the question rather than a filter on it. See
+  // FlagGemsRejectsDtype and FlagGemsRejectsOpDtype. The substitution has to
+  // happen where both the arguments and the name are visible, which is here.
   // `backend` is rewritten alongside, so the dispatch log and the
   // "backend not registered" message name what actually ran rather than what
   // the conf asked for.
@@ -229,10 +243,11 @@ class Dispatcher {
   // on the vendors that measured it, so its conf entries are already a per-op
   // decision made from a measurement.
   template <typename... Args>
-  FnPtr ResolveFn(Backend& backend, const Args&... args) const {
+  FnPtr ResolveFn(const char* op_name, Backend& backend,
+                  const Args&... args) const {
     FnPtr fn = GetFn(backend);
     if (backend != Backend::kFlagGems || fn == nullptr) return fn;
-    if (!detail::FlagGemsRejectsArgs(args...)) return fn;
+    if (!detail::FlagGemsRejectsArgs(op_name, args...)) return fn;
 
     auto [vendor_fn, vendor_backend] = VendorSlot();
     if (vendor_fn == nullptr) {

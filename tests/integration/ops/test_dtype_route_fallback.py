@@ -24,6 +24,15 @@ mul, cat and the comparisons compile -- so the conf has no way to state it. The
 exception lives at runtime instead: ``FlagGemsRejectsDtype`` in
 ``csrc/aten/common.cc``, consulted by ``Dispatcher::ResolveFn``.
 
+The same escape also covers the gaps that are neither per-op nor per-dtype but
+the intersection of the two: ``neg`` over bool. ``flag_gems/ops/neg.py`` is an
+unguarded pointwise ``-x``, so a bool operand is code-generated like any other
+element type and lowers to ``hivm.hir.vadd`` over ``i1``, which BiShengIR
+refuses to verify -- while FlagGems serves a bool operand fine for add, sub,
+abs and the comparisons, and ``neg`` fine for every other dtype. That case is
+``FlagGemsRejectsOpDtype``, consulted by the same ``ResolveFn``; the reference
+behaviour it restores is the ``RuntimeError`` the CPU raises.
+
 These tests are the CI-visible contract for that fallback: only the dtype
 routes change, the dtypes FlagGems does serve keep the configured route, and
 the vendor answer for float64 is numerically right rather than merely
@@ -73,12 +82,32 @@ _FALLBACK_OPS = ("add.Tensor", "reciprocal", "sum", "ones", "zeros_like")
 # control: the fallback must not disturb a route the conf made itself.
 _VENDOR_OPS = ("mul.Tensor",)
 
+# The (op, dtype) probe. One process for all three dtypes, which also re-proves
+# that the per-op backend cache (Dispatcher::cached_backend_) does not pin `neg`
+# to whatever the first call resolved to. The bool call is expected to raise, so
+# the probe catches it and reports the outcome rather than the process failing.
+_OP_DTYPE_PROBE = r"""
+import sys
+import torch
+import torch_fl
 
-def _run(extra_env: dict) -> subprocess.CompletedProcess:
+for dtype in (torch.float32, torch.int64, torch.bool):
+    print(f"### {dtype}", file=sys.stderr, flush=True)
+    a = torch.ones(8, device="flagos", dtype=dtype)
+    try:
+        torch.neg(a)
+        print("### outcome ok", file=sys.stderr, flush=True)
+    except RuntimeError as exc:
+        first = str(exc).splitlines()[0]
+        print(f"### outcome raised {first}", file=sys.stderr, flush=True)
+"""
+
+
+def _run(extra_env: dict, code: str = _PROBE) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update({"FLAGOS_LOG": "dispatch", **extra_env})
     return subprocess.run(
-        [sys.executable, "-c", _PROBE],
+        [sys.executable, "-c", code],
         env=env,
         capture_output=True,
         text=True,
@@ -90,6 +119,8 @@ def _routes_by_dtype(stderr: str) -> dict[str, dict[str, str]]:
     sections: dict[str, dict[str, str]] = {}
     current = None
     for line in stderr.splitlines():
+        if line.startswith("### outcome "):
+            continue
         if line.startswith("### "):
             current = line[4:].strip()
             sections[current] = {}
@@ -97,6 +128,19 @@ def _routes_by_dtype(stderr: str) -> dict[str, dict[str, str]]:
             op, _, backend = line[len("[flagos dispatch] ") :].partition(" -> ")
             sections[current][op] = backend
     return sections
+
+
+def _outcomes_by_dtype(stderr: str) -> dict[str, str]:
+    """``{dtype: outcome}`` from the (op, dtype) probe's ``###`` markers."""
+    outcomes: dict[str, str] = {}
+    current = None
+    for line in stderr.splitlines():
+        if line.startswith("### outcome "):
+            if current is not None:
+                outcomes[current] = line[len("### outcome ") :].strip()
+        elif line.startswith("### "):
+            current = line[4:].strip()
+    return outcomes
 
 
 @pytest.fixture(scope="module")
@@ -157,6 +201,59 @@ class TestFlagGemsDtypeFallback:
                 assert routes[dtype][op] == expected, (
                     f"{op} on {dtype} ran on {routes[dtype][op]}, conf says {expected}"
                 )
+
+
+class TestFlagGemsOpDtypeFallback:
+    """bool `neg` leaves the FlagGems route; the other dtypes keep it.
+
+    Neither half decides this on its own, which is why it is not an entry in
+    the conf and not the dtype-wide predicate above: bool is a dtype FlagGems
+    serves for other ops, and `neg` is an op FlagGems serves for other dtypes.
+    The gap is the intersection, and it is stated as such in
+    ``FlagGemsRejectsOpDtype``.
+    """
+
+    @pytest.mark.ascend
+    def test_bool_neg_lands_on_the_vendor_kernel(self):
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        routes = _routes_by_dtype(result.stderr)
+        assert routes["torch.bool"]["neg"] == "ascend", result.stderr
+
+    @pytest.mark.ascend
+    def test_bool_neg_raises_the_reference_error(self):
+        """The point of the escape: reach the CPU contract, not just a failure.
+
+        The FlagGems route fails inside the compiler, which is neither the
+        reference behaviour nor a message a caller can act on. Routed to the
+        native kernel the call reaches ``at::neg`` on the host copy, which is
+        where ``RuntimeError: Negation, the `-` operator, on a bool tensor is
+        not supported.`` is raised -- the contract
+        ``tests/integration/test_dtype_coverage.py`` pins.
+        """
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        outcome = _outcomes_by_dtype(result.stderr)["torch.bool"]
+        assert outcome.startswith("raised"), outcome
+        assert "bool" in outcome, outcome
+
+    @pytest.mark.ascend
+    def test_other_dtypes_keep_the_configured_route(self):
+        """The escape is per (op, dtype), so it does not leak into `neg` itself.
+
+        float32 and int64 are the two halves the conf entry could not have
+        separated: a per-op entry for `neg` would have moved these off FlagGems
+        as well (and onto the Ascend template's CPU round-trip for the
+        integral case), while the bool call above is the only one that needed
+        moving.
+        """
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        routes = _routes_by_dtype(result.stderr)
+        outcomes = _outcomes_by_dtype(result.stderr)
+        for dtype in ("torch.float32", "torch.int64"):
+            assert routes[dtype]["neg"] == routed_backend("neg"), routes[dtype]
+            assert outcomes[dtype] == "ok", outcomes[dtype]
 
 
 class TestFloat64ResultsAreCorrect:
