@@ -79,6 +79,11 @@ SCHEMA_VERSION = 2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEVICE_SPEC = Path(__file__).resolve().parent / "hf_device_spec.py"
+# Loaded into every child as ``-p hf_flagos_shims``. It is a real file rather
+# than a string constant like PLUGIN below, because unlike the report plugin it
+# is ordinary code with a testable contract and benefits from being importable
+# and lintable in place.
+SHIM_PLUGIN = Path(__file__).resolve().parent / "hf_flagos_shims.py"
 # Installed as ``utils/__init__.py`` in every child. HF's ``utils`` helper
 # directory is a namespace portion in the source tree, and the backend's own
 # regular ``utils`` package out-competes it once the backend extends
@@ -590,6 +595,7 @@ def stage_harness_files(workdir: Path, source: Path) -> None:
     merely be importable.
     """
     shutil.copyfile(DEVICE_SPEC, workdir / DEVICE_SPEC.name)
+    shutil.copyfile(SHIM_PLUGIN, workdir / SHIM_PLUGIN.name)
     (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
     (workdir / "src").symlink_to(source / "src", target_is_directory=True)
     (workdir / "utils").mkdir()
@@ -900,6 +906,8 @@ def run_test_batch(
                 str(source),
                 "-p",
                 "hf_report_plugin",
+                "-p",
+                "hf_flagos_shims",
                 *args.pytest_arg,
             ]
             + batch_nodeids,  # Add nodeids to select specific tests
@@ -1149,6 +1157,8 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             str(source),
             "-p",
             "hf_report_plugin",
+            "-p",
+            "hf_flagos_shims",
             *args.pytest_arg,
         ],
         args.collect_only,
