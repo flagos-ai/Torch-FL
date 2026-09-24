@@ -93,6 +93,33 @@ PY
   )
 }
 
+# The published MACA 3.8.1.3 build image carries vendor torch in /flagos,
+# whereas the older CI image carries a prebuilt CPU venv in /opt/venv. Prepare
+# the same isolated layout when the image is upgraded; keep vendor libtorch as
+# a link input and never import its Python package in the build/test venv.
+if [[ ! -x /opt/venv/bin/python && -x /flagos/bin/python ]]; then
+  FLAGOS_VENDOR_TORCH_LIB="$(/flagos/bin/python - <<'PY'
+from pathlib import Path
+import torch
+
+assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
+print(Path(torch.__file__).resolve().parent / "lib")
+PY
+)"
+  export FLAGOS_VENDOR_TORCH_LIB
+  if ! /flagos/bin/python -m venv /opt/venv; then
+    uv venv --clear --seed --python /flagos/bin/python /opt/venv
+  fi
+  PIP_RETRY_PYTHON=/opt/venv/bin/python pip_retry --index-url "$CPU_TORCH_INDEX_URL_DEFAULT" \
+    "torch==$CPU_TORCH_VERSION_DEFAULT"
+  PIP_RETRY_PYTHON=/opt/venv/bin/python pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
+    build cmake ninja setuptools wheel pytest patchelf
+  export FLAGOS_WHEEL_LOCAL=metax3.8.1.3
+  export PYTHONPATH=""
+else
+  export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
+  export FLAGOS_WHEEL_LOCAL=metax3.8.0
+fi
 export PATH="/opt/venv/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
 export VIRTUAL_ENV=/opt/venv
 export PYTHONNOUSERSITE=1
@@ -118,8 +145,6 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 # on for the 592 ops the conf routes to it either way.
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
-export FLAGOS_WHEEL_LOCAL=metax3.8.0
-export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
 
 export LD_LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib:/opt/maca/mxgpu_llvm/lib:/opt/maca/mxshmem/lib:/opt/maca/ompi/lib:/opt/maca/ucx/lib:/opt/mxdriver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
@@ -127,15 +152,14 @@ export CPATH="/opt/maca/tools/cu-bridge/include:/opt/maca/include:/opt/maca/incl
 
 for path in \
   /opt/venv/bin/python \
-  /opt/maca/tools/cu-bridge/bin/cucc \
-  /opt/vendor-libtorch/lib/libc10.so \
-  /opt/vendor-libtorch/lib/libtorch_cpu.so \
-  /opt/vendor-libtorch/lib/libtorch.so \
-  /opt/vendor-libtorch/lib/libtorch_global_deps.so \
-  /opt/vendor-libtorch/lib/libtorch_python.so \
-  /opt/vendor-libtorch/lib/libc10_cuda.so \
-  /opt/vendor-libtorch/lib/libtorch_cuda.so \
-  /opt/vendor-libtorch/lib/libtorch_cuda_linalg.so; do
+  "$FLAGOS_VENDOR_TORCH_LIB/libc10.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch_cpu.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch_global_deps.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch_python.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libc10_cuda.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch_cuda.so" \
+  "$FLAGOS_VENDOR_TORCH_LIB/libtorch_cuda_linalg.so"; do
   if [[ ! -e "$path" ]]; then
     echo "::error::Required MetaX image asset is missing: $path"
     exit 1
@@ -183,18 +207,15 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
   # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
   # (documented in set_env_musa.sh:176-178).
-  python -m pip install --no-deps 'packaging>=20.0' 'PyYAML>=5.0' 'sqlalchemy>=1.4' 'numpy>=1.20,<2.0'
+  python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
 
   # --- FlagTree: the Triton build carrying the "metax" backend ----------------
   #
-  # 0.6.1 is the newest MetaX build on the FlagOS index and the one every number
-  # in .github/configs/metax.yml and docs/vendors/metax was measured on. 3.6 is
-  # not a preference: FlagGems uses tl.map_elementwise and triton.knobs, which
-  # flagtree 0.5.x (Triton 3.1) does not have -- the two pins move together.
-  # Same install as set_env_musa.sh, from the same index.
+  # The MetaX wheel supplies the backend used by FlagGems. Install only a
+  # published binary so CI cannot fall back to a source build.
   FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}"
   FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-  pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
   # flagtree installs itself as the `triton` module, so assert on the resolved
   # module and not on the distribution name: an image triton-metax winning the
@@ -229,113 +250,28 @@ assert (site / "_flagtree_spec.py").is_file(), (
 print(f"FlagTree Triton: {triton.__version__} ({site})")
 PY
 
-  # --- FlagGems --------------------------------------------------------------
-  #
-  # FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-  # measures the current master, not a pinned snapshot. Override with
-  # TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-  #
-  # A generated kernel calls its operator by the package-level name
-  # (`flag_gems.<name>`, see scripts/codegen/codegen_ops.py) so a name only
-  # resolves if the installed FlagGems defines it. The cohort-gap probe below
-  # (gems_cohort_gap) enforces that against the installed revision on every
-  # run: if it drops a name the checked-in kernels call, this fails naming the
-  # gap instead of erroring per op at dispatch.
-  FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-  FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
-
-  # Discover flag_gems via interpreter query, not directory probe. FlagGems is
-  # normally an editable install, so there is no site-packages/flag_gems directory
-  # to test -- only a .pth file and a finder module pointing at a source tree.
-  VENDOR_FLAGGEMS_PYTHON=""
-  VENDOR_FLAGGEMS_ROOT=""
-  for candidate_python in /opt/conda/bin/python3 /opt/conda/bin/python \
-                          /opt/vendor-torch/bin/python3 /opt/vendor-torch/bin/python \
-                          /usr/bin/python3 /usr/local/bin/python3; do
-    [[ -x "$candidate_python" ]] || continue
-    VENDOR_FLAGGEMS_ROOT="$("$candidate_python" - <<'PY'
-import importlib.util
-from pathlib import Path
-spec = importlib.util.find_spec("flag_gems")
-if spec is None or not spec.submodule_search_locations:
-    print("")
-else:
-    root = Path(next(iter(spec.submodule_search_locations))).resolve()
-    print(root if (root / "__init__.py").is_file() else "")
-PY
-)"
-    if [[ -n "$VENDOR_FLAGGEMS_ROOT" ]]; then
-      VENDOR_FLAGGEMS_PYTHON="$candidate_python"
-      break
-    fi
+  # A generated kernel resolves each flag_gems.<name> at dispatch time. Keep
+  # the cohort-gap probe at the end of this script, after torch_fl is built.
+  FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+  FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-metax/simple}"
+  # Older images linked a vendor source checkout into this venv. A matching
+  # dist-info alone would otherwise make that link look like the wheel.
+  if [[ -L "$VENV_SITE/flag_gems" ]]; then
+    rm "$VENV_SITE/flag_gems"
+  fi
+  for metadata in "$VENV_SITE"/flag_gems-*.dist-info; do
+    [[ -L "$metadata" ]] && rm "$metadata"
   done
+  install_flag_gems
 
-  # The image's copy is a fast path, not an assumption: it is kept only if it
-  # resolves every name the checked-in kernels call. The version string is not
-  # usable as the test -- the stale cohort measured on 2026-09-15 reports
-  # 0.0.0, and a cohort that claims the right version is still only useful if
-  # the names are there.
-  VENDOR_GAP=""
-  if [[ -n "$VENDOR_FLAGGEMS_ROOT" ]]; then
-    VENDOR_GAP="$(gems_cohort_gap "$VENDOR_FLAGGEMS_PYTHON" || true)"
-    if [[ -z "$VENDOR_GAP" ]]; then
-      echo "::warning::Could not probe the image's FlagGems cohort with" \
-           "$VENDOR_FLAGGEMS_PYTHON; treating it as unusable and installing the" \
-           "pinned revision."
-    fi
+  # The published FlagCX wheel requires MACA 3.8.1.3. The current 3.8.0 CI
+  # image remains in use until the runner driver is confirmed compatible.
+  if [[ "$FLAGOS_VENDOR_TORCH_LIB" == /flagos/* ]]; then
+    FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}"
+    pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+      "flagcx===$FLAGCX_VERSION"
+    export FLAGCX_TORCH_BACKEND=flagos
   fi
-
-  if [[ -n "$VENDOR_GAP" && "$VENDOR_GAP" == "0/"* ]]; then
-    echo "Image FlagGems cohort resolves all $VENDOR_GAP kernel names ($VENDOR_FLAGGEMS_ROOT)"
-  else
-    if [[ -n "$VENDOR_FLAGGEMS_ROOT" ]]; then
-      echo "::warning::The image's FlagGems at $VENDOR_FLAGGEMS_ROOT does not" \
-           "resolve $VENDOR_GAP of the names csrc/aten/generated/" \
-           "flaggems_python_kernels.cc calls; installing @$FLAGGEMS_REVISION" \
-           "into the venv instead."
-    else
-      echo "FlagGems not found in vendor interpreters. Installing from source..."
-    fi
-
-    # FlagGems is not available on PyPI. Install from GitHub.
-    install_flag_gems
-
-    # After installation, resolve the package location in the venv itself
-    VENDOR_FLAGGEMS_ROOT="$(python - <<'PY'
-import importlib.util
-from pathlib import Path
-spec = importlib.util.find_spec("flag_gems")
-if spec is None or not spec.submodule_search_locations:
-    print("")
-else:
-    root = Path(next(iter(spec.submodule_search_locations))).resolve()
-    print(root if (root / "__init__.py").is_file() else "")
-PY
-)"
-
-    if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
-      echo "::error::Failed to install FlagGems from source. The MetaX backend" \
-           "requires FlagGems because backends_metax.conf routes 592 ops to the" \
-           "Python FlagGems path."
-      exit 1
-    fi
-  fi
-
-  # Link the resolved flag_gems root (if from vendor) so the venv imports the
-  # same tree the probe above approved; a venv install is already in place.
-  if [[ ! -e "$VENV_SITE/flag_gems" && "$VENDOR_FLAGGEMS_ROOT" != "$VENV_SITE"* ]]; then
-    ln -s "$VENDOR_FLAGGEMS_ROOT" "$VENV_SITE/flag_gems"
-  fi
-  # Link dist-info metadata if it exists alongside the package (for non-editable installs)
-  VENDOR_FLAGGEMS_PARENT="$(dirname "$VENDOR_FLAGGEMS_ROOT")"
-  for metadata in "$VENDOR_FLAGGEMS_PARENT"/flag_gems-*.dist-info; do
-    [[ -e "$metadata" ]] || continue
-    [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
-  done
-
-  # The cohort check is deliberately not here: it has to import flag_gems, which
-  # needs torch_fl first, which needs the native build. It runs at the end of
-  # this script instead. See the comment there.
 fi
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -356,6 +292,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     FLAGOS_VENDOR_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
+    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
+  fi
 fi
 
 cd "$REPO_ROOT"

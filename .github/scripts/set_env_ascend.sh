@@ -25,7 +25,7 @@
 # uses, its task-queue launch path calls at_npu::native::OpCommand (a torch_npu
 # symbol torch_fl must not link), and the exact-string patch that used to strip
 # those calls stopped matching on 3.2.2 and silently no-opped, which broke 11
-# operator tests in run 34786387238. FlagTree 0.6.2a1+ascend3.5 is the Triton
+# operator tests in run 34786387238. FlagTree's ascend3.5 wheel is the Triton
 # 3.5 build for this backend, and torch_fl carries a torch_npu-free backend
 # policy for it (torch_fl/compile/flagtree_ascend_policy.py), so no torch_npu
 # appears anywhere in this environment. See docs/vendors/ascend/installation.md.
@@ -272,25 +272,22 @@ for _ in 1 2 3; do
 done
 
 # FlagTree, the Triton build carrying the Ascend backend. Pinned, not tracking a
-# moving tag: the FlagGems revision below is validated against this exact wheel,
+# moving tag: the FlagGems release below is paired with this backend wheel,
 # and the Triton minor (3.5) has to match the backend the wheel was built for.
 # From the FlagTree user manual ("ascend", Triton 3.5 row).
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
+pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
 
-# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-# measures the current master, not a pinned snapshot. Override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run, e.g.:
-#   TORCH_FL_FLAGGEMS_REVISION=$(git ls-remote https://github.com/flagos-ai/FlagGems.git HEAD | cut -f1)
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+# Install the published Python wheel; avoid a GitHub checkout on the runner.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple}"
 install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead
 # failing the whole batch. numpy stays <2: 2.x breaks the stock +cpu torch C
 # extensions at import, and the Ascend test groups import both.
 pip_retry --index-url "$PIP_INDEX_URL" pybind11
-pip_retry --index-url "$PIP_INDEX_URL" packaging
+pip_retry --index-url "$PIP_INDEX_URL" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL" 'numpy<2'

@@ -260,23 +260,29 @@ fi
 # fails at import, so the two pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_musa}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
 # flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
 # again to ensure isolation.
 "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
 
-# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-# measures the current master, not a pinned snapshot. Override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+# Install the MThreads-indexed wheel instead of cloning FlagGems from GitHub.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-mthreads/simple}"
 install_flag_gems
+
+# The CI image and wheel both target MUSA 5.2 and Python 3.10. Keep the
+# communication extension in the isolated venv rather than copying a package
+# from the vendor torch environment.
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
+pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+  "flagcx===$FLAGCX_VERSION"
+export FLAGCX_TORCH_BACKEND=flagos
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
 # the stock +cpu torch C extensions at import.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
@@ -336,11 +342,8 @@ if command -v mthreads-gmi >/dev/null 2>&1; then
 fi
 
 # Integration deps (pytest, transformers, numpy<2, safetensors, sentencepiece,
-# tiktoken, protobuf) are pip-installed above. Triton is deliberately absent on
-# this line: the image ships no MThreads flagtree build and stock PyPI triton
-# targets NVIDIA, so torch.compile will fail when invoked -- that failure is the
-# environment-gap record the platform owners act on (compile-tests is withheld in
-# the manifest until the image bakes the vendor triton stack).
+# tiktoken, protobuf) are pip-installed above. The MThreads FlagTree wheel
+# supplies Triton from the hosted index.
 
 # --- Export to later workflow steps ------------------------------------------
 if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -351,6 +354,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME \
     FLAGOS_BUILD_VENDOR \
     FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS \
+    FLAGCX_TORCH_BACKEND \
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done

@@ -99,7 +99,6 @@ VENDOR_PYTHON="$(select_vendor_python)"
 VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
 import json
 from pathlib import Path
-import site
 import sys
 
 import torch
@@ -108,7 +107,6 @@ print(json.dumps({
     "version": torch.__version__,
     "base_version": torch.__version__.split("+", 1)[0],
     "root": str(Path(torch.__file__).resolve().parent),
-    "site": site.getsitepackages()[0],
     "python": sys.version.split()[0],
 }, sort_keys=True))
 PY
@@ -120,15 +118,14 @@ import json
 import os
 
 info = json.loads(os.environ["VENDOR_INFO"])
-for key in ("version", "base_version", "root", "site", "python"):
+for key in ("version", "base_version", "root", "python"):
     print(info.get(key) or "")
 PY
 )
 VENDOR_TORCH_VERSION="${VENDOR_FIELDS[0]}"
 VENDOR_TORCH_BASE_VERSION="${VENDOR_FIELDS[1]}"
 VENDOR_TORCH_ROOT="${VENDOR_FIELDS[2]}"
-VENDOR_SITE="${VENDOR_FIELDS[3]}"
-VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[4]}"
+VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[3]}"
 VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 
 # DCU is a boxing build: the DTK torch wheel is a hipified build whose HIP
@@ -220,33 +217,23 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   fi
 fi
 
-# FlagCX is carried over by copy rather than installed: it is not published on
-# any index and the vendor image builds it against DTK's HIP. Triton is
-# deliberately *not* copied any more -- the DTK image's triton is replaced by the
-# flagtree pin below, which is the build that ships the hcu backend together with
-# its entry-point metadata.
+# Install the published DTK-specific FlagCX wheel below. Triton is deliberately
+# not copied from the vendor image: the FlagTree wheel supplies the hcu backend
+# and its entry-point metadata.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-if [[ -d "$VENDOR_SITE/flagcx" ]]; then
-  cp -a "$VENDOR_SITE/flagcx" "$VENV_SITE/"
-fi
-for metadata in "$VENDOR_SITE"/flagcx-*.dist-info; do
-  [[ -e "$metadata" ]] || continue
-  cp -a "$metadata" "$VENV_SITE/"
-done
 
-# --- Hygon Triton (flagtree) + FlagGems --------------------------------------
+# --- Published Hygon wheels --------------------------------------------------
 # Installed for both stages, not just integration: build and integration share
 # one platform job, and restricting this to CI_STAGE=integration would leave the
 # build job's venv without flag_gems -- the wheel then fails as soon as a
 # FlagGems route dispatches. Same reasoning as set_env_musa.sh.
 #
-# --no-deps on both source packages so pip cannot replace the pinned CPU torch
-# with something a transitive requirement prefers.
-# The venv must not end up with two Tritons. A prebuilt /opt/torch-fl-dcu-venv
-# baked by an older setup carried the vendor's triton by copy; pip cannot remove
-# that tree (it ships no dist-info), so it is deleted by path before the flagtree
-# install. What is left for pip is dist-info metadata from an earlier install, so
-# the uninstall loop is bounded by that metadata being present.
+# --no-deps on the wheels prevents their metadata from replacing the pinned
+# CPU torch with a vendor wheel or another PyTorch version.
+# Reuse a correctly provisioned image. Older images copied the vendor's triton
+# without dist-info, so only a matching FlagTree distribution with the hcu
+# backend is safe to keep. Otherwise remove the old tree by path before pip
+# installs the wheel, and bound the uninstall loop by remaining dist-info.
 #
 # `pip uninstall -y` exits 0 even when it skips every named package ("WARNING:
 # Skipping triton as it is not installed"), so a loop keyed on the pip command
@@ -254,34 +241,73 @@ done
 # manifest: the DCU job sat in this line with all output redirected to
 # /dev/null for the remainder of its 60-minute budget and was cancelled before
 # reaching a single test.
-if [[ -d "$VENV_SITE/triton" || -d "$VENV_SITE/triton_kernels" ]]; then
-  echo "Removing pre-existing triton from the venv before installing flagtree"
-fi
-rm -rf "$VENV_SITE/triton" "$VENV_SITE/triton_kernels"
-while compgen -G "$VENV_SITE/triton-*.dist-info" >/dev/null ||
-      compgen -G "$VENV_SITE/triton_kernels-*.dist-info" >/dev/null; do
-  "$VENV_PYTHON" -m pip uninstall -y triton triton_kernels >/dev/null 2>&1 || break
-done
-
 # flagtree is the Triton build carrying the "hcu" (Hygon) backend. 3.6 is not a
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
 # fails at import, so the two pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_dcu}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+import importlib.metadata as metadata
+import sys
 
-# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-# measures the current master, not a pinned snapshot. Override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+try:
+    import triton.backends
+    assert metadata.version("flagtree") == sys.argv[1]
+    assert "hcu" in triton.backends.backends
+except (AssertionError, ImportError, metadata.PackageNotFoundError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using preinstalled FlagTree $FLAGTREE_VERSION with hcu backend"
+else
+  if [[ -d "$VENV_SITE/triton" || -d "$VENV_SITE/triton_kernels" ]]; then
+    echo "Removing pre-existing triton from the venv before installing FlagTree"
+  fi
+  rm -rf "$VENV_SITE/triton" "$VENV_SITE/triton_kernels"
+  while compgen -G "$VENV_SITE/triton-*.dist-info" >/dev/null ||
+        compgen -G "$VENV_SITE/triton_kernels-*.dist-info" >/dev/null; do
+    "$VENV_PYTHON" -m pip uninstall -y triton triton_kernels >/dev/null 2>&1 || break
+  done
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
+    "flagtree===$FLAGTREE_VERSION"
+fi
+
+HYGON_INDEX_URL="${TORCH_FL_HYGON_INDEX_URL:-$HYGON_INDEX_URL_DEFAULT}"
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="$HYGON_INDEX_URL"
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}"
+
+# The release wheel avoids a GitHub clone on every job. The index advertises a
+# SHA-256 for each wheel, so pip verifies the download before installing it.
 install_flag_gems
+
+# FlagCX is a cp310 wheel built for DTK 26.04, matching the DCU CI image.
+# Remove any files previously copied from the vendor Python before installing
+# a different version, since those copies are not necessarily pip-managed.
+if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import sys
+
+try:
+    assert metadata.version("flagcx") == sys.argv[1]
+    assert importlib.util.find_spec("flagcx") is not None
+except (AssertionError, metadata.PackageNotFoundError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using preinstalled FlagCX $FLAGCX_VERSION"
+else
+  rm -rf "$VENV_SITE/flagcx" "$VENV_SITE"/flagcx-*.dist-info
+  pip_retry --no-deps --only-binary=:all: --index-url "$HYGON_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
 # the stock +cpu torch C extensions at import.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'

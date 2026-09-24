@@ -87,7 +87,7 @@ integration_tests:
 
       # The FlagTree wheel is source-free: it ships its own Triton, and the
       # expected version comes from the setup script so the two stay in step.
-      expected = os.environ.get("FLAGTREE_VERSION", "0.6.2a2")
+      expected = os.environ.get("FLAGTREE_VERSION", "0.7.0rc2")
       distribution = importlib.metadata.distribution("flagtree")
       assert distribution.version == expected, distribution.version
       assert is_flagtree_active(), triton.__file__

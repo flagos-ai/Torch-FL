@@ -173,7 +173,7 @@ if ! venv_is_usable; then
 fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake ninja
+  "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake ninja build
   "$VENV_PYTHON" -m pip install \
     --index-url "$CPU_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
@@ -228,20 +228,27 @@ done
 # import, so the flagtree and FlagGems pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_gcu}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
 # flagtree may bring torch_gcu as a dependency or bundle it in the wheel.
 # Uninstall it again to keep the isolated venv free of the vendor ABI.
 "$VENV_PYTHON" -m pip uninstall -y torch_gcu 2>/dev/null || true
 
-# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-# measures the current master, not a pinned snapshot. Override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run. The routing
-# measured against the old 3c6f7537d pin is recorded in
-# docs/vendors/gcu/flaggems-test-results.md.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+# The Hygon, Ascend and Enflame indexes publish the same 5.4.0 Python wheel.
+# Select the Enflame index so this job never needs a GitHub source checkout.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-enflame/simple}"
 install_flag_gems
+
+# The current TopsRider image is 1.9.7 and has no matching FlagCX wheel.
+# The published FlagOS 1.9.10 build image uses /flagos as its vendor Python;
+# only that upgraded toolchain may load the 1.9.10 native wheel.
+if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
+  FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_gcu}"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy is deliberately not listed: the CPU torch wheel does not
@@ -249,7 +256,7 @@ install_flag_gems
 # integration tests are both numpy-free. pip still warns that flag_gems declares
 # a numpy requirement it cannot satisfy; that warning is expected here and is not
 # a failure, because flag_gems is installed with --no-deps.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 
@@ -285,6 +292,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
+    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
+  fi
 fi
 
 cd "$REPO_ROOT"

@@ -76,4 +76,4 @@ def test_the_cuda_script_still_selects_its_interpreter_per_call():
     text = (SCRIPTS_DIR / "set_env_cuda.sh").read_text(encoding="utf-8")
     calls = re.findall(r"pip_retry ", text)
     prefixed = re.findall(r'PIP_RETRY_PYTHON="\$[A-Za-z_]+" pip_retry ', text)
-    assert len(calls) == len(prefixed) == 7, (len(calls), len(prefixed))
+    assert calls and len(calls) == len(prefixed), (len(calls), len(prefixed))

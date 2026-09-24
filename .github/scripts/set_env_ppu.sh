@@ -22,8 +22,7 @@
 # be replaced by the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
-#   3. Installs the FlagGems stack into it: FlagTree (the FlagOS triton dist
-#      with the `ppu` backend) and FlagGems master from git.
+#   3. Installs the published FlagTree and FlagGems wheels into it.
 #   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
 #   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
 #      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
@@ -71,18 +70,14 @@ PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 # sitting beside it. cp312 only, hosted on the FlagOS index. The runner's HTTP
 # proxy does not allowlist that index (it answers CONNECT with 500), so the
 # install below reaches it directly -- see prefer_direct_route. Install it as:
-#   python3.12 -m pip install flagtree===0.6.2a2+ppu3.6 \
+#   python3.12 -m pip install flagtree===0.7.0rc1+ppu3.6 \
 #     --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ppu}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 
-# FlagGems master from the flagos-ai fork, installed into the venv instead of
-# imported from the /workspace/FlagGems bind mount this script used to require:
-# that mount was not present on every runner pod, and its absence aborted the
-# job in environment setup (see the install below). `master` by request;
-# override with TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+# The T-Head index publishes a Python wheel for the pinned FlagGems release.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-thead/simple}"
 
 # PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
 # CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image
@@ -390,7 +385,7 @@ fi
 # flag_gems is a PEP 660 editable install pointing at /workspace/FlagGems (the
 # mount this script no longer requires), and its triton is the vendor build
 # (3.5.0+v0.2.0.ppu2.1.0, backends ['amd','nvidia']). Copying either would
-# shadow the FlagTree triton and the FlagGems master installed below.
+# shadow the FlagTree triton and the FlagGems wheel installed below.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 for package in triton_kernels flagcx; do
   if [[ -d "$VENDOR_SITE/$package" ]]; then
@@ -427,7 +422,7 @@ done
 # FlagGems' own runtime deps are installed explicitly above.
 #
 # FlagTree first: it owns the `triton` package, and flag_gems' vendor detection
-# reads triton's registry at import time (FlagGems master picks its `thead`
+# reads triton's registry at import time (FlagGems 5.4.0 picks its `thead`
 # backend whenever PPU_SDK is in the environment -- exported near the bottom of
 # this script -- so no GEMS_VENDOR wiring is needed here).
 #
@@ -437,14 +432,11 @@ done
 # the checked-in csrc/aten/generated/flaggems_python_kernels.cc. Add it to the
 # build stage if PPU is ever wired into build-wheel-common.yml.
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Route the two external fetches around the runner's proxy where the pod can
-  # reach them directly: FlagTree comes from resource.flagos.net, which this
-  # pod's proxy refuses, and FlagGems master is a large checkout from
-  # github.com, which the same treatment at worst leaves on the proxy. See
-  # prefer_direct_route above.
+  # Both wheels live on resource.flagos.net, which this pod reaches directly
+  # rather than through its rejecting HTTP proxy.
   prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
-  pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
-  prefer_direct_route "$FLAGGEMS_REPO" "FlagGems git checkout"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+  prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
   install_flag_gems
 fi
 

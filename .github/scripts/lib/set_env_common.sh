@@ -56,82 +56,35 @@ pip_retry() {
   done
 }
 
-# The FlagGems install is a VCS install, and pip reports the exit status of its
-# last step -- the wheel build of whichever tree it managed to fetch. A checkout
-# the runner's proxy truncated therefore still ends in `Successfully installed`,
-# and pip never notices. On 2026-09-18 the Ascend runner's clone spent ten
-# minutes printing
-#   fatal: unable to access 'https://github.com/flagos-ai/FlagGems.git/':
-#   Proxy CONNECT aborted
-# (364 times), alongside `error: unable to read sha1 file of ...` and
-# `error: invalid object 100644 2e574121... for
-# '.github/workflows/rule-check.yaml'` for the blobs it never received, and then
-# reported
-#   Successfully installed flaggems_setup-0.0.0
-# -- a 2.1 MB stub named after the build scaffolding rather than the project,
-# where the same revision produced the 10 MB
-# flag_gems-5.4.0rc2.post1+g437ba3938 on every other platform that ran that
-# morning. Nothing failed until the integration suite took its first FlagGems
-# route, four minutes later.
-#
-# So check the install instead of trusting pip's status, and reinstall when it
-# is wrong: the conf routes this platform's operators to flagos_python, so an
-# unusable flag_gems is not a state a provisioning script may leave behind.
-#
-# Three attempts at most, and only for an install pip called successful: a pip
-# failure has already been retried five times by pip_retry, and repeating that
-# spends the job's budget on a link that is down rather than on a bad checkout.
+# A published wheel has a fixed version and an index-provided SHA-256. Check the
+# prebuilt venv before downloading it, then verify the result so a stale image
+# package cannot silently take precedence over the requested release.
 flag_gems_installed() {
-  "${VENV_PYTHON:-python}" - "${FLAGGEMS_REVISION:0:9}" <<'PY'
+  "${VENV_PYTHON:-python}" - "$FLAGGEMS_VERSION" <<'PY'
 import importlib.metadata as metadata
 import importlib.util
 import sys
 
 try:
-    version = metadata.version("flag_gems")
-except metadata.PackageNotFoundError:
-    raise SystemExit("flag_gems is not installed")
-
-# A distribution can be installed with no importable package behind it, which
-# is what a truncated checkout produces.
-if importlib.util.find_spec("flag_gems") is None:
-    raise SystemExit(f"flag_gems {version} has no importable package")
-
-print(f"flag_gems {version}")
-if sys.argv[1] not in version:
-    # Not a failure: a revision given as a branch name, or a tarball without
-    # git metadata, lands on a version string that names neither. Only warn --
-    # reinstalling cannot change how the version was written.
-    print(
-        f"::warning::flag_gems {version} does not name the requested revision "
-        f"{sys.argv[1]}; the checkout it was built from may be incomplete",
-        file=sys.stderr,
-    )
+    assert metadata.version("flag_gems") == sys.argv[1]
+    assert importlib.util.find_spec("flag_gems") is not None
+except (AssertionError, metadata.PackageNotFoundError):
+    raise SystemExit(1)
 PY
 }
 
-# Install FlagGems from the pinned revision, retrying until it is importable.
+# Install only the binary release, never a source distribution or Git checkout.
 install_flag_gems() {
-  local attempt=1
-  while true; do
-    if ! pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"; then
-      echo "::error::could not install FlagGems from ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    if flag_gems_installed; then
-      return 0
-    fi
-    if (( attempt >= 3 )); then
-      echo "::error::no usable flag_gems after $attempt installs of ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    echo "::warning::install attempt $attempt left no usable flag_gems; reinstalling"
-    attempt=$((attempt + 1))
-    # A truncated tree installs under the build scaffolding's name, so both
-    # names have to go for the next attempt to be read as a fresh result.
-    "${VENV_PYTHON:-python}" -m pip uninstall -y flag_gems flaggems_setup >/dev/null 2>&1 || true
-    sleep 10
-  done
+  if flag_gems_installed; then
+    echo "Using preinstalled FlagGems $FLAGGEMS_VERSION"
+    return 0
+  fi
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+    "flag-gems===$FLAGGEMS_VERSION"
+  if ! flag_gems_installed; then
+    echo "::error::FlagGems $FLAGGEMS_VERSION is not importable after wheel installation"
+    return 1
+  fi
 }
 
 # Drop a vendor-torch root from a colon-separated path list, so the isolated
