@@ -59,6 +59,31 @@ requires_cuda_boxing = pytest.mark.skipif(
     reason="csrc/aten/sparse_csr_ops.cc compiles this for CUDA-boxing only",
 )
 
+# Densifying a compressed tensor lays its stored values into a zero-filled
+# dense tensor with `index_add_`, and every generated conf routes `index_add_`
+# to FlagGems.  The MThreads build divides `src.numel()` by `index.numel()`
+# without guarding the empty index
+# (flag_gems/runtime/backend/_mthreads/ops/index_add.py:157), so a structure
+# with nothing stored divides by zero there.  The Hygon build is not exposed:
+# `_hygon/ops/index_add.py` declines its contiguous-suffix fast path when
+# `src.numel() == 0` (line 248), so the same densification passes on the DCU
+# host.  That is FlagGems' defect rather than this surface's, and not a sparse
+# one at all -- any empty-index `index_add_` on MUSA reaches the same line --
+# so the two empty-structure densifications below are xfailed rather than
+# routed around.  Non-strict, and narrowed to the one exception type, so a
+# fixed kernel reports an xpass and anything else stays a failure.  The
+# predicate reads the build's accelerator rather than the conf, so a conf that
+# cannot be found cannot quietly drop the mark and turn the job red again.
+FLAGGEMS_EMPTY_INDEX_ADD = torch_fl._build_accelerator() == "musa"
+
+empty_densification_xfail = pytest.mark.xfail(
+    FLAGGEMS_EMPTY_INDEX_ADD,
+    reason="FlagGems' MThreads index_add_ divides by a zero-length index "
+    "(flag_gems/runtime/backend/_mthreads/ops/index_add.py:157)",
+    strict=False,
+    raises=ZeroDivisionError,
+)
+
 # The 2x2 identity every plain CSR/CSC construction below uses.
 CROW = [0, 1, 2]
 CCOL = [0, 1, 2]
@@ -187,10 +212,17 @@ class TestConstruction:
 
     @pytest.mark.anyplatform
     def test_zeros_allocation(self):
-        """zeros must produce an all-zero dense view, not merely a tensor."""
+        """zeros must build the structure, and it must hold nothing: a `zeros`
+        that allocated values would be a dense tensor wearing a sparse layout."""
         zero = torch.zeros((2, 2), layout=torch.sparse_csr, device=DEVICE)
         assert zero.layout == torch.sparse_csr
         assert zero._nnz() == 0
+        assert zero.values().numel() == 0
+
+    @pytest.mark.anyplatform
+    @empty_densification_xfail
+    def test_zeros_densify_to_zeros(self):
+        zero = torch.zeros((2, 2), layout=torch.sparse_csr, device=DEVICE)
         torch.testing.assert_close(_dense(zero).cpu(), torch.zeros(2, 2))
 
     @pytest.mark.anyplatform
@@ -445,8 +477,22 @@ class TestBufferMovement:
     def test_zero_empties_the_structure(self):
         """`zero_` on a compressed tensor discards the stored values rather
         than writing zeros into them -- the host does the same -- so the
-        result is a structure with no non-zeros, not a dense zero."""
+        result is a structure with no non-zeros, not a dense zero.  The index
+        tensors shrink with it: the host leaves all-zero row pointers, not the
+        original pattern with zeroed values behind it."""
         csr = _csr()
         csr.zero_()
         assert csr._nnz() == 0
+        assert csr.values().numel() == 0
+        torch.testing.assert_close(
+            csr.crow_indices().cpu(), torch.zeros(len(CROW), dtype=torch.int64)
+        )
+
+    @pytest.mark.anyplatform
+    @empty_densification_xfail
+    def test_zeroed_structure_densifies_to_zeros(self):
+        """`zero_`'s result is a compressed tensor with nothing to lay in, so
+        it densifies through the same empty `index_add_` as `zeros` does."""
+        csr = _csr()
+        csr.zero_()
         torch.testing.assert_close(_dense(csr).cpu(), torch.zeros(2, 2))
