@@ -114,10 +114,31 @@ bool LogEnabled(const char* item);
 // The same calls reach aclnn kernels through the vendor slot and return the
 // right float64 answer, so the fallback is a gain rather than a loss.
 //
-// Deliberately a predicate on the dtype alone and not on (op, dtype): the
-// per-op form is exactly the NATIVE_TRITON_GAPS entry the conf generator
-// already has, and it would have to name every pointwise op in the file.
+// Deliberately a predicate on the dtype alone and not on (op, dtype): every op
+// that reaches this build's FlagGems route with one of the dtypes above is
+// affected, so naming the op would carry no information. A gap that is
+// specific to one op cannot be expressed here and does not belong here --
+// see FlagGemsRejectsOpDtype below.
 bool FlagGemsRejectsDtype(at::ScalarType dtype);
+
+// The (op, dtype) form of the same escape, for the gaps where neither half
+// decides on its own: a FlagGems kernel that is unguarded about the element
+// type it code-generates, called with a dtype the reference implementation of
+// that op rejects outright. `neg` over bool is the entry in the table today.
+//
+// Both of the other mechanisms were measured against this gap and neither can
+// state it. A conf entry routes a whole op: `neg` over
+// fp16/bf16/fp32/fp64/int8/int16/int32/int64/uint8 is correct on the FlagGems
+// route, so a NATIVE_TRITON_GAPS entry would move all of them off it and onto
+// the Ascend template's CPU round-trip -- which IsUnaryDtypeSupported sends
+// every integral through, costing 7-30x on integral `neg` to gain 10x on
+// fp32. The dtype-wide predicate above cannot state it either: bool is not a
+// dtype FlagGems fails for in general (add/sub/abs/... all take a bool operand
+// on this build), so a dtype-wide rule would take those down with it.
+//
+// `op_name` is the routed name -- the conf key, so it carries a ".out" suffix
+// only for the calls dispatched under one -- not the ATen schema name.
+bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype);
 
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
