@@ -124,6 +124,19 @@ integration_tests:
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
 
+  # Issue #409: the remaining top-level files no manifest selected. They are
+  # single-device suites, so the multi_device sweep above does not reach them,
+  # and they are named here rather than selected by marker for the reason
+  # test_factory_ops.py is: each would need a marker invented for it, and a
+  # marker that exists only to be selected proves nothing about the file.
+  - name: Portable top-level contracts
+    command: >-
+      python -m pytest
+      tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_dtype_coverage.py
+      tests/integration/test_ops.py
+      -v -s --tb=short
+
   # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
   # cases are measured by the group below, not here (no switch exists any more
   # to skip them -- see ops/conftest.py).

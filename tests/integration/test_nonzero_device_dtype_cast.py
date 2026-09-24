@@ -79,10 +79,19 @@ import torch
 import torch_fl
 
 
-pytestmark = pytest.mark.skipif(
-    torch_fl.flagos.device_count() < 2,
-    reason="needs at least 2 flagos devices",
-)
+# Issue #409: a top-level file is reached by no manifest unless it carries a
+# marker a sweep selects, so this regression had never run in CI. It is a
+# multi-device contract by construction (the cast below is on a non-zero index
+# against device 0), which is exactly what `multi_device` selects -- the step
+# that sweeps tests/integration/ on every platform. The list form keeps the
+# 2+-device guard; a second assignment would silently drop the first.
+pytestmark = [
+    pytest.mark.multi_device,
+    pytest.mark.skipif(
+        torch_fl.flagos.device_count() < 2,
+        reason="needs at least 2 flagos devices",
+    ),
+]
 
 # Index 1 specifically: index 0 is the device the bug does not affect, so
 # asserting on it would pass either way.
