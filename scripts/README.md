@@ -31,6 +31,7 @@ Run every script from the repository root; the examples below assume that.
 | `codegen_autograd.py` | `csrc/aten/generated/variable_type.cc` — the `AutogradPrivateUse1` layer for ops a backend re-owns with a fused kernel. | `python scripts/codegen/codegen_autograd.py` |
 | `codegen_tileops.py` | `csrc/aten/generated/tileops_python_kernels.cc`, `torch_fl/tileops/generated/` (routes, shims), `tests/integration/ops/test_tileops_generated.py`, and the `TILEOPS_OPS` block in `backend_coverage.py`. | `python scripts/codegen/codegen_tileops.py [--check]` |
 | `gen_vendor_confs.py` | `torch_fl/configs/backends_<vendor>.conf`, one full-coverage conf per platform. | `python scripts/codegen/gen_vendor_confs.py [--check\|--stats]` |
+| `gen_cupti_runtime_cbid.py` | `csrc/profiler/generated/cupti_runtime_cbid.txt` (the vendor cbid table as parsed) and `cupti_runtime_cbid_names.inc` (the C++ `cupti_shim.h` includes). | `python scripts/codegen/gen_cupti_runtime_cbid.py --check`; `--refresh [--header PATH]` re-parses `cupti_runtime_cbid.h` |
 | `extract_name_map.py` | `csrc/aten/generated/name_map.json` — op name → dispatcher symbol, parsed back out of the existing `csrc/aten/*.h`/`.cc`. | `python scripts/codegen/extract_name_map.py` |
 | `backend_coverage.py` | Not a generator: the measured coverage sets the conf generator reads. `TILEOPS_OPS` is rewritten in place by `codegen_tileops.py`; the two FlagGems sets are hand-maintained. | — |
 
@@ -105,6 +106,7 @@ require an empty diff before opening a PR that touches them.
 | `csrc/aten/backends/musa/generated/{musa_kernels.cc,musa_register.inc}` | `codegen_mudnn.py` | **manual** (needs MUSA ATen headers) |
 | `csrc/aten/backends/musa/generated/musa_flaggems_register.inc` | `codegen_musa_flaggems.py` | `codegen_musa_flaggems.py --check` — **CI** |
 | `torch_fl/configs/backends_*.conf` | `gen_vendor_confs.py` | `gen_vendor_confs.py --check` — **CI**; `tests/unit/test_gen_vendor_confs.py` and `tests/unit/test_conf_registration_consistency.py` enforce the same contract |
+| `csrc/profiler/generated/cupti_runtime_cbid.txt` and `cupti_runtime_cbid_names.inc` | `gen_cupti_runtime_cbid.py` | `gen_cupti_runtime_cbid.py --check` — **CI**; `tests/unit/test_cupti_runtime_cbid_table.py` enforces the same contract |
 | `torch_fl/tileops/generated/*` | `codegen_tileops.py` | `codegen_tileops.py --check` — **manual** (needs torch + tileops) |
 | `tests/integration/ops/test_tileops_generated.py` | `codegen_tileops.py` | `codegen_tileops.py --check` — **manual** (needs torch + tileops) |
 | `TILEOPS_OPS` in `codegen/backend_coverage.py` | `codegen_tileops.py` | `codegen_tileops.py --check` — **manual** (needs torch + tileops) |
@@ -118,3 +120,11 @@ must run on a host with that vendor's ATen headers; the CUDA generators must run
 with an importable `torch_fl` (built `torch_fl._C`) and, for the FlagGems sets, a
 matching `flag_gems` install. Regenerating in the wrong environment silently
 produces a smaller cohort — see `.claude/skills/flaggems-integration/SKILL.md`.
+
+`gen_cupti_runtime_cbid.py --refresh` has the same hazard in a different shape:
+it must be run against a toolkit at least as new as the one the committed table
+records in its provenance header. An older `cupti_runtime_cbid.h` parses cleanly
+and simply does not declare the ids it predates, so the table would silently lose
+entries instead of failing. `--check` cannot catch that — it only ever compares
+the two committed files — which is why the refresh is a reviewed action and the
+provenance header is part of the artifact.
