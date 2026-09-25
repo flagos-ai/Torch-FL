@@ -1568,8 +1568,10 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # same allocation (`torch.empty(3, pin_memory=True)`, `new_zeros(...,
 # pin_memory=True)` and the int64 `new_ones`) raised. So the flag is treated as
 # unsupported and handed to the composite, which raises as it does everywhere
-# else. Note that `at::empty` is deliberately *not* given the flag even on this
-# path: passing it would only exchange one silent success for another.
+# else. So no allocation on this path is ever reached with the flag set, and the
+# gate above -- not the `pinned_memory(false)` arange puts on its `at::empty` --
+# is what keeps the silent success from coming back: honouring the flag on the
+# allocation would only exchange one silent success for another.
 T_NEW_ONES = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
