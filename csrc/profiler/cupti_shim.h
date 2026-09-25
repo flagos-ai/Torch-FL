@@ -69,49 +69,47 @@ typedef enum {
   CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0 = 3
 } CUpti_ExternalCorrelationKind;
 
-// Runtime API callback id -> human name fallback for naming
-// CUPTI_ACTIVITY_KIND_RUNTIME records. NVIDIA and MetaX use different callback
-// id spaces, so this table is only used for the vendor selected at build time.
-// MetaX normally resolves names through mcptiActivityGetApiName; the fallback
-// below is retained for old MCPTI builds that do not export that helper.
+// Runtime API callback id -> human name for CUPTI_ACTIVITY_KIND_RUNTIME records.
 //
-// Getting one of these wrong is invisible at runtime: a plausible but wrong
-// label is emitted rather than an error. Keep the static table deliberately
-// small and use a generic label for ids that are not known.
+// NVIDIA and MetaX use different callback id spaces, so this lookup is only used
+// for the vendor selected at build time. MetaX normally resolves names through
+// mcptiActivityGetApiName; the fallback below is retained for old MCPTI builds
+// that do not export that helper.
+//
+// The NVIDIA table is generated from CUPTI's own cupti_runtime_cbid.h rather
+// than maintained here. It used to be a hand-written switch holding ~20 ids,
+// which left every other callback id on the generic fallback: on CUDA 180 of 203
+// runtime events in a plain matmul workload were reported as "cudaRuntime", and
+// on PPU 72 of 117. The ids are assigned by that header, are stable and
+// append-only, and a wrong entry is invisible at runtime -- a plausible label is
+// emitted rather than an error -- so deriving the table removes the whole class
+// of bug instead of the instances observed. Regenerate with
+// scripts/codegen/gen_cupti_runtime_cbid.py --refresh; the Codegen checks job
+// runs its --check mode, so neither generated file can be hand-edited.
+//
+// An id the table does not name -- one this CUPTI version does not declare, or an
+// entry point from a newer toolkit than the table was generated from -- keeps the
+// generic label rather than a guessed one. The record is still a real runtime
+// call worth showing, and mislabeling it is worse than leaving it unnamed. The
+// numeric cbid is preserved in the event metadata either way, so an unnamed id is
+// still identifiable from the trace.
+//
+// Not defined on MetaX: MCPTI callback ids are a different namespace, so the
+// table is unusable there and the call site below selects mcptiRuntimeCbidToName
+// instead. Guarding the include as well keeps ~22 KB of NVIDIA names out of that
+// build.
+#if !defined(FLAGOS_METAX_MCPTI)
+#include "generated/cupti_runtime_cbid_names.inc"
+
 inline const char* cuptiRuntimeCbidToName(uint32_t cbid) {
-  switch (cbid) {
-    // --- launches ---
-    case 211: return "cudaLaunchKernel";                 // _v7000
-    case 214: return "cudaLaunchKernel";                 // _ptsz_v7000
-    case 269: return "cudaLaunchCooperativeKernel";      // _v9000
-    case 270: return "cudaLaunchCooperativeKernel";      // _ptsz_v9000
-    case 430: return "cudaLaunchKernelExC";              // _v11060
-    case 431: return "cudaLaunchKernelExC";              // _ptsz_v11060
-    // --- transfers ---
-    case 31:  return "cudaMemcpy";                       // _v3020
-    case 41:  return "cudaMemcpyAsync";                  // _v3020
-    case 225: return "cudaMemcpyAsync";                  // _ptsz_v7000
-    case 49:  return "cudaMemset";                       // _v3020
-    case 51:  return "cudaMemsetAsync";                  // _v3020
-    case 235: return "cudaMemsetAsync";                  // _ptsz_v7000
-    // --- synchronization (the entries most often misread as launches) ---
-    case 131: return "cudaStreamSynchronize";            // _v3020
-    case 239: return "cudaStreamSynchronize";            // _ptsz_v7000
-    case 165: return "cudaDeviceSynchronize";            // _v3020
-    case 137: return "cudaEventSynchronize";             // _v3020
-    case 135: return "cudaEventRecord";                  // _v3020
-    case 242: return "cudaEventRecord";                  // _ptsz_v7000
-    case 147: return "cudaStreamWaitEvent";              // _v3020
-    case 247: return "cudaStreamWaitEvent";              // _ptsz_v7000
-    // --- allocation ---
-    case 20:  return "cudaMalloc";                       // _v3020
-    case 22:  return "cudaFree";                         // _v3020
-    // Unmapped ids keep a generic label rather than a guessed one: the record is
-    // still a real runtime call worth showing, and mislabeling it is worse than
-    // leaving it unnamed.
-    default:  return "cudaRuntime";
+  if (cbid < flagos_cupti_runtime_cbid::kNameCount) {
+    if (const char* name = flagos_cupti_runtime_cbid::kNames[cbid]) {
+      return name;
+    }
   }
+  return "cudaRuntime";
 }
+#endif
 
 #if defined(FLAGOS_METAX_MCPTI)
 inline const char* mcptiRuntimeCbidToName(uint32_t cbid) {

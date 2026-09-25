@@ -89,6 +89,47 @@ def mspti_preload_active() -> bool:
     return _MSPTI_PRELOADED_AT_STARTUP
 
 
+# Every tracer names a runtime record from the record's own callback id, and every
+# tracer has a placeholder for "this id has no name" -- one label that stands in
+# for the whole id space. A trace that is mostly these is a trace whose runtime
+# identity has collapsed: the records are real, but distinct API calls are
+# indistinguishable in Chrome trace, Perfetto, and key_averages().
+#
+# These are the placeholders each tracer falls back to, one entry per tracer so
+# the contract can bound the degradation on every platform rather than only the
+# one it was measured on:
+#
+#   cudaRuntime    cupti_shim.h, whenever the vendor table does not name the id
+#   mcRuntime      mcptiRuntimeCbidToName, for MCPTI builds without
+#                  mcptiActivityGetApiName
+#   musaRuntime    musa_mupti_device_tracer.cc, when MuptiShim::GetCallbackName
+#                  does not resolve the id
+#   topsRuntime    gcu_topspti_device_tracer.cc, when topsptiGetCallbackName does
+#                  not resolve the id
+#   AscendRuntime  cann_device_tracer.cc, for a record with no name field
+#   Unknown        roctracer_device_tracer.cc, when roctracer_op_string returns
+#                  null
+GENERIC_RUNTIME_NAMES = frozenset(
+    {
+        "cudaRuntime",
+        "mcRuntime",
+        "musaRuntime",
+        "topsRuntime",
+        "AscendRuntime",
+        "Unknown",
+    }
+)
+
+# Ceiling on the share of runtime events allowed to carry a placeholder. Stock
+# torch+CUDA names every one of its cuda_runtime events, so the honest bound is
+# zero; this budget exists so that one id a newer toolkit introduces -- or one
+# gap in a vendor resolver this repository does not control -- does not red the
+# suite on a platform where the table itself is correct. It is far below the
+# degradation this bound was written to catch: flagos reported 180/203 (89%) on
+# CUDA and 72/117 (62%) on PPU before the cbid table was generated.
+MAX_GENERIC_RUNTIME_FRACTION = 0.05
+
+
 def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     """Describe public profiler features currently emitted by each tracer.
 

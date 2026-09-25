@@ -80,6 +80,7 @@ jobs:
           set -euo pipefail
           python -m pytest \
             tests/unit/test_ci_version_pins.py \
+            tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
             tests/unit/test_device_tracer_selection.py \

@@ -65,6 +65,12 @@ jobs:
           python3 scripts/codegen/codegen_gcu_flaggems.py --check
           echo "=== codegen_musa_flaggems.py --check ==="
           python3 scripts/codegen/codegen_musa_flaggems.py --check
+          # Re-renders the CUPTI cbid -> name table's .inc from the committed
+          # .txt, so it needs no vendor header and no GPU -- which is the reason
+          # the table is committed as two artifacts rather than parsed from
+          # cupti_runtime_cbid.h at build time.
+          echo "=== gen_cupti_runtime_cbid.py --check ==="
+          python3 scripts/codegen/gen_cupti_runtime_cbid.py --check
 
       - name: Run conf/registration consistency tests
         run: |
