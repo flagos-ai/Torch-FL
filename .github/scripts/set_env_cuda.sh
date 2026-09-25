@@ -457,6 +457,12 @@ if [[ "${CUDA_VERSION:-}" == 13.3.* ]]; then
   export TORCH_DEVICE_BACKEND_AUTOLOAD=0
   FLAGCX_COPIED=1
 else
+  # FlagTree 0.7.0rc2 probes its TLE distributed runtime while FlagGems is
+  # imported. That probe can find a libflagcx.so even when no flagcx Python
+  # package was installed here. The library it finds needs
+  # libcudart.so.12, whereas this job uses CUDA 13.0; disable only TLE's
+  # optional distributed loader until a toolkit-matched FlagCX wheel is used.
+  export USE_TLE_DIST=0
   for package in flagcx; do
     if [[ -d "$VENDOR_SITE/$package" ]]; then
       cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
@@ -538,6 +544,10 @@ from pathlib import Path
 
 import triton
 
+if os.environ.get("USE_TLE_DIST") == "0":
+    # Check the import that FlagGems triggers before spending time on build_ext.
+    from triton.experimental.tle import language  # noqa: F401
+
 expected = os.environ["FLAGTREE_VERSION"]
 flagtree_version = importlib.metadata.version("flagtree")
 assert flagtree_version == expected, (flagtree_version, expected)
@@ -605,5 +615,8 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   done
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
+  if [[ -n "${USE_TLE_DIST:-}" ]]; then
+    printf 'USE_TLE_DIST=%s\n' "$USE_TLE_DIST" >> "$GITHUB_ENV"
   fi
 fi
