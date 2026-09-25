@@ -308,6 +308,11 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         super().__init__(rank, world_size)
         self._store = store
         self._timeout = timeout
+        # Why the native NCCL fallback declined, filled in by _load_nccl_extension
+        # so the "no suitable inner backend" error can carry the real cause
+        # instead of leaving the user with a bare NoneType failure. None until
+        # that path runs.
+        self._nccl_skip_reason = None
         self._view_fn = self._build_inner(store, rank, world_size, timeout)
         self._register_inner_backend()
 
@@ -367,6 +372,9 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
             if native_fn(store, rank, world_size, timeout):
                 return self._resolve_view(prof, vendor, backend="native")
 
+        # getattr because the unit tests drive _build_inner on __new__ instances
+        # that never ran __init__ (see tests/unit/test_vendor_routing.py).
+        reason = getattr(self, "_nccl_skip_reason", None)
         raise RuntimeError(
             f"ProcessGroupFlagOS: no suitable inner backend for "
             f"GEMS_VENDOR={vendor!r}. Install/import flagcx (heterogeneous), or "
@@ -374,6 +382,7 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
             f"({'none wired' if prof.native is None else prof.native}). For a "
             f"CPU-only torch wheel + external libtorch_cuda, build the "
             f"_flagos_nccl extension (torch_fl/comm/_nccl_ext/build.py)."
+            + (f"\nNative NCCL fallback unavailable: {reason}." if reason else "")
         )
 
     def _resolve_view(self, prof, vendor, backend):
@@ -433,13 +442,9 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # USE_C10D_NCCL), but an externally preloaded libtorch_cuda.so still
         # carries the full NCCL backend. The _flagos_nccl extension constructs
         # one and returns it as a c10d.Backend (see torch_fl/comm/_nccl_ext/).
-        try:
-            from torch_fl.comm._nccl_ext import _flagos_nccl
-        except ImportError:
-            try:
-                import _flagos_nccl  # loose build layout
-            except ImportError:
-                return False
+        ext = self._load_nccl_extension()
+        if ext is None:
+            return False
         timeout_ms = 0
         if timeout is not None:
             timeout_ms = (
@@ -447,10 +452,39 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
                 if hasattr(timeout, "total_seconds")
                 else int(timeout)
             )
-        self._inner = _flagos_nccl.make_nccl_backend(
-            store, rank, world_size, timeout_ms, False
-        )
+        self._inner = ext.make_nccl_backend(store, rank, world_size, timeout_ms, False)
         return True
+
+    def _load_nccl_extension(self):
+        """Return the _flagos_nccl extension module, or None when unavailable.
+
+        Sets ``self._nccl_skip_reason`` when it returns None, so _build_inner can
+        report the loader failure in the final diagnostic.
+
+        The package attribute is a None sentinel rather than missing when the
+        extension is not built, so the absence has to be tested explicitly:
+        importing the sentinel succeeds, and the old code then called
+        ``make_nccl_backend`` on it, failing as
+        ``'NoneType' object has no attribute 'make_nccl_backend'`` while
+        discarding the ImportError that explained why the extension was missing.
+        See torch_fl/comm/_nccl_ext/__init__.py.
+        """
+        from torch_fl.comm import _nccl_ext
+
+        ext = _nccl_ext.get_extension()
+        if ext is not None:
+            return ext
+
+        try:
+            import _flagos_nccl as ext  # loose build layout
+        except ImportError as loose_exc:
+            self._nccl_skip_reason = (
+                f"_flagos_nccl is not built "
+                f"(package import: {_nccl_ext.load_error()!r}; "
+                f"loose module import: {loose_exc!r})"
+            )
+            return None
+        return ext
 
     def _try_build_hccl(self, store, rank, world_size, timeout) -> bool:
         """Build a ProcessGroupHCCL via torch_npu (Ascend native fallback).
