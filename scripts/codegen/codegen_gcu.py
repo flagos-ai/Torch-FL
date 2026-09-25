@@ -167,6 +167,9 @@ OPS = {
     "cat": ("cat", None),
     "zeros_like": ("full_like", "ZerosLike"),
     "ones_like": ("full_like", "OnesLike"),
+    # The same family, except that it takes a shape instead of reading one, so it
+    # needs a template of its own to pass the caller's `size` through.
+    "new_ones": ("new_ones", None),
     # arange: all three overloads share one template; the per-overload scalars,
     # the locals the shared body reads and ATen's dtype-inference predicate for
     # that overload live in ARANGE_OVERLOADS.
@@ -1514,6 +1517,90 @@ at::Tensor {kernel}(
       {tops}, self, t_out.get(), t_self.get(),
       gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED,
       TOPSATEN_MEMORY_CONTIGUOUS);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+# new_ones is the one factory a model reaches on an *int64* tensor:
+# `transformers/generation/utils.py:991` builds its attention mask with
+# `attention_mask.new_ones(...)` on every generation step, and that mask is int64.
+#
+# topsatenNewOnes does not take a dtype table like the other entry points: it
+# carries an explicit `data_type` argument and validates it, so everything outside
+# fp32/fp16/bf16 fails its own CheckArgs with TOPSATEN_STATUS_BAD_PARAM, which
+# EXEC_TOPSATEN_CMD converts into a thrown TORCH_CHECK, where the composite would
+# have produced the right tensor. gcu::TopsatenNewOnesDtype is that measured set
+# (see its comment in topsaten_common.h); TopsatenSupportsDtype would admit the
+# integer types the kernel declines. The int64 mask therefore never reaches the
+# vendor entry point.
+#
+# Everything the vendor entry point cannot serve goes to
+# `at::compositeexplicitautograd::new_ones` -- the *same* code the `none` route
+# ran for this op before the kernel existed, so the native path is a pure
+# addition and no dtype changes behaviour. It decomposes to
+# `at::empty(size, ...).fill_(1)`, which keeps the result on the device; a
+# device->host->device round trip here would be a regression on exactly the int64
+# mask this kernel was written for, since that mask grows with the context and is
+# rebuilt on every generation step. Measured on card 0: `empty` + `fill_(1)` is
+# correct for every case the vendor op declines -- rank 0, and i8, i16, i32, i64,
+# bool and f64 -- with every `fill_.Scalar` logging `-> gcu`.
+#
+# The shape is an argument here rather than something to compute as for arange,
+# and topsatenNewOnes takes it as an explicit topsatenSize_t -- the output
+# tensor's own description is not what sizes the write. TopsatenSizeWrapper keeps
+# that vector alive across the call, because topsatenSize_t holds a raw pointer.
+#
+# A rank-0 `size` is a composite case by construction rather than a judgement
+# call: `self.new_ones(())` is a legal ATen call and topsaten rejects an empty
+# dims/strides vector outright ("dims/strides length is invalid",
+# tensor_define.h:58) by throwing std::runtime_error, which would abort instead of
+# propagating a catchable error.
+#
+# `pin_memory` is the third thing the vendor path must not answer. Nothing here
+# can pin memory -- there is no pinned allocator for this device -- so every ATen
+# route raises: the composite reaches `empty`, which raises "Pin memory can only
+# be on CPU", and on CPU the same call raises "pin_memory=True requires a CUDA or
+# other accelerator backend". Measured on card 0: `f32.new_ones(3,
+# pin_memory=True)` reached the vendor entry point and came back with
+# `is_pinned() == False` -- a silent success where all four other spellings of the
+# same allocation (`torch.empty(3, pin_memory=True)`, `new_zeros(...,
+# pin_memory=True)` and the int64 `new_ones`) raised. So the flag is treated as
+# unsupported and handed to the composite, which raises as it does everywhere
+# else. Note that `at::empty` is deliberately *not* given the flag even on this
+# path: passing it would only exchange one silent success for another.
+T_NEW_ONES = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    at::IntArrayRef size, ::std::optional<at::ScalarType> dtype,
+    ::std::optional<at::Layout> layout, ::std::optional<at::Device> device,
+    ::std::optional<bool> pin_memory) {{
+  auto out_dtype = dtype.value_or(self.scalar_type());
+  auto target_device = device.value_or(self.device());
+  if (target_device != self.device() || size.empty() ||
+      layout.value_or(at::kStrided) != at::kStrided ||
+      pin_memory.value_or(false) || !gcu::TopsatenNewOnesDtype(out_dtype)) {{
+    // Called qualified, under the composite key: the dispatcher's own entry for
+    // this op, and the only way to reach the decomposition from here -- the
+    // Tensor method `new_ones` would re-enter this kernel.
+    return at::compositeexplicitautograd::new_ones(
+        self, size, dtype, layout, device, pin_memory);
+  }}
+  auto out = at::empty(
+      size, at::TensorOptions().dtype(out_dtype).device(target_device));
+  // Nothing to write: short-circuiting keeps a zero-element buffer -- which has
+  // no allocation behind it to describe -- away from the vendor entry point.
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  auto self_c = self.contiguous();
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  gcu::TopsatenSizeWrapper t_size(size);
+  EXEC_TOPSATEN_CMD(
+      {tops}, self, t_out.get(), t_self.get(), t_size.get(),
+      gcu::ToTopsatenDataType(out_dtype));
   return out;
 }}
 
@@ -3218,6 +3305,7 @@ CATEGORIES = {
     "addmm_out": T_ADDMM_OUT,
     "cat": T_CAT,
     "full_like": T_FULL_LIKE,
+    "new_ones": T_NEW_ONES,
     "arange": T_ARANGE,
     "zero_inplace": T_ZERO_INPLACE,
     "fill_inplace_scalar": T_FILL_INPLACE_SCALAR,
@@ -3284,6 +3372,7 @@ FILE_HEADER = """\
 #include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/new_ones_compositeexplicitautograd_dispatch.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>

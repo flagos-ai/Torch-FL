@@ -15,6 +15,7 @@
 #include <ATen/ops/all.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/new_ones_compositeexplicitautograd_dispatch.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
@@ -1891,6 +1892,41 @@ at::Tensor OnesLikeKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(OnesLikeFn, ones_like_dispatcher, Backend::kGcu, OnesLikeKernelGcu)
+
+at::Tensor NewOnesKernelGcu(
+    const at::Tensor& self,
+    at::IntArrayRef size, ::std::optional<at::ScalarType> dtype,
+    ::std::optional<at::Layout> layout, ::std::optional<at::Device> device,
+    ::std::optional<bool> pin_memory) {
+  auto out_dtype = dtype.value_or(self.scalar_type());
+  auto target_device = device.value_or(self.device());
+  if (target_device != self.device() || size.empty() ||
+      layout.value_or(at::kStrided) != at::kStrided ||
+      pin_memory.value_or(false) || !gcu::TopsatenNewOnesDtype(out_dtype)) {
+    // Called qualified, under the composite key: the dispatcher's own entry for
+    // this op, and the only way to reach the decomposition from here -- the
+    // Tensor method `new_ones` would re-enter this kernel.
+    return at::compositeexplicitautograd::new_ones(
+        self, size, dtype, layout, device, pin_memory);
+  }
+  auto out = at::empty(
+      size, at::TensorOptions().dtype(out_dtype).device(target_device));
+  // Nothing to write: short-circuiting keeps a zero-element buffer -- which has
+  // no allocation behind it to describe -- away from the vendor entry point.
+  if (out.numel() == 0) {
+    return out;
+  }
+  auto self_c = self.contiguous();
+  gcu::TopsatenTensorWrapper t_self(self_c);
+  gcu::TopsatenTensorWrapper t_out(out);
+  gcu::TopsatenSizeWrapper t_size(size);
+  EXEC_TOPSATEN_CMD(
+      topsatenNewOnes, self, t_out.get(), t_self.get(), t_size.get(),
+      gcu::ToTopsatenDataType(out_dtype));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NewOnesFn, new_ones_dispatcher, Backend::kGcu, NewOnesKernelGcu)
 
 at::Tensor ArangeKernelGcu(
     const at::Scalar& end,

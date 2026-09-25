@@ -904,29 +904,30 @@ NATIVE_TRITON_GAPS = {
         # Factory / creation ops that widen to a 64-bit element type.
         #
         # `new_ones` is here because flag_gems' `new_ones` is a thin wrapper over
-        # its `ones` kernel, so it fails for the same reason and takes the same
-        # fix: `flag_gems/ops/new_ones.py:51` runs `ones_kernel[grid_fn](out, N,
-        # BLOCK_SIZE=1024)`, whose i64 instantiation is the one at
-        # `flag_gems/ops/ones.py:32` that GCU300 cannot lower. It is the only
-        # member of the `new_*` family that reaches the generated op list at all
-        # -- `new_empty`, `new_zeros` and `new_full` have no conf entry and no
-        # registration, so they were never routed and were always correct -- and
-        # that left it as the one factory a model could not call on an int64
+        # its `ones` kernel: `flag_gems/ops/new_ones.py:51` runs
+        # `ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`, whose i64 instantiation
+        # is the one at `flag_gems/ops/ones.py:32` that GCU300 cannot lower. It is
+        # the only member of the `new_*` family that reaches the generated op list
+        # at all -- `new_empty`, `new_zeros` and `new_full` have no conf entry and
+        # no registration, so they were never routed and were always correct --
+        # and that left it as the one factory a model could not call on an int64
         # tensor. `_update_model_kwargs_for_generation` makes that call on every
         # generation step, at `transformers/generation/utils.py:991`
         # (`attention_mask.new_ones((attention_mask.shape[0], num_new_tokens))`),
         # so the generate half of the BERT cohort failed there with
         # `RuntimeError: Pipeline run failed: PassManager execution failed`.
         #
-        # The route below is what its siblings already take. `ones`, `zeros` and
-        # `full` are all in this set, and on an int64 tensor they run as
-        # `fill_.Scalar -> gcu`, `zero_ -> gcu` and `fill_.Scalar -> gcu` --
-        # measured on the S60 with `FLAGOS_LOG=dispatch`, no cpu_fallback. That
-        # holds because their ATen kernels are CompositeExplicitAutograd
-        # (`new_ones` is one too, at RegisterCompositeExplicitAutograd_0.cpp:4690)
-        # with no PrivateUse1 slot, so routing to `none` lets the composite
+        # Unlike its siblings, `new_ones` does not stop here. `ones`, `zeros` and
+        # `full` have no vendor entry point that takes a caller-supplied shape, so
+        # taking them off the FlagGems route leaves the ATen composite to
         # decompose on the device into the `empty` + `fill_`/`zero_` pair
-        # codegen_gcu.py already claims, both of which are int64-correct.
+        # codegen_gcu.py claims. `topsatenNewOnes` does take the shape, and
+        # codegen_gcu.py emits a kernel for it, so `new_ones` is served natively:
+        # membership in this set is what removes it from FlagGems coverage, and
+        # the native kernel behind it is what `route()` then falls through to.
+        # Drop the entry and the route returns to `flaggems` even with the kernel
+        # registered; keep the entry and remove the kernel and it falls back to
+        # `none`.
         "arange",
         "arange.start",
         "arange.start_step",

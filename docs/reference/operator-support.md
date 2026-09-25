@@ -162,21 +162,21 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
-### Enflame GCU S60: `new_ones` leaves the FlagGems route for the composite it decomposes into (2026-09-25)
+### Enflame GCU S60: `new_ones` moves off the FlagGems route onto a native vendor kernel (2026-09-25)
 
-The BERT cohort's failures have three causes and this is the largest of them: **19 of
-its 29 `FAIL`s were `new_ones` on an int64 tensor**, raised on every generation step of
-the assisted-decoding, greedy-search, beam-search and sampling tests. The call site is
-`transformers/generation/utils.py:991`, inside `_update_model_kwargs_for_generation` —
+**The failure this fixes.** The BERT cohort's failures have three causes and this is the
+largest of them: **19 of its 29 `FAIL`s were `new_ones` on an int64 tensor**, raised on every
+generation step of the assisted-decoding, greedy-search, beam-search and sampling tests. The
+call site is `transformers/generation/utils.py:991`, inside
+`_update_model_kwargs_for_generation` —
 `attention_mask.new_ones((attention_mask.shape[0], num_new_tokens))`, where a mask whose
-element type follows the caller's token arithmetic hands a 64-bit element type to a
-factory op. The route was `flaggems`, and flag_gems' `new_ones` is a thin wrapper over
-its `ones` kernel: `flag_gems/ops/new_ones.py:51` runs
-`ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`, whose int64 instantiation is
-`flag_gems/ops/ones.py:32`. FlagTree cannot lower that kernel for GCU300, so the failure
-is a compiler pipeline abort and not a wrong answer, and the compiler says so itself:
-`loc(".../flag_gems/ops/ones.py":32:0): error: 64-bit data type not supported on GCU300!`
-is printed ahead of
+element type follows the caller's token arithmetic hands a 64-bit element type to a factory
+op. The route was `flaggems`, and flag_gems' `new_ones` is a thin wrapper over its `ones`
+kernel: `flag_gems/ops/new_ones.py:51` runs `ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`,
+whose int64 instantiation is `flag_gems/ops/ones.py:32`. FlagTree cannot lower that kernel for
+GCU300, so the failure is a compiler pipeline abort and not a wrong answer, and the compiler
+says so itself: `loc(".../flag_gems/ops/ones.py":32:0): error: 64-bit data type not supported
+on GCU300!` is printed ahead of
 
 ```
 generation/utils.py:991: in _update_model_kwargs_for_generation
@@ -193,56 +193,109 @@ E   RuntimeError: Pipeline run failed: PassManager execution failed
 ```
 
 The frame that raises is three libraries below the op that was routed, and the failing
-module's element type is `tensor<1024x!tt.ptr<i64>>`. That is the same i64-lowering wall
-the vendor SDK's missing int64 kernels put up, and it is why `clamp`, `fmod.Tensor`,
-`gelu`, `mean`, `mean.dim`, `remainder.Tensor` and `silu` carry a `# gcu` marker in the
-FlagGems file at all. The generator already had the policy for it:
-`NATIVE_TRITON_GAPS["gcu"]` is the set of ops FlagGems is not allowed to serve on this
-platform, and its factory/creation family already held `arange`, `arange.start`,
-`arange.start_step`, `constant_pad_nd`, `full`, `full_like`, `linspace`, `ones`,
-`ones_like`, `zeros` and `zeros_like`. `new_ones` was missing from that list, and adding
-it is the whole of the routing half of this change.
+module's element type is `tensor<1024x!tt.ptr<i64>>`. That is the same i64-lowering wall the
+vendor SDK's missing int64 kernels put up, and it is why `clamp`, `fmod.Tensor`, `gelu`,
+`mean`, `mean.dim`, `remainder.Tensor` and `silu` carry a `# gcu` marker in the FlagGems file
+at all. The generator already had the policy for it: `NATIVE_TRITON_GAPS["gcu"]` is the set of
+ops FlagGems is not allowed to serve on this platform, and its factory/creation family already
+held `arange`, `arange.start`, `arange.start_step`, `constant_pad_nd`, `full`, `full_like`,
+`linspace`, `ones`, `ones_like`, `zeros` and `zeros_like`. `new_ones` was missing from that
+list, and adding it is the half of the routing change that removes the FlagGems route.
 
-**The route it moves to is `none`, and that is the route its own ATen kernel supports.**
-`new_ones` is `CompositeExplicitAutograd`
-(`RegisterCompositeExplicitAutograd_0.cpp:4690`) with no PrivateUse1 slot, so `none` does
-not send it to a host fallback: it lets the composite decompose on the device into the
-`empty` + `fill_` pair `codegen_gcu.py` already claims, both of which are int64-correct.
-That is the same argument its siblings `ones`, `zeros` and `full` are routed by, and it is
-measured rather than reasoned: on card 7 with `FLAGOS_LOG=dispatch`, `mask.new_ones((2, 4))`
-on an int64 mask logs `fill_.Scalar -> gcu` and returns
-`torch.int64 [[1, 1, 1, 1], [1, 1, 1, 1]]` on `flagos:0` with no `cpu_fallback` line, while
-`new_zeros` logs `zero_ -> gcu` and `new_full` logs `fill_.Scalar -> gcu` on the same int64
-input. The other three members of the `new_*` family need no route at all: `new_empty`,
-`new_zeros` and `new_full` have no conf entry and no `m.impl` in either generated file, so
-they were never routed and were always correct — `new_ones` was the one factory a model
-could reach.
+The abort is reproducible without the model, on the build this change ships.
+`flag_gems.ops.new_ones.new_ones` on an int64 `self` raises the same
+`RuntimeError: Pipeline run failed: PassManager execution failed`, with `flag_gems/ops/new_ones.py:51`
+as the raising frame; the same call on a float32 `self` returns
+`[[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]`. It is called as the raw launcher rather than
+through `flag_gems.enable()` on purpose: enabling the patch set also intercepts
+`torch.zeros`/`torch.empty`, and those int64 paths abort in their own lowering
+(`.../gcu300/ops/zeros.py:29`) before `new_ones` is ever reached.
 
-**Route delta.** Exactly one route moves: `new_ones` `flaggems` -> `none`. GCU
-`flaggems` **254 -> 253**, `none` **1605 -> 1606**, `gcu` **178** unchanged, over the same
-**2037** routable ops, so accelerated routes go **432 -> 431** (still **21.2 %** in the
-conf's own rounding, `Coverage: 431/2037`). The shipped conf is **1606 `none` / 253
-`flaggems` / 178 `gcu`**, and both generated registration files reconcile against it:
-`253 = 246 + 7` (`gcu_flaggems_register.inc` carries 246 `m.impl` lines and the conf marks
-7 further lines `# gcu`) and `178 = 185 - 7` (`gcu_register.inc` carries 185, unchanged).
-The seven markers are the same seven as before — `clamp`, `fmod.Tensor`, `gelu`, `mean`,
-`mean.dim`, `remainder.Tensor`, `silu` — and there are no orphans and no overlaps in
-either direction. `gcu_flaggems_register.inc`'s provenance banner moves from "247 ops
-registered here, 101 further FlagGems ops already claimed by `gcu_register.inc`" to
-**246 and 101**: `new_ones` leaves the FlagGems route rather than moving to a native
-kernel, so nothing joins the native file. `gcu_register.inc` and `gcu_kernels.cc` are
-byte-identical.
+**The route it moves to is `gcu`, and the kernel behind it is generated.** `new_ones` gets an
+entry of its own in `codegen_gcu.py` rather than sharing the `full_like` family's template,
+because unlike `ones_like` it takes a shape instead of reading one — and unlike `arange` that
+shape is not something to compute: `topsatenNewOnes` takes an explicit `topsatenSize_t`, and
+the output tensor's own description is not what sizes the write. Two conditions have to hold
+for the route, and this change makes both. `new_ones` must stay in `NATIVE_TRITON_GAPS["gcu"]`,
+because `build_all()` computes the FlagGems route set as
+`py_here - NATIVE_TRITON_GAPS.get(vendor, set())`, and the generator must emit the kernel,
+because `route()` only falls through to `<vendor>` for ops the platform registers. Membership
+alone yields `none`; the kernel alone yields `flaggems`. The conf's route is `gcu`.
+
+**The vendor entry point's dtype contract had to be measured, not read off a table.**
+`topsatenNewOnes` takes an explicit `data_type` argument and validates it, instead of
+consulting one of the per-op dtype tables the other entry points use. Measured on S60 with a
+sentinel-filled output buffer, so that "the call declined" and "the call ran" are
+distinguishable, fp32, fp16 and bf16 come back with the whole plane set to 1, while i8, u8,
+i16, u16, i32, u32, i64, u64, PRED, f64 and both float8 formats return
+`TOPSATEN_STATUS_BAD_PARAM` (`op_aten_new_ones.cc:70: new_ones CheckArgs failed.`) and leave
+every element at the sentinel — at rank 1, 2 and 3, on an empty shape, and on all of 2x4 and
+64x64. `TopsatenSupportsDtype` is too permissive for this entry point, so
+`gcu::TopsatenNewOnesDtype` in `topsaten_common.h` is the measured set. Declining is not
+optional: `EXEC_TOPSATEN_CMD` wraps the call in a `TORCH_CHECK` on the status, so a dtype left
+ungated would raise where the composite would have produced the right tensor — and the dtype
+that does it is the int64 one, on exactly the call site above. The dtype of the `input` operand
+is deliberately not part of the test: the operand is only where the kernel reads its device
+from, and an fp32, an i64 and a PRED operand all return the same plane of ones.
+
+**What the vendor kernel cannot serve goes to the composite — the same code the `none` route
+ran.** Everything outside that dtype set, and every call with a non-default `layout`, an
+explicit `device` other than `self`'s, an empty `size`, or `pin_memory=True`, is handed to
+`at::compositeexplicitautograd::new_ones` — the dispatcher's own entry for this op, called
+qualified because the Tensor method would re-enter this kernel. That decomposes to
+`at::empty(size, ...).fill_(1)`, which keeps the result on the device; a device->host->device
+round trip would be a regression on exactly the int64 mask this kernel was written for, since
+that mask grows with the context and is rebuilt on every generation step. `TopsatenSizeWrapper`
+keeps the size vector alive across the call, because `topsatenSize_t` holds a raw pointer, and
+a rank-0 `size` must not reach the vendor entry point at all: `self.new_ones(())` is a legal
+ATen call and topsaten rejects an empty dims/strides vector by throwing `std::runtime_error`
+(`tensor_define.h:58`), which would abort the process instead of propagating a catchable error.
+A zero-element `size` short-circuits before the call for the same reason. Because the composite
+is the decomposition this op was already running, no dtype changes behaviour: the native path
+is a pure addition, and only fp32, fp16 and bf16 take it.
+
+**`pin_memory` is the third thing the native path must not answer.** Nothing here can pin
+memory — there is no pinned allocator for this device — so every ATen route raises: the
+composite reaches `empty`, which raises "Pin memory can only be on CPU", and on CPU the same
+call raises "pin_memory=True requires a CUDA or other accelerator backend". Measured on card 0
+against the kernel before the guard was added, the fp32 native path was the one exception:
+`f32.new_ones(3, pin_memory=True)` reached the vendor entry point and came back with
+`is_pinned() == False` — a silent success where `torch.empty(3, pin_memory=True)`,
+`torch.zeros(0, device).new_zeros(3, pin_memory=True)` and the int64 `new_ones` all raised. The
+flag is therefore treated as unsupported and handed to the composite, and `at::empty` is
+deliberately not given it on the native path either: passing it would only exchange one silent
+success for another. With the guard in place all four spellings raise
+`Pin memory can only be on CPU`. This is the contract `T_ARANGE` already implements, down to
+the message.
+
+**Route delta.** Exactly one route moves: `new_ones` `flaggems` -> `gcu`. GCU `flaggems`
+**254 -> 253**, `gcu` **178 -> 179**, and `none` **1605 -> 1605, unchanged**, over the same
+**2037** routable ops, so accelerated routes stay at **432**
+(`Coverage: 432/2037 ops accelerated (21.2%)`). The shipped conf is **1605 `none` / 253
+`flaggems` / 179 `gcu`**, and both generated registration files reconcile against it:
+`253 = 246 + 7` (`gcu_flaggems_register.inc` carries 246 `m.impl` lines and the conf marks 7
+further lines `# gcu`) and `179 = 186 - 7` (`gcu_register.inc` carries 186). The seven markers
+are the same seven as before — `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`,
+`remainder.Tensor`, `silu` — and there are no orphans and no overlaps in either direction.
+`gcu_flaggems_register.inc`'s provenance banner moves from "246 ops registered here, 101
+further FlagGems ops already claimed by `gcu_register.inc`" to **246 and 102**: `new_ones`
+joins the set the native file claims, which is the second number; the first is unmoved because
+the op was already in that file's excluded-ops list by way of `NATIVE_TRITON_GAPS`.
 
 | Artifact | Before | After |
 |---|---|---|
-| `torch_fl/configs/backends_gcu.conf` | `28f4656c30b39b7a60128cf581426f968c077aa5895d23d6193c642799a4ef1b` | `1fcc1e8b5d9f67694cfcddaedf35d46f3b15662aa81513e1bfbfd3d7c13a71c1` |
-| `gcu_flaggems_register.inc` | `be8431800f21fab5038633e4dc79baa84dc317ca7aa9425f05607233b6e88364` | `f02e066117a31dab40bd8853972de95909aca065a43e0ee4d51c460ce1941d3a` |
-| `gcu_register.inc` | `dcab7a4e87bcb63a3273d63be5cd5ba5e57edfb6ab46164ff06024ac981bdd0c` | *(unchanged)* |
-| `gcu_kernels.cc` | `2bfdc260acbed88ec8815db84984215d6b43a88e109c31f8328e4df42ab42877` | *(unchanged)* |
+| `torch_fl/configs/backends_gcu.conf` | `28f4656c30b39b7a60128cf581426f968c077aa5895d23d6193c642799a4ef1b` | `bd8daa31506c86fc3881a958d06a0a6a5bab5f33aee444c901d413c109137b55` |
+| `gcu_flaggems_register.inc` | `be8431800f21fab5038633e4dc79baa84dc317ca7aa9425f05607233b6e88364` | `6bcfb0300994018274bab2ce374888ba5bffb6a1482660d87910b28d1f3d832c` |
+| `gcu_register.inc` | `dcab7a4e87bcb63a3273d63be5cd5ba5e57edfb6ab46164ff06024ac981bdd0c` | `276303852c7ac06af9d53c0c4a6f7adde2c4533cd09aeddca020ec2beff45fe8` |
+| `gcu_kernels.cc` | `2bfdc260acbed88ec8815db84984215d6b43a88e109c31f8328e4df42ab42877` | `d933fb053b70c9cd97c14e9711e533cd398c20120e63f853f4a60f2c7105e672` |
 
-Generator idempotency: a second run of `scripts/codegen/gen_vendor_confs.py` and
-`scripts/codegen/codegen_gcu_flaggems.py` leaves all four byte-identical, and both
-generators' `--check` modes report the tree up to date.
+Generator idempotency: a second run of `scripts/codegen/codegen_gcu.py`,
+`scripts/codegen/gen_vendor_confs.py` and `scripts/codegen/codegen_gcu_flaggems.py` leaves all
+four byte-identical — re-hashed after each of two consecutive full runs — and the two
+generators that have a check mode (`gen_vendor_confs.py --check`, `codegen_gcu_flaggems.py
+--check`) report the tree up to date. `codegen_gcu.py` has no `--check` (`--help` lists only
+`--category` and `--no-conf`; passing it is an `unrecognized arguments` error), which is why
+idempotency for that one is stated as the hash comparison above.
 
 **The measurement instrument had a defect of its own, and it is fixed in the same
 change.** One of the 29 BERT failures was not the tree's:
@@ -272,14 +325,16 @@ carries its file and a foreign absolute path are left alone.
 
 **After.** The same cohort, the same 336 nodeids and the same runner (`batch_size` 20,
 `collected` 336, `status COMPLETED_RESILIENT`, `crashed_batches []`, `context_poison
-false`) now reads **`{"ERROR": 56, "FAIL": 13, "PASS": 132, "SKIP_CUDA_ONLY": 2,
-"SKIP_OTHER": 133}`** in 616.4 s, against the before run's
-`{"ERROR": 56, "FAIL": 29, "PASS": 116, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in
-578.8 s (artifacts `/tmp/bert_pr.json` `cc099ccb…` and `/tmp/bert_after.json`
-`563609e2…`). The key sets are identical, and exactly **16 statuses change — every one of
-them `FAIL` -> `PASS`**: the fifteen generation tests (beam-search, beam-sample, greedy and
-sampling, each with and without `dict_output`, `beam_search_generate_dict_outputs_use_cache`
-and `greedy_generate_dict_outputs_use_cache`, `generate_from_inputs_embeds_0_greedy` and
+false`, 17 batches) now reads **`{"ERROR": 56, "FAIL": 13, "PASS": 132, "SKIP_CUDA_ONLY":
+2, "SKIP_OTHER": 133}`** in 612.0 s, against the before run's `{"ERROR": 56, "FAIL": 29,
+"PASS": 116, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 578.8 s (artifacts
+`/tmp/bert_pr.json` `cc099ccb5e217a0427633bee26179e61f49acf8b3101e7bb5d3fe5c9c44f0225`
+and `/tmp/bert_final.json`
+`b2d882f55a18beeb240b05f947365de8cdd4d6d8032ef965bdc61a7c40fa4bf7`). The key sets are
+identical, and exactly **16 statuses change — every one of them `FAIL` -> `PASS`**: the
+fifteen generation tests (beam-search, beam-sample, greedy and sampling, each with and
+without `dict_output`, `beam_search_generate_dict_outputs_use_cache` and
+`greedy_generate_dict_outputs_use_cache`, `generate_from_inputs_embeds_0_greedy` and
 `_1_beam_search`, `generate_from_random_inputs_embeds`,
 `generate_methods_with_logits_to_keep`, `generate_with_and_without_position_ids`), plus
 `test_can_load_with_global_device_set`, which is the nodeid repair above. The before run's
@@ -293,13 +348,55 @@ of the kind `NATIVE_TRITON_GAPS` exists for, neither is on a route this change m
 neither is a regression: they are the same wall, reached one op further along because the
 op in front of it no longer fails.
 
+**Which build ran, and how the run was kept offline.** The before and after runs are two
+different builds of the extension rather than two configurations of one — on this platform
+the route is baked into registration at build time — so the `torch_fl_commit` the harness
+records (`git rev-parse` at `REPO_ROOT`) names the source checkout it was launched from and
+not the extension it imported. The identity that matters is the preflight's resolved path,
+and all three runs record `preflight.torch_fl =
+/public-flash/lvyufeng/gcu-issue-repro/torch_fl/__init__.py`: the before run (Sep 24) used
+the pre-change build there, the after run and this one the rebuilt one. This run is
+therefore the **shipped** build — the tree whose `libtorch_fl.so` carries the generated
+`new_ones` kernel and `TopsatenNewOnesDtype` — and it reproduces the intermediate after-run
+(`/tmp/bert_after.json`, `563609e2…`, 616.4 s, launched before the extension was rebuilt
+a second time for the `pin_memory` guard and the composite include)
+**nodeid for nodeid on all 336 keys**; the corrections between the two builds moved no
+cohort outcome. Because this host has no outbound network, the run is made offline through
+`HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` in the environment rather than the harness's own
+`--offline` flag: the flag makes transformers reject the cached revision during version
+resolution and collapses collection to 56 tests, while the two environment variables leave
+it at 336 and make the 46 `test_pipeline_*` tests fail their `from_pretrained` fast and
+land on `run_pipeline_test`'s `except Exception: self.skipTest(...)`
+(`tests/test_pipeline_mixin.py:375-383`) — the same `SKIP_OTHER` status the baseline
+recorded, instead of retrying the network indefinitely inside `huggingface_hub`'s
+`_http_backoff_base` as the first relaunch of this run did.
+
 **Local verification.** `tests/unit/test_gen_vendor_confs.py` with
 `tests/unit/test_conf_registration_consistency.py` — **73 passed**;
 `tests/integration/ops/test_flaggems_conf_consistency.py --noconftest` — **7 passed**;
-`tests/unit/test_transformers_automation.py -k 'plugin_restores or plugin_leaves'` —
-**2 passed, 59 deselected**, which are the two tests the harness half adds;
+`tests/integration/ops/test_new_ones_dispatch.py -m gcu` — **8 passed, 7 deselected**, the
+cases this entry adds; `tests/unit/test_transformers_automation.py -k 'plugin_restores or
+plugin_leaves'` — **2 passed, 59 deselected**, which are the two tests the harness half adds;
 `scripts/codegen/gen_vendor_confs.py --check` and
-`scripts/codegen/codegen_gcu_flaggems.py --check` — up to date. Pinned `ruff 0.15.12`:
+`scripts/codegen/codegen_gcu_flaggems.py --check` — up to date; `scripts/codegen/codegen_gcu.py`
+has no check mode, so for it the same claim rests on the sha256 comparison above.
+The GCU cases are the ones that pin the change rather than describe it: the int64
+route asserted out of `FLAGOS_LOG=dispatch` instead of inferred from the value,
+the split between the three dtypes the vendor entry point writes itself and the
+ones it hands back to the composite (told apart by whether the log carries a
+`fill_`), rank 0 and an empty `size` as a child process so that an abort is an
+exit status rather than a dead session, and `pin_memory`. On this host they were
+run against a rebuilt extension for the reason the paragraph below gives, which
+is why that command carries a `pythonpath` override. That override only reaches
+the pytest process; the child processes those cases launch are pinned a second
+time, by putting the parent's `torch_fl` package directory at the head of the
+child's `sys.path`. Without it the child resolves the import through its working
+directory first and, on a checkout whose prebuilt `.so` is stale, asserts on a
+*route* that belongs to a different build — the first run of these cases did
+exactly that, reporting four failures whose tracebacks name this tree's
+`csrc/aten/register.cc` rather than the rebuilt one. With the pin the same four
+cases pass from the same working directory.
+Pinned `ruff 0.15.12`:
 `ruff check .` — "All checks passed!", `ruff format --check .` — 309 files already
 formatted, both clean on every file this change touches. `tests/unit/test_transformers_automation.py`
 as a whole reports **11 failed, 50 passed** on this host, and the same 11 failures are
@@ -316,16 +413,34 @@ environment carries `ruff 0.16.0`, which also formats Python code blocks inside 
 reports 16 such files; none of them is a Markdown file this change touches, and the lint job
 this repository runs is the pinned 0.15.12.
 
-**The S60-wide FlagGems cohort, rerun.** A route leaves FlagGems here, so this is a new
-cohort rather than the provenance re-run the GCU entries below were, and it was measured
-against exactly the shipped configuration rather than inferred from the routing table.
+**Call-level evidence for the op itself, on the shipped build.** The survey's `new_ones` case
+is a synthesized call with the optional factory `dtype` left at `None` (`default_for`), so its
+result element type follows `self` and only the `2d-i64` profile asks for an int64 output. The
+kernel the FlagGems route reached is driven once per profile on card 2 of the shipped build:
+`flag_gems.ops.new_ones.new_ones` returns the correct plane of ones for `2d-f32`, `4d-f32`,
+`1d-f32`, `2d-f16`, `2d-bool` and `2d-f32-strided`, and raises
+`RuntimeError: Pipeline run failed: PassManager execution failed` on `2d-i64` alone — the
+6-of-7, int64-only shape the cohort records for the other 64 routes that fail on that profile.
+On the shipped conf the same op does not go near that kernel: `FLAGOS_LOG=dispatch` on card 2
+logs `new_ones -> gcu` for an int64, an fp32, an fp16 and a bool operand, with
+`fill_.Scalar -> gcu` for the composite path and no `cpu_fallback` or `flagos_python` line, and
+all four return on-device tensors equal to the CPU reference, `bool` and `int64` included. A
+seventeen-check smoke test over the same build covers the two shapes the vendor entry point
+rejects by construction (rank 0 and an empty `size`), the six dtypes it declines
+(`i8`, `i16`, `i32`, `i64`, `bool`, `f64`), an fp32 result asked of an int64 `self`, fp16 and
+bf16 on the native path, ranks 0/1/3 and a 64x64 fill (8192/8192 elements exactly 1), and all
+of them pass.
+
+**The S60-wide FlagGems cohort, rerun.** A route leaves FlagGems here, so this is a new cohort
+rather than a provenance re-run, and it was measured against exactly the shipped
+configuration rather than inferred from the routing table.
 `tests/manual/flaggems_overload_survey.py` v6 (SHA-256
 `7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`),
 `torch_fl/configs/backends_gcu.conf` at
-`1fcc1e8b5d9f67694cfcddaedf35d46f3b15662aa81513e1bfbfd3d7c13a71c1` — the hash this
-change ships — flag-gems 5.3.2, FlagTree 0.6.1+enflame3.6, torch 2.10.0+cpu, measured as
-twelve artifacts (one serial prefix and eleven parallel shards) over the seven healthy
-cards 0, 1, 2, 3, 4, 6 and 7:
+`bd8daa31506c86fc3881a958d06a0a6a5bab5f33aee444c901d413c109137b55` — the hash this change
+ships — flag-gems 5.3.2, FlagTree 0.6.1+enflame3.6, torch 2.10.0+cpu, measured as seven
+disjoint shards on the seven healthy cards 0, 1, 2, 3, 4, 6 and 7 (37 routes in the first
+shard and 36 in each of the other six, no route measured twice):
 
 | Verdict | Routes |
 |---|---|
@@ -338,111 +453,86 @@ cards 0, 1, 2, 3, 4, 6 and 7:
 | untested | 60 |
 
 1771 cases in all — 975 pass, 705 invalid case, 79 error, 12 wrong (artifact
-`/tmp/gcu-overloads-newones.json`, `3ea621586b7000ef7048c453332d44b96b7bbeb32a65034b6494df3f86bf202a`).
-Everything that describes a route outside the one that moved is unchanged: the same three
-`FAILED` routes (`gcd_`, `lcm`, `lcm_`), the same 60 untested routes, the same 12 `WRONG`,
-the same 705 `INVALID_CASE` and the same 79 `ERROR`. The errors name the two int64 walls
-this workload keeps hitting, and they are two thirds of the cohort's damage done by one
-profile: **51 routes fail only on `2d-i64`** with
-`RuntimeError: Pipeline run failed: PassManager execution failed` out of
+`/tmp/gcu-overloads-final.json`,
+`1b7c6d135b2b8f58e8de1d8eeff822bc58143ef693f7a3cf295933fc0ab921ac`). Everything that describes
+a route outside the one that moved is unchanged: the same three `FAILED` routes (`gcd_`,
+`lcm`, `lcm_`), the same 60 untested routes, the same 12 `WRONG`, the same 705 `INVALID_CASE`
+and the same 79 `ERROR`. The errors name the two int64 walls this workload keeps hitting, and
+they are two thirds of the cohort's damage done by one profile: **51 routes fail only on
+`2d-i64`** with `RuntimeError: Pipeline run failed: PassManager execution failed` out of
 `make_gcuir`, and **13 more fail only on `2d-i64`** with `Exception: <unknown>:0: error:
-<Pass-Options-Parser>: no such option enable_i64` — `angle`, `ceil.out`, `ceil_`,
-`clamp_min`, `exp2`, `isinf`, `isnan`, `logical_not`, `logical_xor`, `pow.Scalar`,
-`relu_`, `threshold`, `threshold_backward`. That is 64 of the 253 routes, 61 of them
-`BASIC_ONLY` and the other three `FAILED`, each with its six non-int64 profiles passing;
-every one of the 64 has the same status, profile and message in the parent cohort as in
-this one. The `rsub.Scalar` failure the BERT cohort now reaches is one of those 51, and
-the survey's record of it is the same abort text as the BERT traceback, so the second
-failure family is measured at cohort scale rather than only observed in the model run.
+<Pass-Options-Parser>: no such option enable_i64` — `angle`, `ceil.out`, `ceil_`, `clamp_min`,
+`exp2`, `isinf`, `isnan`, `logical_not`, `logical_xor`, `pow.Scalar`, `relu_`, `threshold`,
+`threshold_backward`. That is 64 of the 253 routes, 61 of them `BASIC_ONLY` and the other three
+`FAILED`, each with its six non-int64 profiles passing. The `rsub.Scalar` failure the BERT
+cohort now reaches is one of those 51, and the survey's record of it is the same abort text as
+the BERT traceback, so the second failure family is measured at cohort scale rather than only
+observed in the model run.
 
-`new_ones` itself is not in this cohort at all, because it is no longer a FlagGems route;
-on the conf before this change it was `BASIC_ONLY` — and the six profiles that passed
-against the one that did not are exactly the shape an int64-only failure takes, because the
-harness passes `None` for an optional factory `dtype` (`default_for`), so `new_ones`'s
-result element type follows `self` and the `2d-i64` profile does exercise an int64 output.
+`new_ones` itself is not in this cohort at all, because it is no longer a FlagGems route. Its
+own seven cases are measured directly instead, at call level, by the per-profile probe above.
 
-The comparison this section is read by is case for case, route for route, against the conf
-this change starts from, `28f4656c…` — the conf the GCU entry below ships. That conf's
-recorded cohort is 254 routes and 1778 cases (981 pass, 705 invalid case, 80 error,
-12 wrong, artifact `/tmp/gcu-overloads-post.json`, `6d1120be…`), and that artifact is no
-longer on disk, so rather than cite it the parent conf was **re-measured** on this build,
-harness and card set: 254 routes, strict 122, basic-only 69, basic-executable 191, tested
-194, failed 3, untested 60, and 1778 cases — **982 pass, 705 invalid case, 79 error, 12
-wrong** (artifact `/tmp/gcu-overloads-parent.json`,
-`81882479c219ac33228c608b874bbc801cce494d0149198b13c1b32e3967f328`). Two things follow,
-and neither is the A/B one would want.
+**The rest of the cohort compared against the parent configuration.** The cohort the previous
+GCU entry records is the one for `28f4656c…` — the conf on `main`, 254 routes, with `new_ones`
+still on `flaggems`. That artifact is no longer on disk, so the parent conf was **re-measured**
+on this build, harness and card set (artifact `/tmp/gcu-overloads-parent.json`,
+`81882479c219ac33228c608b874bbc801cce494d0149198b13c1b32e3967f328`): 254 routes, strict 122,
+basic-only 69, basic-executable 191, tested 194, failed 3, untested 60, and 1778 cases — 982
+pass, 705 invalid case, 79 error, 12 wrong. Comparing it route for route and case for case
+against the shipped cohort, **the only route present on one side and not the other is
+`new_ones`**, and restricted to the 253 shared routes the two agree on **every** case record
+once the five `INVALID_CASE` messages that print an uninitialised address are normalised
+(`reflection_pad1d_backward`, whose five cases differ only in the pointer value the message
+renders — `padding (1, 93825246127840)` against `padding (1, 93825653218016)` — with every
+status identical on both sides and no `PASS` on either). The whole aggregate delta between the
+two cohorts is therefore `new_ones`' own seven cases: `strict` 122 against 121, and 982 passes
+against 975, which is the seven profiles. No other route's case record moved even though the
+two builds differ in the native `new_ones` registration.
 
-First, comparing the 253 shared routes of that artifact against the shipped cohort's finds
-**one** differing case record in the whole set: `reflection_pad1d_backward`, whose five
-`INVALID_CASE` cases differ only in the pointer value the error message prints
-(`padding (1, 93825246127840)` against `padding (1, 93825653218016)`), with every status
-identical on both sides and no `PASS` on either. That is a message rendering an
-uninitialised address, not a verdict, and it is the only such difference. Three routes
-were measured twice across the two waves of shards that produced this cohort (`exp_`,
-`expm1.out`, `expm1_`, each in a killed shard and its replacement); both measurements are
-byte-identical and the merge asserts that rather than discarding one.
+Two things follow, and neither is a before/after for the op. First, this is not a runtime A/B of
+the route change, and it is not offered as one. On this build the parent conf's `new_ones =
+flaggems` names a backend that no longer has a kernel for the op, so the line is inert: dispatch
+falls through to `none`, the composite serves int64 correctly, and the parent cohort measures
+all seven profiles as `PASS`. That is precisely why the parent cohort cannot exhibit the
+FlagGems failure the change removes — the build that could is the one on `main`, and its survey
+artifact is gone. Second, the reverse is what the comparison does establish: the change is
+confined to `new_ones`, because removing it from the parent cohort's route set makes the two
+cohorts identical.
 
-Second, the re-measurement is **one verdict and one case ahead** of that conf's recorded
-cohort — `strict` 122 against 121, `basic-only` 69 against 70, 982 passes against 981 and
-79 errors against 80 — and the reason is that the parent conf was fed to a binary in which
-`new_ones` no longer has a FlagGems registration. A conf line that names a route no kernel
-implements is inert: dispatch falls through `flaggems_cpp > flaggems > tileops > gcu >
-none`, reaches `none`, and the composite serves int64 correctly, which is what the
-dispatch probe above shows directly. So the parent-cohort artifact is **not** a runtime
-A/B of this route change and is not offered as one. It is nevertheless the closest thing
-to one available: the same conf measured against the two builds differs by exactly one
-route's verdict and one case's status, and `new_ones` is the only route whose
-implementation differs between the two builds, so the difference is attributed to its
-`2d-i64` case — by elimination over a one-route build delta rather than by a case-level
-comparison, because the pre-change artifact is gone.
+**Other platforms.** The generator edits, the GCU conf and the two GCU `.inc` files are the
+whole of the routing half, and the FlagGems Python route set of every other platform is
+untouched: `NATIVE_TRITON_GAPS["gcu"]` is read only when the `gcu` configuration is generated,
+and `codegen_gcu.py` writes only GCU artifacts, so Ascend, DCU, MetaX, MUSA, PPU and Tsingmicro
+are unaffected rather than unvalidated. The harness half is platform-neutral by construction —
+`tests/manual/transformers_hf_tests.py` runs the same runner for every model cohort on every
+platform, and the nodeid repair is a no-op on a checkout where the selection arrives with its
+file part — so the failure it fixed was possible on any platform and is not claimed to have
+been observed on one other than this.
 
-**Other platforms.** The generator edit, the GCU conf and the one GCU `.inc` are the whole
-of the routing half, and the FlagGems Python route set of every other platform is
-untouched: `scripts/codegen/gen_vendor_confs.py`'s `NATIVE_TRITON_GAPS["gcu"]` is read only
-when the `gcu` configuration is generated, so Ascend, DCU, MetaX, MUSA, PPU and Tsingmicro
-are unaffected rather than unvalidated. The harness half is platform-neutral by
-construction — `tests/manual/transformers_hf_tests.py` runs the same runner for every model
-cohort on every platform, and the nodeid repair is a no-op on a checkout where the
-selection arrives with its file part — so the failure it fixed was possible on any platform
-and is not claimed to have been observed on one other than this.
+**Evidence gaps.** The two remaining BERT failure families are recorded and not fixed. Nine
+failures are `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option enable_i64`,
+raised before any codegen: this host's FlagTree passes `enable_i64` as a pass option and the
+installed `/opt/triton_gcu/bin/gcu-compiler-opt` does not accept it, so it is a skew between the
+FlagGems wheel and the vendor compiler rather than an operator gap, and it fails every int64
+pointwise op FlagGems routes. The survey puts it at 13 routes, all on `2d-i64`. Four failures
+are int64 `rsub.Scalar`; a standalone contrast on card 6 shows the same expression correct in
+fp32 and fp16 and raising in int64, and the survey records the route as `BASIC_ONLY` with the
+same abort text on its `2d-i64` profile, as one of the 51. Moving `rsub.Scalar` is deliberately
+left to its own change, for the reason the bool-`neg` and `where.self_out` entries state: a route
+move is a claim about a whole overload set and is priced, measured and reviewed on its own — and
+here the route is one of 64 that fail on the same single profile, so moving it alone would buy
+one op and leave the family, which is an argument for fixing the lowering or the toolkit rather
+than for rerouting operators one at a time.
 
-**Evidence gaps.** The two remaining BERT failure families are recorded and not fixed.
-Nine failures are `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option
-enable_i64`, raised before any codegen: this host's FlagTree passes `enable_i64` as a pass
-option and the installed `/opt/triton_gcu/bin/gcu-compiler-opt` does not accept it, so it
-is a skew between the FlagGems wheel and the vendor compiler rather than an operator gap,
-and it fails every int64 pointwise op FlagGems routes. The survey puts it at 13 routes,
-all on `2d-i64`. Four failures are int64 `rsub.Scalar`, as above; a standalone contrast on
-card 6 shows the same expression correct in fp32 and fp16 and raising in int64, and the
-survey records the route as `BASIC_ONLY` with the same abort text on its `2d-i64` profile
-in both cohorts. Moving `rsub.Scalar` is deliberately left to its own change, for the
-reason the bool-`neg` and `where.self_out` entries state: a route move is a claim about a
-whole overload set and is priced, measured and reviewed on its own — and here the route is
-one of 64 that fail on the same single profile, so moving it alone would buy one op and
-leave the family, which is an argument for fixing the lowering or the toolkit rather than
-for rerouting operators one at a time.
-
-What the survey does not give this change is a case-level comparison of the route it moves.
-The pre-change artifact is gone, so `new_ones`' evidence is the re-measured parent artifact
-— where all seven profiles pass on this build, `2d-i64` included, because the composite
-serves it — plus the aggregate delta between that re-measurement and the recorded
-pre-change cohort, which is one verdict and one case and can only be `new_ones`' int64
-profile. That is an attribution by elimination over a one-route build delta rather than a
-measured before-and-after on the same binary. The route-level comparison can be made by
-hand, however, because the change removes the route and not the kernel: on the shipped
-build `flag_gems.ops.new_ones.new_ones(i64_mask, (2, 4))`, called directly, still raises
-the compiler abort above on an int64 `self` and still returns
-`[[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]` on a float32 one — and that artifact is the
-one the pre-change route reached. Through the shipped conf the same call returns
-`torch.int64 [[1, 1, 1, 1], [1, 1, 1, 1]]` on `flagos:0`, `cpu_equal=True`, with the
-dispatch log showing `fill_.Scalar -> gcu` and no `flagos_python` or `cpu_fallback` line.
-The mechanism behind the composite's correctness is the dispatch probe above, and the
-model-level before-and-after is the BERT cohort. The numbers in this entry are all read
-from artifacts that are still on disk; the two the previous entries cite,
-`/tmp/flaggems_gcu_survey.json` (`1ee7ea4f…`) and `/tmp/gcu-overloads-post.json`
-(`6d1120be…`), are not, which is why the parent cohort was re-measured here. Card 5 faults
-and hangs any `topsaten`-path op, so nothing was measured on it. The `enable_i64` skew is
-an observation about this S60's installed toolkit and is not claimed to hold on any other
+For the op this entry moves, the survey carries no case of its own, and the replacement evidence
+is call-level rather than cohort-level: the per-profile probe of the FlagGems kernel above, the
+dispatch log of the shipped route, and the seventeen-check smoke test. What is *not* measured is
+the vendor kernel's cost against the FlagGems kernel it replaces — the GCU entry's usual
+`empty` + `fill_` decomposition is two launches where `topsatenNewOnes` is one, and no timing was
+taken for either on this op. The conf arithmetic, the four artifact hashes and the banner text
+are all read from the tree. Card 5 faults and hangs any `topsaten`-path op, so nothing was
+measured on it; cards 0, 1, 2, 3, 4, 6 and 7 carried the cohort and the probes. The `enable_i64`
+skew is an observation about this S60's installed toolkit and is not claimed to hold on any other
 machine.
 
 ### DCU: compressed sparse CSR/CSC served on `SparseCsrPrivateUse1` (2026-09-23, Hygon DCU bw1000)
@@ -6834,7 +6924,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
-| 2026-09-25 | Enflame GCU S60 (7 healthy cards 0, 1, 2, 3, 4, 6, 7; card 5 faults and hangs any `topsaten`-path op), FlagTree `0.6.1+enflame3.6`, flag-gems `5.3.2`, torch `2.10.0+cpu`, Python 3.12.13, pytest 8.4.2 | The Enflame GCU S60 FlagGems cohort, 253 routes, plus the 336-nodeid BERT model cohort | `new_ones` `flaggems` -> `none`, via `NATIVE_TRITON_GAPS["gcu"]` in the platform generator, plus a repair to the shared transformers test harness. The BERT cohort's largest failure family: **19 of its 29 `FAIL`s were `new_ones` on an int64 tensor**, at `transformers/generation/utils.py:991` in `_update_model_kwargs_for_generation` (`attention_mask.new_ones((attention_mask.shape[0], num_new_tokens))`), raised on every generation step of the assisted-decoding, greedy-search, beam-search and sampling tests. flag_gems' `new_ones` is a thin wrapper over its `ones` kernel -- `flag_gems/ops/new_ones.py:51` runs `ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`, whose int64 instantiation is `flag_gems/ops/ones.py:32` -- and FlagTree cannot lower that kernel for GCU300, so the failure is a compiler pipeline abort and not a wrong answer: `RuntimeError: Pipeline run failed: PassManager execution failed` out of `triton/backends/enflame/toolkit.py:145` via `compiler.py:253 make_gcuir`, with the failing module's element type `tensor<1024x!tt.ptr<i64>>` and the compiler's own diagnostic, `loc(".../flag_gems/ops/ones.py":32:0): error: 64-bit data type not supported on GCU300!`, printed ahead of it. That is the same i64-lowering wall the vendor SDK's missing int64 kernels put up, and it is why `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor` and `silu` carry a `# gcu` marker in the FlagGems file at all. The generator already had the policy for it: `NATIVE_TRITON_GAPS["gcu"]` is the set of ops FlagGems may not serve on this platform, and its factory/creation family already held `arange`, `arange.start`, `arange.start_step`, `constant_pad_nd`, `full`, `full_like`, `linspace`, `ones`, `ones_like`, `zeros` and `zeros_like`. `new_ones` was missing from that list, and adding it (228 -> 229 entries) is the whole of the routing half. **The route it moves to is the one its own ATen kernel supports.** `new_ones` is `CompositeExplicitAutograd` (`RegisterCompositeExplicitAutograd_0.cpp:4690`) with no PrivateUse1 slot, so `none` does not send it to a host fallback: it lets the composite decompose on the device into the `empty` + `fill_` pair `codegen_gcu.py` already claims, both of which are int64-correct. That is the same argument its siblings `ones`, `zeros` and `full` are routed by, and it is measured rather than reasoned: on card 7 with `FLAGOS_LOG=dispatch`, `mask.new_ones((2, 4))` on an int64 mask logs `fill_.Scalar -> gcu` and returns `torch.int64 [[1, 1, 1, 1], [1, 1, 1, 1]]` on `flagos:0` with no `cpu_fallback` line, while `new_zeros` logs `zero_ -> gcu` and `new_full` logs `fill_.Scalar -> gcu` on the same int64 input. The other three `new_*` members need no route at all: `new_empty`, `new_zeros` and `new_full` have no conf entry and no `m.impl` in either generated file, so they were never routed and were always correct -- `new_ones` was the one factory a model could reach. **Route delta.** Exactly one route moves. GCU `flaggems` **254 -> 253**, `none` **1605 -> 1606**, `gcu` **178** unchanged, over the same **2037** routable ops, so accelerated routes go **432 -> 431** (still 21.2%, `Coverage: 431/2037`). The shipped conf is **1606 `none` / 253 `flaggems` / 178 `gcu`**, and both generated registration files reconcile against it: `253 = 246 + 7` and `178 = 185 - 7`. The seven markers are the same seven as before and there are no orphans and no overlaps in either direction. `gcu_flaggems_register.inc`'s provenance banner moves from "247 ops registered here, 101 further FlagGems ops already claimed by `gcu_register.inc`" to **246 and 101**: `new_ones` leaves the FlagGems route rather than moving to a native kernel, so nothing joins the native file, and `gcu_register.inc` and `gcu_kernels.cc` are byte-identical. The same change carries a second, platform-neutral half, because one of the 29 BERT failures was not the tree's: `tests/manual/transformers_hf_tests.py`'s `stage_harness_files()` symlinks `workdir/tests` at the source's `tests` directory and runs the child with `cwd=workdir`, so pytest computes the nodeid relative to `rootdir` and a selection that arrives as `tests/models/bert/test_modeling_bert.py::BertModelTest::test_x` is reported back as `::BertModelTest::test_x`; `PYTEST_CURRENT_TEST` inherits that nodeid and HF's `run_test_using_subprocess` (`src/transformers/testing_utils.py:3080`) reads it and re-execs `[sys.executable, "-m", "pytest", test]`, which pytest answers with `ERROR: directory argument cannot contain :: selection parts` and exit 4 -- reproduced on this host with the same pytest 8.4.2. A new `_restore_file_part(config, items)` runs first in the child's own report plugin's `pytest_collection_modifyitems` and rewrites `item._nodeid` to the file's path relative to `config.rootdir`, skipping nodeids that already carry their file and anything that escapes the root with `..`; it repairs the reported nodeid rather than changing what is collected, and the harness-side `canonicalize_nodeids()` stays as the second line of defence. | `new_ones` is unmeasurable by the survey: `build_case` cannot synthesize a case for `aten.new_ones`, it is absent from the shipped cohort's `results`, and its parent-cohort record is all seven profiles `PASS` on this build -- `2d-i64` included -- because the composite serves it. So the route's evidence is the model cohort plus the dispatch probe. **BERT**, one process, `--model bert`, `batch_size` 20, `collected` 336, `status COMPLETED_RESILIENT`, `crashed_batches []`, `context_poison false`: **`{"ERROR": 56, "FAIL": 13, "PASS": 132, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 616.4 s** against **`{"ERROR": 56, "FAIL": 29, "PASS": 116, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 578.8 s**, artifacts `/tmp/bert_after.json` `563609e20bd78f8b7ba95d959846370a1504221ad21a0fe8d70b3f269c2567ad` and `/tmp/bert_pr.json` `cc099ccb5e217a0427633bee26179e61f49acf8b3101e7bb5d3fe5c9c44f0225`. The 336-nodeid key sets are identical and exactly **16 statuses change, every one of them `FAIL` -> `PASS`**: the fifteen generation tests (beam-search, beam-sample, greedy and sampling, each with and without `dict_output`, `beam_search_generate_dict_outputs_use_cache` and `greedy_generate_dict_outputs_use_cache`, `generate_from_inputs_embeds_0_greedy` and `_1_beam_search`, `generate_from_random_inputs_embeds`, `generate_methods_with_logits_to_keep`, `generate_with_and_without_position_ids`) plus `test_can_load_with_global_device_set`, which is the nodeid repair. The before run's 29 `FAIL`s bucket as 19 `new_ones`, 9 `enable_i64` and 1 nodeid; the after run's 13 bucket as 9 `enable_i64` and 4 `rsub` -- the same nine `enable_i64` names on both sides. So 15 of the 19 `new_ones` failures pass and 4 now fail **later in the same generation loop**: `transformers/generation/utils.py:2929` evaluates `pad_token_id * (1 - unfinished_sequences)`, which becomes `aten::rsub.Scalar` on an int64 tensor and aborts in the same `make_gcuir` pipeline -- the same wall reached one op further along, because the op in front of it no longer fails. **Survey.** `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`) against `torch_fl/configs/backends_gcu.conf` at `1fcc1e8b5d9f67694cfcddaedf35d46f3b15662aa81513e1bfbfd3d7c13a71c1` -- the hash this change ships -- measured as twelve artifacts over the seven healthy cards: **registered 253, tested 193, basic-executable 190, strict 121, basic-only 69, failed 3, untested 60**, 1771 cases (975 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-newones.json` `3ea621586b7000ef7048c453332d44b96b7bbeb32a65034b6494df3f86bf202a`. The parent conf `28f4656c30b39b7a60128cf581426f968c077aa5895d23d6193c642799a4ef1b` was **re-measured** on this build, harness and card set rather than cited, because the artifact the previous entry recorded against it (`/tmp/gcu-overloads-post.json`, `6d1120be…`) is no longer on disk: 254 routes, strict 122, basic-only 69, tested 194, 1778 cases (982 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-parent.json` `81882479c219ac33228c608b874bbc801cce494d0149198b13c1b32e3967f328`. Comparing the 253 shared routes finds **one** differing case record in the whole set: `reflection_pad1d_backward`'s five `INVALID_CASE` messages differ only in the pointer value the error prints (`padding (1, 93825246127840)` against `padding (1, 93825653218016)`), with every status identical on both sides and no `PASS` on either -- a message rendering an uninitialised address, not a verdict. `only in parent` is `['new_ones']` and `only in new` is empty. Three routes (`exp_`, `expm1.out`, `expm1_`) were measured twice across the two waves of shards and both records are byte-identical, which the merge asserts rather than discarding one. The re-measurement is **one verdict and one case ahead** of that conf's recorded cohort (strict 122 against 121, basic-only 69 against 70, 982 passes against 981, 79 errors against 80); a conf line naming a route no kernel implements is inert -- dispatch falls through `flaggems_cpp > flaggems > tileops > gcu > none` to the composite -- so the parent-cohort artifact is **not** a runtime A/B of this route change and is not offered as one, and the difference is attributed to `new_ones`' `2d-i64` case by elimination over a one-route build delta rather than by a case-level comparison. **The two remaining i64 families are measured at cohort scale, in both cohorts, identically**: 51 routes fail only on `2d-i64` with `RuntimeError: Pipeline run failed: PassManager execution failed` out of `make_gcuir`, and 13 more fail only on `2d-i64` with `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option enable_i64` (`angle`, `ceil.out`, `ceil_`, `clamp_min`, `exp2`, `isinf`, `isnan`, `logical_not`, `logical_xor`, `pow.Scalar`, `relu_`, `threshold`, `threshold_backward`) -- 64 routes, 61 `BASIC_ONLY` and the 3 `FAILED` (`gcd_`, `lcm`, `lcm_`), each with its six non-i64 profiles passing. `rsub.Scalar` is one of the 51, and its record carries the same abort text as the BERT traceback. Tests: `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py` -- **73 passed**; `pytest tests/integration/ops/test_flaggems_conf_consistency.py --noconftest` -- **7 passed**; `pytest tests/unit/test_transformers_automation.py -k 'plugin_restores or plugin_leaves'` -- **2 passed, 59 deselected**, the two tests the harness half adds. Both generators re-run leave all four artifacts byte-identical and both `--check` modes report the tree up to date. Pinned ruff 0.15.12: `ruff check .` -- "All checks passed!", `ruff format --check .` -- 309 files already formatted. **Evidence gaps:** `tests/unit/test_transformers_automation.py` as a whole reports **11 failed, 50 passed** on this host and the same 11 failures are present with the file's base-commit copy in place (**11 failed, 48 passed**, failure sets identical line for line), because this working tree's gitignored prebuilt `torch_fl/_C.cpython-312-x86_64-linux-gnu.so` is a 2026-08-25 artifact that predates `_set_backend_config_path` (`torch_fl/csrc/module.cc`, last changed by #364 on 2026-09-21), so the package's own `torch_fl/__init__.py:1654` calls a symbol the loaded extension does not export; the two new tests do not import `torch_fl` and pass either way. The base conda environment carries `ruff 0.16.0`, which also formats Python code blocks inside markdown and reports 16 such files, none of them a Markdown file this change touches. The nine `enable_i64` failures are a skew between this S60's FlagGems wheel and its installed `/opt/triton_gcu/bin/gcu-compiler-opt`, which does not accept the option, and not an operator gap; moving `rsub.Scalar` is deliberately left to its own change, since it is one of 64 routes failing on the same single profile. `new_ones` has no case-level survey A/B for the reason above, but the route-level one can be made by hand, because the change removes the route and not the kernel: on the shipped build a direct `flag_gems.ops.new_ones.new_ones(i64_mask, (2, 4))` still raises the same compiler abort on an int64 `self` and still returns ones on a float32 one, while the same call through the shipped conf returns `torch.int64 [[1, 1, 1, 1], [1, 1, 1, 1]]` on `flagos:0` with `cpu_equal=True`. Card 5 faults and hangs any `topsaten`-path op, so nothing was measured on it. All other platforms' FlagGems route sets are untouched -- `NATIVE_TRITON_GAPS["gcu"]` is read only when the `gcu` configuration is generated -- so Ascend, DCU, MetaX, MUSA, PPU and Tsingmicro are **not revalidated**; the harness half is platform-neutral by construction and the failure it fixed was possible on any platform but is only claimed for this one. |
+| 2026-09-25 | Enflame GCU S60 (7 healthy cards 0, 1, 2, 3, 4, 6, 7; card 5 faults and hangs any `topsaten`-path op), FlagTree `0.6.1+enflame3.6`, flag-gems `5.3.2`, torch `2.10.0+cpu`, Python 3.12.13, pytest 8.4.2 | The Enflame GCU S60 FlagGems cohort, 253 routes, plus the 336-nodeid BERT model cohort | `new_ones` `flaggems` -> `gcu` -- off the FlagGems route **and** onto a generated vendor-native kernel -- via two coupled generator edits (`NATIVE_TRITON_GAPS["gcu"]` in `gen_vendor_confs.py`, plus a `T_NEW_ONES` template with its `OPS`/`CATEGORIES` entries in `codegen_gcu.py`), one measured dtype gate in `csrc/aten/backends/gcu/topsaten_common.h`, and the repair to the shared transformers test harness. The BERT cohort's largest failure family: **19 of its 29 `FAIL`s were `new_ones` on an int64 tensor**, at `transformers/generation/utils.py:991` in `_update_model_kwargs_for_generation` (`attention_mask.new_ones((attention_mask.shape[0], num_new_tokens))`), raised on every generation step of the assisted-decoding, greedy-search, beam-search and sampling tests. flag_gems' `new_ones` is a thin wrapper over its `ones` kernel -- `flag_gems/ops/new_ones.py:51` runs `ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`, whose int64 instantiation is `flag_gems/ops/ones.py:32` -- and FlagTree cannot lower that kernel for GCU300, so the failure is a compiler pipeline abort and not a wrong answer: `RuntimeError: Pipeline run failed: PassManager execution failed` out of `triton/backends/enflame/toolkit.py:145` via `compiler.py:253 make_gcuir`, with the failing module's element type `tensor<1024x!tt.ptr<i64>>` and the compiler's own diagnostic, `loc(".../flag_gems/ops/ones.py":32:0): error: 64-bit data type not supported on GCU300!`, printed ahead of it. That is the same i64-lowering wall the vendor SDK's missing int64 kernels put up, and it is why `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor` and `silu` carry a `# gcu` marker in the FlagGems file at all. The generator already had the policy for it: `NATIVE_TRITON_GAPS["gcu"]` is the set of ops FlagGems may not serve on this platform, and its factory/creation family already held `arange`, `arange.start`, `arange.start_step`, `constant_pad_nd`, `full`, `full_like`, `linspace`, `ones`, `ones_like`, `zeros` and `zeros_like`. `new_ones` was missing from that list, and **removing it from FlagGems is only half of the routing change: membership alone yields `none`.** **The route it moves to is `gcu`, and the kernel behind it is generated.** `route()` falls through to `<vendor>` only for ops the platform registers, so the op needs an `m.impl("new_ones", WrapperNewOnes)` on `PrivateUse1` and a generator that emits it; it gets an entry of its own in `codegen_gcu.py` rather than the `full_like` family's template, because unlike `ones_like` it takes a shape instead of reading one, and unlike `arange` that shape is not something to compute: `topsatenNewOnes` takes an explicit `topsatenSize_t`, and the output tensor's own description is not what sizes the write. Both conditions hold, so the conf's route is `gcu`; with the kernel alone it would be `flaggems` and with the membership alone `none`, which is what the previous revision of this entry did. **The vendor entry point's dtype contract had to be measured, not read off a table.** `topsatenNewOnes` takes an explicit `data_type` argument and validates it instead of consulting one of the per-op dtype tables the other entry points use. Measured on S60 with a sentinel-filled output buffer, so that "the call declined" and "the call ran" are distinguishable, fp32, fp16 and bf16 come back with the whole plane set to 1, while i8, u8, i16, u16, i32, u32, i64, u64, PRED, f64 and both float8 formats return `TOPSATEN_STATUS_BAD_PARAM` (`op_aten_new_ones.cc:70: new_ones CheckArgs failed.`) and leave every element at the sentinel -- at rank 1, 2 and 3, on an empty shape, and on all of 2x4 and 64x64. `TopsatenSupportsDtype` is too permissive for this entry point, so `gcu::TopsatenNewOnesDtype` in `topsaten_common.h` is the measured set. Declining is not optional: `EXEC_TOPSATEN_CMD` wraps the call in a `TORCH_CHECK` on the status, so a dtype left ungated would raise where the composite would have produced the right tensor -- and the dtype that does it is the int64 one, on exactly the call site above. The dtype of the `input` operand is deliberately not part of the test: the operand is only where the kernel reads its device from, and an fp32, an i64 and a PRED operand all return the same plane of ones. **What the vendor kernel cannot serve goes to the composite -- the same code the `none` route ran.** Everything outside that dtype set, and every call with a non-default `layout`, an explicit `device` other than `self`'s, an empty `size`, or `pin_memory=True`, is handed to `at::compositeexplicitautograd::new_ones`, the dispatcher's own entry for this op, called qualified because the Tensor method would re-enter this kernel. That decomposes to `empty` + `fill_`, which keeps the result on the device -- a device->host->device round trip would be a regression on exactly the int64 mask this is for, since that mask grows with the context and is rebuilt on every generation step. `TopsatenSizeWrapper` keeps the size vector alive across the call because `topsatenSize_t` holds a raw pointer, a rank-0 `size` must not reach the vendor entry point at all (`tensor_define.h:58` rejects an empty dims/strides vector by throwing `std::runtime_error`, which aborts the process instead of propagating a catchable error), and a zero-element `size` short-circuits before the call for the same reason. **`pin_memory` is the third thing the native path must not answer.** Nothing here can pin memory, so every ATen route raises; measured on card 0 against the kernel before the guard was added, the fp32 native path was the one exception, returning `is_pinned() == False` from `f32.new_ones(3, pin_memory=True)` where `torch.empty(3, pin_memory=True)`, `torch.zeros(0, device).new_zeros(3, pin_memory=True)` and the int64 `new_ones` all raised. The flag is therefore treated as unsupported and handed to the composite, and `at::empty` is deliberately not given it on the native path either; with the guard in place all four spellings raise `Pin memory can only be on CPU`, the contract `T_ARANGE` already implements, down to the message. **Route delta.** Exactly one route moves. GCU `flaggems` **254 -> 253**, `gcu` **178 -> 179**, and `none` **1605 -> 1605, unchanged**, over the same **2037** routable ops, so accelerated routes stay at **432** (`Coverage: 432/2037 ops accelerated (21.2%)`). The shipped conf is **1605 `none` / 253 `flaggems` / 179 `gcu`**, and both generated registration files reconcile against it: `253 = 246 + 7` and `179 = 186 - 7`. The seven markers are the same seven as before -- `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor`, `silu` -- and there are no orphans and no overlaps in either direction. `gcu_flaggems_register.inc`'s provenance banner moves from "246 ops registered here, 101 further FlagGems ops already claimed by `gcu_register.inc`" to **246 and 102**: `new_ones` joins the set the native file claims, which is the second number, while the first is unmoved because the op was already in that file's excluded-ops list by way of `NATIVE_TRITON_GAPS`. **The same change carries a second, platform-neutral half, because one of the 29 BERT failures was not the tree's.** `tests/manual/transformers_hf_tests.py`'s `stage_harness_files()` symlinks `workdir/tests` at the source's `tests` directory and runs the child with `cwd=workdir`, so pytest computes the nodeid relative to `rootdir` and a selection that arrives as `tests/models/bert/test_modeling_bert.py::BertModelTest::test_x` is reported back as `::BertModelTest::test_x`; `PYTEST_CURRENT_TEST` inherits that nodeid and HF's `run_test_using_subprocess` (`src/transformers/testing_utils.py:3080`) reads it and re-execs `[sys.executable, "-m", "pytest", test]`, which pytest answers with `ERROR: directory argument cannot contain :: selection parts` and exit 4 -- reproduced on this host with the same pytest 8.4.2. A new `_restore_file_part(config, items)` runs first in the child's own report plugin's `pytest_collection_modifyitems` and rewrites `item._nodeid` to the file's path relative to `config.rootdir`, skipping nodeids that already carry their file and anything that escapes the root with `..`; it repairs the reported nodeid rather than changing what is collected, and the harness-side `canonicalize_nodeids()` stays as the second line of defence. | **BERT**, one process, `--model bert`, `batch_size` 20, `collected` 336, `status COMPLETED_RESILIENT`, `crashed_batches []`, `context_poison false`: **`{"ERROR": 56, "FAIL": 13, "PASS": 132, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 612.0 s** (artifact `/tmp/bert_final.json` `b2d882f55a18beeb240b05f947365de8cdd4d6d8032ef965bdc61a7c40fa4bf7`)  against **`{"ERROR": 56, "FAIL": 29, "PASS": 116, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 578.8 s** (artifact `/tmp/bert_pr.json` `cc099ccb5e217a0427633bee26179e61f49acf8b3101e7bb5d3fe5c9c44f0225`). The key sets are identical and **exactly 16 statuses change, every one of them `FAIL` -> `PASS`** -- the fifteen generation tests (beam-search, beam-sample, greedy and sampling, each with and without `dict_output`, `beam_search_generate_dict_outputs_use_cache` and `greedy_generate_dict_outputs_use_cache`, `generate_from_inputs_embeds_0_greedy` and `_1_beam_search`, `generate_from_random_inputs_embeds`, `generate_methods_with_logits_to_keep`, `generate_with_and_without_position_ids`) plus `test_can_load_with_global_device_set`, the nodeid repair -- so the before run's 29 `FAIL`s bucket as 19 `new_ones`, 9 `enable_i64` and 1 nodeid while the after run's 13 bucket as 9 `enable_i64` and 4 `rsub` (the same nine `enable_i64` names on both sides): the 19 `new_ones` failures split 15 into passes and 4 into a failure that lands **later in the same generation loop**, `transformers/generation/utils.py:2929` evaluating `pad_token_id * (1 - unfinished_sequences)`, which becomes `aten::rsub.Scalar` on an int64 tensor and aborts in the same `make_gcuir` pipeline. Neither remaining family is on a route this change moves, and neither is a regression. The run reproduces `/tmp/bert_after.json` (`563609e20bd78f8b7ba95d959846370a1504221ad21a0fe8d70b3f269c2567ad`, 616.4 s, launched before the extension was rebuilt a second time for the `pin_memory` guard and the composite include) **nodeid for nodeid on all 336 keys**.  **Call-level evidence for the op itself, on the shipped build.** The survey's `new_ones` case is a synthesized call with the optional factory `dtype` left at `None`, so its result element type follows `self` and only the `2d-i64` profile asks for an int64 output; the kernel the FlagGems route reached is therefore driven once per profile on card 2 of the shipped build instead: `flag_gems.ops.new_ones.new_ones` returns the correct plane of ones for `2d-f32`, `4d-f32`, `1d-f32`, `2d-f16`, `2d-bool` and `2d-f32-strided` and raises `RuntimeError: Pipeline run failed: PassManager execution failed` on `2d-i64` alone -- the 6-of-7, int64-only shape the cohort records for the other 64 routes that fail on that profile. On the shipped conf the same op does not go near that kernel: `FLAGOS_LOG=dispatch` on card 2 logs `new_ones -> gcu` for an int64, an fp32, an fp16 and a bool operand, with `fill_.Scalar -> gcu` for the composite path and no `cpu_fallback` or `flagos_python` line, and all four return on-device tensors equal to the CPU reference, `bool` and `int64` included. A seventeen-check smoke test over the same build covers the two shapes the vendor entry point rejects by construction (rank 0 and an empty `size`), the six dtypes it declines (`i8`, `i16`, `i32`, `i64`, `bool`, `f64`), an fp32 result asked of an int64 `self`, fp16 and bf16 on the native path, ranks 0/1/3 and a 64x64 fill (8192/8192 elements exactly 1), and all of them pass. **Survey.** `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`) against `torch_fl/configs/backends_gcu.conf` at `bd8daa31506c86fc3881a958d06a0a6a5bab5f33aee444c901d413c109137b55` -- the hash this change ships -- flag-gems 5.3.2, FlagTree 0.6.1+enflame3.6, torch 2.10.0+cpu, measured as seven disjoint shards on the seven healthy cards 0, 1, 2, 3, 4, 6 and 7 (37 routes in the first shard and 36 in each of the other six, no route measured twice): **registered 253, tested 193, basic-executable 190, strict 121, basic-only 69, failed 3, untested 60**, 1771 cases (975 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-final.json` `1b7c6d135b2b8f58e8de1d8eeff822bc58143ef693f7a3cf295933fc0ab921ac`. The parent conf `28f4656c30b39b7a60128cf581426f968c077aa5895d23d6193c642799a4ef1b` was **re-measured** on this build, harness and card set rather than cited, because the artifact the previous revision of this entry recorded against it (`/tmp/gcu-overloads-post.json`, `6d1120be...`) is no longer on disk: 254 routes, strict 122, basic-only 69, basic-executable 191, tested 194, failed 3, untested 60, 1778 cases (982 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-parent.json` `81882479c219ac33228c608b874bbc801cce494d0149198b13c1b32e3967f328`. Comparing the cohorts route for route and case for case, **the only route present on one side and not the other is `new_ones`**, and restricted to the 253 shared routes the two agree on **every** case record once the five `INVALID_CASE` messages that print an uninitialised address are normalised (`reflection_pad1d_backward`, whose five cases differ only in the pointer value the message renders -- `padding (1, 93825246127840)` against `padding (1, 93825653218016)` -- with every status identical on both sides and no `PASS` on either). The whole aggregate delta between the two cohorts is therefore `new_ones`' own seven cases: strict 122 against 121, and 982 passes against 975. Two things follow, and neither is a before/after for the op: this is **not** a runtime A/B of the route change and is not offered as one, because on this build the parent conf's `new_ones = flaggems` names a backend that no longer has a kernel for the op, so the line is inert -- dispatch falls through `flaggems_cpp > flaggems > tileops > gcu > none` to the composite, which serves all seven profiles as `PASS`, `2d-i64` included; and the reverse is what the comparison does establish, namely that the change is confined to `new_ones`, since removing it from the parent cohort's route set makes the two cohorts identical. **The two remaining i64 families are measured at cohort scale, in both cohorts, identically**: 51 routes fail only on `2d-i64` with `RuntimeError: Pipeline run failed: PassManager execution failed` out of `make_gcuir`, and 13 more fail only on `2d-i64` with `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option enable_i64` (`angle`, `ceil.out`, `ceil_`, `clamp_min`, `exp2`, `isinf`, `isnan`, `logical_not`, `logical_xor`, `pow.Scalar`, `relu_`, `threshold`, `threshold_backward`) -- 64 routes, 61 `BASIC_ONLY` and the 3 `FAILED` (`gcd_`, `lcm`, `lcm_`), each with its six non-i64 profiles passing. `rsub.Scalar` is one of the 51, and its record carries the same abort text as the BERT traceback. `new_ones` itself is not in this cohort at all, because it is no longer a FlagGems route. Tests: `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py` -- **73 passed**; `pytest tests/integration/ops/test_flaggems_conf_consistency.py --noconftest` -- **7 passed**; `pytest tests/integration/ops/test_new_ones_dispatch.py -m gcu` -- **8 passed, 7 deselected**, the cases this entry adds, which pin the int64 route out of `FLAGOS_LOG=dispatch` rather than infer it from the value, split the dtypes the vendor entry point writes itself from the ones it hands back to the composite, and run rank 0 and an empty `size` in a child process so that an abort is an exit status rather than a dead session; `pytest tests/unit/test_transformers_automation.py -k 'plugin_restores or plugin_leaves'` -- **2 passed, 59 deselected**, the two tests the harness half adds. A second run of all three generators leaves all four artifacts byte-identical (`bd8daa31...` / `6bcfb030...` / `27630385...` / `d933fb05...`), re-hashed after each of two consecutive full runs; `gen_vendor_confs.py --check` reports `all vendor confs up to date` and `codegen_gcu_flaggems.py --check` reports its file up to date, while `codegen_gcu.py` has no check mode (`--help` lists only `--category` and `--no-conf`), which is why idempotency for that one is the hash comparison. Pinned ruff 0.15.12: `ruff check .` -- "All checks passed!", `ruff format --check .` -- 309 files already formatted. **Evidence gaps:** `tests/unit/test_transformers_automation.py` as a whole reports **11 failed, 50 passed** on this host and the same 11 failures are present with the file's base-commit copy in place (**11 failed, 48 passed**, failure sets identical line for line), because this working tree's gitignored prebuilt `torch_fl/_C.cpython-312-x86_64-linux-gnu.so` is a 2026-08-25 artifact that predates `_set_backend_config_path` (`torch_fl/csrc/module.cc`, last changed by #364 on 2026-09-21), so the package's own `torch_fl/__init__.py:1654` calls a symbol the loaded extension does not export; the two new tests do not import `torch_fl` and pass either way. The base conda environment carries `ruff 0.16.0`, which also formats Python code blocks inside markdown and reports 16 such files, none of them a Markdown file this change touches. This host has **no outbound network**, so the BERT cohort is run with `HF_HUB_OFFLINE=1` in the environment: HF's pipeline tests catch the resulting `OfflineModeIsEnabled` in `run_pipeline_test`'s `from_pretrained` guard and skip, which is why their status is the same `SKIP_OTHER` the network-era baseline recorded, and the tokenization class is the pre-existing 56-error family in both. What is *not* measured is the vendor kernel's cost against the FlagGems kernel it replaces: the usual GCU `empty` + `fill_` decomposition is two launches where `topsatenNewOnes` is one, and no timing was taken for either on this op. The nine `enable_i64` failures are a skew between this S60's FlagGems wheel and its installed `/opt/triton_gcu/bin/gcu-compiler-opt`, which does not accept the option, and not an operator gap; moving `rsub.Scalar` is deliberately left to its own change, since it is one of 64 routes failing on the same single profile and a route move is a claim about a whole overload set, priced and reviewed on its own. Card 5 faults and hangs any `topsaten`-path op, so nothing was measured on it. All other platforms' FlagGems route sets are untouched -- `NATIVE_TRITON_GAPS["gcu"]` is read only when the `gcu` configuration is generated and `codegen_gcu.py` writes only GCU artifacts -- so Ascend, DCU, MetaX, MUSA, PPU and Tsingmicro are **not revalidated**; the harness half is platform-neutral by construction and the failure it fixed was possible on any platform but is only claimed for this one. |
 | 2026-09-24 | Ascend 910 (910/910B host, CANN 9.0.0, FlagTree `0.6.2a1+ascend3.5`, FlagGems `5.4.0rc2.post1`). **910C not revalidated** | Ascend bool `neg` (one overload) forced off the FlagGems route | Added a third escape predicate to the runtime dispatch path: `FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype)` in `csrc/aten/common.cc`, carrying the one-entry table `{{at::kBool, "neg"}}`, with `FlagGemsRejectsArg`/`FlagGemsRejectsArgs`/`Dispatcher::ResolveFn` in `csrc/aten/dispatcher.h` threading the routed op name (the conf key, so a `.out` suffix appears only for calls dispatched under one) to the two call sites. `flag_gems/ops/neg.py` is an unguarded pointwise `-x`, so a bool operand is code-generated like any other element type and lowers to `hivm.hir.vadd` over `i1`, which BiShengIR refuses to verify; the CPU reference and the aclnn vendor slot both raise `RuntimeError: Negation, the \`-\` operator, on a bool tensor is not supported.` instead, and the escape restores that. Neither existing mechanism could state the gap: a conf entry is per-op and would move the eight dtypes `neg` is correct on (the Ascend `T_UNARY` template sends every integral through a `self.cpu()` round-trip, so that is a 7-30x loss on integral `neg` for a 10x win on fp32), and `FlagGemsRejectsDtype` is per-dtype while bool is a dtype FlagGems serves on this build for `add`/`sub`/`abs`/comparisons. The new predicate answers the dtype-wide question first and only then compares the op name, so the common path costs one enum compare; `Dispatcher::cached_backend_` is deliberately untouched, because it holds an op-level `Backend&` and a per-dtype answer would make it wrong for every other dtype of the same op. **No route changed**: no conf line, no registration set and no `NATIVE_TRITON_GAPS` entry moves, `torch_fl/configs/backends_ascend.conf` is byte-identical at SHA-256 `9d24378804775bda932f4572f94b1984b88fd069d659e16187c5ce8dab80918e` with `neg`/`neg_` still `flaggems  # ascend`, `gen_vendor_confs.py --check` reports `all vendor confs up to date`, and the `ascend` route-count snapshot in `tests/unit/test_conf_registration_consistency.py` is unchanged. `neg_` over bool is **not** covered and is recorded as a separate open defect: the vendor `T_INPLACE_UNARY` template has no dtype guard, so routing bool there reaches `aclnnInplaceNeg` and fails with `aclnnInplaceNegGetWorkspaceSize failed, ret=161002` (re-probed on this build as an empty-message `MLIRCompilationError`) rather than the reference error. The predicate is compiled only under `USE_ASCEND` and returns `false` elsewhere, and no other vendor's plan or conf is touched, so **every other platform is not revalidated**. | One process, ten dtypes, one call each on `flagos:0` against the CPU result for the same operand: fp16 / bf16 / fp32 / fp64 / int8 / int16 / int32 / int64 / uint8 all `OK ... match=True`, bool `RAISED RuntimeError: Negation, the \`-\` operator, on a bool tensor is not supported. If you are trying to invert a mask, use the \`~\`` — the same first line the CPU reference prints in the same process; float32/int64/float64 re-checked on `-3` operands, `match=True`. `FLAGOS_LOG=dispatch` over that probe: 13 `neg` lines, `-> flagos_python` for every non-bool call and `-> ascend` for the bool calls only, all in one process (so the per-op backend cache is not pinning `neg` to the first resolution). Before the change the same bool call failed inside the compiler, not in `at::neg`: `'hivm.hir.vadd' op failed to verify that operand at idx 0 and 1 should have element type 16-bit signless integer or 32-bit signless integer or 16-bit float or 32-bit float or 64-bit signless integer` / `[ERROR] Failed to run BiShengIR pipeline`. `pytest tests/integration/ops/test_dtype_route_fallback.py tests/integration/ops/test_neg_dispatch.py -m ascend -v` — **11 passed, 13 deselected in 156.06s** (the file's 8 pre-existing float64 cases, the 3 new `TestFlagGemsOpDtypeFallback` cases, and the 2 `test_neg_dispatch.py` Ascend cases). `pytest tests/integration/test_dtype_coverage.py -v` — **174 passed in 6.79s**, the previously failing `TestUnaryDtypeSupport::test_neg_bool_matches_cpu_error` now among them and no float or integral dtype regressed; the full Ascend operator cohort, `pytest tests/integration/ops/ -m ascend -q` — **89 passed, 1357 deselected in 832.61s**. Rebuilt with the documented Ascend invocation (`FLAGOS_ACCELERATOR=ascend FLAGOS_BUILD_VENDOR=1 FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 python setup.py build_ext --inplace`, exit 0); a plain `python setup.py build_ext --inplace` first died at cmake configure, because this checkout's pre-existing `build/CMakeCache.txt` still carried `FLAGOS_ACCELERATOR:STRING=cuda` and `FLAGOS_BUILD_FLAGGEMS_CPP:BOOL=ON` from an earlier CUDA configure — the env vars are what make the rebuild correct here, not an optional extra. `npu-smi info` showed all cards idle (0% AICore) throughout, so the shared-box OOM confound recorded in this report does not apply. **Evidence gaps:** the CI target is a 910C image and this is a 910/910B host, so no 910C row is claimed; `flaggems_overload_survey.py` cannot measure either escape (it selects overloads whose conf value is the FlagGems route, and these are runtime decisions no conf value reflects), so the Ascend rows of the generic FlagGems baseline are unchanged and **not revalidated**; `neg_` is untested by construction because the fix does not cover it. |
 | 2026-09-23 | Hygon DCU bw1000 (8 devices), DTK 26.04, hipified torch 2.10.0, Python 3.10.12 | New `SparseCsrPrivateUse1` registration for compressed sparse (CSR/CSC/BSR/BSC) tensors on the `flagos` device (issue #293) -- a dispatch key, not a conf route | Registered the compressed sparse structure surface, the layout conversions and the matrix multiply on `SparseCsrPrivateUse1` in a new `csrc/aten/sparse_csr_ops.cc`, shaped like the merged `csrc/aten/sparse_ops.cc`. `torch.sparse_csr_tensor(..., device="flagos:0")` already carried that key and nothing in the plugin served it, so every operation fell through to its ATen `CompositeExplicitAutograd` default: `crow_indices` and its three siblings carry `SparseCsrCPU`/`SparseCsrCUDA`/`SparseCsrMeta` entries with `crow_indices_default` behind them, an unconditional `TORCH_CHECK(false, ...)` phrased as a layout test, and `empty.memory_format` has no default at all. A sparse key does not resolve down to `PrivateUse1` -- `OperatorEntry::computeDispatchTableEntryWithDebug` reads the fallback slot of the exact key only -- so the boxed `cpu_fallback` in `csrc/aten/register.cc` was unreachable. Registered: `sparse_dim`/`dense_dim`/`_nnz`, `crow_indices`/`col_indices`/`ccol_indices`/`row_indices`, `values`, `empty.memory_format`, `empty_like`, `clone`, `copy_`, `resize_`, `resize_as_sparse_`, `zero_`, `_to_sparse_csr`/`_to_sparse_csc`/`_to_sparse_bsr`/`_to_sparse_bsc`/`_to_sparse`/`_to_sparse.sparse_dim`, `_to_dense`, and behind the `#if !defined(USE_ASCEND) && !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU)` guard `csrc/aten/sdp_choice_stub.cc` already uses (which `-D USE_DCU=1` admits, DCU being CUDA-compatible) `mm`/`mm.out`/`addmm`/`addmm.out`. **No route changed**: this is not a conf entry, so `torch_fl/configs/*.conf` is byte-identical, no overload moved between `flaggems`/`flaggems_cpp`/`tileops`/`cuda`/`none`, and the FlagGems route set the survey enumerates is untouched. The conversion needs a `PrivateUse1` kernel on ATen's `flatten_indices_stub`; the registered slot boxes the index tensor into the CUDA key frame and calls the exported `at::sparse::flatten_indices` rather than naming the stub's `operator()`, because `ATen/native/DispatchStub.h` is not self-contained across the wheel boundary and the arity it would emit is not the one `libtorch_cpu.so` exports -- the plugin keeps only `U at::native::flatten_indices_stub` and `U at::sparse::flatten_indices(at::Tensor const&, c10::ArrayRef<long>, bool)`, and `ATen/native/sparse/SparseStubs.h` is not shipped, so the stub type is re-declared locally. `addmm_out_sparse_compressed_cuda`'s `_check_is_cuda` is what the boxing exists for, and boxing a storage-less sparse operand is what made `device_boxing.h`'s `SetTensorImplDevice` walk a null `storage_impl_`, now guarded by `if (impl->has_storage())` -- the one edit to an existing source file. Ascend, GCU, MUSA, MetaX, PPU, TsingMicro and the generic FlagGems cohort are **not revalidated**: the registrations are new, so they cannot regress a route that did not exist, the guard means those platforms compile only the unguarded half, and no such hardware was exercised here. Two pre-existing wheel defects found while writing the tests are asserted as refusals rather than worked around, and both reproduce with stock CPU PyTorch and no plugin loaded at all: `Tensor.to_sparse_bsr` on a *compressed* input faults inside `_compressed_to_block_compressed_cpu`, and `torch.sparse.mm` faults on an unsorted `crow=[0,2,3], col=[2,0,1]` pattern. | The issue's own 16-check reproducer on `flagos:0` against `cpu`, three routes, **3/16 -> 15/16 on each**: `backends_dcu.conf`, the same conf with `FLAGOS_USE_FLAGGEMS=1`, and `backends_cuda.conf`. Before, thirteen checks raised -- both accessors of both orientations, `values`, `empty`, both conversions, `to_dense`, `spmm`, `clone`, the device round-trip -- the five accessors with the stub's layout-test phrasing (`RuntimeError: crow_indices expected sparse row compressed tensor layout but got SparseCsr`, `RuntimeError: values expected sparse tensor layout but got SparseCsr`) and the rest with `NotImplementedError: Could not run 'aten::empty.memory_format' with arguments from the 'SparseCsrflagos' backend` / `Could not run 'aten::_to_sparse_csr' ...` / `Could not run 'aten::_to_dense' ...`, `spmm` and `clone` through the `empty.memory_format` they stage internally; after, `csc_to_sparse_csr` reports `ok torch.sparse_csr` and `csr_to_sparse_csc` `ok torch.sparse_csc` on `flagos:0`. The one remaining failure is `spmm_reduce`, `aten::_sparse_mm_reduce_impl`, which this change does not register and which still reports `Could not run 'aten::_sparse_mm_reduce_impl' with arguments from the 'SparseCsrflagos' backend` -- out of scope, and the only check not restored. Raw-`torch` positive control on the CUDA host (device `BW`), where none of the plugin's sparse registrations are reachable: **13/13 `ok`** over `torch.sparse_csr_tensor` construction, accessors, `_nnz`, `to_dense`, `empty`, `clone`, `to_sparse_csr`, `mul_scalar`, `spmm`, `addmm`. `pytest tests/integration/ops/test_sparse_csr_dispatch.py -m anyplatform` -- **34 passed, 2 warnings in 16.52s**, every flagos result compared against the same construction on CPU and the CUDA-library group carrying a `skipif` that mirrors the `#if` guard; the two empty-structure densifications are xfailed on MUSA, where densifying an empty structure hands FlagGems' MThreads `index_add_` the zero-length index it divides by; no MUSA hardware was available here, so that job is the verification of the mark. `ruff check` -- "All checks passed!"; `ruff format --check` -- 303 files already formatted; both re-run by path on the new test file -- "All checks passed!" / "1 file already formatted" (ruff 0.15.12). **Evidence gaps:** the compressed sparse surface is not a conf entry, so `flaggems_overload_survey.py` cannot enumerate it through `active_routes()` and no survey row can measure this change; the 459-route DCU FlagGems row above is unchanged by it and is **not re-measured** here -- the rerun taken to confirm that ran the full route list on a single profile, 183 `strict_support` of 395 tested, and is recorded in the section above rather than as a revision of that row's full-matrix totals; the block layouts are asserted only through the two block conversion routes this tree can reach, because `csr.to_sparse_bsr(...)` faults in the wheel itself; and no non-DCU accelerator was exercised by hand. |
 | 2026-09-23 | MTT S5000 (8 devices) | MUSA FlagGems RNG overloads (12) | Fixed `_patch_flaggems_philox()`, which read each candidate module with `getattr(mod, "philox_backend_seed_offset", None)`. A `getattr` default suppresses only `AttributeError`, and a transformers lazy fast-image-processor module in `sys.modules` raises `ModuleNotFoundError: No module named 'torchvision'` on any name it does not define, so the sweep aborted before the rebinding that follows it — including the canonical `random_utils.philox_backend_seed_offset = _patched` — and the surrounding `except Exception: pass` hid it. The bridge therefore installed only in processes that imported torch_fl before transformers; `tests/manual/transformers_hf_tests.py` sets `TORCH_DEVICE_BACKEND_AUTOLOAD=0` and has its device spec import torch_fl last, so its pytest children held the unpatched function, `randn` raised `ValueError: too many values to unpack (expected 2)`, and transformers' `@lru_cache`d fp16 probe cached `False` at collection time. The sweep now binds the canonical module first, reads each namespace from `__dict__`, and isolates every step. **No route changed**: the twelve flaggems-routed RNG overloads stay `flaggems  # musa` and `torch_fl/configs/backends_musa.conf` is untouched. Non-MUSA platforms are inert here and are **not revalidated**. | Reproducer in the harness's import order (`TORCH_DEVICE_BACKEND_AUTOLOAD=0`; `import torch`, then `transformers`, then `torch_fl`), same wheel and same box: bridge `philox_backend_seed_offset`, `is_torch_fp16_available_on_device('flagos')` `False`, `torch.randn(2, 3, device='flagos')` `ValueError: too many values to unpack (expected 2)` **before**, and `_patched` / `True` / `OK` **after**; 210 `sys.modules` entries raise on that attribute in that order, the first being `transformers.models.aria.image_processing_aria_fast`. `transformers_hf_tests.py --model qwen3 --offline --pytest-arg=-k --pytest-arg=test_eager_matches_sdpa_inference`: **PASS=16 SKIP_OTHER=9** before vs **FAIL=8 PASS=16 SKIP_OTHER=1** after (25 collected both times); the eight failures are `test_eager_matches_sdpa_inference_0{0..7}_fp16_*`, an open fp16 defect this change does not fix. `flaggems_overload_survey.py` over the 12 RNG overloads: **registered 12, tested 11, STRICT 7, BASIC_ONLY 1, FAILED 3, UNTESTED 1**, with per-profile statuses identical to a run that restored the pre-fix helper (md5 `79e7c4e3`). `tests/unit/test_musa_rng_bridge.py`: 4 passed after, 1 failed / 3 passed before. |

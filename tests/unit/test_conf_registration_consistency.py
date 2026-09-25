@@ -307,7 +307,7 @@ def test_conf_route_counts_are_stable():
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 459, "cuda": 1578},
-        "gcu": {"none": 1606, "gcu": 178, "flaggems": 253},
+        "gcu": {"none": 1605, "gcu": 179, "flaggems": 253},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
         "musa": {"flaggems": 467, "none": 1518, "musa": 52},
         "ppu": {"flaggems": 591, "cuda": 1446},
