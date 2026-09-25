@@ -821,6 +821,13 @@ def _wrap_ops(ops: List[str], indent: str) -> List[str]:
 
 
 def render_test(routes: List[Route]) -> str:
+    # The `cuda` mark is what makes this file selectable: the routes it covers
+    # are SM90 kernels, and no manifest's -m expression admits a file that
+    # carries only a skip condition. A test file with no selecting marker is an
+    # orphan by the reachability check in tests/unit/test_integration_workdir.py
+    # (issue #409), which is why the mark and the availability gate are both
+    # here -- the mark selects the file on the CUDA platform, the gate skips it
+    # on a CUDA host that has no TileOPs or no SM90 part.
     lines = [
         LICENSE,
         "",
@@ -839,10 +846,13 @@ def render_test(routes: List[Route]) -> str:
         "from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS",
         "from torch_fl.tileops.generated.shims import SHIM_NAMES",
         "",
-        "pytestmark = pytest.mark.skipif(",
-        "    not tileops_runtime.is_tileops_available(),",
-        '    reason="TileOPs unavailable or host is not SM90",',
-        ")",
+        "pytestmark = [",
+        "    pytest.mark.cuda,",
+        "    pytest.mark.skipif(",
+        "        not tileops_runtime.is_tileops_available(),",
+        '        reason="TileOPs unavailable or host is not SM90",',
+        "    ),",
+        "]",
         "",
         "",
         "def _ref(overload):",

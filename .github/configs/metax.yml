@@ -21,9 +21,17 @@ ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-d
 runner_labels:
   - mx-8g-cicd-pytorch
 
-container_volumes: []
+# Issue #409: the two checkpoint-dependent trace/profiler files at the end of
+# this manifest need the Qwen3 checkpoint, and this job had no model mount to run
+# them against. cuda.yml mounts the same host path for the same files. The path
+# is a property of the runner host, not of this repository, so it is unverified
+# from outside that host; the availability step below fails loudly instead of
+# letting Docker hand the job an empty directory.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 container_options: >-
   --privileged
@@ -116,6 +124,20 @@ integration_tests:
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
 
+  # Issue #409: two top-level contract files that no other step selects -- the
+  # step above filters the whole directory on `multi_device`, which neither
+  # carries, and every other sweep is scoped to ops/. Both are portable:
+  # clone()/copy_ honouring the memory format, and the current device a boxing
+  # op has to put back, asserted on flagos tensors alone. Named explicitly, the
+  # same shape test_factory_ops.py is wired with.
+  #
+  # Measured on the eight-device C550 host on 2026-09-24: 13 passed in 29.24s.
+  - name: Run portable dispatch contracts
+    command: >-
+      python -m pytest tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_nonzero_device_dtype_cast.py
+      -v -s --tb=short
+
   # Marker selection, not a file allowlist: the generic per-op dispatch files
   # carry @pytest.mark.main_ops, and the platform gate (tests/integration/ops/
   # conftest.py) already skips the cuda/metax/ascend/dcu-marked cases for a MetaX
@@ -196,6 +218,22 @@ integration_tests:
       tests/integration/test_factory_ops.py
       -v -s --tb=short
 
+  # Issue #409: the broad top-level operator smoke suite, which no other step
+  # runs. It was excluded because 2 of its 58 cases failed on a 910 at
+  # rtol/atol=1e-4 on a float32 mm -- tighter than a vendor cube unit's own
+  # accumulation, since Ascend calls aclnnMm with cube_math_type=1
+  # (ALLOW_FP32_DOWN_PRECISION). Both mm assertions now use the 1e-3 that
+  # ops/test_mm_dispatch.py::test_mm_matches_cuda_ref already uses for the same
+  # shape and comparison. Named explicitly, like test_factory_ops.py above.
+  #
+  # Measured on the eight-device C550 host on 2026-09-24: 58 passed in 3.80s.
+  # This host boxes to the CUDA kernels, so it cannot reproduce the hf32 margin
+  # the tolerance above was widened for.
+  - name: Run general operator contract tests
+    command: >-
+      python -m pytest tests/integration/test_ops.py
+      -v -s --tb=short
+
   # Measured on the eight-device C550 host on 2026-09-15: 27 passed.
   - name: Unified AMP contract
     command: >-
@@ -222,3 +260,36 @@ integration_tests:
   # (the same image gap set_env_musa.sh documents).
   - name: Run torch.compile tests
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
+
+  # Issue #409: two checkpoint-dependent trace/profiler files that no other step
+  # selects. The availability check is here rather than first because the mount
+  # path belongs to the runner host and has not been confirmed from outside it:
+  # a wrong path would otherwise fail the whole job before any other group
+  # reported. Placed last so a missing mount costs one step, not fifteen.
+  #
+  # A file, not the directory: Docker creates an empty directory for a host path
+  # that does not exist, so `test -d` would pass and the failure would surface
+  # deep inside transformers instead.
+  - name: Check model availability
+    command: test -f "$MODEL_PATH/config.json"
+
+  # Measured on the eight-device C550 host on 2026-09-24 against the same Qwen3
+  # checkpoint: 3 passed in 20.55s, repeated 25.20s.
+  #
+  # test_profiler_qwen3_infer.py enforces real kernel names with non-zero
+  # durations in the chrome trace -- the same property the Unified profiler
+  # contract group cannot check here, since its table skips all 12 of its cases
+  # on MetaX. test_fallback_trace.py asserts only that generation produced
+  # tokens; its value is the per-op CPU-fallback report it prints.
+  #
+  # tests/integration/test_fallback_trace_train.py is deliberately NOT here. It
+  # fails on this platform: backends_metax.conf routes _log_softmax_backward_data
+  # to FlagGems (line 419), and that kernel returns nan for the LM-head shape --
+  # intermittently, 1 of 6 trials measured, which is what costs every later
+  # loss its finiteness. It stays in the unit test's _KNOWN_UNREACHABLE table
+  # with that reason recorded rather than as a red step here (issue #409).
+  - name: Run model trace and profiler tests
+    command: >-
+      python -m pytest tests/integration/test_fallback_trace.py
+      tests/integration/test_profiler_qwen3_infer.py
+      --model "$MODEL_PATH" -v -s --tb=short

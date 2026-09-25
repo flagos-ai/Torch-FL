@@ -101,6 +101,14 @@ class TestArithmetic:
 
 
 class TestMatrixOps:
+    # Issue #409: the two mm comparisons below are the only ones in this file
+    # that are checked at 1e-3 rather than 1e-4. A vendor cube unit may run the
+    # fp32 GEMM with a down-precision math mode -- Ascend's aclnnMm is called
+    # with cube_math_type=1 (ALLOW_FP32_DOWN_PRECISION, hf32), which the repo
+    # records as ~2.5e-3 against CPU -- so 1e-4 flagged the platform's chosen
+    # accumulation as a torch_fl defect. 1e-3 is the tolerance the
+    # marker-selected ops/test_mm_dispatch.py::test_mm_matches_cuda_ref already
+    # uses for this exact shape and comparison.
     def test_mm(self, device):
         torch.manual_seed(0)
         a = torch.randn(64, 128, device=device)
@@ -108,7 +116,7 @@ class TestMatrixOps:
         out = torch.mm(a, b)
         assert out.shape == (64, 32)
         assert torch.allclose(
-            out.cpu(), torch.mm(a.cpu(), b.cpu()), rtol=1e-4, atol=1e-4
+            out.cpu(), torch.mm(a.cpu(), b.cpu()), rtol=1e-3, atol=1e-3
         )
 
     def test_mm_out(self, device):
@@ -118,7 +126,7 @@ class TestMatrixOps:
         out = torch.empty(32, 8, device=device)
         torch.mm(a, b, out=out)
         assert torch.allclose(
-            out.cpu(), torch.mm(a.cpu(), b.cpu()), rtol=1e-4, atol=1e-4
+            out.cpu(), torch.mm(a.cpu(), b.cpu()), rtol=1e-3, atol=1e-3
         )
 
     def test_matmul(self, device):

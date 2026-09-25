@@ -604,52 +604,24 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
     "tests/integration/test_apex_compat.py": (
         "needs NVIDIA apex and its amp_C extension; no platform image installs them"
     ),
-    "tests/integration/test_clone_dispatch_case.py": (
-        "runs clean on a 910 (3 passed) and is portable, so it should be wired "
-        "into the manifests in a follow-up"
-    ),
     "tests/integration/test_dtype_coverage.py": (
         "1 of 31 fails on a 910: a bool neg routed to FlagGems fails BiShengIR "
         "compilation; wire it in once that is fixed"
     ),
-    "tests/integration/test_fallback_trace.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
-    ),
     "tests/integration/test_fallback_trace_train.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
-    ),
-    "tests/integration/test_nonzero_device_dtype_cast.py": (
-        "passes on a 910; should be wired into the manifests in a follow-up"
-    ),
-    "tests/integration/test_ops.py": (
-        "2 of 58 fail on a 910 on an rtol/atol of 1e-4 for a float32 mm with "
-        "K=128, which is tighter than the accumulation error; the file is "
-        "otherwise superseded by the marker-selected ops/ suites"
-    ),
-    "tests/integration/test_profiler_qwen3_infer.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
-    ),
-    "tests/integration/ops/test_dcu_flaggems_sdpa.py": (
-        "carries only the dcu mark, and both DCU sweeps require main_ops or flaggems"
+        "runs 10 fp32 training steps and asserts every loss is finite, but on "
+        "MetaX backends_metax.conf routes _log_softmax_backward_data to "
+        "FlagGems and that kernel returns nan intermittently for the LM-head "
+        "shape (2046x151936: 1 of 6 trials, measured on a C550 on 2026-09-24); "
+        "wire it in once the routed kernel is fixed"
     ),
     "tests/integration/ops/test_flaggems_cpp_dispatch.py": (
         "carries only flaggems_cpp, and every set_env_*.sh builds FlagGems "
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0)"
     ),
-    "tests/integration/ops/test_full_cuda_coverage.py": (
-        "carries only the cuda mark, and both CUDA sweeps require main_ops or flaggems"
-    ),
-    "tests/integration/ops/test_gcu_sdpa_mask.py": (
-        "carries only the gcu mark, and both GCU sweeps require anyplatform, "
-        "main_ops or flaggems"
-    ),
     "tests/integration/ops/test_musa_flaggems.py": (
         "documented in musa.yml as held back until the image ships the vendor "
         "triton stack; added now it would record a pass that measured nothing"
-    ),
-    "tests/integration/ops/test_tileops_generated.py": (
-        "auto-generated with no marker at all, so no -m filter can select it; "
-        "the fix is in scripts/codegen/codegen_tileops.py::render_test"
     ),
 }
 

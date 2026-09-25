@@ -93,6 +93,19 @@ integration_tests:
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
 
+  # Issue #409: two top-level contract files that no other step selects -- the
+  # step above filters the whole directory on `multi_device`, which neither
+  # carries, and every other sweep is scoped to ops/. Both are portable:
+  # clone()/copy_ honouring the memory format, and the current device a boxing
+  # op has to put back, asserted on flagos tensors alone. Named explicitly, the
+  # same shape test_factory_ops.py is wired with. Both were recorded passing on
+  # a 910 when #409 was filed.
+  - name: Run portable dispatch contracts
+    command: >-
+      python -m pytest tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_nonzero_device_dtype_cast.py
+      -v -s --tb=short
+
   # Exercise the tests authored for the pure ACLNN backend (marked `ascend`),
   # kept separate from the RNG dispatch suite which carries the `main_ops`
   # marker and is driven by its own step below.
@@ -116,6 +129,19 @@ integration_tests:
 
   - name: Run general factory ops
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+
+  # Issue #409: the broad top-level operator smoke suite, which no other step
+  # runs. It was excluded because 2 of its 58 cases failed on a 910 at
+  # rtol/atol=1e-4 on a float32 mm -- tighter than this platform's own
+  # accumulation, since aclnnMm is called with cube_math_type=1
+  # (ALLOW_FP32_DOWN_PRECISION, hf32; ~2.5e-3 against CPU, recorded in
+  # scripts/codegen/codegen_ascend.py). Both mm assertions now use the 1e-3 that
+  # ops/test_mm_dispatch.py::test_mm_matches_cuda_ref already uses for the same
+  # shape and comparison. Named explicitly, like test_factory_ops.py above.
+  - name: Run general operator contract tests
+    command: >-
+      python -m pytest tests/integration/test_ops.py
+      -v -s --tb=short
 
   - name: Unified AMP contract
     command: >-

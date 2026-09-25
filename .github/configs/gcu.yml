@@ -91,6 +91,27 @@ integration_tests:
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
 
+  # Issue #409: two top-level contract files that no other step selects -- the
+  # step above filters the whole directory on `multi_device`, which neither
+  # carries, and every other sweep is scoped to ops/. Both are portable:
+  # clone()/copy_ honouring the memory format, and the current device a boxing
+  # op has to put back, asserted on flagos tensors alone. Named explicitly, the
+  # same shape test_factory_ops.py is wired with.
+  - name: Run portable dispatch contracts
+    command: >-
+      python -m pytest tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_nonzero_device_dtype_cast.py
+      -v -s --tb=short
+
+  # Issue #409: the file whose only mark is `gcu` is selected by no other step --
+  # both sweeps below require `anyplatform`, `main_ops` or `flaggems`, and it
+  # asserts the vendor topsaten fused SDPA lane rather than a smoke-subset
+  # member. Same shape as the `-m "ascend"` step in ascend.yml.
+  - name: Run GCU-only operator tests
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "gcu" -v -s --tb=short
+
   # Marker selection, not a file allowlist: the earlier nine-file list was a
   # bring-up scaffold, and pinning an allowlist hides every operator added
   # after it. The FlagGems Python routes are exercised by their own group below,
@@ -121,6 +142,17 @@ integration_tests:
 
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+  # Issue #409: the broad top-level operator smoke suite, which no other step
+  # runs. It was excluded because 2 of its 58 cases failed on a 910 at
+  # rtol/atol=1e-4 on a float32 mm -- tighter than a vendor cube unit's own
+  # accumulation, since Ascend calls aclnnMm with cube_math_type=1
+  # (ALLOW_FP32_DOWN_PRECISION). Both mm assertions now use the 1e-3 that
+  # ops/test_mm_dispatch.py::test_mm_matches_cuda_ref already uses for the same
+  # shape and comparison. Named explicitly, like test_factory_ops.py above.
+  - name: Run general operator contract tests
+    command: >-
+      python -m pytest tests/integration/test_ops.py
+      -v -s --tb=short
 
   # #160 measured the full AMP suite on S60 (25 passed): both autocast dtypes,
   # native unscale routes, `convolution_overrideable`, and the GradScaler

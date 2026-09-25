@@ -108,6 +108,31 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
+  # Issue #409: two top-level contract files that no other step selects -- the
+  # step above filters the whole directory on `multi_device`, which neither
+  # carries, and every other sweep is scoped to ops/. Both are portable:
+  # clone()/copy_ honouring the memory format, and the current device a boxing
+  # op has to put back, asserted on flagos tensors alone. Named explicitly, the
+  # same shape test_factory_ops.py is wired with.
+  - name: Run portable dispatch contracts
+    command: >-
+      python -m pytest tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_nonzero_device_dtype_cast.py
+      -v -s --tb=short
+  # Issue #409: the files whose only mark is `cuda` are selected by no other
+  # step -- both sweeps below require `main_ops`, and these files assert CUDA's
+  # own routing rather than a member of the smoke subset. Same shape as the
+  # `-m "ascend"` step in ascend.yml, plus `and not main_ops`: unlike every
+  # other platform, 13 cases here carry both marks and would run twice in this
+  # one job. Measured: `cuda and main_ops` selects 13 cases across 13 files and
+  # none of them is FlagGems-marked, so the vendor sweep below already measures
+  # every one; `dcu`/`gcu`/`ascend`/`metax`/`ppu` have no such overlap and keep
+  # the plain form. `cuda` is also the platform an unidentifiable wheel
+  # defaults to, so this step is where the platform's exclusive cases run.
+  - name: Run CUDA-only operator tests
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "cuda and not main_ops" -v -s --tb=short
   # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
   # cases are measured by the group below, not here (no switch exists any more
   # to skip them -- see ops/conftest.py).
@@ -128,6 +153,17 @@ integration_tests:
       -m "main_ops and not flaggems" -v -s --tb=short
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+  # Issue #409: the broad top-level operator smoke suite, which no other step
+  # runs. It was excluded because 2 of its 58 cases failed on a 910 at
+  # rtol/atol=1e-4 on a float32 mm -- tighter than a vendor cube unit's own
+  # accumulation, since Ascend calls aclnnMm with cube_math_type=1
+  # (ALLOW_FP32_DOWN_PRECISION). Both mm assertions now use the 1e-3 that
+  # ops/test_mm_dispatch.py::test_mm_matches_cuda_ref already uses for the same
+  # shape and comparison. Named explicitly, like test_factory_ops.py above.
+  - name: Run general operator contract tests
+    command: >-
+      python -m pytest tests/integration/test_ops.py
+      -v -s --tb=short
   - name: Unified AMP contract
     command: >-
       python -m pytest tests/integration/test_amp_contract.py
@@ -162,4 +198,28 @@ integration_tests:
   - name: Run training tests
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py
+      --model "$MODEL_PATH" -v -s --tb=short
+
+  # Issue #409: two checkpoint-dependent trace/profiler files that no other step
+  # selects. Unlike the portable contract files above, these cannot be named on
+  # a platform without a model mount at all -- hence $MODEL_PATH rather than a
+  # marker, the same shape the two steps above use.
+  #
+  # Measured on the eight-device C550 host on 2026-09-24 against the same Qwen3
+  # checkpoint: 3 passed in 20.55s, repeated 25.20s. CUDA was not measured --
+  # see the evidence note in the PR.
+  #
+  # test_profiler_qwen3_infer.py enforces real kernel names with non-zero
+  # durations in the chrome trace. test_fallback_trace.py asserts only that
+  # generation produced tokens; its value is the per-op CPU-fallback report it
+  # prints, not a bound on how many ops reach fallback.
+  #
+  # tests/integration/test_fallback_trace_train.py is deliberately NOT here: its
+  # fp32 step makes the LM-head log-softmax backward part of the graph, and that
+  # kernel is intermittently nan on MetaX. It stays in the unit test's
+  # _KNOWN_UNREACHABLE table with that reason recorded (issue #409).
+  - name: Run model trace and profiler tests
+    command: >-
+      python -m pytest tests/integration/test_fallback_trace.py
+      tests/integration/test_profiler_qwen3_infer.py
       --model "$MODEL_PATH" -v -s --tb=short

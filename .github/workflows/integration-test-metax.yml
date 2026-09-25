@@ -46,6 +46,12 @@ jobs:
     timeout-minutes: ${{ inputs['timeout-minutes'] }}
     container:
       image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-dev
+      # Mirrors container_volumes in .github/configs/metax.yml, the same way
+      # integration-test-cuda.yml mirrors its own. Issue #409: the checkpoint-
+      # dependent trace/profiler group at the end of that manifest needs the
+      # Qwen3 checkpoint, which this job had no mount for.
+      volumes:
+        - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
       options: >-
         --privileged
         --ipc=host
