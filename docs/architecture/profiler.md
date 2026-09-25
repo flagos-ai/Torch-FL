@@ -87,7 +87,7 @@ time to the wrong operator.
 ### 1.2 NVIDIA implementation — `cupti_device_tracer.cc`
 
 Every CUPTI/MCPTI type, callback-ID table, and activity-record layout mirror appears only in
-this file:
+this file and its `cupti_shim.h` (which nothing else includes):
 
 - `CuptiTracerInit` (file-level static) — arms CUPTI at module load; see §3.1
 - `bufferRequested` / `bufferCompleted` — CUPTI activity buffer callbacks
@@ -98,6 +98,21 @@ this file:
   runtime call) cannot be truncated by a flat record count
 - `cuptiActivityPushExternalCorrelationId` / `Pop...` — correlation push/pop
 - Kernel name demangling (`abi::__cxa_demangle`)
+- The runtime callback-id → API name lookup, which is **not** written by hand.
+  `csrc/profiler/cupti_shim.h` includes
+  `csrc/profiler/generated/cupti_runtime_cbid_names.inc`, a table of 523 entries
+  generated from CUPTI's own `cupti_runtime_cbid.h` by
+  `scripts/codegen/gen_cupti_runtime_cbid.py`. It used to be a switch holding ~20
+  ids with `default: return "cudaRuntime"`, so on CUDA 180 of 203 runtime events in
+  a plain matmul workload — and on PPU 72 of 117 — were exported under a single
+  indistinguishable label while the raw `cbid` sat unused in the metadata. The ids
+  are assigned by the vendor header and are append-only, so the table is derived
+  rather than maintained: `--check` re-renders the `.inc` from the committed `.txt`
+  and is run by the Codegen checks job, while `--refresh` re-parses the header and is
+  a reviewed action. An id the table does not name keeps the generic label rather
+  than a guessed one — the numeric `cbid` still identifies it — and MetaX is
+  unaffected: MCPTI ids are a different namespace and resolve through
+  `mcptiActivityGetApiName` (§6.2)
 - The 13 kernel metadata fields, matching torch-cuda exactly:
   `grid`, `block`, `registers per thread`, `shared memory`, `warps per SM`,
   `blocks per SM`, `est. achieved occupancy %`, `queued`, `context`, `stream`,
@@ -459,6 +474,20 @@ The shared cross-backend profiler contract (`tests/integration/test_profiler_con
 - `test_profiler_memset_events` stays disabled for Ascend regardless of preload. The direct `ctypes` probe above proves the CANN interception path itself works: `aclrtMemset`/`aclrtMemsetAsync` produce real `gpu_memset` records when called explicitly under preload. But nothing reachable from the shared workload calls that allocator path. `torch.zeros()` -- the only zeroing op the workload exercises -- routes to the `aclnnInplaceZero` kernel (`csrc/aten/backends/ascend/generated/ascend_kernels.cc`), not to the allocator's `aclrtMemset`/`aclrtMemsetAsync` calls in `csrc/runtime/accelerator/ascend/memory.cc`. Switching it only to make a profiler record appear would regress measured 910 latency from 12.7us to 133us at 1 MiB and from 17.4us to 9080us at 64 MiB (`aclrtMemsetAsync` is slower still). The high-performance kernel routing is therefore intentional, and the absent `gpu_memset` record is a correct-by-design capability difference.
 
 Every CI backend runs this contract with the same command. `.github/configs/ascend.yml` carries no shell prefix; its structured `environment` field scopes the prepared preload to this process, and `.github/scripts/run_integration_tests.py` applies it without changing the command string.
+
+`test_profiler_runtime_names_are_not_all_fallback` is the one assertion in that contract
+whose threshold is a *rate*, so its evidence is stated per platform.
+`profiler_support.MAX_GENERIC_RUNTIME_FRACTION` caps the share of runtime events allowed
+to carry a tracer's placeholder name (the labels are listed in
+`profiler_support.GENERIC_RUNTIME_NAMES`). The bound was added in #186, where the
+NVIDIA table was replaced by the generated one above: measured at 180 of 203 (89%)
+degraded on CUDA and 72 of 117 (62%) on PPU before the change, and 0 of 117 on PPU after
+it. It has **not** been revalidated on MUSA or DCU, whose runtimes resolve names through
+`muptiGetCallbackName` and `roctracer_op_string` respectively rather than through a table
+in this repository; a platform whose vendor resolver regressed would now fail here with
+the unresolved `cbid` histogram in the message. MetaX never reaches the assertion (the
+shared fixture skips trace export on that platform), Ascend is skipped because it
+declares no runtime activity, and GCU does not run this file at all.
 
 `import torch_fl` deliberately does not re-exec the process to install the preload. Doing so would disturb file descriptors, multiprocessing, `torchrun`, and debuggers, and exporting the interposer job-wide demonstrably destabilizes unrelated CANN operator processes. Per-process integration environment data is the safe boundary at which to express this startup requirement.
 

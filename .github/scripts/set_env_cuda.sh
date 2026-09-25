@@ -28,51 +28,38 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
 # shellcheck source=.github/version-pins.env
 source "${REPO_ROOT}/.github/version-pins.env"
+
+# Shared set_env helpers (pip_retry, FlagGems install, path stripping).
+# shellcheck source=.github/scripts/lib/set_env_common.sh
+source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
+
+# CUDA's pip calls target several interpreters (PIP_RETRY_PYTHON at each call)
+# and reuse the build cache rather than redownloading the ~2 GB wheel set on
+# every retry.
+export PIP_RETRY_TIMEOUT=600
+export PIP_RETRY_NO_CACHE=0
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
-# FlagTree provides Triton support. The source-free 0.6.2a2 wheel pairs with
+# FlagTree provides Triton support. The source-free 0.7.0 RC wheel pairs with
 # Triton 3.6 and is published as cp312 only, so the isolated test environment
 # below has to run on Python 3.12. The accelerator interpreter resolved further
-# down must be the same interpreter: the FlagGems C++ extension it compiles is
-# imported by the test environment.
+# down must be the same interpreter for the staged accelerator PyTorch assets.
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_cuda}"
 FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-$FLAGTREE_PYTHON_VERSION_DEFAULT}"
 FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-$FLAGTREE_MIN_GLIBC_DEFAULT}"
-# FlagGems currently uses master as its default branch; the repository has no
-# main branch. Keep this overrideable so a tested revision can be pinned by CI.
-FLAGGEMS_REPOSITORY="${TORCH_FL_FLAGGEMS_REPOSITORY:-$FLAGGEMS_REPO_DEFAULT}"
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-# Ninja parallelism for the in-job FlagGems C++ build. The CUDA translation
-# units are the bulk of it, so it is worth leaving headroom on a shared runner.
-FLAGGEMS_CPP_JOBS="${TORCH_FL_FLAGGEMS_CPP_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-nvidia/simple}"
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_cuda}"
 
 # Where the accelerator-side PyTorch comes from. A FlagOS-built image already
 # carries one (`image`); the stock NVIDIA CUDA image does not, so `bootstrap`
-# installs the matching CUDA build into a job-local interpreter and the pieces
-# derived from it — the staged CUDA assets and the FlagGems C++ operators — are
-# produced in the job instead of being copied out of the image. `auto` picks
+# installs the matching CUDA build into a job-local interpreter. The job stages
+# CUDA assets from it; the incompatible published native FlagGems wheel is not
+# installed on this bootstrap path. `auto` picks
 # whichever applies.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
 VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
-
-pip_retry() {
-  local python_exe="$1"
-  shift
-  local attempt=1
-  while true; do
-    if "$python_exe" -m pip install --retries 10 --timeout 600 "$@"; then
-      return 0
-    fi
-    if (( attempt >= 5 )); then
-      echo "::error::pip install failed after $attempt attempts: $*"
-      return 1
-    fi
-    echo "::warning::pip install attempt $attempt failed; retrying: $*"
-    attempt=$((attempt + 1))
-    sleep 10
-  done
-}
 
 find_image_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -83,7 +70,14 @@ find_image_vendor_python() {
     candidate="$(command -v python3 2>/dev/null || true)"
   fi
   if [[ -n "$candidate" && -x "$candidate" ]] \
-    && "$candidate" -c "import torch" >/dev/null 2>&1; then
+    && "$candidate" - "$CPU_TORCH_VERSION" <<'PY' >/dev/null 2>&1
+import sys
+import torch
+
+assert torch.__version__.split("+", 1)[0] == sys.argv[1]
+assert torch.version.cuda == "13.0"
+PY
+  then
     printf '%s' "$candidate"
   fi
 }
@@ -122,17 +116,13 @@ python_has_headers() {
 }
 
 # A stock NVIDIA CUDA image is a compiler image rather than an application
-# runtime: it ships nvcc and the CUDA libraries but neither Python nor git,
-# while everything on the bootstrap path below is cloned with git and installed
-# with pip. Only that path needs this — a FlagOS-built image already carries
-# both, and calls this function nowhere.
+# runtime: it ships nvcc and the CUDA libraries but may lack Python. Only the
+# bootstrap path needs the interpreter; the FlagOS images carry it already.
 ensure_system_prerequisites() {
   local python_exe="python$FLAGTREE_PYTHON_VERSION"
   local python_path
   local attempt
   local -a packages=()
-
-  command -v git >/dev/null 2>&1 || packages+=(git)
 
   python_path="$(command -v "$python_exe" 2>/dev/null || true)"
   if [[ -z "$python_path" ]]; then
@@ -173,10 +163,8 @@ ensure_system_prerequisites() {
 # exec). Progress therefore stays visible in the job log and cannot reach the
 # variable.
 bootstrap_vendor_python() {
-  # The FlagGems C++ operators are compiled by this interpreter and imported by
-  # the test environment, so both have to run the same Python minor version or
-  # the extension module ABI will not match: resolve it exactly the way the test
-  # environment does.
+  # The accelerator PyTorch assets are consumed by the same Python minor
+  # version as the isolated test environment.
   local base_python="${TORCH_FL_VENDOR_PYTHON:-}"
   if [[ -n "$base_python" && "$base_python" != */* ]]; then
     base_python="$(command -v "$base_python" 2>/dev/null || true)"
@@ -200,7 +188,7 @@ bootstrap_vendor_python() {
   "$base_python" -m venv "$vendor_venv"
   local vendor_python="$vendor_venv/bin/python"
   "$vendor_python" -m pip install --upgrade pip
-  pip_retry "$vendor_python" --index-url "$VENDOR_TORCH_INDEX_URL" \
+  PIP_RETRY_PYTHON="$vendor_python" pip_retry --index-url "$VENDOR_TORCH_INDEX_URL" \
     "torch==$CPU_TORCH_VERSION"
   VENDOR_PYTHON="$vendor_python"
 }
@@ -290,13 +278,14 @@ echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
 echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
 echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
-# A prebuilt image carries the FlagGems C++ operators next to flag_gems. A
-# bootstrapped environment has no such copy: the operators are built from the
-# same FlagGems revision this job installs as a Python package, once that
-# revision is known further down.
+# A matching prebuilt image may carry the FlagGems C++ operators. The only
+# published CUDA native wheel has a libtriton_jit.so built against a different
+# PyTorch C++ ABI and cannot be loaded with this job's torch 2.10.0, so the
+# bootstrapped path uses the Python FlagGems wheel without the C++ route.
 VENDOR_FLAGGEMS_DIR=""
 VENDOR_FLAGGEMS_LIB=""
 if [[ "$VENDOR_SOURCE" == "image" ]]; then
+  export FLAGOS_BUILD_FLAGGEMS_CPP=1
   VENDOR_FLAGGEMS_DIR="$("$VENDOR_PYTHON" - <<'PY'
 import importlib.util
 from pathlib import Path
@@ -319,6 +308,8 @@ PY
     echo "::error::FlagGems liboperators.so was not found under $VENDOR_FLAGGEMS_LIB"
     exit 1
   fi
+else
+  export FLAGOS_BUILD_FLAGGEMS_CPP=0
 fi
 
 # Copy only accelerator-side PyTorch libraries. libc10.so, libtorch.so,
@@ -446,7 +437,7 @@ if [[ "$(printf '%s\n%s\n' "$FLAGTREE_MIN_GLIBC" "$IMAGE_GLIBC" | sort -V | head
 fi
 echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
-pip_retry "$VENV_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
   "flagtree===${FLAGTREE_VERSION}"
 
 # Keep only vendor packages that are not provided by FlagTree. In particular,
@@ -454,16 +445,35 @@ pip_retry "$VENV_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
 # source-free FlagTree installation with a potentially incompatible Triton.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 FLAGCX_COPIED=0
-for package in flagcx; do
-  if [[ -d "$VENDOR_SITE/$package" ]]; then
-    cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
-    FLAGCX_COPIED=1
-  fi
-  for metadata in "$VENDOR_SITE"/"$package"-*.dist-info; do
-    [[ -e "$metadata" ]] || continue
-    cp -a "$metadata" "$VENV_SITE/"
+export FLAGCX_TORCH_BACKEND="${FLAGCX_TORCH_BACKEND:-vendor}"
+if [[ "${CUDA_VERSION:-}" == 13.3.* ]]; then
+  # Only a CUDA 13.3 toolkit can load this published native wheel. Current CI
+  # still runs 13.0; the matching image remains gated on its host driver.
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: \
+    --index-url "$FLAGGEMS_INDEX_URL" "flagcx===$FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+  # The wheel build runs in a separate step without an importable torch_fl;
+  # keep FlagCX auto-loading off across steps and import it on demand for comm.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+  FLAGCX_COPIED=1
+else
+  # FlagTree 0.7.0rc2 probes its TLE distributed runtime while FlagGems is
+  # imported. That probe can find a libflagcx.so even when no flagcx Python
+  # package was installed here. The library it finds needs
+  # libcudart.so.12, whereas this job uses CUDA 13.0; disable only TLE's
+  # optional distributed loader until a toolkit-matched FlagCX wheel is used.
+  export USE_TLE_DIST=0
+  for package in flagcx; do
+    if [[ -d "$VENDOR_SITE/$package" ]]; then
+      cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
+      FLAGCX_COPIED=1
+    fi
+    for metadata in "$VENDOR_SITE"/"$package"-*.dist-info; do
+      [[ -e "$metadata" ]] || continue
+      cp -a "$metadata" "$VENV_SITE/"
+    done
   done
-done
+fi
 # FlagCX backs the distributed paths only (`torch_fl.comm` imports it lazily),
 # and no test in the CUDA manifest builds a process group. A bootstrapped
 # environment therefore runs without it instead of paying for a source build;
@@ -472,99 +482,13 @@ if [[ "$FLAGCX_COPIED" == "0" ]]; then
   echo "::notice::flagcx is not installed in this environment; the distributed backend is unavailable"
 fi
 
-# Install the current FlagGems source after FlagTree. FlagGems has no `main`
-# branch at present; `master` is its default branch and can be overridden with
-# TORCH_FL_FLAGGEMS_REVISION for reproducible CI experiments. --no-deps keeps
-# the CPU-only torch ABI intact; install its non-torch dependencies explicitly.
-pip_retry "$VENV_PYTHON" packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
-FLAGGEMS_SOURCE_ROOT="${RUNNER_TEMP:-/tmp}/flag-gems-${CI_STAGE}"
-rm -rf "$FLAGGEMS_SOURCE_ROOT"
-git clone --depth 1 --branch master \
-  "$FLAGGEMS_REPOSITORY" "$FLAGGEMS_SOURCE_ROOT"
-if [[ "$FLAGGEMS_REVISION" != "master" ]]; then
-  # A raw SHA cannot be passed to `git clone --branch`; fetch it explicitly.
-  # (Only the temporary pin above takes this path -- `master` stays a plain
-  # shallow clone.)
-  git -C "$FLAGGEMS_SOURCE_ROOT" fetch --depth 1 origin "$FLAGGEMS_REVISION"
-  git -C "$FLAGGEMS_SOURCE_ROOT" checkout --detach "$FLAGGEMS_REVISION"
-fi
-FLAGGEMS_COMMIT="$(git -C "$FLAGGEMS_SOURCE_ROOT" rev-parse HEAD)"
-echo "FlagGems source: ${FLAGGEMS_REPOSITORY}@${FLAGGEMS_REVISION} (${FLAGGEMS_COMMIT})"
-pip_retry "$VENV_PYTHON" --no-deps --no-build-isolation "$FLAGGEMS_SOURCE_ROOT"
-
-# The FlagGems C++ operators are the native half of FlagGems support: a prebuilt
-# FlagOS image carries them next to flag_gems, a bootstrapped environment builds
-# them from the revision just installed. That revision matters — the native
-# package drops its modules into the flag_gems namespace — so this runs after
-# the Python package above, not before it.
-if [[ "$VENDOR_SOURCE" == "bootstrap" ]]; then
-  echo "Building the FlagGems C++ operators from $FLAGGEMS_COMMIT"
-  # The operators are compiled against c10/cuda, and only a CUDA-enabled torch
-  # ships those headers: the CUDA wheel generates
-  # `c10/cuda/impl/cuda_cmake_macros.h`, the CPU wheel does not. This is why the
-  # vendor interpreter — the one that owns the accelerator torch — runs the
-  # build, exactly as the FlagOS image that carries a prebuilt copy does. The
-  # wheel it produces is installed into the isolated environment afterwards,
-  # which keeps running the CPU wheel plus the staged CUDA assets.
-  #
-  # scikit-build-core drives the build with --no-build-isolation, which means
-  # pip does not resolve cpp/pyproject.toml's build requirements: every one of
-  # them has to be in this environment already. `setuptools-scm` in particular is
-  # needed at metadata time, because that project takes its version from the
-  # parent repository through that provider, and cmake is needed because a CUDA
-  # development image ships a compiler, not a build system. The versions mirror
-  # what the isolated environment installs so both halves of the build agree.
-  pip_retry "$VENDOR_PYTHON" \
-    "setuptools>=64,<77" "setuptools-scm>=8,<10" cmake \
-    "scikit-build-core==0.12.2" "pybind11==3.0.3" "ninja==1.13.0"
-  # Configuring the cpp package probes `import triton` in the building
-  # interpreter and aborts without it, so this environment carries the same
-  # Triton provider the isolated one runs on.
-  pip_retry "$VENDOR_PYTHON" --no-deps --index-url "$FLAGTREE_INDEX_URL" \
-    "flagtree===$FLAGTREE_VERSION"
-  # PEP 621 requires a static project name, so the per-vendor suffix is injected
-  # into cpp/pyproject.toml before building (flag-gems-cpp-cuda).
-  (cd "$FLAGGEMS_SOURCE_ROOT" && bash tools/set_cpp_vendor.sh cuda)
-  # The native package takes its version from the parent repository's tags, and
-  # this clone is shallow and untagged; pin the metadata to the version of the
-  # Python package installed from the same commit so the pair stays in lockstep.
-  FLAGGEMS_CPP_VERSION="$("$VENV_PYTHON" -c 'import importlib.metadata; print(importlib.metadata.version("flag_gems"))')"
-  FLAGGEMS_CPP_WHEEL_DIR="${RUNNER_TEMP:-/tmp}/flag-gems-cpp-wheel-${CI_STAGE}"
-  rm -rf "$FLAGGEMS_CPP_WHEEL_DIR"
-  mkdir -p "$FLAGGEMS_CPP_WHEEL_DIR"
-  # nvcc is not guaranteed to be on PATH in a bootstrapped environment, so name
-  # it explicitly rather than relying on the image having exported it.
-  export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-  export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
-  # cpp/CMakeLists.txt defaults FLAGGEMS_BUILD_CTESTS to the value of
-  # FLAGGEMS_BUILD_C_EXTENSIONS, which would pull in that project's own test
-  # suite: it is not installed, nothing here runs ctest over it (upstream has a
-  # separate workflow for that), and it fails to compile without CUDA include
-  # directories that only its own build sets up. Build what the wheel ships.
-  env \
-    CMAKE_ARGS="-DFLAGGEMS_BUILD_C_EXTENSIONS=ON -DFLAGGEMS_BUILD_CTESTS=OFF -DFLAGGEMS_BACKEND=CUDA -DCMAKE_BUILD_TYPE=Release -DCUDAToolkit_ROOT=$CUDA_HOME" \
-    CMAKE_BUILD_PARALLEL_LEVEL="$FLAGGEMS_CPP_JOBS" \
-    MAX_JOBS="$FLAGGEMS_CPP_JOBS" \
-    CUDACXX="$CUDA_HOME/bin/nvcc" \
-    SETUPTOOLS_SCM_PRETEND_VERSION="$FLAGGEMS_CPP_VERSION" \
-    "$VENDOR_PYTHON" -m pip wheel "$FLAGGEMS_SOURCE_ROOT/cpp" \
-      --no-deps --no-build-isolation -w "$FLAGGEMS_CPP_WHEEL_DIR"
-  # Both interpreters run Python $FLAGTREE_PYTHON_VERSION, so the native wheel
-  # the vendor interpreter built installs into the isolated environment as-is.
-  "$VENV_PYTHON" -m pip install --no-deps --no-build-isolation \
-    "$FLAGGEMS_CPP_WHEEL_DIR"/flag_gems_cpp_cuda-*.whl
-  VENDOR_FLAGGEMS_LIB="$VENV_SITE/flag_gems/lib"
-  VENDOR_FLAGGEMS_DIR="$VENDOR_FLAGGEMS_LIB/cmake/FlagGems"
-  if [[ ! -f "$VENDOR_FLAGGEMS_DIR/FlagGemsConfig.cmake" ]] \
-    || ! compgen -G "$VENDOR_FLAGGEMS_LIB/liboperators.so*" >/dev/null; then
-    echo "::error::The FlagGems C++ build produced no FlagGemsConfig.cmake / liboperators.so under $VENDOR_FLAGGEMS_LIB"
-    exit 1
-  fi
-  echo "FlagGems C++ operators: $FLAGGEMS_CPP_VERSION ($VENDOR_FLAGGEMS_LIB)"
-fi
+# Install the published FlagGems wheel after FlagTree. --no-deps keeps the
+# CPU-only torch ABI intact; install its non-torch dependencies explicitly.
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+install_flag_gems
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  pip_retry "$VENV_PYTHON" pytest transformers
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
@@ -576,26 +500,6 @@ assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 PY
 )"
-
-strip_vendor_paths() {
-  local value="${1:-}"
-  local entry
-  local -a entries=()
-  local -a kept=()
-  IFS=: read -ra entries <<< "$value"
-  for entry in "${entries[@]}"; do
-    [[ -z "$entry" ]] && continue
-    case "$entry" in
-      "$VENDOR_TORCH_ROOT"|"$VENDOR_TORCH_ROOT"/*) ;;
-      *) kept+=("$entry") ;;
-    esac
-  done
-  local joined=""
-  for entry in "${kept[@]}"; do
-    joined="${joined:+$joined:}$entry"
-  done
-  printf '%s' "$joined"
-}
 
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
@@ -609,10 +513,9 @@ export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 export FLAGTREE_VERSION
 export GEMS_VENDOR="${GEMS_VENDOR:-nvidia}"
-# TEMPORARY -- remove once the CUDA FlagTree wheel bundles the FlagTune
-# manifest machinery (triton.flagtune.runtime.errors + hosted manifest
-# defaults; both landed upstream 2026-09-16, after flagtree===0.6.2a2 was
-# cut). Without it, every FlagGems-routed kernel whose autotuner takes the
+# Keep the CUDA FlagTune workaround until the new FlagTree wheel has passed an
+# on-device autotune run. The old wheel lacked the manifest machinery; without
+# this override, every FlagGems-routed kernel whose autotuner takes the
 # Cost Model path dies loading the model bundle: the old wheel has no
 # FLAGTUNE_MANIFEST_URL default and the runner provides none, so
 # model_sources raises ManifestFetchError (TestAutograd goes red on it).
@@ -626,10 +529,10 @@ export USE_FLAGTUNE=0
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
 CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
 CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
-export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake:$VENDOR_FLAGGEMS_DIR${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
+export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${VENDOR_FLAGGEMS_DIR:+:$VENDOR_FLAGGEMS_DIR}${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
 export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64:$CUDA_ASSETS_DIR${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$CUDA_ASSETS_DIR${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib:$VENDOR_FLAGGEMS_LIB:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$CUDA_ASSETS_DIR${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"
 # Verify that the source-free wheel installed the Triton provider it ships,
@@ -640,6 +543,10 @@ import os
 from pathlib import Path
 
 import triton
+
+if os.environ.get("USE_TLE_DIST") == "0":
+    # Check the import that FlagGems triggers before spending time on build_ext.
+    from triton.experimental.tle import language  # noqa: F401
 
 expected = os.environ["FLAGTREE_VERSION"]
 flagtree_version = importlib.metadata.version("flagtree")
@@ -700,9 +607,16 @@ fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   for name in \
     PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
-    FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGTREE_VERSION GEMS_VENDOR \
+    FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR \
+    FLAGOS_BUILD_FLAGGEMS_CPP \
     USE_FLAGTUNE \
     CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
+  if [[ -n "${USE_TLE_DIST:-}" ]]; then
+    printf 'USE_TLE_DIST=%s\n' "$USE_TLE_DIST" >> "$GITHUB_ENV"
+  fi
 fi

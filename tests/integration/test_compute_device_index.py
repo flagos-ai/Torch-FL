@@ -151,8 +151,14 @@ def test_dim_reduction_op():
 
 
 def test_ternary_tensor_op():
-    """CallPythonOp_TTT (addmm: 3 tensor operands)."""
-    a, b, c = torch.randn(4, 4), torch.randn(4, 8), torch.randn(8, 4)
+    """CallPythonOp_TTT (addmm: 3 tensor operands).
+
+    Use exactly representable values so vendor matmul precision differences
+    cannot obscure this test's device-guard assertion.
+    """
+    a = torch.arange(16, dtype=torch.float32).reshape(4, 4) / 8
+    b = torch.arange(32, dtype=torch.float32).reshape(4, 8) / 8
+    c = torch.arange(32, dtype=torch.float32).reshape(8, 4) / 8
     out = torch.addmm(a.to(DEVICE), b.to(DEVICE), c.to(DEVICE))
     _check(out, torch.addmm(a, b, c), "addmm")
 

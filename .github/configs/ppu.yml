@@ -26,9 +26,8 @@ container_volumes:
   # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
   # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
   # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
-  # installs the FlagGems stack into the job venv from the FlagOS index (FlagTree)
-  # and from git (FlagGems master), so the environment is reproducible from the
-  # image plus those two indexes alone.
+  # installs the FlagGems stack into the job venv from published FlagOS wheels,
+  # so the environment is reproducible from the image plus those indexes alone.
   - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 integration_environment:
@@ -148,7 +147,7 @@ integration_tests:
 
   # The venv triton is FlagTree's ppu build (triton 3.6.0, backends {'ppu'}),
   # not the vendor 3.5.0+v0.2.0.ppu2.1.0 (backends {'amd','nvidia'}) -- see
-  # set_env_ppu.sh, which installs flagtree==0.6.2a2+ppu3.6 plus FlagGems master
+  # set_env_ppu.sh, which installs flagtree==0.7.0rc1+ppu3.6 plus FlagGems 5.4.0
   # into the job venv. mm/bmm stay on the vendor route because FlagGems' _hygon
   # mm kernel passes a `num_ldmatrixes` keyword that the triton mm_kernel does
   # not accept: KeyError at triton/runtime/jit.py:_pack_args for mm, and bmm

@@ -40,6 +40,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
 # shellcheck source=.github/version-pins.env
 source "${REPO_ROOT}/.github/version-pins.env"
+
+# Shared set_env helpers (pip_retry, FlagGems install, path stripping).
+# shellcheck source=.github/scripts/lib/set_env_common.sh
+source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
@@ -141,11 +145,6 @@ else
 fi
 
 VENV_PYTHON="$VENV_ROOT/bin/python"
-venv_is_usable() {
-  [[ -x "$VENV_PYTHON" ]] || return 1
-  "$VENV_PYTHON" -m pip --version >/dev/null 2>&1
-}
-
 if ! venv_is_usable; then
   # The vendor base image may not ship the matching python*-venv package. Keep
   # that dependency in the chip-specific setup path so the common workflow stays
@@ -255,125 +254,42 @@ fi
 # --no-deps on both source packages so pip cannot replace the pinned CPU torch
 # 2.10 with something a transitive requirement prefers.
 #
-# Retries are deliberate: the flagtree wheel is 180 MB and the shared mirror can
-# close a large-wheel response early (IncompleteRead) even though the package is
-# there. Retrying just the failed package beats restarting all of setup.
-pip_retry() {
-  local attempt=1
-  while true; do
-    if "$VENV_PYTHON" -m pip install --retries 10 --timeout 300 --no-cache-dir "$@"; then
-      return 0
-    fi
-    if (( attempt >= 5 )); then
-      echo "::error::pip install failed after $attempt attempts: $*"
-      return 1
-    fi
-    echo "::warning::pip install attempt $attempt failed; retrying: $*"
-    attempt=$((attempt + 1))
-    sleep 10
-  done
-}
-
-# The FlagGems install is a VCS install, and pip reports the exit status of its
-# last step -- the wheel build of whichever tree it managed to fetch. A checkout
-# the runner's proxy truncated therefore still ends in `Successfully installed`,
-# and pip never notices. On 2026-09-18 the Ascend runner's clone spent ten
-# minutes printing
-#   fatal: unable to access 'https://github.com/flagos-ai/FlagGems.git/':
-#   Proxy CONNECT aborted
-# (364 times), alongside `error: unable to read sha1 file of ...` and
-# `error: invalid object 100644 2e574121... for
-# '.github/workflows/rule-check.yaml'` for the blobs it never received, and then
-# reported
-#   Successfully installed flaggems_setup-0.0.0
-# -- a 2.1 MB stub named after the build scaffolding rather than the project,
-# where the same revision produced the 10 MB
-# flag_gems-5.4.0rc2.post1+g437ba3938 on every other platform that ran that
-# morning. Nothing failed until the integration suite took its first FlagGems
-# route, four minutes later.
-#
-# So check the install instead of trusting pip's status, and reinstall when it
-# is wrong: the conf routes this platform's operators to flagos_python, so an
-# unusable flag_gems is not a state this script may leave behind.
-flag_gems_installed() {
-  "$VENV_PYTHON" - "${FLAGGEMS_REVISION:0:9}" <<'PY'
-import importlib.metadata as metadata
-import importlib.util
-import sys
-
-try:
-    version = metadata.version("flag_gems")
-except metadata.PackageNotFoundError:
-    raise SystemExit("flag_gems is not installed")
-
-# A distribution can be installed with no importable package behind it, which
-# is what a truncated checkout produces.
-if importlib.util.find_spec("flag_gems") is None:
-    raise SystemExit(f"flag_gems {version} has no importable package")
-
-print(f"flag_gems {version}")
-if sys.argv[1] not in version:
-    # Not a failure: a revision given as a branch name, or a tarball without
-    # git metadata, lands on a version string that names neither. Only warn --
-    # reinstalling cannot change how the version was written.
-    print(
-        f"::warning::flag_gems {version} does not name the requested revision "
-        f"{sys.argv[1]}; the checkout it was built from may be incomplete",
-        file=sys.stderr,
-    )
-PY
-}
-
-# Three attempts at most, and only for an install pip called successful: a pip
-# failure has already been retried five times by pip_retry, and repeating that
-# spends the job's budget on a link that is down rather than on a bad checkout.
-install_flag_gems() {
-  local attempt=1
-  while true; do
-    if ! pip_retry --no-deps "git+${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"; then
-      echo "::error::could not install FlagGems from ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    if flag_gems_installed; then
-      return 0
-    fi
-    if (( attempt >= 3 )); then
-      echo "::error::no usable flag_gems after $attempt installs of ${FLAGGEMS_REPO}@${FLAGGEMS_REVISION}"
-      return 1
-    fi
-    echo "::warning::install attempt $attempt left no usable flag_gems; reinstalling"
-    attempt=$((attempt + 1))
-    # A truncated tree installs under the build scaffolding's name, so both
-    # names have to go for the next attempt to be read as a fresh result.
-    "$VENV_PYTHON" -m pip uninstall -y flag_gems flaggems_setup >/dev/null 2>&1 || true
-    sleep 10
-  done
-}
-
 # flagtree is the Triton build carrying the "mthreads" backend. 3.6 is not a
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
 # fails at import, so the two pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_musa}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
 
 # flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
 # again to ensure isolation.
 "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
 
-# FlagGems from the flagos-ai fork, tracking master by policy: every CI run
-# measures the current master, not a pinned snapshot. Override with
-# TORCH_FL_FLAGGEMS_REVISION to pin a commit for a reproducible run.
-#
-FLAGGEMS_REVISION="${TORCH_FL_FLAGGEMS_REVISION:-$FLAGGEMS_REVISION_DEFAULT}"
-FLAGGEMS_REPO="${TORCH_FL_FLAGGEMS_REPO:-$FLAGGEMS_REPO_DEFAULT}"
+# Install the MThreads-indexed wheel instead of cloning FlagGems from GitHub.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-mthreads/simple}"
 install_flag_gems
+
+# The published FlagCX RC wheel requires MUSA 5.2. Current CI still uses the
+# working MUSA 5.1 image: its runner reported driver 3.3.5-server, while the
+# 5.2 base image requires 5.2.0-server and took over an hour to pull. Keep the
+# wheel path ready for an explicit image/driver upgrade rather than loading a
+# binary against the wrong toolkit in this job.
+if [[ "${TORCH_FL_MUSA_FLAGCX_WHEEL:-0}" == "1" ]]; then
+  FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+  # Wheel building runs in a separate step whose isolated backend cannot
+  # import torch_fl. torch_fl imports FlagCX explicitly when comm needs it.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
 # the stock +cpu torch C extensions at import.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" packaging
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
@@ -433,11 +349,8 @@ if command -v mthreads-gmi >/dev/null 2>&1; then
 fi
 
 # Integration deps (pytest, transformers, numpy<2, safetensors, sentencepiece,
-# tiktoken, protobuf) are pip-installed above. Triton is deliberately absent on
-# this line: the image ships no MThreads flagtree build and stock PyPI triton
-# targets NVIDIA, so torch.compile will fail when invoked -- that failure is the
-# environment-gap record the platform owners act on (compile-tests is withheld in
-# the manifest until the image bakes the vendor triton stack).
+# tiktoken, protobuf) are pip-installed above. The MThreads FlagTree wheel
+# supplies Triton from the hosted index.
 
 # --- Export to later workflow steps ------------------------------------------
 if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -451,6 +364,12 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
   done
+  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
+    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
+  fi
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
 fi
 
 cd "$REPO_ROOT"

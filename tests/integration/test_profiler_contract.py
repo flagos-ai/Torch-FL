@@ -19,6 +19,8 @@ from collections import Counter
 import pytest
 
 from profiler_support import (
+    GENERIC_RUNTIME_NAMES,
+    MAX_GENERIC_RUNTIME_FRACTION,
     arg_key_union,
     event_categories,
     events_in,
@@ -230,14 +232,33 @@ def test_profiler_kernel_names_are_demangled(profile_result, profiler_capabiliti
 def test_profiler_runtime_names_are_not_all_fallback(
     profile_result, profiler_capabilities
 ):
-    """Runtime records preserve callback identity instead of one hard-coded name."""
+    """Runtime records preserve callback identity instead of one hard-coded name.
+
+    This asserts a *bound* rather than the presence of any single named record.
+    The first version of this test accepted either more than one distinct name or
+    a ``cbid`` argument -- and both held at 180 of 203 generic events on CUDA, so
+    it passed on a trace where every distinct runtime call had collapsed into one
+    label. A per-platform budget fails that trace while leaving room for an
+    isolated id the table does not name yet.
+    """
     if not profiler_capabilities.runtime:
         pytest.skip(f"{profiler_capabilities.platform} has no runtime activity")
 
-    names = Counter(
-        event.get("name")
-        for event in events_in(profile_result[1], "privateuse1_runtime")
-    )
-    assert len(names) > 1 or "cbid" in arg_key_union(
-        profile_result[1], "privateuse1_runtime"
-    )
+    runtimes = events_in(profile_result[1], "privateuse1_runtime")
+    assert runtimes, "profiler produced no privateuse1_runtime events"
+
+    generic = [
+        event for event in runtimes if event.get("name") in GENERIC_RUNTIME_NAMES
+    ]
+    fraction = len(generic) / len(runtimes)
+    if fraction > MAX_GENERIC_RUNTIME_FRACTION:
+        unresolvable = Counter(
+            (event.get("args") or {}).get("cbid") for event in generic
+        ).most_common()
+        pytest.fail(
+            f"{len(generic)} of {len(runtimes)} "
+            f"privateuse1_runtime events ({fraction:.1%}) carry a placeholder name "
+            f"instead of the callback id's API name "
+            f"(limit {MAX_GENERIC_RUNTIME_FRACTION:.0%}). Unresolved cbids "
+            f"(cbid, count): {unresolvable}"
+        )

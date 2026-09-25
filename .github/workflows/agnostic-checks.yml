@@ -70,7 +70,7 @@ jobs:
       - name: Check setup-script syntax
         run: |
           set -euo pipefail
-          for script in .github/scripts/set_env_*.sh .github/version-pins.env; do
+          for script in .github/scripts/set_env_*.sh .github/scripts/lib/set_env_common.sh .github/version-pins.env; do
             bash -n "$script"
             echo "OK $script"
           done
@@ -80,6 +80,7 @@ jobs:
           set -euo pipefail
           python -m pytest \
             tests/unit/test_ci_version_pins.py \
+            tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
             tests/unit/test_device_tracer_selection.py \
@@ -94,6 +95,7 @@ jobs:
             tests/unit/test_platform_support_detect.py \
             tests/unit/test_run_integration_tests.py \
             tests/unit/test_run_unit_tests.py \
+            tests/unit/test_set_env_common.py \
             tests/unit/test_transformers_automation.py \
             tests/unit/test_transformers_hf_tests.py \
             tests/unit/test_transformers_model_probe.py \

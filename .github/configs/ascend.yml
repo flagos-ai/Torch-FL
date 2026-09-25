@@ -17,7 +17,7 @@ display_name: Ascend
 setup_script: .github/scripts/set_env_ascend.sh
 
 # The official FlagTree Ascend image: CANN 9.0.0, Python 3.11, aarch64. It is the
-# supported base for flagtree 0.6.2a1+ascend3.5, whose wheel is cp311-only, and it
+# supported base for flagtree 0.7.0rc3+ascend3.5, whose wheel is cp311-only, and it
 # already carries the FlagTree `triton`. set_env_ascend.sh is still self-contained
 # -- it installs stock CPU torch + build deps into a fresh venv and re-pins
 # flagtree/FlagGems from the FlagOS index -- so the image only has to supply

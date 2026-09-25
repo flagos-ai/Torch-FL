@@ -442,14 +442,18 @@ def test_runtime_names_come_from_cbid(profile_result, baseline):
     The cbid->name table is this layer's only defence against a bug whose
     signature is a plausible-but-wrong label rather than an error: before the
     table existed, EVERY runtime record was hardcoded to "cudaLaunchKernel", so
-    a 21.9ms blocking synchronize was reported as a kernel launch. Nothing in
-    the build re-checks that table, so a regression would otherwise be silent.
+    a 21.9ms blocking synchronize was reported as a kernel launch. The table is
+    now generated from CUPTI's own cupti_runtime_cbid.h and re-checked by the
+    Codegen checks job, but nothing in the *build* verifies it, so this still
+    guards against a mapping that compiles and says nothing useful.
 
     The invariant that catches exactly that hardcode: a real workload calls more
     than one runtime API, so at least one event must carry a name that is
     neither the generic ``default:`` fallback ("cudaRuntime") nor
     "cudaLaunchKernel". If the mapping is bypassed, every name collapses to one
-    of those two and this fails.
+    of those two and this fails. It is deliberately weaker than the bound in
+    ``test_profiler_contract.py``, which fails on a partial collapse (#186);
+    this one answers the narrower question of whether *any* name is cbid-derived.
 
     Verified to be a live check, not a tautology: this workload produces
     cudaMalloc / cudaFree / cudaMemcpy / cudaMemsetAsync / cudaDeviceSynchronize
