@@ -230,8 +230,46 @@ def pytest_configure(config):
     config.pluginmanager.register(Recorder(path), "torch_fl_hf_recorder")
 
 
+def _restore_file_part(config, items):
+    # A nodeid passed on the command line comes back bare -- ``::Class::test``,
+    # with no file in front of it -- whenever the selected path reaches the file
+    # through a symlink, which is how ``stage_harness_files`` lays out the work
+    # directory. pytest builds the reported nodeid by making the file path
+    # relative to ``--rootdir``; the path it holds is the one under the working
+    # directory, which is not a descendant of the root directory, so the file
+    # part is dropped.
+    #
+    # That bare form is not merely cosmetic: ``PYTEST_CURRENT_TEST`` is built
+    # from this same nodeid, and HuggingFace reads that variable back to
+    # re-execute a test in a subprocess
+    # (``run_test_using_subprocess``, ``src/transformers/testing_utils.py``).
+    # A bare ``::Class::test`` is not a valid argument -- pytest refuses it with
+    # "directory argument cannot contain :: selection parts" -- so every test
+    # behind that decorator fails here for a reason that has nothing to do with
+    # the device.
+    #
+    # ``item.path`` still knows the file, so the file part is restored from it
+    # rather than guessed from a class/test tail that several files may share.
+    # The path is resolved first: the direct spelling through the symlink has to
+    # come out the same as the resolved one.
+    root = os.path.realpath(str(config.rootdir))
+    for item in items:
+        nodeid = item.nodeid or ""
+        if not nodeid.startswith("::"):
+            continue
+        try:
+            relative = os.path.relpath(os.path.realpath(str(item.path)), root)
+        except (AttributeError, ValueError):
+            continue
+        if relative.startswith(os.pardir):
+            continue
+        item._nodeid = relative.replace(os.sep, "/") + nodeid
+
+
 def pytest_collection_modifyitems(config, items):
     import pytest
+
+    _restore_file_part(config, items)
 
     if os.environ.get("HF_TEST_SKIP_FLEX_ATTENTION") == "1":
         skip = pytest.mark.skip(reason="flex attention requires a CUDA Triton backend")

@@ -127,6 +127,41 @@ inline bool TopsatenArangeDtype(at::ScalarType type) {
   }
 }
 
+// Which dtypes topsatenNewOnes may be handed as the *result* dtype.
+//
+// The narrowest set in this file, and it could not be inferred from any of the
+// others: the vendor entry point carries no dtype table at all, so every type
+// outside fp32/fp16/bf16 fails its own argument check. Measured on S60 with a
+// sentinel-filled output buffer, so "the call declined" and "the call ran" are
+// distinguishable -- i8, u8, i16, u16, i32, u32, i64, u64, PRED, f64 and both
+// float8 formats all return TOPSATEN_STATUS_BAD_PARAM ("new_ones CheckArgs
+// failed", op_aten_new_ones.cc:70) and leave every element of the buffer at the
+// sentinel, while fp32, fp16 and bf16 come back with the whole plane set to 1 --
+// at rank 1, 2 and 3, on an empty shape, and on all of 2x4 and 64x64.
+//
+// Declining is not optional the way it is for the other predicates here:
+// EXEC_TOPSATEN_CMD turns any non-SUCCESS status into a failed TORCH_CHECK, so a
+// dtype left ungated raises where the host path would have produced the right
+// tensor. The caller that does that is the int64 one -- `GenerationMixin` builds
+// its attention mask with `attention_mask.new_ones(...)` on every generation
+// step (transformers/generation/utils.py), and that mask is int64.
+//
+// The dtype of the `input` operand is deliberately *not* part of this test. The
+// operand is only where the kernel reads its device from: measured with an fp32
+// result against an i64, a PRED and an fp32 operand, all three return SUCCESS
+// with the same plane of ones, and filling the operand with sentinel garbage
+// changes nothing. So a caller only has to brace for `out_type`.
+inline bool TopsatenNewOnesDtype(at::ScalarType type) {
+  switch (type) {
+    case at::kFloat:
+    case at::kHalf:
+    case at::kBFloat16:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Which dtypes topsatenIndexSelect accepts an *index* operand as.
 //
 // An index tensor is the one place an integer operand has to be braced for

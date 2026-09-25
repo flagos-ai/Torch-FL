@@ -126,6 +126,7 @@
   m.impl("ne.Scalar", WrapperNeScalar);
   m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg", WrapperNeg);
+  m.impl("new_ones", WrapperNewOnes);
   m.impl("nonzero", WrapperNonzero);
   m.impl("nonzero_static", WrapperNonzeroStatic);
   m.impl("normal.Tensor_Tensor", WrapperNormalTensorTensor);

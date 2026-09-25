@@ -173,6 +173,7 @@
 //   - ne.Scalar
 //   - ne.Tensor
 //   - neg
+//   - new_ones
 //   - nextafter
 //   - nextafter_
 //   - nll_loss_backward
@@ -247,7 +248,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 247 ops registered here, 101 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 246 ops registered here, 102 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
@@ -408,7 +409,6 @@
   m.impl("native_group_norm", WrapperNativeGroupNorm);
   m.impl("native_group_norm_backward", WrapperNativeGroupNormBackward);
   m.impl("neg_", WrapperNegInplace);
-  m.impl("new_ones", WrapperNewOnes);
   m.impl("nll_loss2d_backward", WrapperNllLoss2dBackward);
   m.impl("nll_loss2d_forward", WrapperNllLoss2dForward);
   m.impl("pixel_unshuffle.out", WrapperPixelUnshuffleOut);
