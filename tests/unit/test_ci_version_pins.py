@@ -15,7 +15,7 @@
 """The set_env_*.sh scripts must get their version pins from one file.
 
 Each platform script used to hard-code the CPU-torch pin, the FlagTree index,
-the FlagGems repo/revision and its FlagTree wheel -- so bumping a version meant
+the FlagGems release and its FlagTree wheel -- so bumping a version meant
 seven edits and it was easy to update six and miss one. Those values now live in
 `.github/version-pins.env`, which every script sources. This checks the contract
 holds: the pin file defines what the scripts read, and no script keeps a literal
@@ -40,8 +40,8 @@ SHARED_PINS = [
     "FLAGTREE_INDEX_URL_DEFAULT",
     "FLAGTREE_PYTHON_VERSION_DEFAULT",
     "FLAGTREE_MIN_GLIBC_DEFAULT",
-    "FLAGGEMS_REPO_DEFAULT",
-    "FLAGGEMS_REVISION_DEFAULT",
+    "FLAGGEMS_VERSION_DEFAULT",
+    "FLAGOS_WHEEL_ROOT_DEFAULT",
     "PIP_INDEX_URL_DEFAULT",
 ]
 
@@ -51,7 +51,7 @@ FORBIDDEN_LITERAL_DEFAULTS = [
     ":-2.10.0}",
     ":-https://download.pytorch.org",
     ":-https://resource.flagos.net",
-    ":-437ba393",
+    ":-5.4.0}",
     ":-https://github.com/flagos-ai/FlagGems",
     ":-https://pypi.org/simple",
 ]
