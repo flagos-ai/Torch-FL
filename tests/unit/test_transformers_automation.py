@@ -24,6 +24,7 @@ the runner actually emits.
 import importlib.util
 import os
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -1096,6 +1097,78 @@ def test_a_nodeid_that_already_names_its_file_is_unchanged():
     tests = [{"nodeid": BERT_NODEID}]
     runner.canonicalize_nodeids(tests, [BERT_NODEID])
     assert tests[0]["nodeid"] == BERT_NODEID
+
+
+# --- the in-child plugin's nodeid repair -------------------------------------
+
+
+class FakeItem:
+    """The two attributes the repair reads off a collected item."""
+
+    def __init__(self, nodeid, path):
+        self._nodeid = nodeid
+        self.path = path
+
+    @property
+    def nodeid(self):
+        return self._nodeid
+
+
+def plugin_namespace():
+    namespace = {}
+    exec(compile(runner.PLUGIN, "hf_report_plugin.py", "exec"), namespace)
+    return namespace
+
+
+def test_plugin_restores_the_file_part_a_symlinked_selection_drops(tmp_path):
+    """``PYTEST_CURRENT_TEST`` is built from the nodeid, and HuggingFace reads it
+    back to re-execute a test in a subprocess. Through the harness's symlinked
+    work directory the nodeid comes back with no file part, so the re-exec ran
+    ``pytest ::Class::test``, which collects nothing. Every test behind
+    ``@run_test_using_subprocess`` therefore failed here for a reason that had
+    nothing to do with the device."""
+    source = tmp_path / "transformers"
+    real = source / "tests" / "models" / "bert" / "test_modeling_bert.py"
+    real.parent.mkdir(parents=True)
+    real.write_text("def test_ok():\n    pass\n")
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "tests").symlink_to(source / "tests", target_is_directory=True)
+
+    namespace = plugin_namespace()
+    config = types.SimpleNamespace(rootdir=source)
+    items = [
+        FakeItem(
+            "::BertModelTest::test_can_load_with_global_device_set",
+            workdir / "tests" / "models" / "bert" / "test_modeling_bert.py",
+        )
+    ]
+
+    namespace["_restore_file_part"](config, items)
+
+    assert items[0].nodeid == (
+        "tests/models/bert/test_modeling_bert.py"
+        "::BertModelTest::test_can_load_with_global_device_set"
+    )
+
+
+def test_plugin_leaves_a_nodeid_and_a_foreign_path_alone(tmp_path):
+    """The repair is a no-op unless a file part is actually missing, and it does
+    not invent one for a path outside the root directory."""
+    namespace = plugin_namespace()
+    inside = tmp_path / "tests" / "test_x.py"
+    outside = tmp_path.parent / "elsewhere" / "test_y.py"
+    config = types.SimpleNamespace(rootdir=tmp_path)
+    items = [
+        FakeItem("tests/test_x.py::test_ok", inside),
+        FakeItem("::TestY::test_ok", outside),
+    ]
+
+    namespace["_restore_file_part"](config, items)
+
+    assert items[0].nodeid == "tests/test_x.py::test_ok"
+    assert items[1].nodeid == "::TestY::test_ok"
 
 
 def test_isolation_counts_only_the_summary_line_of_its_own_run():
