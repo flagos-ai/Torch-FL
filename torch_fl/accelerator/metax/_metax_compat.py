@@ -139,7 +139,21 @@ def _query_metax_device_properties(mcruntime, device_index):
         props.major = raw_major
         props.minor = raw_minor
 
-    # Get total memory
+    # Get total memory. mcMemGetInfo reports the *current* device's memory, so
+    # the query has to move the maca runtime to device_index first -- but it has
+    # to move it back afterwards. The maca runtime's current device is process
+    # state torch's own device counter does not track (see the set_device note
+    # below), so leaving it moved makes every later operation meant for device 0
+    # run on the last device probed: DataParallel's _check_balance walks every
+    # device id, and the .to(0) that follows it then lands on device N-1.
+    mcGetDevice = getattr(mcruntime, "mcGetDevice", None)
+    previous_device = ctypes.c_int(0)
+    have_previous = False
+    if mcGetDevice is not None:
+        mcGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        mcGetDevice.restype = ctypes.c_int
+        have_previous = mcGetDevice(ctypes.byref(previous_device)) == 0
+
     mcruntime.mcSetDevice(device_index)
     free_mem = ctypes.c_size_t(0)
     total_mem = ctypes.c_size_t(0)
@@ -149,7 +163,16 @@ def _query_metax_device_properties(mcruntime, device_index):
         ctypes.POINTER(ctypes.c_size_t),
     ]
     mcMemGetInfo.restype = ctypes.c_int
-    ret = mcMemGetInfo(ctypes.byref(free_mem), ctypes.byref(total_mem))
+    try:
+        ret = mcMemGetInfo(ctypes.byref(free_mem), ctypes.byref(total_mem))
+    finally:
+        # Restore only once the previous index is actually known. Without a
+        # successful read-back there is no index to restore, and calling
+        # mcSetDevice with a placeholder would move the runtime somewhere
+        # arbitrary -- so a runtime that cannot report its current device keeps
+        # the previous behaviour of leaving the probe's device in place.
+        if have_previous:
+            mcruntime.mcSetDevice(previous_device.value)
     if ret == 0:
         props.total_memory = total_mem.value // (1024 * 1024)  # in MiB
 

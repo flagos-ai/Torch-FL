@@ -16,6 +16,7 @@ import ctypes
 import os
 import re
 import sys
+import threading
 
 # Single access point for every FLAGOS_* variable (see torch_fl/_env.py). Imported
 # for its side effect as well: it scans the environment once and warns about a
@@ -1472,6 +1473,338 @@ def _patch_ddp_for_flagos():
     _DDP.__init__ = _patched_init
 
 
+# ---------------------------------------------------------------------------
+# DataParallel auto-patch: torch.nn.parallel.DataParallel and its comm layer
+# ---------------------------------------------------------------------------
+
+# Both spellings name the same device: the claim phase renames PrivateUse1 to
+# "flagos", so tensors created afterwards report "flagos", while
+# "privateuseone" is the raw name a tensor can still carry from before the
+# rename (or from a wheel whose rename never ran).
+_FLAGOS_DEVICE_TYPES = ("flagos", "privateuseone")
+
+
+def _flagos_device_type_of_tensors(tensors):
+    """Device type of the first flagos device among ``tensors``, else None."""
+    for tensor in tensors:
+        if tensor.device.type in _FLAGOS_DEVICE_TYPES:
+            return tensor.device.type
+    return None
+
+
+def _flagos_module_device_type(module):
+    """Device type a module is placed on if it is a flagos one, else None.
+
+    Parameters and buffers both: DataParallel's own device guard walks the two
+    together, and a module can hold buffers with no parameters.
+    """
+    for group in (module.parameters(), module.buffers()):
+        device_type = _flagos_device_type_of_tensors(group)
+        if device_type is not None:
+            return device_type
+    return None
+
+
+# Device type of the flagos-placed DataParallel that is scattering right now on
+# this thread, else None. It exists because a CPU input tensor carries no device
+# type, and the integer device ids DataParallel hands to comm.scatter are
+# ambiguous exactly where this patch is needed: on PPU "cuda" and "flagos" name
+# the same silicon, so [0, 1] could mean either list. Only the wrapper knows
+# which one it is driving, so the wrapper says so. Thread local because two
+# DataParallel wrappers in two threads must not see each other's scope; the
+# setter and the reader are always the same thread, since the scatter is called
+# synchronously from DataParallel.forward.
+_flagos_scatter_scope = threading.local()
+
+
+def _patch_comm_for_flagos():
+    """Teach ``torch.nn.parallel.comm``'s device moves about flagos devices.
+
+    ``comm.scatter``, ``comm.gather`` and ``comm.broadcast_coalesced`` are thin
+    wrappers over CUDA-only C++ ops (``torch._C._scatter``, ``_gather``,
+    ``_broadcast_coalesced``). Each reads the caller's device list as a list of
+    *CUDA* indices whatever the tensors are, so on a flagos build it either
+    mislabels the result or refuses outright -- measured on PPU:
+
+        torch._C._scatter(flagos:0 tensor, [0, 1], ...) -> [flagos:0, cuda:1]
+        torch._C._gather([flagos:0, flagos:1], 0, 0)    -> RuntimeError:
+            "Expected all input tensors to be CUDA tensors, but tensor at
+             index 0 has device flagos:0"
+
+    DataParallel reaches all three on its forward path (scatter, then replicate
+    -> broadcast_coalesced, then gather), so each gets a pure-Python flagos
+    branch. They are written as ordinary tensor ops -- ``chunk``/``split``/
+    ``cat``/``to`` -- instead of a translation of the C++ copy loops, which is
+    also what makes a CPU input (the source DataParallel documents) work.
+
+    Every wrapper delegates to the original as soon as no flagos tensor is
+    involved, so CUDA and CPU keep the stock code path.
+    """
+    import functools
+    import warnings
+
+    from torch._utils import _get_device_index
+    from torch.nn.parallel import comm as _comm
+
+    def _as_real(tensor):
+        # comm.* applies _handle_complex on the way in, because the C++ ops have
+        # no complex support and can only scatter/gather the real view. Mirrored
+        # here so the flagos branch does not change the dtype contract its
+        # callers were written against.
+        return torch.view_as_real(tensor) if torch.is_complex(tensor) else tensor
+
+    _orig_scatter = _comm.scatter
+    _orig_gather = _comm.gather
+    _orig_broadcast_coalesced = _comm.broadcast_coalesced
+
+    @functools.wraps(_orig_scatter)
+    def _scatter(
+        tensor, devices=None, chunk_sizes=None, dim=0, streams=None, *, out=None
+    ):
+        device_type = _flagos_device_type_of_tensors((tensor,))
+        if device_type is None:
+            # A CPU input has no device type of its own; the only thing that can
+            # still say the targets are flagos devices is the wrapper, which
+            # sets the scope around this call.
+            device_type = getattr(_flagos_scatter_scope, "device_type", None)
+        if device_type is None:
+            return _orig_scatter(tensor, devices, chunk_sizes, dim, streams, out=out)
+
+        tensor = _as_real(tensor)
+        if out is not None:
+            if devices is not None:
+                raise RuntimeError(
+                    f"'devices' must not be specified when 'out' is specified, but got devices={devices}"
+                )
+            if chunk_sizes is not None:
+                raise RuntimeError(
+                    f"'chunk_sizes' must not be specified when 'out' is specified, but got chunk_sizes={chunk_sizes}"
+                )
+            chunks = tensor.split([t.size(dim) for t in out], dim)
+            for target, chunk in zip(out, chunks):
+                target.copy_(chunk.to(target.device, target.dtype))
+            return tuple(out)
+
+        devices = [_get_device_index(d) for d in devices]
+        chunks = (
+            tensor.chunk(len(devices), dim)
+            if chunk_sizes is None
+            else tensor.split(list(chunk_sizes), dim)
+        )
+        # streams is accepted and dropped on purpose: the C++ op uses it to copy
+        # CPU->accelerator on background streams, and copying synchronously on
+        # the current stream is a strictly-ordered subset of that. The
+        # wait_stream/record_stream pair Scatter.forward runs afterwards stays
+        # valid, because a stream that was never submitted to is already
+        # complete. copy=True because the C++ returns fresh storage for every
+        # chunk, and a chunk already on its target device would otherwise be
+        # handed back as a view of the input, which the Scatter autograd
+        # Function in _functions.py cannot return.
+        return tuple(
+            chunk.to(torch.device(device_type, device), copy=True)
+            for chunk, device in zip(chunks, devices)
+        )
+
+    @functools.wraps(_orig_gather)
+    def _gather(tensors, dim=0, destination=None, *, out=None):
+        tensor_list = list(tensors)
+        device_type = _flagos_device_type_of_tensors(tensor_list)
+        if device_type is None:
+            return _orig_gather(tensors, dim, destination, out=out)
+
+        tensor_list = [_as_real(t) for t in tensor_list]
+        if out is not None:
+            if destination is not None:
+                raise RuntimeError(
+                    f"'destination' must not be specified when 'out' is specified, but got destination={destination}"
+                )
+            out.copy_(
+                torch.cat([t.to(out.device, out.dtype) for t in tensor_list], dim)
+            )
+            return out
+
+        if destination == -1:
+            warnings.warn(
+                "Using -1 to represent CPU tensor is deprecated. Please use a "
+                'device object or string instead, e.g., "cpu".',
+                FutureWarning,
+                stacklevel=2,
+            )
+        destination = _get_device_index(destination, allow_cpu=True, optional=True)
+        # -1 is this API's spelling of "CPU", and _get_device_index keeps it
+        # (allow_cpu=True), so the sign selects the destination *kind* and is not
+        # a device index to be re-labelled with the flagos type. None resolves to
+        # the current device, which is the flagos one under a flagos backend.
+        target = (
+            torch.device("cpu")
+            if destination < 0
+            else torch.device(device_type, destination)
+        )
+        return torch.cat([t.to(target) for t in tensor_list], dim)
+
+    @functools.wraps(_orig_broadcast_coalesced)
+    def _broadcast_coalesced(tensors, devices, buffer_size=10485760):
+        device_type = _flagos_device_type_of_tensors(tensors)
+        if device_type is None:
+            return _orig_broadcast_coalesced(tensors, devices, buffer_size)
+        # Same shape as the C++: one list per device, each holding that device's
+        # copy of every input. buffer_size only tunes the C++'s copy coalescing
+        # (fewer, larger memcpys), and there is nothing to coalesce here. Under
+        # no_grad to match the C++'s fresh, non-differentiable copies; the
+        # Broadcast autograd Function that calls this re-establishes the graph
+        # from ctx.needs_input_grad.
+        with torch.no_grad():
+            return [
+                [
+                    _as_real(t).to(
+                        torch.device(device_type, _get_device_index(device)), copy=True
+                    )
+                    for t in tensors
+                ]
+                for device in devices
+            ]
+
+    _comm.scatter = _scatter
+    _comm.gather = _gather
+    _comm.broadcast_coalesced = _broadcast_coalesced
+
+
+def _patch_dataparallel_for_flagos():
+    """Make ``torch.nn.DataParallel`` place its replicas on flagos devices.
+
+    Three device decisions in DataParallel are CUDA-only, and a flagos-placed
+    module trips all three:
+
+      * the device *type* comes from ``torch._utils._get_available_device_type()``,
+        which answers "cuda" before it ever asks privateuse1. So on PPU and MetaX
+        (where ``torch.cuda.is_available()`` is shimmed True) a module on
+        ``flagos:0`` is given ``src_device_obj = torch.device("cuda", 0)`` and
+        then fails DataParallel's own guard in forward with "module must have its
+        parameters and buffers on device cuda:0 (device_ids[0]) but found one of
+        them on device: flagos:0";
+      * the default device list is ``_get_all_device_indices()``, i.e. torch.cuda's
+        device count, which on a stock +cpu torch is 0;
+      * ``_check_balance`` is CUDA-only, and on MetaX it is also what moves the
+        current device: ``_query_metax_device_properties`` calls ``mcSetDevice``
+        per device and never restores, so after the probe loop every later
+        operation meant for device 0 runs on the last device probed.
+
+    A flagos-placed module therefore builds its own state: devices counted and
+    typed from the flagos device module, no balance probe. Everything after
+    construction is DataParallel's own code -- scatter, replicate,
+    parallel_apply, gather -- and works once ``torch.nn.parallel.comm`` has
+    flagos branches, which is what ``_patch_comm_for_flagos`` installs.
+
+    A module that is not on a flagos device goes to the original ``__init__``
+    unchanged, so CUDA and CPU behavior is untouched.
+    """
+    import functools
+
+    from torch._utils import _get_device_index
+    from torch.nn.parallel import DataParallel as _DataParallel
+
+    _orig_init = _DataParallel.__init__
+    _orig_scatter = _DataParallel.scatter
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, module, device_ids=None, output_device=None, dim=0):
+        device_type = _flagos_module_device_type(module)
+        if device_type is None:
+            return _orig_init(self, module, device_ids, output_device, dim)
+
+        # Module.__init__ has to run before anything is assigned to self: it
+        # installs the __setattr__ machinery that every `self.x = ...` below goes
+        # through. The original __init__ is not called, so this replaces the
+        # super().__init__() at its top.
+        torch.nn.Module.__init__(self)
+        torch._C._log_api_usage_once("torch.nn.parallel.DataParallel")
+
+        if device_ids is None:
+            # The flagos device module rather than torch.cuda: whatever
+            # torch.cuda reports on this host is unrelated to the devices the
+            # module's parameters live on. torch.flagos is the fallback for the
+            # raw "privateuseone" spelling, whose own attribute does not exist.
+            device_ids = range(getattr(torch, device_type, torch.flagos).device_count())
+        if len(device_ids) == 0:
+            raise RuntimeError("no available devices were found")
+        if output_device is None:
+            output_device = device_ids[0]
+
+        self.dim = dim
+        self.module = module
+        self.device_ids = [_get_device_index(x, True) for x in device_ids]
+        self.output_device = _get_device_index(output_device, True)
+        self.src_device_obj = torch.device(device_type, self.device_ids[0])
+        # The flagos-placed marker two things downstream read: DataParallel.scatter
+        # below, and nothing else -- the module's own device type is what
+        # _patch_comm_for_flagos keys on.
+        self._flagos_device_type = device_type
+
+        # No _check_balance: it is the CUDA memory/cores warning, and on MetaX
+        # running it is a side effect on the current device.
+        if len(self.device_ids) == 1:
+            self.module.to(self.src_device_obj)
+
+    @functools.wraps(_orig_scatter)
+    def _patched_scatter(self, inputs, kwargs, device_ids):
+        device_type = getattr(self, "_flagos_device_type", None)
+        if device_type is None:
+            return _orig_scatter(self, inputs, kwargs, device_ids)
+        # Tells comm.scatter that the integer device ids it is about to receive
+        # mean flagos devices. Only load-bearing for a CPU input; see the scope
+        # note next to _flagos_scatter_scope.
+        previous = getattr(_flagos_scatter_scope, "device_type", None)
+        _flagos_scatter_scope.device_type = device_type
+        try:
+            return _orig_scatter(self, inputs, kwargs, device_ids)
+        finally:
+            _flagos_scatter_scope.device_type = previous
+
+    _DataParallel.__init__ = _patched_init
+    _DataParallel.scatter = _patched_scatter
+
+
+def _patch_data_parallel_for_flagos():
+    """Give the functional ``torch.nn.parallel.data_parallel()`` flagos support.
+
+    It is the class's forward path with the device resolution restated inline,
+    so it fails a flagos-placed module the same way (and additionally raises
+    "device type could not be determined" on a build where nothing reports
+    availability). For a flagos-placed module it is delegated to the patched
+    class instead of restating torch's logic a second time, which keeps the two
+    from drifting. Two consequences of that delegation, both deliberate:
+    ``_check_balance`` is skipped where the class would also skip it, and a
+    single-device call now ends with ``module.to(device_ids[0])``, which the
+    class does in ``__init__`` and the function does not -- a no-op for a module
+    already on the device it is being run on.
+    """
+    import functools
+
+    from torch.nn.parallel import DataParallel as _DataParallel
+    from torch.nn.parallel.data_parallel import data_parallel as _data_parallel
+
+    @functools.wraps(_data_parallel)
+    def _patched_data_parallel(
+        module, inputs, device_ids=None, output_device=None, dim=0, module_kwargs=None
+    ):
+        if _flagos_module_device_type(module) is None:
+            return _data_parallel(
+                module, inputs, device_ids, output_device, dim, module_kwargs
+            )
+        if not isinstance(inputs, tuple):
+            inputs = (inputs,) if inputs is not None else ()
+        return _DataParallel(module, device_ids, output_device, dim)(
+            *inputs, **(module_kwargs or {})
+        )
+
+    # Both spellings of the name: torch.nn.parallel re-exports the function, and
+    # the module that defines it is still reachable by path.
+    torch.nn.parallel.data_parallel = _patched_data_parallel
+    sys.modules[
+        "torch.nn.parallel.data_parallel"
+    ].data_parallel = _patched_data_parallel
+
+
 # Register torch.compile backend for flagos device (torch 2.0+)
 def _register_compile_backend():
     """Register the 'flagos' backend with torch._dynamo if available."""
@@ -1700,7 +2033,8 @@ def _phase_vendor_compat() -> None:
 
 
 def _phase_ecosystem() -> None:
-    """FlagGems prep, CUDA alias, and distributed/DDP/compile/BPU registration.
+    """FlagGems prep, CUDA alias, and distributed/DDP/DataParallel/compile/BPU
+    registration.
 
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
@@ -1733,6 +2067,10 @@ def _phase_ecosystem() -> None:
 
     _patch_ddp_for_flagos()
 
+    _patch_comm_for_flagos()
+    _patch_dataparallel_for_flagos()
+    _patch_data_parallel_for_flagos()
+
     _register_compile_backend()
 
     _register_bpu_compile_backend()
@@ -1750,7 +2088,8 @@ def _phase_ecosystem() -> None:
 #   2. preload       relink/preload the vendor libtorch and CUDA assets
 #   3. claim         import torch, free PrivateUse1, load _C, install the device
 #   4. vendor_compat install the vendor runtime shims and resolve GEMS_VENDOR
-#   5. ecosystem     FlagGems prep, CUDA alias, distributed/DDP/compile/BPU
+#   5. ecosystem     FlagGems prep, CUDA alias, distributed/DDP/DataParallel/
+#                    compile/BPU
 #
 # Constraints, each next to the phase it constrains:
 #   * preload before claim: the vendor libtorch has to be in place before
