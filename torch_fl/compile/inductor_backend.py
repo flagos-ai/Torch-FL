@@ -29,6 +29,7 @@ trace inside compile_fx trips `opt_ready_stream && opt_parent_stream`
 """
 
 import os
+import sys
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -240,9 +241,69 @@ def _patch_cuda_rng_for_cpu_torch():
     cuda_module.set_rng_state = _stub_set_rng_state
 
 
+_STATIC_LAUNCHER_ENV = "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"
+
+
+def _static_cuda_launcher_available() -> bool:
+    """Whether this torch build carries Inductor's static Triton launcher."""
+    return hasattr(torch._C, "_StaticCudaLauncher")
+
+
+def pin_static_cuda_launcher() -> bool:
+    """Point Inductor at Triton's own launcher when the static one is unbuilt.
+
+    ``torch._inductor`` launches Triton kernels through
+    ``torch._C._StaticCudaLauncher`` when it can, and the CPU torch wheel this
+    build pairs with an external ``libtorch_cuda.so`` does not compile that
+    class. The ``"flagos"`` backend has scoped the config patch to its own
+    compiles from the start; every *other* entry point -- a bare
+    ``torch.compile``, or ``transformers``' ``CompiledFlexAttention``, which
+    compiles without naming a backend -- reached Inductor's default and died
+    before generating a kernel::
+
+        InductorError: ImportError: cannot import name
+        '_StaticCudaLauncher' from 'torch._C'
+
+    Reading the capability once at import and writing the answer where Inductor
+    and its compile workers will both read it makes the default entry point work.
+    Measured on the H100 CUDA-boxing build at B=2, H=4, S=256, D=64, fp32:
+    ``torch.compile(flex_attention)`` compiled, reached the same kernel
+    ``backend="flagos"`` does, and agreed with the CPU reference to 5.2e-03 (the
+    ``tf32`` the template runs at), where it previously raised.
+
+    Why the environment and not only the config attribute: ``config.py``
+    evaluates ``static_cuda_launcher_default()`` once, at its own import. If that
+    import has already happened the export is too late for it, and the attribute
+    is what Inductor will read; if it has not, the export is what it will read.
+    Both are covered so neither order can lose the pin. The pin has nothing to
+    override -- a build without the class cannot launch through it -- and it
+    still steps aside rather than half-applying when the variable is already
+    exported, so ``TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=1`` remains available
+    for a build that has the class and wants to be told so.
+
+    Returns whether the pin was applied by this call.
+    """
+    if _static_cuda_launcher_available():
+        return False
+
+    if not _env.set_foreign(_STATIC_LAUNCHER_ENV, "0"):
+        # Already exported -- either this same "0", or an explicit "1".
+        # `set_foreign` treats any export as the user's answer, so leave the
+        # process alone.
+        return False
+
+    config = sys.modules.get("torch._inductor.config")
+    if config is not None:
+        config.use_static_cuda_launcher = False
+    return True
+
+
 # Apply runtime probes at module load time, before FakeTensor is imported by
 # the first compile. Native MUSA and GCU are not CUDA, but Inductor's GPU probe
-# is the shared gate for CUDA-shaped GPU devices.
+# is the shared gate for CUDA-shaped GPU devices. The static-launcher pin goes
+# first because it is the only one that has to be in place before any earlier
+# ``torch._inductor`` import can cache Inductor's answer.
+pin_static_cuda_launcher()
 _patch_native_cuda_probe()
 _patch_native_triton_autotune()
 _patch_native_cache_system_key()
@@ -312,8 +373,11 @@ def _resolve_config_patches(
 
     # The static launcher needs torch._C._StaticCudaLauncher, which the CPU
     # torch wheel does not build (we supply libtorch_cuda.so externally). Fall
-    # back to the regular Triton launch path.
-    if not hasattr(torch._C, "_StaticCudaLauncher"):
+    # back to the regular Triton launch path. The import-time pin already
+    # answered this for every entry point, including the default backend; scoping
+    # it into this compile's patches as well keeps the "flagos" backend from
+    # depending on that having happened.
+    if not _static_cuda_launcher_available():
         patches["use_static_cuda_launcher"] = False
 
     return patches

@@ -166,6 +166,44 @@ no operator route in `backends_gcu.conf` changes, and the tokens it removes
 (`repeat_interleave.self_int`, and the complex multiply) are not routed anywhere
 else by this switch.
 
+### Framework compatibility
+
+Import-time shims that adapt another *framework's* assumption about the device,
+rather than a vendor's runtime. Unlike the section above, these apply on every
+accelerator — including a stock CUDA box, where the device is still `flagos`.
+
+| Variable | Scope | Default | Purpose |
+|----------|-------|---------|---------|
+| `FLAGOS_DISABLE_FLEX_ATTENTION_COMPAT` | Runtime | `0` (off) | Leave `torch.nn.attention.flex_attention`'s hard-coded `{cuda, cpu, xpu, hpu}` device gate alone, so a flagos tensor is refused at the entry point as it is upstream. Set `1` to measure a platform against that gate unchanged; see the Flex Attention note below |
+
+**Flex Attention.** `torch.nn.attention.flex_attention` validates its inputs
+against a hard-coded `{cuda, cpu, xpu, hpu}` device set before anything else
+runs, so a `flagos` tensor is refused with `ValueError: FlexAttention is only
+supported on CUDA, CPU or HPU devices` at every entry point. (`create_block_mask`
+has no gate of its own and therefore works while `flex_attention` does not.) The
+set is a placeholder in upstream's own words — `_validate_device`'s docstring
+carries the TODO — and the test it performs is a device *name* membership test,
+so `torch_fl` relaxes that one check for the `flagos` device and delegates every
+other device to the function it replaced.
+
+This is a capability gate, not a route: which backend serves the attention is
+still decided by `backends_*.conf`, and a platform that cannot serve an operator
+still fails — at that operator, naming it. Both implementations behind the gate
+are already available to the device, the eager one from `torch 2.5` on and the
+fused Inductor template through the `flagos` compile backend. Measured on an H100
+with the CUDA-boxing build at `B=2, H=4, S=256, D=64`: eager matches the CPU
+reference to `9.5e-07` (fp32) and the fused kernel to `5.2e-03`, which is the
+`tf32` the fused template runs at. Set `FLAGOS_DISABLE_FLEX_ATTENTION_COMPAT=1`
+to measure a platform against upstream's gate unchanged.
+
+Two upstream assumptions this shim deliberately leaves in place, because neither
+is a device-name test and neither has been measured off NVIDIA: `transformers`
+calls `create_block_mask` with `_compile=True`, which compiles the mask
+construction and — on GCU — takes the process down with SIGSEGV rather than
+raising, which is why the HF runner still skips these tests; and a shape or dtype
+the fused template cannot express fails inside the template, on the template's
+own terms.
+
 ### Assets and libraries
 
 How the external libtorch/CUDA runtime is found at build time and loaded at
@@ -226,6 +264,7 @@ project's own spelling.
 |----------|-------|-----------|---------|
 | `GEMS_VENDOR` | FlagGems | Set if unset | FlagGems' own vendor selector (`nvidia`, `metax`, `hygon`, `ascend`, `mthreads`, `enflame`, …). torch_fl fills it from the detected hardware or the build record so FlagGems does not have to guess. An explicit value torch_fl cannot configure raises `RuntimeError` at `import torch_fl` instead of being silently passed on |
 | `TORCH_DEVICE_BACKEND_AUTOLOAD` | PyTorch | Set if unset | torch's device-backend entry-point autoload. torch_fl sets it to `0` on MUSA builds so vendor plugins (e.g. `torch_musa`) do not claim `PrivateUse1` during `import torch` |
+| `TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER` | PyTorch | Set if unset | Inductor's choice between its static Triton launcher and Triton's own. torch_fl sets it to `0` on a build without `torch._C._StaticCudaLauncher` (the CPU torch wheel this build pairs with an external `libtorch_cuda.so`), because a `torch.compile` that does not name the `flagos` backend otherwise dies before generating a kernel - see the static-launcher note below |
 | `FLAGCX_TORCH_BACKEND` | FlagCX | Set if unset | FlagCX's torch plugin selector; torch_fl sets `flagos` |
 | `TILELANG_DISABLE_CACHE` | tilelang | Set if unset | tilelang's kernel cache. `FLAGOS_TILEOPS_DISABLE_ALL_CACHE=1` sets it to `1` |
 | `TRITON_ENABLE_TASKQUEUE` | FlagTree / torch_npu | Set if unset | The FlagTree Ascend Triton launch queue, on by default upstream. torch_fl turns it off so an unsupported async launch fails with a clear message instead of a silent override |
@@ -262,6 +301,24 @@ comm layer can route (`torch_fl/_vendor.py:KNOWN_VENDORS`) raises `RuntimeError`
 naming the valid values, and a vendor-detection failure with `GEMS_VENDOR` unset
 also raises instead of silently selecting `ascend`. Set it explicitly to select
 a vendor on a host where detection cannot succeed.
+
+**Static Triton launcher.** `torch._inductor` launches Triton kernels through
+`torch._C._StaticCudaLauncher` when the class exists, and the CPU torch wheel
+this build pairs with an external `libtorch_cuda.so` does not compile it. The
+`flagos` compile backend has scoped `use_static_cuda_launcher = False` into its
+own compiles from the start, but a `torch.compile` that does *not* name the
+`flagos` backend — a bare `torch.compile(fn)`, or `transformers`'
+`CompiledFlexAttention` — reached Inductor's default and died with
+`InductorError: ImportError: cannot import name '_StaticCudaLauncher'` before
+generating a kernel. `torch_fl` therefore reads the capability once at import and
+exports `TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0` when the class is absent,
+which covers both the other entry points and Inductor's compile workers.
+`torch._inductor.config` evaluates its default once, at its own import, so the
+pin writes the export *and* — when that import has already happened — the
+attribute, rather than relying on either alone. It is not a preference: a build
+without the class has nothing to opt into, and an explicit export still wins, so
+`TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=1` remains available for a build that has
+the class and wants to be told so.
 
 ## Worker count
 

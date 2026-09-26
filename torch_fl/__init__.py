@@ -1981,6 +1981,23 @@ def _phase_ecosystem() -> None:
 
     _register_compile_backend()
 
+    # flex_attention gates every entry point on a hard-coded {cuda, cpu, xpu,
+    # hpu} device set, so a flagos tensor is refused before any kernel is chosen.
+    # Installed after the compile backend because the fused path it unblocks
+    # needs that backend registered; optional and idempotent either way.
+    try:
+        from torch_fl.compat.flex_attention import install_flex_attention_compat
+
+        install_flex_attention_compat()
+    except Exception as exc:  # noqa: BLE001 - flex-attention support is optional
+        import warnings
+
+        warnings.warn(
+            f"[torch_fl] flex-attention compatibility setup was skipped: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     _register_bpu_compile_backend()
 
 

@@ -196,6 +196,9 @@ FOREIGN: dict[str, str] = {
     "TRITON_ENABLE_TASKQUEUE": "the FlagTree Ascend Triton launch queue",
     "COMPILE_ARCH": "Enflame's tops compiler architecture",
     "HB_DNN_USER_DEFINED_L2M_SIZES": "the BPU hbdk runtime's L2M sizing",
+    "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER": (
+        "Inductor's choice between its static Triton launcher and Triton's own"
+    ),
 }
 
 
@@ -470,6 +473,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_RUNTIME,
         "0 (off)",
         "Disable the optional Apex multi-tensor compatibility layer",
+    ),
+    "FLAGOS_DISABLE_FLEX_ATTENTION_COMPAT": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Leave flex_attention's hard-coded {cuda, cpu, xpu, hpu} device gate "
+        "alone, so a flagos tensor is refused at the entry point as it is "
+        "upstream. Set 1 to measure a platform against that gate unchanged",
     ),
     "FLAGOS_DISABLE_QWENIMAGE_ROPE": (
         SCOPE_RUNTIME,

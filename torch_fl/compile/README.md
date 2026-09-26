@@ -106,6 +106,12 @@ This build pairs a CPU-only pip torch with an externally supplied
 backend compensates:
 
 - `use_static_cuda_launcher = False` -- `torch._C._StaticCudaLauncher` is not built.
+  `inductor_backend.pin_static_cuda_launcher()` reads that at import and exports
+  `TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0`, rather than only scoping the patch
+  into this backend's own compiles: a `torch.compile` that names no backend
+  (`transformers`' `CompiledFlexAttention` is the case) otherwise reaches
+  Inductor's default and dies with `ImportError: cannot import name
+  '_StaticCudaLauncher'` before generating a kernel.
 - `triton.cudagraphs = False` -- `torch.cuda.CUDAGraph` is a dummy base class
   that raises on construction; `mode="max-autotune"` would otherwise enable it.
 - `CudaInterface.get_raw_stream` is re-attached -- the binding exists, but the
