@@ -99,6 +99,12 @@ def _patch_native_cuda_probe() -> None:
     skips the registered flagos device and later attempts CPU-torch CUDA lazy
     initialization ("Torch not compiled with CUDA enabled"). The compiler still
     receives a ``flagos`` device and never executes a CUDA kernel.
+
+    What it replaces is kept as ``torch.cuda._flagos_original_is_available``,
+    which is torch_fl's only way to ask what torch itself answers once this has
+    run. `torch_fl._real_cuda_is_available` reads it, and the ``cuda`` device
+    alias installs only when torch reports no CUDA device -- which is what the
+    saved copy answers, and what the redirected probe no longer does.
     """
     from torch_fl.compile.device_interface import is_native_accelerator
 
@@ -111,6 +117,8 @@ def _patch_native_cuda_probe() -> None:
 
     original = torch.cuda.is_available
     torch.cuda.is_available = torch.flagos.is_available
+    # Read back by torch_fl._real_cuda_is_available, which has to tell this
+    # redirect from a real CUDA runtime; the alias's guard depends on it.
     torch.cuda._flagos_original_is_available = original
     torch.cuda._flagos_native_patched = True
 

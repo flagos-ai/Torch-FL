@@ -1170,6 +1170,32 @@ def _keep_device_identity_checks_working(real_device, shim):
 _cuda_alias_active = False
 
 
+def _real_cuda_is_available() -> bool:
+    """Whether *torch* reports a CUDA device, not whether torch_fl redirected it.
+
+    ``torch.cuda.is_available`` stops being torch's own answer once
+    ``torch_fl.compile`` is imported: ``_patch_native_cuda_probe`` repoints it at
+    the flagos device count so that Inductor's CUDA-shaped FakeTensor probe finds
+    the accelerator on a build that has no CUDA runtime, and saves the function
+    it replaced as ``torch.cuda._flagos_original_is_available``. That import
+    lands before ``_phase_ecosystem`` reaches ``_alias_cuda_to_flagos``, so the
+    saved function is the only remaining answer to "is there real CUDA here".
+
+    Reading the redirected probe instead answers yes on exactly the builds the
+    alias exists for. Measured on MUSA with the redirect in place and this guard
+    reading it: nothing past the guard ran, ``torch.cuda.current_device()``,
+    ``synchronize``, ``device_count`` and ``get_device_properties`` all stayed
+    torch's, and dynamo's ``cuda_extra_check`` -- which calls
+    ``torch.cuda.current_device()`` -- landed in ``torch.cuda._lazy_init`` and
+    raised ``AssertionError: Torch not compiled with CUDA enabled``, so
+    ``torch.compile(model, fullgraph=True)`` could not compile at all.
+    """
+    probe = getattr(torch.cuda, "_flagos_original_is_available", None)
+    if probe is None:
+        probe = torch.cuda.is_available
+    return bool(probe())
+
+
 def _alias_cuda_to_flagos():
     """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
 
@@ -1183,14 +1209,18 @@ def _alias_cuda_to_flagos():
     This rewrites ``cuda`` device *arguments* to the flagos device, so that
     hardcoded-``cuda`` code lands on the accelerator that is actually present.
 
-    Deliberately a no-op when ``torch.cuda.is_available()``: on the CUDA and
+    Deliberately a no-op when *torch* reports a CUDA device: on the CUDA and
     boxing backends ``cuda`` already means a real device, and hijacking it there
-    would break the boxing path, which submits genuine CUDA work.
+    would break the boxing path, which submits genuine CUDA work. Which is not
+    the same question as whether ``torch.cuda.is_available()`` says so --
+    torch_fl redirects that probe on a build without a CUDA runtime, and reading
+    the redirect here is what kept this alias uninstalled; see
+    ``_real_cuda_is_available``.
 
     Opt out with ``FLAGOS_ALIAS_CUDA=0`` -- worth doing if you need
     ``device="cuda"`` to keep failing loudly rather than silently redirecting.
     """
-    if torch.cuda.is_available():
+    if _real_cuda_is_available():
         return
     if not _env.flag("FLAGOS_ALIAS_CUDA", True):
         return
