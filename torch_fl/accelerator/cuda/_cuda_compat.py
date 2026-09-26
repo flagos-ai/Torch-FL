@@ -43,6 +43,7 @@ Modeled on ``torch_fl/accelerator/metax/_metax_compat.py``.
 """
 
 import ctypes
+import functools
 import os
 import warnings
 from dataclasses import dataclass
@@ -677,10 +678,18 @@ def patch_torch_cuda_for_flagos():
     return True
 
 
-# FlagGems' own name for this accelerator, and the one its nvidia backend
-# declares. See patch_flaggems_device_name for why they have to agree.
+# FlagGems' own name for this accelerator, and the one its nvidia and hygon
+# backends declare. See patch_flaggems_device_name for why they have to agree.
 _FLAGGEMS_DEVICE_NAME = "flagos"
 _VENDOR_DEVICE_NAME = "cuda"
+
+# The vendors whose descriptor names this accelerator "cuda" and whose FlagGems
+# kernels have been measured against the realignment. The AMD, Iluvatar,
+# Kunlunxin, MetaX and Thead descriptors declare the same name and carry the
+# same guards, so they have the defect too; they are left out because the
+# remedy newly enables every guarded FlagGems kernel on a platform this change
+# was not measured on. Add a vendor here only with a survey run on its hardware.
+_ALIGNED_VENDORS = ("nvidia", "hygon")
 
 
 def _flag_gems_package_root():
@@ -711,6 +720,47 @@ def _is_flag_gems_module(module, root) -> bool:
     return bool(root and path and os.path.abspath(path).startswith(root))
 
 
+def _plugin_device_index(device):
+    """The index behind a flagos device specifier, or None if it is not one.
+
+    ``"flagos"`` and ``torch.device("flagos")`` name the current device, the way
+    a bare ``"cuda"`` does, so they resolve the same way ``torch.cuda`` resolves
+    its own: through ``current_device()``.
+    """
+    if isinstance(device, str):
+        name, _, index = device.partition(":")
+        if name != _FLAGGEMS_DEVICE_NAME:
+            return None
+        if index:
+            return int(index)
+    elif isinstance(device, torch.device) and device.type == _FLAGGEMS_DEVICE_NAME:
+        if device.index is not None:
+            return device.index
+    else:
+        return None
+    try:
+        return torch.cuda.current_device()
+    except Exception:
+        return 0
+
+
+def _accept_plugin_device(fn):
+    """Wrap a device-properties lookup so it also takes flagos specifiers.
+
+    Anything that is not a flagos specifier is handed to ``fn`` untouched, so
+    the wrapped call keeps torch's own semantics for its own device type.
+    """
+
+    @functools.wraps(fn)
+    def lookup(device=None, *args, **kwargs):
+        index = _plugin_device_index(device)
+        if index is not None:
+            device = index
+        return fn(device, *args, **kwargs)
+
+    return lookup
+
+
 def patch_flaggems_device_name() -> bool:
     """Point FlagGems' device identity at the name torch_fl registered.
 
@@ -733,6 +783,53 @@ def patch_flaggems_device_name() -> bool:
     handed over as, so ``mask * 1.3333333333333333`` raised "Expected a value of
     type 'Tensor' for argument 'other' but instead found type 'float'".
 
+    Hygon's descriptor (``flag_gems/runtime/backend/_hygon/__init__.py``)
+    declares the same ``device_name="cuda"``, so DCU has the same defect with a
+    louder failure mode: the guarded modules there raise instead of falling
+    back, as ``ValueError: i0: input tensor must be on cuda device``. Nine of
+    ``backends_dcu.conf``'s ``flaggems`` ops are guarded that way, over fourteen
+    routes: ``i0`` and its ``.out``, ``special_i0e``, ``special_i1``,
+    ``special_scaled_modified_bessel_k1`` and its ``.out``, ``soft_margin_loss``,
+    ``reflection_pad2d`` and its ``.out``, ``reflection_pad3d`` and its ``.out``,
+    ``_embedding_bag_dense_backward``, and ``eq``'s ``Scalar`` and ``Tensor``
+    overloads. Seven of the fourteen raised on the DCU survey's profiles; the
+    four ``reflection_pad`` routes and ``_embedding_bag_dense_backward`` carry no
+    verdict there because the survey's synthesized arguments do not satisfy
+    ATen's schema for them, and the ``eq`` pair passed either way because the
+    comparison sits on a path a two-operand call does not reach. Re-running that
+    survey on DCU with this change moved all seven off ``FAILED`` -- four to
+    ``STRICT`` and three to ``BASIC_ONLY`` -- with ``backends_dcu.conf`` byte for
+    byte unchanged.
+
+    A second guard class is out of reach and is not claimed here. Five of the
+    configuration's ops read ``tensor.is_cuda`` instead
+    (``special_modified_bessel_k0``, ``nanmedian``, ``roll``, ``topk``,
+    ``upsample_bicubic2d``), and ``is_cuda`` is a property of the tensor rather
+    than of the name, so no realignment reaches it. Only
+    ``special_modified_bessel_k0`` and its ``.out`` assert on it and so fail for
+    that reason; the rest use it to choose between paths and pass in both arms.
+    Only the two vendors in ``_ALIGNED_VENDORS`` are realigned; see the constant
+    for why the other four descriptors that name this accelerator ``cuda`` are
+    not.
+
+    Those two classes are what the rewrite is *for*; a third thing it reaches is
+    not a guard at all. A module global holding the name is not always compared:
+    ``flag_gems.ops.cumsum`` also hands its copy to ``get_device_properties`` to
+    size a grid (``num_sms = get_device_properties(device).multi_processor_count``),
+    and ``torch.cuda`` accepts no name but its own -- ``ValueError: Expected a
+    cuda device, but got: flagos``. Correcting the name alone therefore broke a
+    route the survey cannot build: ``multinomial`` with ``replacement=True``,
+    which reaches that line through ``normed_cumsum``, answered on a non-current
+    device before this change and raised after it, and the DCU integration run
+    moved ``test_multinomial_on_second_device`` from xpass to xfail. The lookup
+    is wrapped once, below, to resolve ``"flagos"``, ``"flagos:N"`` and
+    ``torch.device("flagos"[, N])`` to the index ``torch.cuda`` would have used
+    for the ``"cuda"`` spelling of the same specifier, forwarding everything else
+    untouched. The same wrapper also takes a flagos *tensor* device, because the
+    parameter is the same one -- ``masked_select`` and ``masked_scatter`` pass
+    ``mask.device`` that way above 4096 elements, and that lookup raised on DCU
+    independently of the name.
+
     Renaming the device is preferable to rewriting the comparison because it
     leaves FlagGems' own bookkeeping intact: ``torch_device_fn`` stays
     ``torch.cuda``, which the rest of this module already points at the flagos
@@ -747,7 +844,7 @@ def patch_flaggems_device_name() -> bool:
     device.name`` in 13 of the generic-path modules, ``_DEVICE_NAME`` in
     ``ops/mul.py``). Correcting the singleton alone would leave each of those
     literals stale, so every already-loaded flag_gems module is rewritten as
-    well. Idempotent, and a no-op for any vendor other than nvidia.
+    well. Idempotent, and a no-op for any vendor outside ``_ALIGNED_VENDORS``.
     """
     import importlib.util
     import sys
@@ -763,7 +860,7 @@ def patch_flaggems_device_name() -> bool:
             return False
 
     detector = DeviceDetector()
-    if detector.vendor_name != "nvidia":
+    if detector.vendor_name not in _ALIGNED_VENDORS:
         return False
 
     stale = detector.name
@@ -775,6 +872,13 @@ def patch_flaggems_device_name() -> bool:
 
     detector.name = _FLAGGEMS_DEVICE_NAME
 
+    # The rewrite below also reaches the globals a module passes to
+    # ``get_device_properties`` as a *specifier* rather than compares against
+    # ``tensor.device.type`` -- ``flag_gems.ops.cumsum`` does both. See
+    # _accept_plugin_device for why the lookup has to take the new name.
+    original = getattr(torch.cuda, "get_device_properties", None)
+    lookup = _accept_plugin_device(original) if callable(original) else None
+
     root = _flag_gems_package_root()
     for module in list(sys.modules.values()):
         if module is None or not _is_flag_gems_module(module, root):
@@ -782,6 +886,19 @@ def patch_flaggems_device_name() -> bool:
         for attr in ("device", "_DEVICE_NAME"):
             if getattr(module, attr, None) == stale:
                 setattr(module, attr, _FLAGGEMS_DEVICE_NAME)
+        # `from flag_gems.utils import get_device_properties` bound the function
+        # into the importing module, so rebinding it there is the only way to
+        # reach that copy; modules imported later pick the wrapper up from
+        # flag_gems.utils instead.
+        if (
+            lookup is not None
+            and getattr(module, "get_device_properties", None) is original
+        ):
+            setattr(module, "get_device_properties", lookup)
+    if lookup is not None:
+        # attribute-style call sites (`torch_device_fn.get_device_properties`)
+        # resolve through this one object, which several modules share.
+        torch.cuda.get_device_properties = lookup
     return True
 
 

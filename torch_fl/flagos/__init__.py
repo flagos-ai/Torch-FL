@@ -796,9 +796,13 @@ def _align_flaggems_device_identity():
     the ``backends_cuda.conf`` routing.
 
     No platform gate here: the remedy is decided by which vendor descriptor
-    FlagGems resolved, and only its nvidia one names this accelerator differently
-    from torch_fl. On every other vendor (Ascend, GCU, DCU, MetaX, MUSA) the call
-    returns immediately -- see
+    FlagGems resolved, and of the CUDA-compatible ones only nvidia's and hygon's
+    name this accelerator differently from torch_fl while also being measured
+    against the realignment. DCU needs it as much as CUDA does -- its guarded
+    modules raise rather than fall back, which is the ``ValueError: i0: input
+    tensor must be on cuda device`` class in the DCU survey. On every other
+    vendor (Ascend, GCU, MetaX, MUSA, and the remaining descriptors that say
+    ``cuda``) the call returns immediately -- see
     ``torch_fl.accelerator.cuda._cuda_compat.patch_flaggems_device_name``, which
     GCU mirrors in ``torch_fl.accelerator.gcu._gcu_compat``.
 
