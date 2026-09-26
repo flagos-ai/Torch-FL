@@ -108,13 +108,34 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/
       -m "multi_device" -v -s --tb=short
+
+  # Issue #409: the remaining top-level files no manifest selected. They are
+  # single-device suites, so the multi_device sweep above does not reach them,
+  # and they are named here rather than selected by marker for the reason
+  # test_factory_ops.py is: each would need a marker invented for it, and a
+  # marker that exists only to be selected proves nothing about the file.
+  - name: Portable top-level contracts
+    command: >-
+      python -m pytest
+      tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_dtype_coverage.py
+      tests/integration/test_ops.py
+      -v -s --tb=short
   # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
   # cases are measured by the group below, not here (no switch exists any more
   # to skip them -- see ops/conftest.py).
+  #
+  # Issue #409: `cuda` is in the accepting half because the sweep required
+  # `main_ops`, so a test whose only selecting mark is `cuda` -- every
+  # `*_matches_cuda_ref` case, and the whole of ops/test_full_cuda_coverage.py --
+  # was collected by this job and then deselected. Collection is the check:
+  # `-m "(cuda or main_ops) ..." --collect-only -q` selects 400 of the 1446
+  # ops/ cases where the old expression selected 132, in 21 files the old one
+  # did not reach.
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
+      -m "(cuda or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-

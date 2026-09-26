@@ -63,6 +63,19 @@ makes the in-process tests order-dependent. `test_issue_313_repro_in_a_fresh_pro
 runs the repro in its own interpreter for that reason, and is the one to trust
 for "did this regress".
 
+The synchronize and current-device calls are made on `torch_fl.flagos`, not on
+`torch.cuda`. `torch.cuda` is not a portable name for the flagos runtime: where
+the CUDA alias is installed the two are literally the same function, and where it
+is not -- a MUSA build links stock CPU PyTorch and publishes only a `torch.musa`
+shim, never touching `torch.cuda` -- the stock call raises
+
+    AssertionError: Torch not compiled with CUDA enabled
+
+which is a failure of the test's environment, not of the contract it asserts. The
+flagos surface is the same function in the first case and the working one in the
+second, and is what `tests/integration/test_ops.py::TestSync` already calls. The
+process-level invariant is therefore asserted once, against flagos.
+
 Only meaningful with 2+ devices, so it skips otherwise.
 
 Usage:
@@ -79,10 +92,19 @@ import torch
 import torch_fl
 
 
-pytestmark = pytest.mark.skipif(
-    torch_fl.flagos.device_count() < 2,
-    reason="needs at least 2 flagos devices",
-)
+# Issue #409: a top-level file is reached by no manifest unless it carries a
+# marker a sweep selects, so this regression had never run in CI. It is a
+# multi-device contract by construction (the cast below is on a non-zero index
+# against device 0), which is exactly what `multi_device` selects -- the step
+# that sweeps tests/integration/ on every platform. The list form keeps the
+# 2+-device guard; a second assignment would silently drop the first.
+pytestmark = [
+    pytest.mark.multi_device,
+    pytest.mark.skipif(
+        torch_fl.flagos.device_count() < 2,
+        reason="needs at least 2 flagos devices",
+    ),
+]
 
 # Index 1 specifically: index 0 is the device the bug does not affect, so
 # asserting on it would pass either way.
@@ -144,7 +166,7 @@ def test_int64_to_bool_cast_on_nonzero_device(shape):
     m = torch.ones((1, 160), dtype=torch.int64, device=DEVICE)
 
     b = m.to(dtype=torch.bool)
-    torch.cuda.synchronize()
+    torch_fl.flagos.synchronize()
 
     # The issue's failing line, and it has to come first: copying `b` to the host
     # beforehand re-binds the device and hides the bug.
@@ -166,7 +188,7 @@ def test_cast_values_are_exact_on_nonzero_device():
     m = base.to(DEVICE)
 
     b = m.to(dtype=torch.bool)
-    torch.cuda.synchronize()
+    torch_fl.flagos.synchronize()
 
     assert b.cpu().tolist() == (base != 0).tolist()
 
@@ -177,13 +199,19 @@ def test_cast_values_are_exact_on_nonzero_device():
 
 _REPRO = textwrap.dedent(
     """
-    import torch, torch_fl
+    # torch_fl first, torch second. torch_fl's preload phase has to put the CUDA
+    # assets in place before `import torch` caches its CUDAHooks; the other order
+    # makes the first device op fail with "Cannot initialize CUDA without
+    # ATen_cuda library", which is what the CUDA and DCU jobs hit. The second
+    # import is a sys.modules hit that only binds the name.
+    import torch_fl
+    import torch
 
     dev = "flagos:{index}"
     w = torch.empty((152064, 3584), dtype=torch.bfloat16, device=dev)
     m = torch.ones((1, 160), dtype=torch.int64, device=dev)
     b = m.to(dtype=torch.bool)
-    torch.cuda.synchronize()
+    torch_fl.flagos.synchronize()
     print("true count:", int(b.sum().cpu()))
     """
 ).format(index=INDEX)
@@ -229,7 +257,7 @@ def test_cast_on_nonzero_device_leaves_current_device_alone():
     m = torch.ones((1, 160), dtype=torch.int64, device=DEVICE)
 
     m.to(dtype=torch.bool)
-    torch.cuda.synchronize()
+    torch_fl.flagos.synchronize()
 
     assert torch_fl.flagos.current_device() == 0, (
         f"the cast left the flagos current device at {torch_fl.flagos.current_device()}"
@@ -265,11 +293,8 @@ def test_boxed_op_leaves_current_device_untouched(name, run):
     assert torch_fl.flagos.current_device() == 0
 
     run(t)
-    torch.cuda.synchronize()
+    torch_fl.flagos.synchronize()
 
     assert torch_fl.flagos.current_device() == 0, (
         f"{name} left the flagos current device at {torch_fl.flagos.current_device()}"
-    )
-    assert torch.cuda.current_device() == 0, (
-        f"{name} left the CUDA current device at {torch.cuda.current_device()}"
     )

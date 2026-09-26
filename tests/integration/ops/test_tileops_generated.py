@@ -28,10 +28,13 @@ from torch_fl.tileops import runtime as tileops_runtime
 from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
 from torch_fl.tileops.generated.shims import SHIM_NAMES
 
-pytestmark = pytest.mark.skipif(
-    not tileops_runtime.is_tileops_available(),
-    reason="TileOPs unavailable or host is not SM90",
-)
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not tileops_runtime.is_tileops_available(),
+        reason="TileOPs unavailable or host is not SM90",
+    ),
+]
 
 
 def _ref(overload):

@@ -83,8 +83,12 @@ _PREPARE_STEP = "Prepare wheel-only test workspace"
 _PLATFORM_RE = re.compile(r"^\s*platform:\s*([A-Za-z0-9_]+)\s*$", re.MULTILINE)
 # A column-0 YAML key, used to delimit a top-level block.
 _TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*:")
-# A folded or literal scalar: `command: >-`, `command: |`.
-_SCALAR_KEY_RE = re.compile(r"\s*command:\s*[>|][-+]?\s*")
+# A `command:` key and its value. The value is either a block indicator, as in
+# `command: >-` or `command: |`, or a plain scalar on the same line. Both forms
+# are in use, and a reader that knew only one would silently skip whole steps.
+_COMMAND_KEY_RE = re.compile(r"\s*command:\s*(\S.*?)\s*$")
+# A block scalar indicator: `>`, `>-`, `|`, `|+`.
+_BLOCK_INDICATOR_RE = re.compile(r"[>|][-+]?")
 # A repository script named by a manifest command.
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 # A command that leaves the prepared workspace for the checkout.
@@ -195,6 +199,11 @@ def _manifest_commands(platform: str) -> list[str]:
     Only that block is read. The neighbouring top-level ``setup_script`` key
     names a script too, but that one is not executed from this workspace, so
     requiring it to be copied would be wrong.
+
+    Both scalar forms are read. A step written as a plain ``command: python -m
+    pytest ...`` is as much of an instruction as the folded one beside it, and
+    reading only the folded form drops it -- which for the reachability check
+    below means a file named solely by such a step looks like an orphan.
     """
     config = _CONFIG_DIR / f"{platform}.yml"
     if not config.is_file():
@@ -206,7 +215,14 @@ def _manifest_commands(platform: str) -> list[str]:
         if _TOP_LEVEL_KEY_RE.match(line):
             in_tests = line.startswith("integration_tests:")
             continue
-        if not in_tests or not _SCALAR_KEY_RE.fullmatch(line):
+        if not in_tests:
+            continue
+        key = _COMMAND_KEY_RE.fullmatch(line)
+        if key is None:
+            continue
+        value = key.group(1)
+        if not _BLOCK_INDICATOR_RE.fullmatch(value):
+            commands.append(value)
             continue
         body = _block_after(lines, index, _indent(line))
         commands.append(" ".join(row.strip() for row in body if row.strip()))
@@ -600,56 +616,37 @@ def _reachable_test_files() -> set[str]:
 # the ratchet: the check below is green while it matches reality exactly, and
 # goes red the moment either half drifts -- a new orphan it has not been told
 # about, or an entry here that has since been wired in.
+#
+# What is left after issue #409 worked the list #391 left behind is the
+# environment group, and nothing else: files a job cannot run as the images and
+# mounts stand. None of them is waiting on a code change, so the entry *is* the
+# decision and is written as one, rather than as a task someone forgot.
 _KNOWN_UNREACHABLE: dict[str, str] = {
     "tests/integration/test_apex_compat.py": (
-        "needs NVIDIA apex and its amp_C extension; no platform image installs them"
-    ),
-    "tests/integration/test_clone_dispatch_case.py": (
-        "runs clean on a 910 (3 passed) and is portable, so it should be wired "
-        "into the manifests in a follow-up"
-    ),
-    "tests/integration/test_dtype_coverage.py": (
-        "1 of 31 fails on a 910: a bool neg routed to FlagGems fails BiShengIR "
-        "compilation; wire it in once that is fixed"
+        "needs NVIDIA apex and its amp_C extension, and no CI platform is "
+        "NVIDIA: flagos boxes its device onto CUDA while carrying a CPU "
+        "PyTorch, as cuda.yml's own version assertion states. Accepted "
+        "exclusion unless a job that installs apex is added"
     ),
     "tests/integration/test_fallback_trace.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
+        "needs --model and a mounted Qwen3 checkpoint, which only the CUDA "
+        "runner mounts; wiring it in needs a step on that manifest and a "
+        "decision about what the other six do with it"
     ),
     "tests/integration/test_fallback_trace_train.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
-    ),
-    "tests/integration/test_nonzero_device_dtype_cast.py": (
-        "passes on a 910; should be wired into the manifests in a follow-up"
-    ),
-    "tests/integration/test_ops.py": (
-        "2 of 58 fail on a 910 on an rtol/atol of 1e-4 for a float32 mm with "
-        "K=128, which is tighter than the accumulation error; the file is "
-        "otherwise superseded by the marker-selected ops/ suites"
+        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
     ),
     "tests/integration/test_profiler_qwen3_infer.py": (
-        "needs --model and a mounted Qwen3 checkpoint"
-    ),
-    "tests/integration/ops/test_dcu_flaggems_sdpa.py": (
-        "carries only the dcu mark, and both DCU sweeps require main_ops or flaggems"
+        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
     ),
     "tests/integration/ops/test_flaggems_cpp_dispatch.py": (
         "carries only flaggems_cpp, and every set_env_*.sh builds FlagGems "
-        "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0)"
-    ),
-    "tests/integration/ops/test_full_cuda_coverage.py": (
-        "carries only the cuda mark, and both CUDA sweeps require main_ops or flaggems"
-    ),
-    "tests/integration/ops/test_gcu_sdpa_mask.py": (
-        "carries only the gcu mark, and both GCU sweeps require anyplatform, "
-        "main_ops or flaggems"
+        "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
+        "exclusion until one job opts into that build"
     ),
     "tests/integration/ops/test_musa_flaggems.py": (
         "documented in musa.yml as held back until the image ships the vendor "
         "triton stack; added now it would record a pass that measured nothing"
-    ),
-    "tests/integration/ops/test_tileops_generated.py": (
-        "auto-generated with no marker at all, so no -m filter can select it; "
-        "the fix is in scripts/codegen/codegen_tileops.py::render_test"
     ),
 }
 
@@ -660,7 +657,21 @@ def test_the_reachability_reader_sees_what_the_manifests_actually_ask_for():
     Every manifest runs at least one sweep by marker, so a reading that missed
     them -- or one that stopped seeing ``-m`` -- has to fail here rather than
     report a clean tree.
+
+    Both scalar forms have to be read too. ``command: python -m pytest ...`` on
+    one line is as much of an instruction as the folded ``>-`` form beside it,
+    and this reader used to know only the folded one -- which mattered as soon
+    as the check below started asking the same reader which files run, because a
+    file named solely by a plain-scalar step then reads as an orphan. The
+    Ascend manifest names ``test_factory_ops.py`` that way and in no other.
     """
+    commands = _manifest_commands("ascend")
+    assert commands, "the reader found no command at all in the Ascend manifest"
+    plain = "python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short"
+    assert plain in commands, (
+        "the plain-scalar `command:` form went unread; the reader sees "
+        f"{[command for command in commands if 'test_factory_ops' in command]!r}"
+    )
     selections = _manifest_selections("ascend")
     assert selections, "the reader found no pytest invocation in the Ascend manifest"
     assert any(selection.paths and selection.marker for selection in selections), (

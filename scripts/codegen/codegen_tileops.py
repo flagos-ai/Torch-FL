@@ -839,10 +839,17 @@ def render_test(routes: List[Route]) -> str:
         "from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS",
         "from torch_fl.tileops.generated.shims import SHIM_NAMES",
         "",
-        "pytestmark = pytest.mark.skipif(",
-        "    not tileops_runtime.is_tileops_available(),",
-        '    reason="TileOPs unavailable or host is not SM90",',
-        ")",
+        # Issue #409: without a selecting marker the file fell through every
+        # sweep's `-m` expression and no manifest ran it. TileOPs is an SM90
+        # CUDA feature, so `cuda` is the mark that says both what hardware the
+        # file needs and which sweep should collect it.
+        "pytestmark = [",
+        "    pytest.mark.cuda,",
+        "    pytest.mark.skipif(",
+        "        not tileops_runtime.is_tileops_available(),",
+        '        reason="TileOPs unavailable or host is not SM90",',
+        "    ),",
+        "]",
         "",
         "",
         "def _ref(overload):",
