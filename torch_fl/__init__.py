@@ -362,10 +362,24 @@ def _preload_cuda_assets() -> None:
             nvidia_lib_dirs.extend(sorted(glob.glob(os.path.join(base, "*", "lib"))))
     # Dependency order: cudart first (everything needs it), then the math/comm
     # libs, then nvshmem. Load by soname glob; ignore any that are absent.
+    #
+    # nvrtc-builtins is not optional and is not a dependency of libnvrtc.so in
+    # the ELF sense: NVRTC dlopens it by soname at the first compilation, and it
+    # looks for it on the *caller's* search path rather than next to itself. The
+    # caller here is cuDNN, whose RUNPATH points at nvidia/cudnn/lib, so the
+    # lookup misses and every runtime-compiled cuDNN engine fails to build --
+    # which surfaces as "cuDNN Frontend error: No valid execution plans built"
+    # from any op that lands on one, on sm_90 and later. Preloading the builtins
+    # puts the soname in the global namespace before cuDNN asks for it; this is
+    # the same workaround PyTorch ships in `_preload_cuda_deps`
+    # (pytorch/pytorch#145580).
     _dep_order = [
         "libcudart.so*",
         "libnvrtc.so*",
-        "libnvjitlink.so*",
+        "libnvrtc-builtins.so*",
+        # Capitalised exactly as NVIDIA ships it: a glob is case-sensitive, and
+        # `libnvjitlink.so*` matches nothing.
+        "libnvJitLink.so*",
         "libcublasLt.so*",
         "libcublas.so*",
         "libcudnn*.so*",
