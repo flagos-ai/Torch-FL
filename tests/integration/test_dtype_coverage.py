@@ -64,7 +64,14 @@ ALL_DTYPES = FLOAT_DTYPES + INT_DTYPES + BOOL_DTYPE
 # Ascend instead of reddening the other platform jobs over a FlagGems
 # divergence rather than a torch-fl one.
 _REFERENCE_NEG_IS_ASCEND_ONLY = detect_platform() != "ascend"
+
+# The other divergence the suite found is float64, which no two backends serve
+# the same way. GCU's FlagGems mean kernel does not compile for it and MUSA's
+# muDNN Binary has no float64 MUL mode, so those two cases are marked; the
+# float64 `matmul` case is asserted with a tolerance instead, because there the
+# disagreement is arithmetic rather than a missing kernel.
 _GCU = detect_platform() == "gcu"
+_MUSA = detect_platform() == "musa"
 
 
 class TestFactoryDtypeSupport:
@@ -162,6 +169,12 @@ class TestBinaryDtypeSupport:
 
     @pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
     def test_mul_same_dtype(self, dtype):
+        if dtype is torch.float64 and _MUSA:
+            pytest.xfail(
+                "MUSA routes mul to muDNN's Binary, which reports "
+                "NOT_SUPPORTED for a float64 MUL; its ADD mode takes float64, "
+                "which is why the add case above passes"
+            )
         a = torch.ones(4, device=DEVICE, dtype=dtype)
         b = torch.ones(4, device=DEVICE, dtype=dtype) * 2
         result = torch.mul(a, b)
@@ -174,11 +187,27 @@ class TestBinaryDtypeSupport:
         result = torch.matmul(a, b)
         assert result.dtype == dtype
 
-    def test_float64_matmul_matches_cpu_fallback(self):
+    def test_float64_matmul_matches_cpu_reference(self):
+        """The product agrees with the CPU reference to float64 precision.
+
+        Not bit-for-bit, which is what this used to assert. Ascend reaches the
+        reference by construction -- aclnn takes matmul only up to float32, so
+        `IsMatmulDtypeSupported` in `csrc/aten/backends/ascend/dtype_support.h`
+        sends float64 through `at::matmul` on a CPU copy -- but off Ascend a
+        real device float64 GEMM computes it (CUDA/DCU/MUSA all reach FlagGems'
+        tiled Triton `mm`), and a different summation order over 4x4 inputs of
+        order 1 lands 2 ulp away: the CI jobs measured 4.4e-16 absolute and
+        4.1e-16 relative, identically on all three. That is reordering, not
+        error, and requiring exactness here made the case a proxy for Ascend's
+        routing decision. 1e-12 is ~2000x the observed deviation and still five
+        orders of magnitude tighter than a silent float32 computation would be
+        (~1e-7), so the claim this test is worth making -- the device answer is
+        a float64 answer -- is kept.
+        """
         a = torch.randn(4, 4, dtype=torch.float64)
         b = torch.randn(4, 4, dtype=torch.float64)
         result = torch.matmul(a.to(DEVICE), b.to(DEVICE)).cpu()
-        torch.testing.assert_close(result, torch.matmul(a, b), rtol=0, atol=0)
+        torch.testing.assert_close(result, torch.matmul(a, b), rtol=1e-12, atol=1e-12)
 
     def test_mixed_float_promotion(self):
         """Tensor-tensor arithmetic follows PyTorch promotion rules."""
