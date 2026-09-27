@@ -474,10 +474,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_DISABLE_QWENIMAGE_ROPE": (
         SCOPE_RUNTIME,
         "0 (off)",
-        "Leave diffusers' Qwen-Image rotary-embedding table alone. On GCU torch_fl "
-        "registers the flagos device there, which is what keeps the rotation off "
-        "the complex exponential diffusers would otherwise fall back to; set 1 to "
-        "measure that difference. A capability switch, not a route switch",
+        "Leave diffusers' Qwen-Image rotary-embedding table alone. On the "
+        "flagos device (GCU, Ascend, ...) torch_fl registers that device there, "
+        "which is what keeps the rotation off the complex exponential diffusers "
+        "would otherwise fall back to -- a path the backend may not be able to "
+        "run at all; set 1 to measure that difference. A capability switch, not "
+        "a route switch",
     ),
     # --- Distributed -----------------------------------------------------
     "FLAGOS_DIST_REDIRECT_GLOO": (

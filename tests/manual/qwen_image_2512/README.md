@@ -34,6 +34,7 @@ rather than keeping a second copy that could drift.
 | `memprobe.py` | Per-phase allocator accounting, and what FlagGems is holding. §7. |
 | `common.py` | Import order, placement, split, memory reporting. Both runners use it. |
 | `run.sh` | Wrapper: sets the environment, runs one mode, summarises the log. |
+| `ascend_profile.py` | Checks a finished run's logs and images against a frozen baseline. §6.2. |
 
 ## 1. Prerequisites
 
@@ -195,33 +196,50 @@ accelerator rather than on the host. Serving it there is not the same as serving
 it quickly — see "Why the complex multiply costs what it does" below, where the
 same multiply turns out to be 91x the cost of copying its own operands.
 
-**On GCU the angle path now ships as the default.** `torch_fl`'s GCU branch calls
-`patch_diffusers_qwenimage_rope` at import, which registers the `flagos` device in
-both halves of the extension point upstream provides for exactly this case:
+Ascend is the second measured case, and on it the complex path cannot run at all.
+CANN stores complex tensors but has no complex compute, and the failure lands
+before the first rotation: `QwenEmbedRope._compute_video_freqs` builds its
+operand with `torch.cat` over the polar parts and raises
+`RuntimeError: Unsupported dtype for ACL: ComplexFloat` on the transformer's very
+first call. So on that chip this is not a speed question — the angle path is what
+makes the transformer runnable, and §6.2's profile will not accept a run without
+it.
+
+**The angle path ships as the default on the flagos device, on both vendors that
+install it.** `torch_fl` calls `patch_diffusers_qwenimage_rope` at import — from
+`torch_fl/accelerator/ascend/_ascend_compat.py` on Ascend, from
+`torch_fl/accelerator/gcu/_gcu_compat.py` on GCU, two copies of the same
+registration because this change deliberately touches no GCU file — which
+registers the `flagos` device in both halves of the extension point upstream
+provides for exactly this case:
 `ROPE_PER_DEVICE` at the attention call site, and `_get_device_freqs` (on
 `QwenEmbedRope` and `QwenEmbedLayer3DRope`) for the operand — which has to be
 angles, because that method is cached per device and returns the complex
 exponential for every device but `neuron`. The rotation it registers is
 numerically the same rotation the complex path performs, i.e.
 `apply_rotary_emb_qwen_neuron`'s contraction, asserted bit for bit in
-`tests/unit/test_gcu_qwenimage_rope.py`; what differs is the spelling, which drops
-the stride-0 `repeat_interleave` broadcast that function expands each angle with.
+`tests/unit/test_ascend_qwenimage_rope.py`, with the GCU copy pinned the same way
+in `tests/unit/test_gcu_qwenimage_rope.py`; what differs is the spelling, which
+drops the stride-0 `repeat_interleave` broadcast that function expands each angle
+with.
 `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` opts out and leaves the table as `diffusers`
-ships it.
+ships it — on Ascend that is the `Unsupported dtype for ACL` failure above rather
+than a second leg to measure.
 
 `QWEN_IMAGE_REAL_ROPE=1` is what is left for a device kind the plugin does not
 cover: it makes `common.import_torch` do the same registration for the running
-device type. On GCU it is now redundant with the shipped default — and it is
-still meaningful, because `common.py` deliberately does not overwrite an entry
-that is already set, so the shipped consumer survives it. The switch stays
-documented because the harness runs on more than one backend and because the A/B
-below is stated in its terms.
+device type. On the flagos device — GCU and Ascend both — it is now redundant
+with the shipped default, and it is still meaningful, because `common.py`
+deliberately does not overwrite an entry that is already set, so the shipped
+consumer survives it. The switch stays documented because the harness runs on
+more than one backend and because the A/B below is stated in its terms.
 
 Report the leg both ways regardless, because the state changes what the run
 measures: on the complex path the census carries the
 `view_as_complex`/`view_as_real` traffic; on the angle path the rotation is
 real-valued on the accelerator and those calls disappear. On GCU the two legs are
-now `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` and the default.
+now `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` and the default; on Ascend there is only one
+leg, because the opt-out does not run.
 
 #### The switch is worth a third of the step
 
@@ -436,10 +454,11 @@ QWEN_IMAGE_REAL_ROPE=1 tests/manual/qwen_image_2512/run.sh infer --stage transfo
 QWEN_IMAGE_REAL_ROPE=1 tests/manual/qwen_image_2512/run.sh infer --stage transformer-step --device gcu
 ```
 
-On GCU a `--device flagos` run no longer needs the variable: `import torch_fl`
-installs the same rotation, minus the `repeat_interleave` expansion, and
-`FLAGOS_DISABLE_QWENIMAGE_ROPE=1` is the opt-out. The variable is still what a
-`--device gcu` run takes, and still what the A/B in §3.3 is stated in.
+On the flagos device — GCU and Ascend both — a `--device flagos` run no longer
+needs the variable: `import torch_fl` installs the same rotation, minus the
+`repeat_interleave` expansion, and `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` is the
+opt-out. The variable is still what a `--device gcu` run takes, and still what the
+A/B in §3.3 is stated in.
 
 ## 4. Vendor against flagos, side by side
 
@@ -722,6 +741,86 @@ The raw log is machine-local and was 508 MB; it is not committed. Regenerate it
 by running §4's flagos sweep with `FLAGOS_LOG=dispatch`, which `run.sh` exports
 by default.
 
+### 6.2 The Ascend validation profile
+
+Everything above is printed and then left to the reader. `ascend_profile.py` is
+the half that *enforces* it: it reads what a finished run has already written —
+the four `run.sh infer` logs, the `run.sh sweep` log, and that sweep's
+`manifest.json` with its PNGs — and checks them against a frozen baseline, so a
+later Ascend run is judged rather than eyeballed. It needs no accelerator and no
+model: it parses text and reads PNG headers, so it re-runs on a laptop against a
+carried-over run directory.
+
+```bash
+python tests/manual/qwen_image_2512/ascend_profile.py \
+    --stage-log text-encoder=$OUT/text-encoder.log \
+    --stage-log transformer-step=$OUT/transformer-step.log \
+    --stage-log vae=$OUT/vae.log \
+    --stage-log full=$OUT/full.log \
+    --sweep-log $OUT/sweep.log \
+    --sweep-dir $OUT/flagos
+```
+
+Every path above is a `run.sh` *stdout* capture — `run.sh ... > log 2>&1`, not
+the `$OUT_DIR/infer-*.log` that `run.sh` writes for itself. The inner log holds
+everything the runner needs, but the readings block and the exit status are
+printed around it rather than into it, so a profile pointed at the inner logs
+alone reports them as missing.
+
+Six groups, each one there because that link in the chain broke at least once:
+
+| Group | What it asserts |
+| --- | --- |
+| `configuration` | `torch_fl/configs/backends_ascend.conf` is the file loaded and it is the one in this worktree, no `FLAGOS_FORCE_BACKEND=` global repin is set, and no `[flagos] env override:` line appears in any log. A run that quietly repinned a backend is measuring a different tree. |
+| `fallback` | `cpu_fallback ops : 0` and `libentry failures : 0` in every log. Both fail silently otherwise: a missing route and a FlagGems kernel that would not build leave a run that finishes and images that look plausible. |
+| `stages` | All four stages named themselves and exited 0. |
+| `placement` | Encoder and VAE cards and the transformer's shard map are the baseline's, and the transformer is split over more than one card — the multi-device placement that previously needed context hooks. |
+| `routing` | The distinct operator set per effective backend equals the baseline's. This is the check that catches a route moving unnoticed, and it is where this change is visible: `gelu` and `sum.dim_IntList` belong in the `ascend` list and must be absent from the `flagos_python` one. |
+| `cohort` | Twelve prompts at 1664x928, 50 steps, `true_cfg_scale=4.0`, seed 42; each with a PNG of the expected size, finite statistics, and mean/std inside the baseline's stated tolerance. |
+
+`--record FILE` writes a new baseline from the run it is pointed at instead of
+comparing; that is how `ascend_baseline.json` was produced. Comparing is the
+default and takes no flag.
+
+Three things about the tolerances, because they decide what a failure means.
+Correctness checks are exact — the stage exits, the fallback counts, the
+placement and the per-backend operator sets are equality. The pixel statistics
+are not: the RNG stream is the backend's own, so re-running a prompt is a
+different sample rather than a repetition, and they are compared against a stated
+mean/std tolerance wide enough to absorb that and still catch a decode that
+produced noise. Timings are printed as deltas against the baseline and not gated
+at all, because the box is shared. A baseline is therefore data about one
+accepted run and not a claim of bit-reproducibility — §3.1's determinism check is
+the exact statement, and it is same-process same-seed.
+
+The stage readings a correct Ascend run reports (`FLAGOS_LOG=fallback,dispatch`,
+`cpu_fallback` 0 throughout) were:
+
+| stage | dispatch records | distinct ATen ops | `ascend` calls / ops | `flagos_python` calls / ops |
+| --- | --- | --- | --- | --- |
+| `text-encoder` | 7,239 | 33 | 2,622 / 17 | 4,617 / 17 |
+| `transformer-step` | 31,872 | 42 | 19,263 / 22 | 12,609 / 21 |
+| `vae` | 2,755 | 22 | 357 / 14 | 2,398 / 9 |
+| `full` | 1,477,184 | 53 | 1,010,278 / 26 | 466,906 / 28 |
+
+The union is 26 distinct ATen ops on `ascend` and 28 on `flagos_python`.
+`add.Tensor` is the one op on both lists in every log, and that is the float64
+escape through `FlagGemsRejectsDtype`, not a fallback.
+
+The sweep that produced `ascend_baseline.json` reports the same contract over all
+twelve prompts in one capture: `17,570,431` dispatch records, `53` distinct ATen
+ops, `cpu_fallback ops   : 0`, `libentry failures  : 0`, `exit status        : 0`,
+and `12 images, 5599.5s total, 466.6s mean` — every image at `1664x928`, between
+431.4 s and 481.1 s. Pointed back at the run it was recorded from, the profile
+prints `88/88 checks passed`; the four of those that are `cohort` per-image
+statistics are the only ones the RNG stream can move, and the rest are
+equalities.
+
+`gelu_backward` is deliberately not in the routing check: these four stages are
+inference, and a forward-only graph never calls it. Its route is asserted where
+it is observable — against the conf file — in
+`tests/unit/test_qwen_image_2512_ascend_profile.py`.
+
 ## 7. Where the extra memory went
 
 A chip that runs this flow and reports more reserved memory than the CUDA
@@ -818,6 +917,7 @@ a non-zero total means the installed FlagGems still retains the arguments.
 | Cross-device error inside `scheduler.step` | `proj_out` is not on the first shard | torch_fl: the block map must leave `norm_out`/`proj_out` on the first shard, because accelerate's root hook only moves the forward's output back if it is produced there. |
 | The decode fails on a device mismatch | The VAE is not on the encoder's card | The script: the VAE must be on the execution device (see §2). |
 | An op is missing entirely | No route for it on this chip | torch_fl: fix the route or the kernel, then re-measure the census. Do not patch `diffusers` or `transformers` — a user must be able to `pip install diffusers` and run this unchanged. |
+| `RuntimeError: Unsupported dtype for ACL: ComplexFloat` on the transformer's first forward (Ascend) | The rotary embedding took diffusers' complex fallback (§3.3) | The environment: `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` is set, which opts out of the registration `import torch_fl` installs. Unset it and re-run. |
 
 Attribution is the point of the stages: a failure in `text-encoder` is the
 encoder's operator surface, a failure in `vae` is `Conv3d`, and only a failure
@@ -838,4 +938,10 @@ in `full` that survives both is a problem with the loop itself.
   measure, and it says nothing about whether the pictures are any good.
 - Nothing under `tests/manual/` is in `.github/configs/*.yml`, so none of this
   runs in CI. Adding it would mean mounting a ~54 GB model into the test
-  container and installing `diffusers` there.
+  container and installing `diffusers` there. The Ascend profile of §6.2 is no
+  exception: it is a checker and not a runner, so it is manual by construction.
+- The Ascend profile's baseline is data about one accepted run on one box, and
+  the box here is a 910 while the CI target is a 910C. The exact checks (stages,
+  fallback counts, placement, per-backend operator sets) are the part meant to
+  travel; the recorded pixel statistics are not, and a run on different hardware
+  should be recorded rather than matched against it.
