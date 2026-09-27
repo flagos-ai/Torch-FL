@@ -299,9 +299,11 @@ range. Set `FLAGOS_SDK_VERSION` only from verified build-environment evidence;
 an unknown SDK must remain unknown. Every CI workflow that builds a wheel must
 run `python -m torch_fl_preflight --wheel ... --check-build-env` before installing
 or publishing it. `tests/unit/test_wheel_preflight.py` enforces this workflow
-rule. For release artifacts, record `FLAGOS_VENDOR_TORCH_VERSION` where vendor
-PyTorch supplies libraries, then run the preflight with `--release` and the
-target `--sdk-version` before publication.
+rule. Keep the CLI in the standalone `torch_fl_preflight` package; importing it
+must not import `torch_fl` or load native libraries. Do not add a root-level
+preflight Python module. For release artifacts, record
+`FLAGOS_VENDOR_TORCH_VERSION` where vendor PyTorch supplies libraries, then run
+the preflight with `--release` and the target `--sdk-version` before publication.
 
 Update documentation when:
 - Adding new features → Update README
@@ -339,4 +341,3 @@ never commit anything from it.
 - **.github/AI_AGENT_GUIDE.md** - AI agent specific guidelines
 - **.github/CLAUDE_CODE_GUIDE.md** - Claude Code integration guide
 - **.github/TEMPLATES.md** - Template selection guide
-

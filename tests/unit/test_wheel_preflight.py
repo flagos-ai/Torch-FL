@@ -18,6 +18,7 @@ import ast
 import importlib
 import json
 import os
+import subprocess
 import sys
 import types
 import zipfile
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-import torch_fl_preflight as preflight
+from torch_fl_preflight import core as preflight
 
 
 def test_manifest_builder_works_without_source_root_on_import_path(
@@ -62,6 +63,7 @@ def test_manifest_builder_works_without_source_root_on_import_path(
     fake_torch._C = types.SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.delitem(sys.modules, "torch_fl_preflight", raising=False)
+    monkeypatch.delitem(sys.modules, "torch_fl_preflight.core", raising=False)
     monkeypatch.setattr(importlib.metadata, "version", lambda _: "2.10.0")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -216,6 +218,36 @@ def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):
     assert preflight.main(["--wheel", str(wheel), "--platform", "musa"]) == 1
     assert "Wheel platform is cuda" in capsys.readouterr().err
     assert "torch_fl" not in sys.modules
+
+
+def test_package_module_cli_does_not_import_torch_fl(tmp_path, manifest):
+    wheel = _wheel(tmp_path, manifest)
+    (tmp_path / "torch_fl").mkdir()
+    (tmp_path / "torch_fl" / "__init__.py").write_text(
+        'raise RuntimeError("torch_fl was imported")\n', encoding="utf-8"
+    )
+    source_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(source_root)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch_fl_preflight",
+            "--wheel",
+            str(wheel),
+            "--platform",
+            "musa",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Wheel platform is cuda; requested musa" in result.stderr
+    assert "torch_fl was imported" not in result.stderr
 
 
 def test_release_table_comes_from_wheel_and_requires_known_sdk(

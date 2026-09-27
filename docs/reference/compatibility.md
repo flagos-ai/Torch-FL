@@ -50,9 +50,10 @@ python -m torch_fl_preflight --wheel dist/torch_fl-*.whl --platform cuda \
 optional package differs from the build environment, and warns when PyTorch is
 within the declared range but not the exact build version. `--check-build-env`
 requires exact build dependency versions and is used by every wheel CI job.
-`--require-sdk` rejects wheels without a declared SDK version. The CLI module
-is outside the `torch_fl` package so this check cannot trigger backend import
-side effects. SDK/driver compatibility still requires platform-specific testing.
+`--require-sdk` rejects wheels without a declared SDK version. The CLI lives in
+the standalone `torch_fl_preflight` package, separate from `torch_fl`, so this
+check cannot trigger backend import side effects. SDK/driver compatibility still
+requires platform-specific testing.
 Generate a release table from the final wheel files with
 `python -m torch_fl_preflight --wheel dist/*.whl --release --markdown-table`;
 the command fails if any artifact lacks its required provenance.

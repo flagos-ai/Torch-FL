@@ -567,8 +567,10 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     # setuptools' PEP 517 backend executes setup.py with the source root absent
     # from sys.path, even for --no-isolation builds. Load this source file by
     # absolute path instead of relying on an import that only works in a shell.
-    preflight_path = os.path.join(SOURCE_DIR, "torch_fl_preflight.py")
-    spec = importlib.util.spec_from_file_location("torch_fl_preflight", preflight_path)
+    preflight_path = os.path.join(SOURCE_DIR, "torch_fl_preflight", "core.py")
+    spec = importlib.util.spec_from_file_location(
+        "torch_fl_preflight_core", preflight_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load wheel preflight from {preflight_path}")
     preflight = importlib.util.module_from_spec(spec)
@@ -838,9 +840,13 @@ def _get_setup_kwargs():
         description="FlagGems operators as a custom PyTorch device (flagos)",
         author="FlagGems Team",
         packages=find_packages(
-            include=["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
+            include=[
+                "torch_fl*",
+                "torch_fl_preflight*",
+                "accelerator*",
+                "csrc.runtime.accelerator*",
+            ]
         ),
-        py_modules=["torch_fl_preflight"],
         package_dir={"": "."},
         package_data=package_data,
         ext_modules=ext_modules,

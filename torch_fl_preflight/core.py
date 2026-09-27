@@ -373,7 +373,3 @@ def main(argv=None):
         output = manifests[0] if len(manifests) == 1 else manifests
         print(json.dumps(output, indent=2, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
