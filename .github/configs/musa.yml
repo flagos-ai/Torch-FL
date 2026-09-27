@@ -156,14 +156,20 @@ integration_tests:
   # cuda/metax/ascend/dcu/flaggems_python-marked cases on MUSA, so this selects
   # the anyplatform/main_ops subset that routes to the native mudnn backend.
   #
-  # Ordered AFTER the contract groups (general/AMP/math-bits): this group has
-  # one known MUSA backend gap (filed as an issue; see issue_body.md):
-  #   1. torch.mm on float64 -- mudnn GEMM has no double-precision path
-  #      (test_mm_still_runs[dtype3]).
-  # It is deselected below so the pipeline can complete end to end while the
-  # dev fix is queued. Remove the --deselect once the fix lands.
-  # run_integration_tests.py stops on the first non-zero group, so this
-  # ordering lets the contract groups above go green first.
+  # Ordered AFTER the contract groups (general/AMP/math-bits) because
+  # run_integration_tests.py stops on the first non-zero group, so a backend gap
+  # here would stop the pipeline before those go green.
+  #
+  # This group used to deselect test_mm_still_runs[dtype3] for a float64 mm gap
+  # attributed to "mudnn GEMM has no double-precision path". The attribution was
+  # wrong and the case is deselected no longer: float64 mm on this platform routes
+  # to FlagGems, not to mudnn, and the case measures `32x48x16`, whose aligned tile
+  # stays inside the device's 196608 B static shared-memory limit. What fails is a
+  # float64 mm whose M, K and N all exceed 32, where the mthreads `mm` tune space
+  # asks 262144 B at num_stages 5 and exactly 196608 B at num_stages 4 -- fixed in
+  # torch_fl/flagos/__init__.py, which fits the tune space to the limit. The case
+  # passes on S5000 on the unmodified tree as well, so the deselect had been dead
+  # weight and the two changes are independent.
   #
   # test_rng_dispatch.py is explicitly ignored here even though its tests carry
   # @pytest.mark.(anyplatform + main_ops) and would otherwise be collected:
@@ -182,7 +188,6 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/ops/
       --ignore=tests/integration/ops/test_rng_dispatch.py
-      --deselect "tests/integration/ops/test_soft_lowp_gate_dispatch.py::TestSoftLowpGateLeavesFloatPathsAlone::test_mm_still_runs[dtype3]"
       -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
       -v -s --tb=short
 

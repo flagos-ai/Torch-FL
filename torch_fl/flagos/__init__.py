@@ -229,6 +229,11 @@ def _lazy_init():
     # See the function for the measurement.
     _patch_flaggems_pointwise_dispatch()
 
+    # And again for the tuner: the mthreads `mm` tune space asks more shared
+    # memory on float64 than this device has, so a matmul it refuses has to be
+    # repaired rather than retried. See the function for the measurement.
+    _patch_flaggems_tune_space()
+
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from
     # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
@@ -1881,6 +1886,276 @@ def _patch_flaggems_pointwise_dispatch():
             memo.__wrapped__ = torch.broadcast_shapes
             memo._torch_fl_memoized = True
             torch.broadcast_shapes = memo
+    except Exception:
+        pass
+
+
+_TUNE_SPACE_PATCHED = "_flagos_tune_space_fits_device"
+
+# Resolved on first use rather than at patch time: triton's driver only reports a
+# target once the device is up, and this is first read from a kernel launch.
+_MUSA_SMEM_LIMIT = None
+
+
+def _musa_shared_memory_limit():
+    """Static shared memory one MUSA kernel may ask for, in bytes, or None.
+
+    Read from the backend's own table rather than from torch: on this backend
+    ``torch.cuda.get_device_properties(0)`` leaves ``shared_memory_per_block``
+    and ``shared_memory_per_block_optin`` as ``None``, and the number the compiler
+    enforces its own check against is ``shared_memory_per_multiprocessor``
+    (196608 on an MTT S5000), which triton's mthreads backend derives from the
+    target's arch.
+    """
+    global _MUSA_SMEM_LIMIT
+    if _MUSA_SMEM_LIMIT is None:
+        try:
+            from triton.backends.mthreads.compiler import (
+                _max_static_shared_memory_from_arch,
+            )
+            from triton.runtime import driver as triton_driver
+
+            arch = triton_driver.active.get_current_target().arch
+            smem = _max_static_shared_memory_from_arch(arch)
+            if not smem:
+                return None
+            _MUSA_SMEM_LIMIT = int(smem)
+        except Exception:
+            return None
+    return _MUSA_SMEM_LIMIT
+
+
+def _dot_tile(config):
+    """``(BLOCK_M, BLOCK_N, BLOCK_K)`` of a ``tl.dot`` tune config, else None.
+
+    The shared-memory model below is the one a matmul pipeline asks for, and its
+    operand keys are what identifies such a config; anything else (a reduction,
+    a pointwise block, a config keyed differently) is left exactly as declared.
+    """
+    tile = tuple(config.kwargs.get(key) for key in ("BLOCK_M", "BLOCK_N", "BLOCK_K"))
+    if any(not isinstance(value, int) for value in tile):
+        return None
+    return tile
+
+
+def _pipeline_shared_memory(num_stages, tile, element_size):
+    """The shared memory a pipelined ``tl.dot`` config asks the compiler for.
+
+    Measured on the MTT S5000 host by inverting the relation with a stage count
+    large enough to trip the compiler's own check -- ``OutOfResources`` reports
+    the exact ask -- over fp32 and fp64 tiles at 64x64x64 and 32x64x64::
+
+        dtype  tile          stages  ask        outcome
+        fp32   64x64x64      8       229376     OutOfResources (Required 229376)
+        fp32   64x64x64      5       131072     runs, err 0.0e+00
+        fp64   64x64x64      5       262144     OutOfResources (Required 262144)
+        fp64   64x64x64      4       196608     Triton Error [MUSA]: invalid argument
+        fp64   64x64x64      3       131072     runs, err 7.1e-15
+        fp64   32x64x64      5       196608     Triton Error [MUSA]: invalid argument
+        fp64   32x64x64      4       147456     runs, err 3.6e-15
+
+    Two things follow, and both matter here. The ask is ``(num_stages - 1)`` times
+    the two tile operands at the element size, so it is the *element size* that
+    halves a tune space's budget on float64 -- nothing about the tile changes.
+    And a config is launchable only while the ask stays *strictly* under the
+    limit: an ask that lands exactly on it compiles and then fails at launch with
+    a bare ``RuntimeError`` from the MUSA toolchain, which is why comparing
+    against the limit with ``<=`` would keep handing out a config that cannot run.
+    """
+    block_m, block_n, block_k = tile
+    return (num_stages - 1) * (block_m * block_k + block_k * block_n) * element_size
+
+
+def _fitting_stages(config, tile, element_size, limit):
+    """The deepest pipeline that fits, never deeper than the config declared.
+
+    The ask is computed from the *declared* tile, which is the widest the tile can
+    ever be: FlagTree's AABS narrows a declared tile down to the extent before the
+    compiler sizes it, and the ask only shrinks with it. Sizing the declared tile
+    is therefore the conservative reading, and it is the one that is sound -- a
+    lower bound on the ask could let through a config that lands exactly on the
+    limit the way the float64 4-stage row of the table above does. What keeps that
+    conservatism cheap is *when* this is called: only after the device has refused
+    the declared space at the shape in hand, where the tile it refused is the one
+    the compiler saw (see ``_patch_flaggems_tune_space``). Sizing a space up front
+    instead would shrink stages at shapes AABS was about to narrow below the limit
+    on its own, and those shapes do not need it.
+    """
+    stages = config.num_stages
+    while stages > 1 and _pipeline_shared_memory(stages, tile, element_size) >= limit:
+        stages -= 1
+    return stages
+
+
+def _operand_element_size(args, kwargs):
+    """Bytes per element of the widest operand this launch will be given."""
+    sizes = [
+        tensor.element_size()
+        for tensor in list(args) + list(kwargs.values())
+        if isinstance(tensor, torch.Tensor)
+    ]
+    return max(sizes) if sizes else None
+
+
+def _fitted_tune_space(configs, args, kwargs, limit):
+    """``configs`` with every config's pipeline cut back to what fits, else None.
+
+    None means "nothing to change": either the space is not a ``tl.dot`` space,
+    no operand dtype is known, or every config already fits -- in which case the
+    caller hands the declared space to FlagGems untouched, so the platforms and
+    the op families that were never affected keep the exact tune space they have
+    today.
+    """
+    element_size = _operand_element_size(args, kwargs)
+    if element_size is None:
+        return None
+    import triton
+
+    fitted, changed, seen = [], False, set()
+    for config in configs:
+        tile = _dot_tile(config)
+        if tile is None:
+            return None
+        stages = _fitting_stages(config, tile, element_size, limit)
+        if stages == config.num_stages:
+            candidate = config
+        else:
+            changed = True
+            candidate = triton.Config(
+                config.kwargs,
+                num_warps=config.num_warps,
+                num_stages=stages,
+                num_ctas=config.num_ctas,
+                maxnreg=config.maxnreg,
+                pre_hook=config.pre_hook,
+                ir_override=config.ir_override,
+            )
+        key = (
+            tuple(sorted(candidate.kwargs.items())),
+            candidate.num_warps,
+            candidate.num_stages,
+            candidate.num_ctas,
+            candidate.maxnreg,
+        )
+        # Two declared configs differing only in num_stages collapse onto one
+        # here -- on float64 both 64x64x64 entries of the mthreads `mm` space
+        # become the same num_stages=3 config -- and a duplicate would only cost
+        # a benchmark.
+        if key in seen:
+            continue
+        seen.add(key)
+        fitted.append(candidate)
+    if not changed:
+        return None
+    return fitted or None
+
+
+def _launch_in_fitted_space(original_run, tuner, configs, args, kwargs):
+    """Run the tuner with a fitted space installed, and put FlagGems back.
+
+    FlagGems keeps the space on the tuner for the life of the process, so the
+    declared list has to be reinstated once the call returns. ``configs_hash`` and
+    ``kernel_hash`` are ``cached_property`` values computed from whichever list is
+    current, so they are dropped on both sides of the call: a value left behind by
+    a fitted launch names a launcher nothing declares, and one left behind after
+    the restore names the fitted space for the next call.
+    """
+    declared = tuner.configs
+    tuner.configs = configs
+    tuner.__dict__.pop("configs_hash", None)
+    tuner.__dict__.pop("kernel_hash", None)
+    try:
+        return original_run(tuner, *args, **kwargs)
+    finally:
+        tuner.configs = declared
+        tuner.__dict__.pop("configs_hash", None)
+        tuner.__dict__.pop("kernel_hash", None)
+
+
+def _patch_flaggems_tune_space():
+    """Repair a FlagGems tune space the MUSA device has refused, and only then.
+
+    ``mm`` on float64 fails on this hardware for every shape whose M, K and N all
+    exceed 32 -- ``OutOfResources: out of resource: shared memory, Required:
+    262144, Hardware limit: 196608`` -- and the tune space is why: the mthreads
+    backend ships one ``mm`` entry, two 64x64x64 tiles at ``num_stages`` 5 and 4,
+    and at 8 bytes per element those two ask 262144 B and 196608 B against a
+    196608 B limit. The element size is the whole difference; the same space on
+    float32 asks 131072 B and 98304 B and runs (measured, err 0.0e+00).
+
+    A shape with a dimension at or under 32 survives only because FlagTree's AABS
+    narrows the tile to the extent first, which shrinks the ask below the limit;
+    that is also why the defect looks shape-dependent rather than dtype-wide. A
+    refusal is not something the tuner can absorb: ``LibTuner.run``'s ``bench``
+    catches ``RuntimeError``, and the compiler's rejection is a ``TritonError``,
+    which is an ``Exception`` and not a ``RuntimeError`` -- so the first config
+    that cannot compile ends the whole tuning pass instead of being scored out.
+    The launch-time half of the defect is caught, and that is why the exact-limit
+    case is survivable at all: an ask that lands exactly on 196608 B compiles and
+    is then rejected at launch with a bare ``RuntimeError: Triton Error [MUSA]:
+    invalid argument``, which ``bench`` does catch, so at a narrowed shape the
+    tuner quietly moves on to the next config. Neither half can be fixed from the
+    error side, and both are the tune space asking for more than the device has.
+
+    So the space *is* replaced, but only for the call that was refused. Doing it
+    up front was measured to be wrong: AABS narrows a declared 64x64x64 tile to
+    the operand extents, and a fit that runs before the first launch sizes the
+    declared tile, takes the only remaining config down to ``num_stages`` 3, and
+    leaves a one-config space -- which never reaches the benchmark at all, so the
+    narrowing is lost with the stages. On float64 that costs 5.9x at
+    ``2048x2048x16`` (9.251 ms against 1.579 ms), 6.2x at ``4096x4096x16``
+    (32.212 against 5.211) and 1.8x at ``512x512x32`` (2.369 against 1.294), all
+    measured on S5000 with a synchronized timer, against errors that stay at
+    1e-13 either way. Repairing after the refusal leaves every one of those calls
+    alone -- same winning configuration, same median -- and still fixes
+    ``(64, 64, 64)`` float64, which raises on the unmodified tree and runs at
+    0.324 ms, err 7.1e-15, with the repair.
+
+    Fitting is arithmetic against the backend's own limit (see
+    ``_pipeline_shared_memory``) rather than trial compilation, which keeps it
+    deterministic and cache-stable. If the repaired space does not take either,
+    the caller is shown the refusal of the declared space rather than a
+    replacement's failure: the retry is a repair, not a redefinition of the call.
+
+    Best-effort, like the patches around it: this must not be able to take down
+    device init, and an unfitted tune space is the status quo, not a new failure.
+    """
+    try:
+        from .. import _build_accelerator
+
+        if _build_accelerator() != "musa":
+            return
+
+        libentry = importlib.import_module("flag_gems.utils.libentry")
+        libtuner = libentry.LibTuner
+        if getattr(libtuner, _TUNE_SPACE_PATCHED, False):
+            return
+        original_run = libtuner.run
+
+        def run(self, *args, **kwargs):
+            try:
+                return original_run(self, *args, **kwargs)
+            except Exception as refused:
+                limit = _musa_shared_memory_limit()
+                configs = (
+                    None
+                    if limit is None
+                    else _fitted_tune_space(
+                        getattr(self, "configs", None) or [], args, kwargs, limit
+                    )
+                )
+                if configs is None:
+                    raise
+                try:
+                    return _launch_in_fitted_space(
+                        original_run, self, configs, args, kwargs
+                    )
+                except Exception:
+                    raise refused from None
+
+        run.__wrapped__ = original_run
+        libtuner.run = run
+        setattr(libtuner, _TUNE_SPACE_PATCHED, True)
     except Exception:
         pass
 

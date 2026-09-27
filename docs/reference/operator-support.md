@@ -162,6 +162,250 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
+### MUSA: float64 `mm` served by repairing the FlagGems tune space the device refuses (2026-09-27, MTT S5000)
+
+**One sentence.** The mthreads `mm` tune space declares two 64x64x64 tiles at
+`num_stages` 5 and 4, which at 8 bytes per element ask 262144 B and exactly
+196608 B against this device's 196608 B static shared-memory limit, so every
+float64 `mm` whose M, K and N all exceed 32 died before it reached a kernel; the
+tune space is now repaired for the call the device refused, and only for that
+call. No route moves and `torch_fl/configs/backends_musa.conf` is byte-identical
+(SHA-256 `87d150533c73e4ca40a24c2588aed51387d257044290d1dd85e8cc9a9d40ffad`) --
+this is a launch-configuration fix, not a routing change.
+
+**The failure, in the two forms it takes.** The first configuration is rejected by
+the compiler's own check, from inside the tuner's benchmark, and it is that
+message which names the footprint exactly:
+
+```text
+OutOfResources: out of resource: shared memory, Required: 262144, Hardware limit: 196608.
+Reducing block sizes or `num_stages` may help.
+```
+
+The second configuration asks exactly 196608 B, compiles, and is then rejected at
+launch with a message that names nothing:
+
+```text
+RuntimeError: Triton Error [MUSA]: invalid argument
+```
+
+The two are not symmetric in a way that matters here. `LibTuner.run`'s `bench`
+closure catches `RuntimeError`, so a config that compiles and is then refused at
+launch is scored `inf` and the tuner moves on; the compiler's rejection is a
+`TritonError`, which is an `Exception` and not a `RuntimeError`, so the first
+configuration that cannot be built ends the entire tuning pass instead of being
+scored out. At (64, 64, 64) it is the first form that reaches the caller, and it
+is not survivable from the operator side at all. The second form is what makes
+the limit an *exclusive* bound rather than an inclusive one: measured with the
+float64 64x64x64 space pinned to the 4-stage configuration alone, the ask lands on
+196608 B, the build succeeds, and the launch fails -- so a rule that fitted
+configurations with `<=` would keep handing out a configuration that cannot run.
+
+**The model, measured by inverting it.** Asking for a stage count high enough to
+trip the compiler makes `OutOfResources` report the exact ask, and the relation
+that reproduces every measurement is
+
+```text
+ask = (num_stages - 1) x (BLOCK_M x BLOCK_K + BLOCK_K x BLOCK_N) x element_size
+```
+
+with the `num_stages - 1` because the pipeline's first load comes straight from
+global memory rather than through the shared-memory buffer. Over fp32 and fp64
+tiles at 64x64x64 and 32x64x64, against a CPU reference for the arms that run:
+
+```text
+dtype    tile          stages  ask        outcome
+fp32     64x64x64      8       229376     OutOfResources (Required 229376)
+fp32     64x64x64      5       131072     runs, err 0.0e+00
+fp64     64x64x64      5       262144     OutOfResources (Required 262144)
+fp64     64x64x64      4       196608     Triton Error [MUSA]: invalid argument
+fp64     64x64x64      3       131072     runs, err 7.1e-15
+fp64     32x64x64      5       196608     Triton Error [MUSA]: invalid argument
+fp64     32x64x64      4       147456     runs, err 3.6e-15
+```
+
+The ask scales with the *element size* and not with the tile, so the byte count is
+the whole of the difference between the dtype that failed and the three that did
+not: the same 64-wide space at `num_stages` 5 is 131072 B in fp32 and 262144 B in
+fp64. That is the defect -- one tune space serves every dtype.
+
+**Why the failure is shape-dependent.** FlagTree's AABS narrows a declared tile to
+the operand extent before the compiler sizes it: at an extent of 32 or less the
+block on that axis becomes 32, and the ask shrinks with it. So the shapes that
+failed are exactly the ones where no axis narrows, which leaves the tile at 64x64x64
+and its 4-stage ask on the limit -- M, K and N all above 32. (64, 64, 32) and
+(32, 64, 64) do not fail: their narrowed tile asks 147456 B at 4 stages, while
+their 5-stage ask lands on 196608 B, compiles, is refused at launch and is scored
+out. That is also why `K` looked as though it did not matter at the foot of the
+range even though it is in the formula.
+
+**Where the space comes from.** `mm` on this platform is FlagGems' mthreads
+override (`flag_gems/runtime/backend/_mthreads/ops/mm.py:427`), which selects
+`mm_fma` for float64 -- `is_sqmma_compatible` (line 46) requires fp16 or bf16, so a
+float64 call never takes the square-matmul path -- and takes
+`BLOCK_M`/`BLOCK_N`/`BLOCK_K`/`num_stages` from the `mm:` entry of
+`flag_gems/runtime/backend/_mthreads/tune_configs.yaml`: two 64x64x64
+configurations at `num_stages` 5 and 4, `num_warps` 4, and no element-size term.
+
+The device limit is not readable from torch -- `torch.cuda.get_device_properties(0)`
+leaves `shared_memory_per_block` and `shared_memory_per_block_optin` at `None` here
+-- so it is read from the backend's own table,
+`triton.backends.mthreads.compiler._max_static_shared_memory_from_arch` over
+`triton.runtime.driver.active.get_current_target().arch`, which answers 196608.
+
+**The repair, and why it is failure-driven.** `_patch_flaggems_tune_space()` in
+`torch_fl/flagos/__init__.py`, installed from `_lazy_init` beside the other
+FlagGems patches, wraps `flag_gems.utils.libentry.LibTuner.run`. The wrapper calls
+the original `run`, and only when that raises does it compute a replacement space:
+the element size of the widest tensor operand, each config's `num_stages` cut back
+to the deepest pipeline that stays strictly under the limit, new `triton.Config`
+objects rather than edits to the declared ones, configurations that collapse onto
+the same tile deduplicated, and a retry with that list installed. The declared
+list is put back in a `finally`, and FlagGems' `configs_hash` and `kernel_hash`
+`cached_property` values are dropped on both sides of the call -- they are computed
+from whichever list is current, so one left behind names a launcher the tuner does
+not declare. If the retry does not take either, the caller is shown the device's
+refusal of the *declared* space rather than the replacement's failure.
+
+Fitting the space *before* the first launch was the first design and it was
+measured to be wrong. AABS narrows a declared 64x64x64 tile per shape, and a
+prefitted space goes into the tuner in place of the declared one: the float64 space
+collapses to a single 3-stage config, and a one-config space takes `LibTuner.run`'s
+`else` branch, so it is never benchmarked at all -- the per-shape narrowing is lost
+along with the stages. Measured on S5000 with a synchronized timer, float64 `mm`:
+
+```text
+shape           unmodified            prefitted             repaired on refusal
+64x64x64        OutOfResources        0.325 ms  7.1e-15    0.324 ms  7.1e-15
+2048x2048x16    1.579 ms  4 stages    9.251 ms  3 stages    1.551 ms  4 stages
+4096x4096x16    5.211 ms  4 stages    32.212 ms 3 stages    5.142 ms  4 stages
+512x512x32      1.294 ms  4 stages    2.369 ms  3 stages    1.290 ms  4 stages
+```
+
+That is 5.9x, 6.2x and 1.8x for prefitting on the shapes the device already
+served, against errors that stay at 1e-13 either way; repairing after the refusal
+leaves those same calls on the configuration they chose, and still fixes the shape
+that raised. The winning configuration is identical to the unmodified tree's in
+every row.
+
+**Why the hook is `LibTuner.run`.** A one-config space takes the `else: config =
+self.configs[0]` fast path and never calls `prune_configs`, so a patch on
+FlagTree's AABS hook would miss it -- and a one-config space is what a repaired
+float64 space collapses to. Hooking `run` also sees the compile refusal, which no
+config-level hook does: the failure is raised out of the benchmark and ends the
+pass. `prune_configs` additionally starts from `copy.deepcopy(self.configs)` under
+FlagTree's own `aabs` comment, so it is the wrong level at which to observe what
+the tuner was really given.
+
+Sizing the tile is arithmetic against the backend's own limit rather than trial
+compilation, which keeps it deterministic and cache-stable. The fit is sized from
+the *declared* tile rather than from a narrowed one, which is conservative in
+general and exact where it runs: at every float64 shape measured where the space is
+refused, no axis narrows, so the tile the compiler refused is the declared tile.
+A space whose configurations all fit is never touched -- `_fitted_tune_space`
+returns `None` and the refusal is re-raised as it arrived -- which is what keeps
+float32, and every non-`tl.dot` space (a reduction or a pointwise block has no
+`BLOCK_M`/`BLOCK_N`/`BLOCK_K` triple and this arithmetic does not describe it),
+on exactly the tune space they have today. The mount is deliberately the tuner
+rather than the conf: the conf is generated output, and the number the repair
+needs is not a property of the operator but of the device the process runs on.
+
+**Local verification.**
+
+```text
+$ ruff check .
+All checks passed!
+$ ruff format --check .
+317 files already formatted
+```
+
+`tests/unit/test_flaggems_tune_space.py` pins the four things that can be wrong
+here without hardware: the shared-memory model against the measured table above,
+the exclusive boundary, *when* the repair fires (the declared space of a launch
+the device accepts must not even be sized, because prefitting was measured to cost
+5.9x to 6.2x), and the wrapper's bookkeeping (the declared list restored, no
+`configs_hash` left behind). **21 passed**:
+
+```text
+$ pytest tests/unit/test_flaggems_tune_space.py -q
+21 passed, 26 warnings in 6.96s
+```
+
+`tests/integration/ops/test_musa_flaggems.py` carries the device half -- float64
+`mm` exact against a CPU reference across the narrowing boundary at
+`(31,32,32)`, `(32,32,32)`, `(33,32,32)`, `(33,33,33)`, `(64,64,64)`,
+`(32,64,64)`, `(64,64,32)` and `(512,512,512)`, rtol/atol 1e-12 -- and the space
+the tuner is handed measured through the installed patch with the arithmetic
+written out in the test rather than called from the module under test:
+
+```text
+$ pytest tests/integration/ops/test_musa_flaggems.py -q
+1 failed, 3 passed, 3.99s
+```
+
+The failure is `test_selected_flaggems_routes_execute_on_s5000`, which raises
+`ValueError: lift_fresh Triton kernel requires a musa tensor` from
+`torch.tensor(..., device=DEVICE)`: a pre-existing device-name defect on this
+platform, reproducible with the change reverted, and the file is not in the MUSA
+CI manifest for that reason. The other three cases pass, including
+`test_float64_mm_is_exact_across_the_tile_boundary` and
+`test_the_space_the_tuner_is_given_fits_the_device`.
+
+**FlagGems overload survey.** Rerun on this hardware from the four-shard runner
+(`tests/manual/flaggems_overload_survey.py` against
+`torch_fl/configs/backends_musa.conf`, `harness_version` 6, one child process per
+overload), once on the fixed tree and once on the same tree with only
+`_patch_flaggems_tune_space` neutralised in every child. The cohort is the conf's
+own active route set, **467 overloads** (117+117+117+116 across the four shards, no
+`PENDING` records):
+
+```text
+leg      STRICT  BASIC_ONLY  FAILED  UNTESTED
+after       303          47      38        79
+before      303          47      38        79
+```
+
+Case-level, after the change: PASS 1883, INVALID_CASE 1086, ERROR 151, WRONG 132,
+CRASH 14, TIMEOUT 3 over 467 x 7 profiles, and the before leg carries the same
+numbers. The per-overload JSON is the auditable record: `/tmp/musa-overloads-after-0..3.json`
+and `/tmp/musa-overloads-before-0..3.json`.
+
+The two legs agree on every verdict **and every case status** -- 455 of the 467
+overloads are identical case-for-case, and the 12 that are not differ only in the
+`max_diff=` magnitude printed inside a case that is `WRONG` in both legs, which is
+the survey's own nondeterminism on operators that fail either way. No operator
+changes status in any direction.
+
+That agreement is the expected result and not a null one, which is why the survey
+is regression evidence here rather than evidence for the fix: none of its seven
+profiles (`2d-f32`, `4d-f32`, `1d-f32`, `2d-f16`, `2d-i64`, `2d-bool`,
+`2d-f32-strided`) uses float64, so no profile reaches the configuration this change
+repairs. What the rerun does establish is that wrapping `LibTuner.run` -- which
+every FlagGems `tl.dot` operator on this platform now goes through -- left the
+cohort where it was.
+
+**Route delta: none.** MUSA `flaggems` stays at **467** over the same **2037**
+routable ops, `musa` at **52** and `none` at **1518**; `backends_musa.conf` is
+byte-identical at SHA-256
+`87d150533c73e4ca40a24c2588aed51387d257044290d1dd85e8cc9a9d40ffad`, which is the
+hash the `where.self_out` entry above recorded as its own post-change value, so no
+generated artifact changes and no codegen run is involved: the change is Python
+only, and adds no kernel.
+
+**Evidence gaps.** The survey cannot see this defect at all (no float64 profile),
+so its two legs agree by construction and the fix is evidenced by the device
+measurements above rather than by the cohort; the device measurements are one MTT
+S5000 in a MUSA 5.1.0 / driver 3.3.5 environment with mudnn v3300, and none of the
+other MUSA hosts was revalidated; the two shard JSONs are the only artifact of the
+survey kept and are in `/tmp`, so the comparison is reproducible only by rerunning
+the runner; the per-shape device table comes from a probe script rather than from a
+committed test, while the boundary and the space-fit claims it supports are in
+`tests/integration/ops/test_musa_flaggems.py`; the float64 `mm` boundary was
+measured at 1e-12 tolerance against CPU, so the repair is established to be exact
+to that and not further; and the other float64 MUSA defects this entry does not
+touch remain open and are listed in issue #428.
+
+
 ### Enflame GCU S60: int64 leaves the FlagGems route through the dtype escape, on the seven ops that have a vendor kernel (2026-09-27, S60)
 
 **The gap this closes is three failures and one wrong answer, all on the same 64-bit wall.**
@@ -7411,6 +7655,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-09-27 | MTT S5000 (8 devices, `MTHREADS_VISIBLE_DEVICES=0` for the probes), MUSA SDK 5.1.0 / driver 3.3.5-server, mudnn v3300, FlagTree `0.6.2a3+mthreads3.6`, flag-gems editable from source at `/tmp/FlagGems` (HEAD `4d9c34775`, clean tree; the `5.4.0rc2.post1+ge7b4a865f` in its dist-info is the string baked at install time), torch `2.10.0+cpu`, Python 3.10.21, pytest 9.1.1 | The MUSA FlagGems cohort of `torch_fl/configs/backends_musa.conf`, 467 routes, and one operator's launch configuration (issue #428); no cohort membership change | float64 `mm` on MUSA no longer dies on shared memory. A new `_patch_flaggems_tune_space()` in `torch_fl/flagos/__init__.py`, installed from `_lazy_init` beside the other FlagGems patches, wraps `flag_gems.utils.libentry.LibTuner.run`: on the first exception out of a launch it sizes the widest tensor operand, cuts every `tl.dot` config's `num_stages` back to the deepest pipeline that stays **strictly** under the device's 196608 B static shared-memory limit, and retries once with that space installed, reinstating FlagGems' declared list and dropping its `configs_hash`/`kernel_hash` cached properties on both sides of the call; a space that already fits is handed over untouched and the refusal is re-raised as it arrived. The cause is the mthreads `mm` tune space — `flag_gems/runtime/backend/_mthreads/tune_configs.yaml:56`, reached through `_mthreads/ops/mm.py::mm` (line 427) and `mm_fma` (line 233), float64 never taking the square path because `is_sqmma_compatible` (line 46) requires fp16/bf16 — which ships two 64x64x64 tiles at `num_stages` 5 and 4 and carries no element-size term, so at 8 bytes per element those two ask 262144 B and **exactly** 196608 B against the 196608 B limit while the same space on float32 asks 131072 B and 98304 B and always ran. Every float64 `mm` whose M, K and N all exceed 32 failed, in two asymmetric forms: the 5-stage config with `OutOfResources: out of resource: shared memory, Required: 262144, Hardware limit: 196608` raised out of the tuner's own benchmark, and the 4-stage config, which compiles and is then rejected at launch with a bare `RuntimeError: Triton Error [MUSA]: invalid argument`. The asymmetry is why it was fatal — `bench`'s `except RuntimeError` scores a launch-refused config `inf` and moves on, but `OutOfResources` is a `triton.errors.TritonError`, so an `Exception` and not a `RuntimeError`, and the first config that cannot be built ends the whole tuning pass. FlagTree's AABS is what made the boundary look like 32 rather than K-free: it narrows a declared tile to the operand extent before the compiler sizes it, so `(32,64,64)` and `(64,64,32)` survived on the narrowed 4-stage ask of 147456 B. The repair is failure-driven because the alternative was **measured** to be worse: a space fitted before the first launch collapses to a single 3-stage config, which takes `LibTuner.run`'s `len(self.configs) > 1` gate the other way and is never benchmarked at all, losing AABS's per-shape narrowing with the stages and costing 5.9x at `2048x2048x16` (9.251 ms against 1.579 ms), 6.2x at `4096x4096x16` (32.212 against 5.211) and 1.8x at `512x512x32` (2.369 against 1.294), against errors that stay at ~1e-13 either way. **No route moves**: `torch_fl/configs/backends_musa.conf` is byte-identical at SHA-256 `87d150533c73e4ca40a24c2588aed51387d257044290d1dd85e8cc9a9d40ffad` — the same hash the `where.self_out` entry records as its own post-change value — so the MUSA route counts stay `1518 none / 467 flaggems / 52 musa` over the same 2037 routable ops, no generated artifact changes and no codegen run is involved: the change is Python only and adds no kernel, which is why the CUDA-incompatible-platform kernel rule does not apply to it. Issue #428's citations are corrected in a comment there rather than left standing: the failing condition is M, K and N all above 32 and not M and N with K uninvolved; the arithmetic is `(num_stages - 1) x (BLOCK_M x BLOCK_K + BLOCK_K x BLOCK_N) x element_size`, so 262144 B is the 5-stage ask and 196608 B the 4-stage one, not the 3-stage; `mm_mthreads_expand.yaml` supplies the decorator's **expand** search and not the shipped configs; the failing launch is the mthreads override and not `flag_gems/ops/mm.py::general_mm`; and the limit is not reachable through `torch.cuda.get_device_properties` on this backend, which leaves both shared-memory fields `None` | `FLAGOS_LOG=dispatch` and per-shape probes on device 0: before, float64 `mm` at `(33,33,33)` and `(96,96,96)` raise the `OutOfResources` above while `(32,32,32)`, `(48,32,48)` and `(32,64,64)` return `err=0.0e+00`; after, `(64,64,64)` returns `0.324 ms`, `err=7.1e-15`, on the 3-stage config `BLOCK_M 64 / BLOCK_N 64 / BLOCK_K 64`, and the shapes the device already served keep both their winning configuration **and** their median — `1.551 ms` at `2048x2048x16`, `5.142 ms` at `4096x4096x16`, `1.290 ms` at `512x512x32`, each against `1.579 / 5.211 / 1.294 ms` on the unmodified tree, timed with `torch.utils.benchmark.Timer(...).blocked_autorange(min_run_time=3.0).median` with `torch.flagos.synchronize()` inside the timed region, one shape per process, this tree's wrapper removed or kept to give the two arms. The shared-memory relation was measured by inverting it — a stage count high enough to trip the compiler makes `OutOfResources` print the exact ask — over fp32 and fp64 tiles at 64x64x64 and 32x64x64: fp32 `8 -> 229376` (`OutOfResources`), fp32 `5 -> 131072` (runs, `0.0e+00`), fp64 `5 -> 262144` (`OutOfResources`), fp64 `4 -> 196608` (compiles, then `invalid argument`), fp64 `3 -> 131072` (runs, `7.1e-15`), fp64 32x64x64 `5 -> 196608` (`invalid argument`), `4 -> 147456` (runs, `3.6e-15`); the rows that run were checked against a CPU reference. `pytest tests/unit/test_flaggems_tune_space.py -q` -> **21 passed, 26 warnings in 6.96s**, the four off-hardware claims being the model against that table, the exclusive boundary, when the repair fires and the wrapper's bookkeeping. `pytest tests/integration/ops/test_musa_flaggems.py -q` -> **1 failed, 3 passed, 3.99s**; the failure is the pre-existing `lift_fresh` device-name defect (`ValueError: lift_fresh Triton kernel requires a musa tensor`), reproducible with this change reverted. `pytest tests/unit -q` -> **9 failed, 853 passed, 109 skipped in 68.40s**, the same nine pre-existing failures as before this change (six in `test_flaggems_pointwise_dispatch.py` on a missing `libentry._descriptor_cache_key`, three in `test_musa_rng_bridge.py` that reproduce only when `test_ascend_platform_marker.py` runs first). `ruff check .` -> "All checks passed!", `ruff format --check .` -> **315 files already formatted**, ruff 0.15.12. **Survey**, `tests/manual/flaggems_overload_survey.py` v6 (`harness_version 6`, conf SHA-256 `87d150533c73e4ca40a24c2588aed51387d257044290d1dd85e8cc9a9d40ffad`), four disjoint shards on device 0 with per-shard Triton and FlagGems caches, run **twice on this same tree** — once as shipped and once with `_patch_flaggems_tune_space` neutralised in every child by unwrapping `LibTuner.run` after device init — 467 routes each, no `PENDING` records, artifacts `/tmp/musa-overloads-{after,before}-0..3.json`: both legs read **`STRICT 303 / BASIC_ONLY 47 / FAILED 38 / UNTESTED 79`** (78/12/6/21, 76/12/9/20, 73/10/15/19, 76/13/8/19 per shard) and both censuses read `PASS 1883, INVALID_CASE 1086, ERROR 151, WRONG 132, CRASH 14, TIMEOUT 3` over 467 x 7 profiles, 455 of the 467 routes being identical case for case and the other 12 differing only in the `max_diff=` magnitude printed inside a case that is `WRONG` in both legs (the harness's own nondeterminism on operators that fail either way) with **no route changing status in any direction**. That agreement is the expected result and not a null one: none of the seven profiles (`2d-f32`, `4d-f32`, `1d-f32`, `2d-f16`, `2d-i64`, `2d-bool`, `2d-f32-strided`) is float64, so no profile reaches the configuration this change repairs, and what the pair establishes is that wrapping `LibTuner.run` — which every FlagGems `tl.dot` operator on this platform now goes through — moved nothing in the cohort. **Evidence gaps:** the survey cannot observe this defect at all, so the fix rests on the device measurements above and the survey pair is regression evidence rather than evidence for it; the 1e-12 CPU tolerance bounds the exactness claim and not less; the per-shape table comes from a probe script rather than a committed test, while the boundary and space-fit claims it supports are in `tests/integration/ops/test_musa_flaggems.py`; the two shard JSONs are in `/tmp` and are the only artifact kept, so the pair is reproducible only by rerunning the runner; one MTT S5000 in one MUSA 5.1.0 / driver 3.3.5 environment was measured and no other MUSA host was revalidated; no other platform was measured at all, though the patch is gated on `_build_accelerator() == "musa"` and a unit test pins that off that accelerator `LibTuner.run` is left as it was, so Ascend, BPU, DCU, Enflame GCU, MetaX, PPU and Tsingmicro are **not revalidated**; and the four float64 MUSA defects found alongside this one but not touched here — `addmm`/`addmm.out` wrong at ~1e-07 (`addmm` `NOT_SUPPORTED` on the vendor route while `addmm.out` is silently wrong), `baddbmm` `CompilationError`, `mv`/`addmv` wrong at ~1e-07, and `lift_fresh`'s device-name defect — remain open and are recorded in issue #428. |
 | 2026-09-26 | Ascend 910 (host with 16 NPUs, CANN 9.0.0, FlagTree `0.6.2a1+ascend3.5`, flag-gems `5.4.0rc2.post1+g6d31db9aa`, torch `2.10.0+cpu`, Python 3.11) | The Ascend native route for `_scaled_dot_product_efficient_attention` (one operator, no cohort membership change) | Issue #324: finite additive attention bias is now carried to `aclnnFlashAttentionScore`'s `realShiftOptional` input instead of raising. No route moves and `torch_fl/configs/backends_ascend.conf` is byte-identical (SHA-256 `9d24378804775bda932f4572f94b1984b88fd069d659e16187c5ce8dab80918e`), so the route-count snapshot in `tests/unit/test_conf_registration_consistency.py` is unchanged. The bias is pre-divided by `scale_value` in float32 because ACLNN applies `realShift` to the *unscaled* scores where PyTorch adds `attn_bias` after scaling (measured max abs error against a float32 reference, before -> after: default scale 0.42898 -> 0.00476, `scale=0.5` 0.21858 -> 0.00276, `scale=1.0` unchanged at 0.00616). `attn_bias` rank is now 2-4 (right-aligned broadcasting) and dtype bool/float16/bfloat16/float32. `-inf` entries are split onto `attenMask` and zeroed in the `realShift` operand. Full Ascend ops sweep on the final build: `92 passed, 14 skipped, 1404 deselected in 790.88s`; the new `tests/integration/ops/test_ascend_sdpa_mask_bias.py` `20 passed in 1.67s`. **SDPA backward is not revalidated and no gradient through the bias is claimed**: the shipped conf routes `_scaled_dot_product_efficient_attention_backward` to FlagGems, which on this host raises `AttributeError: 'autotuning_knobs' object has no attribute 'adjust_block_size'` before reaching any kernel, so no SDPA backward ran at all locally; the aclnn backward kernel is unreachable through the shipped conf and its two gaps (it drops `pseShiftOptional`, and rebuilds a non-square causal mask as `{S, S}` instead of `{S, S_kv}`, giving `ret=161001`) are left unchanged and recorded in the PR. The 910C rows of the FlagGems baseline are **not revalidated** by this entry. | `python -m pytest tests/integration/ops/ -m ascend -q` on 2026-09-26 (92 passed, 14 skipped, 1404 deselected, 790.88s); `python -m pytest tests/integration/ops/test_ascend_sdpa_mask_bias.py -v` (20 passed, 1.67s); scale-order and edge probes `/tmp/probe324/pse_diag.py` (9/9) and `/tmp/probe324/pse_edge.py` (~30/30) on the same build; `ruff check` (all checks passed) and `ruff format --check` (312 files already formatted); `scripts/codegen/gen_vendor_confs.py --check` (all vendor confs up to date) |
 | 2026-09-27 | Enflame GCU S60 (7 healthy cards 0, 1, 2, 3, 4, 6, 7; card 5 faults and hangs any `topsaten`-path op), FlagTree `0.6.1+enflame3.6`, flag-gems `5.3.2`, torch `2.10.0+cpu`, Python 3.12.13, pytest 8.4.2 | The Enflame GCU S60 FlagGems cohort, 253 routes, plus the 336-nodeid BERT model cohort | int64 now leaves the FlagGems route on the seven `flaggems` routes that also have a generated GCU kernel: a new `#elif defined(USE_GCU)` branch of `FlagGemsRejectsDtype` returns `dtype == at::kLong`, so `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor` and `silu` move `flaggems` -> `gcu` through the existing `VendorSlot()` substitution. Nothing is regenerated and `torch_fl/configs/backends_gcu.conf` is byte-identical (`bd8daa31…37b55`, 1605 `none` / 253 `flaggems` / 179 `gcu`): a per-op conf cannot express "FlagGems, except for dtype X", which is what the predicate exists for. Three of the seven then return correct int64 results (`clamp`, `fmod.Tensor` and `remainder.Tensor`, the last having silently returned int32 before); the other four raise exactly the CPU reference's error for the same call, so they are a lift from a compiler abort to reference behaviour rather than a new capability. This is a workaround for a version skew — flag_gems 5.3.2's gcu300 `pointwise_dynamic` passes `enable_i64` into `--convert-gpu-to-gcu` and the installed `/opt/triton_gcu/bin/gcu-compiler-opt` (2026-05-21, LLVM 21.0.0git) does not declare it — and it is not a claim that int64 is unsupported on GCU300; the 53 remaining `2d-i64`-only failures (40 pipeline aborts, 13 pass-option rejections) have no `m.impl` to substitute and are not addressed. Removal condition: the branch comes out when the compiler accepts the option or the FlagGems wheel stops emitting it, and `tests/integration/ops/test_dtype_route_fallback.py` fails loudly if it is removed while the skew persists. float64 is deliberately not included: `remainder.Tensor`'s FlagGems float64 route is correct today | `FLAGOS_LOG=dispatch` probes per op on card 2, before (recorded at `/tmp/seven_before.out`) and after, showing all seven `-> flagos_python` then `-> gcu` and `clamp_min` (no `m.impl`) staying on FlagGems; `pytest tests/integration/ops/test_dtype_route_fallback.py -v` -> `5 passed, 9 skipped in 24.30 s` against a stashed-tree rebuild at `1 failed, 9 deselected, 3 errors in 26.06 s`, every failure an `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option enable_i64` raised from `flag_gems/runtime/backend/_enflame/gcu300/ops/clamp.py:96` (`FLAGOS_FORCE_BACKEND=flaggems` cannot reproduce the before state on this build, so the control is two source states, not a runtime switch). The 253-route cohort was re-measured end to end as six disjoint shards on cards 0, 1, 3, 4, 6 and 7 (43/42/42/42/42/42) with `tests/manual/flaggems_overload_survey.py`, harness v6 (SHA-256 `7b01c22c…`), and the merged artifact `/tmp/gcu-overloads-i64recheck.json` (sha256 `102e998e…8cd446`) reproduces the parent `/tmp/gcu-overloads-final.json` (`1b7c6d13…921ac`) exactly — `253 / 193 / 190 / 121`, `STRICT 121 / BASIC_ONLY 69 / UNTESTED 60 / FAILED 3`, 1771 cases `PASS 975 / INVALID_CASE 705 / ERROR 79 / WRONG 12` — the only per-route difference in the whole cohort being an uninitialized padding value in `reflection_pad1d_backward`'s `INVALID_CASE` message, on a route this change does not touch; the seven moved routes keep their `2d-i64` `INVALID_CASE` and the survey-visible controls `clamp_min`, `clamp_max` and `rsub.Scalar` keep their `ERROR`, which is the measured statement that the escape did not over-reach. BERT model cohort, same-tree A/B: both legs collect the same 336 nodeids from `f84eb66` in this tree with `TOPS_VISIBLE_DEVICES=2,3 OMP_NUM_THREADS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 --batch-size 20`, each leg built from its own source state, identical skip sets — `ERROR 56 / FAIL 13 / PASS 132 / SKIP_OTHER 133 / SKIP_CUDA_ONLY 2` in 635.4 s unpatched, `ERROR 56 / FAIL 6 / PASS 139 / SKIP_OTHER 133 / SKIP_CUDA_ONLY 2` in 636.4 s patched, exactly seven `FAIL -> PASS` transitions and no status change in either other direction; the six survivors are four `rsub.Scalar` (`64-bit data type not supported on GCU300!` on the cached `..._rsub_func_tensor_scalar_kernel_rank_1_bptr_t4096.py:61:0`, no vendor kernel) and two in-place `clamp_`, whose separately configured conf routes have no `m.impl`. Neither leg ran on card 5. The earlier `/tmp/bert_i64.json` run used a different `TOPS_VISIBLE_DEVICES` and its skip set differs by two nodeids, so it is superseded; `/tmp/bert_final.json` was taken at `5ffeee7`, the tip of the pre-merge fork branch `fix/gcu-new-ones-int64-route`, which is not an ancestor of `f84eb66`, so it cannot separate this change and is not used as the before leg |
 | 2026-09-25 | Enflame GCU S60 (7 healthy cards 0, 1, 2, 3, 4, 6, 7; card 5 faults and hangs any `topsaten`-path op), FlagTree `0.6.1+enflame3.6`, flag-gems `5.3.2`, torch `2.10.0+cpu`, Python 3.12.13, pytest 8.4.2 | The Enflame GCU S60 FlagGems cohort, 253 routes, plus the 336-nodeid BERT model cohort | `new_ones` `flaggems` -> `gcu` -- off the FlagGems route **and** onto a generated vendor-native kernel -- via two coupled generator edits (`NATIVE_TRITON_GAPS["gcu"]` in `gen_vendor_confs.py`, plus a `T_NEW_ONES` template with its `OPS`/`CATEGORIES` entries in `codegen_gcu.py`), one measured dtype gate in `csrc/aten/backends/gcu/topsaten_common.h`, and the repair to the shared transformers test harness. The BERT cohort's largest failure family: **19 of its 29 `FAIL`s were `new_ones` on an int64 tensor**, at `transformers/generation/utils.py:991` in `_update_model_kwargs_for_generation` (`attention_mask.new_ones((attention_mask.shape[0], num_new_tokens))`), raised on every generation step of the assisted-decoding, greedy-search, beam-search and sampling tests. flag_gems' `new_ones` is a thin wrapper over its `ones` kernel -- `flag_gems/ops/new_ones.py:51` runs `ones_kernel[grid_fn](out, N, BLOCK_SIZE=1024)`, whose int64 instantiation is `flag_gems/ops/ones.py:32` -- and FlagTree cannot lower that kernel for GCU300, so the failure is a compiler pipeline abort and not a wrong answer: `RuntimeError: Pipeline run failed: PassManager execution failed` out of `triton/backends/enflame/toolkit.py:145` via `compiler.py:253 make_gcuir`, with the failing module's element type `tensor<1024x!tt.ptr<i64>>` and the compiler's own diagnostic, `loc(".../flag_gems/ops/ones.py":32:0): error: 64-bit data type not supported on GCU300!`, printed ahead of it. That is the same i64-lowering wall the vendor SDK's missing int64 kernels put up, and it is why `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor` and `silu` carry a `# gcu` marker in the FlagGems file at all. The generator already had the policy for it: `NATIVE_TRITON_GAPS["gcu"]` is the set of ops FlagGems may not serve on this platform, and its factory/creation family already held `arange`, `arange.start`, `arange.start_step`, `constant_pad_nd`, `full`, `full_like`, `linspace`, `ones`, `ones_like`, `zeros` and `zeros_like`. `new_ones` was missing from that list, and **removing it from FlagGems is only half of the routing change: membership alone yields `none`.** **The route it moves to is `gcu`, and the kernel behind it is generated.** `route()` falls through to `<vendor>` only for ops the platform registers, so the op needs an `m.impl("new_ones", WrapperNewOnes)` on `PrivateUse1` and a generator that emits it; it gets an entry of its own in `codegen_gcu.py` rather than the `full_like` family's template, because unlike `ones_like` it takes a shape instead of reading one, and unlike `arange` that shape is not something to compute: `topsatenNewOnes` takes an explicit `topsatenSize_t`, and the output tensor's own description is not what sizes the write. Both conditions hold, so the conf's route is `gcu`; with the kernel alone it would be `flaggems` and with the membership alone `none`, which is what the previous revision of this entry did. **The vendor entry point's dtype contract had to be measured, not read off a table.** `topsatenNewOnes` takes an explicit `data_type` argument and validates it instead of consulting one of the per-op dtype tables the other entry points use. Measured on S60 with a sentinel-filled output buffer, so that "the call declined" and "the call ran" are distinguishable, fp32, fp16 and bf16 come back with the whole plane set to 1, while i8, u8, i16, u16, i32, u32, i64, u64, PRED, f64 and both float8 formats return `TOPSATEN_STATUS_BAD_PARAM` (`op_aten_new_ones.cc:70: new_ones CheckArgs failed.`) and leave every element at the sentinel -- at rank 1, 2 and 3, on an empty shape, and on all of 2x4 and 64x64. `TopsatenSupportsDtype` is too permissive for this entry point, so `gcu::TopsatenNewOnesDtype` in `topsaten_common.h` is the measured set. Declining is not optional: `EXEC_TOPSATEN_CMD` wraps the call in a `TORCH_CHECK` on the status, so a dtype left ungated would raise where the composite would have produced the right tensor -- and the dtype that does it is the int64 one, on exactly the call site above. The dtype of the `input` operand is deliberately not part of the test: the operand is only where the kernel reads its device from, and an fp32, an i64 and a PRED operand all return the same plane of ones. **What the vendor kernel cannot serve goes to the composite -- the same code the `none` route ran.** Everything outside that dtype set, and every call with a non-default `layout`, an explicit `device` other than `self`'s, an empty `size`, or `pin_memory=True`, is handed to `at::compositeexplicitautograd::new_ones`, the dispatcher's own entry for this op, called qualified because the Tensor method would re-enter this kernel. That decomposes to `empty` + `fill_`, which keeps the result on the device -- a device->host->device round trip would be a regression on exactly the int64 mask this is for, since that mask grows with the context and is rebuilt on every generation step. `TopsatenSizeWrapper` keeps the size vector alive across the call because `topsatenSize_t` holds a raw pointer, a rank-0 `size` must not reach the vendor entry point at all (`tensor_define.h:58` rejects an empty dims/strides vector by throwing `std::runtime_error`, which aborts the process instead of propagating a catchable error), and a zero-element `size` short-circuits before the call for the same reason. **`pin_memory` is the third thing the native path must not answer.** Nothing here can pin memory, so every ATen route raises; measured on card 0 against the kernel before the guard was added, the fp32 native path was the one exception, returning `is_pinned() == False` from `f32.new_ones(3, pin_memory=True)` where `torch.empty(3, pin_memory=True)`, `torch.zeros(0, device).new_zeros(3, pin_memory=True)` and the int64 `new_ones` all raised. The flag is therefore treated as unsupported and handed to the composite, and `at::empty` is deliberately not given it on the native path either; with the guard in place all four spellings raise `Pin memory can only be on CPU`, the contract `T_ARANGE` already implements, down to the message. **Route delta.** Exactly one route moves. GCU `flaggems` **254 -> 253**, `gcu` **178 -> 179**, and `none` **1605 -> 1605, unchanged**, over the same **2037** routable ops, so accelerated routes stay at **432** (`Coverage: 432/2037 ops accelerated (21.2%)`). The shipped conf is **1605 `none` / 253 `flaggems` / 179 `gcu`**, and both generated registration files reconcile against it: `253 = 246 + 7` and `179 = 186 - 7`. The seven markers are the same seven as before -- `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor`, `silu` -- and there are no orphans and no overlaps in either direction. `gcu_flaggems_register.inc`'s provenance banner moves from "246 ops registered here, 101 further FlagGems ops already claimed by `gcu_register.inc`" to **246 and 102**: `new_ones` joins the set the native file claims, which is the second number, while the first is unmoved because the op was already in that file's excluded-ops list by way of `NATIVE_TRITON_GAPS`. **The same change carries a second, platform-neutral half, because one of the 29 BERT failures was not the tree's.** `tests/manual/transformers_hf_tests.py`'s `stage_harness_files()` symlinks `workdir/tests` at the source's `tests` directory and runs the child with `cwd=workdir`, so pytest computes the nodeid relative to `rootdir` and a selection that arrives as `tests/models/bert/test_modeling_bert.py::BertModelTest::test_x` is reported back as `::BertModelTest::test_x`; `PYTEST_CURRENT_TEST` inherits that nodeid and HF's `run_test_using_subprocess` (`src/transformers/testing_utils.py:3080`) reads it and re-execs `[sys.executable, "-m", "pytest", test]`, which pytest answers with `ERROR: directory argument cannot contain :: selection parts` and exit 4 -- reproduced on this host with the same pytest 8.4.2. A new `_restore_file_part(config, items)` runs first in the child's own report plugin's `pytest_collection_modifyitems` and rewrites `item._nodeid` to the file's path relative to `config.rootdir`, skipping nodeids that already carry their file and anything that escapes the root with `..`; it repairs the reported nodeid rather than changing what is collected, and the harness-side `canonicalize_nodeids()` stays as the second line of defence. | **BERT**, one process, `--model bert`, `batch_size` 20, `collected` 336, `status COMPLETED_RESILIENT`, `crashed_batches []`, `context_poison false`: **`{"ERROR": 56, "FAIL": 13, "PASS": 132, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 612.0 s** (artifact `/tmp/bert_final.json` `b2d882f55a18beeb240b05f947365de8cdd4d6d8032ef965bdc61a7c40fa4bf7`)  against **`{"ERROR": 56, "FAIL": 29, "PASS": 116, "SKIP_CUDA_ONLY": 2, "SKIP_OTHER": 133}` in 578.8 s** (artifact `/tmp/bert_pr.json` `cc099ccb5e217a0427633bee26179e61f49acf8b3101e7bb5d3fe5c9c44f0225`). The key sets are identical and **exactly 16 statuses change, every one of them `FAIL` -> `PASS`** -- the fifteen generation tests (beam-search, beam-sample, greedy and sampling, each with and without `dict_output`, `beam_search_generate_dict_outputs_use_cache` and `greedy_generate_dict_outputs_use_cache`, `generate_from_inputs_embeds_0_greedy` and `_1_beam_search`, `generate_from_random_inputs_embeds`, `generate_methods_with_logits_to_keep`, `generate_with_and_without_position_ids`) plus `test_can_load_with_global_device_set`, the nodeid repair -- so the before run's 29 `FAIL`s bucket as 19 `new_ones`, 9 `enable_i64` and 1 nodeid while the after run's 13 bucket as 9 `enable_i64` and 4 `rsub` (the same nine `enable_i64` names on both sides): the 19 `new_ones` failures split 15 into passes and 4 into a failure that lands **later in the same generation loop**, `transformers/generation/utils.py:2929` evaluating `pad_token_id * (1 - unfinished_sequences)`, which becomes `aten::rsub.Scalar` on an int64 tensor and aborts in the same `make_gcuir` pipeline. Neither remaining family is on a route this change moves, and neither is a regression. The run reproduces `/tmp/bert_after.json` (`563609e20bd78f8b7ba95d959846370a1504221ad21a0fe8d70b3f269c2567ad`, 616.4 s, launched before the extension was rebuilt a second time for the `pin_memory` guard and the composite include) **nodeid for nodeid on all 336 keys**.  **Call-level evidence for the op itself, on the shipped build.** The survey's `new_ones` case is a synthesized call with the optional factory `dtype` left at `None`, so its result element type follows `self` and only the `2d-i64` profile asks for an int64 output; the kernel the FlagGems route reached is therefore driven once per profile on card 2 of the shipped build instead: `flag_gems.ops.new_ones.new_ones` returns the correct plane of ones for `2d-f32`, `4d-f32`, `1d-f32`, `2d-f16`, `2d-bool` and `2d-f32-strided` and raises `RuntimeError: Pipeline run failed: PassManager execution failed` on `2d-i64` alone -- the 6-of-7, int64-only shape the cohort records for the other 64 routes that fail on that profile. On the shipped conf the same op does not go near that kernel: `FLAGOS_LOG=dispatch` on card 2 logs `new_ones -> gcu` for an int64, an fp32, an fp16 and a bool operand, with `fill_.Scalar -> gcu` for the composite path and no `cpu_fallback` or `flagos_python` line, and all four return on-device tensors equal to the CPU reference, `bool` and `int64` included. A seventeen-check smoke test over the same build covers the two shapes the vendor entry point rejects by construction (rank 0 and an empty `size`), the six dtypes it declines (`i8`, `i16`, `i32`, `i64`, `bool`, `f64`), an fp32 result asked of an int64 `self`, fp16 and bf16 on the native path, ranks 0/1/3 and a 64x64 fill (8192/8192 elements exactly 1), and all of them pass. **Survey.** `tests/manual/flaggems_overload_survey.py` v6 (`7b01c22ce3a94315f1364df242323e9faac27f2585debfb05030670c7c756cc7`) against `torch_fl/configs/backends_gcu.conf` at `bd8daa31506c86fc3881a958d06a0a6a5bab5f33aee444c901d413c109137b55` -- the hash this change ships -- flag-gems 5.3.2, FlagTree 0.6.1+enflame3.6, torch 2.10.0+cpu, measured as seven disjoint shards on the seven healthy cards 0, 1, 2, 3, 4, 6 and 7 (37 routes in the first shard and 36 in each of the other six, no route measured twice): **registered 253, tested 193, basic-executable 190, strict 121, basic-only 69, failed 3, untested 60**, 1771 cases (975 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-final.json` `1b7c6d135b2b8f58e8de1d8eeff822bc58143ef693f7a3cf295933fc0ab921ac`. The parent conf `28f4656c30b39b7a60128cf581426f968c077aa5895d23d6193c642799a4ef1b` was **re-measured** on this build, harness and card set rather than cited, because the artifact the previous revision of this entry recorded against it (`/tmp/gcu-overloads-post.json`, `6d1120be...`) is no longer on disk: 254 routes, strict 122, basic-only 69, basic-executable 191, tested 194, failed 3, untested 60, 1778 cases (982 pass, 705 invalid case, 79 error, 12 wrong), artifact `/tmp/gcu-overloads-parent.json` `81882479c219ac33228c608b874bbc801cce494d0149198b13c1b32e3967f328`. Comparing the cohorts route for route and case for case, **the only route present on one side and not the other is `new_ones`**, and restricted to the 253 shared routes the two agree on **every** case record once the five `INVALID_CASE` messages that print an uninitialised address are normalised (`reflection_pad1d_backward`, whose five cases differ only in the pointer value the message renders -- `padding (1, 93825246127840)` against `padding (1, 93825653218016)` -- with every status identical on both sides and no `PASS` on either). The whole aggregate delta between the two cohorts is therefore `new_ones`' own seven cases: strict 122 against 121, and 982 passes against 975. Two things follow, and neither is a before/after for the op: this is **not** a runtime A/B of the route change and is not offered as one, because on this build the parent conf's `new_ones = flaggems` names a backend that no longer has a kernel for the op, so the line is inert -- dispatch falls through `flaggems_cpp > flaggems > tileops > gcu > none` to the composite, which serves all seven profiles as `PASS`, `2d-i64` included; and the reverse is what the comparison does establish, namely that the change is confined to `new_ones`, since removing it from the parent cohort's route set makes the two cohorts identical. **The two remaining i64 families are measured at cohort scale, in both cohorts, identically**: 51 routes fail only on `2d-i64` with `RuntimeError: Pipeline run failed: PassManager execution failed` out of `make_gcuir`, and 13 more fail only on `2d-i64` with `Exception: <unknown>:0: error: <Pass-Options-Parser>: no such option enable_i64` (`angle`, `ceil.out`, `ceil_`, `clamp_min`, `exp2`, `isinf`, `isnan`, `logical_not`, `logical_xor`, `pow.Scalar`, `relu_`, `threshold`, `threshold_backward`) -- 64 routes, 61 `BASIC_ONLY` and the 3 `FAILED` (`gcd_`, `lcm`, `lcm_`), each with its six non-i64 profiles passing. `rsub.Scalar` is one of the 51, and its record carries the same abort text as the BERT traceback. `new_ones` itself is not in this cohort at all, because it is no longer a FlagGems route. Tests: `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py` -- **73 passed**; `pytest tests/integration/ops/test_flaggems_conf_consistency.py --noconftest` -- **7 passed**; `pytest tests/integration/ops/test_new_ones_dispatch.py -m gcu` -- **8 passed, 7 deselected**, the cases this entry adds, which pin the int64 route out of `FLAGOS_LOG=dispatch` rather than infer it from the value, split the dtypes the vendor entry point writes itself from the ones it hands back to the composite, and run rank 0 and an empty `size` in a child process so that an abort is an exit status rather than a dead session; `pytest tests/unit/test_transformers_automation.py -k 'plugin_restores or plugin_leaves'` -- **2 passed, 59 deselected**, the two tests the harness half adds. A second run of all three generators leaves all four artifacts byte-identical (`bd8daa31...` / `6bcfb030...` / `27630385...` / `d933fb05...`), re-hashed after each of two consecutive full runs; `gen_vendor_confs.py --check` reports `all vendor confs up to date` and `codegen_gcu_flaggems.py --check` reports its file up to date, while `codegen_gcu.py` has no check mode (`--help` lists only `--category` and `--no-conf`), which is why idempotency for that one is the hash comparison. Pinned ruff 0.15.12: `ruff check .` -- "All checks passed!", `ruff format --check .` -- 309 files already formatted. **Evidence gaps:** `tests/unit/test_transformers_automation.py` as a whole reports **11 failed, 50 passed** on this host and the same 11 failures are present with the file's base-commit copy in place (**11 failed, 48 passed**, failure sets identical line for line), because this working tree's gitignored prebuilt `torch_fl/_C.cpython-312-x86_64-linux-gnu.so` is a 2026-08-25 artifact that predates `_set_backend_config_path` (`torch_fl/csrc/module.cc`, last changed by #364 on 2026-09-21), so the package's own `torch_fl/__init__.py:1654` calls a symbol the loaded extension does not export; the two new tests do not import `torch_fl` and pass either way. The base conda environment carries `ruff 0.16.0`, which also formats Python code blocks inside markdown and reports 16 such files, none of them a Markdown file this change touches. This host has **no outbound network**, so the BERT cohort is run with `HF_HUB_OFFLINE=1` in the environment: HF's pipeline tests catch the resulting `OfflineModeIsEnabled` in `run_pipeline_test`'s `from_pretrained` guard and skip, which is why their status is the same `SKIP_OTHER` the network-era baseline recorded, and the tokenization class is the pre-existing 56-error family in both. What is *not* measured is the vendor kernel's cost against the FlagGems kernel it replaces: the usual GCU `empty` + `fill_` decomposition is two launches where `topsatenNewOnes` is one, and no timing was taken for either on this op. The nine `enable_i64` failures are a skew between this S60's FlagGems wheel and its installed `/opt/triton_gcu/bin/gcu-compiler-opt`, which does not accept the option, and not an operator gap; moving `rsub.Scalar` is deliberately left to its own change, since it is one of 64 routes failing on the same single profile and a route move is a claim about a whole overload set, priced and reviewed on its own. Card 5 faults and hangs any `topsaten`-path op, so nothing was measured on it. All other platforms' FlagGems route sets are untouched -- `NATIVE_TRITON_GAPS["gcu"]` is read only when the `gcu` configuration is generated and `codegen_gcu.py` writes only GCU artifacts -- so Ascend, DCU, MetaX, MUSA, PPU and Tsingmicro are **not revalidated**; the harness half is platform-neutral by construction and the failure it fixed was possible on any platform but is only claimed for this one. |
