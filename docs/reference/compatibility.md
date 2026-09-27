@@ -18,6 +18,45 @@
 | FlagGems | Platform dependent | Installed from PyPI or a vendor-compatible build only where the platform route uses it. |
 | Triton/compiler | Platform dependent | Use the compiler distribution required by the selected accelerator. |
 
+## Wheel compatibility record
+
+Every built wheel contains `torch_fl/compatibility.json`. It records the selected
+platform and kernel sets, bundled libtorch location, build-time PyTorch version
+and C++ ABI flag, the installed FlagTree/FlagGems/FlagCX versions observed during
+the build, the explicitly declared vendor PyTorch version when one supplies
+device libraries, and the wheel's Python requirements. These fields describe
+the artifact; an observed build version is evidence of testing, not an implicit
+pin on every downstream install. The package's version ranges remain the
+installation contract.
+
+An SDK version is recorded only when the builder sets `FLAGOS_SDK_VERSION` to a
+verified value. An absent value means **unknown**, not compatible with all SDKs.
+For CUDA, DCU, MetaX, and PPU release artifacts, also set
+`FLAGOS_VENDOR_TORCH_VERSION` from the vendor wheel used to source device/core
+libraries. `--release` rejects missing SDK or vendor PyTorch provenance. The
+build-time C++ ABI flag describes the PyTorch interpreter used
+for compilation; a vendor libtorch bundle may have a separate ABI provenance
+that must be checked against the vendor SDK. This manifest does not prove host
+driver compatibility.
+
+Inspect a wheel before importing its native extension:
+
+```bash
+python -m torch_fl_preflight --wheel dist/torch_fl-*.whl --platform cuda \
+  --sdk-version 13.3 --check-installed
+```
+
+`--check-installed` checks declared dependency ranges, warns when an installed
+optional package differs from the build environment, and warns when PyTorch is
+within the declared range but not the exact build version. `--check-build-env`
+requires exact build dependency versions and is used by every wheel CI job.
+`--require-sdk` rejects wheels without a declared SDK version. The CLI module
+is outside the `torch_fl` package so this check cannot trigger backend import
+side effects. SDK/driver compatibility still requires platform-specific testing.
+Generate a release table from the final wheel files with
+`python -m torch_fl_preflight --wheel dist/*.whl --release --markdown-table`;
+the command fails if any artifact lacks its required provenance.
+
 ## Platform Matrix
 
 | Platform | Build selector | Execution path | Eager and autograd | `torch.compile` | Distributed | Profiler | FlagGems | Status |

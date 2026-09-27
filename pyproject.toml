@@ -79,6 +79,9 @@ flagcx = [
 # compiles fail. See torch_fl/_autoload.py.
 torch_fl = "torch_fl._autoload:init"
 
+[project.scripts]
+torch-fl-preflight = "torch_fl_preflight:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
@@ -86,7 +89,7 @@ include = ["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
 # Native libs (libtorch_fl.so) are built via setup.py cmdclass; editable install must
 # run build_ext — see EditableWheelWithCmake in setup.py.
 [tool.setuptools]
-py-modules = []
+py-modules = ["torch_fl_preflight"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

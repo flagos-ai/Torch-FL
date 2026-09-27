@@ -560,6 +560,35 @@ def _write_build_config() -> None:
         f.write(content)
 
 
+def _write_compatibility_manifest(wheel_version: str) -> None:
+    """Write artifact facts after the native build, before wheel staging."""
+    import torch
+
+    from torch_fl_preflight import make_manifest
+
+    kernels = _kernel_switches(FLAGOS_ACCELERATOR)
+    compiled = [KERNEL_SET_NAME[name] for name in KERNEL_SWITCHES if kernels[name]]
+    manifest = make_manifest(
+        platform=FLAGOS_ACCELERATOR,
+        wheel_version=wheel_version,
+        kernels=compiled,
+        bundle_libdir=_BUNDLE_LIBDIR,
+        vendor_torch_libraries=_platform_entry(FLAGOS_ACCELERATOR)[
+            "vendor_torch_libraries"
+        ],
+        requirements=_install_requires(),
+        torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
+        sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
+        vendor_torch_version=os.environ.get("FLAGOS_VENDOR_TORCH_VERSION"),
+    )
+    if manifest["build"]["distributions"]["torch"] is None:
+        raise RuntimeError("Build-time PyTorch distribution is missing")
+    path = os.path.join(BASE_DIR, "torch_fl", "compatibility.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
 def _bundle_cuda_assets() -> None:
     """Copy the external CUDA .so assets into torch_fl/lib so the wheel is
     self-contained.
@@ -643,11 +672,13 @@ class BuildExtWithCmake(_build_ext):
 
     def run(self):
         build_deps()
+        _write_compatibility_manifest(self.distribution.get_version())
         # ``build`` runs build_py before build_ext, but CMake installs package
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
         # list, so copy late-generated files explicitly into wheel staging.
         relative_paths = [
             "_build_config.py",
+            "compatibility.json",
             "lib/flagos_platform",
             "include/flagos.h",
         ]
@@ -776,6 +807,7 @@ def _get_setup_kwargs():
             # backends_metax.conf, ...). Now consolidated under configs/.
             "configs/backends*.conf",
             "codegen_skip_ops.txt",
+            "compatibility.json",
         ]
     }
 
@@ -800,6 +832,7 @@ def _get_setup_kwargs():
         packages=find_packages(
             include=["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
         ),
+        py_modules=["torch_fl_preflight"],
         package_dir={"": "."},
         package_data=package_data,
         ext_modules=ext_modules,
@@ -871,7 +904,7 @@ TORCH_PIN = "torch>=2.10,<2.11"
 
 
 def _install_requires():
-    reqs = [TORCH_PIN]
+    reqs = [TORCH_PIN, "packaging>=23"]
     # FlagGems (and its Triton) is the default operator source, so it is a hard
     # runtime dep everywhere it can actually run. Platforms that ship their own
     # Triton are the exception: pulling PyPI's NVIDIA-targeted triton wheel would

@@ -104,4 +104,5 @@ jobs:
             tests/unit/test_transformers_hf_tests.py \
             tests/unit/test_transformers_model_probe.py \
             tests/unit/test_vendor_resolution.py \
+            tests/unit/test_wheel_preflight.py \
             -v --tb=short -p no:cacheprovider

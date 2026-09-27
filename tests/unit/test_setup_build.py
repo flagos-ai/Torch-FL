@@ -15,7 +15,9 @@
 import json
 import re
 import runpy
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import setuptools
@@ -66,6 +68,18 @@ def test_build_ext_stages_generated_build_config(
         "build_deps",
         lambda: setup_globals["_write_build_config"](),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)),
+    )
+    import torch_fl_preflight
+
+    monkeypatch.setattr(
+        torch_fl_preflight,
+        "installed_version",
+        lambda name: "2.10.0+cpu" if name == "torch" else None,
+    )
     monkeypatch.setattr(build_ext, "run", lambda self: None)
 
     command = command_type(Distribution(setup_kwargs))
@@ -79,6 +93,16 @@ def test_build_ext_stages_generated_build_config(
         'ACCELERATOR = "musa"\n'
         'KERNELS = ("flaggems", "vendor")\n'
     )
+    compatibility = json.loads(
+        (tmp_path / "wheel" / "torch_fl" / "compatibility.json").read_text()
+    )
+    assert compatibility["platform"] == "musa"
+    assert compatibility["wheel_version"] == "0.1.0"
+    assert compatibility["build"]["kernels"] == ["flaggems", "vendor"]
+    assert compatibility["build"]["vendor_torch_libraries"] is False
+    assert compatibility["build"]["distributions"]["torch"] == "2.10.0+cpu"
+    assert compatibility["build"]["sdk_version"] is None
+    assert compatibility["build"]["vendor_torch_version"] is None
 
 
 def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_env):
@@ -229,6 +253,7 @@ def test_platform_table_is_internally_consistent():
         "project_languages",
         "runtime_dir",
         "bundle_libdir",
+        "vendor_torch_libraries",
         "wheel_local",
         "use_macro",
         "writes_platform_marker",
@@ -239,6 +264,7 @@ def test_platform_table_is_internally_consistent():
     for accelerator, row in table["accelerators"].items():
         for field in required:
             assert field in row, (accelerator, field)
+        assert isinstance(row["vendor_torch_libraries"], bool), accelerator
         assert set(row["kernel_defaults"]) == set(switches), accelerator
         assert all(
             isinstance(value, bool) for value in row["kernel_defaults"].values()

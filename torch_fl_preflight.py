@@ -1,0 +1,379 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Inspect a torch_fl wheel without importing torch_fl or its native extension."""
+
+import argparse
+import json
+import sys
+import zipfile
+from email.parser import Parser
+from importlib import metadata
+from pathlib import Path
+
+MANIFEST_PATH = "torch_fl/compatibility.json"
+SCHEMA_VERSION = 1
+BUILD_DISTRIBUTIONS = ("torch", "flagtree", "flag_gems", "flagcx")
+UNKNOWN_VERSION_MARKERS = {"unknown", "latest", "none", "n/a"}
+
+
+def installed_version(name):
+    """Return the installed distribution version without importing its package."""
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def make_manifest(
+    *,
+    platform,
+    wheel_version,
+    kernels,
+    bundle_libdir,
+    vendor_torch_libraries,
+    requirements,
+    torch_abi,
+    sdk_version=None,
+    vendor_torch_version=None,
+):
+    """Record build facts and declared requirements, not inferred SDK support."""
+    for label, value in (
+        ("FLAGOS_SDK_VERSION", sdk_version),
+        ("FLAGOS_VENDOR_TORCH_VERSION", vendor_torch_version),
+    ):
+        if value and value.strip().lower() in UNKNOWN_VERSION_MARKERS:
+            raise ValueError(f"{label} must be a verified version, not {value!r}")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "platform": platform,
+        "wheel_version": wheel_version,
+        "build": {
+            "kernels": sorted(kernels),
+            "bundle_libdir": bundle_libdir,
+            "vendor_torch_libraries": vendor_torch_libraries,
+            "distributions": {
+                name: installed_version(name) for name in BUILD_DISTRIBUTIONS
+            },
+            "torch_cxx11_abi": torch_abi,
+            "sdk_version": sdk_version.strip() or None if sdk_version else None,
+            "vendor_torch_version": (
+                vendor_torch_version.strip() or None if vendor_torch_version else None
+            ),
+        },
+        "requirements": sorted(requirements),
+    }
+
+
+def _check_shape(manifest):
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != SCHEMA_VERSION
+    ):
+        raise ValueError("Unsupported or missing compatibility manifest schema")
+    if not isinstance(manifest.get("platform"), str) or not manifest["platform"]:
+        raise ValueError("Compatibility manifest has no platform")
+    if (
+        not isinstance(manifest.get("wheel_version"), str)
+        or not manifest["wheel_version"]
+    ):
+        raise ValueError("Compatibility manifest has no wheel version")
+    build = manifest.get("build")
+    if not isinstance(build, dict):
+        raise ValueError("Compatibility manifest has no build record")
+    if not isinstance(build.get("kernels"), list) or not all(
+        isinstance(value, str) for value in build["kernels"]
+    ):
+        raise ValueError("Compatibility manifest has invalid kernel sets")
+    if not isinstance(build.get("bundle_libdir"), str):
+        raise ValueError("Compatibility manifest has no libtorch bundle location")
+    if not isinstance(build.get("vendor_torch_libraries"), bool):
+        raise ValueError("Compatibility manifest has no vendor libtorch policy")
+    if not isinstance(build.get("distributions"), dict) or set(
+        build["distributions"]
+    ) != set(BUILD_DISTRIBUTIONS):
+        raise ValueError("Compatibility manifest has incomplete build distributions")
+    if not build["distributions"]["torch"]:
+        raise ValueError("Compatibility manifest has no build-time PyTorch version")
+    if build.get("torch_cxx11_abi") not in (True, False):
+        raise ValueError("Compatibility manifest has no PyTorch C++ ABI value")
+    if build.get("sdk_version") is not None and not isinstance(
+        build["sdk_version"], str
+    ):
+        raise ValueError("Compatibility manifest has invalid SDK version")
+    if build.get("vendor_torch_version") is not None and not isinstance(
+        build["vendor_torch_version"], str
+    ):
+        raise ValueError("Compatibility manifest has invalid vendor PyTorch version")
+    for name in ("sdk_version", "vendor_torch_version"):
+        value = build.get(name)
+        if value and value.strip().lower() in UNKNOWN_VERSION_MARKERS:
+            raise ValueError(f"Compatibility manifest has an unverified {name}")
+    if not isinstance(manifest.get("requirements"), list) or not all(
+        isinstance(value, str) for value in manifest["requirements"]
+    ):
+        raise ValueError("Compatibility manifest has invalid requirements")
+
+
+def load_wheel(path):
+    """Read and validate the embedded record against wheel METADATA."""
+    with zipfile.ZipFile(path) as wheel:
+        matches = [name for name in wheel.namelist() if name == MANIFEST_PATH]
+        if len(matches) != 1:
+            raise ValueError(f"Wheel must contain exactly one {MANIFEST_PATH}")
+        manifest = json.loads(wheel.read(MANIFEST_PATH))
+        meta_paths = [
+            name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")
+        ]
+        if len(meta_paths) != 1:
+            raise ValueError("Wheel must contain exactly one dist-info/METADATA")
+        wheel_metadata = Parser().parsestr(wheel.read(meta_paths[0]).decode("utf-8"))
+    _check_shape(manifest)
+    if wheel_metadata.get("Name", "").replace("-", "_").lower() != "torch_fl":
+        raise ValueError("Wheel metadata is not for torch_fl")
+    if wheel_metadata.get("Version") != manifest["wheel_version"]:
+        raise ValueError("Manifest wheel version differs from wheel METADATA")
+    # Setuptools may reorder comma-separated specifiers; compare parsed requirements.
+    from packaging.requirements import Requirement
+
+    def normalized(values):
+        result = set()
+        for value in values:
+            requirement = Requirement(value)
+            marker = str(requirement.marker) if requirement.marker else ""
+            if "extra ==" in marker:
+                continue
+            result.add(
+                (
+                    requirement.name.lower().replace("-", "_"),
+                    str(requirement.specifier),
+                    marker,
+                )
+            )
+        return result
+
+    declared = wheel_metadata.get_all("Requires-Dist", [])
+    if normalized(declared) != normalized(manifest["requirements"]):
+        raise ValueError("Manifest requirements differ from wheel METADATA")
+    from packaging.version import Version
+
+    torch_requirements = []
+    for value in manifest["requirements"]:
+        requirement = Requirement(value)
+        if requirement.name.lower().replace("-", "_") == "torch":
+            torch_requirements.append(requirement)
+    if (
+        len(torch_requirements) != 1
+        or Version(manifest["build"]["distributions"]["torch"])
+        not in torch_requirements[0].specifier
+    ):
+        raise ValueError("Build-time PyTorch is outside the wheel's declared range")
+    return manifest
+
+
+def load_installed():
+    """Locate an installed manifest without importing the torch_fl package."""
+    distribution = metadata.distribution("torch_fl")
+    path = distribution.locate_file(MANIFEST_PATH)
+    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    _check_shape(manifest)
+    if distribution.version != manifest["wheel_version"]:
+        raise ValueError("Installed manifest version differs from package metadata")
+    return manifest
+
+
+def check_environment(
+    manifest,
+    *,
+    platform=None,
+    sdk_version=None,
+    require_sdk=False,
+    release=False,
+    check_installed=False,
+    check_build_env=False,
+    strict_tested=False,
+):
+    """Return actionable errors and warnings without loading a native library."""
+    errors = []
+    warnings = []
+    if platform and platform != manifest["platform"]:
+        errors.append(f"Wheel platform is {manifest['platform']}; requested {platform}")
+    recorded_sdk = manifest["build"]["sdk_version"]
+    if (require_sdk or release) and not recorded_sdk:
+        errors.append(
+            "Wheel has no declared SDK version; rebuild with FLAGOS_SDK_VERSION"
+        )
+    if (
+        release
+        and manifest["build"]["vendor_torch_libraries"]
+        and not manifest["build"]["vendor_torch_version"]
+    ):
+        errors.append(
+            "Wheel has no vendor PyTorch provenance; rebuild with "
+            "FLAGOS_VENDOR_TORCH_VERSION"
+        )
+    if sdk_version:
+        if not recorded_sdk:
+            errors.append(
+                "Wheel SDK is unknown; cannot verify the requested SDK version"
+            )
+        elif sdk_version != recorded_sdk:
+            errors.append(f"Wheel SDK is {recorded_sdk}; requested {sdk_version}")
+    elif recorded_sdk:
+        warnings.append(
+            "Installed SDK was not supplied; SDK compatibility is unverified"
+        )
+
+    if check_installed or check_build_env:
+        built = manifest["build"]["distributions"]
+        for name, expected in built.items():
+            if not expected:
+                continue
+            actual = installed_version(name)
+            if check_build_env and actual != expected:
+                errors.append(
+                    f"{name} build version is {expected}; installed {actual or 'missing'}"
+                )
+            elif check_installed and name != "torch" and actual != expected:
+                message = (
+                    f"{name} was built/tested with {expected}; installed "
+                    f"{actual or 'missing'}"
+                )
+                (errors if strict_tested else warnings).append(message)
+        if check_installed:
+            from packaging.requirements import Requirement
+            from packaging.version import Version
+
+            for raw in manifest["requirements"]:
+                requirement = Requirement(raw)
+                if requirement.marker and not requirement.marker.evaluate():
+                    continue
+                actual = installed_version(requirement.name)
+                if actual is None or Version(actual) not in requirement.specifier:
+                    errors.append(f"Required {raw}; installed {actual or 'missing'}")
+            if installed_version("torch") != built["torch"]:
+                warnings.append(
+                    "Installed PyTorch differs from the build version; the declared "
+                    "range passed, but native ABI compatibility is not proven"
+                )
+    return errors, warnings
+
+
+def markdown_table(manifests):
+    """Render a release table from wheel contents rather than a copied pin list."""
+    rows = [
+        "| Platform | Wheel | Build PyTorch | Vendor PyTorch | SDK | FlagTree | FlagGems | FlagCX |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for manifest in sorted(manifests, key=lambda item: item["platform"]):
+        build = manifest["build"]
+        distributions = build["distributions"]
+        rows.append(
+            "| "
+            + " | ".join(
+                (
+                    manifest["platform"],
+                    manifest["wheel_version"],
+                    distributions["torch"],
+                    build["vendor_torch_version"] or "not recorded",
+                    build["sdk_version"] or "unknown",
+                    distributions["flagtree"] or "not recorded",
+                    distributions["flag_gems"] or "not recorded",
+                    distributions["flagcx"] or "not recorded",
+                )
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--wheel", type=Path, nargs="+", help="wheel(s) to inspect without importing"
+    )
+    source.add_argument(
+        "--installed", action="store_true", help="inspect installed torch_fl"
+    )
+    parser.add_argument("--platform", help="expected accelerator")
+    parser.add_argument("--sdk-version", help="SDK version to compare with the build")
+    parser.add_argument(
+        "--require-sdk", action="store_true", help="reject an unknown SDK"
+    )
+    parser.add_argument(
+        "--release", action="store_true", help="require release provenance"
+    )
+    parser.add_argument(
+        "--check-installed", action="store_true", help="validate runtime dependencies"
+    )
+    parser.add_argument(
+        "--check-build-env",
+        action="store_true",
+        help="require exact build distributions",
+    )
+    parser.add_argument(
+        "--strict-tested", action="store_true", help="reject untested optional versions"
+    )
+    parser.add_argument(
+        "--markdown-table",
+        action="store_true",
+        help="render a release table from wheel(s)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        manifests = (
+            [load_wheel(path) for path in args.wheel]
+            if args.wheel
+            else [load_installed()]
+        )
+        errors = []
+        warnings = []
+        for manifest in manifests:
+            current_errors, current_warnings = check_environment(
+                manifest,
+                platform=args.platform,
+                sdk_version=args.sdk_version,
+                require_sdk=args.require_sdk,
+                release=args.release,
+                check_installed=args.check_installed,
+                check_build_env=args.check_build_env,
+                strict_tested=args.strict_tested,
+            )
+            errors.extend(current_errors)
+            warnings.extend(current_warnings)
+    except (
+        ImportError,
+        OSError,
+        ValueError,
+        zipfile.BadZipFile,
+        metadata.PackageNotFoundError,
+    ) as exc:
+        parser.exit(2, f"torch-fl-preflight: {exc}\n")
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    if args.markdown_table:
+        print(markdown_table(manifests))
+    else:
+        output = manifests[0] if len(manifests) == 1 else manifests
+        print(json.dumps(output, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
