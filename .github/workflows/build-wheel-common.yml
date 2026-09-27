@@ -74,7 +74,7 @@ jobs:
         run: python -m build --wheel --no-isolation
 
       - name: Validate wheel compatibility manifest
-        run: python -m torch_fl_preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Verify wheel
         run: |
@@ -86,6 +86,9 @@ jobs:
           package_files = [str(path) for path in files("torch_fl")]
           assert any("torch_fl" in path for path in package_files), (
               "torch_fl module not found in wheel"
+          )
+          assert any(path.endswith("torch-fl-preflight") for path in package_files), (
+              "Installed wheel is missing the preflight script"
           )
           print(f"Package: {package_metadata['Name']} {package_metadata['Version']}")
           print(f"Installed files: {len(package_files)}")

@@ -56,7 +56,7 @@ def test_build_ext_stages_generated_build_config(
     monkeypatch, tmp_path, clean_kernel_env
 ):
     _, setup_kwargs = _load_setup(monkeypatch)
-    assert "torch_fl_preflight" in setup_kwargs["packages"]
+    assert "scripts/tools/torch-fl-preflight" in setup_kwargs["scripts"]
     source_root = tmp_path / "source"
     package_root = source_root / "torch_fl"
     package_root.mkdir(parents=True)

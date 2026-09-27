@@ -297,11 +297,11 @@ CI package versions, preserve the artifact contract in
 generated manifest or treat a CI-tested exact version as a universal supported
 range. Set `FLAGOS_SDK_VERSION` only from verified build-environment evidence;
 an unknown SDK must remain unknown. Every CI workflow that builds a wheel must
-run `python -m torch_fl_preflight --wheel ... --check-build-env` before installing
+run `python scripts/tools/torch-fl-preflight --wheel ... --check-build-env` before installing
 or publishing it. `tests/unit/test_wheel_preflight.py` enforces this workflow
-rule. Keep the CLI in the standalone `torch_fl_preflight` package; importing it
-must not import `torch_fl` or load native libraries. Do not add a root-level
-preflight Python module. For release artifacts, record
+rule. Keep the CLI under `scripts/tools/`, and package it as an installed script;
+running it must not import `torch_fl` or load native libraries. Do not add a
+root-level preflight module or package. For release artifacts, record
 `FLAGOS_VENDOR_TORCH_VERSION` where vendor PyTorch supplies libraries, then run
 the preflight with `--release` and the target `--sdk-version` before publication.
 

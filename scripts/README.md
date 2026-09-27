@@ -4,8 +4,8 @@
 # scripts/
 
 Development tooling: operator code generation, vendor build helpers, the
-Transformers triage pipeline, and standalone checks. Nothing here is imported at
-runtime by the installed wheel except where noted; these are host-side tools.
+Transformers triage pipeline, and standalone checks. These are host-side tools;
+`tools/torch-fl-preflight` is also installed as a wheel script.
 
 ## Layout
 
@@ -14,7 +14,7 @@ runtime by the installed wheel except where noted; these are host-side tools.
 | `codegen/` | Generators. Each reads a source of truth and writes into `csrc/aten/generated/`, `torch_fl/configs/`, or `torch_fl/tileops/generated/`. |
 | `vendor/` | Per-vendor build and setup steps: bundling a vendor libtorch into the wheel, patching a vendor Triton fork, preparing BPU/NPU toolchains. Called by `.github/scripts/set_env_*.sh` and by `setup.py`. |
 | `transformers/` | The Transformers test → triage → verify → dedup → file-issue pipeline, plus its own smoke test. |
-| `tools/` | Standalone checks that do not belong to the pipeline above: PR validation, a FlagGems-on-Ascend sweep, a MUSA failure recorder, and a pytest-free TileOPs check. |
+| `tools/` | Standalone checks that do not belong to the pipeline above: wheel preflight, PR validation, a FlagGems-on-Ascend sweep, a MUSA failure recorder, and a pytest-free TileOPs check. |
 
 Run every script from the repository root; the examples below assume that.
 
@@ -78,6 +78,7 @@ in this directory.
 
 | Script | Purpose |
 |---|---|
+| `torch-fl-preflight` | Validate an artifact's compatibility manifest before importing `torch_fl`. `python scripts/tools/torch-fl-preflight --wheel dist/*.whl --check-build-env`; installed as `torch-fl-preflight`. |
 | `validate_ai_pr.py` | Validate an AI-authored PR body against the repository's requirements. `python scripts/tools/validate_ai_pr.py --pr-body pr_description.md` |
 | `verify_flaggems_ascend.py` | Per-op check of whether the FlagGems Triton path is numerically correct on Ascend. Slow (Triton JIT dominates, hours for a full sweep), supports `--shard i/n` and `--ops`. |
 | `record_musa_flaggems_failures.py` | Record MUSA FlagGems ops that fail CI so they move into `NATIVE_TRITON_GAPS`, then regenerate the confs. |

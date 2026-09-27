@@ -86,7 +86,7 @@ jobs:
           python -m build --wheel --no-isolation
 
       - name: Validate wheel compatibility manifest
-        run: python -m torch_fl_preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Install wheel and test dependencies
         run: |

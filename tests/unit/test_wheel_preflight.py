@@ -26,14 +26,21 @@ from pathlib import Path
 
 import pytest
 
-from torch_fl_preflight import core as preflight
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+PREFLIGHT_PATH = SOURCE_ROOT / "scripts" / "tools" / "torch-fl-preflight"
+loader = importlib.machinery.SourceFileLoader(
+    "torch_fl_preflight_test", str(PREFLIGHT_PATH)
+)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+preflight = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(preflight)
 
 
 def test_manifest_builder_works_without_source_root_on_import_path(
     tmp_path, monkeypatch
 ):
     """PEP 517 runs setup.py with a sys.path that cannot import sibling files."""
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = SOURCE_ROOT
     source = ast.parse((source_root / "setup.py").read_text(encoding="utf-8"))
     function = next(
         node
@@ -62,8 +69,6 @@ def test_manifest_builder_works_without_source_root_on_import_path(
     fake_torch = types.ModuleType("torch")
     fake_torch._C = types.SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.delitem(sys.modules, "torch_fl_preflight", raising=False)
-    monkeypatch.delitem(sys.modules, "torch_fl_preflight.core", raising=False)
     monkeypatch.setattr(importlib.metadata, "version", lambda _: "2.10.0")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -220,20 +225,18 @@ def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):
     assert "torch_fl" not in sys.modules
 
 
-def test_package_module_cli_does_not_import_torch_fl(tmp_path, manifest):
+def test_script_cli_does_not_import_torch_fl(tmp_path, manifest):
     wheel = _wheel(tmp_path, manifest)
     (tmp_path / "torch_fl").mkdir()
     (tmp_path / "torch_fl" / "__init__.py").write_text(
         'raise RuntimeError("torch_fl was imported")\n', encoding="utf-8"
     )
-    source_root = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(source_root)))
+    env["PYTHONPATH"] = str(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
-            "-m",
-            "torch_fl_preflight",
+            str(PREFLIGHT_PATH),
             "--wheel",
             str(wheel),
             "--platform",
@@ -307,7 +310,9 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
         if "python -m build --wheel --no-isolation" not in source:
             continue
         build_at = source.index("python -m build --wheel --no-isolation")
-        verify_at = source.index("python -m torch_fl_preflight --wheel dist/*.whl")
+        verify_at = source.index(
+            "python scripts/tools/torch-fl-preflight --wheel dist/*.whl"
+        )
         assert verify_at > build_at, path
         assert "--check-build-env" in source[verify_at : verify_at + 160], path
         install_at = source.find("python -m pip install", build_at)

@@ -34,7 +34,7 @@ jobs:
         run: pip install ruff==0.15.12
 
       - name: Ruff check
-        run: ruff check --output-format=github .
+        run: ruff check --output-format=github . scripts/tools/torch-fl-preflight
 
       - name: Ruff format check
-        run: ruff format --check .
+        run: ruff format --check . scripts/tools/torch-fl-preflight
