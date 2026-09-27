@@ -15,7 +15,8 @@
 display_name: Enflame GCU
 
 # GCU-specific environment preparation stays outside the common workflow.
-setup_script: .github/scripts/set_env_gcu.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: gcu
 
 # Pinned TopsRider image used for the manual wheel validation. The setup script
 # can install python3.12-venv when this base image is used directly; a derived

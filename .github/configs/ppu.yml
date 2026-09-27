@@ -14,7 +14,8 @@
 
 display_name: PPU
 
-setup_script: .github/scripts/set_env_ppu.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: ppu
 
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
 

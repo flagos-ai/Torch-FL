@@ -70,6 +70,10 @@ source "${REPO_ROOT}/.github/version-pins.env"
 # shellcheck source=.github/scripts/lib/set_env_common.sh
 source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 
+# pip constraints for the provisioning venvs: the transitive pulls the pin table
+# cannot reach. Exported so every pip install in the platform hook honours it.
+export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"
+
 HOOK="${REPO_ROOT}/.github/scripts/hooks/set_env_${PLATFORM}.sh"
 if [[ ! -f "$HOOK" ]]; then
   echo "::error::set_env.sh: unknown platform '${PLATFORM}'; expected one of: ascend cuda dcu gcu metax musa ppu" >&2

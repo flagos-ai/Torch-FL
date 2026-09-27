@@ -15,7 +15,8 @@
 display_name: MUSA
 
 # MUSA-specific environment preparation stays outside the common workflow.
-setup_script: .github/scripts/set_env_musa.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: musa
 
 # Keep the previously running MUSA 5.1 image until the runner driver is
 # upgraded for MUSA 5.2 and that image can be pulled within the job budget.

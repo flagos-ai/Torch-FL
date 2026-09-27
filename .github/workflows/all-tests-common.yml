@@ -86,6 +86,7 @@ jobs:
 
           DISPLAY_NAME=$(yq -r '.display_name' "$CONFIG_FILE")
           SETUP_SCRIPT=$(yq -r '.setup_script' "$CONFIG_FILE")
+          SETUP_PLATFORM=$(yq -r '.setup_platform' "$CONFIG_FILE")
           CI_IMAGE=$(yq -r '.ci_image' "$CONFIG_FILE")
           RUNS_ON=$(yq -o=json -I=0 '.runner_labels' "$CONFIG_FILE")
           VOLUMES=$(yq -o=json -I=0 '.container_volumes' "$CONFIG_FILE")
@@ -128,6 +129,10 @@ jobs:
             echo "::error::Invalid setup_script in $CONFIG_FILE: $SETUP_SCRIPT"
             exit 1
           fi
+          if [[ -z "$SETUP_PLATFORM" || "$SETUP_PLATFORM" == "null" ]]; then
+            echo "::error::setup_platform is required in $CONFIG_FILE"
+            exit 1
+          fi
           if [[ -z "$CI_IMAGE" || "$CI_IMAGE" == "null" ]]; then
             echo "::error::ci_image is required in $CONFIG_FILE"
             exit 1
@@ -146,6 +151,7 @@ jobs:
 
           printf '%s=%s\n' display_name "$DISPLAY_NAME" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' setup_script "$SETUP_SCRIPT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' setup_platform "$SETUP_PLATFORM" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' ci_image "$CI_IMAGE" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' container_options "$OPTIONS" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' timeout_minutes "$TIMEOUT_MINUTES" >> "$GITHUB_OUTPUT"
@@ -164,6 +170,7 @@ jobs:
     with:
       display_name: ${{ needs.configuration.outputs.display_name }}
       setup_script: ${{ needs.configuration.outputs.setup_script }}
+      setup_platform: ${{ needs.configuration.outputs.setup_platform }}
       image: ${{ needs.configuration.outputs.ci_image }}
       runs_on: ${{ needs.configuration.outputs.runs_on }}
       container_volumes: ${{ needs.configuration.outputs.container_volumes }}
@@ -186,6 +193,7 @@ jobs:
     with:
       display_name: ${{ needs.configuration.outputs.display_name }}
       setup_script: ${{ needs.configuration.outputs.setup_script }}
+      setup_platform: ${{ needs.configuration.outputs.setup_platform }}
       image: ${{ needs.configuration.outputs.ci_image }}
       runs_on: ${{ needs.configuration.outputs.runs_on }}
       container_volumes: ${{ needs.configuration.outputs.container_volumes }}

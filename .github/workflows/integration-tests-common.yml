@@ -23,6 +23,9 @@ on:
       setup_script:
         required: true
         type: string
+      setup_platform:
+        required: true
+        type: string
       image:
         required: true
         type: string
@@ -70,7 +73,7 @@ jobs:
       - name: Prepare platform environment
         env:
           CI_STAGE: integration
-        run: bash "${{ inputs.setup_script }}"
+        run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
       - name: Download wheel artifact
         if: inputs.wheel_source == 'artifact'

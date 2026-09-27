@@ -14,7 +14,8 @@
 
 display_name: MetaX
 
-setup_script: .github/scripts/set_env_metax.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: metax
 
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-dev
 

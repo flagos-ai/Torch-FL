@@ -15,7 +15,8 @@
 display_name: Hygon DCU
 
 # Platform-specific preparation is implemented outside the common workflows.
-setup_script: .github/scripts/set_env_dcu.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: dcu
 
 # Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
 # used by set_env_dcu.sh. The script still falls back to creating a fresh venv

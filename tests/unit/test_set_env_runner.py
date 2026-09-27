@@ -88,15 +88,43 @@ def test_named_workflows_use_the_parameterized_entrypoint():
         )
 
 
-def test_config_driven_path_routes_through_a_wrapper():
-    """The configs name the wrapper, which routes to the runner.
+def test_config_driven_path_uses_the_runner():
+    """The configs name the runner and the platform, so no wrapper hop.
 
-    `all-tests-common.yml` validates that the config's setup_script is a file and
-    runs it with no arguments, so the config keeps pointing at the wrapper; the
-    wrapper is the parameterized call.
+    `all-tests-common.yml` reads setup_script/setup_platform from the config and
+    runs `bash set_env.sh --platform <p>`; the wrappers stay only for the docs
+    and local use.
     """
     for platform in PLATFORMS:
         text = (REPO_ROOT / ".github" / "configs" / f"{platform}.yml").read_text(
             encoding="utf-8"
         )
-        assert f"setup_script: .github/scripts/set_env_{platform}.sh" in text, platform
+        assert "setup_script: .github/scripts/set_env.sh" in text, platform
+        assert f"setup_platform: {platform}" in text, platform
+
+
+def test_common_workflows_pass_the_platform():
+    """The config-driven common workflows call the runner with --platform."""
+    for name in ("build-wheel-common.yml", "integration-tests-common.yml"):
+        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        assert (
+            'bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"'
+            in text
+        ), name
+        assert "      setup_platform:" in text, name
+
+
+def test_runner_applies_the_pip_constraints():
+    """The runner exports PIP_CONSTRAINT; the file exists and pins the known drift.
+
+    The constraints file is what fixes the transitive pulls the pin table cannot
+    reach, so it must be applied to every install (the runner exports it before
+    sourcing the hook) and must still name them.
+    """
+    runner = RUNNER.read_text(encoding="utf-8")
+    assert 'export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"' in runner
+    constraints = (REPO_ROOT / ".github" / "constraints.txt").read_text(
+        encoding="utf-8"
+    )
+    for pin in ("torch==", "numpy<2", "transformers>="):
+        assert pin in constraints, pin

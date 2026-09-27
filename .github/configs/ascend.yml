@@ -14,7 +14,8 @@
 
 display_name: Ascend
 
-setup_script: .github/scripts/set_env_ascend.sh
+setup_script: .github/scripts/set_env.sh
+setup_platform: ascend
 
 # The official FlagTree Ascend image: CANN 9.0.0, Python 3.11, aarch64. It is the
 # supported base for flagtree 0.7.0rc3+ascend3.5, whose wheel is cp311-only, and it
