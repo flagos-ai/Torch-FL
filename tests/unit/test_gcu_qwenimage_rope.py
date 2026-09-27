@@ -43,6 +43,9 @@ import pytest
 import torch
 
 from torch_fl.accelerator.gcu._gcu_compat import (
+    _ROTATION_TABLES,
+    _ROTATION_TABLES_MAX,
+    _rotation_table,
     flagos_qwenimage_rotary_emb,
     patch_diffusers_qwenimage_rope,
 )
@@ -169,6 +172,70 @@ class TestTheRotationIsTheSameRotation:
         assert torch.allclose(
             pairs.pow(2).sum(-1), source.pow(2).sum(-1), atol=1e-5, rtol=1e-5
         )
+
+
+class TestTheRotationTableIsMemoised:
+    """The memo is invisible except in cost -- unless its guard is too weak.
+
+    Reusing the expansion is exact by construction, so every failure this class
+    can find is a *stale hit*: a table handed back for an operand it was not
+    built from. The guard is the identity of the angle tensor plus its
+    ``_version``, and these are the two ways past it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def empty_cache(self):
+        """Tests here mutate angle tensors; leave no poisoned entry behind."""
+        _ROTATION_TABLES.clear()
+        yield
+        _ROTATION_TABLES.clear()
+
+    def test_a_repeated_operand_reuses_the_tensors(self):
+        freqs = _angles(SHAPES[0], SHAPES[0][-1])
+
+        first = _rotation_table(freqs)
+        second = _rotation_table(freqs)
+
+        assert first[0] is second[0]
+        assert first[1] is second[1]
+
+    def test_a_different_operand_of_the_same_shape_is_not_reused(self):
+        """Shape and dtype alone are not the key; the values have to be."""
+        shape = SHAPES[0]
+        one = _angles(shape, shape[-1])
+        other = one.clone()
+        other[0, 0] += 1.0
+
+        assert _rotation_table(one)[0] is not _rotation_table(other)[0]
+
+        x = _tensors(shape, torch.bfloat16)
+        assert torch.equal(
+            flagos_qwenimage_rotary_emb(x, other), _neuron_expansion(x, other)
+        )
+
+    def test_an_in_place_write_invalidates_the_entry(self):
+        """`_version` is what stops a mutated operand being answered from cache."""
+        shape = SHAPES[0]
+        freqs = _angles(shape, shape[-1])
+        x = _tensors(shape, torch.bfloat16)
+
+        assert torch.equal(
+            flagos_qwenimage_rotary_emb(x, freqs), _neuron_expansion(x, freqs)
+        )
+
+        freqs.add_(0.5)
+
+        assert torch.equal(
+            flagos_qwenimage_rotary_emb(x, freqs), _neuron_expansion(x, freqs)
+        )
+
+    def test_the_cache_is_bounded(self):
+        """A long run must not accumulate one table per angle tensor it sees."""
+        shape = SHAPES[1]
+        for _ in range(_ROTATION_TABLES_MAX + 3):
+            _rotation_table(_angles(shape, shape[-1]))
+
+        assert len(_ROTATION_TABLES) <= _ROTATION_TABLES_MAX
 
 
 class TestTheRegistration:
