@@ -234,6 +234,12 @@ def _lazy_init():
     # repaired rather than retried. See the function for the measurement.
     _patch_flaggems_tune_space()
 
+    # Same window, and it depends on the line above: every fp64 addmm on this
+    # platform comes out of a kernel that rounds both dot operands to float32,
+    # and the only fp64-exact product this device has is `mm`'s. See the
+    # function for the measurement.
+    _patch_flaggems_addmm_fp64()
+
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from
     # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
@@ -2160,6 +2166,289 @@ def _patch_flaggems_tune_space():
         run.__wrapped__ = original_run
         libtuner.run = run
         setattr(libtuner, _TUNE_SPACE_PATCHED, True)
+    except Exception:
+        pass
+
+
+_ADDMM_FP64_PATCHED = "_flagos_fp64_addmm"
+
+
+def _addmm_fp64_terms(bias, mat1, mat2, alpha, beta):
+    """``(alpha, beta)`` as floats when the operands are strided float64, else None.
+
+    The three operands are tested together because an ``addmm`` mixes dtypes in
+    no useful way: ATen's rule is that the bias agrees with the matrices, and the
+    mixed pair that does reach the kernel on this route -- a float32 bias
+    alongside float64 matrices, which is accepted instead of refused, see the
+    patch below -- is forwarded to the original and measured unchanged. A
+    non-strided operand is excluded because the composition below is built out of
+    ``mm``, which serves dense matrices. Nothing is tested of the bias's shape:
+    every bias an ``addmm`` accepts -- 2-D of the output's shape, 1-D of length
+    N, or 0-D -- is one ``add`` broadcasts for itself.
+    """
+    try:
+        for tensor in (bias, mat1, mat2):
+            if tensor.dtype != torch.float64 or tensor.layout != torch.strided:
+                return None
+        return float(alpha), float(beta)
+    except Exception:
+        return None
+
+
+def _fp64_addmm_product(mm, mat1, mat2):
+    """``mat1 @ mat2`` in float64, around the one shape where ``mm`` is not.
+
+    ``_mthreads/ops/mm.py`` dispatches to ``gemv_mm`` whenever the *second*
+    operand is a single column wide (``mm``, line 427), and that kernel is float32
+    throughout: an fp32 accumulator and both operands rounded into it ("Keep the
+    reduction in fp32 so N=1 GEMV matches the mm path more closely", lines
+    195-215). So the composition's product is exact everywhere except a
+    single-column result, where it would return the same float32 answer the
+    kernel this patch replaces returns. Measured at (64, 64, 1) against the same
+    CPU reference: 2.0e-05 relative through ``mm``, 1.4e-13 one column wider.
+
+    Widening the second operand to two columns and slicing the extra one off
+    keeps the call off that shortcut -- the padded column is zeros, so it
+    contributes nothing -- and it is the only branch that also covers a
+    single-row, single-column product, which transposing the operands does not
+    (that leaves ``mm`` looking at one column again, and was measured to cost
+    3.8e-06 on a (1, 64, 64) product it otherwise serves exactly).
+    """
+    if mat2.shape[1] == 1:
+        mat2 = torch.cat((mat2, mat2.new_zeros((mat2.shape[0], 1))), dim=1)
+        return mm(mat1, mat2)[:, :1]
+    return mm(mat1, mat2)
+
+
+def _fp64_addmm_composite(mm, bias, mat1, mat2, alpha, beta, out):
+    """``beta * bias + alpha * (mat1 @ mat2)``, with no operand rounded to fp32.
+
+    See ``_patch_flaggems_addmm_fp64`` for why this is a composition rather than
+    a kernel: the product has to come from ``mm``, the one matmul on this
+    platform that keeps float64, and every remaining term is elementwise. ``out``
+    is written last, so an ``addmm_`` whose bias *is* its destination is read
+    before it is overwritten.
+    """
+    product = _fp64_addmm_product(mm, mat1, mat2)
+    if alpha != 1.0:
+        product = product * alpha
+    # PyTorch ignores the bias when beta is zero, NaN and Inf included, and the
+    # kernel this replaces does the same; `bias * 0.0` would not, and would put a
+    # NaN into a result the reference leaves finite.
+    if beta != 0.0:
+        product = product + (bias if beta == 1.0 else bias * beta)
+    if out is None:
+        return product
+    out.copy_(product)
+    return out
+
+
+def _flaggems_addmm_fp64_wrapper(original, mm, in_place=False):
+    """``addmm``/``addmm_out``/``addmm_`` with a float64 branch.
+
+    One wrapper serves all three because their signatures differ only in the
+    ``out`` keyword, which ``addmm`` and ``addmm_`` do not take: the C++ bridge
+    resolves each name separately, so each is wrapped by its own call of this
+    factory, and each reaches ``original`` by the same call. ``addmm_`` arrives
+    with ``self`` as the bias *and* as the destination, hence ``in_place``.
+    """
+
+    def addmm(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
+        terms = _addmm_fp64_terms(bias, mat1, mat2, alpha, beta)
+        if terms is None or (out is not None and out.dtype != torch.float64):
+            if out is None:
+                return original(bias, mat1, mat2, beta=beta, alpha=alpha)
+            return original(bias, mat1, mat2, beta=beta, alpha=alpha, out=out)
+        return _fp64_addmm_composite(
+            mm, bias, mat1, mat2, *terms, out=bias if in_place else out
+        )
+
+    addmm.__wrapped__ = original
+    setattr(addmm, _ADDMM_FP64_PATCHED, True)
+    return addmm
+
+
+def _flaggems_addmm_dtype_fp64_wrapper(original, mm, in_place=False):
+    """``addmm.dtype``/``addmm.dtype_out`` with a float64 branch.
+
+    The ``out_dtype`` these two carry only makes the float64 case reachable in
+    one way -- every operand float64 and ``out_dtype`` float64, which is what
+    plain ``addmm`` computes -- so gating on exactly that leaves the mixed
+    precision combinations, the ones a compiler actually emits, to FlagGems'
+    own kernel.
+    """
+
+    def addmm_dtype(bias, mat1, mat2, out_dtype=None, *, beta=1, alpha=1, out=None):
+        terms = (
+            None
+            if out_dtype != torch.float64
+            else _addmm_fp64_terms(bias, mat1, mat2, alpha, beta)
+        )
+        if terms is None or (out is not None and out.dtype != torch.float64):
+            if out is None:
+                return original(
+                    bias, mat1, mat2, out_dtype=out_dtype, beta=beta, alpha=alpha
+                )
+            return original(
+                bias, mat1, mat2, out_dtype=out_dtype, beta=beta, alpha=alpha, out=out
+            )
+        return _fp64_addmm_composite(
+            mm, bias, mat1, mat2, *terms, out=bias if in_place else out
+        )
+
+    addmm_dtype.__wrapped__ = original
+    setattr(addmm_dtype, _ADDMM_FP64_PATCHED, True)
+    return addmm_dtype
+
+
+def _flag_gems_callable(module_names, attribute):
+    """The first callable ``attribute`` in ``module_names``, and the module holding it.
+
+    Resolved by importing the defining submodule, never by reading the
+    ``flag_gems`` namespace. On this platform that namespace is empty when these
+    patches install: ``_lazy_init`` is reached *from inside* ``import flag_gems``
+    -- the module's own ``from flag_gems.fused import *`` pulls in a FLA kernel
+    whose import-time ``check_shared_mem()`` calls ``torch_device_fn
+    .current_device()``, which is ``current_device`` here -- and a module that is
+    still executing has no attributes for the star-imports below it to have set
+    yet. Measured at that instant: ``hasattr(flag_gems, "mm")`` and
+    ``hasattr(flag_gems, "addmm")`` are both False, while
+    ``importlib.import_module("_mthreads.ops.addmm")`` already yields the same
+    function object ``flag_gems.addmm`` becomes once the import finishes.
+
+    The vendor directory name in ``module_names`` is spelled by the caller, so a
+    vendor that ships its own ``addmm_`` is picked up ahead of the generic one.
+    """
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        found = getattr(module, attribute, None)
+        if callable(found):
+            return module, found
+    return None, None
+
+
+def _patch_flaggems_addmm_fp64():
+    """Keep float64 ``addmm`` from being computed in float32.
+
+    The mthreads addmm kernel declares ``IS_FP64``, allocates a ``tl.float64``
+    accumulator when it is set, and then, inside the K loop, rounds *both* dot
+    operands down before the multiply:
+
+        if IS_FP64:
+            a = a.to(tl.float32)
+            b = b.to(tl.float32)
+        accumulator += tl.dot(a, b, allow_tf32=False)
+
+    So the accumulation is float64 and every product in it is float32, which
+    costs the mantissa the dtype was chosen for. Measured on an MTT S5000 at
+    ``(64, 64, 64)`` against a CPU float64 reference, over five bias kinds (2-D,
+    length-N, 0-D, ``(1, N)`` and ``(M, 1)``) times the three ``(alpha, beta)``
+    pairs ``(1, 1)``, ``(2.5, 0)`` and ``(0.25, -1.75)``: the unwrapped
+    ``addmm``, ``addmm.out`` and ``addmm_`` are wrong on all 32 of those cases.
+    Over repeated runs the first two land at 6e-08 to 1.2e-07 relative
+    (``max_abs`` 7e-06 to 9e-06) and ``addmm_`` at 1.4e-07 to 1.9e-07
+    (``max_abs`` 1e-06 to 6e-06), where float64 would be at 1e-16.
+
+    The same matmul one op over is exact, with one shape excepted:
+    ``_mthreads/ops/mm.py`` keeps float64 through ``tl.dot`` (its only cast is the
+    ``a.dtype != b.dtype`` one) and measures 1.9e-16 relative against the same
+    reference, but it dispatches to a float32 ``gemv_mm`` whenever the product is
+    one column wide, and that shape measures 2.0e-05 at (64, 64, 1). So ``tl.dot``
+    on float64 is not what this device lacks -- the addmm kernel's own operand
+    handling is -- and ``mm(mat1, mat2) * alpha + bias * beta``, with the
+    single-column case kept off the GEMV shortcut, is a float64 addmm the platform
+    can already compute. Measured after the patch, the same 32 cases sit at
+    2.5e-16 to 8.3e-16 relative (``addmm_`` 3.7e-16 to 7.6e-16) with ``max_abs``
+    at most 5.7e-14, and non-contiguous operands, an ``out_dtype=float64``
+    ``addmm.dtype``/``addmm.dtype_out`` and a single-column product measure the
+    same.
+
+    That composition is what this patch installs, for float64 only and for all
+    five entrypoints, because the defect is not confined to one of them: the
+    generic ``flag_gems/ops/addmm.py`` repeats the downcast in its
+    ``_accumulate_dot`` helper and ``flag_gems/ops/addmm_.py`` is a ``copy_`` of
+    that generic ``addmm``'s result, so repairing the mthreads kernel alone would
+    leave ``addmm_`` wrong.
+
+    What it costs: float64 ``tl.dot`` is a small fraction of this device's
+    float32 DMMA rate, so the fp32-rounding kernel being replaced is fast
+    precisely because it is not float64. On 1024x1024x1024 float64, synchronized,
+    warm and median of 10, two runs of the same harness put the patched
+    ``addmm`` at 23.13 and 23.15 ms (92.9 and 92.8 GFLOP/s), the original at 1.92
+    and 2.04 ms (1121 and 1052 GFLOP/s), and ``mm`` alone at 23.05 ms (93.2
+    GFLOP/s) -- about 11x, of which almost all is ``mm`` rather than the
+    composition wrapped around it. That is the price of accuracy the dtype was
+    requested for: an fp64 addmm that is fast because it is fp32 is not an fp64
+    addmm, and a caller who wants that rate has float32 to ask for. The
+    alternative was to leave the op silently wrong. The one shape that does more
+    than call ``mm`` is the single-column product, which copies one zero column
+    onto the second operand first -- less work than the GEMV it avoids.
+
+    What it does not do is re-derive the op's type and shape rules. The gate
+    accepts exactly one case -- three float64 strided operands, and an ``out``
+    that is float64 or absent -- and forwards every other call to the original
+    unchanged, measured bit for bit on fp32 operands, on the fp16 and
+    fp16->float32 ``addmm.dtype`` pairs a compiler emits, on an ``out`` buffer of
+    a dtype the fp64 branch cannot serve, and on an ``addmm_`` whose ``self`` is
+    not the output shape. Two consequences, both measured, are worth knowing.
+    ``torch.addmm`` with a float32 bias alongside float64 matrices does not raise
+    the dtype error ATen documents: that check is not on this route, and the
+    original kernel and the wrapper both return a float64 result. And an invalid
+    call the gate does accept fails with the composition's error rather than the
+    kernel's assert -- a ``mat2`` with the wrong K still raises an
+    ``AssertionError``, while a bias that cannot broadcast raises the broadcast's
+    ``RuntimeError`` where the original raised an ``AssertionError``. Neither
+    returns a result, and neither is a call that has one.
+
+    One semantic detail the composition has to reproduce, and does: with
+    ``beta == 0`` PyTorch ignores the bias rather than scaling it, so a NaN bias
+    leaves a finite result (measured: the reference and the composition both have
+    no NaN, ``bias * 0`` has one).
+
+    Best-effort, like the patches around it: an unwrapped FlagGems is wrong here,
+    not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "musa" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        # Taken from FlagGems rather than spelled out here, so that a rename on
+        # either side is a visible miss instead of a patch that installs nothing.
+        vendor_ops = f"_{flag_gems.runtime.device.vendor_name}.ops"
+        _, mm = _flag_gems_callable((f"{vendor_ops}.mm", "flag_gems.ops.mm"), "mm")
+        if mm is None:
+            return
+        for name, leaf, factory, in_place in (
+            ("addmm", "addmm", _flaggems_addmm_fp64_wrapper, False),
+            ("addmm_out", "addmm", _flaggems_addmm_fp64_wrapper, False),
+            ("addmm_", "addmm_", _flaggems_addmm_fp64_wrapper, True),
+            ("addmm_dtype", "addmm", _flaggems_addmm_dtype_fp64_wrapper, False),
+            ("addmm_dtype_out", "addmm", _flaggems_addmm_dtype_fp64_wrapper, False),
+        ):
+            module, original = _flag_gems_callable(
+                (f"{vendor_ops}.{leaf}", f"flag_gems.ops.{leaf}"), name
+            )
+            if original is None or getattr(original, _ADDMM_FP64_PATCHED, False):
+                continue
+            wrapper = factory(original, mm, in_place=in_place)
+            # The C++ bridge resolves "flag_gems.<name>" once and caches the
+            # callable, and every re-export above holds its own reference, so
+            # rebind every module that currently points at the original.
+            _rebind_flag_gems_name(name, original, wrapper)
+            # ``flag_gems`` has not finished importing at this point, and it
+            # binds these names from the defining modules only afterwards
+            # (``flag_gems/__init__.py`` ends its star imports, then
+            # ``SpecOpRegistrar(...).apply()`` reads the vendor modules with
+            # ``inspect.getmembers``), so the rebind above is what reaches the
+            # package namespace. Setting the defining module's own attribute as
+            # well keeps the patch correct for an import that starts here.
+            module.__dict__[name] = wrapper
     except Exception:
         pass
 

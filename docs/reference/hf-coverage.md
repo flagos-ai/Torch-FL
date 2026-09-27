@@ -110,7 +110,7 @@ FSDP2's stream setup instead.
   MUSA integer division through mudnn and promote true division").
 - **#264** (TorchInductor/Triton requires CUDA libraries) — PR #419 (`48829b8`,
   "ask torch, not the redirected probe, before aliasing cuda to flagos").
-- **#263** (ProcessGroupGloo rejects `flagos` tensors) — PR #435 (2026-09-27, "answer gloo
+- **#263** (ProcessGroupGloo rejects `flagos` tensors) — PR #435 (`3d596fe`, 2026-09-27, "answer gloo
   requests with the flagos backend and stage collectives over host memory"). gloo cannot be
   repaired from the gloo side, so the request is answered with the `flagos` backend before the
   backend config is built, and `ProcessGroupFlagOS` grew a last tier that stages
@@ -124,8 +124,8 @@ FSDP2's stream setup instead.
   and `test_fsdp2_save_load_dcp`, and they fail *after* the collectives, in
   `_fsdp_param_group.py::FSDPCommContext.lazy_init`, with `RuntimeError: libascendcl.so
   not found. ACL runtime is required` — `torch_fl.flagos.Stream` sends every non-GCU
-  platform without a CUDA runtime to the Ascend ACL stream. That is a MUSA gap with no
-  issue of its own yet, not the collective path this row tracks.
+  platform without a CUDA runtime to the Ascend ACL stream. That is a MUSA gap and not the
+  collective path this row tracks; it has its own issue, #451.
 
 Because `Affected tests` and the baseline header above describe `64e60dd`, the
 whole table is a dated snapshot and not a statement about the current tree.

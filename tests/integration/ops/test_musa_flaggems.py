@@ -32,7 +32,26 @@ def _require_flaggems_mthreads():
         pytest.skip(f"FlagGems MThreads runtime is unavailable: {exc}")
     if "mthreads" not in triton.backends.backends:
         pytest.skip("the installed Triton does not provide the MThreads backend")
-    flag_gems.enable()
+    if flag_gems.runtime.device.vendor_name != "mthreads":
+        pytest.skip(
+            "FlagGems resolved a different vendor: "
+            f"{flag_gems.runtime.device.vendor_name!r}"
+        )
+    # Deliberately *not* ``flag_gems.enable()``. That build has no
+    # ``_mthreads/enable_configs.yaml``, so enabling the patch set registers
+    # every FlagGems op -- including the ones ``backends_musa.conf`` routes to
+    # the native MUSA kernels -- and on this vendor build the generic
+    # implementations cannot serve what those routes can. Measured with the
+    # registry enabled: ``tensor * 2.5`` raises ``RuntimeError: aten::mul()
+    # Expected a value of type 'Tensor' for argument 'other' but instead found
+    # type 'float'``, and ``torch.tensor(2.5, device="flagos:0")`` raises
+    # ``ValueError: lift_fresh Triton kernel requires a musa tensor`` -- the same
+    # two shapes of gap that carry ``# gcu`` markers in the FlagGems file, from a
+    # registry with no vendor config to narrow it. ``torch_fl/__init__.py``
+    # refuses that registry for exactly this reason ("would register a competing
+    # PrivateUse1 implementation and bypass the shared dispatcher"), so these
+    # tests measure the route the product ships: the conf's, reached through the
+    # generated kernels below.
 
 
 def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
@@ -184,6 +203,148 @@ def test_float64_mm_is_exact_across_the_tile_boundary():
             atol=1e-12,
             msg=f"float64 mm at {m}x{k}x{n}",
         )
+
+
+def test_float64_addmm_is_exact_through_every_entrypoint():
+    """The float64 ``addmm`` repair, against a CPU float64 reference.
+
+    ``_patch_flaggems_addmm_fp64`` serves the float64 case of all five ATen
+    overloads the MUSA config routes to FlagGems (``addmm``, ``addmm.out``,
+    ``addmm_``, ``addmm.dtype``, ``addmm.dtype_out``) by composing the op out of
+    ``mm``, because the mthreads kernel rounds both dot operands to float32
+    inside its K loop: over this matrix of cases the original measures 6e-08 to
+    1.2e-07 relative, where float64 is 1e-16, while ``mm`` -- the same matmul one
+    op over, with no such cast -- is exact, a single-column product aside, where
+    ``mm`` rounds as well and the composition widens the operand instead.
+
+    That the patch is installed, and that FlagGems' own callables are still
+    behind it, is asserted before anything is measured: an unpatched route here
+    is wrong rather than broken, so on a tree without the repair every case
+    below still returns a float64 tensor and only the tolerance separates a
+    float64 answer from a float32 one.
+    """
+    _require_flaggems_mthreads()
+    import flag_gems
+
+    for name in ("addmm", "addmm_out", "addmm_", "addmm_dtype", "addmm_dtype_out"):
+        wrapper = flag_gems.__dict__.get(name)
+        assert wrapper is not None, name
+        assert getattr(wrapper, torch_fl.flagos._ADDMM_FP64_PATCHED, False), name
+        assert callable(wrapper.__wrapped__), name
+    # The float64-exact product the composition is built on, as opposed to the
+    # generic module of the same name.
+    assert flag_gems.mm.__module__ == "_mthreads.ops.mm"
+
+    for m, k, n in [
+        (33, 33, 33),
+        (48, 64, 32),
+        (64, 64, 64),
+        (128, 96, 64),
+        # A single-column product is the one shape ``mm`` is not float64 on: it
+        # dispatches to a float32 GEMV kernel, so it is the shape the composition
+        # has to widen rather than hand over (measured before the widening:
+        # 2.0e-05 relative at 64x64x1, 2.1e-03 at 512x512x1).
+        (64, 64, 1),
+        (512, 512, 1),
+        (1, 64, 1),
+    ]:
+        mat1 = torch.randn(m, k, dtype=torch.float64)
+        # A transposed second operand: the gate tests `layout`, not contiguity,
+        # and the composition's `mm` serves a strided matrix.
+        mat2 = torch.randn(n, k, dtype=torch.float64).t()
+        biases = [
+            torch.randn(m, n, dtype=torch.float64),
+            torch.randn(n, dtype=torch.float64),
+            torch.randn((), dtype=torch.float64),
+        ]
+        for index, bias in enumerate(biases):
+            for alpha, beta in [(1, 1), (2.5, 0), (0.25, -1.75)]:
+                case = f"addmm at {m}x{k}x{n}, bias {index}, alpha={alpha} beta={beta}"
+                got = torch.addmm(
+                    bias.to(DEVICE),
+                    mat1.to(DEVICE),
+                    mat2.to(DEVICE),
+                    beta=beta,
+                    alpha=alpha,
+                ).cpu()
+                torch.testing.assert_close(
+                    got,
+                    torch.addmm(bias, mat1, mat2, beta=beta, alpha=alpha),
+                    rtol=1e-12,
+                    atol=1e-12,
+                    msg=case,
+                )
+
+
+def test_float64_addmm_out_variants_write_the_same_answer():
+    """The four overloads that take an ``out``, driven the way ATen spells them.
+
+    ``addmm.out`` and ``addmm.dtype_out`` write the buffer they are given and
+    return it; ``addmm_`` and ``addmm.dtype`` allocate. The in-place pair is the
+    one with a real hazard -- an ``addmm_``'s bias *is* its destination, so a
+    composition that wrote the product first would lose the ``beta`` term -- and
+    the dtype pair carries ``out_dtype`` positionally, which is where the gate
+    reads it.
+    """
+    _require_flaggems_mthreads()
+
+    m, k, n = 64, 64, 64
+    bias = torch.randn(m, n, dtype=torch.float64)
+    mat1 = torch.randn(m, k, dtype=torch.float64)
+    mat2 = torch.randn(k, n, dtype=torch.float64)
+    want = torch.addmm(bias, mat1, mat2, beta=0.25, alpha=-1.75)
+    tensors = [t.to(DEVICE) for t in (bias, mat1, mat2)]
+    options = {"beta": 0.25, "alpha": -1.75}
+
+    out = torch.empty(m, n, dtype=torch.float64, device=DEVICE)
+    assert torch.addmm(*tensors, out=out, **options) is out
+    torch.testing.assert_close(out.cpu(), want, rtol=1e-12, atol=1e-12)
+
+    in_place = tensors[0].clone()
+    assert in_place.addmm_(tensors[1], tensors[2], **options) is in_place
+    torch.testing.assert_close(in_place.cpu(), want, rtol=1e-12, atol=1e-12)
+
+    got = torch.ops.aten.addmm.dtype(*tensors, torch.float64, **options)
+    assert got.dtype == torch.float64
+    torch.testing.assert_close(got.cpu(), want, rtol=1e-12, atol=1e-12)
+
+    dtype_out = torch.empty(m, n, dtype=torch.float64, device=DEVICE)
+    returned = torch.ops.aten.addmm.dtype_out(
+        *tensors, torch.float64, out=dtype_out, **options
+    )
+    assert returned is dtype_out
+    torch.testing.assert_close(dtype_out.cpu(), want, rtol=1e-12, atol=1e-12)
+
+
+def test_a_nan_bias_does_not_reach_a_zero_beta_result():
+    """``beta == 0`` drops the bias instead of scaling it, NaN included.
+
+    The one place the composition is not a plain ``addmm`` expression: ``bias *
+    0.0`` is NaN, so the term has to be skipped rather than multiplied, or a
+    float64 ``addmm`` with a zero beta returns NaN where the reference --
+    ATen's CPU kernel and the FlagGems kernel it replaced, both -- returns a
+    finite product.
+    """
+    _require_flaggems_mthreads()
+
+    m, k, n = 64, 64, 64
+    bias = torch.full((m, n), float("nan"), dtype=torch.float64).to(DEVICE)
+    mat1 = torch.randn(m, k, dtype=torch.float64).to(DEVICE)
+    mat2 = torch.randn(k, n, dtype=torch.float64).to(DEVICE)
+
+    got = torch.addmm(bias, mat1, mat2, beta=0.0, alpha=2.5).cpu()
+    want = torch.addmm(
+        torch.full((m, n), float("nan"), dtype=torch.float64),
+        mat1.cpu(),
+        mat2.cpu(),
+        beta=0.0,
+        alpha=2.5,
+    )
+    assert torch.isfinite(got).all()
+    torch.testing.assert_close(got, want, rtol=1e-12, atol=1e-12)
+    # The spelling the skip exists to avoid, and the one the kernel this patch
+    # replaces would have produced had it multiplied the bias in float64.
+    assert not torch.isfinite(torch.full((m, n), float("nan")) * 0.0).any()
 
 
 def test_the_space_the_tuner_is_given_fits_the_device():
