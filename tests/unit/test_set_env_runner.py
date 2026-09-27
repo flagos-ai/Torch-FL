@@ -114,6 +114,21 @@ def test_common_workflows_pass_the_platform():
         assert "      setup_platform:" in text, name
 
 
+def test_config_discovery_exports_the_platform():
+    """all-tests-common.yml must declare setup_platform as a job output.
+
+    It is read into the config step's GITHUB_OUTPUT, but `needs.<job>.outputs`
+    only exposes what the job's `outputs:` block lists; without this the common
+    workflows receive an empty platform and the runner exits 2.
+    """
+    text = (WORKFLOWS / "all-tests-common.yml").read_text(encoding="utf-8")
+    assert "setup_platform: ${{ steps.config.outputs.setup_platform }}" in text
+    assert (
+        'printf \'%s=%s\\n\' setup_platform "$SETUP_PLATFORM" >> "$GITHUB_OUTPUT"'
+        in text
+    )
+
+
 def test_runner_applies_the_pip_constraints():
     """The runner exports PIP_CONSTRAINT; the file exists and pins the known drift.
 

@@ -55,6 +55,7 @@ jobs:
     outputs:
       display_name: ${{ steps.config.outputs.display_name }}
       setup_script: ${{ steps.config.outputs.setup_script }}
+      setup_platform: ${{ steps.config.outputs.setup_platform }}
       ci_image: ${{ steps.config.outputs.ci_image }}
       runs_on: ${{ steps.config.outputs.runs_on }}
       container_volumes: ${{ steps.config.outputs.container_volumes }}
