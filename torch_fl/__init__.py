@@ -1098,6 +1098,27 @@ def _patch_flaggems_codegen_config():
         sys.modules["torch_npu"] = _npu_shim
         sys.modules["torch_npu._C"] = _npu_c_shim
 
+    # diffusers keys the Qwen-Image rotary embedding on device type and knows
+    # only `cuda` (complex exponential) and `neuron` (rotation angles). An
+    # unlisted device takes the `cuda` fallback, whose operands are complex --
+    # and CANN has no complex compute at all, so `_compute_video_freqs` raises
+    # "Unsupported dtype for ACL: ComplexFloat" from the `torch.cat` over
+    # `freqs_neg`/`freqs_pos` before the first rotation is applied, and the
+    # transformer cannot run. Registering the `flagos` device in both halves of
+    # that extension point is what makes the rotation expressible on this backend.
+    #
+    # It has to run here rather than at the call site: `_get_device_freqs` caches
+    # per device on first use, so this is the last point reliably before the
+    # pipeline exists. Costs a diffusers import -- the call is a no-op when
+    # diffusers is not installed, when it has no Qwen-Image rope table, or when
+    # FLAGOS_DISABLE_QWENIMAGE_ROPE is set. See
+    # torch_fl/accelerator/ascend/_ascend_compat.py.
+    from torch_fl.accelerator.ascend._ascend_compat import (
+        patch_diffusers_qwenimage_rope,
+    )
+
+    patch_diffusers_qwenimage_rope()
+
 
 def _patch_cuda_device_context():
     """

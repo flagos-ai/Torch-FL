@@ -95,11 +95,12 @@ def _select_real_valued_rope(torch, device_kind):
     on, the rotation is real-valued on the accelerator and those calls disappear.
     Set ``QWEN_IMAGE_REAL_ROPE=1`` to turn it on.
 
-    The flagos leg no longer depends on that switch: ``torch_fl``'s GCU branch
-    calls ``patch_diffusers_qwenimage_rope`` at import, which installs the angle
-    operand and a cheaper expansion of the same rotation for this device. What is
-    left here is the switch for every other device kind, and the A/B remains
-    available because neither step overwrites an entry that is already set.
+    The flagos leg no longer depends on that switch: ``torch_fl``'s GCU and
+    Ascend branches call ``patch_diffusers_qwenimage_rope`` at import, which
+    installs the angle operand and a cheaper expansion of the same rotation for
+    this device. What is left here is the switch for every other device kind, and
+    the A/B remains available because neither step overwrites an entry that is
+    already set.
     """
     if os.environ.get("QWEN_IMAGE_REAL_ROPE", "0") in ("", "0"):
         return
@@ -123,10 +124,11 @@ def _select_real_valued_rope(torch, device_kind):
 
         return wrapped
 
-    # torch_fl's GCU branch installs the same pair from production code, and the
-    # consumer it registers is the cheaper expansion of this same rotation. Do not
-    # wrap the operand producer twice or overwrite that entry -- this function is
-    # now the non-flagos half of the same setup and the A/B switch for the rest.
+    # torch_fl's flagos branches (GCU and Ascend both) install the same pair
+    # from production code, and the consumer they register is the cheaper
+    # expansion of this same rotation. Do not wrap the operand producer twice or
+    # overwrite that entry -- this function is now the non-flagos half of the
+    # same setup and the A/B switch for the rest.
     if not getattr(qwenimage, "_flagos_qwenimage_rope_installed", False):
         qwenimage.QwenEmbedRope._get_device_freqs = _get_device_freqs(
             qwenimage.QwenEmbedRope._get_device_freqs

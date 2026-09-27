@@ -1,4 +1,4 @@
-"""Exercise common.py's real-valued-RoPE hook without a GCU.
+"""Exercise common.py's real-valued-RoPE hook without an accelerator.
 
 `_select_real_valued_rope` only touches diffusers and whatever torch object it is
 handed, so a CPU torch is enough to prove the registration: the two
@@ -19,7 +19,8 @@ interpreter -- the plugin's pair exists only where `torch_fl` was imported, and
 it holds the `flagos` device type only -- and the run prints which one it found
 so a skipped check is never mistaken for a passing one. What the plugin installs
 is also covered, without an accelerator, by
-`tests/unit/test_gcu_qwenimage_rope.py`.
+`tests/unit/test_ascend_qwenimage_rope.py` and `tests/unit/test_gcu_qwenimage_rope.py`
+-- one per vendor, because the plugin's copy is per vendor too.
 
 The numeric half -- that the wrapped method really returns rotation angles for
 the registered type and the complex frequencies for every other one -- calls
@@ -48,7 +49,7 @@ enabled = os.environ.get("QWEN_IMAGE_REAL_ROPE", "0") not in ("", "0")
 
 
 # `flagos` is the one device kind that also pulls `torch_fl` in, and torch_fl's
-# GCU branch is what installs the plugin's pair -- so the device kind asked for
+# flagos branch is what installs the plugin's pair -- so the device kind asked for
 # here is what decides which of the two installers this run is looking at. Any
 # other kind imports torch alone and exercises common.py's own installer.
 #
@@ -91,9 +92,10 @@ def from_a_factory(method):
     Identity against a snapshot cannot answer this on a flagos interpreter,
     where the plugin's pair is already installed by the time the snapshot is
     taken; the shape of what is on the class can, and it needs no device.
-    `_gcu_compat._device_freqs` and `common._get_device_freqs` both hand back a
-    nested `wrapped` and neither applies `functools.wraps`, so the qualname
-    ends in `_device_freqs.<locals>.wrapped` for both, while diffusers' own
+    `torch_fl`'s two accelerator compat modules -- `_ascend_compat.py` and
+    `_gcu_compat.py` -- and `common.py` all install a `_get_device_freqs` that
+    returns a nested `wrapped` and applies no `functools.wraps`, so its
+    qualname ends in `_device_freqs.<locals>.wrapped`, while diffusers' own
     method -- behind an lru_cache either way -- keeps its class-qualified name.
     """
     return getattr(method, "__qualname__", "").endswith(
@@ -104,7 +106,7 @@ def from_a_factory(method):
 before_rope = dict(qwenimage.ROPE_PER_DEVICE)
 before_qwen = qwenimage.QwenEmbedRope._get_device_freqs
 before_layer = qwenimage.QwenEmbedLayer3DRope._get_device_freqs
-# Whether torch_fl's GCU branch installed its own pair before this script ran.
+# Whether torch_fl's flagos branch installed its own pair before this script ran.
 # Read here, not after the call: what the call does depends on it.
 by_plugin = bool(getattr(qwenimage, "_flagos_qwenimage_rope_installed", False))
 had_key = DEVICE_KIND in before_rope
@@ -165,7 +167,7 @@ if enabled and numeric and by_plugin:
     print(
         "  numeric half skipped: torch_fl's plugin holds the running device type,\n"
         "  so this function's closure is not the one in place -- see\n"
-        "  tests/unit/test_gcu_qwenimage_rope.py for what the plugin installs"
+        "  tests/unit/test_ascend_qwenimage_rope.py for what the plugin installs"
     )
 
 if enabled and numeric and not by_plugin:
