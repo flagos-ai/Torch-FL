@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
 import json
 import re
 import runpy
@@ -73,11 +74,9 @@ def test_build_ext_stages_generated_build_config(
         "torch",
         SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)),
     )
-    import torch_fl_preflight
-
     monkeypatch.setattr(
-        torch_fl_preflight,
-        "installed_version",
+        importlib.metadata,
+        "version",
         lambda name: "2.10.0+cpu" if name == "torch" else None,
     )
     monkeypatch.setattr(build_ext, "run", lambda self: None)

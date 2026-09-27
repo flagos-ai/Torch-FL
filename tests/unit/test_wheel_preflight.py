@@ -14,14 +14,72 @@
 
 """Wheel preflight must work without importing torch_fl or accelerator runtimes."""
 
+import ast
+import importlib
 import json
+import os
 import sys
+import types
 import zipfile
 from pathlib import Path
 
 import pytest
 
 import torch_fl_preflight as preflight
+
+
+def test_manifest_builder_works_without_source_root_on_import_path(
+    tmp_path, monkeypatch
+):
+    """PEP 517 runs setup.py with a sys.path that cannot import sibling files."""
+    source_root = Path(__file__).resolve().parents[2]
+    source = ast.parse((source_root / "setup.py").read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in source.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_write_compatibility_manifest"
+    )
+    namespace = {
+        "os": os,
+        "importlib": importlib,
+        "json": json,
+        "SOURCE_DIR": str(source_root),
+        "BASE_DIR": str(tmp_path),
+        "FLAGOS_ACCELERATOR": "cuda",
+        "_kernel_switches": lambda _: {"VENDOR": True},
+        "KERNEL_SWITCHES": ("VENDOR",),
+        "KERNEL_SET_NAME": {"VENDOR": "vendor"},
+        "_BUNDLE_LIBDIR": "lib",
+        "_platform_entry": lambda _: {"vendor_torch_libraries": True},
+        "_install_requires": lambda: ["torch>=2.10,<2.11"],
+    }
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), "setup.py", "exec"),
+        namespace,
+    )
+    fake_torch = types.ModuleType("torch")
+    fake_torch._C = types.SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.delitem(sys.modules, "torch_fl_preflight", raising=False)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _: "2.10.0")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "path",
+        [
+            entry
+            for entry in sys.path
+            if Path(entry or os.getcwd()).resolve() != source_root
+        ],
+    )
+    (tmp_path / "torch_fl").mkdir()
+
+    namespace["_write_compatibility_manifest"]("0.1.0")
+
+    manifest = json.loads((tmp_path / "torch_fl" / "compatibility.json").read_text())
+    assert manifest["platform"] == "cuda"
+    assert manifest["build"]["distributions"]["torch"] == "2.10.0"
 
 
 @pytest.fixture

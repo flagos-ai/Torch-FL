@@ -564,11 +564,19 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     """Write artifact facts after the native build, before wheel staging."""
     import torch
 
-    from torch_fl_preflight import make_manifest
+    # setuptools' PEP 517 backend executes setup.py with the source root absent
+    # from sys.path, even for --no-isolation builds. Load this source file by
+    # absolute path instead of relying on an import that only works in a shell.
+    preflight_path = os.path.join(SOURCE_DIR, "torch_fl_preflight.py")
+    spec = importlib.util.spec_from_file_location("torch_fl_preflight", preflight_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load wheel preflight from {preflight_path}")
+    preflight = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(preflight)
 
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     compiled = [KERNEL_SET_NAME[name] for name in KERNEL_SWITCHES if kernels[name]]
-    manifest = make_manifest(
+    manifest = preflight.make_manifest(
         platform=FLAGOS_ACCELERATOR,
         wheel_version=wheel_version,
         kernels=compiled,
