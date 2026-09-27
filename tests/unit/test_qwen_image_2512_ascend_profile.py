@@ -31,12 +31,33 @@ from pathlib import Path
 
 import pytest
 
-# The cohort half of the profile reads PNGs, so it needs the same two packages
-# the flow itself needs. Every platform image that can run the flow has them;
-# a box without them skips rather than failing, which is what the profile would
-# have to do anyway.
-pytest.importorskip("numpy")
-Image = pytest.importorskip("PIL.Image")
+# The cohort half of the profile reads PNGs, so these fixtures need the same two
+# packages the flow itself needs -- and the profile reaches for them lazily, so
+# it is only the fixtures here that depend on them at import time.
+#
+# They are imported defensively rather than with a module-level ``importorskip``
+# because the two are not equivalent: an ``importorskip`` that fires during
+# collection leaves the module with nothing to collect, and pytest reports that
+# as exit 5, which the per-file unit runner scores as a failure rather than as a
+# skip. A marker keeps the tests collectible, so the box sees "skipped" and the
+# file sees exit 0. Neither package is a dependency of this one, and Pillow in
+# particular is not in every image that runs the unit suite.
+try:
+    import numpy  # noqa: F401
+except ImportError:  # pragma: no cover - only reached where the stack is absent
+    numpy = None
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - only reached where the stack is absent
+    Image = None
+
+# Everything that builds a run needs both, since ``make_run`` writes the cohort's
+# PNGs. ``test_the_shipped_baseline_describes_the_cohort`` reads only JSON and
+# the conf, so it is deliberately left unmarked and runs on any box.
+needs_the_png_stack = pytest.mark.skipif(
+    numpy is None or Image is None,
+    reason="the profile's PNG half needs numpy and Pillow",
+)
 
 FLOW = Path(__file__).parents[1] / "manual" / "qwen_image_2512"
 REPO_ROOT = FLOW.parents[2]
@@ -192,6 +213,7 @@ def run_profile(args, baseline, capsys):
     return code, capsys.readouterr().out
 
 
+@needs_the_png_stack
 def test_a_complete_run_satisfies_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -208,6 +230,7 @@ def test_a_complete_run_satisfies_the_contract(tmp_path, capsys):
     assert "the transformer is actually split across more than one card" in out
 
 
+@needs_the_png_stack
 def test_cpu_fallback_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -227,6 +250,7 @@ def test_cpu_fallback_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] full: cpu_fallback ops" in out
 
 
+@needs_the_png_stack
 def test_a_global_backend_override_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -246,6 +270,7 @@ def test_a_global_backend_override_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] no global backend override" in out
 
 
+@needs_the_png_stack
 def test_a_per_operator_override_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -263,6 +288,7 @@ def test_a_per_operator_override_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] no per-operator env override" in out
 
 
+@needs_the_png_stack
 def test_an_operator_leaving_the_ascend_route_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -287,6 +313,7 @@ def test_an_operator_leaving_the_ascend_route_fails_the_contract(tmp_path, capsy
     assert "[FAIL] flagos_python: distinct operators" in out
 
 
+@needs_the_png_stack
 def test_a_different_placement_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -313,6 +340,7 @@ def test_a_different_placement_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] the transformer is actually split across more than one card" in out
 
 
+@needs_the_png_stack
 def test_an_incomplete_cohort_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path, pngs=11)
     # A baseline recorded from a complete cohort, so the shortfall is the run's.
@@ -325,6 +353,7 @@ def test_an_incomplete_cohort_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] prompt count" in out
 
 
+@needs_the_png_stack
 def test_a_wrong_image_size_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -337,6 +366,7 @@ def test_a_wrong_image_size_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] [01] image size" in out
 
 
+@needs_the_png_stack
 def test_a_reshuffled_manifest_setting_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -355,6 +385,7 @@ def test_a_reshuffled_manifest_setting_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] manifest: num_inference_steps" in out
 
 
+@needs_the_png_stack
 def test_a_failed_stage_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
@@ -373,6 +404,7 @@ def test_a_failed_stage_fails_the_contract(tmp_path, capsys):
     assert "[FAIL] vae: exit status" in out
 
 
+@needs_the_png_stack
 def test_a_missing_stage_log_fails_the_contract(tmp_path, capsys):
     args, run_dir, sweep_dir, stage_logs = make_run(tmp_path)
     baseline = build_baseline(tmp_path, run_dir, sweep_dir, stage_logs)
