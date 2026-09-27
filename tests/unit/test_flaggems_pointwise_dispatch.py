@@ -254,7 +254,7 @@ class TestBroadcastShapesMemo:
 
 
 class TestGate:
-    """The patch is scoped to the build and conf it was measured on."""
+    """The patch is scoped to the builds and confs it was measured on."""
 
     def _restore(self, run, key, descriptor_key, broadcast_shapes):
         libentry.LibEntry.run = run
@@ -262,9 +262,9 @@ class TestGate:
         libentry._descriptor_cache_key = descriptor_key
         torch.broadcast_shapes = broadcast_shapes
 
-    def test_does_not_install_off_dcu(self):
-        if _build_accelerator() == "dcu":
-            pytest.skip("DCU build -- this is the configuration the gate opens on")
+    def test_does_not_install_off_the_measured_builds(self):
+        if _build_accelerator() in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+            pytest.skip("a build the gate opens on")
         before = (
             libentry.LibEntry.run,
             libentry.LibEntry.key,
@@ -279,9 +279,9 @@ class TestGate:
             torch.broadcast_shapes,
         ) == before
 
-    def test_installs_on_dcu_and_is_idempotent(self):
-        if _build_accelerator() != "dcu":
-            pytest.skip("not a DCU build")
+    def test_installs_on_a_measured_build_and_is_idempotent(self):
+        if _build_accelerator() not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+            pytest.skip("not a build the gate opens on")
         saved = (
             libentry.LibEntry.run,
             libentry.LibEntry.key,

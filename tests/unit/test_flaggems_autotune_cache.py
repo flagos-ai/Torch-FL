@@ -64,10 +64,16 @@ def as_dcu(monkeypatch):
 
 
 def test_noop_off_the_measured_configuration(monkeypatch):
-    """Anywhere but a FlagGems-routed DCU build, nothing is touched. Forced
-    rather than assumed: this suite also runs on the DCU host the number was
-    measured on, where the real detector answers "dcu"."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "cuda")
+    """Anywhere but a FlagGems-routed build whose launches go through the
+    FlagGems Python path, nothing is touched. Forced rather than assumed: this
+    suite also runs on the hosts the number was measured on, where the real
+    detector answers for this build.
+
+    ``ascend`` is the arm, not ``cuda``: the CUDA boxing build now shares the
+    patch (``flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS``), so it is no longer an
+    example of a configuration the gate closes on.
+    """
+    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "ascend")
     monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: True)
     monkeypatch.delenv(ENV_VAR, raising=False)
     previous = triton_knobs.autotuning.cache

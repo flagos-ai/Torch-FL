@@ -145,18 +145,18 @@ class TestFallbackReturnsSelf:
 
 
 class TestGate:
-    """The patch is scoped to the build and conf it was measured on."""
+    """The patch is scoped to the builds and confs it was measured on."""
 
-    def test_does_not_register_off_dcu(self):
-        if _build_accelerator() == "dcu":
-            pytest.skip("DCU build -- this is the configuration the gate opens on")
+    def test_does_not_register_off_the_measured_builds(self):
+        if _build_accelerator() in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+            pytest.skip("a build the gate opens on")
         before = len(flagos._PATCH_LIBS)
         flagos._patch_flaggems_index_put()
         assert len(flagos._PATCH_LIBS) == before
 
-    def test_registers_on_dcu(self):
-        if _build_accelerator() != "dcu":
-            pytest.skip("not a DCU build")
+    def test_registers_on_a_measured_build(self):
+        if _build_accelerator() not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+            pytest.skip("not a build the gate opens on")
         flag_gems = pytest.importorskip("flag_gems")
         if getattr(flag_gems, "index_put_", None) is None:
             pytest.skip("this flag_gems has no index_put_")
