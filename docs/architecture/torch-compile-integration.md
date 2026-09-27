@@ -366,6 +366,16 @@ inductor generates Triton kernels that operate on flagos tensors directly.
    - Ops inductor does not fuse fall back to eager flagos dispatch
      (FlagGems Python/C++ or CUDA boxing) with no changes needed
 
+5. **GCU 64-bit guard** (`torch_fl/compile/triton_64bit_guard.py`)
+   - GCU300 cannot compile a kernel that needs a 64-bit value, and one of the
+     two ways to reach that state segfaults below inductor's own error handling.
+     Wraps `CachingAutotuner._precompile_config` to raise a named
+     `InductorError` instead, before `triton.compile` is entered
+   - GCU-only (`platform_profile().vendor`, checked inside the patch), so other
+     targets are untouched. Installed from both `flagos_compile_backend` and
+     `torch_fl`'s eager registration, since the default `backend="inductor"`
+     path never reaches the former
+
 **Flow**:
 ```
 torch.compile(model, backend="flagos")
@@ -443,6 +453,54 @@ Existing dispatch variables (`FLAGOS_BACKEND_CONFIG`) still apply to compiled ke
 2. Check for unsupported ops (dynamic shapes, custom ops)
 3. Verify meta implementations for custom ops
 
+### 64-bit Kernels on GCU (`InductorError: ... has no 64-bit support`)
+
+**Symptom**: a compile on GCU fails with
+
+```
+InductorError: RuntimeError: The GCU300 target has no 64-bit support, and kernel
+'triton_red_fused_...' needs 64-bit values:
+  line 21: tmp1 = tl.full([1, 1], 7, tl.int64)
+```
+
+The GCU300 target has no 64-bit support at all, in either of the two forms a
+generated kernel can reach it:
+
+* a 64-bit **operand** (an int64 or float64 tensor), visible in the kernel
+  signature as `*i64` / `*fp64`;
+* a 64-bit **promotion of size arithmetic**, which keeps an int32 signature.
+  Inductor's `SIMDScheduling.select_index_dtype` falls back to `torch.int64`
+  whenever `can_use_32bit_indexing` declines the buffer set, and every
+  size-derived value in the kernel then carries that dtype. No input tensor is
+  64-bit in this case, and no inductor config knob selects the index dtype.
+
+The second form is why `torch_fl/compile/triton_64bit_guard.py` refuses the
+kernel **before** `triton.compile` is entered rather than translating an error
+afterwards. The vendor compiler cannot legalize the `arith.extsi` that feeds an
+i64 value and aborts the pass pipeline: the process dies with SIGSEGV, exit code
+139, no traceback. That abort is below the `try/except` inductor wraps around
+`triton.compile` in `CachingAutotuner._precompile_config`, so nothing on
+inductor's exception path runs and no Python-level handler can catch it. The
+guard is a predicate over the generated source and the signature, and it raises
+in place of the crash.
+
+**What to do**:
+1. Keep the values 32-bit where the model allows it.
+2. Skip compiling the kernel that generates it. Flex attention's
+   `create_block_mask` hits the promotion on *any* input dtype, so pass
+   `_compile=False` (or wrap the factory in `torch._dynamo.disable`) — the mask
+   builds eagerly and the rest of the model still compiles.
+   `torch_fl.compile.triton_64bit_guard.gcu_64bit_unsupported()` answers True on
+   such a build, for code that wants to choose the route itself.
+3. `FLAGOS_COMPILE_FALLBACK_EAGER=1` turns the refusal into an eager run
+   (`backend="flagos"` only — the guard also covers the default
+   `backend="inductor"` path, which has no fallback wrapper).
+
+This is a limitation of the target, not of the guard: with the guard removed the
+same kernels come back as a pipeline error or a segfault. A build whose vendor
+compiler gains 64-bit support should drop the guard; it is gated on the GCU
+vendor string, so it cannot affect any other platform.
+
 ### No Speedup
 
 **Symptom**: Compiled model runs at same speed as eager.
@@ -493,6 +551,11 @@ FLAGOS_USE_FLAGTREE=1 pytest tests/integration/test_compile.py::test_flagtree_co
 # including plain CPU -- these test the selection logic, not the toolchain
 pytest tests/unit/test_compile_platform_profile.py -v
 
+# The 64-bit predicate and the guard's install/refuse behaviour, on any
+# platform; the GCU arm of it needs the vendor Triton stack and a real card
+pytest tests/unit/test_triton_64bit_guard.py -v
+pytest tests/integration/test_compile.py -k "64bit or block_mask" -v
+
 # Ascend, on a real 910. Clear the inductor cache first: a warm cache hides the
 # compile-worker crash the serial-compile default exists for
 rm -rf /tmp/torchinductor_root
@@ -534,6 +597,13 @@ tests live alongside it:
    Only the
    graphs in `tests/integration/test_compile.py` are validated; whole-model
    compilation is not yet exercised there
+7. **GCU has no 64-bit kernels**: the GCU300 target cannot compile a kernel that
+   needs a 64-bit value, whether the operand is int64/float64 or Inductor
+   promoted the index dtype on its own. Those kernels are refused with a
+   diagnosis instead of crashing the interpreter — see
+   [64-bit Kernels on GCU](#64-bit-kernels-on-gcu-inductorerror--has-no-64-bit-support).
+   Removing the refusal (a compiler that gains 64-bit support) is what closes
+   this, not a change on the torch_fl side
 
 ## Roadmap
 

@@ -1032,6 +1032,111 @@ def test_gcu_compiles_forward_backward(device):
 
 
 @pytest.mark.gcu
+def test_gcu_refuses_a_64bit_kernel_with_a_diagnosis(device):
+    """An int64 kernel must be named and refused, not fail inside the pipeline.
+
+    The GCU300 target has no 64-bit support. Without the guard the compiler
+    produces ``Pipeline run failed: PassManager execution failed`` with no
+    indication of which operand asked for 64 bits, and for the promoted-index
+    form it segfaults instead of failing at all (see the test below).
+    """
+    _skip_unless_gcu()
+    from torch._inductor.exc import InductorError
+
+    def fn(x):
+        return x + 1
+
+    x = torch.ones(4, dtype=torch.int64, device=device)
+    with pytest.raises(InductorError, match="no 64-bit support") as excinfo:
+        torch.compile(fn, backend="flagos")(x)
+
+    assert "triton_poi_fused_add" in str(excinfo.value)
+
+
+@pytest.mark.gcu
+def test_gcu_block_mask_raises_instead_of_dumping_core(device):
+    """Reproduction A of issue #400: an int32 block mask killed the interpreter.
+
+    Nothing in Python can catch the failure this replaces. The vendor pass
+    manager aborts inside ``triton.compile`` -- legalizing the ``arith.extsi``
+    that a promoted int64 index needs -- which is *below* the try/except
+    Inductor wraps around that call, so the process dies with SIGSEGV. Without
+    the guard this test does not fail, it takes the pytest process down (exit
+    code 139). A refusal naming the kernel is the contract.
+
+    The input is int32 on purpose: no tensor is 64-bit here, Inductor promotes
+    the index dtype on its own.
+    """
+    _skip_unless_gcu()
+    flex_attention = pytest.importorskip("torch.nn.attention.flex_attention")
+    from torch._inductor.exc import InductorError
+
+    block_mask = torch.ones(13, 7, dtype=torch.int32, device=device)
+    with pytest.raises(InductorError, match="no 64-bit support") as excinfo:
+        flex_attention.create_block_mask(
+            lambda b, h, q, kv: (kv <= q) & (block_mask[b, kv] != 0),
+            B=13,
+            H=None,
+            Q_LEN=7,
+            KV_LEN=7,
+            device=device,
+            _compile=True,
+        )
+
+    # The message has to say which kernel and which lines, or the caller has
+    # nothing to act on.
+    assert "tl.int64" in str(excinfo.value)
+
+
+@pytest.mark.gcu
+def test_gcu_block_mask_builds_eagerly(device):
+    """``_compile=False`` is the way to get a BlockMask on GCU, and it works.
+
+    Flex attention's mask factory is usable on this target as long as the
+    generated reduction never reaches the vendor compiler, so the refusal above
+    costs a compile rather than the feature.
+    """
+    _skip_unless_gcu()
+    flex_attention = pytest.importorskip("torch.nn.attention.flex_attention")
+
+    block_mask = torch.ones(13, 7, dtype=torch.int32, device=device)
+    mask = flex_attention.create_block_mask(
+        lambda b, h, q, kv: (kv <= q) & (block_mask[b, kv] != 0),
+        B=13,
+        H=None,
+        Q_LEN=7,
+        KV_LEN=7,
+        device=device,
+        _compile=False,
+    )
+
+    assert isinstance(mask, flex_attention.BlockMask)
+    # 13 batch rows, one query block each (Q_LEN=7 fits in one), one live kv
+    # block -- the mask is dense over the single block, so every row uses one.
+    assert mask.kv_num_blocks.shape == (13, 1, 1)
+    assert int(mask.kv_num_blocks.sum()) == 13
+
+
+@pytest.mark.gcu
+def test_gcu_guard_leaves_32bit_kernels_alone(device):
+    """The negative control: a 32-bit kernel must still compile and match eager.
+
+    The guard reads the generated source, so this is the check that it does not
+    refuse the kernels the GCU path exists to produce.
+    """
+    _skip_unless_gcu()
+
+    def fn(x, y):
+        return (x * 2 + y).relu()
+
+    x = torch.randn(64, 64, device=device)
+    y = torch.randn(64, 64, device=device)
+    compiled = torch.compile(fn, backend="flagos")(x, y)
+    assert_on_flagos(compiled)
+    torch.testing.assert_close(compiled, fn(x, y), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.gcu
 def test_gcu_defaults_to_serial_compile(monkeypatch):
     """A tops pointer only resolves against the current device, so no forking.
 

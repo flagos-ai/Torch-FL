@@ -1517,8 +1517,8 @@ def _register_compile_backend():
         # lowers e.g. RMSNorm (`aten.mean.dim`) and trips
         # `get_backend_features("flagos") -> assert scheduling_ctor`
         # (torch/_inductor/codegen/common.py:460) because flagos was never
-        # registered in inductor's codegen table. The three functions are
-        # idempotent and mirror what `flagos_compile_backend` runs before every
+        # registered in inductor's codegen table. These patches are idempotent
+        # and mirror what `flagos_compile_backend` runs before every
         # compile_fx.
         from torch_fl.compile.device_interface import register_flagos_device_interface
         from torch_fl.compile.inductor_codegen import (
@@ -1534,6 +1534,7 @@ def _register_compile_backend():
         from torch_fl.compile.triton_resource_limits import (
             patch_triton_resource_limit_errors,
         )
+        from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
 
         register_flagos_device_interface()
         publish_codegen_on_device_module()
@@ -1541,6 +1542,12 @@ def _register_compile_backend():
         patch_triton_libdevice_module_map()
         patch_triton_resource_limit_errors()
         patch_triton_byte_load_workarounds()
+
+        # The default `backend="inductor"` path bypasses `flagos_compile_backend`
+        # entirely, and a GCU300 64-bit kernel kills the process from inside the
+        # vendor pass manager where no Python handler can reach it. Install the
+        # guard here, not only on the flagos backend.
+        patch_triton_64bit_guard()
     except (ImportError, AttributeError):
         # torch._dynamo not available (torch < 2.0) or inductor missing
         pass
