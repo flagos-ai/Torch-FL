@@ -6582,7 +6582,13 @@ at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArra
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
-  auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
+  // Integral/bool inputs promote to int64 when no dtype given
+  // (matches torch). aclnnReduceSum accepts the bool input against
+  // an int64 out tensor and returns the count, so no input cast.
+  at::ScalarType out_dtype = dtype.has_value()
+      ? dtype.value()
+      : (c10::isIntegralType(self.scalar_type(), /*includeBool=*/true)
+             ? at::kLong : self.scalar_type());
   int64_t ndim = self.dim();
   std::vector<int64_t> norm_dims;
   if (dim.has_value() && !dim.value().empty()) {

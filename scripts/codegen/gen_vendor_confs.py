@@ -649,6 +649,104 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 # un-blocks tests/integration/test_compute_device_index.py::test_tuple_returning_op,
 # which is itself blocked from CI by issue #391. Not yet filed upstream.
 #
+# ascend: sum.dim_IntList, because the FlagGems kernel reduces a bool operand in
+# i1 -- which turns the reduction into an "any" and makes the count wrong. Two
+# defects sit behind it, both in the non-fp16 branch of `sum_dim_kernel`
+# (flag_gems/ops/sum.py:229):
+#
+#   * `cdtype = inp.dtype.element_ty` (:242) leaves a bool input accumulating in
+#     i1, where `_sum += a` (:257) is a bitwise OR and `tl.sum` (:258) over i1 is
+#     an "any". Every row holding at least one True reduces to `1` and every row
+#     holding none to `0`, in the correct int64 dtype, so nothing downstream can
+#     tell the count is wrong. Measured on Ascend with the FlagGems route forced
+#     back: a `(1, 52)` bool tensor with 52 Trues returns `[1]`, with 40 Trues
+#     `[1]`, with 1 True `[1]`, with no Trues `[0]`; a `(3, 52)` tensor whose rows
+#     hold 52/0/52 Trues returns `[1, 0, 1]` along dim=1 and `[1, 1, 1, 1]` along
+#     dim=0, where the CPU returns `[1, 0, 1]` and `[2, 2, 2, 2]`.
+#   * the same i1 accumulate is rejected outright by BiShengIR on the
+#     multi-dimension path, so `mask.sum(dim=(0, 1))` is a hard RuntimeError
+#     rather than a wrong answer:
+#         loc("_sum"(.../flag_gems/ops/sum.py:257:16)): error: 'hivm.hir.vadd' op
+#         failed to verify that operand at idx 0 and 1 should have element type
+#         16-bit signless integer or 32-bit signless integer or 16-bit float or
+#         32-bit float or 64-bit signless integer
+#
+# The float, fp16 and int64 paths are numerically correct, so this is a dtype
+# gap that a per-op conf entry spends more than it needs to. It is written that
+# way anyway because the mechanism this repo has for a dtype gap
+# (`FlagGemsRejectsOpDtype` in csrc/aten/common.cc) exists to keep an op on
+# FlagGems for the dtypes that work, and the only thing keeping `sum.dim_IntList`
+# there for float would be an unmeasured speed claim -- aclnnReduceSum is exact
+# for every dtype. The survey's 2d-f32, 4d-f32, 1d-f32, 2d-f16, 2d-i64 and
+# 2d-f32-strided profiles all PASS; the 2d-bool profile is the one that is WRONG.
+#
+# `mask = row_mask and col_mask` (:254) is not part of this. It reads like a
+# Python `and` that would return the second operand and drop the row check, and
+# Triton warns about it on every launch ("Logical operators 'and' and 'or' are
+# deprecated for non-scalar tensors"), but the front end lowers a BoolOp between
+# block tensors to `logical_and` (`visit_BoolOp`, folding its operands through
+# `_apply_binary_method`; triton/compiler/code_generator.py:1575-1587), so the
+# mask is correct and only the spelling is deprecated.
+#
+# The full reduction is unaffected: `mask.sum()` routes through `sum`, not
+# `sum.dim_IntList`, and returns `tensor([52], dtype=torch.int64)` correctly.
+#
+# This is what blocks the Qwen-Image text encoder on Ascend. diffusers'
+# `QwenImagePipeline._extract_masked_hidden` does `bool_mask.sum(dim=1)` and
+# feeds the result to `torch.split`, so the wrong [1] becomes
+# `RuntimeError: split_with_sizes: split sizes sum to 1 but tensor has 52
+# elements along dim 0` -- a crash three frames away from its cause.
+#
+# Ascend implements sum.dim_IntList through aclnnReduceSum
+# (SumDimIntlistKernelAscend in csrc/aten/backends/ascend/generated/), so the
+# route back is free. That kernel needed a fix of its own before the move was
+# correct -- it did not apply torch's no-dtype promotion and returned the input
+# dtype, so a bool sum came back `tensor([True])` rather than int64 counts; the
+# promotion now lives in codegen_ascend.py's `_reduce_dtype_prologue`. With both
+# in place `mask.sum(dim=1)` returns `[52]` and `mask.sum(dim=(0,1))` returns
+# `[52]`, bit-identical to the CPU. Not yet filed upstream.
+#
+# ascend: gelu and gelu_backward, both `approximate` spellings and every dtype,
+# because the failure is in the kernels rather than at a dispatch boundary.
+# Three of flag_gems/ops/gelu.py's four kernels evaluate `pow(x_fp32, 2)` --
+# `gelu_tanh` (:43), `gelu_backward_none` (:54) and `gelu_backward_tanh` (:67,
+# :69) -- and `pow` there is `tl_extra_shim.pow`. The Python int literal `2`
+# reaches triton-ascend's libdevice binding as an int32 operand, and the table
+# that resolves it has no `(float32, int32)` overload:
+#
+#     triton.compiler.errors.CompilationError: at 3:71:
+#     def gelu_tanh(x):
+#         x_fp32 = x.to(tl.float32)
+#         output = 0.5 * x * (1 + tanh(x_fp32 * 0.79788456 * (1 + 0.044715 * pow(x_fp32, 2))))
+#     KeyError((triton.language.float32, triton.language.int32))
+#
+# The column is the `pow(` call. `gelu_none` is the one kernel in the file with
+# no `pow` and the only one that compiles, so `approximate="none"` runs and
+# `approximate="tanh"` cannot launch at all; `gelu_backward_none` uses the same
+# construct, so a fwd+bwd graph is unbuildable whichever forward spelling is
+# chosen. This is what blocks the Qwen-Image transformer on Ascend, and it is not
+# avoidable there: diffusers' `QwenImageFeedForward` builds its activation with
+# `approximate="tanh"` (models/activations.py:85, reached from
+# transformer_qwenimage.py), so all 60 blocks take the failing route.
+#
+# Measured with tests/manual/flaggems_overload_survey.py against the pre-fix conf
+# (SHA-256 9d24378804775bda932f4572f94b1984b88fd069d659e16187c5ce8dab80918e), which
+# is where the two ops part company: `gelu_backward` FAILED on every float
+# profile -- 2d-f32, 4d-f32, 1d-f32, 2d-f16, 2d-f32-strided -- with the KeyError
+# above, so no per-dtype escape could state it, while `gelu` came back STRICT
+# because the survey drives the default `approximate="none"` spelling only. The
+# gap in `gelu` is argument-valued, and the conf keys on the ATen overload, so
+# the only way to route the tanh call away from FlagGems is to move the overload.
+#
+# Ascend implements both ops through aclnnGeluV2 / aclnnGeluBackwardV2
+# (GeluKernelAscend / GeluBackwardKernelAscend in
+# csrc/aten/backends/ascend/generated/), so the route back is free. Measured on
+# Ascend910 with CANN 9.0.0, FlagTree 0.6.2a1+ascend3.5 and FlagGems 6d31db9aa
+# over the three gate shapes the transformer actually feeds it -- (2, 4096, 24),
+# (1, 32, 3584), (2, 8, 256) -- forward and backward, both `approximate`
+# spellings: max|d| 4.8e-07 forward and 1.3e-06 backward against a float64 CPU
+# reference, all finite. Not yet filed upstream.
+#
 # musa: index_add and randn_like/randn were the first entries in this set (#275,
 # 2026-09-15), recorded as "index_add returns all zeros instead of accumulating"
 # and "randn crashes unpacking generator state". Neither signature reproduces.
@@ -863,6 +961,8 @@ NATIVE_TRITON_GAPS = {
         "exponential_",
         "ge.Scalar",
         "ge.Tensor",
+        "gelu",
+        "gelu_backward",
         "gt.Scalar",
         "gt.Tensor",
         "le.Scalar",
@@ -881,6 +981,7 @@ NATIVE_TRITON_GAPS = {
         "randperm",
         "sort",
         "sort.stable",
+        "sum.dim_IntList",
         "topk",
     },
     "gcu": {

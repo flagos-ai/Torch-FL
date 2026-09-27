@@ -2709,12 +2709,11 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
 
-# Shared prologue for the dtype-aware reduce categories (sum.dim_IntList /
-# mean.dim). OptionalIntArrayRef dim (None/empty = reduce all) + optional dtype.
-# Mirrors the handwritten sum.cc dim-normalization and reduced-shape logic.
-_REDUCE_DTYPE_PROLOGUE = """\
-  namespace ascend = at::native::flagos::ascend;
-  auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
+# Shared body for the dtype-aware reduce categories (sum.dim_IntList / mean.dim).
+# OptionalIntArrayRef dim (None/empty = reduce all) + optional dtype. Mirrors the
+# handwritten sum.cc dim-normalization and reduced-shape logic. The `out_dtype`
+# initializer differs between the two and is supplied by _reduce_dtype_prologue.
+_REDUCE_DTYPE_PROLOGUE_BODY = """\
   int64_t ndim = self.dim();
   std::vector<int64_t> norm_dims;
   if (dim.has_value() && !dim.value().empty()) {{
@@ -2736,13 +2735,45 @@ _REDUCE_DTYPE_PROLOGUE = """\
   ascend::AclIntArrayWrapper acl_dim(norm_dims);
 """
 
+
+def _reduce_dtype_prologue(promote_integral=False):
+    """Prologue for the dtype-aware reduce categories.
+
+    ``promote_integral`` selects torch's no-dtype promotion rule for the
+    reduction's output type: an integral (including bool) input reduces to
+    int64. ``sum.dim_IntList`` needs it -- ``pipeline_qwenimage``'s
+    ``_extract_masked_hidden`` does ``bool_mask.sum(dim=1)`` and splits on the
+    result, which must be token counts in int64 rather than the bool "any" that
+    a same-dtype reduction computes. ``mean.dim`` must not have it: ATen rejects
+    an integral input to ``mean`` outright, so promoting there would describe an
+    output the op can never produce.
+    """
+    if promote_integral:
+        dtype_init = (
+            "  // Integral/bool inputs promote to int64 when no dtype given\n"
+            "  // (matches torch). aclnnReduceSum accepts the bool input against\n"
+            "  // an int64 out tensor and returns the count, so no input cast.\n"
+            "  at::ScalarType out_dtype = dtype.has_value()\n"
+            "      ? dtype.value()\n"
+            "      : (c10::isIntegralType(self.scalar_type(), /*includeBool=*/true)\n"
+            "             ? at::kLong : self.scalar_type());\n"
+        )
+    else:
+        dtype_init = "  auto out_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();\n"
+    return (
+        "  namespace ascend = at::native::flagos::ascend;\n"
+        + dtype_init
+        + _REDUCE_DTYPE_PROLOGUE_BODY
+    )
+
+
 # reduce_sum_dtype: sum.dim_IntList(self, int[]? dim, keepdim, ScalarType? dtype).
 #   aclnnReduceSum(self, dims, keepdim, aclDataType, out)
 T_REDUCE_SUM_DTYPE = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _REDUCE_DTYPE_PROLOGUE
+    + _reduce_dtype_prologue(promote_integral=True)
     + """\
   aclDataType acl_dtype = ascend::ToAclDataType(out_dtype);
 
@@ -2761,7 +2792,7 @@ T_REDUCE_SUM_DTYPE_CACHED = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _REDUCE_DTYPE_PROLOGUE
+    + _reduce_dtype_prologue(promote_integral=True)
     + """\
   aclDataType acl_dtype = ascend::ToAclDataType(out_dtype);
 
@@ -2862,7 +2893,7 @@ T_REDUCE_MEAN_DTYPE = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _REDUCE_DTYPE_PROLOGUE
+    + _reduce_dtype_prologue()
     + """\
   auto acl_dtype = static_cast<int32_t>(ascend::ToAclDataType(out_dtype));
 
@@ -2881,7 +2912,7 @@ T_REDUCE_MEAN_DTYPE_CACHED = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim, std::optional<at::ScalarType> dtype) {{
 """
-    + _REDUCE_DTYPE_PROLOGUE
+    + _reduce_dtype_prologue()
     + """\
   auto acl_dtype = static_cast<int32_t>(ascend::ToAclDataType(out_dtype));
 
