@@ -33,9 +33,21 @@ So there are two configurations to hold, and the difference is decided inside
 Measured in a subprocess, not in this one: the install runs once, at
 ``import torch_fl``, and is idempotent, so by the time a test body could delete
 the seven the decision has already been made and re-running would prove
-nothing. Each script takes the seven away from ``torch._C`` *before* importing
-torch_fl, which is both the ``+cpu`` case on a machine that has a CUDA build of
-torch and the native case on one that does not.
+nothing. Each script takes the seven off ``torch._C`` before the install reads
+them, which is both the ``+cpu`` case on a machine that has a CUDA build of torch
+and the native case on one that does not.
+
+Where that deletion lands is not free. It has to be after torch is imported --
+there is no ``torch._C`` to take anything off before that -- and before
+``torch_fl`` looks at it, and on DCU torch_fl has to be imported *first*: its
+preload is what puts the DTK device libraries in the process, and importing
+torch ahead of it leaves every later device operation dying with "Cannot
+initialize CUDA without ATen_cuda library" (the constraint ``_phase_preload``
+documents). Importing torch in the script to do the deleting is what took the
+roundtrip below down on the DCU pipeline, in run 36261615856. So the deletion
+runs from a meta path finder instead, on ``torch._C`` itself: that is the one
+point that is both after torch is born and before torch_fl reads it, whichever
+order the two are imported in.
 """
 
 import os
@@ -62,17 +74,56 @@ COMM_NAMES = (
 #: for a cold filesystem cache, not for the work this does.
 TIMEOUT_SECONDS = 300
 
+#: Hides the stock comm layer without importing torch to do it. The deletion has
+#: to land after ``torch._C`` exists and before ``InitDataParallelComm()`` reads
+#: it, and on DCU the two imports either side of that window have an order that
+#: cannot be broken to make room for it. A meta path finder is the one point
+#: that satisfies both, because it runs on ``torch._C`` itself: the imports stay
+#: in whatever order the platform needs, and the seven are gone by the time the
+#: install looks.
 _PREAMBLE = f"""
-import torch
+import importlib.abc
+import importlib.util
+import sys
 
 NAMES = {list(COMM_NAMES)!r}
-for _name in NAMES:
-    if hasattr(torch._C, _name):
-        delattr(torch._C, _name)
 
-# The import under test. It publishes the seven, and on a torch build that has
-# no CUDA comm layer it is the only thing that can.
+
+class _StripStockCommLayer(importlib.abc.MetaPathFinder):
+    # Deletes the seven the moment torch._C is created.
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "torch._C":
+            return None
+        # One shot: the lookup below walks sys.meta_path, and this finder must
+        # not be on it when that happens.
+        sys.meta_path.remove(self)
+        spec = importlib.util.find_spec(fullname)
+        if spec is None or spec.loader is None:
+            return None
+        stock = spec.loader
+
+        class _Loader:
+            def create_module(self, spec):
+                return stock.create_module(spec)
+
+            def exec_module(self, module):
+                stock.exec_module(module)
+                for name in NAMES:
+                    if hasattr(module, name):
+                        delattr(module, name)
+
+        spec.loader = _Loader()
+        return spec
+
+
+sys.meta_path.insert(0, _StripStockCommLayer())
+
+# torch_fl first. Its preload is what loads the device libraries, and importing
+# torch ahead of it is what DCU's import gate forbids -- see the module
+# docstring. The hook above is what lets that order hold while the seven are
+# still absent.
 import torch_fl
+import torch
 """
 
 

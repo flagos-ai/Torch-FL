@@ -41,16 +41,46 @@ COMM_NAMES = (
     "_gather_out",
 )
 
-# torch_fl MUST be imported before torch (preloads libtorch_cuda.so). The one
-# exception is --no-stock-comm, which has to take the seven away *between* the
-# two imports, before torch_fl publishes them; see the flag's help text.
 NO_STOCK_COMM = "--no-stock-comm" in sys.argv
 if NO_STOCK_COMM:
-    import torch
+    # torch_fl MUST be imported before torch: its preload is what loads the
+    # device libraries, and importing torch first leaves torch's CUDAHooks
+    # cached against a process that has not loaded them, so every later device
+    # operation dies with "Cannot initialize CUDA without ATen_cuda library".
+    # That rules out the obvious way to do this flag -- `import torch`, take the
+    # seven away, `import torch_fl` -- so the deletion runs off a meta path
+    # finder instead, on torch._C itself, which happens after torch is born and
+    # before the install reads the seven, whichever order the two are imported.
+    import importlib.abc
+    import importlib.util
 
-    for _name in COMM_NAMES:
-        if hasattr(torch._C, _name):
-            delattr(torch._C, _name)
+    class _StripStockCommLayer(importlib.abc.MetaPathFinder):
+        # Deletes the seven the moment torch._C is created.
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname != "torch._C":
+                return None
+            # One shot: the lookup below walks sys.meta_path, and this finder
+            # must not be on it when that happens.
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            stock = spec.loader
+
+            class _Loader:
+                def create_module(self, spec):
+                    return stock.create_module(spec)
+
+                def exec_module(self, module):
+                    stock.exec_module(module)
+                    for name in COMM_NAMES:
+                        if hasattr(module, name):
+                            delattr(module, name)
+
+            spec.loader = _Loader()
+            return spec
+
+    sys.meta_path.insert(0, _StripStockCommLayer())
 
 import torch_fl  # noqa: E402,F401
 import torch  # noqa: E402
