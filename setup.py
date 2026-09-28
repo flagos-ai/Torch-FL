@@ -692,6 +692,10 @@ class BuildExtWithCmake(_build_ext):
             "include/flagos.h",
         ]
         patterns = ["lib/*.so*", "lib/*.dylib*", "lib/*.dll", "lib/*.lib"]
+        if FLAGOS_ACCELERATOR == "metax":
+            patterns.extend(("lib_maca/*.so*", "lib_maca/vendor_version.py"))
+        if FLAGOS_ACCELERATOR == "ppu":
+            patterns.extend(("lib_ppu/*.so*", "lib_ppu/vendor_version.py"))
         if FLAGOS_ACCELERATOR == "dcu":
             # cmake installs the core-ABI shim straight into lib_dcu during
             # build_ext. build_py has already cached its file list by then, so
@@ -795,10 +799,11 @@ def _get_setup_kwargs():
             # Self-contained wheels: the vendor's forked libtorch C++ .so bundled
             # here so the process loads that C++ runtime without a separate
             # vendor torch wheel (see scripts/vendor/bundle_*_libtorch.sh, and
-            # torch_fl/accelerator/_vendor_libtorch.py for the relink at import).
+            # torch_fl/accelerator/_vendor_libtorch.py for private selection).
             # The trailing * matters for lib_dcu: DTK's auditwheel-mangled
             # torch.libs deps end in a version suffix (libglog-6ed04f2c.so.0.0.0).
             "lib_maca/*.so*",
+            "lib_maca/vendor_version.py",
             "lib_dcu/*.so*",
             # DTK torch's own version.py, carried so _restore_dcu_hip_version()
             # can hand triton's hcu backend the hip/rocm strings the stock +cpu
@@ -806,6 +811,7 @@ def _get_setup_kwargs():
             # only match *.so*.
             "lib_dcu/vendor_version.py",
             "lib_ppu/*.so*",
+            "lib_ppu/vendor_version.py",
             "include/*.h",
             # The DTK-private symbol manifest that libflagos_dtk_core_compat.so
             # must export, shipped so an installed wheel can be re-audited with

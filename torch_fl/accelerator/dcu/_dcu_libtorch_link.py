@@ -35,12 +35,11 @@ Default (decoupled) mode
     installable next to a stock torch and uninstalling torch_fl leaves no trace.
 
 Legacy mode (``FLAGOS_DCU_VENDOR_CORE=1``)
-    Symlink DTK's whole core set over the official ``torch/lib`` and preload it,
-    the pre-decoupling behaviour.  This is the rollback path, and the only mode
+    Select DTK's whole core set through a private torch facade and preload it.
+    This is the fallback path, and the only mode
     where DTK-private schemas such as ``aten::native_fuse_rmsnorm`` work, since
     their schema wrappers and autograd registrations live in the core fork.  It
-    mutates the torch installation in place (reversible via
-    ``torch/lib/_orig_backup/``) and needs the matching full bundle from
+    leaves the torch installation intact and needs the matching full bundle from
     ``FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh``.
 
 Why the preload must happen before ``import torch``: PyTorch caches its
@@ -149,7 +148,7 @@ _preloaded = False
 
 
 def vendor_core_mode():
-    """True when the legacy vendor-core (symlink) path is requested."""
+    """True when the full vendor-core path is requested."""
     return _env.flag("FLAGOS_DCU_VENDOR_CORE")
 
 
@@ -262,10 +261,10 @@ def preload_dcu_device_libs():
 
 
 def ensure_dcu_libtorch_links():
-    """Legacy mode: symlink the active torch wheel's core .so to DTK's copies.
+    """Legacy mode: select DTK's core via a private torch facade.
 
-    Idempotent; reversible via ``torch/lib/_orig_backup/``.  Returns True if
-    links are in place (or already were), False if there was nothing to do.
+    Idempotent; the installed torch wheel is never changed. Returns True if
+    vendor core was selected, False if there was nothing to do.
     """
     # Pre-flight: a bundle built in decoupled mode has no core .so, and the
     # generic linker would fail mid-way on the first missing one with a message
@@ -298,7 +297,7 @@ def setup_dcu_runtime():
     """Make DTK's kernels available in this process, before ``import torch``.
 
     Dispatches on ``FLAGOS_DCU_VENDOR_CORE``: decoupled preload by default,
-    legacy relink when the env var is set.
+    full vendor-core selection when the env var is set.
     """
     if vendor_core_mode():
         return ensure_dcu_libtorch_links()
@@ -306,8 +305,5 @@ def setup_dcu_runtime():
 
 
 def restore_original_libtorch():
-    """Undo ensure_dcu_libtorch_links(): remove links, restore backups.
-
-    A no-op for decoupled mode, which never modified ``torch/lib``.
-    """
+    """Compatibility no-op; neither runtime mode modifies the installed wheel."""
     _restore(_CORE_SO, _HIP_SO, bundle_dirname=_BUNDLE_DIR)

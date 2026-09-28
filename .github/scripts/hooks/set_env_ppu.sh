@@ -18,7 +18,7 @@
 # is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
 # ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
 # build bundles its libtorch into lib_ppu/. The stock CPU wheel's core libs must
-# be replaced by the PPU build at import time. This script:
+# be selected from the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
 #   3. Installs the published FlagTree and FlagGems wheels into it.
@@ -29,7 +29,7 @@
 # Nothing here reads a host bind mount, so the environment is fully reproducible
 # from the image plus this script's indexes.
 #
-# Core replacement itself is automatic at `import torch_fl` time, gated on
+# Core selection itself is automatic at `import torch_fl` time, gated on
 # lib_ppu/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
 # backends_ppu.conf. No mode env var is involved.
 
@@ -170,7 +170,7 @@ echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
 # PPU core libs are a local USE_CUDA=1 build, not an upstream wheel. They carry
 # the undefined symbols libtorch_fl.so needs, so they must be bundled and later
-# symlinked over the stock CPU wheel's core libs at import time.
+# selected via a private torch facade at import time.
 for path in \
   "$VENDOR_TORCH_LIB/libc10.so" \
   "$VENDOR_TORCH_LIB/libtorch_cpu.so" \
@@ -396,7 +396,7 @@ done
 # Why --no-deps on both: flag_gems would otherwise pull PyPI's NVIDIA `triton`,
 # replacing the FlagTree build installed one line earlier, and it would also
 # re-resolve `torch`, replacing the pinned CPU wheel this whole setup depends on
-# (the PPU core libs are symlinked over *that* wheel's libs at import time).
+# (the PPU core libs are selected through a private facade at import time).
 # FlagGems' own runtime deps are installed explicitly above.
 #
 # FlagTree first: it owns the `triton` package, and flag_gems' vendor detection
@@ -506,11 +506,16 @@ PY
 # resolve to the venv rather than the image's editable-install path.
 if [[ "$CI_STAGE" == "integration" ]]; then
   python - <<'PY'
+import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import sys
 
-import torch_fl  # noqa: F401  (swaps in the bundled PPU libtorch core)
+lib = Path(importlib.util.find_spec("torch").submodule_search_locations[0]) / "lib"
+before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in lib.iterdir() if path.is_file()}
+import torch_fl  # noqa: F401  (selects the bundled PPU libtorch core)
 import flag_gems
 import triton
 import triton.backends
@@ -522,6 +527,10 @@ assert str(Path(flag_gems.__file__).resolve()).startswith(venv), flag_gems.__fil
 
 vendor = flag_gems.runtime.backend.device_finder.DeviceDetector()._get_vendor_from_env()
 assert vendor == "thead", f"flag_gems selected vendor {vendor!r}; PPU_SDK={os.environ.get('PPU_SDK')!r}"
+
+after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+         for path in lib.iterdir() if path.is_file()}
+assert after == before, "PPU import changed the installed torch/lib"
 
 print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
 print(f"triton backends: {sorted(triton.backends.backends)}")

@@ -258,21 +258,22 @@ def _conf_routes_to_flaggems() -> bool:
 
 
 def _relink_vendor_libtorch() -> None:
-    """Point the active torch wheel's torch/lib at this wheel's bundled libtorch.
+    """Select bundled vendor libtorch before importing torch.
 
     MetaX, DCU and PPU all run on a *forked* libtorch whose core .so
     (libc10/libtorch_cpu/libtorch_python/...) differ from the upstream ones a
     stock ``torch==X.Y.Z+cpu`` wheel ships.  A self-contained wheel bundles them
-    under torch_fl/lib_{maca,dcu,ppu}/ and symlinks them over the stock files;
+    under torch_fl/lib_{maca,dcu,ppu}/ and expose them through a private torch
+    package facade without modifying the installed PyTorch wheel;
     see torch_fl.accelerator._vendor_libtorch for why a ctypes preload alone is
     not enough there.
 
     This MUST run before `import torch` -- afterwards libc10 is already mapped
-    and relinking is too late.  Every backend's entry point is idempotent and a
+    and selecting another core is too late. Every backend's entry point is idempotent and a
     no-op when its bundle dir is absent (a plain in-place build, where torch
     already IS the vendor wheel), so this is safe to call unconditionally.
 
-    MetaX is a boxing-only build: accel=="metax" relinks unconditionally (an
+    MetaX is a boxing-only build: accel=="metax" selects its core unconditionally (an
     in-place build reaches the vendor torch through FLAGOS_VENDOR_TORCH_LIB, a
     self-contained wheel through lib_maca/).  DCU and PPU have no native-kernel
     mode, so bundle-dir presence alone decides.  The CUDA backend is not here:
@@ -293,7 +294,7 @@ def _relink_vendor_libtorch() -> None:
     if accel == "dcu":
         # Decoupled by default: preload only DTK's device libraries on top of the
         # official core, leaving torch/lib untouched. FLAGOS_DCU_VENDOR_CORE=1
-        # selects the legacy full-core relink. See
+        # selects the full vendor core through a private facade. See
         # torch_fl/accelerator/dcu/_dcu_libtorch_link.py.
         from torch_fl.accelerator.dcu._dcu_libtorch_link import setup_dcu_runtime
 
@@ -1805,7 +1806,7 @@ def _phase_conf() -> None:
 
 
 def _phase_preload() -> None:
-    """Relink/preload the vendor libtorch and CUDA assets before `import torch`.
+    """Select/preload the vendor libtorch and CUDA assets before `import torch`.
 
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
@@ -1952,7 +1953,7 @@ def _phase_ecosystem() -> None:
 
     # Initialize CUDA runtime only when FlagGems Python path needs it (CUDA backend ops).
     # The check must be against the *build* backend, not torch.cuda.is_available():
-    # a DCU self-contained wheel relinks a hipified libtorch into a stock +cpu torch,
+    # a DCU self-contained wheel selects a hipified libtorch for a stock +cpu torch,
     # which makes is_available() return True even though the CUDA runtime libs are
     # absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not found".
     # PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
@@ -2010,7 +2011,7 @@ def _phase_ecosystem() -> None:
 # being implied by where each statement happens to sit in the file.
 #
 #   1. conf          pick the op-routing config and stage the MetaX shim
-#   2. preload       relink/preload the vendor libtorch and CUDA assets
+#   2. preload       select/preload the vendor libtorch and CUDA assets
 #   3. claim         import torch, free PrivateUse1, load _C, install the device
 #   4. vendor_compat install the vendor runtime shims and resolve GEMS_VENDOR
 #   5. ecosystem     FlagGems prep, CUDA alias, distributed/DDP/DataParallel/

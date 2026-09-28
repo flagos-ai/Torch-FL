@@ -22,17 +22,15 @@
 # boxing kernels dispatch into.
 #
 # FLAGOS_DCU_VENDOR_CORE=1 selects the legacy mode: bundle DTK's full core set
-# plus all of torch.libs/, which torch_fl then symlinks over the official
-# wheel's torch/lib at import (see torch_fl/accelerator/_vendor_libtorch.py).
-# That is the rollback path and the only mode where the DTK-private fused
+# plus all of torch.libs/, which torch_fl selects through a private torch
+# facade (see torch_fl/accelerator/_vendor_libtorch.py). It is the only mode where the DTK-private fused
 # schemas are usable, since their schema wrappers live in the core fork.
 #
 # Note on $ORIGIN semantics: glibc expands $ORIGIN from the path the object was
-# *opened by*, not from the resolved real path. So opening a bundled .so through
-# a torch/lib symlink gives $ORIGIN = torch/lib, where the hashed deps that sit
-# alongside it in lib_dcu do not exist. Both the runtime preload and the legacy
-# relink therefore walk the bundle's own paths, and the RUNPATH below names the
-# bundle dir relatively as well.
+# opened by. The private facade contains links to every bundled dependency, so
+# a library opened through either the bundle or the facade finds its peers via
+# $ORIGIN. Preloading from the bundle path also gives those dependencies global
+# scope before torch imports its core runtime.
 #
 # Not bundled in either mode: the DTK driver stack (libgalaxyhip.so.5
 # libMIOpen.so.1 librocblas.so.4 librccl.so.1, ...) stays on the target under
@@ -109,25 +107,17 @@ VENDOR_RPATH="${VENDOR_RPATH}:${ROCM_PATH}/llvm/lib:/opt/hyhal/lib"
 VENDOR_RPATH="${VENDOR_RPATH}:/opt/mpi/lib:/opt/mellanox/hcoll/lib"
 
 if [ "${VENDOR_CORE}" = "1" ]; then
-  echo "Mode                 : legacy (vendor core libs bundled + relinked)"
+  echo "Mode                 : legacy (vendor core libs bundled for private facade)"
 else
   echo "Mode                 : decoupled (device libs only, official core kept)"
 fi
 echo "Source DTK torch/lib : ${SRC}"
 echo "Target lib_dcu       : ${LIB_DCU}"
 echo "DTK driver path      : ${ROCM_PATH}"
-# Libs inside the bundle must be openable from two paths:
-#   1. Directly from lib_dcu/ (the runtime preload walks this one, see
-#      torch_fl/accelerator/dcu/_dcu_libtorch_link.py)
-#   2. Through the torch/lib/ symlinks in legacy mode (when `import torch`
-#      loads libtorch_global_deps.so itself)
-# glibc expands $ORIGIN from the path the object was opened by, so path #2 gives
-# $ORIGIN = torch/lib and cannot find libmpi-3fcb240d.so.40.40.3 and other
-# auditwheel-mangled libs sitting in lib_dcu. Both dirs are siblings under
-# site-packages (torch/lib -> ../../torch_fl/lib_dcu), so adding one more
-# relative path covers both cases. Measured: without this, `import torch` before
-# `import torch_fl` dies on libmpi not found.
-BUNDLE_ORIGIN="\$ORIGIN:\$ORIGIN/../../torch_fl/lib_dcu"
+# The full bundle is available both at lib_dcu/ and through the private torch
+# facade's lib/ directory. Its auditwheel-mangled dependencies live beside each
+# opened library in either view, so one $ORIGIN covers both paths.
+BUNDLE_ORIGIN="\$ORIGIN"
 BUNDLE_RPATH="${BUNDLE_ORIGIN}:${VENDOR_RPATH}"
 
 # torch.libs/: auditwheel dir sibling to torch/, filenames carry hash suffixes.
@@ -292,7 +282,7 @@ PY
   fi
   "${PYTHON:-python}" "${REPO_DIR}/scripts/vendor/check_dcu_core_abi.py" "${_ABI_ARGS[@]}"
 
-  # A decoupled wheel that still carries a vendor core lib would relink nothing
+  # A decoupled wheel that still carries a vendor core lib would select nothing
   # but shadow the official core through RPATH order; fail loudly instead.
   for _core in "${CORE_SO[@]}"; do
     if [ -e "${LIB_DCU}/${_core}" ]; then
@@ -337,6 +327,10 @@ if [ -f "${_VENDOR_VERSION_PY}" ]; then
   echo "Copied vendor version.py -> lib_dcu/vendor_version.py"
   grep -E "^\s*(hip|rocm|__version__)\s*(:|=)" "${LIB_DCU}/vendor_version.py" || true
 else
+  if [ "${VENDOR_CORE}" = "1" ]; then
+    echo "error: vendor PyTorch version metadata missing: ${_VENDOR_VERSION_PY}" >&2
+    exit 1
+  fi
   echo "warning: ${_VENDOR_VERSION_PY} not found, triton hcu backend may not activate" >&2
 fi
 

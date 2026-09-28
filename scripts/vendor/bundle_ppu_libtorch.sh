@@ -64,9 +64,9 @@ CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so)
 MKL_SO=(libmkl_core.so.1 libmkl_gnu_thread.so.1 libmkl_intel_lp64.so.1)
 
 VENDOR_RPATH="${PPU_SDK}/CUDA_SDK/lib64:${PPU_SDK}/lib:${PPU_SDK}/lib64"
-# Same as DCU: libs inside the bundle must be openable from both lib_ppu/
-# and torch/lib/ symlink paths.
-BUNDLE_ORIGIN="\$ORIGIN:\$ORIGIN/../../torch_fl/lib_ppu"
+# Libraries are opened from lib_ppu/ or from the private torch facade's lib/.
+# Both directories contain the complete bundled dependency set.
+BUNDLE_ORIGIN="\$ORIGIN"
 
 echo "Source PPU torch/lib : ${SRC}"
 echo "Target lib_ppu       : ${LIB_PPU}"
@@ -74,6 +74,13 @@ echo "PPU SDK path         : ${PPU_SDK}"
 
 bundle_copy_so "${SRC}" "${LIB_PPU}" "${BUNDLE_ORIGIN}:${VENDOR_RPATH}" 1 "${CORE_SO[@]}"
 bundle_copy_so "${SRC}" "${LIB_PPU}" "${BUNDLE_ORIGIN}:${VENDOR_RPATH}" 0 "${CUDA_SO[@]}"
+
+VENDOR_VERSION_PY="$(cd "${SRC}/.." && pwd)/version.py"
+if [ ! -f "${VENDOR_VERSION_PY}" ]; then
+  echo "error: vendor PyTorch version metadata missing: ${VENDOR_VERSION_PY}" >&2
+  exit 1
+fi
+cp -fL "${VENDOR_VERSION_PY}" "${LIB_PPU}/vendor_version.py"
 
 # System MKL: a direct DT_NEEDED of libtorch_cpu.so, with no same-named file
 # in the official wheel.

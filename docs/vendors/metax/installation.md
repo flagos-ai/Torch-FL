@@ -279,7 +279,7 @@ pip install "git+https://github.com/FlagOpen/FlagGems.git@5a58df410c551c4f4eb41d
 
 The FlagGems revision is load-bearing, not cosmetic. A generated kernel calls its operator by package-level name (`flag_gems.<name>`), resolved by `getattr` at dispatch time (`csrc/aten/backends/flagos/python_op_caller.cc:GetFunc`), so a cohort that does not define one of those names fails exactly the routes that use it. The revision above resolves all 666 names the checked-in `csrc/aten/generated/flaggems_python_kernels.cc` calls; `.github/scripts/set_env_metax.sh` measures that ratio before every integration job and refuses to run when it is not `0/666`.
 
-That measurement has an import-order requirement of its own, because the setup venv runs the stock `torch+cpu` wheel: its `torch/lib` carries no `libtorch_cuda.so`, so `torch.cuda.is_available()` is `False` until `torch_fl` has relinked that directory to the MetaX libtorch. In that state the MetaX Triton backend reports itself inactive (`triton/backends/metax/driver.py:is_active`), and `flag_gems` reaches `triton.runtime.driver.active` while it is being imported (`flag_gems.fused` -> `pointwise_dynamic` -> `triton.runtime.jit.parse` -> the Triton hint manager's backend lookup), so a bare `import flag_gems` in the venv fails with `RuntimeError: 0 active drivers ([]). There should only be one.` — the FlagGems install is fine, the probe is simply running too early. The ratio is therefore taken in a process that imports `torch_fl` first, at the end of the setup script rather than beside the FlagGems install, since `torch_fl` is not importable until `setup.py build_ext` has run. The same rule applies to any ad-hoc check against the venv: `import torch_fl`
+That measurement has an import-order requirement of its own, because the setup venv runs the stock `torch+cpu` wheel: its `torch/lib` carries no `libtorch_cuda.so`, so `torch.cuda.is_available()` is `False` until `torch_fl` has selected the MetaX libtorch through a private facade. In that state the MetaX Triton backend reports itself inactive (`triton/backends/metax/driver.py:is_active`), and `flag_gems` reaches `triton.runtime.driver.active` while it is being imported (`flag_gems.fused` -> `pointwise_dynamic` -> `triton.runtime.jit.parse` -> the Triton hint manager's backend lookup), so a bare `import flag_gems` in the venv fails with `RuntimeError: 0 active drivers ([]). There should only be one.` — the FlagGems install is fine, the probe is simply running too early. The ratio is therefore taken in a process that imports `torch_fl` first, at the end of the setup script rather than beside the FlagGems install, since `torch_fl` is not importable until `setup.py build_ext` has run. The same rule applies to any ad-hoc check against the venv: `import torch_fl`
 first, or the device surface is not there yet.
 
 ### Runtime Configuration
@@ -413,7 +413,7 @@ handle is refreshed from `at::globalContext().allowTF32CuBLAS()` on every call.
 
 ### `import torch_fl` fails with configuration errors or missing libraries
 
-**Cause:** the MetaX-specific import-time setup (libtorch relink, `torch.cuda`
+**Cause:** the MetaX-specific import-time setup (libtorch selection, `torch.cuda`
 shim) did not run.
 
 **Fix:** confirm the wheel was built for MetaX (`FLAGOS_ACCELERATOR=metax`, recorded at

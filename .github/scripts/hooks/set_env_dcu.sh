@@ -366,7 +366,7 @@ fi
 # above, with the DTK-private ATen symbols supplied by
 # libflagos_dtk_core_compat.so. The script's own ABI guard fails the build if a
 # DTK release ever needs more from the vendor core than the shim covers.
-# FLAGOS_DCU_VENDOR_CORE=1 selects the legacy full-core bundle + relink; CI
+# FLAGOS_DCU_VENDOR_CORE=1 selects the full-core bundle and private facade; CI
 # smoke-tests that path separately below.
 FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
   PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
@@ -434,8 +434,8 @@ PY
   # fork -- so it must not be allowed to rot. Two properties are checked:
   #
   #   1. Selecting legacy mode against a decoupled bundle fails fast with the
-  #      mode-mismatch message, before mutating torch/lib.
-  #   2. A full legacy bundle relinks, computes, and restores cleanly.
+  #      mode-mismatch message, without touching torch/lib.
+  #   2. A full legacy bundle selects the vendor core and computes cleanly.
   #
   # Order matters: this runs *after* the decoupled gates because it rebuilds
   # lib_dcu. The last step restores the decoupled bundle, which is what the wheel
@@ -459,7 +459,14 @@ PY
       PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
       bash scripts/vendor/bundle_dcu_libtorch.sh
     FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
-import torch_fl  # noqa: F401  (relinks torch/lib, then preloads DTK's core)
+import hashlib
+import importlib.util
+from pathlib import Path
+
+lib = Path(importlib.util.find_spec("torch").submodule_search_locations[0]) / "lib"
+before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in lib.iterdir() if path.is_file()}
+import torch_fl  # noqa: F401  (selects DTK's core without changing torch/lib)
 import torch
 
 from torch_fl.accelerator.dcu._dcu_libtorch_link import restore_original_libtorch
@@ -470,13 +477,15 @@ try:
     b = torch.randn(64, 64, device="flagos")
     err = (a @ b).cpu() - (a.cpu() @ b.cpu())
     assert err.abs().max().item() < 1e-3, err.abs().max().item()
+    after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in lib.iterdir() if path.is_file()}
+    assert after == before, "DCU vendor-core import changed the installed torch/lib"
     print(
         f"Legacy DCU runtime OK: torch {torch.__version__} hip {torch.version.hip}, "
         f"mm err {err.abs().max().item():.3g}"
     )
 finally:
-    # Leave the venv's torch/lib as we found it: the symlinks point into a bundle
-    # that is about to be replaced by the decoupled one.
+    # Kept for older callers. The private facade leaves the installed wheel intact.
     restore_original_libtorch()
 PY
     CPU_TORCH_ROOT="$CPU_TORCH_ROOT" python - <<'PY'
@@ -489,7 +498,7 @@ links = sorted(entry.name for entry in os.scandir(lib) if entry.is_symlink())
 if links or (lib / "_orig_backup").exists():
     print(f"::error::legacy smoke left {lib} modified: {links}")
     sys.exit(1)
-print(f"Legacy smoke rolled back cleanly: no symlinks or backup in {lib}")
+print(f"Legacy smoke left the installed torch/lib unchanged: {lib}")
 PY
 
     echo "Restoring the decoupled bundle for the wheel"

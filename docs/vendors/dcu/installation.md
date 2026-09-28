@@ -71,11 +71,15 @@ bash scripts/vendor/bundle_dcu_libtorch.sh                    # stages DTK's dev
 ```
 
 `FLAGOS_DCU_VENDOR_CORE=1` on both commands selects the legacy mode, which
-bundles DTK's full core set and symlinks it over the installed torch wheel
-(reversible via `torch/lib/_orig_backup/`). Use it if you need DTK's private
+bundles DTK's full core set and selects it through a private torch facade,
+leaving the installed wheel unchanged. Use it if you need DTK's private
 fused ops, which are unreachable in the default mode. The two bundle layouts are
 not interchangeable: selecting a mode that does not match the bundle on disk
 fails at import rather than half-wiring the process.
+
+The vendor-core path checks the vendor and front-end PyTorch three-part versions
+before loading any libraries. Import `torch_fl` before `torch` so the private
+facade can select the matching runtime.
 
 Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Point the active (stock) torch wheel's ``torch/lib`` at a bundled vendor libtorch.
+"""Load a bundled vendor libtorch through a private torch package overlay.
 
 Why this exists
 ---------------
@@ -26,12 +26,13 @@ self-contained wheel must ship the core libs, not just the vendor one.
 
 Pure ``ctypes`` preloading does NOT work for core libs.  The stock wheel's
 ``_C.so`` / ``libtorch_python.so`` carry an ``$ORIGIN`` RUNPATH that pulls the
-upstream ``libc10.so`` back in *by full path*, so the process ends up with two
-libc10 and dies in duplicate static init (``Key already registered ...
-caffe2_report_cpu_memory_usage``).  The robust fix is to make the physical files
-that RUNPATH resolves to *be* the vendor ones: replace the stock wheel's
-``torch/lib/<so>`` with symlinks into the bundle dir.  Originals move to
-``torch/lib/_orig_backup/``, so the operation is fully reversible.
+upstream ``libc10.so`` back in, so the process ends up with two libc10 and dies
+in duplicate static init.  Instead, create a private ``torch/`` facade under a
+user-owned cache.  Its top-level files point at the installed torch package;
+its ``lib/`` points at the bundled vendor libraries, falling back to stock
+files only when the bundle does not provide one.  Put that facade first on
+``sys.path`` (and ``PYTHONPATH`` for child interpreters) before importing torch.
+The installed torch wheel is never written to, including on interrupted startup.
 
 The CUDA backend is the one exception and does not use this module: the official
 ``+cpu`` wheel's core libs *are* the upstream ones, so only the extra CUDA libs
@@ -39,31 +40,33 @@ are missing and a ctypes preload (``torch_fl.__init__._preload_cuda_assets``)
 suffices.
 
 Callers must invoke this from ``torch_fl/__init__.py`` BEFORE ``import torch``
-(afterwards libc10 is already mapped and relinking is too late).  Every entry
-point here is idempotent.
+(afterwards libc10 is already mapped and selecting another ABI is too late).
+Every entry point here is idempotent. A vendor-core bundle must contain the
+required core libraries and a ``vendor_version.py`` with the same three-part
+PyTorch version as the installed front-end. An unpackaged vendor torch can use
+its adjacent ``version.py``. A legacy library-only image may declare that
+version with ``TORCH_FL_VENDOR_TORCH_VERSION`` instead.
 
 Note on ``$ORIGIN`` and symlinks: glibc expands ``$ORIGIN`` from the path the
-object was *loaded by*, NOT from its resolved target.  Opening
-``torch/lib/libtorch_cpu.so`` (a symlink) therefore gives ``$ORIGIN`` =
-``torch/lib``, where a bundle-internal dependency does not exist -- measured on
-DCU, whose ``libc10.so`` needs the auditwheel-mangled ``libgflags-8aee0f6c.so``
-that ships in the bundle dir:
-
-    ctypes.CDLL(".../torch/lib/libc10.so")     -> libgflags-...so: not found
-    ctypes.CDLL(".../torch_fl/lib_dcu/libc10.so") -> OK
-
-So ``_preload_global`` dlopens the *bundle* paths, not the symlinks.  That also
-covers the symlinks: glibc keys loaded objects by (device, inode), and a symlink
-shares both with its target, so a later lookup that resolves through
-``torch/lib`` finds the object already mapped instead of re-opening it.
+object was loaded by, not from its resolved target.  ``_preload_global`` opens
+vendor libraries by their bundle paths so their bundled dependencies resolve;
+the facade includes those dependencies as well for later RUNPATH lookups.
 """
 
+import ast
 import ctypes
+import hashlib
+import importlib
 import importlib.util
+import json
 import os
+import re
+import shutil
+import stat
 import sys
+import tempfile
 
-# One flag per bundle dir: a process only ever relinks for its own backend, but
+# One flag per bundle dir: a process only ever activates its own backend, but
 # keying by name keeps the module reentrant and makes the no-op cheap.
 _done = set()
 # dlopen handles kept alive for the process lifetime (see _preload_global).
@@ -151,27 +154,165 @@ def discover_vendor_torch_lib(
     return _scan_sibling_envs(probe_so, vendor_markers)
 
 
-def _link_one(dst_dir, backup_dir, name, target, required, vendor):
-    """Idempotently point ``dst_dir/name`` at ``target`` (a vendor .so)."""
-    dst = os.path.join(dst_dir, name)
-    if not os.path.exists(target):
-        if required:
-            raise FileNotFoundError(f"{vendor} so missing: {target}")
-        return
-    # Already correctly linked?
-    if os.path.islink(dst) and os.path.realpath(dst) == os.path.realpath(target):
-        return
-    # Back up a real (non-symlink) original once.
-    if os.path.exists(dst) and not os.path.islink(dst):
-        os.makedirs(backup_dir, exist_ok=True)
-        bak = os.path.join(backup_dir, name)
-        if not os.path.exists(bak):
-            os.replace(dst, bak)
-        else:
-            os.remove(dst)
-    elif os.path.islink(dst):
-        os.remove(dst)  # stale/incorrect link
-    os.symlink(target, dst)
+def _same_core_files(active, src, core_so):
+    """Only skip the overlay when every active core library is byte-identical."""
+    for name in core_so:
+        current = os.path.join(active, name)
+        vendor = os.path.join(src, name)
+        if not os.path.isfile(current) or not os.path.isfile(vendor):
+            return False
+        if os.path.samefile(current, vendor):
+            continue
+        if os.path.getsize(current) != os.path.getsize(vendor):
+            return False
+        digests = []
+        for path in (current, vendor):
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digests.append(digest.digest())
+        if digests[0] != digests[1]:
+            return False
+    return True
+
+
+def _torch_base_version(path):
+    """Read the generated torch version without importing (or executing) torch."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+    except (OSError, SyntaxError) as exc:
+        raise RuntimeError(f"Cannot read PyTorch ABI version from {path}") from exc
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__version__"
+            for target in node.targets
+        ):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError) as exc:
+            raise RuntimeError(f"Invalid PyTorch ABI version in {path}") from exc
+        match = (
+            re.match(r"^(\d+)\.(\d+)\.(\d+)", value) if isinstance(value, str) else None
+        )
+        if match:
+            return match.group(0)
+    raise RuntimeError(f"Missing PyTorch ABI version in {path}")
+
+
+def _check_abi_version(active, src, vendor):
+    installed = os.path.join(os.path.dirname(active), "version.py")
+    bundled = os.path.join(src, "vendor_version.py")
+    source = (
+        bundled
+        if os.path.isfile(bundled)
+        else os.path.join(os.path.dirname(src), "version.py")
+    )
+    front_version = _torch_base_version(installed)
+    if os.path.isfile(source):
+        vendor_version = _torch_base_version(source)
+    else:
+        # Older MetaX images expose only a staged torch/lib directory. The
+        # image owner can declare its ABI explicitly; an undeclared ABI fails.
+        vendor_version = os.environ.get("TORCH_FL_VENDOR_TORCH_VERSION", "")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", vendor_version):
+            raise RuntimeError(
+                f"{vendor} libtorch ABI version metadata missing: {source}; "
+                "supply torch/version.py or TORCH_FL_VENDOR_TORCH_VERSION"
+            )
+    if front_version != vendor_version:
+        raise RuntimeError(
+            f"{vendor} libtorch {vendor_version} is incompatible with the "
+            f"installed PyTorch Python package {front_version}; install a matching "
+            "torch wheel or rebuild the vendor bundle"
+        )
+
+
+def _overlay_cache_root():
+    """Use a private cache so concurrent interpreters share only complete overlays."""
+    root = os.path.join(tempfile.gettempdir(), f"torch-fl-libtorch-{os.getuid()}")
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    info = os.lstat(root)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"Unsafe vendor libtorch overlay cache: {root}")
+    return root
+
+
+def _overlay_key(active, src):
+    paths = []
+    for path in (os.path.dirname(active), active, src):
+        info = os.stat(path)
+        paths.append(
+            (os.path.realpath(path), info.st_dev, info.st_ino, info.st_mtime_ns)
+        )
+    return hashlib.sha256(repr((sys.version_info[:2], paths)).encode()).hexdigest()[:24]
+
+
+def _overlay_marker(active):
+    """Return the vendor source if active torch/lib already belongs to an overlay."""
+    marker = os.path.join(os.path.dirname(os.path.dirname(active)), ".ready")
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            return json.load(handle).get("vendor_source")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _link_entries(src, dst, *, skip=()):
+    for entry in os.scandir(src):
+        if entry.name in skip:
+            continue
+        os.symlink(entry.path, os.path.join(dst, entry.name))
+
+
+def _prepare_overlay(active, src):
+    """Atomically publish a private torch facade, leaving the installed wheel intact."""
+    torch_root = os.path.dirname(active)
+    if not os.path.isfile(os.path.join(torch_root, "__init__.py")):
+        raise RuntimeError(f"No torch package found beside {active}")
+    if os.path.exists(os.path.join(active, "_orig_backup")):
+        raise RuntimeError(
+            f"{active} contains a legacy _orig_backup; restore the installed "
+            "PyTorch wheel before using the immutable vendor runtime"
+        )
+    cache = _overlay_cache_root()
+    key = _overlay_key(active, src)
+    overlay = os.path.join(cache, key)
+    ready = os.path.join(overlay, ".ready")
+    if os.path.isfile(ready):
+        return overlay
+    stage = tempfile.mkdtemp(prefix=f"{key}.", dir=cache)
+    try:
+        facade = os.path.join(stage, "torch")
+        os.mkdir(facade)
+        facade_lib = os.path.join(facade, "lib")
+        os.mkdir(facade_lib)
+        _link_entries(torch_root, facade, skip=("lib",))
+        # Vendor files take precedence.  Including the whole bundle is required
+        # for auditwheel-mangled and other $ORIGIN-relative dependencies.
+        vendor_names = {entry.name for entry in os.scandir(src)}
+        _link_entries(src, facade_lib)
+        _link_entries(active, facade_lib, skip=vendor_names | {"_orig_backup"})
+        with open(os.path.join(stage, ".ready"), "w", encoding="utf-8") as handle:
+            json.dump({"vendor_source": os.path.realpath(src)}, handle)
+        try:
+            os.replace(stage, overlay)
+        except OSError:
+            # Another process may have published the same complete overlay.
+            if not os.path.isfile(ready):
+                raise
+    finally:
+        if os.path.isdir(stage):
+            shutil.rmtree(stage)
+    return overlay
 
 
 def _preload_global(lib_dir, load_order, core_so, vendor, fallback_dir=None):
@@ -187,7 +328,7 @@ def _preload_global(lib_dir, load_order, core_so, vendor, fallback_dir=None):
     ``lib_dir`` must be the *source* dir (the bundle), never the ``torch/lib``
     symlink dir -- see the ``$ORIGIN`` note in the module docstring.
 
-    ``fallback_dir`` (the stock wheel's ``torch/lib``) covers a non-core .so the
+    ``fallback_dir`` (the private facade's ``torch/lib``) covers a non-core .so the
     vendor image simply does not ship.  Measured: the MetaX CI's
     ``/opt/vendor-libtorch/lib`` has no ``libshm.so``, so the bundle has none
     either, yet ``libtorch_python.so`` carries a hard ``DT_NEEDED: libshm.so``.
@@ -195,7 +336,7 @@ def _preload_global(lib_dir, load_order, core_so, vendor, fallback_dir=None):
     satisfies that DT_NEEDED by soname against the already-loaded object; without
     it the loader only searches the bundle's RUNPATH and dies with "libshm.so:
     cannot open shared object file".  Its own deps (libc10, libtorch_cpu) resolve
-    through ``torch/lib``, where they are symlinks into the bundle, so they share
+    through the facade's ``torch/lib``, where they are symlinks into the bundle, so they share
     an inode with what is already mapped and no second copy appears.
     """
     handles = []
@@ -226,24 +367,24 @@ def ensure_vendor_libtorch_links(
     vendor=None,
     load_order=None,
 ):
-    """Symlink the active torch wheel's core .so to the vendor wheel's copies.
+    """Select the vendor core through a private torch facade before importing torch.
 
     Args:
         bundle_dirname: dir inside the wheel holding the bundle ("lib_maca", ...).
         core_so: .so that MUST be present; a missing one raises.
-        extra_so: .so the stock ``+cpu`` wheel may not ship at all (the vendor
-            libs); linked in fresh when available, skipped silently otherwise.
+        extra_so: vendor libraries expected by the caller; retained for API
+            compatibility. The facade contains every file in the vendor bundle.
         env_override: env var naming an explicit source dir.
         vendor_markers: substrings identifying a vendor torch in ``version.py``.
         probe_so: file whose presence proves a dir is a real vendor libtorch dir.
             Defaults to the first entry of ``extra_so``, else of ``core_so``.
         vendor: label used in error messages.
-        load_order: when given, dlopen these RTLD_GLOBAL after linking, in this
+        load_order: when given, dlopen these RTLD_GLOBAL after creating the facade, in this
             order (see ``_preload_global``). Names absent from ``core_so`` may be
             missing; a missing core .so raises.
 
-    Returns True if links are in place (or already were), False if there was
-    nothing to do (no bundle, no vendor torch found, or already running on it).
+    Returns True when vendor libraries are selected (or already active), False
+    when no bundle or vendor torch is available. The installed wheel is immutable.
     """
     if bundle_dirname in _done:
         return True
@@ -256,47 +397,55 @@ def ensure_vendor_libtorch_links(
     )
     if active is None or src is None:
         return False
-    # Already running on the vendor wheel itself -> nothing to do.
-    if os.path.realpath(active) == os.path.realpath(src):
+    _check_abi_version(active, src, label)
+    # An inherited PYTHONPATH can select an already published facade before this
+    # module is imported in a subprocess. Its core libraries are already correct.
+    if _overlay_marker(active) == os.path.realpath(src):
+        if load_order:
+            _runtime_handles.extend(
+                _preload_global(src, load_order, core_so, label, fallback_dir=active)
+            )
         _done.add(bundle_dirname)
         return True
-
-    backup = os.path.join(active, "_orig_backup")
+    if os.path.realpath(active) == os.path.realpath(src) or _same_core_files(
+        active, src, tuple(core_so) + tuple(extra_so)
+    ):
+        _done.add(bundle_dirname)
+        return True
+    if "torch" in sys.modules:
+        raise RuntimeError(
+            f"{label} requires a different libtorch core; import torch_fl before "
+            "torch so the vendor runtime can be selected without changing the "
+            "installed PyTorch wheel"
+        )
     for name in core_so:
-        _link_one(active, backup, name, os.path.join(src, name), True, label)
-    for name in extra_so:
-        _link_one(active, backup, name, os.path.join(src, name), False, label)
+        path = os.path.join(src, name)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{label} libtorch runtime missing: {path}")
+
+    overlay = _prepare_overlay(active, src)
+    facade_lib = os.path.join(overlay, "torch", "lib")
 
     if load_order:
-        # dlopen from `src` (the bundle), not from `active`: loading through the
-        # torch/lib symlinks would expand $ORIGIN to torch/lib and lose the
-        # bundle-internal deps. `active` is only the fallback for a non-core .so
-        # the vendor image does not ship. Keep the handles alive for the process
-        # lifetime.
+        # Load bundle dependencies through their real source paths. The facade
+        # provides a safe fallback for libraries missing from the bundle.
         _runtime_handles.extend(
-            _preload_global(src, load_order, core_so, label, fallback_dir=active)
+            _preload_global(src, load_order, core_so, label, fallback_dir=facade_lib)
         )
 
+    sys.path.insert(0, overlay)
+    inherited = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = (
+        os.pathsep.join((overlay, inherited)) if inherited else overlay
+    )
+    importlib.invalidate_caches()
     _done.add(bundle_dirname)
     return True
 
 
 def restore_original_libtorch(core_so, extra_so=(), bundle_dirname=None):
-    """Undo ensure_vendor_libtorch_links(): drop links, restore the backups."""
-    active = active_torch_lib()
-    if active is None:
-        return
-    backup = os.path.join(active, "_orig_backup")
-    for name in tuple(core_so) + tuple(extra_so):
-        dst = os.path.join(active, name)
-        if os.path.islink(dst):
-            os.remove(dst)
-    if os.path.isdir(backup):
-        for name in os.listdir(backup):
-            os.replace(os.path.join(backup, name), os.path.join(active, name))
-        try:
-            os.rmdir(backup)
-        except OSError:
-            pass
-    if bundle_dirname:
-        _done.discard(bundle_dirname)
+    """Compatibility no-op: the installed torch wheel no longer needs restoring.
+
+    A loaded libtorch cannot be switched back inside the same interpreter. The
+    private facade and its paths therefore remain active until process exit.
+    """

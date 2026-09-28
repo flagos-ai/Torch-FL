@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Symlink the PPU libtorch .so into the active (official) torch wheel's lib dir.
+"""Select PPU libtorch through a private torch facade.
 
 PPU builds against ``PPU_SDK/CUDA_SDK`` with its own ``FLAGOS_ACCELERATOR=ppu`` value;
 the CUDA boxing kernels apply unchanged.  What differs from a real NVIDIA box is the
@@ -25,8 +25,8 @@ That local build also links the system MKL from ``/usr/local/lib``
 (``libmkl_core``/``libmkl_gnu_thread``/``libmkl_intel_lp64``), which the bundling
 script copies into ``lib_ppu/`` alongside the core libs.
 
-See ``torch_fl.accelerator._vendor_libtorch`` for the symlink mechanism and why a
-ctypes preload cannot replace core libs.  No env gate: the relink is skipped when
+See ``torch_fl.accelerator._vendor_libtorch`` for the private facade mechanism and
+why a ctypes preload cannot replace core libs. No env gate: selection is skipped when
 ``torch_fl/lib_ppu/`` was not bundled or torch already IS the PPU build.  The PPU
 SDK runtime stays on the target under ``/usr/local/PPU_SDK``.
 """
@@ -99,10 +99,10 @@ def _discover_ppu_torch_lib():
 
 
 def ensure_ppu_libtorch_links():
-    """Symlink the active torch wheel's core .so to the PPU build's copies.
+    """Select the PPU core without changing the installed torch wheel.
 
-    Idempotent; reversible via ``torch/lib/_orig_backup/``.  Returns True if
-    links are in place (or already were), False if there was nothing to do.
+    Idempotent. Returns True if the vendor core is selected, False if there was
+    nothing to do.
     """
     return ensure_vendor_libtorch_links(
         _BUNDLE_DIR,
@@ -168,5 +168,5 @@ def restore_ppu_cuda_version():
 
 
 def restore_original_libtorch():
-    """Undo ensure_ppu_libtorch_links(): remove links, restore backups."""
+    """Compatibility no-op; the installed torch wheel is never modified."""
     _restore(_CORE_SO, _CUDA_SO, bundle_dirname=_BUNDLE_DIR)

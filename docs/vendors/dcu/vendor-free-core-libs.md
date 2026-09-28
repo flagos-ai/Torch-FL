@@ -5,8 +5,8 @@ A DCU wheel runs DTK's HIP kernels on the **official** PyTorch core. Only DTK's
 `libtorch_global_deps.so`, `libtorch_python.so` and `libshm.so` come from the
 stock `torch` wheel, which is never modified.
 
-This is the default. `FLAGOS_DCU_VENDOR_CORE=1` selects the previous behaviour
-(symlink DTK's whole core set over the installed wheel) as a rollback path.
+This is the default. `FLAGOS_DCU_VENDOR_CORE=1` selects DTK's whole core set
+through a private torch facade, also leaving the installed wheel unchanged.
 
 - Measured: 2026-08-29, Hygon DCU (8 cards), DTK 2604
 - Vendor torch: `2.10.0+das.opt1.dtk2604`; official torch: `2.10.0+cpu`
@@ -133,22 +133,22 @@ fails with `Error in dlopen: libcaffe2_nvrtc.so`.
 Nothing under the official `torch/lib` is touched, so torch_fl installs beside a
 stock torch and uninstalling leaves no trace.
 
-Legacy mode has one extra ordering constraint, for the opposite reason: it *does*
-symlink the bundle into `torch/lib`, and `LD_LIBRARY_PATH` (which names `torch/lib`
-in a source checkout, and does so in CI) is searched ahead of every RUNPATH. So a
-transitive `DT_NEEDED` resolves to the symlink, and glibc expands `$ORIGIN` from the
-path the object was *opened by* — `torch/lib`, where the bundle's hash-suffixed deps
-do not exist. Measured on the CI image: `libtorch.so` -> `libtorch_hip.so` ->
+The former legacy mode had one extra ordering constraint: it symlinked the
+bundle into the installed `torch/lib`, and `LD_LIBRARY_PATH` (which names that
+directory in CI) was searched ahead of every RUNPATH. A transitive `DT_NEEDED`
+could therefore resolve through that symlink, and glibc expanded `$ORIGIN` from
+the path the object was opened by — the installed `torch/lib`, where the bundle's
+hash-suffixed deps did not exist. Measured on the CI image: `libtorch.so` -> `libtorch_hip.so` ->
 `libmagma.so` picked up through the symlink dies with
 
 ```text
 OSError: libmkl_gf_lp64-e350bb11.so: cannot open shared object file
 ```
 
-even though that MKL library sits in `lib_dcu` right next to `libmagma.so`. Opening
-the same file from the bundle path loads it, and the later by-soname resolution then
-matches the already-mapped object by inode. The legacy preload list therefore covers
-every `.so` it symlinks, `libmagma.so` included, ahead of `libtorch.so`.
+even though that MKL library sits in `lib_dcu` right next to `libmagma.so`. The
+current facade exposes every bundled dependency beside `libmagma.so`, and the
+preload list opens vendor libraries from the bundle path, `libmagma.so` included,
+ahead of `libtorch.so`.
 
 ### 4. A `torch.cuda` shim
 
@@ -252,8 +252,10 @@ Non-zero device: `flagos:3` mm err 2.86e-06. Bundle gates:
 libflagos_dtk_core_compat.so`, `Verified: no vendor core lib in the bundle`, and
 the `DT_NEEDED` self-check reports no unresolved names.
 
-Legacy rollback re-verified end to end (`legacy torch 2.10.0+cpu 6.3.26113 err
-1.19e-06`), with `restore_original_libtorch()` leaving `torch/lib` clean.
+Legacy rollback was re-verified end to end before the private-facade change
+(`legacy torch 2.10.0+cpu 6.3.26113 err 1.19e-06`). The current facade path
+still needs on-device verification; `restore_original_libtorch()` is now a
+compatibility no-op because it never changes the installed `torch/lib`.
 
 The packaged wheel was also installed on its own, into a venv holding nothing but
 the official `torch 2.10.0+cpu`, and run from a directory outside the checkout, so
@@ -278,7 +280,7 @@ vendor_core_mode True   add err 0.0   mm err 2.86e-06
 # Default: device libs only, on the official torch wheel.
 bash scripts/vendor/bundle_dcu_libtorch.sh
 
-# Rollback: DTK's full core set, relinked into the torch install.
+# Fallback: DTK's full core set, selected through a private torch facade.
 FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh
 ```
 

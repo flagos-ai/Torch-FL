@@ -57,9 +57,9 @@ CORE_SO=(libc10.so libtorch_cpu.so libtorch.so libtorch_global_deps.so libtorch_
 CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so)
 
 VENDOR_RPATH="${MACA_PATH}/lib:${MACA_PATH}/lib64"
-# Same as DCU: libs inside the bundle must be openable from both lib_maca/
-# and torch/lib/ symlink paths.
-BUNDLE_ORIGIN="\$ORIGIN:\$ORIGIN/../../torch_fl/lib_maca"
+# Libraries are opened from lib_maca/ or from the private torch facade's lib/.
+# Both directories contain the complete bundled dependency set.
+BUNDLE_ORIGIN="\$ORIGIN"
 
 echo "Source MetaX torch/lib : ${SRC}"
 echo "Target lib_maca        : ${LIB_MACA}"
@@ -67,6 +67,18 @@ echo "maca runtime path      : ${MACA_PATH}/lib"
 
 bundle_copy_so "${SRC}" "${LIB_MACA}" "${BUNDLE_ORIGIN}:${VENDOR_RPATH}" 0 \
     "${CORE_SO[@]}" "${CUDA_SO[@]}"
+
+VENDOR_VERSION_PY="$(cd "${SRC}/.." && pwd)/version.py"
+if [ -f "${VENDOR_VERSION_PY}" ]; then
+  cp -fL "${VENDOR_VERSION_PY}" "${LIB_MACA}/vendor_version.py"
+elif [[ "${TORCH_FL_VENDOR_TORCH_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  # A legacy image exposes only /opt/vendor-libtorch/lib, not torch/version.py.
+  # Its image owner must explicitly assert the ABI version during bundling.
+  printf '__version__ = "%s"\n' "$TORCH_FL_VENDOR_TORCH_VERSION" > "${LIB_MACA}/vendor_version.py"
+else
+  echo "error: vendor PyTorch version metadata missing: ${VENDOR_VERSION_PY}" >&2
+  exit 1
+fi
 
 # Strip the build machine's hard-coded MetaX torch/lib absolute path from
 # torch_fl.so, rewrite to find the forked libtorch from lib_maca inside the package.

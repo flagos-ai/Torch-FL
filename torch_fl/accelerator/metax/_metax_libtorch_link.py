@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Symlink MetaX libtorch .so into the active (official) torch wheel's lib dir.
+"""Select MetaX libtorch through a private torch facade.
 
 On MetaX we reuse PyTorch's CUDA boxing kernels by running
 the *MetaX* C++ runtime (libtorch_cpu.so / libtorch_cuda.so / libc10.so ...),
@@ -20,10 +20,10 @@ which is a hard fork exporting ``at::maca::*`` symbols.  With a stock
 ``torch==X.Y.Z+cpu`` front-end, the process must load that fork instead of the
 upstream .so shipped in ``torch/lib``.
 
-The mechanism -- symlink replacement, ``_orig_backup/``, the RTLD_GLOBAL preload,
+The mechanism -- private facade and RTLD_GLOBAL preload --
 and why a pure ctypes preload cannot do this on its own -- lives in
 ``torch_fl.accelerator._vendor_libtorch``.  This module is just the MetaX .so
-lists; whether to relink at all is decided by
+lists; whether to select the vendor runtime is decided by
 ``torch_fl.__init__._relink_vendor_libtorch`` (unconditional on a MetaX build --
 it is boxing-only, reaching the vendor torch through FLAGOS_VENDOR_TORCH_LIB or a
 self-contained lib_maca/ bundle).
@@ -50,7 +50,7 @@ _CORE_SO = (
     "libtorch_global_deps.so",
     "libtorch_python.so",
 )
-# CUDA .so the stock +cpu wheel does not ship at all; symlinked in fresh.
+# CUDA .so the stock +cpu wheel does not ship at all; exposed in the facade.
 # libshm.so is a DT_NEEDED of MetaX's libtorch_python.so (torch.multiprocessing's
 # shared-memory manager) and is a *different* build in the MetaX wheel, so it has
 # to come from the same set.
@@ -106,14 +106,13 @@ def _discover_maca_torch_lib():
 
 
 def ensure_maca_libtorch_links():
-    """Symlink the active torch wheel's core .so to the MetaX wheel's copies.
+    """Select the MetaX core without changing the installed torch wheel.
 
-    Idempotent; reversible via ``torch/lib/_orig_backup/``.  Returns True if
-    links are in place (or already were), False if there was nothing to do (no
+    Idempotent. Returns True if the vendor core is selected, False if there was nothing to do (no
     bundle, no MetaX torch found, or torch already IS the MetaX wheel).
 
-    Deciding *whether* to relink is the caller's job -- see
-    ``torch_fl.__init__._relink_vendor_libtorch``, which relinks on every MetaX
+    Deciding *whether* to select it is the caller's job -- see
+    ``torch_fl.__init__._relink_vendor_libtorch``, which runs on every MetaX
     build (a self-contained wheel finds lib_maca/, an in-place build finds the
     vendor torch through FLAGOS_VENDOR_TORCH_LIB).  This used to self-gate on a
     mode variable, which made the self-contained path a silent no-op:
@@ -133,5 +132,5 @@ def ensure_maca_libtorch_links():
 
 
 def restore_original_libtorch():
-    """Undo ensure_maca_libtorch_links(): remove links, restore backups."""
+    """Compatibility no-op; the installed torch wheel is never modified."""
     _restore(_CORE_SO, _CUDA_SO, bundle_dirname=_BUNDLE_DIR)

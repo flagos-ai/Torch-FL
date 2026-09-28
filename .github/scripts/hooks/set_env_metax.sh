@@ -39,8 +39,8 @@ import re
 from pathlib import Path
 
 if os.environ.get("GEMS_COHORT_PRELUDE") == "torch_fl":
-    # Must precede flag_gems: torch_fl points the stock +cpu wheel's torch/lib at
-    # the MetaX libtorch, and without that the MetaX FlagTree Triton resolves no
+    # Must precede flag_gems: torch_fl selects the MetaX core via a private facade.
+    # Without that, MetaX FlagTree Triton resolves no
     # active driver, so flag_gems raises at import. See the cohort check below.
     import torch_fl  # noqa: F401, E402
 
@@ -98,6 +98,9 @@ PY
   export PYTHONPATH=""
 else
   export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
+  # This image stages only the shared libraries, without torch/version.py.
+  # The image's vendor core is built against the pinned 2.10.0 Python wheel.
+  export TORCH_FL_VENDOR_TORCH_VERSION=2.10.0
   export FLAGOS_WHEEL_LOCAL=metax3.8.0
 fi
 export PATH="/opt/venv/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
@@ -267,7 +270,7 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
-  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL FLAGOS_VENDOR_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH
+  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
@@ -322,12 +325,12 @@ bash scripts/vendor/bundle_maca_libtorch.sh
 #     torch.cuda.is_available(); it is False for a torch/lib with no
 #     libtorch_cuda.so and for a device that is not visible alike.
 #
-#     Importing torch_fl is what removes that condition: it points the stock
-#     wheel's torch/lib at the MetaX libtorch (the bundle
+#     Importing torch_fl is what removes that condition: it selects the MetaX
+#     libtorch through a private facade (the bundle
 #     bundle_maca_libtorch.sh just wrote, or FLAGOS_VENDOR_TORCH_LIB), and it has
 #     to happen before `import torch` -- which is exactly the order the probe
-#     uses. The relink is on disk, so it holds for every later process, the
-#     tests included.
+#     uses. Child interpreters inherit the facade through PYTHONPATH; other
+#     processes select it independently when they import torch_fl first.
 #
 # torch_fl._C is what makes torch_fl importable at all, and build_ext has just
 # built it. The gate mirrors set_env_musa.sh's `import torch_fl._C` guard: on a
@@ -356,11 +359,22 @@ if [[ "$CI_STAGE" == "integration" ]]; then
     echo "FlagGems cohort: $FLAGGEMS_GAP kernel names resolve"
 
     python - <<'PY'
+import hashlib
+import importlib.util
+from pathlib import Path
+
+lib = Path(importlib.util.find_spec("torch").submodule_search_locations[0]) / "lib"
+before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in lib.iterdir() if path.is_file()}
 import torch_fl  # noqa: F401  -- must precede flag_gems; see the cohort check above
 
 import triton
 
 import flag_gems
+
+after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+         for path in lib.iterdir() if path.is_file()}
+assert after == before, "MetaX import changed the installed torch/lib"
 
 print(f"Triton: {triton.__version__} ({triton.__file__})")
 print(f"FlagGems: {flag_gems.__version__} ({flag_gems.__file__})")
