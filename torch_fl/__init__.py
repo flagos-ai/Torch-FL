@@ -65,6 +65,7 @@ def _is_ppu_build() -> bool:
 # through FLAGOS_BACKEND_CONFIG (nothing to resolve) or none was found. Handed to
 # the C++ routing table right after _C loads; read through backend_config_path().
 _BACKEND_CONFIG_PATH = ""
+_STARTUP_PROFILE = "full"
 
 
 def _select_backend_config() -> None:
@@ -1436,14 +1437,9 @@ def _register_distributed_backend():
       - All ``torch.distributed.*`` collectives work on flagos tensors without
         any monkeypatching — the ProcessGroup itself does the view conversion.
     """
-    try:
-        from torch_fl.comm import register_flagos_backend
+    from torch_fl.comm import register_flagos_backend
 
-        register_flagos_backend()
-    except Exception as e:
-        import warnings
-
-        warnings.warn(f"[torch_fl] Failed to register 'flagos' dist backend: {e}")
+    register_flagos_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -1774,9 +1770,8 @@ def _register_compile_backend():
         # vendor pass manager where no Python handler can reach it. Install the
         # guard here, not only on the flagos backend.
         patch_triton_64bit_guard()
-    except (ImportError, AttributeError):
-        # torch._dynamo not available (torch < 2.0) or inductor missing
-        pass
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError("torch.compile integration is unavailable") from exc
 
 
 def _register_bpu_compile_backend() -> None:
@@ -1788,27 +1783,118 @@ def _register_bpu_compile_backend() -> None:
     opposite of every other platform here, where the compile path is incidental
     and the kernels do the work.
 
-    Import failures are swallowed deliberately. The backend pulls in onnx and
-    (optionally) hbdk4, so on a board that has the runtime but not the
-    toolchain, raising here would make `import torch_fl` fail outright and take
-    the working eager path down with it.
+    The optional integration runner reports import failures independently. A
+    board without the ONNX toolchain can still use its eager fallback.
     """
     if _build_accelerator() != "bpu":
-        return
-    try:
-        from torch_fl.accelerator import bpu
+        raise RuntimeError("BPU compile backend requires a BPU build")
+    from torch_fl.accelerator import bpu
 
-        bpu.register()
-    except Exception as exc:  # noqa: BLE001
-        import warnings
+    bpu.register()
 
-        warnings.warn(
-            f'torch.compile(backend="bpu") is unavailable: {exc}. '
-            "Eager ops still work (they run on the CPU); the BPU offload path "
-            "needs onnx installed.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+
+_OPTIONAL_INTEGRATIONS = (
+    "apex",
+    "ddp",
+    "parallel_comm",
+    "dataparallel",
+    "data_parallel",
+    "compile",
+    "flex_attention",
+    "bpu",
+)
+_optional_integration_state = {}
+
+
+def _install_apex_compat() -> bool:
+    from torch_fl.compat.apex import install_apex_compat
+
+    return install_apex_compat()
+
+
+def _install_flex_attention_compat() -> bool:
+    from torch_fl.compat.flex_attention import install_flex_attention_compat
+
+    return install_flex_attention_compat()
+
+
+def optional_integration_status() -> dict:
+    """Report each optional hook as inactive, active, or failed with a reason."""
+    return {
+        name: _optional_integration_state.get(name, "inactive")
+        for name in _OPTIONAL_INTEGRATIONS
+    }
+
+
+def activate_optional_integrations(*names: str, strict: bool = True) -> dict:
+    """Install optional framework hooks after the mandatory device bootstrap.
+
+    Repeated calls do not wrap PyTorch objects twice. A failed hook is not
+    retried in the same process because it may have partly changed global
+    state. ``strict=False`` reports failures and continues with other hooks;
+    the import-time compatibility profile uses that mode. Explicit calls raise
+    so applications know when a requested integration was unavailable.
+    """
+    selected = names or tuple(
+        name
+        for name in _OPTIONAL_INTEGRATIONS
+        if name != "bpu" or _build_accelerator() == "bpu"
+    )
+    unknown = sorted(set(selected) - set(_OPTIONAL_INTEGRATIONS))
+    if unknown:
+        raise ValueError(f"Unknown torch_fl integration(s): {', '.join(unknown)}")
+
+    installers = {
+        "apex": _install_apex_compat,
+        "ddp": _patch_ddp_for_flagos,
+        "parallel_comm": _patch_comm_for_flagos,
+        "dataparallel": _patch_dataparallel_for_flagos,
+        "data_parallel": _patch_data_parallel_for_flagos,
+        "compile": _register_compile_backend,
+        "flex_attention": _install_flex_attention_compat,
+        "bpu": _register_bpu_compile_backend,
+    }
+    prerequisites = {
+        "dataparallel": ("parallel_comm",),
+        "data_parallel": ("parallel_comm", "dataparallel"),
+        "flex_attention": ("compile",),
+    }
+
+    def activate(name: str) -> None:
+        status = _optional_integration_state.get(name)
+        if status == "active":
+            return
+        if status is not None:
+            if strict:
+                raise RuntimeError(f"torch_fl integration {name} previously {status}")
+            return
+        for prerequisite in prerequisites.get(name, ()):
+            activate(prerequisite)
+            if _optional_integration_state.get(prerequisite) != "active":
+                message = f"failed: prerequisite {prerequisite} is unavailable"
+                _optional_integration_state[name] = message
+                if strict:
+                    raise RuntimeError(f"torch_fl integration {name} {message}")
+                _env.warn(f"Optional integration {name} {message}")
+                return
+        try:
+            installed = installers[name]()
+        except Exception as exc:  # noqa: BLE001 - independent optional hooks
+            message = f"failed: {type(exc).__name__}: {exc}"
+            _optional_integration_state[name] = message
+            if strict:
+                raise RuntimeError(f"torch_fl integration {name} {message}") from exc
+            _env.warn(f"Optional integration {name} {message}")
+        else:
+            if installed is False:
+                if strict:
+                    raise RuntimeError(f"torch_fl integration {name} is unavailable")
+            else:
+                _optional_integration_state[name] = "active"
+
+    for name in selected:
+        activate(name)
+    return optional_integration_status()
 
 
 def _phase_conf() -> None:
@@ -1817,6 +1903,10 @@ def _phase_conf() -> None:
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
     """
+    global _STARTUP_PROFILE
+    _STARTUP_PROFILE = _env.choice(
+        "FLAGOS_STARTUP_PROFILE", ("full", "minimal"), "full"
+    )
     _select_backend_config()
 
     # Optional: PyTorch wheels may require libcudart.so.12 version tags on MetaX.
@@ -1944,18 +2034,8 @@ def _phase_vendor_compat() -> None:
     # the normal DeviceBoxingGuard. Install an optional, CUDA-alias-only shim at the
     # common MultiTensorApply boundary; it remains lazy when Apex is not installed
     # and supports applications that import Apex either before or after torch_fl.
-    try:
-        from torch_fl.compat.apex import install_apex_compat
-
-        install_apex_compat()
-    except Exception as exc:  # noqa: BLE001 - Apex compatibility is optional
-        import warnings
-
-        warnings.warn(
-            f"[torch_fl] Apex compatibility setup was skipped: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    if _STARTUP_PROFILE == "full":
+        activate_optional_integrations("apex", strict=False)
 
     # Patch FlagGems codegen config before any FlagGems code is imported
     _patch_flaggems_codegen_config()
@@ -1963,8 +2043,7 @@ def _phase_vendor_compat() -> None:
 
 
 def _phase_ecosystem() -> None:
-    """FlagGems prep, CUDA alias, and distributed/DDP/DataParallel/compile/BPU
-    registration.
+    """Mandatory FlagGems/distributed setup, then profile-selected framework hooks.
 
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
@@ -1995,32 +2074,18 @@ def _phase_ecosystem() -> None:
 
     _register_distributed_backend()
 
-    _patch_ddp_for_flagos()
-
-    _patch_comm_for_flagos()
-    _patch_dataparallel_for_flagos()
-    _patch_data_parallel_for_flagos()
-
-    _register_compile_backend()
-
-    # flex_attention gates every entry point on a hard-coded {cuda, cpu, xpu,
-    # hpu} device set, so a flagos tensor is refused before any kernel is chosen.
-    # Installed after the compile backend because the fused path it unblocks
-    # needs that backend registered; optional and idempotent either way.
-    try:
-        from torch_fl.compat.flex_attention import install_flex_attention_compat
-
-        install_flex_attention_compat()
-    except Exception as exc:  # noqa: BLE001 - flex-attention support is optional
-        import warnings
-
-        warnings.warn(
-            f"[torch_fl] flex-attention compatibility setup was skipped: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
+    if _STARTUP_PROFILE == "full":
+        activate_optional_integrations(
+            "ddp",
+            "parallel_comm",
+            "dataparallel",
+            "data_parallel",
+            "compile",
+            "flex_attention",
+            strict=False,
         )
-
-    _register_bpu_compile_backend()
+        if _build_accelerator() == "bpu":
+            activate_optional_integrations("bpu", strict=False)
 
 
 # ===========================================================================
@@ -2035,8 +2100,7 @@ def _phase_ecosystem() -> None:
 #   2. preload       select/preload the vendor libtorch and CUDA assets
 #   3. claim         import torch, free PrivateUse1, load _C, install the device
 #   4. vendor_compat install the vendor runtime shims and resolve GEMS_VENDOR
-#   5. ecosystem     FlagGems prep, CUDA alias, distributed/DDP/DataParallel/
-#                    compile/BPU
+#   5. ecosystem     mandatory FlagGems/distributed setup, then optional hooks
 #
 # Constraints, each next to the phase it constrains:
 #   * preload before claim: the vendor libtorch has to be in place before
@@ -2061,5 +2125,7 @@ __all__ = [
     "distributed",
     "get_registered_ops",
     "is_flaggems_enabled",
+    "activate_optional_integrations",
+    "optional_integration_status",
     "quantization",
 ]

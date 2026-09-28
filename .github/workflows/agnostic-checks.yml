@@ -100,6 +100,8 @@ jobs:
             tests/unit/test_run_unit_tests.py \
             tests/unit/test_set_env_common.py \
             tests/unit/test_set_env_runner.py \
+            tests/unit/test_startup_lifecycle.py \
+            tests/unit/test_startup_subprocess.py \
             tests/unit/test_transformers_automation.py \
             tests/unit/test_transformers_hf_tests.py \
             tests/unit/test_transformers_model_probe.py \

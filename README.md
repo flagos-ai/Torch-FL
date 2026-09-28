@@ -148,6 +148,7 @@ For device queries, synchronization, and multi-device usage patterns, see the [Q
 
 ### Architecture
 
+- [Startup Lifecycle](docs/architecture/startup-lifecycle.md) — Mandatory bootstrap and explicit framework integration activation
 - [Distributed Collectives](docs/architecture/distributed-flagcx.md) — ProcessGroupFlagOS, FlagCX, and vendor fallbacks
 - [Profiler Integration](docs/architecture/profiler.md) — torch.profiler parity and CUPTI integration
 - [torch.compile Integration](docs/architecture/torch-compile-integration.md) — Inductor GPU device registration

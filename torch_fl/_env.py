@@ -408,6 +408,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "0 (off)",
         "Leave the FlagGems Python layer unregistered (C++ stub-only mode)",
     ),
+    "FLAGOS_STARTUP_PROFILE": (
+        SCOPE_RUNTIME,
+        "full",
+        "Choose full import-time framework integration or minimal startup with "
+        "explicit activation. FlagTree, FlagGems, and FlagCX remain required "
+        "dependencies in both profiles",
+    ),
     # --- Runtime diagnostics ---------------------------------------------
     "FLAGOS_LOG": (
         SCOPE_RUNTIME,

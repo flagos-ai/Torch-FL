@@ -90,6 +90,7 @@ from what was compiled in; the variables below override or widen that table.
 | `FLAGOS_OP_<name>` | Runtime | No default | Per-operator backend override (e.g. `FLAGOS_OP_add__Tensor=cuda`); replace `.` with `__` in op names |
 | `FLAGOS_FORCE_BACKEND` | Runtime | No default (off) | Repin every op onto one backend family for A/B measurement: `flaggems`, `vendor`, or `tileops`. An op the target does not implement is reported on stderr and left on its configured backend; an op it does implement but this wheel did not compile raises rather than falling back. The `tileops` mode repins the ops the conf annotates `# tileops` and additionally needs the `tileops` package, an SM90 device and a `FLAGOS_BUILD_TILEOPS=ON` build |
 | `FLAGOS_DISABLE_FLAGGEMS_PY` | Runtime | `0` (off) | Leave the FlagGems Python layer unregistered (C++ stub-only mode) |
+| `FLAGOS_STARTUP_PROFILE` | Runtime | `full` | `full` activates framework compatibility hooks during import; `minimal` leaves those hooks for explicit activation. FlagTree, FlagGems, and FlagCX remain required in both profiles |
 
 `FLAGOS_FORCE_BACKEND` is a single enum rather than the three switches it
 replaced (`ALL_USE_FLAGGEMS`, `ALL_USE_VENDOR`, `FLAGOS_USE_TILEOPS`), so "two at
