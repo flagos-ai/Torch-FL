@@ -127,13 +127,42 @@ def _wheel(tmp_path, manifest, *, version="0.1.0+cuda13.3", requirements=None):
     return path
 
 
+def _snapshot_modules():
+    """The names in ``sys.modules`` now, to diff across a call under test.
+
+    Outright membership is not assertable from a test in this file. pytest
+    imports every test module of the session during collection, and twenty-five
+    files under tests/unit import torch_fl at module level, so by the time any
+    test here runs the name is already present whatever order the command line
+    gave -- ``pytest tests/unit/`` cannot pass a bare ``"torch_fl" not in
+    sys.modules``. The diff across the call is the property this file is about,
+    and under the per-file CI runner (``run_unit_tests.py``), where torch_fl is
+    absent, that diff is the outright membership test.
+
+    An import already satisfied from ``sys.modules`` leaves no trace in a diff,
+    so it cannot be read as proof that the tool never asks for the package:
+    ``test_script_cli_does_not_import_torch_fl`` covers that case by running the
+    CLI in a subprocess with a poisoned ``torch_fl`` on ``PYTHONPATH``.
+    """
+    return set(sys.modules)
+
+
+def _assert_imported_no_torch_fl(since):
+    added = {
+        name
+        for name in set(sys.modules) - since
+        if name == "torch_fl" or name.startswith("torch_fl.")
+    }
+    assert not added, f"the preflight imported {sorted(added)}"
+
+
 def test_wheel_manifest_agrees_with_metadata_without_importing_package(
     tmp_path, manifest
 ):
-    assert "torch_fl" not in sys.modules
+    before = _snapshot_modules()
     loaded = preflight.load_wheel(_wheel(tmp_path, manifest))
     assert loaded == manifest
-    assert "torch_fl" not in sys.modules
+    _assert_imported_no_torch_fl(before)
 
 
 def test_wheel_rejects_missing_or_stale_manifest(tmp_path, manifest):
@@ -220,9 +249,10 @@ def test_strict_tested_rejects_optional_build_version_changes(manifest, monkeypa
 
 def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):
     wheel = _wheel(tmp_path, manifest)
+    before = _snapshot_modules()
     assert preflight.main(["--wheel", str(wheel), "--platform", "musa"]) == 1
     assert "Wheel platform is cuda" in capsys.readouterr().err
-    assert "torch_fl" not in sys.modules
+    _assert_imported_no_torch_fl(before)
 
 
 def test_script_cli_does_not_import_torch_fl(tmp_path, manifest):
