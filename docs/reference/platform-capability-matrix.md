@@ -20,7 +20,7 @@ when a platform gains or loses one.
 | `dcu` | CUDA-ABI boxing (hipified DTK torch) | `cuda` (+ `dcu` DTK-core shim) | — (boxing) | `dcu` | 2037 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
-| `musa` | vendor-native (mudnn) | `musa` | `musa` | — (no dir) | 2037 | yes |
+| `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI boxing (Kuiper) | `tsingmicro` | — | — (no dir) | 53 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 
@@ -55,7 +55,11 @@ platform, not a per-build choice.
   the `torch.compile(backend="bpu")` path.
 - **TsingMicro** has a sparse hand-written conf (53 routes) and no CI job; its
   Python compat module does not exist.
-- **MUSA** has no Python compat module and no compile-only CI job.
+- **MUSA** has no Python compat module and no compile-only CI job. It does have a
+  `torch_fl/accelerator/musa/` directory, but it holds only `musa_stream.py` (the
+  stream/event wrappers `torch.flagos.Stream` dispatches to) — not a
+  `_musa_compat.py`, so the "Python compat" column below reads "stream/event only"
+  rather than naming a module.
 - **PPU** profiles through the CUPTI tracer but emits no `gpu_memset` activity, which is the
   capability `tests/integration/profiler_support.py` declares for it: a measured 512x512
   matmul trace carries the `kernel`, `gpu_memcpy` and `privateuse1_runtime` categories and no
@@ -72,4 +76,4 @@ against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
 - `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, musa, tsingmicro
 - `csrc/aten/backends/`: ascend, flagos, gcu, musa, soft_lowp
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, ppu
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, musa, ppu
