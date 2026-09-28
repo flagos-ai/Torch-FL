@@ -103,6 +103,46 @@ inline bool MudnnSupportsArithmeticDtype(at::ScalarType type) {
   return type != at::kBool && MudnnSupportsDtype(type);
 }
 
+// The matmul family is narrower still: DOUBLE has a Tensor::Type in the table
+// above, but every entry point mudnn's MatMul/BatchMatMul expose rejects it --
+// Run and RunWithBiasAdd both answer "NOT_SUPPORTED in MatMul::Run, Reason:
+// unsupported data type DOUBLE,DOUBLE,DOUBLE,,DOUBLE" (measured on mudnn v3300,
+// same for BatchMatMul). So `MudnnSupportsDtype(kDouble)` is not a statement
+// that fp64 matmul runs; it is only that the type maps. The matmul kernels gate
+// on this predicate and refuse a dtype it rejects -- see
+// MusaRaiseUnsupportedMatmulDtype -- rather than computing it on the host.
+inline bool MudnnSupportsMatmulDtype(at::ScalarType type) {
+  return type != at::kDouble && MudnnSupportsArithmeticDtype(type);
+}
+
+// A dtype the predicate above rejects has no accelerator path: mudnn's matmul
+// entry points reject it outright, and FlagGems' MThreads addmm/baddbmm lose
+// fp64 as well (a float32 operand cast, and an IS_FP64 flag no launch site ever
+// passes). The backend config routes the matmul family to `musa`, and `musa` is
+// a claim that the op runs on the device, so these kernels raise instead of
+// quietly computing on the host: a tensor the conf asked the accelerator for
+// must not come back from the CPU.
+//
+// The error names the two things that do work, and only those. Going through
+// `FLAGOS_OP_<op>=none` is deliberately not one of them: `none` is a
+// registration-time conf value -- codegen skips m.impl() for it so the call
+// reaches the boxed cpu_fallback -- and the matmul family is registered (mudnn
+// has the kernels), so setting that override at runtime selects an empty slot
+// and raises the dispatcher's "routed to 'none' ... but the op is registered on
+// PrivateUse1" message instead of computing anything. The host path a user can
+// actually take is to move the operands, which is what the message says.
+[[noreturn]] inline void MusaRaiseUnsupportedMatmulDtype(const char* op,
+                                                         at::ScalarType type) {
+  // `type` streams as a ScalarType name ("Double", "Bool"); the dtype name a
+  // user writes in Python comes from getDtypeNames, so the message uses that.
+  TORCH_CHECK(false, op, ": ", c10::getDtypeNames(type).first,
+              " is not a dtype the MUSA (mudnn) matmul kernels support, and the "
+              "backend config routes ", op,
+              " to musa, which runs on the device only. Cast the operands to "
+              "float32, float16 or bfloat16, or move them to the host with "
+              "`.cpu()` and run the op there.");
+}
+
 // A musa device pointer resolves only against the *current* device, so an op on
 // flagos:1 must run with device 1 selected. Restores the previous device.
 class MusaDeviceGuard {

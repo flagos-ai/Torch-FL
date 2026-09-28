@@ -21,6 +21,8 @@
 //   - _conj
 //   - add.Tensor
 //   - add_.Tensor
+//   - addmm
+//   - baddbmm
 //   - div.Tensor
 //   - div.Tensor_mode
 //   - div_.Tensor

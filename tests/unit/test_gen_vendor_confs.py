@@ -281,6 +281,8 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
         "_conj",
         "add.Tensor",
         "add_.Tensor",
+        "addmm",
+        "baddbmm",
         "div.Tensor",
         "div.Tensor_mode",
         "div_.Tensor",

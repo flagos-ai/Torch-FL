@@ -1524,6 +1524,23 @@ NATIVE_TRITON_GAPS = {
         "_conj",
         "add.Tensor",
         "add_.Tensor",
+        # addmm/baddbmm: FlagGems' MThreads matmul kernels lose fp64, and they
+        # lose it in two different ways. `_mthreads/ops/baddbmm.py` declares an
+        # `IS_FP64` constexpr that `_baddbmm_launch` never passes to the kernel,
+        # so the accumulator is unconditionally float32 and the fp64 call
+        # raises in the Triton front end. `_mthreads/ops/addmm.py` downcasts
+        # both operands to float32 before the dot, so an fp64 call returns a
+        # float32 answer without saying so. Measured on the MUSA CI runner with
+        # flag_gems 5.4.0 and torch 2.10.0+cpu, 64x64x64 against a CPU fp64
+        # reference: `baddbmm` raised `CompilationError` and `addmm` returned a
+        # float32-grade answer (the gap tracks the fp32 operand rounding, and
+        # its size moves with the seed; the downcast is the stable fact). The
+        # vendor kernel that takes both over is T_ADDMM
+        # in codegen_mudnn.py; the route and this entry are two halves of one
+        # claim. FlagGems is told about the two kernels separately, and these
+        # entries come off when a release no longer ships the defect.
+        "addmm",
+        "baddbmm",
         "div.Tensor",
         "div.Tensor_mode",
         "div_.Tensor",

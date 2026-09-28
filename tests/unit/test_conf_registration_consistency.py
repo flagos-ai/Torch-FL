@@ -309,7 +309,7 @@ def test_conf_route_counts_are_stable():
         "dcu": {"flaggems": 454, "cuda": 1583},
         "gcu": {"none": 1605, "gcu": 179, "flaggems": 253},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
-        "musa": {"flaggems": 467, "none": 1518, "musa": 52},
+        "musa": {"flaggems": 465, "none": 1518, "musa": 54},
         "ppu": {"flaggems": 591, "cuda": 1446},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
