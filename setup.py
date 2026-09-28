@@ -643,6 +643,64 @@ def _bundle_cuda_assets() -> None:
         print(f"[setup] bundled CUDA assets into torch_fl/lib: {', '.join(copied)}")
 
 
+_NCCL_EXT_BUILD_PATH = os.path.join(
+    SOURCE_DIR, "torch_fl", "comm", "_nccl_ext", "build.py"
+)
+
+
+def _load_nccl_ext_builder():
+    """Import torch_fl/comm/_nccl_ext/build.py without importing torch_fl.
+
+    Loaded from its path rather than as ``torch_fl.comm._nccl_ext.build``: that
+    form imports torch_fl, which imports torch, which -- with device-backend
+    autoloading on -- imports the half-built native package this build is in the
+    middle of producing. build.py is stdlib-only at import time for exactly this
+    reason; tests/unit/test_nccl_ext_build.py loads it the same way.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "torch_fl_nccl_ext_build", _NCCL_EXT_BUILD_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Cannot load the _flagos_nccl builder at {_NCCL_EXT_BUILD_PATH}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _nccl_ext_extension():
+    """The ``_flagos_nccl`` Extension for this accelerator, or None.
+
+    None means the accelerator does not wire the native comm bridge into its
+    wheel (the builder's docstring names the DCU-only scope, and why); the
+    standalone builder still covers that platform. A configuration error on an
+    accelerator that *is* wired is raised instead of skipped: a released DCU
+    wheel without this extension is the defect, so an unresolvable DTK link set
+    has to stop the build rather than quietly ship a wheel whose
+    ProcessGroupFlagOS has no native RCCL fallback.
+
+    Called from _get_setup_kwargs() under RUN_BUILD_DEPS, so a real build pass
+    always reaches it. That is deliberate -- the DTK link set is resolvable
+    exactly when a DCU build is possible at all, and setup.py must not be able
+    to describe a DCU wheel it cannot build.
+    """
+    if not os.path.isfile(_NCCL_EXT_BUILD_PATH):
+        return None
+    builder = _load_nccl_ext_builder()
+    try:
+        extension = builder.wheel_extension()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"FLAGOS_ACCELERATOR={FLAGOS_ACCELERATOR} selected, but the "
+            f"_flagos_nccl native comm bridge cannot be configured: {exc}"
+        ) from exc
+    if extension is not None:
+        print(f"[setup] native comm bridge target: {extension.name}")
+    return extension
+
+
 def _verify_built_native_libs() -> None:
     lib = os.path.join(BASE_DIR, "torch_fl", "lib", "libtorch_fl.so")
     if not os.path.isfile(lib):
@@ -679,9 +737,39 @@ def _verify_built_native_libs() -> None:
 class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
+    def _prepare_nccl_extension(self):
+        """Finish the torch_fl.comm._nccl_ext._flagos_nccl target in place.
+
+        The target itself is appended in _get_setup_kwargs() so setuptools'
+        bookkeeping (finalize_options' ext_map, _needs_stub, get_outputs) sees
+        it. What can only be added here is torch's own include and library
+        paths, which belong to the interpreter build_deps() has just run with.
+        """
+        builder = _load_nccl_ext_builder()
+        for extension in self.extensions:
+            if extension.name != builder.WHEEL_EXTENSION_NAME:
+                continue
+            from torch.utils.cpp_extension import include_paths, library_paths
+
+            # Torch's paths go last so DTK's cuda.h/nccl.h win over any
+            # torch-shipped copy, the ordering build.py's CppExtension gives.
+            extension.include_dirs += include_paths()
+            extension.library_dirs += library_paths()
+            # The c10/torch/torch_cpu the factory's pybind module links against,
+            # mirroring CppExtension in torch_fl/comm/_nccl_ext/build.py.
+            extension.libraries += ["c10", "torch", "torch_cpu"]
+            print(
+                "[setup] _flagos_nccl link set: "
+                + ", ".join(extension.libraries)
+                + " | "
+                + ", ".join(extension.extra_link_args)
+            )
+            return
+
     def run(self):
         build_deps()
         _write_compatibility_manifest(self.distribution.get_version())
+        self._prepare_nccl_extension()
         # ``build`` runs build_py before build_ext, but CMake installs package
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
         # list, so copy late-generated files explicitly into wheel staging.
@@ -789,6 +877,21 @@ def _get_setup_kwargs():
             extra_link_args=extra_link_args,
         )
     ]
+    # torch_fl.comm._nccl_ext._flagos_nccl: the factory that exposes the
+    # vendor's ProcessGroupNCCL to a CPU-only torch wheel. Added to ext_modules
+    # here rather than at build_ext time so setuptools' own bookkeeping --
+    # finalize_options' ext_map/_needs_stub, get_outputs, and the inplace copy
+    # back into torch_fl/comm/_nccl_ext/ -- sees the target. torch's include and
+    # library paths are added later, in BuildExtWithCmake (they need the
+    # interpreter build_deps() runs with).
+    #
+    # Gated on RUN_BUILD_DEPS: resolving the DCU link set reads DTK paths that
+    # only a build environment has, so a metadata-only pass (egg_info, sdist,
+    # --version) must not need them.
+    if RUN_BUILD_DEPS:
+        nccl_ext = _nccl_ext_extension()
+        if nccl_ext is not None:
+            ext_modules.append(nccl_ext)
 
     package_data = {
         "torch_fl": [
@@ -813,6 +916,12 @@ def _get_setup_kwargs():
             "lib_ppu/*.so*",
             "lib_ppu/vendor_version.py",
             "include/*.h",
+            # The native comm bridge's source, so the standalone builder
+            # (comm/_nccl_ext/build.py) can still rebuild the extension from an
+            # installed wheel. build.py itself ships with the package; the .cpp
+            # next to it does not, and a release that omitted it left users
+            # unable to rebuild _flagos_nccl in place.
+            "comm/_nccl_ext/*.cpp",
             # The DTK-private symbol manifest that libflagos_dtk_core_compat.so
             # must export, shipped so an installed wheel can be re-audited with
             # scripts/vendor/check_dcu_core_abi.py against a different DTK release.

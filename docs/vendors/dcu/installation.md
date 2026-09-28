@@ -327,6 +327,14 @@ project, so it stays opt-in instead of being assumed either way.
 
 Multi-card works with FlagGems enabled, over FlagCX or the RCCL fallback. The automatic `GEMS_VENDOR=hygon` routes `ProcessGroupFlagOS` to the CUDA-ABI profile (zero-copy `_flagos_to_cuda_view` + `ProcessGroupNCCL`, which on DTK is RCCL: `dist.is_nccl_available() == True` and `torch.cuda.nccl.version()` reports `(2, 22, 3)`).
 
+The RCCL tier needs `ProcessGroupNCCL`, which the CPU-only `torch==2.10.0+cpu` core this wheel front-ends does not export — `torch.distributed.ProcessGroupNCCL` is absent, so without the bridge the tier cannot be built at all and the group falls through to host-staged gloo. On DCU that class is supplied by `_flagos_nccl`, a pybind factory built against the bundled `lib_dcu` (`libc10_hip` / `libtorch_hip`) plus `librccl`; since #366 the wheel packages it at `torch_fl/comm/_nccl_ext/`, so an installed wheel reaches RCCL with no source checkout and no `build.py` run. Confirm what the installed package actually carries before relying on the tier:
+
+```bash
+python -m pytest tests/integration/test_comm_native_bridge.py -v
+```
+
+That file is what CI runs for this tier (`.github/configs/dcu.yml`, the `Native comm bridge` group) in its wheel-only workspace, so a released wheel cannot silently lose the tier again. It asserts two things: the factory loads from inside the installed `torch_fl`, and a world-size-1 `flagos` group resolves its inner backend to `nccl` — with neither the FlagCX nor the staged-gloo skip reason set — and completes a collective. `torch.distributed.ProcessGroupNCCL` being absent from the CPU-only torch is expected and is the reason the bridge exists; the test does not assert it either way. FlagCX is tried first when `flagcx` is importable, so this tier is what remains when it is not.
+
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1  # RCCL warns when unset; affects
                                     # multi-card throughput and stability

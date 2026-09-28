@@ -60,6 +60,11 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ascend: requires Ascend NPU hardware")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA hardware")
     config.addinivalue_line("markers", "gcu: requires Enflame GCU hardware")
+    # `dcu` is registered in ops/conftest.py too, where the per-platform skip
+    # table reads it. A DCU-only contract at the top level of tests/integration/
+    # (test_comm_native_bridge.py) needs it registered here as well: ops/conftest
+    # is loaded only when something under ops/ is collected.
+    config.addinivalue_line("markers", "dcu: requires Hygon DCU hardware")
     # The multi-device contract files sit at the top level of tests/integration/,
     # where nothing sweeps by default: every manifest names what it runs, so a
     # file added there is picked up by no CI job (issue #391). They are selected

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import setuptools
-from setuptools import Distribution
+from setuptools import Distribution, Extension
 from setuptools.command.build_ext import build_ext
 
 
@@ -304,3 +304,103 @@ def test_setup_resolves_the_table_defaults(monkeypatch, clean_kernel_env):
         assert namespace["_kernel_switches"](accelerator) == row["kernel_defaults"], (
             accelerator
         )
+
+
+def _make_minimal_dtk(root):
+    """Just enough of a DTK tree for the DCU _flagos_nccl link set to resolve."""
+    for relative in (
+        "cuda/cuda-12/include/cuda.h",
+        "include/rccl/nccl.h",
+        "lib/librccl.so",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
+def _make_minimal_vendor_torch_lib(root):
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("libc10_hip.so", "libtorch_hip.so"):
+        (root / name).touch()
+
+
+def _dcu_bridge_env(monkeypatch, tmp_path):
+    """Point a DCU build at throwaway DTK and vendor torch/lib trees."""
+    dtk = tmp_path / "dtk"
+    vendor_lib = tmp_path / "vendor-torch" / "lib"
+    _make_minimal_dtk(dtk)
+    _make_minimal_vendor_torch_lib(vendor_lib)
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "dcu")
+    monkeypatch.setenv("ROCM_PATH", str(dtk))
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(vendor_lib))
+
+
+def test_build_ext_appends_the_dcu_comm_bridge_target(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    """A DCU build must describe the bridge, so setuptools builds and stages it.
+
+    It has to be in ext_modules from _get_setup_kwargs() rather than appended by
+    the build_ext command: finalize_options fills ext_map/_needs_stub and
+    get_outputs from that list before run(), and the inplace copy back into
+    torch_fl/comm/_nccl_ext/ is driven by it (issue #366).
+    """
+    _dcu_bridge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["setup.py", "build_ext"])
+
+    _, setup_kwargs = _load_setup(monkeypatch)
+
+    assert [extension.name for extension in setup_kwargs["ext_modules"]] == [
+        "torch_fl._C",
+        "torch_fl.comm._nccl_ext._flagos_nccl",
+    ]
+
+
+def test_metadata_only_pass_does_not_resolve_the_dcu_link_set(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    """egg_info/sdist must not need DTK to be installed.
+
+    FLAGOS_ACCELERATOR=dcu with no DTK anywhere is exactly the metadata case: it
+    resolves, but only because the gate keeps the bridge out of the target list.
+    """
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "dcu")
+    monkeypatch.setenv("ROCM_PATH", str(tmp_path / "missing-dtk"))
+    monkeypatch.setattr(sys, "argv", ["setup.py", "egg_info"])
+
+    _, setup_kwargs = _load_setup(monkeypatch)
+
+    assert [extension.name for extension in setup_kwargs["ext_modules"]] == [
+        "torch_fl._C"
+    ]
+
+
+def test_build_ext_adds_torch_paths_to_the_comm_bridge_only(
+    monkeypatch, clean_kernel_env
+):
+    """Only the bridge target gains torch's include/library paths and link set.
+
+    torch_fl._C is a C stub over libtorch_bindings.so and must not inherit the
+    c10/torch/torch_cpu link set the pybind factory needs.
+    """
+    # Stubbed rather than imported: torch.utils.cpp_extension reports the paths
+    # of the *installed* torch, and importing the real one from this checkout
+    # pulls in torch_fl's device-backend preload.
+    cpp_extension = SimpleNamespace(
+        include_paths=lambda: ["/torch/include"],
+        library_paths=lambda: ["/torch/lib"],
+    )
+    monkeypatch.setitem(sys.modules, "torch.utils.cpp_extension", cpp_extension)
+
+    namespace, _ = _load_setup(monkeypatch)
+    bridge_name = namespace["_load_nccl_ext_builder"]().WHEEL_EXTENSION_NAME
+    bridge = Extension(name=bridge_name, sources=["nccl_backend.cpp"])
+    other = Extension(name="torch_fl._C", sources=["torch_fl/csrc/stub.c"])
+    command = SimpleNamespace(extensions=[other, bridge])
+
+    namespace["BuildExtWithCmake"]._prepare_nccl_extension(command)
+
+    assert bridge.include_dirs == ["/torch/include"]
+    assert bridge.library_dirs == ["/torch/lib"]
+    assert bridge.libraries == ["c10", "torch", "torch_cpu"]
+    assert other.include_dirs == [] and other.libraries == []

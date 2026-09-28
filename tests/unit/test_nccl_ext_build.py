@@ -167,3 +167,159 @@ def test_dcu_compiler_rejects_gcc_8(monkeypatch):
 
     with pytest.raises(RuntimeError, match="requires GCC 9 or newer"):
         build._validate_dcu_compiler({"CXX": "g++"})
+
+
+def test_wheel_extension_is_dcu_only(tmp_path):
+    """The wheel path is scoped to DCU; every other accelerator stays standalone.
+
+    CUDA in particular: enabling it would make the wheel build depend on
+    nvidia-nccl-cu12, which is an optional extra of the installed torch rather
+    than a build requirement (see build._WHEEL_ACCELERATORS).
+    """
+    repo = tmp_path / "repo"
+
+    assert (
+        build.wheel_extension(
+            {"FLAGOS_ACCELERATOR": "cuda", "CUDA_HOME": str(tmp_path)}, str(repo)
+        )
+        is None
+    )
+    assert build.wheel_extension({"FLAGOS_ACCELERATOR": "musa"}, str(repo)) is None
+    assert build.wheel_extension({}, str(repo)) is None
+
+
+def test_wheel_extension_targets_the_package_path_with_the_dcu_link_set(tmp_path):
+    """DCU resolves to a dotted Extension so the .so lands in the package.
+
+    The dotted name is what makes setuptools' inplace copy put the file in
+    torch_fl/comm/_nccl_ext/, the package torch_fl/comm/_nccl_ext/__init__.py
+    imports from -- issue #366's completion bar, an installed wheel that loads
+    the bridge with no source checkout.
+    """
+    repo = tmp_path / "repo"
+    dtk = tmp_path / "dtk"
+    vendor_lib = tmp_path / "vendor-torch" / "lib"
+    _make_dtk(dtk)
+    _make_dcu_torch_lib(vendor_lib)
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+
+    extension = build.wheel_extension(
+        {
+            "FLAGOS_ACCELERATOR": "dcu",
+            "ROCM_PATH": str(dtk),
+            "FLAGOS_VENDOR_TORCH_LIB": str(vendor_lib),
+        },
+        str(repo),
+    )
+
+    assert extension.name == "torch_fl.comm._nccl_ext._flagos_nccl"
+    # Same leaf name on disk as the standalone builder produces, so a source
+    # checkout can carry either build's output.
+    assert extension.name.rsplit(".", 1)[-1] == build._STANDALONE_EXTENSION_NAME
+    assert extension.sources == [
+        str(Path(build.__file__).resolve().parent / "nccl_backend.cpp")
+    ]
+    assert extension.libraries == ["c10_hip", "torch_hip", "rccl"]
+    assert dict(extension.define_macros) == {
+        **dict(build._COMMON_MACROS),
+        "TORCH_EXTENSION_NAME": "_flagos_nccl",
+    }
+    assert extension.extra_compile_args == ["-std=c++17"]
+    # The bundled lib_dcu is the only RUNPATH a wheel may carry, even though the
+    # vendor tree and DTK are still link search paths.
+    assert extension.extra_link_args == ["-Wl,-rpath,$ORIGIN/../../lib_dcu"]
+    assert str(vendor_lib) in extension.library_dirs
+    assert str(repo / "torch_fl" / "lib_dcu") in extension.library_dirs
+    assert str(dtk / "cuda" / "cuda-12" / "include") in extension.include_dirs
+    # torch's own include/library paths are deliberately absent: resolving them
+    # here would make loading setup.py import torch. setup.py adds them at
+    # build_ext time instead.
+    assert not any("site-packages" in directory for directory in extension.include_dirs)
+
+
+def test_every_build_defines_the_module_init_symbol(tmp_path):
+    """Regression guard: the wheel .so must export PyInit__flagos_nccl.
+
+    nccl_backend.cpp writes ``PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)``. torch's
+    BuildExtension defines that macro for the standalone build, but the wheel goes
+    through plain setuptools, so a wheel built without this define exports
+    ``PyInit_TORCH_EXTENSION_NAME`` instead and import fails with "dynamic module
+    does not define module export function (PyInit__flagos_nccl)" -- observed on a
+    real DCU wheel build, not hypothesised. Both entry points therefore have to
+    carry it, and both have to agree on the leaf, because the symbol cannot
+    contain dots.
+    """
+    repo = tmp_path / "repo"
+    dtk = tmp_path / "dtk"
+    vendor_lib = tmp_path / "vendor-torch" / "lib"
+    _make_dtk(dtk)
+    _make_dcu_torch_lib(vendor_lib)
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+    env = {
+        "FLAGOS_ACCELERATOR": "dcu",
+        "ROCM_PATH": str(dtk),
+        "FLAGOS_VENDOR_TORCH_LIB": str(vendor_lib),
+    }
+
+    wheel = build.wheel_extension(env, str(repo))
+    standalone_name = build._STANDALONE_EXTENSION_NAME
+    assert wheel.name.rsplit(".", 1)[-1] == standalone_name
+
+    assert dict(wheel.define_macros)["TORCH_EXTENSION_NAME"] == standalone_name
+    # The standalone builder's kwargs default to the same define, which is also
+    # what BuildExtension appends -- a duplicate, identical -D on its command line.
+    config = build._build_config(env, str(repo))
+    assert (
+        dict(build._extension_kwargs(config)["define_macros"])["TORCH_EXTENSION_NAME"]
+        == standalone_name
+    )
+    assert build._module_init_name(wheel.name) == standalone_name
+    assert build._module_init_name("_flagos_nccl") == standalone_name
+
+
+def test_wheel_rpaths_keeps_only_relocatable_entries(tmp_path):
+    """A released wheel must not name the machine that built it.
+
+    The standalone builder keeps every entry: it runs out of a source checkout,
+    where the vendor torch/lib it was linked against has to be reachable at run
+    time too.
+    """
+    repo = tmp_path / "repo"
+    dtk = tmp_path / "dtk"
+    vendor_lib = tmp_path / "vendor-torch" / "lib"
+    _make_dtk(dtk)
+    _make_dcu_torch_lib(vendor_lib)
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+
+    config = build._build_config(
+        {
+            "FLAGOS_ACCELERATOR": "dcu",
+            "ROCM_PATH": str(dtk),
+            "FLAGOS_VENDOR_TORCH_LIB": str(vendor_lib),
+        },
+        str(repo),
+    )
+
+    assert config.rpaths == (
+        str(vendor_lib),
+        "$ORIGIN/../../lib_dcu",
+        str(dtk / "lib"),
+    )
+    assert build._wheel_rpaths(config) == ("$ORIGIN/../../lib_dcu",)
+    assert build._extension_kwargs(config)["extra_link_args"] == [
+        f"-Wl,-rpath,{vendor_lib}",
+        "-Wl,-rpath,$ORIGIN/../../lib_dcu",
+        f"-Wl,-rpath,{dtk / 'lib'}",
+    ]
+
+
+def test_wheel_extension_raises_when_the_dcu_link_set_is_unresolvable(tmp_path):
+    """A DCU wheel without the bridge is the defect, so it must not be skipped."""
+    dtk = tmp_path / "dtk"
+    _make_dtk(dtk)
+
+    with pytest.raises(RuntimeError, match="libc10_hip, libtorch_hip"):
+        build.wheel_extension(
+            {"FLAGOS_ACCELERATOR": "dcu", "ROCM_PATH": str(dtk)},
+            str(tmp_path / "repo"),
+        )

@@ -14,10 +14,21 @@
 
 """Build the flagos NCCL/RCCL backend extension (``_flagos_nccl``).
 
-This standalone builder is for CPU-only torch installations where
-``torch.distributed`` does not expose ``ProcessGroupNCCL``, while an external
-vendor libtorch provides the implementation. It supports NVIDIA CUDA/NCCL and
-Hygon DCU/RCCL; wheel integration is handled separately.
+This builder serves CPU-only torch installations where ``torch.distributed``
+does not expose ``ProcessGroupNCCL``, while an external vendor libtorch provides
+the implementation. It supports NVIDIA CUDA/NCCL and Hygon DCU/RCCL.
+
+Two entry points share the configuration resolved here:
+
+* ``python torch_fl/comm/_nccl_ext/build.py`` -- the standalone builder below,
+  out-of-tree, for both CUDA and DCU.
+* ``wheel_extension()`` -- called by ``setup.py`` so a DCU wheel ships the
+  extension under ``torch_fl/comm/_nccl_ext/`` without a source checkout. See
+  ``_WHEEL_ACCELERATORS`` for why only DCU is wired into the wheel.
+
+Because the wheel path is driven by importing this module (from its path, never
+as part of ``torch_fl``, so that reading ``setup.py`` does not import torch),
+this module must stay stdlib-only at import time.
 
 CUDA example::
 
@@ -59,6 +70,28 @@ _COMMON_MACROS = (
     ("USE_C10D_NCCL", None),
     ("C10_CUDA_NO_CMAKE_CONFIGURE_FILE", None),
 )
+_SOURCE = "nccl_backend.cpp"
+
+# The standalone builder writes a flat module next to this file: it chdirs into
+# _HERE and builds ``--inplace``, so setuptools resolves the package root as the
+# current directory and a dotted name would nest torch_fl/ inside it.
+_STANDALONE_EXTENSION_NAME = "_flagos_nccl"
+# The wheel needs the dotted name instead, so the .so lands in
+# torch_fl/comm/_nccl_ext/ inside the wheel -- which is the package path
+# torch_fl/comm/_nccl_ext/__init__.py imports ``_flagos_nccl`` from. Both names
+# produce the same file name on disk (``_flagos_nccl.<abi>.so``), so a source
+# checkout can carry either.
+WHEEL_EXTENSION_NAME = "torch_fl.comm._nccl_ext._flagos_nccl"
+
+# Accelerators whose link set is wired into the wheel build. DCU only: its
+# _dcu_config() refuses to configure unless every one of libc10_hip,
+# libtorch_hip and librccl is linkable, so the wheel either gets a bridge
+# measured against the bundled lib_dcu or fails the build -- and without it
+# ProcessGroupFlagOS's native RCCL fallback is dead in a released wheel (the
+# bug in issue #366). The CUDA link set gets no such check: it would have to
+# link nvidia-nccl-cu12, which is an extra rather than a build dependency, so
+# enabling it here would turn a missing NCCL wheel into a CUDA build failure.
+_WHEEL_ACCELERATORS = ("dcu",)
 
 
 @dataclass(frozen=True)
@@ -277,6 +310,106 @@ def _build_config(env: Mapping[str, str] = None, repo_root: str = None) -> _Buil
     return _cuda_config(selected_env, selected_repo)
 
 
+def _module_init_name(extension_name: str) -> str:
+    """The name ``PYBIND11_MODULE`` expands to, i.e. the ``PyInit_<result>`` symbol.
+
+    ``nccl_backend.cpp`` spells the module as ``PYBIND11_MODULE(TORCH_EXTENSION_NAME,
+    m)``, and that macro is defined by torch's ``BuildExtension`` from the last dot
+    component of the extension name (``_define_torch_extension_name``). The wheel
+    path goes through plain setuptools instead, where nothing defines it: the .so
+    then exports ``PyInit_TORCH_EXTENSION_NAME`` and the import fails with
+    "dynamic module does not define module export function (PyInit__flagos_nccl)",
+    at load time, in an installed wheel, with no build error pointing at it.
+
+    Dots cannot appear in the symbol, which is why the leaf is used -- the wheel's
+    dotted name and the standalone flat name agree on it by construction (see
+    ``test_every_build_defines_the_module_init_symbol``).
+    """
+    return extension_name.rsplit(".", 1)[-1]
+
+
+def _extension_kwargs(
+    config: _BuildConfig,
+    rpaths: Sequence[str] = None,
+    extension_name: str = _STANDALONE_EXTENSION_NAME,
+) -> dict:
+    """Compiler/linker arguments every _flagos_nccl build shares.
+
+    The vendor include and library paths, the defines that unlock
+    ``ProcessGroupNCCL.hpp`` in a CPU-only torch wheel and name the pybind module
+    (``extension_name`` selects the latter; see ``_module_init_name``), and the
+    relocatable RPATHs out of _BuildConfig (``rpaths`` overrides them; see
+    ``_wheel_rpaths``). Nothing here resolves a torch install, so it is callable
+    before torch is importable (see ``wheel_extension``).
+    """
+    selected_rpaths = config.rpaths if rpaths is None else rpaths
+    return dict(
+        sources=[os.path.join(_HERE, _SOURCE)],
+        define_macros=[
+            *_COMMON_MACROS,
+            ("TORCH_EXTENSION_NAME", _module_init_name(extension_name)),
+        ],
+        include_dirs=list(config.include_dirs),
+        library_dirs=list(config.library_dirs),
+        libraries=list(config.libraries),
+        extra_compile_args=["-std=c++17"],
+        extra_link_args=[f"-Wl,-rpath,{path}" for path in selected_rpaths],
+    )
+
+
+def _wheel_rpaths(config: _BuildConfig) -> Tuple[str, ...]:
+    """The subset of ``config.rpaths`` a released wheel may carry.
+
+    Only the relocatable, $ORIGIN-relative entries. The rest name the machine
+    that built the wheel: on DCU, FLAGOS_VENDOR_TORCH_LIB is an absolute DTK
+    torch/lib path, taken at build time so the factory can be linked against
+    libc10_hip/libtorch_hip. In a decoupled wheel those come from the bundled
+    lib_dcu, which the $ORIGIN entry reaches first anyway -- and leaving the
+    absolute entry in would let a target that happens to have a DTK torch at that
+    path load libtorch_hip.so from it instead, silently re-coupling the wheel to
+    a vendor build this one was never measured against. The DTK driver
+    directories (/opt/dtk/lib, ...) are dropped for a different reason: they are
+    reached through the bundled libs' own RUNPATH, which is where their DT_NEEDED
+    edges live, not through this module's.
+    """
+    return tuple(path for path in config.rpaths if path.startswith("$ORIGIN"))
+
+
+def wheel_extension(env: Mapping[str, str] = None, repo_root: str = None):
+    """The setuptools Extension for the package build, or None.
+
+    None means this accelerator has no wheel-integrated ``_flagos_nccl`` (see
+    ``_WHEEL_ACCELERATORS``); the standalone builder still covers it. A
+    RuntimeError from configuration is *not* swallowed when the accelerator is
+    in that tuple -- a DCU wheel without the bridge is the failure being fixed,
+    so an unresolvable DTK link set has to stop the build.
+
+    The returned Extension deliberately carries no torch include or library
+    paths: those come from the *installed* torch, and resolving them here would
+    make loading setup.py import torch (see the module docstring). setup.py adds
+    them at build_ext time.
+    """
+    selected_env = os.environ if env is None else env
+    try:
+        accelerator = _selected_accelerator(selected_env)
+    except RuntimeError:
+        return None
+    if accelerator not in _WHEEL_ACCELERATORS:
+        return None
+
+    from setuptools import Extension
+
+    config = _build_config(selected_env, repo_root)
+    return Extension(
+        name=WHEEL_EXTENSION_NAME,
+        **_extension_kwargs(
+            config,
+            rpaths=_wheel_rpaths(config),
+            extension_name=WHEEL_EXTENSION_NAME,
+        ),
+    )
+
+
 def _compiler_command(env: Mapping[str, str]) -> Tuple[str, ...]:
     configured = env.get("CXX")
     command = tuple(shlex.split(configured)) if configured else ()
@@ -337,16 +470,12 @@ def main():
     from setuptools import setup
     from torch.utils.cpp_extension import BuildExtension, CppExtension
 
+    # CppExtension rather than the plain Extension wheel_extension() returns: it
+    # is what adds torch's own include and library paths, which is fine here
+    # because the standalone builder runs as a script with torch importable.
     extension = CppExtension(
-        name="_flagos_nccl",
-        sources=[os.path.join(_HERE, "nccl_backend.cpp")],
-        # USE_C10D_NCCL unlocks ProcessGroupNCCL.hpp in a CPU-only torch wheel.
-        define_macros=list(_COMMON_MACROS),
-        include_dirs=list(config.include_dirs),
-        library_dirs=list(config.library_dirs),
-        libraries=list(config.libraries),
-        extra_compile_args=["-std=c++17"],
-        extra_link_args=[f"-Wl,-rpath,{path}" for path in config.rpaths],
+        name=_STANDALONE_EXTENSION_NAME,
+        **_extension_kwargs(config),
     )
 
     original_argv = sys.argv[:]
