@@ -46,7 +46,7 @@ discovery.
 
 ```bash
 FLAGOS_ACCELERATOR=musa python -m build --wheel --no-isolation
-pip install dist/torch_fl-0.1.0-cp310-cp310-linux_x86_64.whl
+pip install dist/torch_fl-2.10.0-cp310-cp310-linux_x86_64.whl
 ```
 
 `torch_fl` locates `mudnn` through `MUSA_HOME`; no CUDA toolkit is required. Do

@@ -826,12 +826,18 @@ def _get_setup_kwargs():
         ]
     }
 
-    version = "0.1.0"
+    # The project version names the PyTorch minor line the wheel binds to, so
+    # torch_fl 2.10.0 is the release built against torch 2.10.x. The generated
+    # ATen bindings are tied to that same line (TORCH_PIN below), which makes a
+    # wheel unusable on any other one; carrying the line in the version keeps
+    # that visible from the filename alone. Bumping it is a deliberate act that
+    # belongs with a codegen regeneration, not a routine edit.
+    version = "2.10.0"
     # A local version segment tags which vendor a self-contained wheel bundles a
     # forked libtorch for. That bundle is SDK-version-bound whether we say so or
     # not -- DTK's libtorch_hip.so has librocblas.so.4 written into its
     # DT_NEEDED -- so making the binding visible in the filename is strictly
-    # better than leaving two incompatible wheels both called 0.1.0. Override
+    # better than leaving two incompatible wheels both called 2.10.0. Override
     # with FLAGOS_WHEEL_LOCAL to pin the exact SDK, e.g.
     # FLAGOS_WHEEL_LOCAL=metax3.8.1 / FLAGOS_WHEEL_LOCAL=dtk2604.
     _default_local = _platform_entry(FLAGOS_ACCELERATOR)["wheel_local"] or None

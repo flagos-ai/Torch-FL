@@ -21,9 +21,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch_fl"
-# Version is computed in setup.py: the MetaX self-contained build appends a
-# local segment (e.g. 0.1.0+metax3.8.1) via FLAGOS_WHEEL_LOCAL. A static value
-# here would override setup()'s version, so it must be declared dynamic.
+# Version is computed in setup.py: it names the supported PyTorch minor line and
+# the MetaX self-contained build appends a local segment (e.g.
+# 2.10.0+metax3.8.1) via FLAGOS_WHEEL_LOCAL. A static value here would override
+# setup()'s version, so it must be declared dynamic.
 description = "FlagGems operators as a custom PyTorch device (flagos)"
 readme = "README.md"
 requires-python = ">=3.8"

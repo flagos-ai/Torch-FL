@@ -97,7 +97,7 @@ def test_build_ext_stages_generated_build_config(
         (tmp_path / "wheel" / "torch_fl" / "compatibility.json").read_text()
     )
     assert compatibility["platform"] == "musa"
-    assert compatibility["wheel_version"] == "0.1.0"
+    assert compatibility["wheel_version"] == "2.10.0"
     assert compatibility["build"]["kernels"] == ["flaggems", "vendor"]
     assert compatibility["build"]["vendor_torch_libraries"] is False
     assert compatibility["build"]["distributions"]["torch"] == "2.10.0+cpu"
