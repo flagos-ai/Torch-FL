@@ -54,7 +54,8 @@ intentional skip instead of a fabricated pass. Adding a backend means extending
 one capability table, not adding a test file. The device backend contract gates
 only baseline behavior shared by all platforms; its separate complex-arithmetic
 diagnostic reports the observed support state without granting a silent skip to
-a baseline case.
+a baseline case. Mixed-index `add` rejection is part of the correctness gate and
+is enforced before selecting a vendor or FlagGems route.
 
 Both support modules share `platform_support.detect_platform()` and must not import torch at module scope: they are loaded as pytest plugins before `torch_fl` preloads its device assets, and importing torch first breaks the required library initialization order.
 
@@ -89,7 +90,10 @@ Every platform manifest runs this same command after its environment check.
 `tests/integration/conftest.py` exits with `flagos device is not available`
 before collecting contract failures when the runner or runtime is unavailable.
 Core cases compare deterministic device results and metadata with CPU; the
-two-device case skips only when the hardware exposes fewer than two devices.
+two-device cases skip only when the hardware exposes fewer than two devices.
+The mixed-device cases cover functional, in-place, and `out=` additions; a CPU
+scalar tensor remains a legal operand.
+
 The final `backend_capability` case prints the observed complex-arithmetic
 status and records it as a JUnit property without failing a platform that does
 not support that optional dtype path. Operator matrices, specialized dtype

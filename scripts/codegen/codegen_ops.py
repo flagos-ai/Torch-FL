@@ -163,6 +163,27 @@ _INDEX_RANGE_CHECKED_LIST_OPS = {
     "index.Tensor",
 }
 
+# These add overloads accept multiple tensors, but not multiple indexed flagos
+# devices. Check before backend dispatch so CUDA boxing, FlagGems, and native
+# vendor routes obey the same PyTorch contract. CPU scalar operands remain legal.
+_SAME_DEVICE_CHECK_PAIRS = {
+    "add.Tensor": (("self", "other"),),
+    "add_.Tensor": (("self", "other"),),
+    "add.out": (("self", "other"), ("self", "out"), ("other", "out")),
+    "add.Scalar_out": (("self", "out"),),
+}
+
+
+def _same_device_prelude(op, args):
+    pairs = _SAME_DEVICE_CHECK_PAIRS.get(op, ())
+    names = {name for _, name in args}
+    for first, second in pairs:
+        if first not in names or second not in names:
+            raise SystemExit(f"{op}: device check needs {first} and {second}")
+    return "".join(
+        f"  CheckSameFlagosDevice({first}, {second});\n" for first, second in pairs
+    )
+
 
 def _index_bounds_prelude(op, args):
     """Range-check prelude for the index family, emitted into the wrapper.
@@ -2231,7 +2252,7 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
     # Runs before the dispatcher call, so on a platform that compiles the check
     # in the backend kernel never sees an out-of-range index. See
     # csrc/aten/index_bounds.h.
-    prelude = _index_bounds_prelude(op, args)
+    prelude = _index_bounds_prelude(op, args) + _same_device_prelude(op, args)
     return (
         f"{ret_type} {wname}({args_decl(args)}) {{\n{prelude}{body}\n}}",
         wname,

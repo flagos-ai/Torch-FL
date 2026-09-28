@@ -146,6 +146,15 @@ def test_inplace_and_out_reuse_destination():
 
 
 @pytest.mark.backend_contract
+def test_cpu_scalar_tensor_can_join_device_add():
+    device = torch.tensor([1.0, 2.0], device=DEVICE)
+    scalar = torch.tensor(3.0)
+    torch.testing.assert_close(
+        torch.add(device, scalar).cpu(), torch.tensor([4.0, 5.0]), rtol=0, atol=0
+    )
+
+
+@pytest.mark.backend_contract
 def test_minimal_autograd_forward_and_backward():
     cpu = torch.tensor([1.0, 2.0, 3.0])
     device = cpu.to(DEVICE).requires_grad_()
@@ -160,27 +169,39 @@ def test_minimal_autograd_forward_and_backward():
 
 
 @pytest.mark.backend_contract
-def test_mixed_device_arithmetic_rejects_mismatch_in_subprocess():
+@pytest.mark.parametrize(
+    "operation",
+    ["functional", "inplace", "out_operand", "out_destination", "scalar_out"],
+)
+def test_mixed_device_arithmetic_rejects_mismatch_in_subprocess(operation):
     if torch_fl.flagos.device_count() < 2:
         pytest.skip("mixed-device arithmetic requires two flagos devices")
 
     script = """
 import torch_fl
 import torch
+import sys
 
 first = torch.ones(2, device='flagos:0')
 second = torch.ones(2, device='flagos:1')
+operations = {
+    'functional': lambda: torch.add(first, second),
+    'inplace': lambda: first.add_(second),
+    'out_operand': lambda: torch.add(first, second, out=torch.empty_like(first)),
+    'out_destination': lambda: torch.add(first, first, out=torch.empty_like(second)),
+    'scalar_out': lambda: torch.add(first, 1.0, out=torch.empty_like(second)),
+}
 try:
-    torch.add(first, second)
+    operations[sys.argv[1]]()
 except RuntimeError as error:
     assert 'device' in str(error).lower(), str(error)
 else:
-    raise AssertionError('mixed-device add silently accepted both inputs')
+    raise AssertionError(f'mixed-device {sys.argv[1]} add silently succeeded')
 """
     env = os.environ.copy()
     env["FLAGOS_STARTUP_PROFILE"] = "minimal"
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, operation],
         env=env,
         capture_output=True,
         text=True,
