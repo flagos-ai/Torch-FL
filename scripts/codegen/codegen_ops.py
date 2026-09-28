@@ -2629,7 +2629,8 @@ def main():
         # value, so on the FlagGems route the lazy view is replaced with an eager
         # copy and 7 of the 12 math-bits contract cases fail with "torch.conj
         # must stay lazy for this contract to apply". MetaX carries the same
-        # exemption in metax_triton_fallback below; the cuda boxing path is ATen's
+        # exemption, recorded in its conf and in BOXING_GAP_NOTES in
+        # scripts/codegen/gen_vendor_confs.py; the cuda boxing path is ATen's
         # own _conj, which keeps the bit.
         #
         # addmm is a FlagTree/Triton compile exception. Current flag_gems master
@@ -3084,249 +3085,41 @@ def main():
             f"({len(flaggems_forced_cuda & set(flaggems_py))} override-only excluded)"
         )
 
-        # backends_metax.conf: FlagGems-first like every generated conf, but
-        # the ops triton-metax / flag_gems cannot run on the flagos device are
-        # forced back to the cuda boxing kernel (maca libtorch_cuda via mcblas)
-        # instead of flagos_python. In the MetaX boxing wheel the fallback MUST be
-        # cuda, not metax: the hand-written mxcc backend is not registered
-        # (FLAGOS_BUILD_VENDOR=OFF).
-        #   - mm/bmm(.out): FlagGems uses a SPLIT_K kwarg triton-metax rejects.
-        #   - mean.dim: FlagGems' non-inner-dim path uses a CUDA context that
-        #     fails on triton-metax.
-        #   - flag_gems device-guarded ops: several flag_gems kernels check
-        #     tensor.device.type against flag_gems.device (== "cuda") and either
-        #     (a) fall back to torch.<op> -> re-enters flagos_python dispatch ->
-        #         infinite recursion (flaggems_recursive_fallback above, folded in
-        #         below -- that set is device-independent, so it applies here too),
-        #         or
-        #     (b) raise ValueError("Inputs must be cuda tensors ...")
-        #         (embedding_dense_backward, i0, reflection_pad2d, soft_margin_loss,
-        #          special_i0e, special_i1, ...).
-        #     Our flagos tensors have device.type "flagos", so both paths fail.
-        #     Route these to the cuda boxing kernel (runs directly on maca
-        #     libtorch_cuda). Derived from flag_gems ops that guard on device.type.
-        # Grow this set as testing reveals more triton-metax / flag_gems gaps.
-        metax_triton_fallback = flaggems_forced_cuda | {
-            "mm",
-            "mm.out",
-            "bmm",
-            "bmm.out",
-            "mean.dim",
-            # MetaX Triton cannot lower scalar arithmetic when the scalar is
-            # normalized to a tensor overload: FlagGems promotes the scalar to
-            # f64, then the compiler rejects f64 -> bf16.
-            "add.Tensor",
-            "div.Scalar",
-            "div.Tensor",
-            # MetaX must preserve PyTorch's lazy conjugate bit. FlagGems' _conj
-            # path materializes the value instead of returning a conjugate view.
-            "_conj",
-            # The MetaX FlagGems C++ sort path corrupts the profiler workload;
-            # keep sort on CUDA boxing until its activity handling is fixed.
-            "sort",
-            "sort.stable",
-            # The profiler contract uses matmul -> relu -> sum. Keep this
-            # workload on CUDA boxing while MetaX activity correlation is being
-            # stabilized across FlagGems kernels.
-            "relu",
-            "relu_",
-            "sum.dim_IntList",
-            # flag_gems ops that guard on device.type == "cuda" (recurse or raise
-            # on the flagos device); route to cuda boxing instead of flagos_python.
-            # (mul.Tensor and friends come in via flaggems_recursive_fallback.)
-            "conv_transpose2d",
-            "scaled_mm",
-            "as_strided_copy",
-            "embedding_dense_backward",
-            "i0",
-            "i0.out",
-            "i0_",
-            "reflection_pad2d",
-            "reflection_pad2d.out",
-            "reflection_pad3d",
-            "reflection_pad3d.out",
-            "soft_margin_loss",
-            "special_i0e",
-            "special_i0e.out",
-            "special_i1",
-            "special_i1.out",
-            "prelu",
-            "_prelu_kernel_backward",
-            "arcsinh",
-            "im2col",
-            "lift_fresh_copy",
-            "resolve_conj",
-            "t_copy",
-            "zero",
-            "special_gammainc",
-            "special_scaled_modified_bessel_k1",
-            "_upsample_nearest_exact1d",
-            # slice_backward: FlagGems' slice_backward_kernel does an out-of-bounds
-            # access on large tensors (e.g. grad_output [1, 6144, 35] scattered into
-            # [1, 6144, 32], as in Qwen3.5 linear-attn conv1d bwd), raising an
-            # Xnack Error / ATU Fault (0x8) in the shader. On MetaX that fault
-            # DISABLES the whole process's mcruntime (mcGetDevice ->
-            # mcErrorIllegalAddress), poisoning every subsequent op -- unrecoverable
-            # in-process. Route to the cuda boxing kernel, which is bounds-safe.
-            "slice_backward",
-            # slice.Tensor: flag_gems' slice op asserts against complex64 and
-            # complex128 (`flag_gems/ops/slice.py`, "slice: unsupported dtype"),
-            # but the assertion is vestigial -- the implementation is a pure
-            # `torch.as_strided` view built from the input's shape, strides and
-            # storage offset, and never consults a dtype.
-            # diffusers' QwenImageTransformer2DModel slices complex rotary
-            # frequencies (`freqs_pos[0][idx : idx + frame]` in
-            # _compute_video_freqs), so Qwen-Image-2512's transformer step dies
-            # on the FlagGems route with that assertion and passes on boxing.
-            # Not MetaX-specific -- the assertion rejects complex on every
-            # device -- but held here rather than in flaggems_runtime_broken so
-            # the change stays inside MetaX, the way the special_bessel_j0 group
-            # below is. Reported upstream as FlagGems issue #6356 (the remaining
-            # half of #6049/#6061, which trimmed the same assertion for bool);
-            # when the fix lands this entry can come out.
-            "slice.Tensor",
-            # Route regressions found by the differential survey of the 166 ops
-            # MetaX gained when FLAGGEMS_PYTHON_OPS was widened to the FlagGems
-            # master @ 5a58df410 cohort (flag_gems 5.4.0rc2.post1+g5a58df410,
-            # flagtree 0.6.1+metax3.6, MetaX C550, 2026-09-15). Each op was run
-            # on both routes through the same `2d-f32` profile -- one input pair
-            # built on the host and moved with `.to("flagos")`, so both arms see
-            # identical values -- and each one PASSES on cuda while failing on
-            # flaggems. `tests/manual/flaggems_overload_survey.py` produced both
-            # verdicts (the cuda arm with FLAGOS_OP_<op>=cuda).
-            #
-            #  - gems asserts the input is a real CUDA tensor
-            #    (`special_bessel_j0` "Tensors must be CUDA tensors";
-            #    `special_i1e(.out)` "Tensors must be cuda tensors";
-            #    `special_chebyshev_polynomial_w.out` "input x must be on cuda
-            #    device"). Same literal `device.type == "cuda"` guard class as
-            #    flaggems_runtime_broken group (2), so these are not
-            #    MetaX-specific -- they belong there at the next ceiling
-            #    revision; held here so this change stays inside MetaX.
-            "special_bessel_j0",
-            "special_i1e",
-            "special_i1e.out",
-            "special_chebyshev_polynomial_w.out",
-            #  - the gems wrapper raises before it can serve the caller, so the
-            #    op aborts rather than returning anything: `nansum.out` returns
-            #    None and is copy_'d ("'NoneType' object has no attribute
-            #    copy_'"), `lu_unpack.out` writes a (0,) buffer against a (32,)
-            #    result, `linalg_matrix_exp.out` demands `out` as a keyword
-            #    (TypeError), and `_cdist_forward` rejects `compute_mode=None`
-            #    ("None is not a valid value for compute_mode") where ATen
-            #    accepts it.
-            "nansum.out",
-            "lu_unpack.out",
-            "linalg_matrix_exp.out",
-            "_cdist_forward",
-            #  - the gems kernel runs to completion and returns the wrong result,
-            #    which no caller notices without comparing values.
-            #    `_compute_linear_combination` (.out) reaches max_diff 22.12 /
-            #    1.91e+37, `_fused_rms_norm` returns (32,) where ATen returns
-            #    (32, 1), `igamma`/`igamma_` return finite values where ATen
-            #    returns NaN on the negative domain (the same one-sided
-            #    disagreement measured for `igammac_`, which is held in
-            #    flaggems_runtime_broken), `logit_backward` max_diff=nan, and
-            #    `special_shifted_chebyshev_polynomial_t` max_diff 361.53.
-            #    `sum.out` is the mildest of these and is shape-only: it returns
-            #    the (32, 32) `out` buffer where ATen returns the 0-dim result
-            #    view, so a caller that reduces into a larger buffer reads the
-            #    wrong shape even though the sum itself landed.
-            "sum.out",
-            "_compute_linear_combination",
-            "_compute_linear_combination.out",
-            "_fused_rms_norm",
-            "igamma",
-            "igamma_",
-            "logit_backward",
-            "special_shifted_chebyshev_polynomial_t",
-            # NOT held, for the record: five of the 21 ops the same survey flagged
-            # fail on the cuda route too, so holding them would not fix anything.
-            # `_native_batch_norm_legit.no_stats` segfaults on both routes;
-            # `linalg_lstsq` and `log_sigmoid_backward(.grad_input)` return wrong
-            # values on both; `linalg_eig` returns host-matching eigenvalues on
-            # flaggems but raises "MAGMA requires compiling PyTorch" on cuda, so
-            # flaggems is the better route even though the survey calls it WRONG
-            # (the comparison is against eigenvectors, which are defined only up
-            # to phase).
-        }
-        mfg_conf_path = repo_root / "torch_fl/configs/backends_metax.conf"
-        mfg_lines = conf_license + [
-            "# flagos op backend config -- AUTO-GENERATED (metax boxing + flaggems)",
-            "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
-            "# FlagGems-first, but ops triton-metax cannot run",
-            "# (mm/bmm/mean.dim) fall back to the cuda boxing kernel (maca",
-            "# libtorch_cuda), NOT metax (mxcc backend is off in boxing mode).",
-            "# Selected at runtime from the build record (FLAGOS_ACCELERATOR=metax).",
-            "#",
-            "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
-            "",
-        ]
-        n_metax_fallback = 0
-        for op in sorted(op_info):
-            if op in metax_triton_fallback:
-                backend = "cuda"
-                if op in flaggems_py:
-                    n_metax_fallback += 1
-            else:
-                backend = "flagos_python" if op in flaggems_py else "cuda"
-            mfg_lines.append(f"{op} = {backend}")
-        mfg_conf_path.write_text("\n".join(mfg_lines) + "\n")
+        # The vendor confs are not written here. Every
+        # torch_fl/configs/backends_<platform>.conf belongs to
+        # scripts/codegen/gen_vendor_confs.py; backends_cuda.conf, written above,
+        # is the one exception, being the one-line-per-generated-wrapper table of
+        # this run's own op set.
+        #
+        # This block used to end with two hand-rolled writers, for
+        # backends_metax.conf and backends_dcu.conf, built from op_info plus a
+        # local fallback set in the pre-#272 `cuda | flagos_python` vocabulary.
+        # They overwrote the confs unconditionally, so a documented full
+        # regeneration silently reverted the pins those platforms record -- mm,
+        # bmm and mean.dim on metax; slice_backward, silu_backward and
+        # native_batch_norm on dcu -- and dropped the ops the generator's op
+        # universe carries on top of op_info (matmul, matmul_backward,
+        # scaled_dot_product_attention). The per-op diagnosis those writers
+        # restated now lives with the routing, in BOXING_GAP_NOTES and the gap
+        # sets of gen_vendor_confs.py.
+        #
+        # The catch-up is printed rather than run. Invoking the generator from
+        # here would make this command a superset of it: a CUDA-path
+        # regeneration would also rewrite six vendor confs, from whatever
+        # coverage ceiling the caller's environment happened to discover, on a
+        # diff a reviewer reads as CUDA-binding churn. The confs' own generator
+        # is a documented separate command (scripts/README.md) precisely so its
+        # output is reviewed on its own, and the same chain already exists one
+        # step upstream: codegen_tileops.py writes the TILEOPS_OPS block of
+        # backend_coverage.py, this run writes FLAGGEMS_PYTHON_OPS beside it,
+        # and neither one calls gen_vendor_confs.py. Stating the follow-up keeps
+        # a full regeneration free of routing changes, which is the property
+        # #459 is about, while the coverage move that does need one is visible
+        # right above and in the printed hint.
         print(
-            f"   regenerated {mfg_conf_path.name} "
-            f"({n_metax_fallback} flaggems ops forced back to cuda)"
-        )
-
-        # backends_dcu.conf: FlagGems-first like every generated conf, but the
-        # ops DTK's triton (the `hcu` backend) cannot run are forced back to the
-        # cuda boxing kernel (which on DCU is libtorch_hip via the CUDA dispatch
-        # key). Selected at runtime by FLAGOS_ACCELERATOR=dcu.
-        #   - slice_backward: the flag_gems kernel triggers a hardware VMFault
-        #     ("Invalid address access") on hcu. It only manifests once the
-        #     grad it produces is consumed by MIOpen's convolution_backward
-        #     (tests/integration/ops/test_conv1d_dispatch.py, C=6144 depthwise);
-        #     the kernel's own output metadata and values check out, so this is a
-        #     hcu codegen bug, not a shape/stride mismatch on our side.
-        #   - silu_backward: the flag_gems kernel calls tl.math.div_rn, whose
-        #     lowering (builder.create_precise_divf) is missing in hcu triton --
-        #     it returns None, so compilation dies with
-        #     AttributeError("'NoneType' object has no attribute 'type'").
-        # flaggems_recursive_fallback is folded in: that set is device-independent
-        # (the guard those kernels trip is device.type != "cuda", true for any
-        # PrivateUse1 tensor), so it applies on DCU exactly as on metax.
-        # Note this fallback set overlaps metax_triton_fallback's slice_backward
-        # entry by coincidence, not cause: metax hits an out-of-bounds Xnack fault
-        # inside the gems kernel, DCU faults only downstream in MIOpen.
-        # Grow this set as testing reveals more triton-hcu gaps.
-        dcu_triton_fallback = flaggems_forced_cuda | {
-            "slice_backward",
-            "silu_backward",
-        }
-        dfg_conf_path = repo_root / "torch_fl/configs/backends_dcu.conf"
-        dfg_lines = conf_license + [
-            "# flagos op backend config -- AUTO-GENERATED (dcu boxing + flaggems)",
-            "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
-            "# FlagGems-first, but ops DTK's triton (hcu backend)",
-            "# cannot run fall back to the cuda boxing kernel -- which on DCU is",
-            "# libtorch_hip, reached via the CUDA dispatch key.",
-            "# Selected at runtime by FLAGOS_ACCELERATOR=dcu.",
-            "#",
-            "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
-            "",
-        ]
-        n_dcu_fallback = 0
-        for op in sorted(op_info):
-            if op in dcu_triton_fallback:
-                backend = "cuda"
-                if op in flaggems_py:
-                    n_dcu_fallback += 1
-            else:
-                backend = "flagos_python" if op in flaggems_py else "cuda"
-            dfg_lines.append(f"{op} = {backend}")
-        dfg_conf_path.write_text("\n".join(dfg_lines) + "\n")
-        print(
-            f"   regenerated {dfg_conf_path.name} "
-            f"({n_dcu_fallback} flaggems ops forced back to cuda)"
+            f"   vendor confs unchanged; if the coverage above moved, refresh "
+            f"{repo_root / 'torch_fl/configs'} with:\n"
+            "     python3 scripts/codegen/gen_vendor_confs.py"
         )
 
     print("\nDone. Files in:", out_dir)

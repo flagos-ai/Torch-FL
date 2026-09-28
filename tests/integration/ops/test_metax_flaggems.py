@@ -38,8 +38,8 @@ way ``test_musa_flaggems.py`` does for the MThreats hybrid path:
    identically on every flagos platform -- see the ``flaggems_runtime_broken``
    entries in ``scripts/codegen_ops.py`` for the per-op diagnosis. The rest fail
    for a reason specific to their gems kernel -- a wrapper that raises, or a
-   result that differs from ATen's -- and are listed per op in the
-   ``metax_triton_fallback`` literal.
+   result that differs from ATen's -- and are listed per op in
+   ``BOXING_GAP_NOTES["metax"]`` in ``scripts/codegen/gen_vendor_confs.py``.
 
 The dispatch log is the oracle for (1) instead of monkeypatching a FlagGems
 callable: ``PythonOpCache::GetFunc`` memoizes the resolved ``py::object`` per
@@ -75,7 +75,8 @@ moved with ``.to("flagos")``, so both arms see identical values, and the cuda ar
 reached with ``FLAGOS_OP_<op>=cuda`` -- and each one **passes on cuda while
 failing on flaggems**, which is what makes the withdrawal a correction rather
 than a preference. The failures fall in three groups, spelled out per op in the
-``metax_triton_fallback`` literal in ``scripts/codegen_ops.py``: four where the
+``BOXING_GAP_NOTES["metax"]`` note in ``scripts/codegen/gen_vendor_confs.py``:
+four where the
 gems kernel asserts its input is a real CUDA tensor and aborts, four where the
 gems wrapper raises on its own argument handling (``nansum.out``,
 ``lu_unpack.out``, ``linalg_matrix_exp.out`` and ``_cdist_forward``), and eight
@@ -259,8 +260,9 @@ _FORCED_OFF_FLAGGEMS = (
     # FlagGems cohort added (see the module docstring). Every one of them PASSES
     # on the cuda boxing route and fails on flaggems, so the hold is a
     # correction; the per-op diagnosis is grouped by cause in the
-    # `metax_triton_fallback` literal in scripts/codegen_ops.py. The groups below
-    # state the *measured* gems verdict, which is what the survey recorded.
+    # `BOXING_GAP_NOTES["metax"]` note in scripts/codegen/gen_vendor_confs.py.
+    # The groups below state the *measured* gems verdict, which is what the
+    # survey recorded.
     #
     # Group 1 -- the gems kernel asserts its input is a real CUDA tensor, so it
     # aborts before computing anything:

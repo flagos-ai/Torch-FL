@@ -169,10 +169,14 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 #
 # The gap set is per-platform, not a FlagGems defect: the kernel works elsewhere,
 # but this platform's triton backend cannot run it, so the op is forced back to
-# boxing. MetaX's and DCU's live in codegen_ops.py (flaggems_forced_cuda plus the
-# per-platform additions) and are recovered here by diffing that platform's
-# existing conf against backends_flaggems.conf, rather than restated -- one
-# source of truth, and the per-op diagnosis stays in the codegen comments. PPU's
+# boxing. MetaX's and DCU's are recovered here by diffing that platform's
+# existing conf -- an op FlagGems covers whose conf line reads `cuda` is a gap
+# that platform measured, so the set is read back from the artifact instead of
+# restated, and the per-op diagnosis is in BOXING_GAP_NOTES below. That round
+# trip only holds while this script is the confs' sole writer: codegen_ops.py
+# wrote backends_metax.conf and backends_dcu.conf as well until #459, from
+# fallback sets that had drifted away from the confs, so a documented full
+# regeneration silently reverted the pins the diff had recovered. PPU's
 # is a literal (BOXING_TRITON_GAPS) because it is vendor-first no longer, and the
 # diff cannot tell a gap from a policy exception on a flaggems-first platform.
 BOXING_PLATFORMS = {
@@ -318,6 +322,76 @@ BOXING_GAP_NOTES = {
         "flaggems and raises 'Expected tensor to have CPU Backend' on cuda, so",
         "it must stay on flaggems. Only native_batch_norm moves.",
         "_native_batch_norm_legit and its variants were already on cuda.",
+        "slice_backward and silu_backward are pinned to cuda for two hcu",
+        "backend gaps rather than for wrong answers: both gems kernels are",
+        "correct where they can run, and neither can run here. slice_backward",
+        "faults the hardware -- 'Invalid address access' -- and only once the",
+        "grad it produced is consumed by MIOpen's convolution_backward",
+        "(tests/integration/ops/test_conv1d_dispatch.py, C=6144 depthwise), so",
+        "it is an hcu codegen bug rather than a shape/stride mismatch on our",
+        "side: the kernel's own output metadata and values check out when",
+        "measured on its own. silu_backward calls tl.math.div_rn, whose",
+        "lowering is the same div_rn shim the div.*_mode entries above are",
+        "pinned for -- it returns None on the hcu backend, and here the None",
+        "reaches the builder, so compilation dies with AttributeError:",
+        "'NoneType' object has no attribute 'type'. MetaX pins slice_backward",
+        "too, for a cause that is not this one (an out-of-bounds Xnack fault",
+        "inside the gems kernel); the two entries overlap by coincidence.",
+        "The .out / .grad_input spellings are spelled cuda as well, but that",
+        "is not a gap: FlagGems does not cover those overloads.",
+    ),
+    "metax": (
+        "MetaX is FlagGems-first like every generated conf, but the ops",
+        "triton-metax or flag_gems cannot run on the flagos device are pinned",
+        "to cuda and reach the boxing kernel (maca libtorch_cuda via mcblas).",
+        "The fallback has to be cuda and not a metax-native backend: the",
+        "hand-written mxcc backend is not registered in the MetaX boxing wheel",
+        "(FLAGOS_BUILD_VENDOR=OFF).",
+        "mm/bmm and their .out spellings are the FlagGems SPLIT_K kwarg",
+        "triton-metax rejects; mean.dim is FlagGems' non-inner-dim path, which",
+        "builds a CUDA context that fails on triton-metax.",
+        "add.Tensor, div.Scalar and div.Tensor are the scalar-arithmetic group:",
+        "MetaX Triton cannot lower it once FlagGems normalizes the scalar to a",
+        "tensor overload and promotes it to f64, because the compiler then",
+        "rejects f64 -> bf16. _conj is a contract pin rather than a compile",
+        "one: ATen's conj is a lazy view that sets the Conjugate bit and leaves",
+        "the storage alone, while FlagGems' kernel materializes the value.",
+        "sort and sort.stable, plus the matmul -> relu -> sum.dim_IntList",
+        "workload, are held for the profiler: the MetaX FlagGems C++ sort path",
+        "corrupts that workload, and the contract above is what MetaX activity",
+        "correlation is being stabilized against.",
+        "The rest are flag_gems kernels that guard on tensor.device.type",
+        'against flag_gems.device (== "cuda") and so fail on a flagos device',
+        "either by falling back to torch.<op>, which re-enters flagos_python",
+        "dispatch and recurses, or by raising ValueError('Inputs must be cuda",
+        "tensors ...'): embedding_dense_backward, i0, reflection_pad2d,",
+        "soft_margin_loss, special_i0e, special_i1, im2col, zero and the",
+        "mul_.Tensor group among them.",
+        "slice_backward is held for a fault rather than a wrong answer: gem's",
+        "slice_backward_kernel reads out of bounds on large tensors (a",
+        "grad_output [1, 6144, 35] scattered into [1, 6144, 32], from the",
+        "conv1d backward of a linear-attention model), and on MetaX that",
+        "Xnack/ATU fault (0x8) disables the whole process's mcruntime -- every",
+        "later op fails with mcErrorIllegalAddress -- so the bounds-safe boxing",
+        "kernel is the only way back.",
+        "slice.Tensor is held on a vestigial assertion: flag_gems/ops/slice.py",
+        "rejects complex64 and complex128, while its body is a pure as_strided",
+        "view that never consults a dtype, and diffusers'",
+        "QwenImageTransformer2DModel slices complex rotary frequencies.",
+        "Reported upstream as FlagGems issue #6356; the entry can come out when",
+        "that lands.",
+        "Most of the rest were measured by the 2026-09-15 differential survey",
+        "of the 166 ops MetaX gained at the FlagGems 5.4.0rc2.post1 ceiling,",
+        "which reached each op on both routes with one host-built operand pair.",
+        "The per-op verdicts, and the five flagged ops that fail on both routes",
+        "and are therefore not held, are grouped in",
+        "tests/integration/ops/test_metax_flaggems.py; the survey itself is in",
+        "docs/reference/operator-support.md.",
+        "This set is not restated here: gen_vendor_confs.py reads it back from",
+        "backends_metax.conf on every run (see BOXING_PLATFORMS), so a pin is",
+        "recorded by the route it takes in this file, and the gap does not",
+        "drift away from the conf the way it did while codegen_ops.py wrote a",
+        "second copy from a stale literal (issue #459).",
     ),
     "ppu": (
         "49 of the 482 FlagGems-covered ops are pinned to cuda; the other 433",
@@ -1510,15 +1584,16 @@ TILEOPS_PLATFORMS = set()
 # boxing_cpp_ops(). test_metax_conf_keeps_mm_boxed pins the exception.
 #
 # Verification on this route is not the same as being routed on it: five of these
-# also sit in `metax_triton_fallback` (codegen_ops.py) for a reason recorded
-# there, and route_boxing() checks that gap set first, so the conf keeps `bmm`,
-# `bmm.out`, `sort`, `sort.stable` and `sum.dim_IntList` on the boxing kernel and
-# only 12 of the 17 reach flaggems_cpp. Measured again on the C550 host while
+# also sit in MetaX's boxing gap set, which route_boxing() checks first, so the
+# conf keeps `bmm`, `bmm.out`, `sort`, `sort.stable` and `sum.dim_IntList` on the
+# boxing kernel and only 12 of the 17 reach flaggems_cpp. That set is read back
+# from backends_metax.conf (see BOXING_PLATFORMS) and its per-op reasons are in
+# BOXING_GAP_NOTES["metax"]. Measured again on the C550 host while
 # reviewing this set: forcing `bmm` or `mm` onto the C++ route with
 # `FLAGOS_OP_bmm=flaggems_cpp` fails on the fp32 inputs `aten::bmm` must serve
 # ("soft-lowp matrix kernel requires a low-precision input"), while `sort` and
 # `embedding` compute the host answer there -- `sort`'s pin is its profiler
-# interaction, not its values, as the codegen_ops.py entry says.
+# interaction, not its values, as the note says.
 METAX_CPP_MEASURED = {
     "_softmax",
     "_softmax_backward_data",

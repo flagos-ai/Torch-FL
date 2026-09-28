@@ -151,11 +151,11 @@ class TestSumDimDispatch:
         GCU300 front end rejects for an int64 operand (see
         NATIVE_TRITON_GAPS["gcu"]), and MetaX keeps this overload on the cuda
         boxing kernel while its activity handling in the profiler workload is
-        being stabilized (see metax_triton_fallback in
-        scripts/codegen/codegen_ops.py). Platforms whose conf keeps the FlagGems
-        route still log flagos_python, so asserting the conf's own value keeps
-        this test meaningful on every platform rather than pinning it to the one
-        it was written on.
+        being stabilized (see BOXING_GAP_NOTES["metax"] in
+        scripts/codegen/gen_vendor_confs.py). Platforms whose conf keeps the
+        FlagGems route still log flagos_python, so asserting the conf's own value
+        keeps this test meaningful on every platform rather than pinning it to
+        the one it was written on.
         """
         result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"

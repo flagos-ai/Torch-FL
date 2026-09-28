@@ -55,20 +55,31 @@ conflict — the upstream copy is authoritative.
 
 ### Regenerate rather than merge generated files
 
-For conflicts inside generated artifacts (`csrc/aten/generated/*`,
-`torch_fl/configs/backends_*.conf`), do not hand-merge conflict markers. Take
-the upstream side, port only the *generator* change, and re-run codegen:
+For conflicts inside generated artifacts, do not hand-merge conflict markers. Take
+the upstream side, port only the *generator* change, and re-run the generator that
+owns the file — the two artifact trees have different owners:
 
 ```bash
 git checkout flagos/main -- csrc/aten/generated/ torch_fl/configs/
-FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py
+FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py  # csrc/aten/generated/*
+/usr/bin/python3 scripts/codegen/gen_vendor_confs.py                  # torch_fl/configs/backends_*.conf
 ```
 
-Then confirm idempotency — a second run must produce no diff:
+`torch_fl/configs/backends_cuda.conf` is the exception: it is the CUDA boxing
+table `codegen_ops.py` writes, one line per wrapper that run generated. Every
+other conf belongs to `gen_vendor_confs.py` and `codegen_ops.py` does not write
+it, so a CUDA-path run leaves the vendor confs at whatever the checkout put
+there and prints the `gen_vendor_confs.py` command as a follow-up when the
+FlagGems coverage it discovered moved (issue #459).
+
+Then confirm idempotency — each generator must reproduce what it just wrote:
 
 ```bash
+git add csrc/aten/generated torch_fl/configs   # snapshot run 1
 FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py
-git diff --quiet && echo "idempotent" || echo "generator is NOT idempotent"
+/usr/bin/python3 scripts/codegen/gen_vendor_confs.py --check
+git diff --quiet -- csrc/aten/generated torch_fl/configs \
+  && echo "idempotent" || echo "generator is NOT idempotent"
 ```
 
 ### Do not clobber upstream changes to files you also touched
