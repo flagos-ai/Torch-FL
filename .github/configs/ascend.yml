@@ -89,6 +89,8 @@ integration_tests:
   # tests/integration/, where no manifest sweeps by default -- a file added there
   # reached no CI job at all. Selected by marker rather than by filename so the
   # same step works on every platform and the 2+-device guard stays in the test.
+  - name: Backend autoload contract
+    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
   - name: Multi-device contracts
     command: >-
       python -m pytest tests/integration/
