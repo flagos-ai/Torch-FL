@@ -349,9 +349,12 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     ),
     "FLAGOS_WHEEL_LOCAL": (
         SCOPE_BUILD,
-        "SDK-derived",
-        "Local version label for the wheel (e.g. metax3.8.1), for dev builds "
-        "that must pin the exact SDK",
+        "The platform's wheel_local from cmake/flagos_platforms.json",
+        "Local version label for the wheel -- the vendor name, and the Nexus "
+        "pypi lane the artifact belongs in (2.10.0+nvidia -> "
+        "flagos-pypi-nvidia). Overriding it is for dev builds that must pin an "
+        "exact SDK; the SDK version itself belongs in FLAGOS_SDK_VERSION, which "
+        "the wheel's compatibility.json records",
     ),
     "FLAGOS_SKIP_CUDA_ASSETS": (
         SCOPE_BUILD,

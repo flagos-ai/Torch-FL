@@ -437,7 +437,10 @@ export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
 export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
-export FLAGOS_WHEEL_LOCAL="${FLAGOS_WHEEL_LOCAL:-ppu}"
+# FLAGOS_WHEEL_LOCAL is not set here: the wheel's local segment is the vendor
+# name, taken from the wheel_local column of cmake/flagos_platforms.json
+# ("thead", the Nexus lane PPU publishes to). Setting it here would make the
+# artifact name depend on the build script instead of the platform table.
 # PPU image ships FlagGems as source only (no built liboperators.so /
 # FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGOS_BUILD_FLAGGEMS_CPP) must be off.
 # setup.py's `ppu` branch already forces it OFF; exporting it here keeps the
@@ -543,5 +546,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_WHEEL_LOCAL FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

@@ -55,6 +55,12 @@ def clean_kernel_env(monkeypatch):
 def test_build_ext_stages_generated_build_config(
     monkeypatch, tmp_path, clean_kernel_env
 ):
+    # The wheel version is resolved from the environment when setup.py is read,
+    # before anything patches the module global, so the ambient platform has to
+    # be the one under test or the manifest's wheel_version describes another
+    # platform's build. That was invisible while only one platform had a local
+    # version segment.
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "musa")
     _, setup_kwargs = _load_setup(monkeypatch)
     assert "scripts/tools/torch-fl-preflight" in setup_kwargs["scripts"]
     source_root = tmp_path / "source"
@@ -97,7 +103,9 @@ def test_build_ext_stages_generated_build_config(
         (tmp_path / "wheel" / "torch_fl" / "compatibility.json").read_text()
     )
     assert compatibility["platform"] == "musa"
-    assert compatibility["wheel_version"] == "2.10.0"
+    # The local segment is the platform's `wheel_local` from
+    # cmake/flagos_platforms.json -- the Nexus vendor lane, not an SDK version.
+    assert compatibility["wheel_version"] == "2.10.0+mthreads"
     assert compatibility["build"]["kernels"] == ["flaggems", "vendor"]
     assert compatibility["build"]["vendor_torch_libraries"] is False
     assert compatibility["build"]["distributions"]["torch"] == "2.10.0+cpu"

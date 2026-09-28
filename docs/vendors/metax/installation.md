@@ -46,13 +46,17 @@ cd PyTorch-Plugin-FL
 FLAGOS_ACCELERATOR=metax \
   FLAGOS_BUILD_VENDOR=OFF \
   FLAGOS_VENDOR_TORCH_LIB=<path-to-torch+metax>/torch/lib \
-  FLAGOS_WHEEL_LOCAL=metax3.8.1 \
   python setup.py bdist_wheel
 ```
 
 **Parameters:**
 - `FLAGOS_VENDOR_TORCH_LIB`: Path to the `torch+metax` wheel's `torch/lib` directory (source of forked libtorch)
-- `FLAGOS_WHEEL_LOCAL`: Local version tag (e.g., `metax3.8.1` → wheel version `2.10.0+metax3.8.1`), identifying the target MACA/driver version
+- `FLAGOS_WHEEL_LOCAL`: Optional. The wheel's local version label defaults to the
+  vendor name (`metax` → `2.10.0+metax`), which also names the Nexus lane the
+  artifact belongs to (`flagos-pypi-metax`). Set it only for a dev build that
+  must pin the exact SDK, e.g. `FLAGOS_WHEEL_LOCAL=metax3.8.1` →
+  `2.10.0+metax3.8.1`; the release artifacts keep the vendor name and record the
+  SDK in `FLAGOS_SDK_VERSION` / `compatibility.json` instead.
 
 #### Step 2: Bundle the Forked Libtorch
 
@@ -74,7 +78,7 @@ cp build/lib.*/torch_fl/_C.*.so build/lib.*/torch_fl/
 python setup.py bdist_wheel --skip-build --bdist-dir "$(mktemp -d)"
 ```
 
-The result is `dist/torch_fl-2.10.0+metax3.8.1-cp312-cp312-linux_x86_64.whl` (~1.1 GB — it bundles the forked libtorch and exceeds PyPI's 100 MB limit; distribute via private index or direct transfer).
+The result is `dist/torch_fl-2.10.0+metax-cp312-cp312-linux_x86_64.whl` (~1.1 GB — it bundles the forked libtorch and exceeds PyPI's 100 MB limit; distribute via private index or direct transfer).
 
 ### Installation on Target Host
 
@@ -82,7 +86,7 @@ The result is `dist/torch_fl-2.10.0+metax3.8.1-cp312-cp312-linux_x86_64.whl` (~1
 
 ```bash
 pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
-pip install torch_fl-2.10.0+metax3.8.1-cp312-cp312-linux_x86_64.whl
+pip install torch_fl-2.10.0+metax-cp312-cp312-linux_x86_64.whl
 ```
 
 #### Runtime Configuration

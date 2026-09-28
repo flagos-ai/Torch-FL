@@ -94,15 +94,21 @@ PY
     "torch==$CPU_TORCH_VERSION_DEFAULT"
   PIP_RETRY_PYTHON=/opt/venv/bin/python pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
     build cmake ninja setuptools wheel pytest patchelf
-  export FLAGOS_WHEEL_LOCAL=metax3.8.1.3
   export PYTHONPATH=""
 else
   export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
   # This image stages only the shared libraries, without torch/version.py.
   # The image's vendor core is built against the pinned 2.10.0 Python wheel.
   export TORCH_FL_VENDOR_TORCH_VERSION=2.10.0
-  export FLAGOS_WHEEL_LOCAL=metax3.8.0
 fi
+# FLAGOS_WHEEL_LOCAL is deliberately not set here. The wheel's local segment is
+# the vendor name ("metax"), taken from the wheel_local column of
+# cmake/flagos_platforms.json, so the two images above produce the same
+# artifact name and it stays a property of the source rather than of whichever
+# image happens to build it. The distinction these lines used to encode -- MACA
+# 3.8.1.3 against 3.8.0 -- belongs in FLAGOS_SDK_VERSION, which
+# torch_fl/compatibility.json records; nothing sets it today, so the manifest
+# reports the SDK as unknown for both. See docs/reference/environment-variables.md.
 export PATH="/opt/venv/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
 export VIRTUAL_ENV=/opt/venv
 export PYTHONNOUSERSITE=1
@@ -270,7 +276,7 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
-  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
+  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
