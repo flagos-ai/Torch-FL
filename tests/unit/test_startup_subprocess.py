@@ -24,9 +24,11 @@ from pathlib import Path
 import pytest
 
 
-def _run(code, profile):
+def _run(code, profile, *, autoload=None):
     env = os.environ.copy()
     env["FLAGOS_STARTUP_PROFILE"] = profile
+    if autoload is not None:
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = autoload
     result = subprocess.run(
         [sys.executable, "-c", code],
         env=env,
@@ -43,15 +45,33 @@ def _require_torch():
         pytest.skip("PyTorch and a built torch_fl are needed for subprocess tests")
 
 
+def _require_torch_first_supported():
+    _require_torch()
+    detector = runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
+    )
+    if detector["build_accelerator"]() != "cuda":
+        pytest.skip("Vendor libtorch overlays require torch_fl before torch")
+
+
 def test_minimal_import_and_explicit_repeated_activation():
     _require_torch()
     _run(
         """
 import torch_fl
 import torch
+from importlib.metadata import entry_points
 
 assert all(value == 'inactive' for value in
            torch_fl.optional_integration_status().values())
+assert torch._C._get_privateuse1_backend_name() == 'flagos'
+hooks = [ep for ep in entry_points(group='torch.backends')
+         if ep.name == 'torch_fl']
+assert len(hooks) == 1, hooks
+hook = hooks[0].load()
+hook()
+hook()
+assert torch._C._get_privateuse1_backend_name() == 'flagos'
 torch.empty(1, device='flagos')
 torch_fl.activate_optional_integrations('ddp')
 first = torch.nn.parallel.DistributedDataParallel.__init__
@@ -80,19 +100,65 @@ torch.empty(1, device='flagos')
 
 
 def test_torch_first_import_on_cuda():
-    _require_torch()
-    detector = runpy.run_path(
-        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
-    )
-    if detector["build_accelerator"]() != "cuda":
-        pytest.skip("Vendor libtorch overlays require torch_fl before torch")
+    _require_torch_first_supported()
     _run(
         """
 import torch
+import sys
+assert 'torch_fl' not in sys.modules
 import torch_fl
 
 assert torch.device('flagos').type == 'flagos'
 assert torch_fl.optional_integration_status()['ddp'] == 'inactive'
 """,
         "minimal",
+        autoload="0",
+    )
+
+
+def test_bare_torch_autoloads_in_fresh_compile_worker_on_cuda():
+    _require_torch_first_supported()
+    if os.environ.get("TORCH_DEVICE_BACKEND_AUTOLOAD", "1") != "1":
+        pytest.skip("This CI image disables all torch.backends entry points")
+    _run(
+        """
+import sys
+import torch
+import triton
+
+assert 'torch_fl' in sys.modules
+assert torch._C._get_privateuse1_backend_name() == 'flagos'
+assert torch.device('flagos').type == 'flagos'
+assert hasattr(torch, 'flagos')
+assert torch.flagos.is_available()
+from torch_fl._autoload import init
+init()
+init()
+assert torch._C._get_privateuse1_backend_name() == 'flagos'
+""",
+        "full",
+        autoload="1",
+    )
+
+
+def test_foreign_privateuse1_plugin_has_actionable_diagnostic_on_cuda():
+    _require_torch_first_supported()
+    _run(
+        """
+import sys
+import torch
+
+torch.utils.rename_privateuse1_backend('foreign')
+try:
+    import torch_fl
+except RuntimeError as error:
+    message = str(error)
+    assert "PrivateUse1 is already claimed by the 'foreign' backend" in message
+    assert 'TORCH_DEVICE_BACKEND_AUTOLOAD=0' in message
+    assert 'torch_fl._C' not in sys.modules
+else:
+    raise AssertionError('torch_fl claimed a foreign PrivateUse1 backend')
+""",
+        "minimal",
+        autoload="0",
     )

@@ -21,7 +21,7 @@ pins the two parts that need no hardware:
   * the device-type helpers, which are what decide whether a module is routed to
     the flagos construction path at all -- a wrong answer here is silent, and
     sends a flagos module down the cuda-first path the patch exists to avoid;
-  * the wiring: that the ecosystem phase installs all three patches, that the
+  * the wiring: that optional activation installs all three patches, that the
     comm patch hands torch's comm primitives to the extension, and that the
     extension publishes exactly the primitives torch's comm layer calls -- a
     torch upgrade that reaches for a new one would otherwise escape the patch
@@ -147,24 +147,37 @@ def test_module_device_type_reads_parameters_and_buffers():
     assert classify(_Module()) is None
 
 
-def test_ecosystem_installs_the_dataparallel_patches():
-    calls = [
-        ast.unparse(node.value.func)
-        for node in _function(_tree(), "_phase_ecosystem").body
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-    ]
-    for name in (
-        "_patch_comm_for_flagos",
-        "_patch_dataparallel_for_flagos",
-        "_patch_data_parallel_for_flagos",
-    ):
-        assert name in calls, f"{name} is not called by _phase_ecosystem: {calls}"
-    # The comm branches have to exist before anything can construct a flagos
-    # DataParallel, and both follow the DDP patch they mirror.
-    assert calls.index("_patch_ddp_for_flagos") < calls.index("_patch_comm_for_flagos")
-    assert calls.index("_patch_comm_for_flagos") < calls.index(
-        "_patch_dataparallel_for_flagos"
+def test_optional_activation_installs_the_dataparallel_patches():
+    activation = _function(_tree(), "activate_optional_integrations")
+    installers = next(
+        node
+        for node in ast.walk(activation)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "installers"
+            for target in node.targets
+        )
     )
+    mapped = {
+        key.value: ast.unparse(value)
+        for key, value in zip(installers.value.keys, installers.value.values)
+    }
+    assert mapped["parallel_comm"] == "_patch_comm_for_flagos"
+    assert mapped["dataparallel"] == "_patch_dataparallel_for_flagos"
+    assert mapped["data_parallel"] == "_patch_data_parallel_for_flagos"
+
+    prerequisites = next(
+        node
+        for node in ast.walk(activation)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "prerequisites"
+            for target in node.targets
+        )
+    )
+    dependencies = ast.literal_eval(prerequisites.value)
+    assert dependencies["dataparallel"] == ("parallel_comm",)
+    assert dependencies["data_parallel"] == ("parallel_comm", "dataparallel")
 
 
 def test_comm_patch_hands_the_primitives_to_the_extension():

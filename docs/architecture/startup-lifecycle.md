@@ -5,6 +5,30 @@ must happen after selecting and preloading the vendor libtorch, but before loadi
 `torch_fl._C`. On vendors with a private libtorch overlay, import `torch_fl`
 before `torch`; reversing that order is unsupported and fails with a diagnostic.
 
+PyTorch also discovers Torch-FL's `torch.backends` entry point at the end of a
+bare `import torch`. This path supports fresh processes such as Inductor compile
+workers **only when the installed torch core and CUDA assets are already safe to
+load before Torch-FL runs**. It cannot retroactively replace a vendor libtorch
+core or undo a CUDA hook initialized earlier in PyTorch's import. The supported
+startup choices are:
+
+| Environment | Startup | Result |
+|---|---|---|
+| Any supported build | `import torch_fl` before `import torch` | Torch-FL selects/preloads the runtime, then registers `flagos`. |
+| CUDA build with a compatible preloaded runtime | Bare `import torch`, autoload enabled | PyTorch loads Torch-FL's entry point and registers `flagos`, including in a fresh compile worker. |
+| Any build with `TORCH_DEVICE_BACKEND_AUTOLOAD=0` | `import torch_fl` explicitly | PyTorch skips **all** backend entry points; explicit Torch-FL import remains available. |
+| Vendor core overlay without prior preload | Bare `import torch` | Unsupported: PyTorch has already mapped the wrong core by the time the entry point runs. |
+
+MUSA sets `TORCH_DEVICE_BACKEND_AUTOLOAD=0` before its own PyTorch import so
+`torch_musa` cannot claim the one PrivateUse1 slot first. CI also disables
+autoload on other images when their vendor plugins or preload requirements make
+torch-first import unsafe. This switch is global to all `torch.backends` plugins;
+it is not a setting that makes FlagTree, FlagGems or FlagCX optional. If another
+plugin has already claimed PrivateUse1, explicit Torch-FL import raises a
+diagnostic naming the owner and suggesting `import torch_fl` first or disabling
+autoload before starting Python. PyTorch itself wraps entry-point failures in
+`Failed to load the backend extension` and suggests the same opt-out.
+
 The import pipeline has five ordered phases:
 
 | Phase | Work | Can be deferred? |

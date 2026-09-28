@@ -81,6 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            tests/unit/test_backend_autoload_contract.py \
             tests/unit/test_ci_version_pins.py \
             tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
