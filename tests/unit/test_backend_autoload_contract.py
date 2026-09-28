@@ -15,7 +15,6 @@
 """The autoload contract that can be checked without a built accelerator wheel."""
 
 import ast
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +22,33 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 INIT = ROOT / "torch_fl" / "__init__.py"
+
+
+def _pyproject_table(table: str) -> dict:
+    """Read one ``[table]`` of pyproject.toml without a TOML parser.
+
+    ``tomllib`` is Python 3.11+, and the accelerator CI interpreters are 3.10:
+    DCU and GCU build against the image's cp310 Python, and the DCU unit group
+    is the one job that collects this whole directory. Importing it there was a
+    collection error, which failed the file and with it the per-file unit group.
+    ``tomli`` would be the other fix, but nothing in tests/unit has a parser
+    dependency today and this file needs one table of one file, so the table is
+    scanned directly instead.
+    """
+    lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+    header = f"[{table}]"
+    if header not in lines:
+        raise AssertionError(f"pyproject.toml has no {header} table")
+    entries = {}
+    for line in lines[lines.index(header) + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("["):  # the next table ends this one
+            break
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, _, value = stripped.partition("=")
+        entries[key.strip()] = value.strip().strip('"')
+    return entries
 
 
 def _function(name):
@@ -40,8 +66,7 @@ def _function(name):
 
 
 def test_installed_entry_point_targets_the_device_bootstrap():
-    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert config["project"]["entry-points"]["torch.backends"] == {
+    assert _pyproject_table('project.entry-points."torch.backends"') == {
         "torch_fl": "torch_fl._autoload:init"
     }
 
