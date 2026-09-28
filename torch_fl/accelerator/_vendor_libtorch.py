@@ -400,7 +400,13 @@ def ensure_vendor_libtorch_links(
     _check_abi_version(active, src, label)
     # An inherited PYTHONPATH can select an already published facade before this
     # module is imported in a subprocess. Its core libraries are already correct.
-    if _overlay_marker(active) == os.path.realpath(src):
+    selected_source = _overlay_marker(active)
+    if selected_source and selected_source != os.path.realpath(src):
+        raise RuntimeError(
+            f"{label} cannot use torch from a different vendor facade "
+            f"({selected_source}); clear the inherited PYTHONPATH before startup"
+        )
+    if selected_source:
         if load_order:
             _runtime_handles.extend(
                 _preload_global(src, load_order, core_so, label, fallback_dir=active)

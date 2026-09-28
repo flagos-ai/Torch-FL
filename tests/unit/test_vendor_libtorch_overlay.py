@@ -227,6 +227,26 @@ def test_inherited_facade_can_preload_after_torch_import(
     assert preloaded == [active]
 
 
+def test_inherited_facade_rejects_another_vendor(fake_runtime, tmp_path, monkeypatch):
+    stock, vendor = fake_runtime
+    module = _load_module()
+    monkeypatch.setattr(module, "_overlay_cache_root", lambda: str(tmp_path))
+    overlay = module._prepare_overlay(str(stock), str(vendor))
+    second = tmp_path / "other-vendor"
+    second.mkdir()
+    (second / "vendor_version.py").write_text("__version__ = '2.10.0+other'\n")
+    for name in CORE:
+        (second / name).write_bytes(b"other-" + name.encode())
+    monkeypatch.setattr(
+        module, "active_torch_lib", lambda: str(Path(overlay) / "torch" / "lib")
+    )
+    monkeypatch.setattr(
+        module, "discover_vendor_torch_lib", lambda *a, **k: str(second)
+    )
+    with pytest.raises(RuntimeError, match="different vendor facade"):
+        module.ensure_vendor_libtorch_links("vendor", CORE, vendor="Test")
+
+
 def test_concurrent_publication_ignores_interrupted_stage(fake_runtime, tmp_path):
     stock, vendor = fake_runtime
     cache = tmp_path / "cache"
