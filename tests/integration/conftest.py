@@ -71,6 +71,15 @@ def pytest_configure(config):
         "(select with -m multi_device)",
     )
     config.addinivalue_line(
+        "markers", "backend_contract: core FlagOS device correctness gate"
+    )
+    config.addinivalue_line(
+        "markers", "backend_smoke: non-raising public device API smoke"
+    )
+    config.addinivalue_line(
+        "markers", "backend_capability: non-gating capability diagnostic"
+    )
+    config.addinivalue_line(
         "markers", "profiler: shared public torch.profiler contract"
     )
     config.addinivalue_line(

@@ -89,6 +89,10 @@ integration_tests:
   # same step works on every platform and the 2+-device guard stays in the test.
   - name: Backend autoload contract
     command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
+  - name: Device backend smoke contract
+    command: >-
+      python -m pytest tests/integration/test_device_backend_contract.py
+      -v -s --tb=short
   - name: Multi-device contracts
     command: >-
       python -m pytest tests/integration/

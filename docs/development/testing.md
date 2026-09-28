@@ -42,8 +42,19 @@ Public PyTorch APIs whose behavior must be identical on every backend are tested
 | `profiler_device`, `profiler_kernel`, `profiler_runtime`, `profiler_memcpy`, `profiler_memset`, `profiler_flow`, `profiler_linkage`, `profiler_metadata` | Individual tracer capabilities |
 | `amp` | Selects the whole `torch.amp` contract (`tests/integration/test_amp_contract.py`) |
 | `amp_device`, `amp_grad_scaler` | AMP device compute and GradScaler route capabilities |
+| `backend_contract` | Gating correctness cases in `test_device_backend_contract.py` |
+| `backend_smoke` | Non-raising public device API cases in the same file |
+| `backend_capability` | Non-gating capability observations, reported in the test log and JUnit properties |
 
-Each contract has a support module (`profiler_support.py`, `amp_support.py`) holding a frozen capability dataclass resolved from the active platform. A test that needs a capability the backend does not provide skips with a reason naming the platform, so an unimplemented vendor route reports as an intentional skip instead of a fabricated pass. Adding a backend means extending one capability table, not adding a test file.
+The profiler and AMP contracts have support modules (`profiler_support.py`,
+`amp_support.py`) holding frozen capability dataclasses resolved from the active
+platform. A test that needs a capability the backend does not provide skips with
+a reason naming the platform, so an unimplemented vendor route reports as an
+intentional skip instead of a fabricated pass. Adding a backend means extending
+one capability table, not adding a test file. The device backend contract gates
+only baseline behavior shared by all platforms; its separate complex-arithmetic
+diagnostic reports the observed support state without granting a silent skip to
+a baseline case.
 
 Both support modules share `platform_support.detect_platform()` and must not import torch at module scope: they are loaded as pytest plugins before `torch_fl` preloads its device assets, and importing torch first breaks the required library initialization order.
 
@@ -64,6 +75,25 @@ Test filtering is automatic: `conftest.py` detects the active platform from the 
 ```bash
 pytest tests/unit/ -v
 ```
+
+### Shared device backend contract
+
+Run the small cross-platform gate against an installed Torch-FL wheel and an
+available accelerator:
+
+```bash
+python -m pytest tests/integration/test_device_backend_contract.py -v -s --tb=short
+```
+
+Every platform manifest runs this same command after its environment check.
+`tests/integration/conftest.py` exits with `flagos device is not available`
+before collecting contract failures when the runner or runtime is unavailable.
+Core cases compare deterministic device results and metadata with CPU; the
+two-device case skips only when the hardware exposes fewer than two devices.
+The final `backend_capability` case prints the observed complex-arithmetic
+status and records it as a JUnit property without failing a platform that does
+not support that optional dtype path. Operator matrices, specialized dtype
+routes, and storage lifetime belong to their dedicated suites.
 
 ### Platform-filtered Operator Tests
 
