@@ -40,6 +40,12 @@
 # the DCU job that already runs these files. No numpy pin is needed here: the
 # numpy<2 constraint elsewhere protects the stock torch C extensions, and this
 # job installs no torch.
+#
+# setuptools is the third: test_ci_version_pins.py executes setup.py to check
+# that the requirements the wheel declares are the pins the platform scripts
+# install. That is the file's own subject -- the pin wiring -- and setup.py
+# needs no torch to be read, only setuptools. It is listed explicitly rather
+# than assumed from the runner image.
 
 name: Platform-agnostic checks
 
@@ -65,7 +71,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install pytest and transformers
-        run: pip install pytest "transformers>=4.51"
+        run: pip install pytest "transformers>=4.51" setuptools
 
       - name: Check setup-script syntax
         run: |

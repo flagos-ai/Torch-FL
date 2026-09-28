@@ -26,6 +26,57 @@ All platforms require:
 
 Platform-specific requirements (CUDA toolkit version, vendor SDK paths, additional dependencies) are documented in each platform's installation guide.
 
+## Runtime Dependencies and the Package Index
+
+A wheel declares the four things it needs and cannot work without: `torch`, and
+the three packages built outside this repository — **FlagTree** (the Triton build
+carrying the vendor's backend), **FlagGems** (the operator source) and **FlagCX**
+(the distributed backend). They are pinned to the exact versions the wheel was
+built against, taken from
+[`.github/version-pins.env`](../../.github/version-pins.env), which is the same
+file the CI setup scripts read. Nothing about them is a range: `flagtree` and
+`flagcx` are not on PyPI at all, `flag_gems` there is an older cohort than the
+one the per-op routing tables in `torch_fl/configs/backends_*.conf` were
+generated against, and a FlagTree build is per-platform (its package name carries
+the vendor's Triton backend, e.g. `0.7.0rc2+hcu3.6` for DCU).
+
+That means the index has to carry more than one location. Which one serves what:
+
+| Requirement | Where it is published |
+|---|---|
+| `torch_fl` | `flagos-pypi-<vendor>` — the lane named by the wheel's local version (`2.10.0+hygon` → `flagos-pypi-hygon`) |
+| `flag_gems`, `flagcx` | the same vendor lane |
+| `flagtree` | `flagos-pypi-hosted`, for every platform |
+| `torch==2.10.0+cpu` | `https://download.pytorch.org/whl/cpu` |
+| everything else (`packaging`, `PyYAML`, `numpy`, …) | PyPI (or a mirror) |
+
+So a single `--index-url` has to name a **group repository** that contains all of
+those. Where one is not configured, list them instead — this is the DCU case, and
+it resolves (torch_fl 2.10.0+hygon on a cp310 target):
+
+```bash
+BASE=https://resource.flagos.net/repository
+pip install \
+  --index-url       "$BASE/flagos-pypi-hygon/simple/" \
+  --extra-index-url "$BASE/flagos-pypi-hosted/simple/" \
+  --extra-index-url "$BASE/pypi-proxy/simple/" \
+  --extra-index-url "https://download.pytorch.org/whl/cpu" \
+  torch_fl==2.10.0+hygon
+```
+
+Two things that are easy to get wrong here:
+
+- **The vendor lane alone is not enough**, even for the platforms whose lane
+  already carries all three FlagOS packages: `flag_gems` itself declares
+  `packaging>=26.0` and `PyYAML==6.0.1`, which the lanes do not serve.
+- **`flagtree` is not in most lanes.** It is fetched from `flagos-pypi-hosted`,
+  which is how the CI scripts are already split (`FLAGTREE_INDEX_URL` versus
+  `FLAGGEMS_INDEX_URL` in `.github/scripts/hooks/set_env_*.sh`).
+
+If your environment provisions the stack itself — as CI does, installing the
+wheel with `--no-deps` and each sibling through its own hook — pass `--no-deps`
+and keep that arrangement.
+
 ## Source Installation Contract
 
 Each platform installation guide defines:

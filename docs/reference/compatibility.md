@@ -15,8 +15,13 @@
 |---|---|---|
 | Python | 3.8 or later | From package metadata. Platform SDKs and available wheels may impose a narrower range. |
 | PyTorch | 2.10.x (`>=2.10,<2.11`) | Generated ATen bindings are tied to this minor line. |
-| FlagGems | Platform dependent | Installed from PyPI or a vendor-compatible build only where the platform route uses it. |
-| Triton/compiler | Platform dependent | Use the compiler distribution required by the selected accelerator. |
+| FlagGems | The version in `.github/version-pins.env` | Declared as an exact requirement, not a range: the per-op routing tables were generated against one cohort. Published to the platform's vendor lane. |
+| FlagTree | The platform's pin in `.github/version-pins.env` | Declared as an exact requirement and it *is* Triton — the package name carries the vendor's backend (`0.7.0rc2+hcu3.6`). Published to `flagos-pypi-hosted`. Platforms with no FlagTree build declare `triton>=3.5.1` instead. |
+| FlagCX | The platform's pin in `.github/version-pins.env` | Declared only where the vendor runtime has a build (CUDA, DCU, GCU, MetaX, MUSA); elsewhere the distributed path falls back to the NCCL-shaped route. |
+| Triton/compiler | Comes from FlagTree | Use the compiler distribution required by the selected accelerator. |
+
+The index requirements for installing those are in
+[Installation](../getting-started/installation.md#runtime-dependencies-and-the-package-index).
 
 ## Wheel compatibility record
 

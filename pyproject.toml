@@ -61,16 +61,13 @@ dev = [
     # `ruff` behaves identically to the gate.
     "ruff==0.15.12",
 ]
-# FlagCX enables the heterogeneous unified-comm inner backend for distributed
-# (ProcessGroupFlagOS tries it first, then falls back to the vendor-native
-# backend — NCCL/HCCL). It is a hardware-specific compiled artifact (per-vendor
-# adaptor + CCL). Published wheels live on the matching vendor indexes at
-# resource.flagos.net, so the installer must select a toolkit-compatible index
-# and version (see .github/version-pins.env and docs/architecture/distributed-flagcx.md).
-# This extra declares the dependency but does not select a vendor index.
-flagcx = [
-    "flagcx",
-]
+# There was a `flagcx` extra here, declaring a bare `flagcx` for the
+# heterogeneous unified-comm inner backend. It is gone because the package is
+# now a pinned requirement on every platform that has a build for it (CUDA,
+# DCU, GCU, MetaX, MUSA -- see _flagos_sibling_requires in setup.py), and the
+# extra could not have worked where it was not: `flagcx` is not on PyPI, and the
+# build is per-vendor (`0.14.0rc2.post2+dtk2604`). The four platforms without a
+# pin have no FlagCX build at all and fall back to the NCCL-shaped route.
 
 [project.entry-points."torch.backends"]
 # PyTorch calls this at the end of `import torch`, so processes torch_fl does not

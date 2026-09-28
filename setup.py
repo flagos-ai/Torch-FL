@@ -974,7 +974,13 @@ def _get_setup_kwargs():
         include_package_data=False,
         python_requires=">=3.8",
         install_requires=_install_requires(),
-        extras_require={"cuda": _cuda_runtime_requires()},
+        # No extras_require here: pyproject.toml's
+        # [project.optional-dependencies] owns that table and setuptools reports
+        # `extras_require` overwritten in `pyproject.toml` when both are given,
+        # so a `cuda` extra declared here was never in any artifact. The CUDA
+        # runtime dependencies are hard requirements on that platform anyway
+        # (_install_requires), and `pip install torch_fl[cuda]` is unaffected --
+        # it never resolved to anything.
     )
 
 
@@ -1001,26 +1007,86 @@ _CUDA_RUNTIME_DEPS = [
 ]
 
 
-def _cuda_runtime_requires():
-    return list(_CUDA_RUNTIME_DEPS)
+# torch_fl is a thin build on three packages that live outside this repository:
+# FlagTree (the Triton build carrying the vendor backend), FlagGems (the operator
+# source) and FlagCX (the distributed backend). Omitting them is not a crash --
+# every import in the Python layer is guarded -- but the result is a flagos device
+# that routes no operator and a distributed path staged through the host, so the
+# wheel declares the exact versions it was built and measured against.
+#
+# The versions come from .github/version-pins.env, the file the CI setup scripts
+# source, rather than a second copy here. Two things that file settles and a
+# guessed range does not:
+#
+#   * flagtree and flagcx are not on PyPI at all, and flag_gems on a generic
+#     index resolves to an older cohort (5.0.x) than the one the per-op routing
+#     tables in torch_fl/configs/backends_*.conf were generated against, so a
+#     floor like `flag_gems>=5.0.2` is satisfied by a build this wheel was never
+#     measured on;
+#   * FlagTree is per-platform -- the same package name carries the vendor's own
+#     Triton backend (0.7.0rc2+hcu3.6 for DCU, 0.7.0rc3+metax3.6 for MetaX) -- so
+#     a plain `triton` requirement is the wrong shape. Declaring triton next to a
+#     vendor FlagTree is what produces Ascend's "0 active drivers" failure.
+#
+# Resolution needs an index that carries both locations: FlagTree is published to
+# flagos-pypi-hosted while flag_gems and flagcx sit in the per-vendor lane
+# (flagos-pypi-<vendor>), which is exactly how the CI scripts are configured
+# (FLAGTREE_INDEX_URL and FLAGGEMS_INDEX_URL in .github/scripts/hooks/set_env_*.sh).
+# A single --index-url therefore has to name a group repository containing both,
+# plus a proxy for PyPI and one for download.pytorch.org/whl/cpu.
+VERSION_PINS = os.path.join(SOURCE_DIR, ".github", "version-pins.env")
 
 
-def _vendor_supplies_triton() -> bool:
-    """True when the target platform ships its own Triton, so PyPI's
-    NVIDIA-targeted wheel must not be pulled in as a dependency.
+def _version_pins() -> dict:
+    """The KEY=VALUE assignments of .github/version-pins.env.
 
-    - FLAGOS_ACCELERATOR=dcu: DTK ships its own Triton (and builds pure-boxing).
-    - FLAGOS_ACCELERATOR=ascend: `triton` is provided by FlagTree, installed out of
-      band (it has no PyPI release satisfying `triton>=3.5.1`). Declaring the
-      dep makes pip install stock triton over FlagTree, after which any
-      Triton entry point dies with "0 active drivers".
-    - PPU (FLAGOS_ACCELERATOR=ppu): the vendor Triton lives on a private index and is
-      versioned 3.x+<sdk> (e.g. 3.5.0+v0.2.0.ppu2.1.0), which does not satisfy
-      a `triton>=3.5.1` pin; its sdist is also a download shim that pip cannot
-      always build. Install it manually, then `pip install --no-deps` this
-      package. See "Build from Source (PPU Platform)" in the README.
+    Read as data rather than sourced. The file says of itself that it is "a plain
+    assignment file meant to be sourced" -- no `export`, no quoting and no value
+    that expands a variable -- so a parser here is the same read the CI scripts
+    do, and the two cannot drift into disagreeing about a pin.
     """
-    return FLAGOS_ACCELERATOR in ("dcu", "ascend", "ppu")
+    if not os.path.isfile(VERSION_PINS):
+        raise RuntimeError(
+            f"{VERSION_PINS} is missing, so the FlagTree/FlagGems/FlagCX versions "
+            "this wheel must declare are unknown. They cannot be guessed: the "
+            "package names are vendor- and cohort-specific. Build from a checkout "
+            "of the repository."
+        )
+    pins = {}
+    with open(VERSION_PINS, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            pins[key.strip()] = value.strip().strip("\"'")
+    return pins
+
+
+def _flagos_sibling_requires() -> list:
+    """FlagTree, FlagGems and FlagCX at the versions this wheel was built against."""
+    pins = _version_pins()
+    reqs = []
+    flagtree = pins.get(f"FLAGTREE_VERSION_{FLAGOS_ACCELERATOR}")
+    if flagtree:
+        # FlagTree *is* Triton -- it installs a `triton` distribution -- so
+        # pinning it is what keeps a stock NVIDIA triton wheel out of the
+        # environment on every platform that has a FlagTree build.
+        reqs.append(f"flagtree=={flagtree}")
+    else:
+        # No FlagTree build is published for this platform, so Triton has to
+        # come from somewhere else. tsingmicro and bpu are the two.
+        reqs.append("triton>=3.5.1")
+    flag_gems = pins.get("FLAGGEMS_VERSION_DEFAULT")
+    if not flag_gems:
+        raise RuntimeError(f"{VERSION_PINS} defines no FLAGGEMS_VERSION_DEFAULT")
+    reqs.append(f"flag_gems=={flag_gems}")
+    flagcx = pins.get(f"FLAGCX_VERSION_{FLAGOS_ACCELERATOR}")
+    if flagcx:
+        # Only the platforms whose vendor runtime FlagCX has a build for. The
+        # others fall back to the NCCL-shaped path, so there is nothing to pin.
+        reqs.append(f"flagcx=={flagcx}")
+    return reqs
 
 
 # The checked-in csrc/aten/generated/* bindings are generated against a
@@ -1035,20 +1101,7 @@ TORCH_PIN = "torch>=2.10,<2.11"
 
 def _install_requires():
     reqs = [TORCH_PIN, "packaging>=23"]
-    # FlagGems (and its Triton) is the default operator source, so it is a hard
-    # runtime dep everywhere it can actually run. Platforms that ship their own
-    # Triton are the exception: pulling PyPI's NVIDIA-targeted triton wheel would
-    # install ~200 MB of the wrong artifact (or fail to resolve outright). All
-    # flag_gems imports in the Python layer are ImportError-guarded, so omitting
-    # it is safe.
-    #
-    # The floor is intentional, not the version CI tests. CI installs the
-    # published FlagOS wheel pinned in .github/version-pins.env
-    # (FLAGGEMS_VERSION_DEFAULT), which is ahead of this floor; the floor only
-    # guarantees the API this wheel's generated kernels call exists. Bumping the
-    # floor to match CI would force every downstream install onto one build.
-    if not _vendor_supplies_triton():
-        reqs += ["flag_gems>=5.0.2", "triton>=3.5.1"]
+    reqs += _flagos_sibling_requires()
     # For a CUDA wheel we bundle libtorch_cuda.so and preload it at import; it
     # needs the NVIDIA runtime libs present, so make them hard deps. Ascend/MetaX
     # builds do not (they supply their own runtime), so keep it CUDA-only.
