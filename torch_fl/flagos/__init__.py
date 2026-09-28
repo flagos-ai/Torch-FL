@@ -359,7 +359,12 @@ def reset_peak_memory_stats(device=None):
 
 
 class Stream(torch.cuda.Stream):
-    """Flagos stream that wraps a CUDA stream (same GPU memory)."""
+    """Flagos stream: a real CUDA stream where there is a CUDA runtime.
+
+    Where there is not, ``__new__`` falls back to ``object.__new__(cls)`` and
+    ``__init__`` builds one of the ``torch_fl.accelerator`` vendor streams --
+    Enflame tops, MUSA, or Ascend ACL -- and delegates every method below to it.
+    """
 
     def __new__(cls, device=None, priority=0, **kwargs):
         if device is None:
@@ -377,14 +382,32 @@ class Stream(torch.cuda.Stream):
         # object.__new__(cls) and we need a full native implementation. Import the
         # vendor module late to avoid touching it on CUDA runs.
         if not _has_cuda_runtime():
-            if _platform() == "gcu":
+            vendor = _platform()
+            if vendor == "gcu":
                 from torch_fl.accelerator.gcu.tops_stream import TopsStream
 
                 self._stream = TopsStream(device, priority)
-            else:
+            elif vendor == "musa":
+                from torch_fl.accelerator.musa.musa_stream import MusaStream
+
+                self._stream = MusaStream(device, priority)
+            elif vendor == "ascend":
                 from torch_fl.accelerator.ascend.acl_stream import AclStream
 
                 self._stream = AclStream(device, priority)
+            else:
+                # This arm used to be a bare ``else`` that meant Ascend, so any
+                # accelerator named neither "gcu" nor a CUDA runtime took it. MUSA
+                # did: constructing a stream imported
+                # torch_fl.accelerator.ascend.acl_stream -- whose first statement is
+                # ctypes.CDLL("libascendcl.so") -- on a host with no Ascend toolkit.
+                # Naming the vendor here makes the next accelerator that arrives
+                # without a stream class fail on the missing implementation instead
+                # of on a missing vendor library.
+                raise RuntimeError(
+                    f"torch_fl has no Stream implementation for the {vendor!r} "
+                    f"accelerator, only for 'gcu', 'musa' and 'ascend'"
+                )
             # Set device attribute for __repr__ compatibility with torch.cuda.Stream
             self.device = self._stream.device
         elif not hasattr(torch._C, "_cuda_getCurrentStream"):
@@ -433,6 +456,12 @@ class Stream(torch.cuda.Stream):
 
     @property
     def gcu_stream(self):
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return self.cuda_stream
+
+    @property
+    def musa_stream(self):
         if hasattr(self, "_stream"):
             return self._stream.handle
         return self.cuda_stream
@@ -523,12 +552,18 @@ def _real_current_stream(device=None):
             from torch_fl.accelerator.gcu.tops_stream import current_tops_stream
 
             return current_tops_stream(idx)
-        from torch_fl.accelerator.ascend.acl_stream import current_acl_stream
+        if _platform() == "ascend":
+            from torch_fl.accelerator.ascend.acl_stream import current_acl_stream
 
-        try:
-            return current_acl_stream(idx)
-        except RuntimeError:
-            return _DefaultStreamHandle(idx)
+            try:
+                return current_acl_stream(idx)
+            except RuntimeError:
+                return _DefaultStreamHandle(idx)
+        # MUSA answers from the C++ runtime at the top of this function and never
+        # arrives here; an accelerator with no stream class of its own has no
+        # current stream to describe and gets this same handle-only stand-in,
+        # rather than being sent to Ascend for one.
+        return _DefaultStreamHandle(idx)
     if not hasattr(torch._C, "_cuda_getCurrentStream"):
         return _cuda_stream_shim(idx)
     stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(idx)
@@ -580,39 +615,53 @@ class _HostTimedEvent:
 
 
 class Event(torch.cuda.Event):
-    """Flagos event backed by CUDA or native ACL runtime state."""
+    """Flagos event: a real CUDA event where there is a CUDA runtime.
+
+    Where there is not, this is the vendor's event (Enflame tops, Ascend ACL) or,
+    on MUSA and any accelerator without one, the host-clock
+    ``_HostTimedEvent``.
+    """
 
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
         if not _has_cuda_runtime():
-            try:
-                obj = object.__new__(cls)
-                if _platform() == "gcu":
+            # One spelling of the host-clock fallback for the arms below, so they
+            # differ only in which vendor class they try first.
+            host_timed = dict(
+                enable_timing=enable_timing,
+                blocking=blocking,
+                interprocess=interprocess,
+                external=external,
+            )
+            if _platform() == "gcu":
+                try:
                     from torch_fl.accelerator.gcu.tops_stream import TopsEvent
 
-                    obj._event = TopsEvent(
-                        enable_timing=enable_timing,
-                        blocking=blocking,
-                        interprocess=interprocess,
-                        external=external,
-                    )
-                else:
+                    obj = object.__new__(cls)
+                    obj._event = TopsEvent(**host_timed)
+                    return obj
+                except RuntimeError:
+                    return _HostTimedEvent(**host_timed)
+            if _platform() == "ascend":
+                try:
                     from torch_fl.accelerator.ascend.acl_stream import AclEvent
 
+                    obj = object.__new__(cls)
                     obj._event = AclEvent(
                         enable_timing=enable_timing,
                         blocking=blocking,
                         external=external,
                     )
-                return obj
-            except RuntimeError:
-                return _HostTimedEvent(
-                    enable_timing=enable_timing,
-                    blocking=blocking,
-                    interprocess=interprocess,
-                    external=external,
-                )
+                    return obj
+                except RuntimeError:
+                    return _HostTimedEvent(**host_timed)
+            # MUSA, whose vendor events live behind the shared C ABI: its timing
+            # flags are not musa_runtime's, so there is nothing here to wrap and
+            # the host clock is the clock that is left. Any other accelerator with
+            # no event class takes the same answer, rather than being sent to
+            # Ascend for one. See torch_fl/accelerator/musa/musa_stream.py.
+            return _HostTimedEvent(**host_timed)
         if not hasattr(torch._C, "_cuda_getCurrentStream"):
             # CPU torch wheel over a real CUDA runtime: torch.cuda.Event is the
             # wheel's dummy base class and no C++ CUDA event is reachable, so the
@@ -695,15 +744,25 @@ def stream(s):
     # On native runtimes with no CUDA, switch the thread-local stream registry.
     if not hasattr(torch._C, "_cuda_setStream"):
         native = getattr(s, "_stream", s)
-        if _platform() == "gcu":
+        vendor = _platform()
+        if vendor == "gcu":
             from torch_fl.accelerator.gcu.tops_stream import TopsStream
 
             native_type = TopsStream
-        else:
+        elif vendor == "ascend":
             from torch_fl.accelerator.ascend.acl_stream import AclStream
 
             native_type = AclStream
-        if isinstance(native, native_type):
+        else:
+            # MUSA, and any accelerator with no stream class of its own: every
+            # stream on the device *is* the shared one, so there is nothing to
+            # switch to and nothing to restore. Running the body is the whole
+            # contract, and it keeps this call from reaching for Ascend. The
+            # restore below is also why MUSA cannot be routed through the arms
+            # above: the stream ``_real_current_stream`` returns there is a
+            # handle-only stand-in with no ``set_current`` to restore with.
+            native_type = None
+        if native_type is not None and isinstance(native, native_type):
             previous = _real_current_stream(native.device_index)
             native.set_current()
             try:

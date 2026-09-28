@@ -123,9 +123,21 @@ FSDP2's stream setup instead.
   The three that fail are `test_fsdp2_plan_vs_ddp_0_untied`, `test_fsdp2_plan_vs_ddp_1_tied`
   and `test_fsdp2_save_load_dcp`, and they fail *after* the collectives, in
   `_fsdp_param_group.py::FSDPCommContext.lazy_init`, with `RuntimeError: libascendcl.so
-  not found. ACL runtime is required` — `torch_fl.flagos.Stream` sends every non-GCU
-  platform without a CUDA runtime to the Ascend ACL stream. That is a MUSA gap with no
-  issue of its own yet, not the collective path this row tracks.
+  not found. ACL runtime is required` — `torch_fl.flagos.Stream` sent every non-GCU
+  platform without a CUDA runtime to the Ascend ACL stream. That is the
+  `torch.flagos.Stream()` row of #451, not the collective path this row tracks. Fixed
+  by PR #467 over `6b69999`: MUSA has its own stream class
+  (`torch_fl/accelerator/musa/musa_stream.py`, a handle to the one stream
+  `GetDefaultMusaStream` hands out, which is the queue mudnn and Triton already share),
+  and the four vendor dispatches name their arms instead of ending in an `else` that
+  meant Ascend, so an unlisted accelerator now raises instead of importing another
+  vendor's runtime. The failing frame was re-run on the MTT S5000 in this change and
+  passes, as does FSDP2 itself — `tests/manual/musa/test_fsdp2_musa.py --world-size 2`
+  completed with finite, non-increasing loss across two MTT S5000 devices, over
+  `ProcessGroupFlagOS`'s host-staged gloo tier (this environment has no vendor
+  communicator, as the warning in that run records). The six nodeids were **not**
+  re-run through the HF harness, so the `05be850` numbers above are what the harness
+  last measured.
 
 Because `Affected tests` and the baseline header above describe `64e60dd`, the
 whole table is a dated snapshot and not a statement about the current tree.

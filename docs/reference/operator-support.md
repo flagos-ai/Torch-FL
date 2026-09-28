@@ -568,8 +568,11 @@ dtype, so a float64 call returns `rel 8.7e-08` / `9.1e-08`, which is float32
 resolution in a float64 tensor. Filed as FlagGems issue
 [#6725](https://github.com/flagos-ai/FlagGems/issues/6725) and left on the route
 that carries it. The fourth row, `torch.flagos.Stream()` raising
-`libascendcl.so not found`, is a Torch-FL gap rather than a routing one and is
-untouched here.
+`libascendcl.so not found`, is a Torch-FL gap rather than a routing one. It is
+fixed in PR #467, which gives MUSA a stream class of its own
+(`torch_fl/accelerator/musa/musa_stream.py`) and makes the vendor dispatches name
+their arms instead of falling through to Ascend; no operator route changes with
+it, so nothing in this document is re-measured here.
 
 **Not revalidated.** The four platforms in the FlagGems overload survey --
 MUSA is not among them -- were not re-measured for this change: this is a MUSA

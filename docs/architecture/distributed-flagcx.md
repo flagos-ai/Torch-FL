@@ -125,13 +125,22 @@ by a runtime switch:
 
 **Partially validated on the FSDP2 suite.** Of the six `Qwen3ModelTest::test_fsdp2_*` nodeids
 that #263 counted, three now pass (`test_fsdp2_save_load`, `test_fsdp2_sharding_structure_0_untied`,
-`test_fsdp2_sharding_structure_1_tied`); the other three get past the collectives and then fail in
-FSDP2's stream setup on a **separate** defect — `torch_fl.flagos.Stream.__init__` routes every
-non-GCU platform without a CUDA runtime to the Ascend ACL stream, so on MUSA it raises
+`test_fsdp2_sharding_structure_1_tied`); the other three got past the collectives and then failed in
+FSDP2's stream setup on a **separate** defect — `torch_fl.flagos.Stream.__init__` routed every
+non-GCU platform without a CUDA runtime to the Ascend ACL stream, so on MUSA it raised
 `RuntimeError: libascendcl.so not found. ACL runtime is required` at
-`_fsdp_param_group.py::FSDPCommContext.lazy_init`. MUSA has no Python-side stream/event
-implementation (`torch_fl/accelerator/` has `ascend`, `gcu`, `metax`, `dcu`, `cuda`, `bpu`,
-`ppu`), so those three remain blocked on that work, not on the collective path.
+`_fsdp_param_group.py::FSDPCommContext.lazy_init`. MUSA had no Python-side stream/event
+implementation (`torch_fl/accelerator/` had `ascend`, `gcu`, `metax`, `dcu`, `cuda`, `bpu`,
+`ppu`), so those three were blocked on that work, not on the collective path.
+
+That work landed as PR #467 over `6b69999`, and with it the three nodeids are no longer blocked by
+it: MUSA now has `torch_fl/accelerator/musa/musa_stream.py`, and the vendor dispatches name their
+arms rather than ending in an `else` that meant Ascend. On an MTT S5000 the failing frame
+(`FSDPCommContext.lazy_init`) and FSDP2 itself now run — `tests/manual/musa/test_fsdp2_musa.py
+--world-size 2` trained to a finite, non-increasing loss across two MTT S5000 devices. That run's
+collectives went over the host-staged gloo tier above, since this environment has no vendor
+communicator; the MCCL path this document is about was not exercised by it, and the six nodeids were
+not re-run through the HF harness.
 
 ---
 
