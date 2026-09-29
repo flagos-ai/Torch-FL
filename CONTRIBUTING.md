@@ -97,6 +97,13 @@ Install the pinned ruff version CI uses:
 pip install ruff==0.15.12
 ```
 
+## Releasing
+
+A release is a tag: pushing `v2.10.0` builds a wheel on every publishing
+platform and uploads each to its vendor PyPI lane. See the
+[Releasing Guide](docs/development/releasing.md) for what the tag starts, where
+each wheel goes, and what a new platform has to add to be included.
+
 ## Adding an Accelerator Backend
 
 New platform integrations require several components. Use existing backends (CUDA, MetaX, Ascend) as reference implementations.

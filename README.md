@@ -164,6 +164,12 @@ For device queries, synchronization, and multi-device usage patterns, see the [Q
 - [Moore Threads MUSA](docs/vendors/musa/installation.md)
 - [D-Robotics BPU](docs/vendors/bpu/installation.md)
 
+### Development
+
+- [Releasing](docs/development/releasing.md) — What a release tag builds and where each wheel is published
+- [Testing](docs/development/testing.md) — Test organization, marks, and how to run each suite
+- [Integration Harness](docs/development/integration-harness-design.md) — How the per-platform integration manifests are structured
+
 ## Contributing
 
 Contributions are welcome in these areas:

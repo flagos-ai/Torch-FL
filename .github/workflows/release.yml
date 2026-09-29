@@ -1,0 +1,181 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tag a release, get the wheels.
+#
+# Push `v2.10.0` and this builds the wheel on every publishing platform's own
+# runner, then uploads each one to the vendor PyPI lane it belongs to. The tag
+# names the release and each wheel's local segment names its SDK, so
+# `v2.10.0` produces `torch_fl-2.10.0+cuda13.3`, `torch_fl-2.10.0+dtk2604`, and
+# so on -- one release, one artifact per platform.
+#
+# The build jobs reuse the `build-wheel-*.yml` wrappers the CI pipelines already
+# call, so a release builds exactly what CI verified (same image, same setup
+# hook, same wheel build, and the same `Verify wheel` step that re-installs the
+# artifact before it is offered here). Nothing about the build is release-only.
+#
+# Where each wheel goes is the `pypi_lane` column of cmake/flagos_platforms.json;
+# the upload itself is .github/scripts/publish_wheels.py.
+#
+# Credentials: the organization secret NEXUS_TOKEN, in `user:token` form -- the
+# same one flagos-ai/build-infra uses. It is read only by the `publish` job, so
+# no vendor runner and no wheel build ever sees it. No per-repo secret is
+# needed; if the organization secret is not visible to this repository, the
+# publish job fails on an empty token rather than uploading nothing quietly.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release from (a tag that already exists)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag decides whether this is a release at all. Mirrors the guard in
+  # flagos-ai/build-infra/.github/workflows/upload-nexus.yml so the two agree:
+  # a bare version tag publishes, a variant or pre-release tag does not, and a
+  # manual dispatch always does.
+  guard:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Read the tag
+        id: check
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "push" ]; then
+            echo "tag=${DISPATCH_TAG}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch for ${DISPATCH_TAG} - publishing."
+            exit 0
+          fi
+          echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          if [[ "$REF_NAME" =~ ^v?[0-9]+(\.[0-9]+){0,3}(\.post[0-9]+)?$ ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Stable release tag '${REF_NAME}' - publishing."
+          else
+            # A tag like v2.10.0-rc1 or v2.10.0+cuda13.3. This is the same rule
+            # the organization's shared uploader applies, so a tag that would be
+            # skipped there is not silently published here either.
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Non-stable tag '${REF_NAME}' - building nothing. Re-run this workflow with workflow_dispatch to release it deliberately."
+          fi
+
+  # One job per publishing platform, spelled out rather than a matrix: each has
+  # its own runner label, image and timeout, which is the shape ci.yml uses too.
+  build-cuda:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-cuda.yml
+
+  build-dcu:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-dcu.yml
+
+  build-musa:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-musa.yml
+
+  build-ascend:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-ascend.yml
+
+  build-metax:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-metax.yml
+
+  build-ppu:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/build-wheel-ppu.yml
+
+  # GCU is the one platform with no build-wheel-* wrapper: it is the only
+  # "common" platform (its runner is not one of the six vendor pipelines), so
+  # ci.yml drives it straight through all-tests-common.yml. Its build is called
+  # the same way here, with the same inputs build-wheel-<vendor>.yml passes.
+  build-gcu:
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    uses: ./.github/workflows/all-tests-common.yml
+    with:
+      platform: gcu
+      run_build: true
+      run_integration_tests: false
+      upload_artifact: true
+
+  publish:
+    name: Publish to the vendor lanes
+    needs:
+      - guard
+      - build-cuda
+      - build-dcu
+      - build-musa
+      - build-ascend
+      - build-metax
+      - build-ppu
+      - build-gcu
+    if: needs.guard.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every platform's wheel
+        uses: actions/download-artifact@v4
+        with:
+          # One directory per artifact, named wheel-<platform>; the script reads
+          # the platform out of the directory name.
+          pattern: wheel-*
+          path: wheels/
+
+      - name: Install twine
+        run: python -m pip install --upgrade twine
+
+      - name: Publish
+        env:
+          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/publish_wheels.py \
+            --wheels wheels \
+            --tag "${{ needs.guard.outputs.tag }}"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Release ${{ needs.guard.outputs.tag }}"
+            echo
+            find wheels -name '*.whl' | sort | sed 's/^/- `/; s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
