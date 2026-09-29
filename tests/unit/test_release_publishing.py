@@ -312,27 +312,35 @@ def test_ci_still_builds_without_publishing():
     ), "ci.yml must not ask for a release upload"
 
 
-def test_the_publish_step_runs_on_the_builder_after_the_recovery_artifact():
-    """Order matters twice: the upload is last, and the artifact comes before it.
+def test_the_publish_step_runs_before_the_artifact_upload():
+    """The upload crosses the border; publishing must not wait behind it.
 
-    The artifact is the documented way to re-upload one lane without rebuilding,
-    so it has to exist before the upload can fail without it.
+    Measured on the 2.10.0 release, per platform: publishing takes 18-32 s (the
+    vendor lane is in China, like the runner), while the artifact step is 2m25s
+    for 476 MB, 3m15s for 316 MB, 9m43s for 672 MB, and on DCU's 889 MB wheel it
+    failed outright after 21 minutes. With the artifact step first, that failure
+    skipped the publish step and DCU shipped nothing -- twice. So the order is
+    load-bearing, not cosmetic: publish first, artifact after.
+
+    The artifact still has to be produced when publishing fails, because it is
+    the documented way to re-upload one lane without rebuilding, hence
+    `always()`.
     """
     text = (REPO_ROOT / ".github" / "workflows" / "build-wheel-common.yml").read_text(
         encoding="utf-8"
     )
     build_at = text.index("python -m build --wheel --no-isolation")
     verify_at = text.index("python -m pip install --no-deps dist/*.whl")
-    artifact_at = text.index("name: Upload wheel")
     publish_at = text.index("name: Publish the wheel to its vendor lane")
-    assert build_at < verify_at < artifact_at < publish_at, (
+    artifact_at = text.index("name: Upload wheel")
+    assert build_at < verify_at < publish_at < artifact_at, (
         build_at,
         verify_at,
-        artifact_at,
         publish_at,
+        artifact_at,
     )
 
-    step = text[publish_at:]
+    step = text[publish_at:artifact_at]
     # Only release.yml sets it, so a normal CI build of this same workflow is
     # untouched.
     assert "if: inputs.publish" in step[:200], step[:200]
@@ -344,6 +352,9 @@ def test_the_publish_step_runs_on_the_builder_after_the_recovery_artifact():
     # A release is a tag; a manual dispatch of this workflow must not publish a
     # branch tip under a release version.
     assert "GITHUB_REF_TYPE" in step and '!= "tag"' in step
+
+    artifact = text[artifact_at : artifact_at + 220]
+    assert "if: always()" in artifact, artifact
 
 
 # --- The upload itself -------------------------------------------------------
