@@ -369,3 +369,76 @@ def test_main_runs_the_platforms_concurrently(tmp_path, monkeypatch):
 
     assert rc == 0
     assert max(peak) == len(publishing_platforms()), max(peak)
+
+
+# --- The idempotency check ---------------------------------------------------
+
+# Both of these were wrong in a way a fixture would not have caught, and both
+# only show up against the real index:
+#
+#   * `/simple/torch_fl/` is a 404 and `/simple/torch-fl/` is the page -- Nexus
+#     normalises the name and does not redirect. Asking with the underscore
+#     form made the check return False for `torch_fl` itself, so the skip that
+#     makes a re-run safe never fired.
+#   * the version is followed by `+` when the wheel has a local segment
+#     (`torch_fl-2.10.0rc1+cann9.0.0-cp311-...`) and `-` when it does not, so
+#     matching only `-` reported "not published" for every platform with a
+#     segment -- which is all of them.
+
+
+class _FakeResponse:
+    def __init__(self, page):
+        self._page = page
+
+    def read(self):
+        return self._page.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _serve(monkeypatch, page, seen=None):
+    publisher = _publisher()
+
+    def fake_urlopen(url, timeout=None):
+        if seen is not None:
+            seen.append(url)
+        return _FakeResponse(page)
+
+    monkeypatch.setattr(publisher.urllib.request, "urlopen", fake_urlopen)
+    return publisher
+
+
+def test_the_index_is_asked_for_the_normalised_name(monkeypatch):
+    seen = []
+    publisher = _serve(monkeypatch, "no wheels here", seen)
+
+    publisher.already_published(
+        "torch_fl", "2.10.0rc1", "https://resource.flagos.net/r/simple"
+    )
+
+    assert seen == ["https://resource.flagos.net/r/simple/torch-fl/"], seen
+
+
+def test_a_local_segment_counts_as_published(monkeypatch):
+    """The form every platform produces now."""
+    _serve(monkeypatch, "torch_fl-2.10.0rc1+cann9.0.0-cp311-cp311-linux_aarch64.whl")
+    publisher = _publisher()
+    assert publisher.already_published("torch_fl", "2.10.0rc1", "https://x/simple")
+
+
+def test_a_wheel_without_a_segment_counts_as_published(monkeypatch):
+    """The form tsingmicro and bpu would produce."""
+    _serve(monkeypatch, "torch_fl-2.10.0-cp312-cp312-linux_x86_64.whl")
+    publisher = _publisher()
+    assert publisher.already_published("torch_fl", "2.10.0", "https://x/simple")
+
+
+def test_a_different_version_is_not_published(monkeypatch):
+    _serve(monkeypatch, "torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl")
+    publisher = _publisher()
+    assert not publisher.already_published("torch_fl", "2.10.0rc1", "https://x/simple")
+    assert not publisher.already_published("torch_fl", "2.10.0rc2", "https://x/simple")

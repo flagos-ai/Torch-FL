@@ -106,10 +106,25 @@ def assert_tag_names_the_version(pairs: list, tag: str) -> None:
 def already_published(package: str, version: str, index_url: str) -> bool:
     """Whether the lane already serves this exact version.
 
-    Nexus rejects a duplicate with a 400 and twine reports it as an opaque
+    Nexus rejects a duplicate with a 400 that twine reports as an opaque
     failure, so the check is done first to say something useful instead.
+
+    Two things about Nexus's PyPI layout this has to get right, both found by
+    running it against the real lanes rather than a fixture:
+
+    * **The index path is the normalised name.** `/simple/torch_fl/` is a 404
+      and `/simple/torch-fl/` is the page; Nexus does not redirect between
+      them. Asking with the underscore form made this return `False` for every
+      package whose name contains one -- which is `torch_fl` itself, so the
+      idempotent skip never fired and a re-run would have tried to re-upload an
+      artifact the lane already had.
+    * **The version is followed by `+` when the wheel has a local segment** and
+      `-` when it does not: `torch_fl-2.10.0rc1+cann9.0.0-cp311-...` against
+      `torch_fl-2.10.0-cp312-...`. Matching only `-` reported "not published"
+      for every platform that carries a segment, which is all of them now.
     """
-    url = f"{index_url}/{package}/"
+    normalised = package.replace("_", "-").replace(".", "-").lower()
+    url = f"{index_url}/{normalised}/"
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
             page = response.read().decode("utf-8", "replace")
@@ -118,7 +133,7 @@ def already_published(package: str, version: str, index_url: str) -> bool:
             return False
         raise
     escaped = re.escape(f"{package}-{version}")
-    return re.search(rf"{escaped}-[^\"#<]*\.whl", page) is not None
+    return re.search(rf"{escaped}(\+|-)[^\"#<]*\.whl", page) is not None
 
 
 def upload(
