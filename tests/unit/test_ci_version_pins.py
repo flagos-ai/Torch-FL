@@ -45,7 +45,6 @@ SHARED_PINS = [
     "CPU_TORCH_VERSION_DEFAULT",
     "CPU_TORCH_INDEX_URL_DEFAULT",
     "FLAGTREE_INDEX_URL_DEFAULT",
-    "FLAGTREE_PYTHON_VERSION_DEFAULT",
     "FLAGTREE_MIN_GLIBC_DEFAULT",
     "FLAGGEMS_VERSION_DEFAULT",
     "FLAGOS_WHEEL_ROOT_DEFAULT",
@@ -97,6 +96,20 @@ def test_scripts_read_their_platform_flagtree_pin():
             f'FLAGTREE_VERSION="${{TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_{platform}}}"'
             in text
         ), platform
+
+
+def test_the_cuda_hook_reads_its_own_python_pin():
+    """CUDA was the only hook with a Python pin, and it read a shared default.
+
+    That default meant the same number in two places: here and the per-platform
+    block, whose purpose is that each platform has exactly one interpreter. The
+    hook now reads `_cuda`, like it already reads `_cuda` for FlagTree.
+    """
+    text = (HOOKS_DIR / "set_env_cuda.sh").read_text(encoding="utf-8")
+    assert (
+        'FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-$FLAGTREE_PYTHON_VERSION_cuda}"'
+        in text
+    )
 
 
 def test_no_script_keeps_a_literal_copy_of_a_shared_pin():
