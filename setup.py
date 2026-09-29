@@ -1039,14 +1039,20 @@ VERSION_PINS = os.path.join(SOURCE_DIR, ".github", "version-pins.env")
 
 
 def _requires_python() -> str:
-    """The one interpreter this wheel can be installed with, as a PEP 440 specifier.
+    """The one interpreter line this wheel can be installed with.
 
-    Not a range. A FlagTree build is published for exactly one cp tag, torch_fl
-    links that build, and the wheel filename already carries the tag -- so the
-    interpreter is fixed per platform (3.12 on cuda/gcu/metax/ppu, 3.10 on
-    dcu/musa, 3.11 on ascend). Declaring `>=3.8` let a resolver accept 3.8, 3.9
-    or 3.13, none of which has a FlagTree, and the failure surfaced much later
-    inside the extension instead of at install time.
+    A FlagTree build is published for exactly one cp tag, torch_fl links that
+    build, and the wheel filename already carries the tag -- so the interpreter
+    is fixed per platform: 3.12 on cuda/gcu/metax/ppu, 3.10 on dcu/musa, 3.11 on
+    ascend. Declaring `>=3.8` let a resolver accept 3.8, 3.9 or 3.13, none of
+    which has a FlagTree, and the failure surfaced much later inside the
+    extension instead of at install time.
+
+    Spelled `>=3.12,<3.13` rather than `==3.12`, which does not mean what it
+    looks like: `==3.12` matches the version 3.12 exactly, and no interpreter
+    reports that -- CPython reports 3.12.3, so every install was rejected by its
+    own interpreter the first time this was written. The range says "this minor
+    line", which is the actual constraint.
     """
     pins = _version_pins()
     version = pins.get(f"FLAGTREE_PYTHON_VERSION_{FLAGOS_ACCELERATOR}")
@@ -1054,7 +1060,8 @@ def _requires_python() -> str:
         # tsingmicro and bpu build no FlagTree; they also publish no wheel, so
         # this only affects a local build of one of them.
         return ">=3.8"
-    return f"=={version}"
+    major, minor = version.split(".")[:2]
+    return f">={major}.{minor},<{major}.{int(minor) + 1}"
 
 
 def _version_pins() -> dict:

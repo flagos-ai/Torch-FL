@@ -259,7 +259,13 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
         # `>=3.8` is exactly the regression this is here for.
         declared = globals_["_get_setup_kwargs"]()["python_requires"]
         if pinned:
-            assert declared == f"=={pinned}", (platform, declared)
+            # The minor line, not the exact version: `==3.12` does not match
+            # 3.12.3, and every interpreter reports a patch release.
+            major, minor = pinned.split(".")[:2]
+            assert declared == f">={major}.{minor},<{major}.{int(minor) + 1}", (
+                platform,
+                declared,
+            )
         else:
             # No FlagTree, so no lane and no artifact either.
             assert declared == ">=3.8", (platform, declared)
