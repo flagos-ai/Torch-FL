@@ -47,7 +47,16 @@ container_options: >-
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
 
-timeout_minutes: 60
+# 90, not the 60 the other platforms use. This is the only manifest that also
+# runs the whole tests/unit directory (per file, one process each) on top of a
+# wheel build and thirteen integration groups, and it does not fit in an hour:
+# measured on this job, 58m18s for one green run (2026-09-28T16:26Z) and 62m26s
+# for the next, which was cancelled by the limit with every test already
+# reported -- 72/72 unit files PASS and no failing step. The limit was the only
+# thing that was red. Raise this rather than trim the group: the unit directory
+# is the per-file coverage that caught the cp310 `tomllib` collection error, and
+# nothing else runs it. Ascend, the other long manifest, is already at 120.
+timeout_minutes: 90
 wheel_artifact_name: wheel-dcu
 # Keep DCU integration self-contained; transferring the bundled libtorch wheel
 # through the Actions artifact service can exceed the self-hosted runner job
