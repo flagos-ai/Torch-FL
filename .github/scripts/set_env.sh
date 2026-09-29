@@ -70,6 +70,11 @@ source "${REPO_ROOT}/.github/version-pins.env"
 # shellcheck source=.github/scripts/lib/set_env_common.sh
 source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 
+# Reaching a host around the runner's HTTP proxy (prefer_direct_route). Shared
+# with the release upload step, which hits the same Nexus host from the same pod.
+# shellcheck source=.github/scripts/lib/proxy_route.sh
+source "${REPO_ROOT}/.github/scripts/lib/proxy_route.sh"
+
 # pip constraints for the provisioning venvs: the transitive pulls the pin table
 # cannot reach. Exported so every pip install in the platform hook honours it.
 export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"

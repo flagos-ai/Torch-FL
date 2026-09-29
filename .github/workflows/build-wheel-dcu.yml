@@ -22,6 +22,15 @@ on:
         required: false
         type: boolean
         default: true
+      publish:
+        description: "Whether to publish the built wheel to its vendor Nexus lane"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      NEXUS_TOKEN:
+        description: "user:token for the vendor Nexus lanes, read only when publish is set"
+        required: false
   workflow_dispatch:
     inputs:
       upload-artifact:
@@ -38,3 +47,6 @@ jobs:
       run_build: true
       run_integration_tests: false
       upload_artifact: ${{ inputs['upload-artifact'] }}
+      publish: ${{ inputs.publish }}
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
