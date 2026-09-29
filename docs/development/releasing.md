@@ -12,12 +12,22 @@ git push upstream v2.10.0
 
 `.github/workflows/release.yml` runs on `v*` tags. It:
 
-1. **Checks the tag is a release.** A bare version tag publishes; a variant or
-   pre-release tag (`v2.10.0-rc1`, `v2.10.0+cuda13.3`) only builds nothing and
-   says so. This mirrors the guard in
-   `flagos-ai/build-infra/.github/workflows/upload-nexus.yml`, so a tag that
-   would be skipped there is not published here by accident either.
-   `workflow_dispatch` with a `tag` input always proceeds — the escape hatch.
+1. **Checks the tag is a release.** A version tag publishes, and so does a
+   release candidate (`v2.10.0rc1`, `v2.10.0a1`, `v2.10.0b1`) — a candidate
+   nobody can install cannot be tested, which is the only reason to cut one. A
+   variant tag (`v2.10.0+cuda13.3`) builds nothing and says so, because the SDK
+   it names is already in the wheel's filename. This mirrors the guard in
+   `flagos-ai/build-infra/.github/workflows/upload-nexus.yml` for the stable
+   case, so a tag that would be skipped there is not published here by accident
+   either. `workflow_dispatch` with a `tag` input always proceeds — the escape
+   hatch.
+
+   The candidate suffix reaches the artifact through the tag: the build reads
+   `GITHUB_REF_NAME` and exports `FLAGOS_WHEEL_PRERELEASE`, so `v2.10.0rc1`
+   produces `torch_fl-2.10.0rc1+cuda13.3`. PEP 440 sorts that below `2.10.0`, so
+   `pip install torch_fl==2.10.0` does not pick the candidate up. The uploader
+   then requires the tag and the wheel to name the same version, which is what
+   stops a candidate being published under the release's name or the reverse.
 2. **Builds on every platform**, one job each, on the platform's own runner. The
    build is the same one CI runs: the `build-wheel-*.yml` wrapper (or
    `all-tests-common.yml` for GCU, which has no wrapper), the same image and

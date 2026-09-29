@@ -19,6 +19,7 @@ import json
 import multiprocessing
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -942,6 +943,19 @@ def _get_setup_kwargs():
     # that visible from the filename alone. Bumping it is a deliberate act that
     # belongs with a codegen regeneration, not a routine edit.
     version = "2.10.0"
+    # A pre-release suffix, for cutting a release candidate before the release.
+    # PEP 440 spells it without a separator -- 2.10.0rc1 sorts below 2.10.0, so
+    # installing `torch_fl==2.10.0` does not pick the candidate up -- and the
+    # release workflow sets this from the tag it was triggered by. Unset (the
+    # normal case) leaves the version alone.
+    prerelease = os.environ.get("FLAGOS_WHEEL_PRERELEASE", "").strip()
+    if prerelease:
+        if not re.fullmatch(r"(a|b|rc)[0-9]+", prerelease):
+            raise ValueError(
+                f"FLAGOS_WHEEL_PRERELEASE={prerelease!r} is not a PEP 440 "
+                "pre-release suffix; expected something like 'rc1', 'a2' or 'b1'"
+            )
+        version = f"{version}{prerelease}"
     # A local version segment names the SDK this wheel was built against. The
     # bundle is SDK-bound whether we say so or not -- DTK's libtorch_hip.so has
     # librocblas.so.4 written into its DT_NEEDED -- and a vendor publishes more

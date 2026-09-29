@@ -357,6 +357,15 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "already implied and does not appear in the name. Overriding it is for "
         "a dev build that must pin something else",
     ),
+    "FLAGOS_WHEEL_PRERELEASE": (
+        SCOPE_BUILD,
+        "Unset",
+        "PEP 440 pre-release suffix for the wheel version (rc1, a1, b1), for "
+        "cutting a release candidate. The release workflow sets it from the tag, "
+        "so v2.10.0rc1 produces torch_fl-2.10.0rc1+cuda13.3; PEP 440 sorts that "
+        "below 2.10.0, so installing torch_fl==2.10.0 does not pick the "
+        "candidate up",
+    ),
     "FLAGOS_SKIP_CUDA_ASSETS": (
         SCOPE_BUILD,
         "0 (off)",

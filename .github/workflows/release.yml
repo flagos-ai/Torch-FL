@@ -77,15 +77,26 @@ jobs:
             exit 0
           fi
           echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
-          if [[ "$REF_NAME" =~ ^v?[0-9]+(\.[0-9]+){0,3}(\.post[0-9]+)?$ ]]; then
+          stable='^v?[0-9]+(\.[0-9]+){0,3}(\.post[0-9]+)?$'
+          prerelease='^v?[0-9]+(\.[0-9]+){0,3}(a|b|rc)[0-9]+$'
+          if [[ "$REF_NAME" =~ $stable ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "Stable release tag '${REF_NAME}' - publishing."
+          elif [[ "$REF_NAME" =~ $prerelease ]]; then
+            # A release candidate publishes too, deliberately: a candidate
+            # nobody can install cannot be tested, which is the only reason to
+            # cut one. It cannot be mistaken for the release -- the suffix is in
+            # the version (`torch_fl-2.10.0rc1+cuda13.3`), where PEP 440 sorts
+            # it below `2.10.0`.
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Pre-release tag '${REF_NAME}' - publishing the candidate."
           else
-            # A tag like v2.10.0-rc1 or v2.10.0+cuda13.3. This is the same rule
-            # the organization's shared uploader applies, so a tag that would be
-            # skipped there is not silently published here either.
+            # A variant tag like v2.10.0+cuda13.3, or any spelling this does not
+            # recognise. The organization's shared uploader would skip these for
+            # a stable release, so they are not published here by surprise
+            # either; workflow_dispatch is the deliberate way through.
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Non-stable tag '${REF_NAME}' - building nothing. Re-run this workflow with workflow_dispatch to release it deliberately."
+            echo "::notice::Non-release tag '${REF_NAME}' - building nothing. Re-run this workflow with workflow_dispatch to release it deliberately."
           fi
 
   # One job per publishing platform, spelled out rather than a matrix: each has

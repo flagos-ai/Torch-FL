@@ -136,3 +136,77 @@ def test_the_tag_must_name_the_versions_base(wheel, tag, ok, tmp_path):
     else:
         with pytest.raises(SystemExit, match="not the tag"):
             publisher.assert_tag_names_the_version(pairs, tag)
+
+
+# --- Pre-release tags --------------------------------------------------------
+
+RELEASE_GUARD_PATTERNS = {
+    # The two regexes release.yml applies, in order.
+    "stable": r"^v?[0-9]+(\.[0-9]+){0,3}(\.post[0-9]+)?$",
+    "prerelease": r"^v?[0-9]+(\.[0-9]+){0,3}(a|b|rc)[0-9]+$",
+}
+
+
+def _guard(tag: str) -> bool:
+    """Whether release.yml would publish a wheel for this tag."""
+    import re
+
+    for name in ("stable", "prerelease"):
+        if re.fullmatch(RELEASE_GUARD_PATTERNS[name], tag):
+            return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "tag, publishes",
+    [
+        ("v2.10.0", True),
+        ("v2.10.0.post1", True),
+        # A candidate is publishable on purpose: an rc nobody can install
+        # cannot be tested, which is the only reason to cut one.
+        ("v2.10.0rc1", True),
+        ("v2.10.0rc10", True),
+        ("v2.10.0a1", True),
+        ("v2.10.0b2", True),
+        # A variant tag carries the SDK the artifact already carries; letting it
+        # through would publish the same wheel twice under two tags.
+        ("v2.10.0+cuda13.3", False),
+        ("v2.10.0-rc1", False),
+        ("v2.10.0.dev1", False),
+    ],
+)
+def test_the_release_guard_publishes_releases_and_candidates_only(tag, publishes):
+    assert _guard(tag) is publishes, tag
+
+
+def test_the_release_guard_patterns_are_the_ones_in_the_workflow():
+    """The table above is only worth anything if it matches the real workflow.
+
+    Three separate things have to hold, and each has been got wrong once while
+    writing this: the patterns are the ones the workflow defines, the pre-release
+    branch is actually reached (an `elif` that assigns `publish=true`), and the
+    stable branch comes first so `v2.10.0` is not read as a candidate.
+    """
+    text = RELEASE.read_text(encoding="utf-8")
+    for name, pattern in RELEASE_GUARD_PATTERNS.items():
+        assert f"{name}='{pattern}'" in text, name
+    stable_at = text.index('if [[ "$REF_NAME" =~ $stable ]]')
+    prerelease_at = text.index('elif [[ "$REF_NAME" =~ $prerelease ]]')
+    assert stable_at < prerelease_at, "the stable branch has to be tested first"
+    branch = text[prerelease_at : text.index("else", prerelease_at)]
+    assert 'echo "publish=true"' in branch, "the candidate branch must publish"
+
+
+def test_the_build_workflow_derives_the_pre_release_from_the_tag():
+    """A candidate tag is inert unless the build learns about it.
+
+    `v2.10.0rc1` reaches the wheel only through FLAGOS_WHEEL_PRERELEASE, which
+    build-wheel-common.yml sets from the tag before `python -m build`. Without
+    it the wheels would say `2.10.0` and the tag/version check at upload would
+    correctly refuse to publish them.
+    """
+    text = (REPO_ROOT / ".github" / "workflows" / "build-wheel-common.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "FLAGOS_WHEEL_PRERELEASE" in text
+    assert "GITHUB_REF_TYPE" in text and "GITHUB_REF_NAME" in text
