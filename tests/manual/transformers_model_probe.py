@@ -465,19 +465,48 @@ def build_config():
     return cfg
 
 
+# Auto classes tried in order, with the task label recorded for the result.
+# The harness is not causal-LM-only: decoder architectures get a causal head
+# plus `generate()`, encoder architectures fall back to a masked-LM head, and
+# anything else falls back to the bare `AutoModel` body. `AutoModel` maps every
+# config type, so it is the catch-all that keeps non-text or headless models
+# measurable instead of failing them as `UNSUPPORTED_TASK`.
+AUTO_CLASSES = (
+    ("causal_lm", "AutoModelForCausalLM"),
+    ("masked_lm", "AutoModelForMaskedLM"),
+    ("base", "AutoModel"),
+)
+
+
 def build_model(cfg):
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoModel, AutoModelForCausalLM, AutoModelForMaskedLM
+
     torch.manual_seed(SEED)
-    try:
-        model = AutoModelForCausalLM.from_config(cfg)
-    except Exception as exc:  # noqa: BLE001
-        fail("config", "UNSUPPORTED_TASK", exc,
-             detail="no causal-LM mapping, or the config cannot instantiate one")
+    classes = (AutoModelForCausalLM, AutoModelForMaskedLM, AutoModel)
+    last_unrecognized = None
+    for (task, label), cls in zip(AUTO_CLASSES, classes):
+        try:
+            model = cls.from_config(cfg)
+            break
+        except ValueError as exc:
+            # "Unrecognized configuration class ... for this kind of AutoModel"
+            # means this model type has no mapping for the head, not that the
+            # config is broken. Fall through to the next candidate. Any other
+            # ValueError is a genuine instantiation failure and stops the run.
+            message = str(exc)
+            if "Unrecognized configuration class" in message or "should be one of" in message:
+                last_unrecognized = exc
+                continue
+            fail("config", "UNSUPPORTED_TASK", exc,
+                 detail=f"config is a {label} but cannot instantiate a model")
+    else:
+        fail("config", "UNSUPPORTED_TASK", last_unrecognized,
+             detail="no auto-model mapping (causal LM, masked LM, or base)")
     params = sum(p.numel() for p in model.parameters())
     if params > MAX_PARAMS:
         fail("config", "CONFIG_TOO_LARGE", params=params, max_params=MAX_PARAMS,
              detail="config ignored the tiny overrides; refusing to allocate")
-    return model.to(DTYPE).eval(), params
+    return model.to(DTYPE).eval(), params, task
 
 
 # --- comparison ---------------------------------------------------------------
@@ -679,7 +708,7 @@ def run_layer(layer, cpu_model, dev_model, cpu_inputs, dev_inputs):
 # Load and run after definitions so config errors are reported in the protocol.
 try:
     cfg = build_config()
-    model, params = build_model(cfg)
+    model, params, task = build_model(cfg)
     # Module.to() mutates in place and returns self, so the CPU baseline must
     # be a distinct object. Sharing one would compare the device against
     # itself and report every layer as passing.
@@ -689,7 +718,7 @@ try:
     dev_model.probe_optimizer = torch.optim.SGD(dev_model.parameters(), lr=1e-3)
     cpu_inputs = make_inputs(cfg)
     dev_inputs = tensors_on(cpu_inputs, DEV)
-    emit("config", "PASS", params=params)
+    emit("config", "PASS", params=params, task=task)
 except SystemExit:
     raise
 except Exception as exc:  # noqa: BLE001
@@ -709,6 +738,8 @@ def summarize(result: dict, layers: list[str]) -> str:
         f"duration   {result['duration_s']}s",
     ]
     config = result["layers"].get("config", {})
+    if config.get("task"):
+        lines.append(f"task       {config['task']}")
     if config.get("params"):
         lines.append(f"params     {config['params']:,}")
     if result.get("context_poison"):
