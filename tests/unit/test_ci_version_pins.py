@@ -213,3 +213,73 @@ def test_setup_refuses_to_guess_when_the_pin_file_is_missing(monkeypatch):
     monkeypatch.setitem(globals_, "VERSION_PINS", str(REPO_ROOT / "absent.env"))
     with pytest.raises(RuntimeError, match="FlagTree/FlagGems/FlagCX"):
         globals_["_flagos_sibling_requires"]()
+
+
+# --- The interpreter, and the SDK in the filename ----------------------------
+
+
+def _wheel_local(platform: str) -> str:
+    table = json.loads(PLATFORM_TABLE.read_text(encoding="utf-8"))
+    return table["accelerators"][platform]["wheel_local"]
+
+
+def test_requires_python_is_the_platforms_pinned_interpreter():
+    """The wheel asks for the platform's pin -- one interpreter, not a range.
+
+    What this checks is the wiring: that `setup.py` reads
+    `FLAGTREE_PYTHON_VERSION_<platform>` and emits it as `==<version>`, so a
+    renamed key or a reinstated `>=3.8` default fails here. What it cannot check
+    is that the pin is *correct*, because the cp tag is a fact about the index
+    (FlagTree publishes one wheel per interpreter) and not derivable offline --
+    editing both the pin and this expectation together would still pass. The cp
+    tag is verified against the index where the wheel is built; the filename
+    carries it either way, which is why a wrong pin is a loud failure at install
+    and not a silent one.
+    """
+    pins = _pins()
+    globals_ = _setup_globals()
+    for platform in _platforms_in_the_table():
+        pinned = pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
+        globals_["FLAGOS_ACCELERATOR"] = platform
+        # Read it back off the kwargs setup() is called with, not off the helper:
+        # a helper that computes the right string while setup() still hard-codes
+        # `>=3.8` is exactly the regression this is here for.
+        declared = globals_["_get_setup_kwargs"]()["python_requires"]
+        if pinned:
+            assert declared == f"=={pinned}", (platform, declared)
+        else:
+            # No FlagTree, so no lane and no artifact either.
+            assert declared == ">=3.8", (platform, declared)
+
+
+def test_every_platform_with_a_wheel_segment_has_an_interpreter_pin():
+    """The two travel together: both describe the one published artifact."""
+    pins = _pins()
+    for platform in _platforms_in_the_table():
+        assert bool(_wheel_local(platform)) == bool(
+            pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
+        ), platform
+
+
+def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
+    """One SDK spelling, not two.
+
+    The segment names the SDK the wheel was built against, and for every
+    platform that has a FlagCX build that is the same token FlagCX is published
+    under (`+cuda13.3`, `+dtk2604`). Ascend was aligned to CANN for this reason.
+    PPU has no FlagCX build yet, so it has no counterpart to check against.
+    """
+    pins = _pins()
+    for platform in _platforms_in_the_table():
+        flagcx = pins.get(f"FLAGCX_VERSION_{platform}")
+        if not flagcx:
+            continue
+        _, _, sdk = flagcx.partition("+")
+        assert sdk, (platform, flagcx)
+        assert _wheel_local(platform) == sdk, (platform, _wheel_local(platform), sdk)
+
+
+def test_wheel_segments_are_unique_across_platforms():
+    """Two platforms sharing a segment would be two wheels with one name."""
+    segments = [s for s in map(_wheel_local, _platforms_in_the_table()) if s]
+    assert len(segments) == len(set(segments)), sorted(segments)

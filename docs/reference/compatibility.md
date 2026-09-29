@@ -13,11 +13,11 @@
 
 | Component | Supported range | Notes |
 |---|---|---|
-| Python | 3.8 or later | From package metadata. Platform SDKs and available wheels may impose a narrower range. |
+| Python | One version per platform | Computed in `setup.py`: a FlagTree build exists for exactly one cp tag and the wheel links it, so the interpreter is fixed — 3.12 on CUDA/GCU/MetaX/PPU, 3.10 on DCU/MUSA, 3.11 on Ascend. `Requires-Python` says so, and the wheel filename repeats it. |
 | PyTorch | 2.10.x (`>=2.10,<2.11`) | Generated ATen bindings are tied to this minor line. |
 | FlagGems | The version in `.github/version-pins.env` | Declared as an exact requirement, not a range: the per-op routing tables were generated against one cohort. Published to the platform's vendor lane. |
-| FlagTree | The platform's pin in `.github/version-pins.env` | Declared as an exact requirement and it *is* Triton — the package name carries the vendor's backend (`0.7.0rc2+hcu3.6`). Published to `flagos-pypi-hosted`. Platforms with no FlagTree build declare `triton>=3.5.1` instead. |
-| FlagCX | The platform's pin in `.github/version-pins.env` | Declared only where the vendor runtime has a build (CUDA, DCU, GCU, MetaX, MUSA); elsewhere the distributed path falls back to the NCCL-shaped route. |
+| FlagTree | The platform's pin in `.github/version-pins.env` | Declared as an exact requirement and it *is* Triton — the package name carries the vendor's backend (`0.7.0+hcu3.6`, the trailing number being the Triton line). The pin tracks the newest build published to the platform's own lane. Platforms with no FlagTree build declare `triton>=3.5.1` instead. |
+| FlagCX | The platform's pin in `.github/version-pins.env` | Declared only where the vendor runtime has a build (CUDA, DCU, GCU, MetaX, MUSA, Ascend); PPU has none yet, and on the rest the distributed path falls back to the NCCL-shaped route. |
 | Triton/compiler | Comes from FlagTree | Use the compiler distribution required by the selected accelerator. |
 
 The index requirements for installing those are in

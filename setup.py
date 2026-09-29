@@ -942,13 +942,14 @@ def _get_setup_kwargs():
     # that visible from the filename alone. Bumping it is a deliberate act that
     # belongs with a codegen regeneration, not a routine edit.
     version = "2.10.0"
-    # A local version segment tags which vendor a self-contained wheel bundles a
-    # forked libtorch for. That bundle is SDK-version-bound whether we say so or
-    # not -- DTK's libtorch_hip.so has librocblas.so.4 written into its
-    # DT_NEEDED -- so making the binding visible in the filename is strictly
-    # better than leaving two incompatible wheels both called 2.10.0. Override
-    # with FLAGOS_WHEEL_LOCAL to pin the exact SDK, e.g.
-    # FLAGOS_WHEEL_LOCAL=metax3.8.1 / FLAGOS_WHEEL_LOCAL=dtk2604.
+    # A local version segment names the SDK this wheel was built against. The
+    # bundle is SDK-bound whether we say so or not -- DTK's libtorch_hip.so has
+    # librocblas.so.4 written into its DT_NEEDED -- and a vendor publishes more
+    # than one SDK variant of the same platform (the nvidia lane carries CUDA
+    # 12.8 and 13.3 builds of everything, the metax lane two MACAs), so two
+    # incompatible wheels would otherwise both be called 2.10.0. The value comes
+    # from the platform table, where the other build facts live; override it with
+    # FLAGOS_WHEEL_LOCAL for a dev build that must pin something else.
     _default_local = _platform_entry(FLAGOS_ACCELERATOR)["wheel_local"] or None
     local = os.environ.get("FLAGOS_WHEEL_LOCAL", _default_local)
     if local:
@@ -972,7 +973,7 @@ def _get_setup_kwargs():
             "clean": BuildClean,  # type: ignore[misc]
         },
         include_package_data=False,
-        python_requires=">=3.8",
+        python_requires=_requires_python(),
         install_requires=_install_requires(),
         # No extras_require here: pyproject.toml's
         # [project.optional-dependencies] owns that table and setuptools reports
@@ -1035,6 +1036,25 @@ _CUDA_RUNTIME_DEPS = [
 # A single --index-url therefore has to name a group repository containing both,
 # plus a proxy for PyPI and one for download.pytorch.org/whl/cpu.
 VERSION_PINS = os.path.join(SOURCE_DIR, ".github", "version-pins.env")
+
+
+def _requires_python() -> str:
+    """The one interpreter this wheel can be installed with, as a PEP 440 specifier.
+
+    Not a range. A FlagTree build is published for exactly one cp tag, torch_fl
+    links that build, and the wheel filename already carries the tag -- so the
+    interpreter is fixed per platform (3.12 on cuda/gcu/metax/ppu, 3.10 on
+    dcu/musa, 3.11 on ascend). Declaring `>=3.8` let a resolver accept 3.8, 3.9
+    or 3.13, none of which has a FlagTree, and the failure surfaced much later
+    inside the extension instead of at install time.
+    """
+    pins = _version_pins()
+    version = pins.get(f"FLAGTREE_PYTHON_VERSION_{FLAGOS_ACCELERATOR}")
+    if not version:
+        # tsingmicro and bpu build no FlagTree; they also publish no wheel, so
+        # this only affects a local build of one of them.
+        return ">=3.8"
+    return f"=={version}"
 
 
 def _version_pins() -> dict:

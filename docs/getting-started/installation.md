@@ -18,7 +18,7 @@
 
 All platforms require:
 
-- **Python**: 3.8 or later
+- **Python**: one version per platform, not a range — 3.12 on CUDA/GCU/MetaX/PPU, 3.10 on DCU/MUSA, 3.11 on Ascend. A FlagTree build exists for exactly one cp tag and the wheel links it, so `Requires-Python` names a single interpreter. See the platform table in the [Compatibility Matrix](../reference/compatibility.md).
 - **PyTorch**: 2.10.x (`>=2.10,<2.11`) — generated ATen bindings are tied to this minor line
 - **CMake**: 3.18 or later
 - **C++ build toolchain**: A working C++17 compiler (GCC 7+, Clang 5+, or MSVC 2017+)

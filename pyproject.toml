@@ -22,12 +22,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "torch_fl"
 # Version is computed in setup.py: it names the supported PyTorch minor line and
-# the MetaX self-contained build appends a local segment (e.g.
-# 2.10.0+metax3.8.1) via FLAGOS_WHEEL_LOCAL. A static value here would override
-# setup()'s version, so it must be declared dynamic.
+# appends the platform's SDK local segment (e.g. 2.10.0+cuda13.3) from
+# cmake/flagos_platforms.json. A static value here would override setup()'s
+# version, so it must be declared dynamic.
 description = "FlagGems operators as a custom PyTorch device (flagos)"
 readme = "README.md"
-requires-python = ">=3.8"
+# Computed in setup.py from FLAGTREE_PYTHON_VERSION_<platform> in
+# .github/version-pins.env. Not a range: a FlagTree build exists for exactly one
+# cp tag and torch_fl links it, so each platform has a single usable interpreter
+# (3.12 on cuda/gcu/metax/ppu, 3.10 on dcu/musa, 3.11 on ascend). The wheel
+# filename already carries the cp tag; this makes the resolver say so instead of
+# failing later inside the extension.
 license = {text = "Apache-2.0"}
 authors = [
     {name = "FlagGems Team"}
@@ -37,10 +42,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # flag_gems is the default operator source for the flagos device: its Triton
@@ -52,7 +56,7 @@ classifiers = [
 # Declared dynamic so setup.py can drop flag_gems/triton on platforms built in
 # pure-boxing mode (FLAGOS_ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
 # is the wrong artifact — DTK ships its own. See _install_requires() in setup.py.
-dynamic = ["version", "dependencies"]
+dynamic = ["version", "dependencies", "requires-python"]
 
 [project.optional-dependencies]
 dev = [

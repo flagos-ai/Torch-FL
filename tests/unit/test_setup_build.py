@@ -104,8 +104,8 @@ def test_build_ext_stages_generated_build_config(
     )
     assert compatibility["platform"] == "musa"
     # The local segment is the platform's `wheel_local` from
-    # cmake/flagos_platforms.json -- the Nexus vendor lane, not an SDK version.
-    assert compatibility["wheel_version"] == "2.10.0+mthreads"
+    # cmake/flagos_platforms.json -- the SDK the wheel was built against.
+    assert compatibility["wheel_version"] == "2.10.0+musa5.2.0"
     assert compatibility["build"]["kernels"] == ["flaggems", "vendor"]
     assert compatibility["build"]["vendor_torch_libraries"] is False
     assert compatibility["build"]["distributions"]["torch"] == "2.10.0+cpu"
