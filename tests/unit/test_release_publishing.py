@@ -16,14 +16,15 @@
 
 `release.yml` on a `v*` tag builds one wheel per publishing platform and
 `.github/scripts/publish_wheels.py` uploads each to the lane named by the
-`pypi_lane` column of cmake/flagos_platforms.json. The parts that can be wrong
-without a runner are checked here: that the workflow covers every publishing
-platform (a missing job would silently ship a release missing a vendor), that
-the lanes are one-per-platform, and that the version the tag names is the
-version in each wheel.
+`pypi_lane` column of cmake/flagos_platforms.json. Each platform uploads its own
+wheel from the runner that built it, so the upload never crosses the border the
+GitHub-hosted way did. The parts that can be wrong without a runner are checked
+here: that the workflow covers every publishing platform (a missing job would
+silently ship a release missing a vendor), that each of those jobs carries the
+upload, that the lanes are one-per-platform, and that the version the tag names
+is the version in each wheel.
 
-Nothing here touches the network; the upload itself is exercised by
-`--dry-run` in the release job's own log.
+Nothing here touches the network.
 """
 
 import importlib.util
@@ -59,6 +60,34 @@ def _publisher():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _release_jobs(text: str) -> dict:
+    """{job name: its YAML}, split on the two-space job keys under `jobs:`.
+
+    Line-based rather than a YAML parse, for the same reason the checks below are
+    text scans: tests/unit has no YAML parser it would otherwise need. A job key is
+    the only thing indented exactly two spaces, so a job's body is every line
+    indented further than that, and a two-space comment between jobs belongs to
+    neither.
+    """
+    jobs: dict[str, list[str]] = {}
+    name = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        key = stripped[:-1] if stripped.endswith(":") else ""
+        is_key = (
+            line.startswith("  ")
+            and not line.startswith("   ")
+            and bool(key)
+            and key.replace("-", "").replace("_", "").isalnum()
+        )
+        if is_key:
+            name = key
+            jobs[name] = []
+        elif name and line.startswith("   "):
+            jobs[name].append(line)
+    return {name: "\n".join(body) for name, body in jobs.items()}
 
 
 def test_every_publishing_platform_has_a_build_job_in_the_release_workflow():
@@ -201,6 +230,23 @@ def test_the_release_guard_patterns_are_the_ones_in_the_workflow():
     assert 'echo "publish=true"' in branch, "the candidate branch must publish"
 
 
+def test_a_dispatch_must_come_from_the_tag_ref():
+    """A dispatch from a branch builds a branch tip under the tag's version.
+
+    The wheels are built from the run's own ref, and the pre-release suffix comes
+    from that ref as well, so `v2.10.0rc1` dispatched from `main` produces
+    `2.10.0+<sdk>` -- a version the tag does not name, built from whatever that
+    branch pointed at. The upload's version check would then refuse all seven
+    wheels, after seven builds. Requiring the tag ref rejects it in seconds.
+    """
+    text = RELEASE.read_text(encoding="utf-8")
+    branch = text[
+        text.index('if [ "$EVENT" != "push" ]') : text.index('echo "tag=${REF_NAME}"')
+    ]
+    assert 'if [ "$DISPATCH_TAG" != "$REF_NAME" ]' in branch, branch
+    assert "::error::" in branch and "exit 1" in branch
+
+
 def test_the_build_workflow_derives_the_pre_release_from_the_tag():
     """A candidate tag is inert unless the build learns about it.
 
@@ -214,6 +260,90 @@ def test_the_build_workflow_derives_the_pre_release_from_the_tag():
     )
     assert "FLAGOS_WHEEL_PRERELEASE" in text
     assert "GITHUB_REF_TYPE" in text and "GITHUB_REF_NAME" in text
+
+
+# --- Uploading from the platform's own runner --------------------------------
+
+# A wheel used to leave the runner that built it and be pushed to Nexus from one
+# GitHub-hosted job, which put 2.35 GB on a cross-border link at ~0.13 MB/s and
+# was killed by its own timeout on v2.10.0rc1. Each platform now uploads its own
+# wheel in the job that built it, so what has to hold is that every build job
+# carries the upload. A platform wired without it would produce a green release
+# that is silently missing a wheel, which nothing else here would catch: naming
+# the platform somewhere in the workflow (the test above) is satisfied either way.
+
+
+def test_every_release_build_job_carries_the_upload():
+    jobs = _release_jobs(RELEASE.read_text(encoding="utf-8"))
+    builds = {
+        name: body
+        for name, body in jobs.items()
+        if "build-wheel-" in body or "all-tests-common.yml" in body
+    }
+    assert len(builds) == len(publishing_platforms()), sorted(builds)
+    for name, body in builds.items():
+        assert "publish: true" in body, f"{name} builds a wheel but does not publish it"
+        assert "NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}" in body, name
+
+
+def test_ci_still_builds_without_publishing():
+    """The release flag must be opt-in, or every push would try to upload.
+
+    ci.yml calls the same all-tests-common.yml without it and passes no secrets,
+    which only works because the input defaults to false and the token is not
+    required. Flipping either would fail every push at run creation.
+    """
+    common = (REPO_ROOT / ".github" / "workflows" / "all-tests-common.yml").read_text(
+        encoding="utf-8"
+    )
+    interfaces = common[common.index("on:") : common.index("\njobs:")]
+    publish_at = interfaces.index("publish:")
+    assert "type: boolean" in interfaces[publish_at : publish_at + 120]
+    assert "default: false" in interfaces[publish_at : publish_at + 120]
+
+    secrets_at = interfaces.index("    secrets:")
+    assert "NEXUS_TOKEN:" in interfaces[secrets_at:]
+    assert "required: true" not in interfaces[secrets_at:], (
+        "an optional secret must not become required: ci.yml passes none"
+    )
+
+    assert "publish" not in (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    ), "ci.yml must not ask for a release upload"
+
+
+def test_the_publish_step_runs_on_the_builder_after_the_recovery_artifact():
+    """Order matters twice: the upload is last, and the artifact comes before it.
+
+    The artifact is the documented way to re-upload one lane without rebuilding,
+    so it has to exist before the upload can fail without it.
+    """
+    text = (REPO_ROOT / ".github" / "workflows" / "build-wheel-common.yml").read_text(
+        encoding="utf-8"
+    )
+    build_at = text.index("python -m build --wheel --no-isolation")
+    verify_at = text.index("python -m pip install --no-deps dist/*.whl")
+    artifact_at = text.index("name: Upload wheel")
+    publish_at = text.index("name: Publish the wheel to its vendor lane")
+    assert build_at < verify_at < artifact_at < publish_at, (
+        build_at,
+        verify_at,
+        artifact_at,
+        publish_at,
+    )
+
+    step = text[publish_at:]
+    # Only release.yml sets it, so a normal CI build of this same workflow is
+    # untouched.
+    assert "if: inputs.publish" in step[:200], step[:200]
+    # The upload decides its own route to Nexus, which is not the same on every
+    # runner: the PPU pod's proxy refuses the CONNECT to resource.flagos.net.
+    assert "lib/proxy_route.sh" in step
+    assert "prefer_direct_route" in step
+    assert "publish_wheels.py" in step
+    # A release is a tag; a manual dispatch of this workflow must not publish a
+    # branch tip under a release version.
+    assert "GITHUB_REF_TYPE" in step and '!= "tag"' in step
 
 
 # --- The upload itself -------------------------------------------------------
@@ -340,6 +470,36 @@ def test_a_transient_failure_is_retried(tmp_path, monkeypatch):
     wheel.write_bytes(b"x" * 1024)
     publisher.upload(wheel, "http://example.invalid/simple", "user:token", 42)
     assert len(attempts) == 2
+
+
+def test_an_index_refusal_is_reported_as_a_lane_failure(tmp_path, monkeypatch):
+    """The idempotency check goes out over the same link the upload does.
+
+    This host answers an intermittent 503, and `already_published` re-raises any
+    non-404 status. That used to escape as a traceback and abort the job, instead
+    of naming the lane that needs re-running -- which is the whole point of the
+    skip check existing.
+    """
+    publisher = _publisher()
+
+    def refuse(*_args, **_kwargs):
+        raise publisher.urllib.error.HTTPError(
+            "https://x/simple/torch-fl/", 503, "Service Unavailable", None, None
+        )
+
+    monkeypatch.setattr(publisher, "already_published", refuse)
+
+    wheel = tmp_path / "torch_fl-2.10.0rc1+x-cp312-cp312-linux_x86_64.whl"
+    wheel.write_bytes(b"x" * 1024)
+    _, outcome = publisher.publish_one(
+        "cuda",
+        "nvidia",
+        wheel,
+        "http://example.invalid/simple",
+        "user:token",
+        SimpleNamespace(dry_run=False, upload_timeout=42),
+    )
+    assert outcome == "failed"
 
 
 def test_main_runs_the_platforms_concurrently(tmp_path, monkeypatch):

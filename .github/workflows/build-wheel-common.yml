@@ -48,6 +48,21 @@ on:
         required: false
         type: boolean
         default: true
+      # Publish the wheel to its vendor Nexus lane from this same job, on the
+      # runner that built it. Releasing from here rather than funneling every
+      # wheel to one GitHub-hosted job is what keeps the upload off a
+      # cross-border link: measured on v2.10.0rc1, a GitHub-hosted runner pushed
+      # 2.35 GB to resource.flagos.net at ~0.13 MB/s and was killed by its
+      # 60-minute timeout, while the same bytes uploaded from a runner in China
+      # at 13-23 MB/s. Only release.yml sets this.
+      publish:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      NEXUS_TOKEN:
+        description: "user:token for the vendor Nexus lanes, read only when publish is set"
+        required: false
 
 jobs:
   build:
@@ -64,6 +79,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Fail in seconds rather than after seven platform builds. An organization
+      # secret that is not visible to this repository, or one of the `secrets:`
+      # hops that carries it to a vendor runner, is otherwise only noticed when
+      # the upload finally runs.
+      - name: Check the release credentials
+        if: inputs.publish
+        env:
+          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NEXUS_TOKEN:-}" ]]; then
+            echo "::error::NEXUS_TOKEN is empty: the organization secret is not visible to this repository, or this workflow was not given it"
+            exit 1
+          fi
+          echo "NEXUS_TOKEN is set (${#NEXUS_TOKEN} characters)"
 
       - name: Prepare platform environment
         env:
@@ -119,3 +150,60 @@ jobs:
         with:
           name: ${{ inputs.artifact_name }}
           path: dist/*.whl
+
+      # After the artifact step on purpose: the artifact is the recovery path if
+      # this step fails, so it has to exist first.
+      - name: Publish the wheel to its vendor lane
+        if: inputs.publish
+        timeout-minutes: 20
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .github/version-pins.env
+
+          # Only release.yml sets publish, and it runs on a tag ref -- but this
+          # workflow can also be dispatched by hand, and a branch tip must never
+          # be published under a release version.
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]]; then
+            echo "::error::publish was requested on ${GITHUB_REF_TYPE:-unknown} ref '${GITHUB_REF_NAME:-?}'; a release is published from a tag"
+            exit 1
+          fi
+
+          # Installed before the route probe below so the probe trusts the same
+          # CA store twine will (the probe prefers certifi, which twine's
+          # dependency tree is what puts in this venv).
+          python -m pip install --only-binary=:all: "twine==$TWINE_VERSION_DEFAULT"
+
+          # The ways to the vendor lanes differ per runner: PPU's pod proxy
+          # refuses the CONNECT to resource.flagos.net while the MUSA runner's
+          # serves it, so ask the pod which route works instead of assuming.
+          # TORCH_FL_PROXY_ROUTE=direct|proxy overrides the probe.
+          source .github/scripts/lib/proxy_route.sh
+          prefer_direct_route "$FLAGOS_WHEEL_ROOT_DEFAULT" "the vendor lanes"
+
+          # publish_wheels.py reads the platform out of the artifact directory
+          # name, and the artifact name is the platform's own config value, so
+          # the lane a wheel goes to and the artifact it came from cannot
+          # disagree. It refuses a directory that names no publishing platform.
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          shopt -u nullglob
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "::error::expected exactly one wheel in dist/, found ${#wheels[@]}"
+            exit 1
+          fi
+          platform="${ARTIFACT_NAME#wheel-}"
+          mkdir -p "wheels/wheel-$platform"
+          mv "${wheels[0]}" "wheels/wheel-$platform/"
+
+          python .github/scripts/publish_wheels.py \
+            --wheels wheels \
+            --tag "$GITHUB_REF_NAME"
+
+          {
+            echo "## Release $GITHUB_REF_NAME"
+            echo
+            echo "- \`$(basename "${wheels[0]}")\` -> the \`$platform\` lane"
+          } >> "$GITHUB_STEP_SUMMARY"

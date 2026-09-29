@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           for script in .github/scripts/set_env.sh .github/scripts/set_env_*.sh \
-            .github/scripts/hooks/set_env_*.sh .github/scripts/lib/set_env_common.sh \
+            .github/scripts/hooks/set_env_*.sh .github/scripts/lib/*.sh \
             .github/version-pins.env; do
             bash -n "$script"
             echo "OK $script"

@@ -15,24 +15,45 @@
 # Tag a release, get the wheels.
 #
 # Push `v2.10.0` and this builds the wheel on every publishing platform's own
-# runner, then uploads each one to the vendor PyPI lane it belongs to. The tag
-# names the release and each wheel's local segment names its SDK, so
-# `v2.10.0` produces `torch_fl-2.10.0+cuda13.3`, `torch_fl-2.10.0+dtk2604`, and
-# so on -- one release, one artifact per platform.
+# runner and uploads each one to the vendor PyPI lane it belongs to -- build and
+# upload in the same job, on the same runner. The tag names the release and each
+# wheel's local segment names its SDK, so `v2.10.0` produces
+# `torch_fl-2.10.0+cuda13.3`, `torch_fl-2.10.0+dtk2604`, and so on: one release,
+# one artifact per platform.
 #
 # The build jobs reuse the `build-wheel-*.yml` wrappers the CI pipelines already
 # call, so a release builds exactly what CI verified (same image, same setup
 # hook, same wheel build, and the same `Verify wheel` step that re-installs the
-# artifact before it is offered here). Nothing about the build is release-only.
+# artifact before it is offered here). Nothing about the build is release-only;
+# `publish: true` is the only release-specific input.
 #
-# Where each wheel goes is the `pypi_lane` column of cmake/flagos_platforms.json;
-# the upload itself is .github/scripts/publish_wheels.py.
+# Uploading from the platform's own job is deliberate, and is how
+# flagos-ai/build-infra releases its own wheels. The other shape -- one
+# GitHub-hosted job downloading all seven artifacts and pushing them to Nexus --
+# put 2.35 GB on a cross-border link at ~0.13 MB/s and was killed by its own
+# 60-minute timeout on v2.10.0rc1, while the same bytes uploaded from a runner in
+# China at 13-23 MB/s. GitHub's own artifact hop is not the cost: that run moved
+# all seven artifacts in 22 seconds. Where each wheel goes is the `pypi_lane`
+# column of cmake/flagos_platforms.json; the upload itself is
+# .github/scripts/publish_wheels.py, run per platform by `build-wheel-common.yml`.
 #
 # Credentials: the organization secret NEXUS_TOKEN, in `user:token` form -- the
-# same one flagos-ai/build-infra uses. It is read only by the `publish` job, so
-# no vendor runner and no wheel build ever sees it. No per-repo secret is
-# needed; if the organization secret is not visible to this repository, the
-# publish job fails on an empty token rather than uploading nothing quietly.
+# same one flagos-ai/build-infra uses. Publishing from each platform's own job
+# means it now reaches every vendor runner, with write access to every vendor
+# lane; the guard that travels with it is publish_wheels.py's version check,
+# which refuses to publish a wheel whose base version is not the tag, plus the
+# ref check that refuses to publish from anything but a tag. It is mapped
+# explicitly at every `uses:` hop, because `secrets: inherit` is not transitive.
+# No per-repo secret is needed; if the organization secret is not visible to this
+# repository, each build job fails on an empty token before it builds anything
+# rather than uploading nothing quietly.
+#
+# Recovering a single failed lane: each wheel is still uploaded as a workflow
+# artifact, so `gh run download <run-id> --pattern 'wheel-<platform>'` plus a
+# local `python .github/scripts/publish_wheels.py --wheels <dir> --tag <tag>`
+# re-uploads just that lane in about a minute, without rebuilding anything. The
+# version check makes it a no-op for lanes that already have the wheel. See
+# docs/development/releasing.md.
 
 name: Release
 
@@ -43,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release from (a tag that already exists)"
+        description: "Tag to release from (dispatch this workflow from that tag's ref)"
         required: true
 
 permissions:
@@ -71,6 +92,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" != "push" ]; then
+            # The wheels are built from this run's ref, and the pre-release
+            # suffix comes from the ref too, so a dispatch from a branch would
+            # publish a branch tip under the tag's version in the wrong wheel
+            # version. Requiring the tag makes the input description true and
+            # makes the dispatch path a real re-run.
+            if [ "$DISPATCH_TAG" != "$REF_NAME" ]; then
+              echo "::error::This workflow builds from its own ref. Dispatch it from the tag's ref (the 'Use workflow from' selector) rather than from a branch: ref is '${REF_NAME}', tag input is '${DISPATCH_TAG}'."
+              exit 1
+            fi
             echo "tag=${DISPATCH_TAG}" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "Manual dispatch for ${DISPATCH_TAG} - publishing."
@@ -101,35 +131,60 @@ jobs:
 
   # One job per publishing platform, spelled out rather than a matrix: each has
   # its own runner label, image and timeout, which is the shape ci.yml uses too.
+  # Every one of them carries the upload with it.
   build-cuda:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-cuda.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   build-dcu:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-dcu.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   build-musa:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-musa.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   build-ascend:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-ascend.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   build-metax:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-metax.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   build-ppu:
     if: needs.guard.outputs.publish == 'true'
     needs: guard
     uses: ./.github/workflows/build-wheel-ppu.yml
+    with:
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   # GCU is the one platform with no build-wheel-* wrapper: it is the only
   # "common" platform (its runner is not one of the six vendor pipelines), so
@@ -144,49 +199,6 @@ jobs:
       run_build: true
       run_integration_tests: false
       upload_artifact: true
-
-  publish:
-    name: Publish to the vendor lanes
-    needs:
-      - guard
-      - build-cuda
-      - build-dcu
-      - build-musa
-      - build-ascend
-      - build-metax
-      - build-ppu
-      - build-gcu
-    if: needs.guard.outputs.publish == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download every platform's wheel
-        uses: actions/download-artifact@v4
-        with:
-          # One directory per artifact, named wheel-<platform>; the script reads
-          # the platform out of the directory name.
-          pattern: wheel-*
-          path: wheels/
-
-      - name: Install twine
-        run: python -m pip install --upgrade twine
-
-      - name: Publish
-        env:
-          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-        run: |
-          set -euo pipefail
-          python .github/scripts/publish_wheels.py \
-            --wheels wheels \
-            --tag "${{ needs.guard.outputs.tag }}"
-
-      - name: Summarise
-        if: always()
-        run: |
-          {
-            echo "## Release ${{ needs.guard.outputs.tag }}"
-            echo
-            find wheels -name '*.whl' | sort | sed 's/^/- `/; s/$/`/'
-          } >> "$GITHUB_STEP_SUMMARY"
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}

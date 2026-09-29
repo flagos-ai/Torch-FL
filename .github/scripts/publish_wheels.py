@@ -221,6 +221,13 @@ def publish_one(
             f"{prefix}\n            FAILED (twine exit {error.returncode})", flush=True
         )
         return platform, "failed"
+    except (urllib.error.HTTPError, urllib.error.URLError) as error:
+        # The idempotency GET, not the upload: this host answers an intermittent
+        # 503 (see the note in upload() below), and re-raising it would abort the
+        # whole job with a traceback instead of reporting the one lane that needs
+        # re-running.
+        print(f"{prefix}\n            FAILED (index unreachable: {error})", flush=True)
+        return platform, "failed"
 
 
 def main(argv=None) -> int:

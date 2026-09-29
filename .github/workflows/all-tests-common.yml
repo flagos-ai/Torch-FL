@@ -43,6 +43,17 @@ on:
         type: number
         default: 0
         description: Override the platform configuration when greater than zero
+      publish:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Publish the built wheel to its vendor Nexus lane from the build runner.
+          Release-only; see build-wheel-common.yml.
+    secrets:
+      NEXUS_TOKEN:
+        description: "user:token for the vendor Nexus lanes, read only when publish is set"
+        required: false
 
 jobs:
   configuration:
@@ -179,6 +190,9 @@ jobs:
       timeout_minutes: ${{ fromJson(needs.configuration.outputs.timeout_minutes) }}
       artifact_name: ${{ needs.configuration.outputs.wheel_artifact_name }}
       upload_artifact: ${{ inputs.upload_artifact }}
+      publish: ${{ inputs.publish }}
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
 
   integration-tests:
     name: Integration tests
