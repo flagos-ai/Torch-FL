@@ -144,15 +144,6 @@ jobs:
           print(f"Installed files: {len(package_files)}")
           PY
 
-      - name: Upload wheel
-        if: inputs.upload_artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name }}
-          path: dist/*.whl
-
-      # After the artifact step on purpose: the artifact is the recovery path if
-      # this step fails, so it has to exist first.
       - name: Publish the wheel to its vendor lane
         if: inputs.publish
         timeout-minutes: 20
@@ -207,3 +198,22 @@ jobs:
             echo
             echo "- \`$(basename "${wheels[0]}")\` -> the \`$platform\` lane"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # After the upload on purpose, and it is the step after that which
+      # decides this order. The wheel goes to the vendor lane from a runner in
+      # China (18-32 s measured on every platform), while this artifact step
+      # crosses the border and is the slow, fragile one: measured on the 2.10.0
+      # release, 2m25s for 476 MB, 3m15s for 316 MB, 9m43s for 672 MB, and it
+      # failed outright after 21 minutes on DCU's 889 MB wheel. Uploading first
+      # made that the gate on publishing -- DCU's publish step was skipped twice
+      # and the platform shipped nothing -- so publishing runs first instead.
+      # `if: always()` keeps the artifact, which is the documented way to
+      # re-upload one lane without rebuilding, on the failure path too; the
+      # artifact step still fails the job when it fails, which is what makes a
+      # slow or refused upload visible.
+      - name: Upload wheel
+        if: always() && inputs.upload_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: dist/*.whl
