@@ -51,9 +51,31 @@ git push upstream v2.10.0
 
 The tag names the release and the local segment names the SDK, so the two must
 agree on everything before the `+`; the uploader checks that and refuses to
-publish a wheel whose base version is not the tag. Re-running a release whose
-wheels are already in the lane skips them and uploads only the missing ones, so
-a partial failure can be retried by re-running the workflow.
+publish a wheel whose base version is not the tag.
+
+Re-running a release whose wheels are already in the lane skips them and uploads
+only the missing ones, so a partial failure can be retried by re-running the
+workflow. Note that a *partially* published version cannot be completed later
+against the same version number if a wheel's content has to change — Nexus does
+not overwrite — so a broken artifact means cutting the next candidate.
+
+### How the upload behaves
+
+The seven platforms upload **concurrently**, one worker per lane. Nothing is
+shared: each platform publishes to its own repository, so there is nothing to
+serialise on. Uploads are serial only in `--dry-run`.
+
+Each wheel gets a **timeout** (900 s by default, `--upload-timeout` to change
+it) and one retry on failure. Both are there because of what the egress proxy
+does: it answers an intermittent `503`, and a stalled transfer hangs on a socket
+read with no output. For scale, a 388 MB download from this same Nexus takes
+19 s (~20 MB/s) from a CI runner, so a wheel taking many minutes is a stall and
+not slowness. Without the timeout one stalled wheel holds the whole release —
+which is what happened to `v2.10.0rc1`, where the 476 MB CUDA wheel hung and the
+other six never started.
+
+A lane that fails is reported in the summary and the job exits non-zero, but
+every other lane is still attempted, so one bad lane does not cost the rest.
 
 ## Credentials
 

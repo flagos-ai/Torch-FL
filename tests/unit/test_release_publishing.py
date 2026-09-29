@@ -28,7 +28,11 @@ Nothing here touches the network; the upload itself is exercised by
 
 import importlib.util
 import json
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -210,3 +214,158 @@ def test_the_build_workflow_derives_the_pre_release_from_the_tag():
     )
     assert "FLAGOS_WHEEL_PRERELEASE" in text
     assert "GITHUB_REF_TYPE" in text and "GITHUB_REF_NAME" in text
+
+
+# --- The upload itself -------------------------------------------------------
+
+# Serial uploads cost the whole release when one transfer stalls, which is what
+# happened to v2.10.0rc1: the 476 MB CUDA wheel hung behind a publisher that
+# uploads one at a time, and the other six never started.
+
+
+def _pairs(tmp_path):
+    """A downloaded-artifact tree, one wheel per publishing platform."""
+    pairs = []
+    for platform in publishing_platforms():
+        directory = tmp_path / f"wheel-{platform}"
+        directory.mkdir(parents=True, exist_ok=True)
+        wheel = directory / "torch_fl-2.10.0rc1+x-cp312-cp312-linux_x86_64.whl"
+        wheel.write_bytes(b"x" * 1024)
+        pairs.append((platform, wheel))
+    return pairs
+
+
+def test_every_platform_is_uploaded_with_a_timeout(tmp_path, monkeypatch):
+    """One bad lane must not be able to consume the publish window."""
+    publisher = _publisher()
+    monkeypatch.setattr(publisher, "already_published", lambda *_a, **_k: False)
+    timeouts = []
+
+    def fake_run(args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+
+    monkeypatch.setattr(publisher.subprocess, "run", fake_run)
+    monkeypatch.setattr(publisher.time, "sleep", lambda _s: None)
+
+    pairs = _pairs(tmp_path)
+    lanes = publishing_platforms()
+    outcomes = {}
+    with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
+        futures = [
+            pool.submit(
+                publisher.publish_one,
+                platform,
+                lanes[platform],
+                wheel,
+                "http://example.invalid/simple",
+                "user:token",
+                SimpleNamespace(dry_run=False, upload_timeout=42),
+            )
+            for platform, wheel in pairs
+        ]
+        for future in as_completed(futures):
+            platform, outcome = future.result()
+            outcomes[platform] = outcome
+
+    assert set(outcomes) == set(lanes)
+    assert set(outcomes.values()) == {"uploaded"}
+    assert timeouts == [42] * len(pairs)
+
+
+def test_a_stalled_upload_is_reported_as_a_timeout(tmp_path, monkeypatch):
+    """The thing that actually went wrong, named rather than left as a hang."""
+    publisher = _publisher()
+    monkeypatch.setattr(publisher, "already_published", lambda *_a, **_k: False)
+
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+
+    monkeypatch.setattr(publisher.subprocess, "run", fake_run)
+
+    wheel = tmp_path / "torch_fl-2.10.0rc1+x-cp312-cp312-linux_x86_64.whl"
+    wheel.write_bytes(b"x" * 1024)
+    _, outcome = publisher.publish_one(
+        "dcu",
+        "hygon",
+        wheel,
+        "http://example.invalid/simple",
+        "user:token",
+        SimpleNamespace(dry_run=False, upload_timeout=42),
+    )
+    assert outcome == "timed out"
+
+
+def test_a_failed_upload_is_reported_and_not_retried_forever(tmp_path, monkeypatch):
+    publisher = _publisher()
+    monkeypatch.setattr(publisher, "already_published", lambda *_a, **_k: False)
+    attempts = []
+
+    def fake_run(args, **kwargs):
+        attempts.append(1)
+        raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(publisher.subprocess, "run", fake_run)
+    monkeypatch.setattr(publisher.time, "sleep", lambda _s: None)
+
+    wheel = tmp_path / "torch_fl-2.10.0rc1+x-cp312-cp312-linux_x86_64.whl"
+    wheel.write_bytes(b"x" * 1024)
+    _, outcome = publisher.publish_one(
+        "cuda",
+        "nvidia",
+        wheel,
+        "http://example.invalid/simple",
+        "user:token",
+        SimpleNamespace(dry_run=False, upload_timeout=42),
+    )
+    assert outcome == "failed"
+    # Two attempts: a transient refusal is worth one retry, a permanent one
+    # is not worth more.
+    assert len(attempts) == 2
+
+
+def test_a_transient_failure_is_retried(tmp_path, monkeypatch):
+    """The egress proxy answers an intermittent 503; one must not fail a release."""
+    publisher = _publisher()
+    attempts = []
+
+    def fake_run(args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(publisher.subprocess, "run", fake_run)
+    monkeypatch.setattr(publisher.time, "sleep", lambda _s: None)
+
+    wheel = tmp_path / "torch_fl-2.10.0rc1+x-cp312-cp312-linux_x86_64.whl"
+    wheel.write_bytes(b"x" * 1024)
+    publisher.upload(wheel, "http://example.invalid/simple", "user:token", 42)
+    assert len(attempts) == 2
+
+
+def test_main_runs_the_platforms_concurrently(tmp_path, monkeypatch):
+    """The test above proves the helper can overlap; this proves main asks it to.
+
+    Without this, `workers = 1` in main would pass every other test here, and
+    the release would go back to one upload at a time.
+    """
+    publisher = _publisher()
+    _pairs(tmp_path)
+    live = []
+    peak = []
+
+    def fake_publish_one(platform, lane, wheel, index_url, token, args):
+        live.append(1)
+        peak.append(len(live))
+        time.sleep(0.05)
+        live.pop()
+        return platform, "uploaded"
+
+    monkeypatch.setattr(publisher, "publish_one", fake_publish_one)
+    monkeypatch.setenv("NEXUS_TOKEN", "user:token")
+
+    rc = publisher.main(
+        ["--wheels", str(tmp_path), "--tag", "v2.10.0rc1", "--upload-timeout", "1"]
+    )
+
+    assert rc == 0
+    assert max(peak) == len(publishing_platforms()), max(peak)
