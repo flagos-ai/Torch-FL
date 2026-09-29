@@ -101,6 +101,26 @@ That matters because the pod proxies differ — the PPU pod's proxy refuses the
 `CONNECT` while the MUSA runner's serves the same host. `TORCH_FL_PROXY_ROUTE=direct|proxy`
 overrides the probe if a runner ever needs forcing.
 
+### Publishing runs before the artifact upload
+
+The two steps in `build-wheel-common.yml` are ordered deliberately: publish to
+the lane first, then upload the artifact, and the artifact step is
+`if: always()`.
+
+Publishing is the fast one — 18–32 s on every platform, because the vendor lane
+is in China like the runner is. The artifact step crosses the border and is the
+slow, fragile one: measured on the 2.10.0 release, 2m25s for the 476 MB CUDA
+wheel, 3m15s for PPU's 316 MB, 9m43s for MetaX's 672 MB, and on DCU's 889 MB
+wheel **it failed outright after 21 minutes**. With the artifact step first, that
+failure skipped the publish step: DCU published nothing, twice, while every other
+platform published in half a minute. So publishing must not sit behind a
+cross-border transfer it does not need.
+
+`always()` is what keeps the recovery path: the artifact is still produced when
+publishing fails, which is what [Recovering a single lane](#recovering-a-single-lane)
+is built on. A failed artifact step still fails the job, so a slow or refused
+artifact upload stays visible rather than being swallowed.
+
 ## Credentials
 
 The organization secret **`NEXUS_TOKEN`** in `user:token` form — the same one
