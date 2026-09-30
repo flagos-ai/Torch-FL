@@ -487,6 +487,20 @@ def _manifest_platforms() -> list[str]:
     return sorted(path.stem for path in _CONFIG_DIR.glob("*.yml"))
 
 
+def test_device_backend_contract_runs_unfiltered_on_every_platform():
+    """Keep the shared correctness gate in every platform's wheel-only job."""
+    target = "tests/integration/test_device_backend_contract.py"
+    missing = [
+        platform
+        for platform in _manifest_platforms()
+        if not any(
+            target in selection.paths and selection.marker is None
+            for selection in _manifest_selections(platform)
+        )
+    ]
+    assert not missing, f"device backend contract is absent or filtered: {missing}"
+
+
 def _marks_of(test_file: Path) -> set[str]:
     """The selecting marks a test file carries, read textually off the source.
 

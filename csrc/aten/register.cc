@@ -323,6 +323,22 @@ BPUWrapperConvolutionBackwardOverrideable(
 // ============================================================
 // Generated wrappers for 71 CUDA operators
 // ============================================================
+// Validate indexed PrivateUse1 operands before selecting a vendor or FlagGems
+// route. A backend may otherwise copy one operand onto the other's device (or
+// pass both to a kernel) and silently accept a call PyTorch must reject. Leave
+// CPU operands to the selected route: CPU scalar promotion is legal.
+void CheckSameFlagosDevice(const at::Tensor& first, const at::Tensor& second) {
+  if (!first.defined() || !second.defined() ||
+      !first.device().is_privateuseone() ||
+      !second.device().is_privateuseone()) {
+    return;
+  }
+  TORCH_CHECK(
+      first.device() == second.device(),
+      "Expected all tensors to be on the same device, but found ",
+      first.device(), " and ", second.device());
+}
+
 #define FLAGOS_GEN_WRAPPERS
 #include "generated/register.inc"
 #undef FLAGOS_GEN_WRAPPERS

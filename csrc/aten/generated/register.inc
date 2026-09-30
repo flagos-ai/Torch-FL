@@ -1782,18 +1782,24 @@ at::Tensor WrapperAddScalar(const at::Tensor & self, const at::Scalar & other, c
   return at::native::flagos::add_scalar_dispatcher(self, other, alpha);
 }
 at::Tensor & WrapperAddScalarOut(const at::Tensor & self, const at::Scalar & other, const at::Scalar & alpha, at::Tensor & out) {
+  CheckSameFlagosDevice(self, out);
   return at::native::flagos::add_scalar_out_dispatcher(self, other, alpha, out);
 }
 at::Tensor WrapperAddTensor(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+  CheckSameFlagosDevice(self, other);
   return at::native::flagos::add_tensor_dispatcher(self, other, alpha);
 }
 at::Tensor & WrapperAddOut(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha, at::Tensor & out) {
+  CheckSameFlagosDevice(self, other);
+  CheckSameFlagosDevice(self, out);
+  CheckSameFlagosDevice(other, out);
   return at::native::flagos::add_out_dispatcher(self, other, alpha, out);
 }
 at::Tensor & WrapperAddInplaceScalar(at::Tensor & self, const at::Scalar & other, const at::Scalar & alpha) {
   return at::native::flagos::add_inplace_scalar_dispatcher(self, other, alpha);
 }
 at::Tensor & WrapperAddInplaceTensor(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+  CheckSameFlagosDevice(self, other);
   return at::native::flagos::add_inplace_tensor_dispatcher(self, other, alpha);
 }
 at::Tensor WrapperAddbmm(const at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha) {
