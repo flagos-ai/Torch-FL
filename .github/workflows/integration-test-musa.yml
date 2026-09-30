@@ -15,6 +15,8 @@
 name: Integration Tests (MUSA)
 
 on:
+  push:
+    branches: [improve_musa]
   workflow_call:
     inputs:
       timeout-minutes:
@@ -31,6 +33,28 @@ on:
         default: 60
 
 jobs:
+  check-setup:
+    name: Check MUSA environment setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Test environment setup and integration manifest
+        run: |
+          bash -n .github/scripts/set_env.sh
+          bash -n .github/scripts/set_env_musa.sh
+          bash -n .github/scripts/hooks/set_env_musa.sh
+          bash -n .github/scripts/lib/set_env_common.sh
+          python -m pip install pytest 'PyYAML==6.0.1'
+          python -m pytest tests/unit/test_musa_env_script.py tests/unit/test_musa_ci_manifest.py tests/unit/test_set_env_common.py tests/unit/test_set_env_runner.py tests/unit/test_ci_version_pins.py -q
+      - name: Smoke-test minimum Python build tooling
+        run: |
+          python -m pip install 'setuptools==64.0.0' build
+          python -c "import build; from setuptools.command.editable_wheel import editable_wheel"
+
   # The test list lives in .github/configs/musa.yml, not inline here. See
   # load-platform-tests.yml for why.
   load-tests:
@@ -40,10 +64,10 @@ jobs:
 
   integration-tests:
     name: Build and test (MUSA)
-    needs: load-tests
+    needs: [load-tests, check-setup]
     runs-on:
       - mt-8g-cicd-pytorch
-    timeout-minutes: ${{ inputs['timeout-minutes'] }}
+    timeout-minutes: ${{ inputs['timeout-minutes'] || 60 }}
     container:
       image: registry.mthreads.com/mcconline/musa-pytorch-release-public@sha256:13f7375aab77a4ace7084558eb939a977467330f558a3c2a185c6c6d31ec8935
       options: >-

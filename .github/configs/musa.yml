@@ -96,6 +96,48 @@ integration_tests:
       print(f"MUSA devices: {torch_fl.flagos.device_count()}")
       PY
 
+  # These suites must exercise the installed MThreads runtime, not pass through
+  # their optional-dependency skips. Run after wheel installation, outside the
+  # source checkout, and import torch_fl before FlagGems to install its shim.
+  - name: Check MUSA FlagTree and FlagGems runtime
+    command: |
+      python - <<'PY'
+      import importlib.metadata
+      from pathlib import Path
+
+      import torch_fl
+      from torch_fl import _env
+      from torch_fl._build_config import ACCELERATOR
+      import flag_gems
+      import triton.backends
+      from torch_fl.compile.flagtree_shim import (
+          bind_flagtree_musa_driver,
+          flagtree_backend,
+          flagtree_musa_driver_target,
+          is_flagtree_active,
+      )
+
+      assert ACCELERATOR == "musa", ACCELERATOR
+      assert "flaggems" in _env.build_kernels(), _env.build_kernels()
+      assert is_flagtree_active(), triton.__file__
+      assert flagtree_backend() == "mthreads", flagtree_backend()
+      assert "mthreads" in triton.backends.backends, sorted(triton.backends.backends)
+
+      distribution = importlib.metadata.distribution("flagtree")
+      triton_root = Path(triton.__file__).resolve().parent
+      assert Path(distribution.locate_file("triton")).resolve() == triton_root, triton_root
+      assert flag_gems.vendor_name == "mthreads", flag_gems.vendor_name
+      assert torch_fl.flagos.is_available(), "MUSA device is unavailable"
+      assert bind_flagtree_musa_driver(), "FlagTree cannot bind to torch_fl"
+      target = flagtree_musa_driver_target()
+      assert target is not None and target[0] == "musa", target
+
+      print(f"FlagTree: {distribution.version}")
+      print(f"Triton: {triton.__version__} ({triton_root})")
+      print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+      print(f"MUSA compile target: {target}")
+      PY
+
   # Issue #391: the multi-device contract files sit at the top level of
   # tests/integration/, where no manifest sweeps by default -- a file added there
   # reached no CI job at all. Selected by marker rather than by filename so the
@@ -194,6 +236,24 @@ integration_tests:
       -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
       -v -s --tb=short
 
+  # The generic main-ops sweep above does not select this musa-only file.
+  # It verifies the Python entry points actually called by generated dispatch,
+  # native/FlagGems RNG reservations, and float64 mm tune-space boundaries.
+  - name: Run MUSA FlagGems hybrid tests
+    command: >-
+      python -m pytest tests/integration/ops/test_musa_flaggems.py
+      -m musa -v -s --tb=short
+
+  # Match CUDA's full compile suite, including eager/compiled correctness,
+  # backward, dtype coverage, wheel autoload and the MUSA runtime binding.
+  # The shared suite owns other vendors' capability skips; do not deselect
+  # failing MUSA cases here or replace their device execution with CPU fallback.
+  - name: Run torch.compile tests with FlagTree
+    command: >-
+      FLAGOS_USE_FLAGTREE=1
+      python -m pytest tests/integration/test_compile.py
+      -v -s --tb=short
+
   # Triage phase: ordered last so a murand failure cannot block the functional
   # groups above. As of 2026-08-28 the CI runner's murand (vendor RNG library)
   # is broken -- murandGenerateUniform/Normal fail with LAUNCH_FAILURE and
@@ -218,20 +278,6 @@ integration_tests:
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - tests/integration/test_compile.py. torch.compile needs the vendor
-  #     flagtree (flagtree-0.5.0+mthreads3.1, Triton 3.1, backend "mthreads");
-  #     set_env_musa.sh deliberately does not link one, and stock PyPI triton is
-  #     not a substitute -- it ships no mthreads backend and cannot compile a
-  #     MUSA kernel at all. The suite itself is green on the MTT S5000 with that
-  #     runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1 failed, the
-  #     failure being the torch.backends entry-point case, which asserts an
-  #     installed wheel and cannot hold in a build-tree run). Add this group when
-  #     the image bakes the vendor triton stack; it is an image gap, not a code
-  #     one.
-  #   - tests/integration/ops/test_musa_flaggems.py (hybrid route). Same
-  #     vendor-triton prerequisite as compile: its two cases skip without
-  #     FlagGems installed, so adding the group to this image would record a
-  #     pass that measured nothing.
   #   - tests/integration/test_profiler_parity.py. Unlike the contract group
   #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
   #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,

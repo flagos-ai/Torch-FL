@@ -644,10 +644,6 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
         "exclusion until one job opts into that build"
     ),
-    "tests/integration/ops/test_musa_flaggems.py": (
-        "documented in musa.yml as held back until the image ships the vendor "
-        "triton stack; added now it would record a pass that measured nothing"
-    ),
 }
 
 

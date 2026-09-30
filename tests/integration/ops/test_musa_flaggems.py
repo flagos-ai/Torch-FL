@@ -12,6 +12,7 @@ DEVICE = torch.device("flagos:0")
 
 
 def _require_flaggems_mthreads():
+    """Require the runtime without replacing torch_fl's dispatch kernels."""
     if torch_fl.flagos.device_count() < 1:
         pytest.skip("MUSA device is unavailable")
     # The wheel decides whether the hybrid path exists, not the shell it runs
@@ -27,12 +28,14 @@ def _require_flaggems_mthreads():
         )
     try:
         import triton
-        import flag_gems
+        import flag_gems  # noqa: F401 -- verify availability without registering ops
     except Exception as exc:
         pytest.skip(f"FlagGems MThreads runtime is unavailable: {exc}")
     if "mthreads" not in triton.backends.backends:
         pytest.skip("the installed Triton does not provide the MThreads backend")
-    flag_gems.enable()
+    # torch_fl already routes each overload through its generated C++ kernels.
+    # Global FlagGems registration would bypass that dispatcher and register
+    # lift_fresh, whose vendor-device check rejects flagos tensors.
 
 
 def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):

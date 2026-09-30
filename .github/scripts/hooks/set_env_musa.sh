@@ -92,6 +92,78 @@ export LD_LIBRARY_PATH="$MUSA_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # --- Isolated Python ---------------------------------------------------------
 # The vendor image Python has torch_musa (and its 2.9.1 libtorch) installed, so
 # the build runs in a venv holding nothing but stock CPU torch.
+# Clear inherited Python paths before probing or provisioning any interpreter.
+# Backend autoload is disabled only for probes, not for the integration tests.
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+# The shared retry helper already supports caching; opt in only for MUSA.
+PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"
+
+musa_prepare_pip_cache() {
+  [[ "${PIP_RETRY_NO_CACHE:-0}" == "1" ]] && return 0
+  # GitHub containers may inherit a HOME whose pip cache is owned by another
+  # user. Use the writable job workspace instead; honour explicit overrides.
+  local cache_dir="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache/musa}"
+  if ! mkdir -p "$cache_dir" || [[ ! -O "$cache_dir" || ! -w "$cache_dir" ]]; then
+    echo "::error::MUSA pip cache must be owned and writable by the current user: $cache_dir" >&2
+    return 1
+  fi
+  cache_dir="$(cd "$cache_dir" && pwd -P)"
+  export PIP_CACHE_DIR="$cache_dir"
+  echo "MUSA pip cache: $PIP_CACHE_DIR"
+}
+
+musa_validate_build_tools() {
+  # setup.py imports editable_wheel even for a non-editable native build.
+  # Validate real imports after provisioning, before any large wheel download.
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+}
+
+musa_venv_is_isolated() {
+  venv_is_usable || return 1
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+assert importlib.util.find_spec("torch_musa") is None
+try:
+    metadata.distribution("torch_musa")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit("vendor torch_musa metadata is present")
+PY
+}
+
+musa_cpu_torch_is_usable() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
+import sys
+import torch
+
+expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+}
+
 BOOTSTRAP_PYTHON="${TORCH_FL_BOOTSTRAP_PYTHON:-}"
 if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
   for candidate in python3.10 python3 python; do
@@ -107,14 +179,22 @@ if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
 fi
 
 PREBUILT_VENV="${TORCH_FL_PREBUILT_MUSA_VENV:-/opt/torch-fl-musa-venv}"
-USING_PREBUILT=0
 if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
   VENV_ROOT="$PREBUILT_VENV"
-  USING_PREBUILT=1
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if ! musa_venv_is_isolated; then
+    echo "::error::Prebuilt MUSA venv is not isolated and usable: $VENV_ROOT" >&2
+    exit 1
+  fi
   echo "Using prebuilt MUSA venv: $VENV_ROOT"
 else
   VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-musa-${CI_STAGE}}"
-  "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT" || true
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if musa_venv_is_isolated 2>/dev/null; then
+    echo "Reusing isolated MUSA venv: $VENV_ROOT"
+  else
+    "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT" || true
+  fi
   # Ensure system site-packages are not inherited (torch_musa from base image)
   if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
     # Remove any existing include-system-site-packages line and add our own
@@ -125,7 +205,7 @@ else
 fi
 
 VENV_PYTHON="$VENV_ROOT/bin/python"
-if ! venv_is_usable; then
+if ! musa_venv_is_isolated; then
   # The vendor base image may not ship the matching python*-venv package. Keep
   # that dependency in the chip-specific setup path so the common workflow stays
   # image agnostic; a derived CI image should bake it in.
@@ -151,18 +231,24 @@ if ! venv_is_usable; then
   fi
 fi
 
-if ! venv_is_usable; then
+if ! musa_venv_is_isolated; then
   echo "::error::Isolated Python was not created at $VENV_ROOT; install the matching python*-venv package in the CI image" >&2
   exit 1
 fi
 
-if (( USING_PREBUILT == 0 )); then
-  # build (pypa/build) is the PEP 517 frontend the common "Build wheel" step
-  # invokes via `python -m build --wheel --no-isolation`. MetaX gets it from the
-  # prebuilt /opt/venv; this fresh venv must ship it itself. A derived CI image
-  # that bakes a prebuilt musa venv must bake `build` into it too.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL_ARG" \
-    --upgrade pip setuptools wheel cmake ninja build
+# Reconcile build dependencies even in a prebuilt venv (older images lack
+# pypa/build). No --upgrade: satisfied requirements need no download.
+musa_prepare_pip_cache
+# editable_wheel was added in setuptools 64. The distro's 59.6.0 satisfies
+# the older >=45 metadata floor but cannot import the current setup.py.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" \
+  'pip>=23' 'setuptools>=64' wheel 'cmake>=3.18' ninja build
+musa_validate_build_tools
+if ! musa_cpu_torch_is_usable 2>/dev/null; then
+  # Request the local +cpu version explicitly: torch==2.10.0 alone also
+  # considers a preinstalled non-CPU 2.10.0 build satisfied.
+  CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
+  echo "Installing CPU PyTorch $CPU_TORCH_VERSION in $VENV_ROOT"
   install_cpu_torch
 fi
 
@@ -170,10 +256,8 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # Test dependencies. transformers pulls numpy 2.x, which breaks the stock
   # +cpu torch C extensions at import, so numpy stays on 1.x.
   #
-  # sentencepiece + tiktoken + protobuf: the Qwen3 tests load the tokenizer via
-  # AutoTokenizer, and the mounted model dir has no tokenizer.json, so
-  # transformers converts the slow tokenizer to a fast one and that conversion
-  # needs one of these.
+  # transformers is also used by the MUSA BERT dispatch regression; removing
+  # it would silently skip existing coverage even when Qwen3 is not enabled.
   #
   # transformers is pinned to [4.51, 5): 4.51 is where Qwen3 model_type support
   # landed (older releases raise "Unrecognized model" on AutoConfig), and 5.x has
@@ -184,8 +268,12 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # Installed even into a prebuilt venv: a venv baked without them turns the
   # inference and training groups into an environment failure that looks like a
   # platform failure. pip is a no-op when they are already present.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL_ARG" \
-    pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" \
+    pytest "transformers>=4.51,<5" "numpy<2" safetensors 'PyYAML==6.0.1'
+  # Enable when adding a Qwen3 model mount/test group, or for manual Qwen3 runs.
+  if [[ "${TORCH_FL_INSTALL_QWEN_DEPS:-0}" == "1" ]]; then
+    pip_retry --index-url "$PIP_INDEX_URL_ARG" sentencepiece tiktoken protobuf
+  fi
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
@@ -229,7 +317,7 @@ fi
 # build job's venv without flag_gems -- the wheel then fails as soon as a
 # FlagGems route dispatches. Same reasoning as set_env_ascend.sh.
 #
-# --no-deps on both source packages so pip cannot replace the pinned CPU torch
+# --no-deps on both binary packages so pip cannot replace the pinned CPU torch
 # 2.10 with something a transitive requirement prefers.
 #
 # flagtree is the Triton build carrying the "mthreads" backend. 3.6 is not a
@@ -273,7 +361,7 @@ pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
 
 # --- Verify the isolation held ----------------------------------------------
-CI_STAGE="$CI_STAGE" CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import importlib.util
 import os
 import sys
@@ -282,7 +370,8 @@ from pathlib import Path
 import torch
 
 torch_path = Path(torch.__file__).resolve()
-assert torch.__version__.split("+", 1)[0] == os.environ["CPU_TORCH_VERSION"], torch.__version__
+expected = os.environ["CPU_TORCH_VERSION"].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
 # The 2.9.1 vendor ABI must not be reachable from this interpreter.
@@ -326,9 +415,8 @@ if command -v mthreads-gmi >/dev/null 2>&1; then
   mthreads-gmi
 fi
 
-# Integration deps (pytest, transformers, numpy<2, safetensors, sentencepiece,
-# tiktoken, protobuf) are pip-installed above. The MThreads FlagTree wheel
-# supplies Triton from the hosted index.
+# Integration keeps the existing operator/contract baseline, including BERT.
+# Qwen3 tokenizer dependencies are opt-in. FlagTree supplies MThreads Triton.
 
 # --- Export to later workflow steps ------------------------------------------
 if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -336,6 +424,9 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  if [[ -n "${PIP_CACHE_DIR:-}" ]]; then
+    export_ci_env PIP_CACHE_DIR
+  fi
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
