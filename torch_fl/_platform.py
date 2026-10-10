@@ -63,12 +63,22 @@ _ACCELERATOR_TO_PLATFORM = {
     "musa": "musa",
     "gcu": "gcu",
     "ppu": "ppu",
+    "kunlunxin": "kunlunxin",
 }
 
 #: Conf-name fragments, matched in order, for the last-resort case where the
 #: marker and the record are both absent. "cuda" is last so a vendor conf that
 #: happens to mention it cannot win over its own name.
-_CONF_PLATFORM_FRAGMENTS = ("ascend", "metax", "musa", "gcu", "dcu", "ppu", "cuda")
+_CONF_PLATFORM_FRAGMENTS = (
+    "ascend",
+    "metax",
+    "musa",
+    "gcu",
+    "dcu",
+    "ppu",
+    "kunlunxin",
+    "cuda",
+)
 
 
 def _torch_fl_package_dir() -> Path | None:

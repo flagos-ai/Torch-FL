@@ -35,8 +35,8 @@ from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
 IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-# Accelerator platform: "cuda" (default), "ppu", "metax", "ascend",
-# "tsingmicro", "dcu", "gcu", "musa", or "bpu"
+# Accelerator platform: "cuda" (default), "ppu", "metax", "kunlunxin",
+# "ascend", "tsingmicro", "dcu", "gcu", "musa", or "bpu"
 FLAGOS_ACCELERATOR = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
 
 # Where the sources live. Distinct from BASE_DIR, which is repointed at a
@@ -344,6 +344,56 @@ def _dtk_root() -> str:
     return default
 
 
+def _kunlunxin_roots() -> tuple[str, str]:
+    """Return the validated Kunlunxin XPU SDK root and libcudart directory.
+
+    The XPU SDK ships a CUDA-shaped runtime: cuda_runtime.h under
+    ``XPU_ROOT/include`` and the libcudart shim under ``XCUDART_ROOT`` (the
+    SDK's own ``so/`` directory on a P800 install). Both are host-only build
+    inputs -- the runtime libraries are never copied into the wheel -- so this
+    only locates them. Returns ``(XPU_ROOT, <directory holding libcudart.so*>)``.
+    """
+    xpu_root = os.path.realpath(os.environ.get("XPU_ROOT", "/usr/local/xpu"))
+    xcudart_root = os.path.realpath(
+        os.environ.get("XCUDART_ROOT", os.path.join(xpu_root, "so"))
+    )
+    if not os.path.isfile(os.path.join(xpu_root, "include", "cuda_runtime.h")):
+        raise RuntimeError(
+            "FLAGOS_ACCELERATOR=kunlunxin selected, but cuda_runtime.h was not "
+            f"found under {xpu_root}/include. Set XPU_ROOT to the Kunlunxin XPU "
+            "SDK root."
+        )
+    # The shim's soname tracks the SDK's CUDA-compat version (libcudart.so.11.0
+    # on XPU SDK 5.0.21) rather than a fixed one, and it sits either directly in
+    # XCUDART_ROOT or one level down in lib/, so match the whole family in both
+    # spots instead of pinning a filename.
+    for cudart_dir in (xcudart_root, os.path.join(xcudart_root, "lib")):
+        if glob.glob(os.path.join(cudart_dir, "libcudart.so*")):
+            return xpu_root, cudart_dir
+    raise RuntimeError(
+        "FLAGOS_ACCELERATOR=kunlunxin selected, but no libcudart.so* was found "
+        f"under {xcudart_root} or {xcudart_root}/lib. Set XCUDART_ROOT to the "
+        "directory holding the XPU CUDA-compat runtime."
+    )
+
+
+def _setup_kunlunxin_build_env(env: dict) -> tuple[str, str]:
+    """CPATH/LIBRARY_PATH/LD_LIBRARY_PATH for the Kunlunxin XPU SDK.
+
+    Kunlunxin is a CUDA-boxing build: host g++ compiles the generated boxing
+    kernels against the SDK's CUDA-shaped headers and links the libcudart shim,
+    so both the include and lib directories have to be reachable. Returns
+    ``(XPU_ROOT, <directory holding libcudart.so*>)``.
+    """
+    xpu_root, xcudart_dir = _kunlunxin_roots()
+    env.setdefault("XPU_ROOT", xpu_root)
+    env.setdefault("XCUDART_ROOT", xcudart_dir)
+    _prepend_env_path(env, "CPATH", os.path.join(xpu_root, "include"))
+    _prepend_env_path(env, "LIBRARY_PATH", xcudart_dir)
+    _prepend_env_path(env, "LD_LIBRARY_PATH", xcudart_dir)
+    return xpu_root, xcudart_dir
+
+
 # The values an explicit environment variable may not contradict, from the
 # shared table's per-platform "pins". Each pin is a set(... CACHE BOOL ... FORCE)
 # in CMakeLists.txt: the FORCE would win over the -D silently, so a build record
@@ -499,6 +549,10 @@ def build_deps():
             cmake_args.append(f"-DFLAGGEMS_DIR={flaggems_dir}")
     elif FLAGOS_ACCELERATOR == "dcu":
         cmake_args.append(f"-DROCM_PATH={_dtk_root()}")
+    elif FLAGOS_ACCELERATOR == "kunlunxin":
+        xpu_root, xcudart_dir = _setup_kunlunxin_build_env(build_env)
+        cmake_args.append(f"-DXPU_ROOT={xpu_root}")
+        cmake_args.append(f"-DXCUDART_ROOT={xcudart_dir}")
 
     subprocess.check_call([cmake, BASE_DIR] + cmake_args, cwd=build_dir, env=build_env)
 

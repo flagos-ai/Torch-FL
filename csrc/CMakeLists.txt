@@ -32,15 +32,17 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 
 # Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
 # use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,
-# DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms
-# without a supported activity API use the unavailable implementation. Each
-# source defines the same factory.
+# Kunlunxin uses it against the XPU SDK's CUDA-shaped runtime, DCU uses ROCtracer,
+# Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms without a supported
+# activity API use the unavailable implementation. Each source defines the same
+# factory.
 #
 # Every accelerator in cmake/flagos_platforms.json must land in exactly one arm;
 # tests/unit/test_device_tracer_selection.py pins the resulting mapping.
 if(FLAGOS_ACCELERATOR STREQUAL "cuda"
    OR FLAGOS_ACCELERATOR STREQUAL "metax"
-   OR FLAGOS_ACCELERATOR STREQUAL "ppu")
+   OR FLAGOS_ACCELERATOR STREQUAL "ppu"
+   OR FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
@@ -472,6 +474,11 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   if(ROCTRACER_LIBRARY)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${ROCTRACER_LIBRARY})
   endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # Kunlunxin's vendor torch exposes CUDA registrations and uses the CUDA-shaped
+  # runtime, so the standard allocator and generated CUDA boxing path apply; the
+  # CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside ${_torch_fl_link_libs}.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)

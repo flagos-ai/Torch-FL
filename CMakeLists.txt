@@ -14,7 +14,7 @@
 
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
-set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, or bpu")
+set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, or bpu")
 
 # Vendor driver/runtime dirs to embed in RUNPATH. Never bundled into the wheel
 # (a machine with the card has the driver), mirroring MetaX's /opt/maca.
@@ -397,6 +397,55 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
 
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early
   # (guard: if(TARGET torch::cudart) return()).
+  add_library(torch::cudart INTERFACE IMPORTED)
+  if(NOT TARGET CUDA::nvToolsExt)
+    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # Kunlunxin XPU SDK. The CUDA-shaped headers and the libcudart shim come from
+  # the driver installation and are never copied into the wheel: the SDK ships
+  # cuda_runtime.h under XPU_ROOT/include and libcudart.so* under XCUDART_ROOT
+  # (the SDK's own so/ directory on a P800), which is what the vendor torch
+  # links against.
+  flagos_resolve_sdk_root(XPU_ROOT "/usr/local/xpu" XPU_ROOT)
+  flagos_resolve_sdk_root(XCUDART_ROOT "${XPU_ROOT}/so" XCUDART_ROOT)
+  if(NOT EXISTS "${XPU_ROOT}/include/cuda_runtime.h")
+    message(FATAL_ERROR
+      "Kunlunxin XPU SDK not found: ${XPU_ROOT}/include/cuda_runtime.h does not "
+      "exist. Set XPU_ROOT to the Kunlun XPU SDK root.")
+  endif()
+  # The shim's soname tracks the SDK's CUDA-compat version (libcudart.so.11.0 on
+  # XPU SDK 5.0.21) rather than a fixed one, and it sits either directly in
+  # XCUDART_ROOT or one level down in lib/, so match the whole family in both
+  # spots instead of pinning a filename.
+  file(GLOB _kunlun_cudart_libs
+    "${XCUDART_ROOT}/libcudart.so*" "${XCUDART_ROOT}/lib/libcudart.so*")
+  if(NOT _kunlun_cudart_libs)
+    message(FATAL_ERROR
+      "Kunlun CUDA runtime not found: no libcudart.so* under ${XCUDART_ROOT} or "
+      "${XCUDART_ROOT}/lib. Set XCUDART_ROOT to the directory holding the XPU "
+      "CUDA-compat runtime.")
+  endif()
+  list(GET _kunlun_cudart_libs 0 _kunlun_cudart_lib)
+  get_filename_component(_kunlun_cudart_dir "${_kunlun_cudart_lib}" DIRECTORY)
+  message(STATUS "Kunlunxin XPU SDK path: ${XPU_ROOT}")
+  message(STATUS "Kunlun CUDA runtime path: ${_kunlun_cudart_dir}")
+
+  add_library(cuda_runtime_compat INTERFACE IMPORTED)
+  set_target_properties(cuda_runtime_compat PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${XPU_ROOT}/include"
+  )
+  target_link_directories(cuda_runtime_compat INTERFACE "${_kunlun_cudart_dir}")
+  target_link_libraries(cuda_runtime_compat INTERFACE cudart)
+
+  set(CUDA_RUNTIME_LIB cuda_runtime_compat)
+
+  # Embed the CUDA-compat runtime path so LD_LIBRARY_PATH is not needed at runtime.
+  list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_cudart_dir}")
+  set(FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_cudart_dir}")
+
+  # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
+  # host-only boxing/runtime sources are compiled (no NVIDIA toolkit probe).
   add_library(torch::cudart INTERFACE IMPORTED)
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)

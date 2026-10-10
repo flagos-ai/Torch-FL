@@ -135,6 +135,39 @@
       "pins": {}
     },
 
+    "kunlunxin": {
+      "_comment": [
+        "Kunlunxin XPU: the vendor torch registers its kernels under the CUDA",
+        "dispatch key and drives the CUDA-shaped runtime the XPU SDK ships",
+        "(cuda_runtime.h from XPU_ROOT, libcudart.so.12 from XCUDART_ROOT), so the",
+        "generated boxing kernels re-dispatch PrivateUse1 -> CUDA into the vendor",
+        "libtorch unchanged. The runtime sources are the shared cuda/ ones. No",
+        "FlagGems liboperators exists for the XPU SDK, so the C++ wrappers stay off."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "cuda",
+      "bundle_libdir": "lib",
+      "vendor_torch_libraries": true,
+      "wheel_local": "",
+      "pypi_lane": "",
+      "use_macro": "USE_KUNLUNXIN",
+      "writes_platform_marker": false,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for the XPU SDK"
+        }
+      }
+    },
+
     "ascend": {
       "_comment": [
         "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",

@@ -117,6 +117,13 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}
       ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${HBUCP_LIB} ${LIBBPU_LIB})
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # Kunlunxin XPU. Like DCU/MetaX the vendor SDK ships a CUDA-shaped runtime
+  # (cuda_runtime.h under XPU_ROOT/include, libcudart.so* under XCUDART_ROOT),
+  # so the runtime sources are the shared cuda/ ones
+  # (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda") and there is no kunlunxin/ subdir.
+  target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 else()
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
 

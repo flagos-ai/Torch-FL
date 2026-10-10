@@ -193,6 +193,14 @@ BOXING_PLATFORMS = {
     # every CUDA FlagGems route; a separate conf is what lets the two platforms
     # disagree about mm/bmm. Filed upstream as FlagGems issue #6225.
     "ppu": "backends_ppu.conf",
+    # Kunlunxin XPU is a CUDA-ABI boxing platform like dcu/ppu/metax: its SDK
+    # ships a CUDA-shaped runtime (cuda_runtime.h + libcudart.so.12) and the
+    # vendor torch registers kernels under the CUDA dispatch key, so every op
+    # routes to the shared CUDA boxing kernels. No FlagGems route is generated
+    # yet (kunlunxin is absent from FLAGGEMS_PYTHON_PLATFORMS /
+    # FLAGGEMS_CPP_PLATFORMS), which makes this conf uniformly BOXING_FALLBACK
+    # until the measured allowlist lands in a follow-up.
+    "kunlunxin": "backends_kunlunxin.conf",
 }
 BOXING_FALLBACK = "cuda"
 
@@ -619,6 +627,12 @@ FLAGGEMS_CPP_PLATFORMS = {"metax"}
 # compile the Python caller and may use the measured FlagGems coverage --
 # including PPU, whose FlagTree install (triton with the `ppu` backend) is
 # what set_env_ppu.sh provisions.
+#
+# Kunlunxin is deliberately absent. Its P800 port brings up the CUDA boxing path
+# only; the FlagGems Python allowlist (5 measured routes on the 2.9 line) is a
+# follow-up, so backends_kunlunxin.conf routes every covered op to the boxing
+# kernel rather than claiming coverage the P800 has not run. Add kunlunxin here
+# only together with that measurement, so the gate and the conf stay in step.
 FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
@@ -2212,7 +2226,15 @@ def build_all(conf_dir: Path) -> dict:
         # `py_here` -- route_boxing() checks the gap set first.
         measured = boxing_measured_python_ops(sparse_conf)
         gaps -= measured
-        py_here = fg_py | measured
+        # Same gate as the native vendors below: a platform whose FlagGems
+        # Python routes are not measured yet is not in FLAGGEMS_PYTHON_PLATFORMS,
+        # so its conf routes nothing to flaggems and every covered op stays on
+        # the boxing kernel. Kunlunxin is the first such boxing platform -- the
+        # P800 port lands the boxing path only and its FlagGems allowlist is a
+        # follow-up -- and this gate is a no-op for metax/dcu/ppu, which are all
+        # in the set. Routing the shared ceiling here instead would claim
+        # coverage the P800 has not run.
+        py_here = (fg_py if platform in FLAGGEMS_PYTHON_PLATFORMS else set()) | measured
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.
         cpp_here = (

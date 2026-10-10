@@ -62,11 +62,12 @@ PLATFORM_REGISTRATION = {
         "backends/musa/generated/musa_flaggems_register.inc",
     ],
     "bpu": [],  # BPU registers no compute ops (register.cc:479-498)
-    # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro fall through to
-    # generated/register.inc (register.cc:500-502), which claims every
-    # generated op.
+    # Boxing platforms (cuda, dcu, metax, ppu, kunlunxin) and tsingmicro fall
+    # through to generated/register.inc (register.cc:500-502), which claims
+    # every generated op.
     "cuda": ["generated/register.inc"],
     "dcu": ["generated/register.inc"],
+    "kunlunxin": ["generated/register.inc"],
     "metax": ["generated/register.inc"],
     "ppu": ["generated/register.inc"],
     "tsingmicro": ["generated/register.inc"],
@@ -74,7 +75,7 @@ PLATFORM_REGISTRATION = {
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in
 # gen_vendor_confs.py), not the platform name.
-BOXING_PLATFORMS = {"cuda", "dcu", "metax", "ppu"}
+BOXING_PLATFORMS = {"cuda", "dcu", "kunlunxin", "metax", "ppu"}
 
 PLATFORMS = sorted(PLATFORM_REGISTRATION)
 
@@ -128,12 +129,12 @@ def test_full_coverage_confs_share_one_op_set():
     union of vendor-only ops (EXTRA_NATIVE + EXTRA_ROUTED) so the route counts
     in each header are commensurable.  The confs that get the full-coverage
     treatment are the vendor confs (musa, gcu, ascend) and the CUDA-boxing
-    confs (dcu, metax, ppu).  ``backends_cuda.conf`` is the *base* list (the
-    one ``codegen_ops.py`` rewrites) and therefore lacks the three widened ops;
-    ``backends_bpu.conf`` is empty and ``backends_tsingmicro.conf`` is
-    hand-written and sparse.  Those three are asserted separately.
+    confs (dcu, metax, ppu, kunlunxin).  ``backends_cuda.conf`` is the *base*
+    list (the one ``codegen_ops.py`` rewrites) and therefore lacks the three
+    widened ops; ``backends_bpu.conf`` is empty and ``backends_tsingmicro.conf``
+    is hand-written and sparse.  Those three are asserted separately.
     """
-    full_coverage = {"ascend", "gcu", "musa", "dcu", "metax", "ppu"}
+    full_coverage = {"ascend", "gcu", "musa", "dcu", "kunlunxin", "metax", "ppu"}
     reference = _parse_conf(CONF_DIR / "backends_musa.conf")
     for platform in sorted(full_coverage):
         routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
@@ -308,6 +309,7 @@ def test_conf_route_counts_are_stable():
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 454, "cuda": 1583},
         "gcu": {"none": 1605, "gcu": 179, "flaggems": 253},
+        "kunlunxin": {"cuda": 2037},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
         "musa": {"flaggems": 465, "none": 1518, "musa": 54},
         "ppu": {"flaggems": 591, "cuda": 1446},

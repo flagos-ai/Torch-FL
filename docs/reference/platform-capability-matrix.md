@@ -1,9 +1,9 @@
 # Platform capability matrix
 
-The nine `FLAGOS_ACCELERATOR` values, what each is, and what it actually
+The ten `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers seven of the nine — so this page is the authoritative
+is aten-only, and CI covers seven of the ten — so this page is the authoritative
 answer.
 
 The directory inventory at the end is machine-checked by
@@ -18,6 +18,7 @@ when a platform gains or loses one.
 | `ppu` | CUDA-ABI boxing (bundled PPU libtorch) | `cuda` (+ `lib_ppu/` bundle) | — (boxing) | `ppu` | 2037 | yes |
 | `metax` | CUDA-ABI boxing (bundled MACA libtorch) | `metax` | — (native retired) | `metax` | 2037 | yes |
 | `dcu` | CUDA-ABI boxing (hipified DTK torch) | `cuda` (+ `dcu` DTK-core shim) | — (boxing) | `dcu` | 2037 | yes |
+| `kunlunxin` | CUDA-ABI boxing (Kunlun XPU SDK) | `cuda` | — (boxing) | — (no dir) | 2037 | no |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
@@ -30,7 +31,8 @@ Column notes:
   `cmake/flagos_platforms.json` for the per-platform kernel-switch defaults).
 - **runtime dir** is the `csrc/runtime/accelerator/<dir>` whose sources the
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
-  toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
+  toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too, as
+  does `kunlunxin` (its XPU SDK ships a CUDA-shaped runtime).
 - **aten backend** is the `csrc/aten/backends/<dir>` vendor kernel tree, when one
   exists. `flagos/` (the Python op caller) and `soft_lowp/` (the software
   low-precision matmul path shared by DCU/MetaX) are shared, not per-platform.
@@ -67,7 +69,14 @@ platform, not a per-build choice.
   two of its tests need the memset category and one needs a `::`-qualified kernel name, which
   the vendor's `gemm_ktype0_*`/`sum_kernel_*` kernel set does not produce. It also ships no
   `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
-- **CI covers 7 of 9**: TsingMicro and BPU have no `.github/configs/` entry.
+- **Kunlunxin** (Kunlun P800 XPU) routes every op to the CUDA boxing kernel: its
+  P800 port brings up the boxing path only, and the FlagGems Python allowlist is
+  a follow-up, so `backends_kunlunxin.conf` claims no FlagGems route and the
+  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`. It has no CI job, no
+  `torch_fl/accelerator/` module and no `csrc/runtime/accelerator/` directory
+  (its runtime dir is `cuda`).
+- **CI covers 7 of 10**: TsingMicro, Kunlunxin and BPU have no
+  `.github/configs/` entry.
 
 ## Directory inventory
 

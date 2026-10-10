@@ -77,6 +77,7 @@ def _select_backend_config() -> None:
       * a native-kernel vendor marker -> backends_<that platform>.conf
       * a MetaX build                 -> backends_metax.conf (boxing-only build)
       * a DCU build                   -> backends_dcu.conf
+      * a Kunlunxin build             -> backends_kunlunxin.conf (CUDA-ABI boxing)
       * a PPU wheel                   -> backends_ppu.conf
       * otherwise                     -> backends_cuda.conf
 
@@ -207,6 +208,8 @@ def _select_backend_config() -> None:
         conf_name = "backends_metax.conf"
     elif _build_accelerator() == "dcu":
         conf_name = "backends_dcu.conf"
+    elif _build_accelerator() == "kunlunxin":
+        conf_name = "backends_kunlunxin.conf"
     elif _is_ppu_build():
         conf_name = "backends_ppu.conf"
     else:

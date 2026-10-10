@@ -72,6 +72,7 @@ the command fails if any artifact lacks its required provenance.
 | Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Beta (MSPTI kernel/runtime/flow/memcpy events plus device-time linkage, all CI-covered by the shared contract; parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 and bool `neg` routes fall back to ACLNN) | Beta |
 | PPU | `FLAGOS_ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
+| Kunlunxin (Kunlun P800) | `FLAGOS_ACCELERATOR=kunlunxin` | CUDA boxing against the Kunlun XPU SDK's CUDA-shaped runtime | Experimental (device count, device index, allocation and host↔device copy measured on a P800 OAM; eager ops not validated — the box's vendor XPU runtime is torch-2.9-bound; not in CI) | Not validated | Not validated | Experimental (CUPTI arm hardened to degrade gracefully when the vendor profiler is unconfigured; not measured on hardware) | Not validated (FlagGems route deferred to a follow-up; the config claims no FlagGems route) | Experimental |
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
@@ -257,6 +258,49 @@ and FP16 inputs, max-autotune, recompilation, FakeTensor tracing, and the
 FlagTree-specific result/device checks. The FlagTree wheel must replace the
 active `triton` installation before Python starts; the current DCU CI image
 uses DTK Triton and does not exercise this path.
+
+### Kunlunxin (Kunlun P800)
+
+Kunlunxin has its own `FLAGOS_ACCELERATOR=kunlunxin` value (see
+[`setup.py`](../../setup.py)) and rides the CUDA-boxing path: the P800 XPU SDK
+exposes a CUDA-shaped runtime (`cuda_runtime.h` plus a `libcudart.so.12`
+compatibility shim) and the Kunlun vendor torch registers its kernels under the
+CUDA dispatch key, so the generated PrivateUse1 → CUDA boxing kernels dispatch
+into the vendor libtorch with no handwritten per-operator kernels. The build
+takes the host compiler and does not need `nvcc`. FlagGems C++ stays off
+(`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`, since the XPU SDK ships no `liboperators.so`).
+
+The default config,
+[`torch_fl/configs/backends_kunlunxin.conf`](../../torch_fl/configs/backends_kunlunxin.conf),
+routes every covered op to the `cuda` boxing key. Kunlunxin is deliberately
+absent from `FLAGGEMS_PYTHON_PLATFORMS` in
+[`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py),
+so no operator is rerouted to a FlagGems backend: the measured FlagGems allowlist
+is a follow-up PR. There is no `.github/configs/kunlunxin.yml`, so no CI job
+validates this platform; the measured scope is the build-from-source smoke
+harness in [`docs/vendors/kunlunxin/installation.md`](../vendors/kunlunxin/installation.md).
+
+The XPU SDK ships a CUPTI-compatible profiler shim, so kunlunxin is armed by the
+same CUPTI tracer as `cuda` / `metax` / `ppu`. That shim's context manager
+(`checkRuntimeProfilerEnv`) **throws** — rather than returning a `CUptiResult` —
+when the vendor profiler is not enabled, which killed the interpreter at module
+load: the arm runs from a static initializer, and an exception escaping one calls
+`std::terminate`. `csrc/profiler/cupti_device_tracer.cc` now wraps the arm and
+records whether it succeeded, so a misconfigured vendor profiler degrades to
+"tracer not armed" (`available()` is false, `start()` is a no-op) instead of
+aborting `import torch_fl`. On `cuda` / `metax` / `ppu` the wrapper is inert,
+because real CUPTI reports refusals as return codes and never throws.
+
+**Runtime measurement boundary.** On the P800 box used for the port the vendor
+XPU runtime is built against torch 2.9: the vendor overlay's `torch_xmlir`
+extension fails to load against a stock torch 2.10 with an undefined ATen `_ops`
+symbol (`at::_ops::triu_::redispatch`). The port therefore measures the build,
+`import torch_fl`, backend-config selection, and the boxing device layer (device
+count, device index, allocation, host↔device copy) on real hardware; eager
+operators that reach ATen's CUDA dispatch (for example `torch.mm` → the vendor
+BLAS) require a vendor torch 2.10 runtime and are **not validated** here. The
+boxing device layer routes through the port's own `csrc/runtime/` CUDA sources and
+the XPU driver shim, which is why it runs where the ATen path does not.
 
 ### Enflame GCU
 

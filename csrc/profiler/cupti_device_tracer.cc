@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -638,6 +639,11 @@ std::mutex g_tracer_mutex;
 // Buffer pool for CUPTI activity records
 constexpr size_t kBufferSize = 8 * 1024 * 1024;  // 8MB per buffer
 constexpr size_t kBufferAlignment = 8;
+
+// Whether the device-side activity kinds were successfully armed at module
+// load. Set once by CuptiTracerInit and read by CuptiDeviceTracer::start().
+// False when the vendor runtime refused to arm (see armDeviceActivities).
+bool g_cupti_armed = false;
 }  // namespace
 
 /**
@@ -648,12 +654,24 @@ constexpr size_t kBufferAlignment = 8;
  */
 class CuptiDeviceTracer : public DeviceTracer {
  public:
-  bool available() const override { return CuptiShim::get().ok; }
+  bool available() const override {
+    // Armed at module load AND a CUPTI library was found. A vendor runtime that
+    // refused the arm (see armDeviceActivities) leaves this false, so callers
+    // correctly report the tracer as unavailable rather than starting a session
+    // that can never capture anything.
+    return CuptiShim::get().ok && g_cupti_armed;
+  }
 
   void start() override {
     auto& shim = CuptiShim::get();
     if (!shim.ok) {
       FLAGOS_CUPTI_LOG("[flagos] CUPTI not available in start()\n");
+      return;
+    }
+    if (!g_cupti_armed) {
+      // The load-time arm was refused by the vendor runtime; re-issuing the
+      // same calls here would raise the same exception.
+      FLAGOS_CUPTI_LOG("[flagos] CUPTI not armed, start() is a no-op\n");
       return;
     }
 
@@ -1272,6 +1290,37 @@ void bufferCompleted(
   free(buffer);
 }
 
+// Arm the device-side activity kinds, tolerating a vendor CUPTI compatibility
+// layer that refuses by THROWING rather than returning an error code.
+//
+// Real CUPTI reports every refusal as a CUptiResult and never throws, so on
+// cuda/metax/ppu this is a no-op wrapper. The Kunlun XPU SDK's libcupti is the
+// counter-example: its context manager (checkRuntimeProfilerEnv) throws a
+// std::runtime_error unless XPU_ENABLE_PROFILER_TRACING=1 is set. An exception
+// escaping a static initializer calls std::terminate, so on that platform a
+// plain `import torch_fl` killed the interpreter before any op ran. Catching
+// here degrades a misconfigured vendor profiler to "tracer not armed" instead
+// of taking the process down with it, and leaves the CUPTI arm usable when the
+// vendor runtime IS configured.
+bool armDeviceActivities(CuptiShim& shim) {
+  try {
+    shim.ActivityRegisterCallbacks(bufferRequested, bufferCompleted);
+    shim.ActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+    shim.ActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
+    shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY);
+    shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMSET);
+    return true;
+  } catch (const std::exception& e) {
+    FLAGOS_CUPTI_LOG("[flagos] vendor CUPTI refused to arm: "
+                     << e.what() << " -- tracer left unarmed\n");
+    return false;
+  } catch (...) {
+    FLAGOS_CUPTI_LOG(
+        "[flagos] vendor CUPTI refused to arm -- tracer left unarmed\n");
+    return false;
+  }
+}
+
 // Static initialization: arm CUPTI at module load.
 struct CuptiTracerInit {
   CuptiTracerInit() {
@@ -1300,18 +1349,7 @@ struct CuptiTracerInit {
     // first CUDA context -- which this still satisfies -- not that every
     // activity kind be armed at import.
     FLAGOS_CUPTI_LOG("[flagos] Registering CUPTI activity callbacks...\n");
-    CUptiResult res =
-        shim.ActivityRegisterCallbacks(bufferRequested, bufferCompleted);
-    FLAGOS_CUPTI_LOG("[flagos] ActivityRegisterCallbacks result: " << res << "\n");
-    CUptiResult en_ck =
-        shim.ActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-    CUptiResult en_k = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
-    CUptiResult en_m = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY);
-    CUptiResult en_s = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMSET);
-    FLAGOS_CUPTI_LOG("[flagos] init ActivityEnable CONCURRENT_KERNEL=" << en_ck
-              << " KERNEL=" << en_k << " MEMCPY=" << en_m
-              << " MEMSET=" << en_s
-              << " (RUNTIME/EXTERNAL_CORRELATION deferred to start())\n");
+    g_cupti_armed = armDeviceActivities(shim);
   }
 };
 static CuptiTracerInit g_tracer_init;

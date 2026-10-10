@@ -55,6 +55,7 @@ EXPECTED_TRACER = {
     "cuda": "cupti_device_tracer",
     "ppu": "cupti_device_tracer",
     "metax": "cupti_device_tracer",
+    "kunlunxin": "cupti_device_tracer",
     "dcu": "roctracer_device_tracer",
     "ascend": "cann_device_tracer",
     "gcu": "gcu_topspti_device_tracer",
@@ -249,6 +250,7 @@ def test_the_cupti_arm_names_its_platforms_explicitly():
     assert "MATCHES" not in condition and "STRLESS" not in condition
     assert sorted(re.findall(r'STREQUAL "([^"]+)"', condition)) == [
         "cuda",
+        "kunlunxin",
         "metax",
         "ppu",
     ]
