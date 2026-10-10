@@ -6863,6 +6863,35 @@ behind them, leaving the rest to `cpu_fallback`. Until that lands, treat only
 the matmul and reduction routes above as supported. `cat` and `rms_norm` are not
 covered by the prototype and remain open.
 
+### TsingMicro: CUDA-only sparse-CSR and SDP registrations leave the build (2026-10-10, TX8)
+
+Two hand-written registration blocks that had been compiled into TsingMicro
+builds are now excluded, on the same predicate the rest of the plugin uses to
+separate CUDA-boxing builds from the platforms that cannot run CUDA-compatible
+kernels. They are the `SparseCsrPrivateUse1` block in
+`csrc/aten/sparse_csr_ops.cc` — `mm`, `mm.out`, `addmm` and `addmm.out`, plus the
+`flatten_indices` stub slot — and the PrivateUse1 / AutogradPrivateUse1
+`_fused_sdp_choice` block in `csrc/aten/sdp_choice_stub.cc`.
+
+Neither block was reachable on this platform. Both need CUDA-target symbols:
+`at::native::addmm_out_sparse_compressed_cuda` for the sparse-CSR registrations
+and the stub's CUDA slot for the SDP choice. The TsingMicro environment's
+`libtorch_cpu.so` and `libtorch.so` define neither, and the build links no
+`libtorch_cuda.so`. Before the change the shipped `libtorch_fl.so` carried one
+undefined CUDA reference and the ops were registered but could only fail at first
+call; after it the reference is gone and the ops fall through to the same
+"DispatchStub: missing kernel" / "Could not run" errors the stock wheel raises.
+The TsingMicro registration set loses those four sparse-CSR entries and the SDP
+choice slot.
+
+**Not revalidated.** These two routes were never runnable in this cohort, so
+there is no measured TsingMicro result to revise — the FlagGems-route results
+above stand unchanged. The change was verified at the link level only
+(counts of undefined symbols per object and per shared library before and
+after, via `nm --undefined-only`); `tests/manual/flaggems_overload_survey.py` was
+not re-run against the new cohort because the excluded ops cannot run here in
+either arm. That evidence gap is recorded here and in the PR.
+
 ## FlagGems Route Removals
 
 The 10 stale-qualname routes fixed on 2026-08-31 are omitted from this section

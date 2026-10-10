@@ -193,15 +193,15 @@ using ToSparseSparseDimFn = Tensor (*)(const Tensor&, int64_t);
 // PrivateUse1 slot delegates to the stub's CUDA kernel.  Both therefore need
 // the CUDA-compatible libtorch (libtorch_hip.so / libtorch_cuda.so, i.e. the
 // cuSPARSE symbols and the stub's CUDA slot) that the CUDA-boxing platforms
-// link and the others do not: Ascend, Enflame GCU, MUSA and BPU.  On those the
-// guards keep an undefined cuSPARSE symbol out of the shared library, and a
-// PrivateUse1 slot that could only assert on its way to CUDA out of the stub,
-// so the ops stay unimplemented there -- the same
+// link and the others do not: Ascend, Enflame GCU, MUSA, TsingMicro and BPU.
+// On those the guards keep an undefined cuSPARSE symbol out of the shared
+// library, and a PrivateUse1 slot that could only assert on its way to CUDA out
+// of the stub, so the ops stay unimplemented there -- the same
 // "DispatchStub: missing kernel" / "Could not run" errors the stock wheel
 // raises -- instead of half-registered.  This is the same predicate
 // csrc/aten/sdp_choice_stub.cc uses, for the same reason.
-#if !defined(USE_ASCEND) && !defined(USE_GCU) && !defined(USE_MUSA) && \
-    !defined(USE_BPU)
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU)
 
 namespace {
 
@@ -320,8 +320,8 @@ TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // on a platform where addmm.out is not compiled would only move the failure
   // one frame, and the CSC inputs _sparse_csr_mm accepts would reach
   // _to_sparse_csr first anyway.
-#if !defined(USE_ASCEND) && !defined(USE_GCU) && !defined(USE_MUSA) && \
-    !defined(USE_BPU)
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU)
   m.impl("mm", at::native::_sparse_csr_mm);
   m.impl("mm.out", at::native::_sparse_csr_mm_out);
   m.impl("addmm", at::native::addmm_sparse_compressed_dense);
