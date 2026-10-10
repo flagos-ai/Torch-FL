@@ -50,7 +50,7 @@ PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 # sitting beside it. cp312 only, hosted on the FlagOS index. The runner's HTTP
 # proxy does not allowlist that index (it answers CONNECT with 500), so the
 # install below reaches it directly -- see prefer_direct_route. Install it as:
-#   python3.12 -m pip install flagtree===0.7.0rc1+ppu3.6 \
+#   python3.12 -m pip install flagtree===0.7.0+ppu3.6 \
 #     --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ppu}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
