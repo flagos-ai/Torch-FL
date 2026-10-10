@@ -75,7 +75,7 @@ the command fails if any artifact lacks its required provenance.
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
-| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | Runtime only | Not validated | Not validated | Not validated | Not applicable | Runtime only |
+| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | FlagGems-only through a vendor FlagTree/Triton build; no vendor-native kernel fallback | Experimental (matmul and reduction routes measured on TX8; pointwise routes blocked by the `empty_like` registration gap) | Not validated | Not validated | Not validated | Experimental (Python dispatch via the `torch.txda` shim; no CI) | Experimental |
 
 ## Platform Notes
 
@@ -341,13 +341,30 @@ evidence above is from on-board measurement, not continuous validation.
 ### TsingMicro
 
 TsingMicro has a build selector (`FLAGOS_ACCELERATOR=tsingmicro`) and links against the Kuiper SDK
-(see [`CMakeLists.txt`](../../CMakeLists.txt), lines 196-216), but
-[`setup.py`](../../setup.py) (lines 367-375) disables every kernel set for it, mirroring the
-same "no per-op kernel to call" treatment documented for BPU (see
-[`docs/vendors/bpu/integration.md`](../vendors/bpu/integration.md), lines 37-43). There is no
-recoverable current install or test guide, and no CI manifest, for this platform. It is marked
-**Runtime only**, and setup and operator validation should be treated as not currently
-documented.
+(see [`CMakeLists.txt`](../../CMakeLists.txt), lines 196-216). Unlike BPU, it does have an
+eager operator path: the wheel registers the full generated PrivateUse1 op list (the
+`#else` branch of [`csrc/aten/register.cc`](../../csrc/aten/register.cc)) and
+[`torch_fl/configs/backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf)
+routes those ops to FlagGems. There is no vendor-native kernel set to fall back to —
+TsingMicro's compute path is FlagGems through a vendor FlagTree/Triton build, and a build
+that cannot reach FlagGems has nothing behind it.
+
+The routing works, but the registration set does not. Because the full generated list is
+claimed on PrivateUse1 while FlagGems supplies no kernel for `empty_like`, that op resolves
+through the dispatcher to the CUDA boxing kernel, which needs a CUDA runtime a TsingMicro
+CPU-torch build does not have, so it raises `NotImplementedError: Could not run
+'aten::empty_strided' with arguments from the 'CUDA' backend`. Every FlagGems kernel that
+allocates its output through `torch.empty_like` (FlagGems' `pointwise_dynamic`, used by
+`add`/`mul`/`silu`/`softmax` and the rest of the pointwise family) is therefore
+unreachable, and `cat`/`rms_norm` fail through CUDA calls for the same reason. The
+matmul family and the reductions that allocate differently (`mm`, `bmm`, `sum`, `mean`,
+`randn`) do run and match the CPU reference. The registration subsetting that would fix
+the rest — a TsingMicro-scoped `tsingmicro_flaggems_register.inc`, as MUSA uses — is not
+part of this change; see the TsingMicro row in
+[`docs/reference/operator-support.md`](operator-support.md) for the measured split.
+
+This was measured on a TX8 host, not in CI. There is no CI manifest, and no current
+installation or test guide, for this platform.
 
 ## Reading the Matrix
 

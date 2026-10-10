@@ -24,6 +24,7 @@ namespace at::native::flagos {
 namespace {
 
 struct PythonOpCache {
+  py::module_ gems_module;
   py::module_ ops_module;
   std::unordered_map<std::string, py::object> func_cache;
   std::mutex init_mutex;
@@ -35,12 +36,52 @@ struct PythonOpCache {
   // host that has TileOPs but not FlagGems.
   void EnsureInitialized() {}
 
-  // flag_gems.ops, imported once on demand. Only bare-name lookups need it.
+  // flag_gems package, imported once on demand. Its top level is where the
+  // SpecOpRegistrar installs the vendor-resolved callable for the active
+  // backend, so it is the authoritative source (see VendorOpByName).
+  py::module_& GemsModule() {
+    if (!gems_module) {
+      gems_module = py::module_::import("flag_gems");
+    }
+    return gems_module;
+  }
+
+  // flag_gems.ops, imported once on demand. The fallback for bare-name lookups.
   py::module_& OpsModule() {
     if (!ops_module) {
       ops_module = py::module_::import("flag_gems.ops");
     }
     return ops_module;
+  }
+
+  // The active backend's callable for `func_name`, obtained through FlagGems'
+  // own resolver: the SpecOpRegistrar in flag_gems/__init__.py rebinds the
+  // package-level name for every op the vendor overrides, while the generic
+  // flag_gems.ops submodule keeps the stock implementation. Vendors whose
+  // tune_configs.yaml declares a different META schema than the generic kernel
+  // (tsingmicro's mm adds SPLIT_K; TILE_M/N/K for bmm) rely on exactly this:
+  // the vendor mm takes SPLIT_K, the generic one does not, so resolving to the
+  // generic callable turns the tuned config into
+  // "KeyError: Keyword argument SPLIT_K was specified but unrecognised".
+  //
+  // Returns an empty object when the name is absent or not callable at the
+  // package top level, so the caller can fall back to the dotted path.
+  py::object VendorOpByName(const char* func_name) {
+    py::object candidate;
+    try {
+      candidate = GemsModule().attr(func_name);
+    } catch (const py::error_already_set&) {
+      // AttributeError: not every spec op is re-exported (a few private
+      // helpers exist only under flag_gems.ops).
+      PyErr_Clear();
+      return py::object();
+    }
+    if (!py::isinstance<py::function>(candidate)) {
+      // Do not let a module/type/constant shadow a real kernel. Every name in
+      // the generated tables is a function in the cohort codegen ran against.
+      return py::object();
+    }
+    return candidate;
   }
 
   py::object GetFunc(const char* name) {
@@ -54,26 +95,40 @@ struct PythonOpCache {
       // Bare name: resolve from the flag_gems.ops module (legacy typed callers).
       func = OpsModule().attr(name);
     } else {
-      // Dotted qualname "module.submodule.func": import the module, getattr func.
-      // This is what the auto-discovered generic kernels pass, taken from
-      // fn.__module__ + "." + fn.__name__, so it locates the exact callable in
-      // _FULL_CONFIG regardless of whether flag_gems.ops re-exports it.
+      // Dotted qualname "module.submodule.func". codegen freezes the *generic*
+      // package path here -- _normalize_flaggems_qualname maps every discovery
+      // alias (including vendor-private "_tsingmicro.ops.mm") to
+      // flag_gems.ops.* so the generated artifact stays hardware-portable.
+      //
+      // Portability in the artifact must not mean "run the generic kernel".
+      // Discovery measured arity/category/kwargs against the *vendor* callable
+      // that _FULL_CONFIG held, so calling the generic one mismatches on
+      // exactly the ops the vendor tuned: a tsingmicro mm invocation reaches
+      // mm_kernel_general through flag_gems.ops.mm.mm while the tuned config
+      // it is handed carries SPLIT_K, which only _tsingmicro.ops.mm accepts.
+      //
+      // So re-resolve through the package top level first. That keeps the
+      // artifact portable (the frozen path is still what codegen pinned) while
+      // letting FlagGems' registrar pick the vendor implementation for whatever
+      // backend is actually active.
       std::string module_path = qual.substr(0, dot);
       std::string func_name = qual.substr(dot + 1);
-      try {
-        py::module_ mod = py::module_::import(module_path.c_str());
-        func = mod.attr(func_name.c_str());
-      } catch (const py::error_already_set&) {
-        // The qualname is recorded on whichever box ran the discovery codegen, so
-        // a vendor-private override module gets frozen into the generated file:
-        // 28 of these say "_hygon.ops.<op>" (mul, mm, silu, sort, ...), which
-        // does not exist on an Ascend host -> ModuleNotFoundError: No module
-        // named '_hygon.ops.mul' the first time FlagGems mode multiplied two
-        // tensors. flag_gems.ops re-exports the vendor-resolved callable for
-        // every one of them, so retry there; the dotted path stays the preferred
-        // lookup because it pins the exact _FULL_CONFIG entry when it does exist.
-        PyErr_Clear();
-        func = OpsModule().attr(func_name.c_str());
+      func = VendorOpByName(func_name.c_str());
+      if (!func) {
+        try {
+          py::module_ mod = py::module_::import(module_path.c_str());
+          func = mod.attr(func_name.c_str());
+        } catch (const py::error_already_set&) {
+          // The qualname is recorded on whichever box ran the discovery codegen,
+          // so a vendor-private override module gets frozen into the generated
+          // file: 28 of these say "_hygon.ops.<op>" (mul, mm, silu, sort, ...),
+          // which does not exist on an Ascend host -> ModuleNotFoundError: No
+          // module named '_hygon.ops.mul' the first time FlagGems mode
+          // multiplied two tensors. flag_gems.ops re-exports the vendor-resolved
+          // callable for every one of them, so retry there.
+          PyErr_Clear();
+          func = OpsModule().attr(func_name.c_str());
+        }
       }
     }
     func_cache[name] = func;

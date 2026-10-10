@@ -497,13 +497,22 @@ class _DefaultStreamHandle:
     ``synchronize``/``wait_stream`` have nothing to do here.
     """
 
-    __slots__ = ("cuda_stream", "gcu_stream", "musa_stream", "device_index")
+    __slots__ = (
+        "cuda_stream",
+        "gcu_stream",
+        "musa_stream",
+        "txda_stream",
+        "device_index",
+    )
 
     def __init__(self, device_index: int = 0):
         self.cuda_stream = 0
         self.gcu_stream = 0
         get_musa_stream = getattr(_C, "_get_musa_current_raw_stream", None)
         self.musa_stream = get_musa_stream(device_index) if get_musa_stream else 0
+        # TsingMicro's triton launcher (triton.backends.tsingmicro.driver) reads
+        # `.txda_stream`; the TX runtime only has the default stream, handle 0.
+        self.txda_stream = 0
         self.device_index = device_index
 
     def __int__(self) -> int:

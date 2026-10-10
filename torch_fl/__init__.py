@@ -712,6 +712,97 @@ def _install_musa_flaggems_compat() -> None:
 # FlagGems operators registered for the flagos device. Always empty: the Python
 # registration layer is gone and everything dispatches through the C++ stub path,
 # so this exists only to back get_registered_ops() / is_flaggems_enabled().
+
+
+def _install_tsingmicro_flaggems_compat() -> None:
+    """Expose the ``torch.txda`` surface FlagGems' TSINGMICRO backend needs.
+
+    Only built for a TsingMicro wheel that routes at least one op to FlagGems
+    (``backends_tsingmicro.conf`` is entirely ``flagos_python``), and inert
+    otherwise, mirroring the MUSA shim above.
+
+    torch_fl must NOT import ``torch_txda``: that package hard-links its own
+    ``libtorch.so``/``libtorch_cpu.so`` and is ABI-bound to the vendor's torch
+    minor, so it fails at import on any other torch line
+    (``undefined symbol: c10::TensorImpl::compute_strides_like_channels_last_3d``
+    on 2.10) -- and it would additionally claim the process-global PrivateUse1
+    key as ``txda``, colliding with torch_fl's ``flagos``. FlagGems only needs a
+    few attributes off ``torch.txda`` for its device discovery, device guard and
+    Triton launch, so synthesize exactly those from ``torch_fl.flagos`` -- the
+    same surface, backed by the TX runtime torch_fl already owns.
+    """
+    if _build_accelerator() != "tsingmicro" or not _conf_routes_to_flaggems():
+        return
+
+    import importlib.machinery
+    import types
+
+    txda = types.ModuleType("torch.txda")
+
+    # Straight proxies to the flagos device module.
+    for name in (
+        "device",
+        "device_count",
+        "current_device",
+        "set_device",
+        "synchronize",
+        "is_available",
+        "get_device_properties",
+        "current_stream",
+        "stream",
+        "Stream",
+        "Event",
+        "default_generators",
+        "empty_cache",
+        "mem_get_info",
+        "memory_allocated",
+        "memory_reserved",
+        "manual_seed",
+        "initial_seed",
+        "get_rng_state",
+        "set_rng_state",
+    ):
+        value = getattr(flagos, name, None)
+        if value is not None:
+            setattr(txda, name, value)
+
+    # flag_gems' codegen config and its Triton launch grid read
+    # `.multi_processor_count` / `.major` / `.minor` off the object, and
+    # torch_fl.flagos._DeviceProperties supplies name/total_memory already.
+    def _get_device_capability(device=None):
+        if device is None:
+            device = flagos.current_device()
+        props = flagos.get_device_properties(device)
+        return props.major, props.minor
+
+    txda.get_device_capability = _get_device_capability
+    txda.get_device_name = lambda device=None: (
+        flagos.get_device_properties(
+            flagos.current_device() if device is None else device
+        ).name
+    )
+
+    # triton.backends.tsingmicro.driver imports torch_txda at module scope, a
+    # requirement torch_fl deliberately does not satisfy. Publish a STUB under
+    # that name so the import succeeds and returns the same torch.txda object;
+    # the driver then only ever reads torch.txda.{current_device,set_device,
+    # current_stream,is_available}, which this shim provides.
+    if "torch_txda" not in sys.modules:
+        stub = types.ModuleType("torch_txda")
+        stub.torch = torch
+        stub.txda = txda
+        stub.__getattr__ = lambda name: getattr(torch.txda, name)
+        stub.__spec__ = importlib.machinery.ModuleSpec(
+            name="torch_txda", loader=None, origin="torch_fl_shim"
+        )
+        sys.modules["torch_txda"] = stub
+
+    txda.__spec__ = importlib.machinery.ModuleSpec(
+        name="torch.txda", loader=None, origin="torch_fl_shim"
+    )
+    torch.txda = txda
+
+
 _registered_ops = []
 
 
@@ -724,7 +815,10 @@ def _patch_flaggems_philox():
     manual_seed/get_rng_state/set_rng_state and mixed native/FlagGems call order
     deterministic without maintaining a second CUDA-style generator state.
     """
-    if _build_accelerator() != "musa" or not _conf_routes_to_flaggems():
+    if (
+        _build_accelerator() not in ("musa", "tsingmicro")
+        or not _conf_routes_to_flaggems()
+    ):
         return
 
     try:
@@ -940,6 +1034,20 @@ def _patch_flaggems_codegen_config():
         # bridge the flagos RNG onto the CUDA generators it now exposes.
         patch_torch_cuda_for_dcu()
         install_dcu_rng_bridge()
+        return
+
+    # --- TsingMicro branch ---
+    # Keyed on the build accelerator: the TX8 host has no libcuda.so and no
+    # /dev/davinci*, so without this branch the vendor falls through to the
+    # ascend fallback below and gets GEMS_VENDOR=ascend. flag_gems picks its
+    # backend from that variable, and only TSINGMICRO resolves the torch.txda
+    # device object the shim above publishes -- so the fallback does not merely
+    # mislabel the vendor, it makes device discovery fail outright.
+    if (
+        _build_accelerator() == "tsingmicro"
+        and os.environ.get("GEMS_VENDOR") != "ascend"
+    ):
+        os.environ.setdefault("GEMS_VENDOR", "tsingmicro")
         return
 
     # --- Enflame GCU branch ---
@@ -2020,6 +2128,7 @@ def _phase_vendor_compat() -> None:
     load-bearing, so the constraints are documented at the runner.
     """
     _install_musa_flaggems_compat()
+    _install_tsingmicro_flaggems_compat()
 
     # torch::utils::device_lazy_init(PrivateUse1) imports the module named
     # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some

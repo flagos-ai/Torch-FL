@@ -177,7 +177,7 @@
       "wheel_local": "",
       "pypi_lane": "",
       "use_macro": "USE_TSINGMICRO",
-      "writes_platform_marker": false,
+      "writes_platform_marker": true,
       "c10_cuda_no_cmake_configure": true,
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,

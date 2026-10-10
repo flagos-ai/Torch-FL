@@ -549,8 +549,12 @@ install(TARGETS ${LIBRARY_NAME}
 )
 
 if(FLAGOS_PLATFORM_WRITES_MARKER)
-  # torch_fl/__init__.py pins backends_cuda.conf by default, which on
-  # GCU/MUSA/BPU/Ascend would route every op to the (absent) CUDA kernels.
+  # Which platforms land here is the `writes_platform_marker` flag in
+  # cmake/flagos_platforms.json. torch_fl/__init__.py pins backends_cuda.conf by
+  # default, which on GCU/MUSA/BPU/Ascend/TsingMicro would route every op to the
+  # (absent) CUDA kernels -- on a tsingmicro wheel that is a hard failure, not a
+  # fallback, since the config routes to `cuda` and the CPU-torch build cannot
+  # init CUDA.
   # Record the platform next to the libs so the Python side can pick
   # backends_<platform>.conf instead. BPU additionally uses the marker to decide
   # whether to register the "bpu" torch.compile backend. Ascend previously
