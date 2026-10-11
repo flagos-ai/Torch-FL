@@ -578,6 +578,18 @@ _FLAGGEMS_PY_CATEGORIES = {
     "factory",
 }
 
+# Ops whose aten schema is (Tensor[], int) -> Tensor, served by the dedicated
+# ListI caller. An explicit list rather than a category derived from the schema,
+# because detect_category() sees the TensorList and files these under
+# foreach_tensorlist -- the _foreach_* family, whose kernels are rank-identical
+# elementwise unaries -- which is not a py category at all. A schema-shaped rule
+# would therefore also have to reason about every _foreach_* op gems has nothing
+# to do with, whereas membership here is a claim about one op's signature.
+# python_op_caller.h already declares the caller for exactly this signature.
+_FLAGGEMS_TENSORLIST_DIM = {
+    "cat",
+}
+
 # gems ops whose wrapper is `(*args, **kwargs)` so inspect.signature can't
 # recover the arity -> _flaggems_gems_npos() returns None and the main loop's
 # `if npos is None: continue` gate rejects them (guarding the silent
@@ -788,7 +800,9 @@ def discover_flaggems_ops(codegen_ops, funcs):
     Safety gates (see plan; validated in scratch analysis):
       - op must have a generated dispatcher (op in codegen_ops) and a schema.
       - flag_gems function arity must be inspectable (no *args/**kwargs).
-      - category in {functional_pure, inplace, tuple_return, out_variant}.
+      - category in {functional_pure, inplace, tuple_return, out_variant}, or the
+        op is listed in _FLAGGEMS_TENSORLIST_DIM, whose arity gate is the
+        stricter "schema is exactly (Tensor[], int) and gems takes both".
       - ARITY gate (guards the silent "dropped trailing scalar" trap):
           functional_pure/inplace/tuple_return: gems npos == #aten args.
           out_variant: gems npos == #aten NON-out args (gems doesn't take `out`).
@@ -837,10 +851,24 @@ def discover_flaggems_ops(codegen_ops, funcs):
                 continue
         func = funcs[op]
         cat = detect_category(func)
-        if cat not in _FLAGGEMS_PY_CATEGORIES:
+        if cat not in _FLAGGEMS_PY_CATEGORIES and op not in _FLAGGEMS_TENSORLIST_DIM:
             continue
         s = func.func
         aten_args = list(s.arguments.flat_all)
+        # (Tensor[], int) -> Tensor, e.g. cat(tensors, dim). gems takes exactly
+        # the schema's two positionals -- no out arg to split off and no
+        # trailing kwarg -- so it is decided here, before the branches below,
+        # all of which read `cat` as one of the py categories. `kwargs` stays
+        # empty: the ListI caller forwards dim positionally.
+        if op in _FLAGGEMS_TENSORLIST_DIM:
+            schema_types = [str(a.type) for a in aten_args]
+            if (
+                len(aten_args) == npos == 2
+                and schema_types[0] == "Tensor[]"
+                and schema_types[1] == "int"
+            ):
+                result[op] = (_normalize_flaggems_qualname(fn), "tensorlist_dim", [])
+            continue
         out_args = list(s.arguments.out) if hasattr(s.arguments, "out") else []
         resolved_cat = cat
         # kwargs: aten trailing args gems declares keyword-only (dtype/alpha/...).
@@ -1340,6 +1368,26 @@ def gen_flaggems_python_kernel(
             call = f"  {tuple_call(len(out_names))};"
             make = "{" + ", ".join(out_names) + "}"
         body = f"{call}\n  return {make};"
+    elif category == "tensorlist_dim":
+        # (TensorList, int) -> Tensor, e.g. cat(tensors, dim). The dedicated
+        # ListI caller materializes the ITensorListRef into a python list and
+        # forwards dim positionally, which is the signature gems declares for
+        # cat. The two parameter names come from the CppSignature in `args`
+        # rather than from the schema: that is what makes the emitted decl match
+        # the *Fn typedef it must satisfy, since torchgen spells the schema's
+        # `Tensor[]` as `const at::ITensorListRef &` there.
+        list_name = next((n for t, n in args if "TensorList" in t), None)
+        dim_name = next((n for t, n in args if t in ("int64_t", "int", "long")), None)
+        if list_name is None or dim_name is None:
+            raise ValueError(
+                f"tensorlist_dim needs a TensorList and an integer arg; {op} has {args}"
+            )
+        body = (
+            f'  auto result = CallPythonOp_ListI("{gems_func}", {list_name}, '
+            f"{dim_name});\n"
+            f"  UnboxToFlagos(result);\n"
+            f"  return result;"
+        )
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 

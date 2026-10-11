@@ -1042,6 +1042,12 @@ at::Tensor BucketizeTensorKernelPython(const at::Tensor & self, const at::Tensor
   return result;
 }
 
+at::Tensor CatKernelPython(const at::ITensorListRef & tensors, int64_t dim) {
+  auto result = CallPythonOp_ListI("flag_gems.cat", tensors, dim);
+  UnboxToFlagos(result);
+  return result;
+}
+
 at::Tensor CeilKernelPython(const at::Tensor & self) {
   auto result = CallPythonOp_Generic("flag_gems.ceil", {self});
   UnboxToFlagos(result);
@@ -4352,6 +4358,7 @@ REGISTER_IMPL_TO_DISPATCHER(BlackmanWindowPeriodicFn, blackman_window_periodic_d
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kFlagGems, BmmKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kFlagGems, BmmOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(BucketizeTensorFn, bucketize_tensor_dispatcher, Backend::kFlagGems, BucketizeTensorKernelPython)
+REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kFlagGems, CatKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kFlagGems, CeilKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(CeilOutFn, ceil_out_dispatcher, Backend::kFlagGems, CeilOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(CeilInplaceFn, ceil_inplace_dispatcher, Backend::kFlagGems, CeilInplaceKernelPython)

@@ -306,18 +306,18 @@ def test_conf_route_counts_are_stable():
     expected = {
         # mm and mm.out moved from the aclnn route to flaggems; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
-        "ascend": {"flaggems": 223, "none": 1662, "ascend": 152},
+        "ascend": {"flaggems": 224, "none": 1662, "ascend": 151},
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
-        "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
+        "gcu": {"none": 1603, "gcu": 180, "flaggems": 254},
         "kunlunxin": {"cuda": 2037},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
-        "musa": {"flaggems": 465, "none": 1518, "musa": 54},
-        "ppu": {"flaggems": 591, "cuda": 1446},
+        "musa": {"flaggems": 466, "none": 1518, "musa": 53},
+        "ppu": {"flaggems": 592, "cuda": 1445},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():
