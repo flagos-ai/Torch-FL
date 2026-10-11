@@ -741,25 +741,46 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 # workaround, and both are silent. Ascend implements all twelve overloads
 # through aclnn, so the route back is free. Not yet filed upstream.
 #
-# ascend: mm and mm.out, for the same defect MetaX routes around below -- the
-# Ascend tune config tunes a kernel that cannot accept one of its own keys.
+# ascend: mm and mm.out used to be pinned here for a FlagGems tuner defect, and
+# are no longer. The pin recorded that the Ascend tune config tunes a kernel
+# that cannot accept one of its own keys:
 # flag_gems/runtime/backend/_ascend/tune_configs.yaml declares
 # BLOCK_M/BLOCK_N/BLOCK_K/SPLIT_K for `mm:`, while the kernel that key is fetched
-# for -- flag_gems/ops/mm.py:mm_kernel_general, wrapped in
-# `@libtuner(configs=runtime.get_tuned_config("mm"))` and reached from `mm` /
-# `mm_out` through the general path -- takes only
-# BLOCK_M/BLOCK_N/BLOCK_K/GROUP_M/IS_FP64. The first call therefore dies inside
-# the autotuner's own benchmark run, before any kernel is compiled, with
-# "KeyError: 'Keyword argument SPLIT_K was specified but unrecognised'" raised
-# from triton/spec/ascend/runtime/jit.py:_pack_args. Measured on Ascend910 /
-# CANN 9.0.0 / FlagTree 0.6.2a1+ascend3.5 against the revision CI pins (FlagGems
-# d45285ba) and against master (6d31db9aa); the yaml entry and the kernel
-# signature are identical in both. Ascend has aclnn kernels for both overloads,
-# so the route back is free. The rest of the family is unaffected: bmm, bmm.out
-# and addmm run on FlagGems and match a float64 CPU reference to 1.6e-7
-# relative, three orders tighter than the aclnn path's 1.7e-4, so the gap is
-# exactly these two overloads. matmul is not in the FlagGems coverage this conf
-# is generated from and already routes to `ascend`. Not yet filed upstream.
+# for -- flag_gems/ops/mm.py:mm_kernel_general, reached from `mm` / `mm_out`
+# through the general path -- takes only BLOCK_M/BLOCK_N/BLOCK_K/GROUP_M/
+# IS_FP64. The first call would die inside the autotuner's own benchmark run,
+# before any kernel was compiled, with "KeyError: 'Keyword argument SPLIT_K was
+# specified but unrecognised'" from triton/spec/ascend/runtime/jit.py:_pack_args.
+# That was measured on Ascend910 / CANN 9.0.0 / FlagTree 0.6.2a1+ascend3.5
+# against FlagGems d45285ba and 6d31db9aa.
+#
+# It does not reproduce on the current cohort. Measured on Ascend910C / CANN
+# 9.0.0 / FlagTree 0.7.0+ascend3.5 / FlagGems 5.4.0: the yaml still declares
+# SPLIT_K for `mm:` (lines 98/103/108) and runtime.get_tuned_config("mm") still
+# returns the three Config objects carrying it, but the first call succeeds. The
+# key never reaches _pack_args because FlagGems' own LibEntry.run no longer
+# forwards **kwargs to the kernel at all -- it collects the arguments from the
+# wrapped kernel's signature (self.jit_function.params, then
+# self.signature.parameters) and launches positionally as
+# `kernel[grid[0:3]](*all_args)` (flag_gems/utils/libentry.py:1472-1622), so a
+# config key the kernel does not declare is dropped instead of passed to the
+# argument packer. Confirmed with a cold cache -- a fresh HOME, which leaves
+# both the triton compile cache and ~/.flaggems/config_cache empty -- so a
+# cached tuned config is not the reason, and in a fresh process whose
+# `[flagos dispatch]` line reads `mm -> flaggems`.
+#
+# Routing them here also fixes numerics the runtime-conformance suite reads. At
+# 64x64 with a fixed seed, FlagGems matches an fp32 CPU reference to 8.6e-6
+# max-abs; the aclnn route returns 4.7e-3, which misses a rtol=atol=1e-3
+# comparison at the near-zero entries. The aclnn cube ops run fp32 operands
+# through `get_cube_math_type(true)`, i.e. cubeMathType=1, which downcasts them
+# to HF32; ALLOW_HF32=0 does not change the result, so the downcast is the mode
+# the kernel asks for and not a CANN default to tune away.
+# The rest of the family is unaffected: bmm, bmm.out and addmm already run on
+# FlagGems and match a float64 CPU reference to 1.6e-7 relative, three orders
+# tighter than the aclnn path's 1.7e-4. matmul is not in the FlagGems coverage
+# this conf is generated from and still routes to `ascend`. The FlagGems tuner
+# defect itself is still unfiled upstream.
 #
 # ascend: topk returns all zeros -- both the values and the indices -- and does it
 # silently, for every shape measured. On Ascend910 with CANN 9.0.0, FlagTree
@@ -1110,8 +1131,6 @@ NATIVE_TRITON_GAPS = {
         "le.Tensor",
         "lt.Scalar",
         "lt.Tensor",
-        "mm",
-        "mm.out",
         "mul_.Tensor",
         "native_dropout",
         "native_dropout_backward",

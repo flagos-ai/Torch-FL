@@ -162,6 +162,195 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
+### Ascend: `mm` and `mm.out` return to the FlagGems route, with integral matmul escaping it by dtype (2026-10-12, Ascend 910C)
+
+**One sentence.** Ascend's aclnn cube matmul is driven with a cube-math type of
+`1`, which downcasts fp32 operands to HF32, so an fp32 `mm` at the
+runtime-conformance operand size answers 4.7e-3 away from the reference where
+FlagGems answers 6.3e-6 away -- outside that cohort's `rtol=atol=1e-3` budget, and
+enough to fail two of its stream tests -- so `mm` and `mm.out` return to the
+FlagGems route that #272 moved them off, with int64/int32/int16/uint8 matmul
+escaping that route by dtype through `FlagGemsRejectsOpDtype`; the escape, not the
+route, is what keeps integral matmul on the cube kernel.
+
+**The failure, on the route being left.** With the wheel built for `ascend` and
+`torch_fl/configs/backends_ascend.conf` as it stood at `6573910e` -- the revision
+whose `mm = ascend` and `mm.out = ascend` came from
+`NATIVE_TRITON_GAPS["ascend"]` -- `python -m pytest tests/integration/runtime -q
+-rA --tb=short` is red:
+
+```text
+RUNTIME-CONFORMANCE accel=ascend kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=30 failed=2 skipped=0 errors=0
+2 failed, 30 passed in 220.88s (0:03:40)
+```
+
+Both failures are the same fp32 matmul -- `test_runtime_stream.py::_operands()` is
+`torch.manual_seed(0)` and then `randn(64, 64)` twice -- and both print the same
+mismatch, which is what makes this an entry about a value rather than about the
+stream protocol:
+
+```text
+Mismatched elements: 92 / 4096 (2.2%)
+Greatest absolute difference: 0.004545688629150391 at index (58, 49) (up to 0.001 allowed)
+Greatest relative difference: 0.28119564056396484 at index (53, 17) (up to 0.001 allowed)
+```
+
+`test_matmul_on_non_default_stream_matches_default` fails on its *second*
+`assert_close`, against the CPU reference, at the same index as its first, against
+the same call on the default stream -- so the non-default stream agrees with the
+default one and the value is the defect.
+`test_event_wait_orders_work_across_streams` asserts nothing about ordering beyond
+the event wait and fails identically. Nothing else in the cohort moves, and the
+suite's own `mm` case is *not* what discriminates: `runtime_probe.py` uses 8x8
+fp32 operands, where the vendor route's 1.069069e-03 max-abs error is inside
+`rtol=atol=1e-3` -- the reference values there carry rtol, so up to 2.1e-3 is
+allowed -- and the call passes on **both** routes. The two 64x64 stream tests are
+the cases that separate them.
+
+**The mechanism, per dtype.** `mm` on the vendor route reaches `aclnnMm` through
+the Ascend template's cube path, and the plugin passes
+`ascend::OpPreparation::get_cube_math_type(true)`, whose body is
+`return allow_hf32 ? 1 : 0;` -- a bare cube-math type of `1`, with no named enum
+between it and the call. That is the value at every fp32 matmul call site on this
+route: `matmul.cc`, and the generated `MmKernelAscend`, `MmOutKernelAscend`,
+`BmmKernelAscend` and `BmmOutKernelAscend` in
+`csrc/aten/backends/ascend/generated/ascend_kernels.cc`. The installed CANN 9.0.0
+headers describe the argument only as an `int8_t cubeMathType` that "specifies the
+Cube unit's computation logic" (`aclnnop/aclnn_matmul.h`), with no value table; the
+one HF32 symbol in the toolkit is the unrelated compile-level `ACL_ALLOW_HF32` in
+`acl/acl_op_compiler.h`, and neither `ACL_CUBE_MATH_TYPE_*` nor
+`ALLOW_FP32_DOWNCAST` exists anywhere in the toolkit or in the installed
+site-packages. What the value does is therefore recorded as measured rather than
+as a quoted constant: fp32 operands come back as if truncated to a 10-bit
+mantissa, which is what HF32 is. Measured at the conformance operands (64x64,
+`manual_seed(0)` then two draws) against an fp64 CPU reference, on this host
+(Ascend 910C, CANN
+9.0.0, FlagTree `0.7.0+ascend3.5`, FlagGems 5.4.0, torch 2.10.0+cpu):
+
+```text
+dtype  route                       [flagos dispatch] mm     max-abs       within 1e-3
+fp32   FlagGems (this change)      mm -> flagos_python      6.344024e-06  yes
+fp32   aclnn cube (pre-fix route)  mm -> ascend             4.674678e-03  no
+fp16   identical on both routes                             7.704686e-03  yes
+bf16   identical on both routes                             6.220317e-02  no
+fp64   aclnn cube (dtype escape)   mm -> ascend             0.000000e+00  yes
+```
+
+The route is the only variable that moves fp32, and the reference base does not
+change that ranking: against the suite's own fp32 CPU reference the same operands
+give 8.583069e-06 on FlagGems and 4.674911e-03 on the cube route, which is the
+comparison the two stream tests actually make. fp16 and bf16 return bit-identical
+values whichever kernel runs, so this change neither causes nor fixes bf16's
+6.2e-02 -- which is outside the budget on both routes, and no bf16 `mm` is in the
+cohort. fp64 never reaches FlagGems at all: `FlagGemsRejectsDtype` keeps every
+`kDouble` off that route on Ascend, so its exact 0.0 is the cube kernel's fp64
+path. `ALLOW_HF32=0` in the environment does not move the fp32 number (4.674678e-03
+measured with it set), and that name resolves to nothing in this tree, so the
+downcast is not reachable as a tuning knob from the
+operator side; the route is.
+
+**Why the conf could not state this on its own.** A conf entry routes a whole op,
+and the vendor route is the right route for integral `mm`: the FlagGems `mm`
+kernel code-generates through `tl.dot`, which this triton backend refuses for
+64-bit, 16-bit and unsigned 8-bit integers, so before this change the conf had to
+choose between fp32 numerics and integral support. With `FLAGOS_LOG=dispatch`, one
+call per dtype on the shipped conf:
+
+```text
+dtype  [flagos dispatch] mm     result vs a CPU int64 reference
+int64  mm -> ascend             equal
+int32  mm -> ascend             equal
+int16  mm -> ascend             equal
+uint8  mm -> ascend             equal
+int8   mm -> flagos_python      equal
+```
+
+`int8` is the exception and stays on FlagGems -- `tl.dot` accepts a signed 8-bit
+operand -- so the exception is four dtypes wide and not five, and the escape is
+what expresses exactly that intersection. `FlagGemsRejectsOpDtype` in
+`csrc/aten/common.cc` carries it: its `USE_ASCEND` table already held
+`{at::kBool, "neg"}`, and now also `{kLong|kInt|kShort|kByte, "mm"}` and the same
+four for `"mm.out"`, which is its own conf key and therefore needs its own rows.
+`ResolveFn` consults the table only on the FlagGems route and substitutes the
+vendor kernel for those dtypes, rewriting the backend it reports, so the
+`[flagos dispatch]` line names the kernel that actually ran. The route change and
+the dtype split are one mechanism, not two.
+
+**Route delta.** Ascend `flaggems` 221 -> **223**, `ascend` 154 -> **152**, `none`
+1662 unchanged; 2037 entries, still 375 accelerated (18.4%). Conf SHA-256
+`3e6979f6cc9756d3b2cc6c002cb9925056967ee06f62aab17098bb41a3862f0d` (at `6573910e`)
+-> `2fd28efe4346cf14f5e721164bc6022e07873ebdcb322d8d97d8fc98c7828795`. The diff
+is four lines: the two header counts and `mm = ascend` / `mm.out = ascend` becoming
+`mm = flaggems  # ascend` / `mm.out = flaggems  # ascend`. The conf stays generated
+output -- the two ops leave `NATIVE_TRITON_GAPS["ascend"]` in
+`scripts/codegen/gen_vendor_confs.py` -- and is byte-identical across two runs of
+that script, whose `--check` reports `all vendor confs up to date` (exit 0) with
+every other platform's conf byte-identical to its backup. The move is the
+deliberate update `tests/unit/test_conf_registration_consistency.py::test_conf_route_counts_are_stable`
+asks for, its `ascend` snapshot going `{"flaggems": 221, "none": 1662, "ascend": 154}`
+-> `{"flaggems": 223, "none": 1662, "ascend": 152}`.
+
+**Why the recorded cannot-compile gap was retired.** `mm` and `mm.out` sat in
+`NATIVE_TRITON_GAPS["ascend"]` because the FlagGems route raised `KeyError:
+Keyword argument SPLIT_K was specified but unrecognised`. That no longer
+reproduces on this cohort, and the reason is positional: `LibEntry.run` launches
+`kernel[grid[0:3]](*all_args)` built from the kernel's own signature
+(`flag_gems/utils/libentry.py`), so a tune-space key the kernel does not declare is
+dropped rather than forwarded to triton's `_pack_args`. Measured with a cold cache
+-- `HOME` pointed at an empty directory, `.flaggems` and `.triton` both absent
+before the run -- the first `mm` call compiles (3 and 34 cache files written after)
+and returns 6.344024e-06, so no tuned state left behind by an earlier revision is
+what makes the route work.
+
+**Regression gate.** No new test file is added; the existing suite is the gate, and
+it discriminates on this change in both directions on one revision of the wheel --
+red on the pre-fix conf (2 failed, quoted above), and green with the conf this entry
+documents:
+
+```text
+RUNTIME-CONFORMANCE accel=ascend kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=32 failed=0 skipped=0 errors=0
+32 passed in 196.17s (0:03:16)
+```
+
+`test_runtime_dispatch_route.py` supplies the other half without device
+arithmetic: it compares each op's `[flagos dispatch]` line to the conf's own route,
+so a regeneration that put `mm` back on `ascend` fails there as well, and the
+snapshot assertion above catches a conf edited without its generator.
+
+**Evidence gaps.** Recorded rather than papered over:
+
+- `mm.out` over int64 fails on both arms, and this change does not fix it. Under
+  the escape (post-fix, `mm.out -> ascend`) and under the pre-fix conf's own direct
+  route (`FLAGOS_OP_mm.out=ascend`, `mm.out -> ascend`) the same call raises
+  `RuntimeError: aclnnMmGetWorkspaceSize failed, ret=161002`, while `mm` at the same
+  dtype passes on both. Whatever the cube kernel objects to is a property of
+  `aclnnMm` with an `out=` operand, not of this change, which substitutes by dtype
+  exactly as designed (`mm.out -> flagos_python` for float, `mm.out -> ascend` for
+  int64). It is recorded here because the survey names it: `2d-i64 ERROR` on
+  `mm.out` against `2d-i64 PASS` on `mm`. No fix is attempted in this change.
+- The mandated survey sees less than the change moves. Harness v6 against the
+  post-fix conf (SHA-256 `2fd28efe`), scoped to the two ops that moved:
+  `mm` `{registered 1, tested 1, STRICT 1}`, `mm.out` `{tested 1, BASIC_ONLY 1}`,
+  `failed 0` and `untested 0` on both, aggregate `{"basic_executable": 2,
+  "registered": 2, "strict_support": 1, "tested": 2, "verdicts": {"BASIC_ONLY": 1,
+  "STRICT": 1}}` (exit 0). Per profile, `mm`: `2d-f32`, `2d-f16`, `2d-i64` and
+  `2d-f32-strided` PASS; `4d-f32` and `1d-f32` INVALID_CASE on `RuntimeError: self
+  must be a matrix`; `2d-bool` INVALID_CASE on `NotImplementedError:
+  "addmm_impl_cpu_" not implemented for 'Bool'`. `mm.out` is identical except that
+  `2d-i64` is `ERROR` on `aclnnMmGetWorkspaceSize failed, ret=161002`, which is
+  what makes it `BASIC_ONLY` rather than `STRICT`. The survey has no bf16 profile,
+  so the 6.2e-02 above is not part of this cohort; and because both ops are
+  `flagos_python` post-fix, the survey's 7-profile answer is the *FlagGems* route's
+  -- the vendor route's fp32 defect is documented here from the suite's own failure
+  instead, which is what the survey cannot produce.
+- The other 221 Ascend `flaggems` routes are **not revalidated** by this change. It
+  moves two ops and measures those two; no sweep of the remainder was run, and
+  `sort`/`sort.stable` keep their `NATIVE_TRITON_GAPS["ascend"]` entries untouched.
+- The `flagos` device is the only accelerator this entry measures. It claims
+  nothing about `dcu`, `musa`, `gcu`, `kunlunxin`, `metax`, `ppu` or `tsingmicro`,
+  whose `mm` rows are neither revalidated nor affected: `FlagGemsRejectsOpDtype`'s
+  new rows live in the `USE_ASCEND` branch alone.
+
 ### MUSA: float64 `mm` served by repairing the FlagGems tune space the device refuses (2026-09-27, MTT S5000)
 
 **One sentence.** The mthreads `mm` tune space declares two 64x64x64 tiles at
@@ -8914,6 +9103,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-10-12 | Ascend 910C (CANN 9.0.0) | Ascend full-coverage conf (2037-route denominator), runtime-conformance subset | `mm` and `mm.out` rerouted from `ascend` back to `flaggems`, the route #272 moved them off, because the vendor route truncates fp32: `mm` reaches `aclnnMm` through the cube path with `ascend::OpPreparation::get_cube_math_type(true)`, i.e. a bare cube-math type of `1`, which downcasts fp32 operands to HF32 (10-bit mantissa). Both ops leave `NATIVE_TRITON_GAPS["ascend"]` in `scripts/codegen/gen_vendor_confs.py` — their recorded `KeyError: Keyword argument SPLIT_K was specified but unrecognised` no longer reproduces, because `LibEntry.run` launches `kernel[grid[0:3]](*all_args)` from the kernel's own signature and drops an undeclared tune key — and `FlagGemsRejectsOpDtype`'s `USE_ASCEND` table in `csrc/aten/common.cc` gains `mm` and `mm.out` over int64/int32/int16/uint8, so integral matmul still takes the cube kernel while `int8` stays on FlagGems (`tl.dot` accepts it). Route delta `flaggems` 221 -> **223**, `ascend` 154 -> **152**, `none` 1662 unchanged; 375 accelerated (18.4%). Every other platform's conf is byte-identical. | Conf SHA-256 `3e6979f6cc9756d3b2cc6c002cb9925056967ee06f62aab17098bb41a3862f0d` -> `2fd28efe4346cf14f5e721164bc6022e07873ebdcb322d8d97d8fc98c7828795`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` exits 0. Same wheel, same host, one revision of the conf apart: pre-fix `RUNTIME-CONFORMANCE accel=ascend kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=30 failed=2 skipped=0 errors=0` (`2 failed, 30 passed in 220.88s`), both failures fp32 `mm` at `test_runtime_stream.py`'s 64x64 operands — `Greatest absolute difference: 0.004545688629150391 at index (58, 49) (up to 0.001 allowed)`, 92/4096 elements — and post-fix `RUNTIME-CONFORMANCE accel=ascend kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=32 failed=0 skipped=0 errors=0` (`32 passed in 196.17s`, pytest exit 0). Per dtype at 64x64 `seed 0` against an fp64 CPU reference: fp32 `mm -> flagos_python` 6.344024e-06 vs `mm -> ascend` 4.674678e-03, and 4.674678e-03 with `ALLOW_HF32=0` set, so the downcast is not a reachable knob; fp16 (7.704686e-03) and bf16 (6.220317e-02) are identical on both routes and bf16 is outside 1e-3 on both, so the route neither causes nor fixes it. `FLAGOS_LOG=dispatch` per dtype: int64/int32/int16/uint8 `mm -> ascend` and int8 `mm -> flagos_python`, all equal to a CPU int64 reference. Cold-cache check with `HOME` pointed at an empty directory (`.flaggems` and `.triton` absent) compiles `mm` and returns 6.344024e-06. Survey (harness v6, conf `2fd28efe`): `mm` `{tested 1, STRICT 1}`, `mm.out` `{tested 1, BASIC_ONLY 1}`, `failed 0 untested 0`, exit 0. Regression gate is the existing suite — red on the pre-fix conf, green on this one — plus the updated `test_conf_route_counts_are_stable` snapshot and `test_runtime_dispatch_route.py`'s conf-to-dispatch comparison. Evidence gaps: `mm.out` over int64 raises `RuntimeError: aclnnMmGetWorkspaceSize failed, ret=161002` on **both** arms (post-fix escape and the pre-fix conf's own direct route), so it is pre-existing and not fixed here; the survey has no bf16 profile; the other 221 Ascend `flaggems` routes and every other accelerator are **not revalidated**. |
 | 2026-10-11 | Kunlunxin P800 OAM (new platform row) | Generated full-coverage CUDA-boxing config | New accelerator id `FLAGOS_ACCELERATOR=kunlunxin`. Kunlunxin is a CUDA-ABI boxing platform (the vendor torch registers under the CUDA dispatch key and drives the XPU SDK's CUDA-shaped runtime), added alongside `dcu`/`ppu`/`metax` with `runtime_dir: "cuda"` and `project_languages: ["CXX","C"]`. `backends_kunlunxin.conf` is generated by `scripts/codegen/gen_vendor_confs.py` from `BOXING_PLATFORMS` with fallback `cuda`: **2037 `cuda` / 0 `flaggems` / 0 `none`**. No op is rerouted to a vendor-native or FlagGems backend; kunlunxin is absent from `FLAGGEMS_PYTHON_PLATFORMS`, so no FlagGems route is claimed. No route moved in any other platform's cohort. | Routing countable from the generated file: 2037 ops, all on `cuda`. `gen_vendor_confs.py` twice → empty diff, `--check` exits 0. `tests/unit/test_conf_registration_consistency.py` pins `{"cuda": 2037}`; `test_setup_build.py` validates the new platform row. On a P800 OAM under a stock torch 2.10 build of this port, `import torch_fl`, backend-config selection to `backends_kunlunxin.conf`, `device_count() == 8`, and the boxing device layer on `flagos:1` (`set_device`, `current_device`, allocation, host↔device round-trip, `Stream`, `synchronize`, `empty_cache`) were measured green; **operators on the `cuda` route, including the harness's `mm` check, are not measured** — the vendor XPU runtime on that box is torch-2.9-bound, so eager ops reaching ATen's CUDA dispatch raise `NotImplementedError` under torch 2.10 and validating them requires a vendor torch 2.10 runtime. The FlagGems overload cohort is **not revalidated** on the P800 and this change claims no FlagGems route; the 2.9-line FlagGems allowlist is deferred to a follow-up PR. |
 | 2026-10-10 | TsingMicro TX8 (8 devices) | FlagGems-only routing bring-up (new platform row) | First on-hardware measurement for TsingMicro, and the platform's first documented operator path. The wheel is built `FLAGOS_ACCELERATOR=tsingmicro` against the Kuiper runtime; `cmake/flagos_platforms.json` now sets `writes_platform_marker` for tsingmicro, which makes `csrc/CMakeLists.txt` write the `lib/flagos_platform` marker (tsingmicro was the only accelerator with `writes_platform_marker: false` whose build then silently fell back to `backends_cuda.conf` and died on `AssertionError: Torch not compiled with CUDA enabled`). Two FlagGems-route defects fixed, both required before any route ran: the generated Python tables freeze the generic kernel path (`flag_gems.ops.mm`) while FlagGems' `SpecOpRegistrar` keeps the vendor callable at package top level, so a tuned vendor route resolved to the untuned generic kernel and raised `KeyError: Keyword argument SPLIT_K was specified but unrecognised` (fixed by re-resolving through the package top level in `python_op_caller.cc`); and the philox RNG bridge was gated to MUSA and matched modules by name prefix, so the vendor RNG modules — which bind the helper into their own globals and are not named `flag_gems.*` — kept the unpatched helper and `randn` raised `ValueError: too many values to unpack (expected 2)` (fixed in `torch_fl/__init__.py`). TsingMicro has **no vendor-native kernel fallback**: the FlagGems route is the compute path. FlagGems is not patched — both fixes are in torch_fl's dispatch and compat layers. No route count changed for any other platform, and no other platform is revalidated. | 14-op CPU-parity probe on `flagos:0` (TX8, torch 2.10.0+cpu, FlagTree 0.7.0+tsingmicro3.6, FlagGems 5.4.0 src): `mm` (64x64), `bmm` (4x32x32), `sum`, `mean` and `randn` pass and match the CPU reference (`mm allclose=True`, `randn` finite and distinct across draws). `add`, `mul`, `silu`, `softmax`, `exp`, `relu`, `gelu`, `layer_norm` and the three ops claimed by neither FLAGGEMS_PYTHON_OPS nor the 25 handwritten native registrations (`erfinv`, `lgamma`, `sigmoid`) raise `NotImplementedError: Could not run 'aten::empty_strided' with arguments from the 'CUDA' backend`; `cat` and `rms_norm` raise `RuntimeError: PyTorch is not linked with support for cuda devices`. Both groups trace to one cause — the full generated op list is claimed on PrivateUse1 while FlagGems has no `empty_like` kernel, so the route degrades to `EmptyLikeKernelCuda`; `pointwise_dynamic` allocates every elementwise output through `torch.empty_like`. Registered-but-uncovered ops therefore cannot reach `cpu_fallback`, so `none` is not an available route on this platform. The known fix was prototyped (claim `empty_like` on PrivateUse1 with a memory-format-aware wrapper: `add`/`silu`/`softmax`/`exp`/`relu`/`gelu`/`layer_norm` then all pass against CPU) but is **not** included here; the durable fix is the MUSA pattern, a TsingMicro-scoped `tsingmicro_flaggems_register.inc`. Evidence gap: the standard `flaggems_overload_survey.py` cannot measure this cohort — it selects `flagos_python` entries, and every tsingmicro route is `flaggems`. `pytest` is not installed in the measurement venv, so no test suite was run on this platform; the unit-suite and lint results in the PR are from the CPU dev host and do not exercise these routes. |
 | 2026-09-28 | Moore Threads MTT S5000 (8 devices), MUSA 5.1.0, driver 3.3.5-server, mudnn v3300, torch 2.10.0+cpu, FlagTree 0.7.0rc2+mthreads3.6, FlagGems 5.4.0, FlagCX 0.14.0rc2.post2+musa5.2.0, Python 3.10.12 | The MUSA full-coverage conf's `flaggems` cohort: two overloads (`addmm`, `baddbmm`) moved to `musa`, 467 routes -> 465 (issue [#451](https://github.com/flagos-ai/Torch-FL/issues/451)) | Two routes that could not carry float64 anywhere. On this backend both legs were broken for that dtype and the breakage was in different layers, so the fix has two halves that are only correct together. FlagGems 5.4.0's `_mthreads/ops/baddbmm.py` declares `IS_FP64: tl.constexpr = False` on the kernel and branches on it to size the accumulator, but `_baddbmm_launch` -- the only path both entry points take -- sends just the three `bias_*_stride` kwargs, so the flag was a constant `False` while the float64 operands went straight into `tl.dot`; every float64 call died at compile time with `AssertionError("Loop-carried variable accumulator has initial type <['32', '32'], fp32> but is re-assigned to <['32', '32'], fp64> in loop!")` before any GPU work, reported as FlagGems issue [#6724](https://github.com/flagos-ai/FlagGems/issues/6724) with the confirmation that passing `IS_FP64=True` by hand makes the same call return `rel 3.153e-16`. The `_mthreads` `addmm` kernel ran but cast both dot operands to float32 inside the K loop (`if IS_FP64: a = a.to(tl.float32); b = b.to(tl.float32)`, `addmm.py:141-143`) immediately before an otherwise-float64 dot, covered by the open FlagGems PR [#6713](https://github.com/flagos-ai/FlagGems/pull/6713); the downcast discriminator at 64x64x64, seed 0, measures `|got - exact_fp64| = 4.324e-06` against an fp32 rounding budget of `7.980e-06`. Routing alone would only have moved the failure, so the predicate moved with it: with `addmm` on `musa` the old predicate sent float64 straight into mudnn, where `MatMul::Run`, `MatMul::RunWithBiasAdd` and the `BatchMatMul` forms all reject `DOUBLE,DOUBLE,DOUBLE,,DOUBLE` (mudnn v3300), and the six generated MatMul/BatchMatMul kernels (`Mm`, `Bmm`, `MmOut`, `BmmOut`, `Addmm`, `Baddbmm`) moved from `MudnnSupportsArithmeticDtype` to the new `MudnnSupportsMatmulDtype`, which states the narrower truth that `MudnnSupportsDtype(at::kDouble)` was never claiming. Those six kernels then refuse the dtypes that predicate rejects -- `TORCH_CHECK` through `MusaRaiseUnsupportedMatmulDtype` -- instead of taking the `.cpu()` fallback the other MUSA categories keep, because a `musa` route is a claim about the device: the tensor is either computed on the accelerator or the call fails and says so. The refusal names the op, the dtype, the three dtypes that do work and the host path -- move the operands with `.cpu()` -- and deliberately not `FLAGOS_OP_<op>=none`: `none` is a registration-time conf value that makes codegen skip `m.impl()`, so at runtime it selects an empty dispatcher slot and raises `routed to 'none' (no accelerated impl on this platform) but the op is registered on PrivateUse1` instead of computing anything. The other categories are deliberately untouched, because the dtypes their predicates reject (complex, quantized, fp8) have no device path at all and refusing them would withdraw ops that work today. Both generators were run twice and the tree is byte-identical on the second run, and the third artifact that reads `NATIVE_TRITON_GAPS['musa']`, `csrc/aten/backends/musa/generated/musa_flaggems_register.inc`, was regenerated with `codegen_musa_flaggems.py` for the same reason: the two new gaps add two lines to the excluded-op comment block at the top of the file, while its 358 `m.impl()` lines are unchanged, because bare `addmm` and `baddbmm` were never in the FlagGems list -- they are already claimed by `musa_register.inc`, which is exactly why the conf could route them to `flaggems` while the mudnn kernels sat registered and unreachable. The conf moves from SHA-256 `87d150533c73e4ca40a24c2588aed51387d257044290d1dd85e8cc9a9d40ffad` to `b0efb6e4b3f5d768787bc2b72985689d3061ceb89ed7ff8d0c1c3e15d97d2fe2` in four lines (two counts, two routes). Measured on hardware, float64 `addmm` and `baddbmm` now raise on their default route, each naming its own op: `addmm: float64 is not a dtype the MUSA (mudnn) matmul kernels support, and the backend config routes addmm to musa, which runs on the device only. Cast the operands to float32, float16 or bfloat16, or move them to the host with `.cpu()` and run the op there.` (the same sentence with `baddbmm`). That replaces the base tree's `1.630e-07` of silent float32-grade error from `addmm` and its `AssertionError` at compile time from `baddbmm`, and the path the message names is exact -- the operands on the host return `rel 0.000e+00`, dtype `torch.float64` -- while fp32 `addmm` still answers `device(type='flagos', index=0)`, so the refusal changed nothing about the dtypes that work. `FLAGOS_OP_addmm=none` is measured as the non-answer it is: `addmm: routed to 'none' (no accelerated impl on this platform) but the op is registered on PrivateUse1 -- regenerate the vendor conf so registration and routing agree`, which is why the kernel's message does not mention it. `FLAGOS_OP_mm__out=musa` reaches the `mm.out` kernel and reports `mm.out:`, i.e. the out= overloads carry their own spelling rather than the base op the mudnn tag uses. fp32/fp16/bfloat16 are unchanged between the routes and faster on the vendor one (1024x1024x1024 `addmm`: 0.248 / 0.101 / 0.101 ms against 0.513 / 0.210 / 0.210 ms). The float64 CPU fallback the predicate used to reach is no longer reachable by default: it measured 5.660 ms against 1.979 ms on the FlagGems route at 1024x1024x1024 and 74.288 against 1.383 ms at 4096x4096x64, and a silent host computation is what this change removes. `mm` and `bmm` keep their `flaggems` route, which carries float64 correctly, so only the two `addmm` overloads changed default behaviour at that dtype. `mv`/`addmv` were left on FlagGems -- no mudnn `Mv`/`Addmv` path exists and the vendor's own float64 forms raise -- and their hardcoded float32 accumulator is reported as FlagGems issue [#6725](https://github.com/flagos-ai/FlagGems/issues/6725). |

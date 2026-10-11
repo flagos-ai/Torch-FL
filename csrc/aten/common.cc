@@ -534,15 +534,53 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   // fails with "aclnnInplaceNegGetWorkspaceSize failed, ret=161002" rather
   // than with the reference message. That is a separate defect in the
   // in-place codegen and is left visible rather than papered over here.
+  //
+  // `mm` and `mm.out` over the integral dtypes are the second entry, and the
+  // only one where the op stays on the FlagGems route while part of its dtype
+  // set leaves it. The FlagGems matmul kernel builds its tl.dot from the
+  // operand element type, and the Ascend dot intrinsic takes floating point
+  // only, so int64/int32/int16/uint8 operands die inside the compiler:
+  //
+  //   triton.compiler.errors.CompilationError: at 56:15:
+  //     acc += tl.dot(a, b, out_dtype=dot_out_dtype, allow_tf32=False)
+  //   AssertionError('Unsupported lhs dtype int64')
+  //
+  // (Ascend910C, CANN 9.0.0, shipped backends_ascend.conf.) int8 is the
+  // exception and is left alone: tl.dot accepts it and the FlagGems route is
+  // correct for it. The aclnn kernel behind the vendor slot serves all four --
+  // integer matmul is exact there, so this is not a precision trade. Measured
+  // on the same conf: int64/int32/int16/uint8 `mm` on the vendor route agree
+  // with the CPU reference exactly.
+  //
+  // A route cannot state this split, which is why the table has to. `mm` was
+  // moved off the vendor route because the aclnn cube path downcasts fp32 to
+  // HF32 across the whole float family -- 4.7e-3 against a CPU reference, where
+  // tests/integration/runtime asserts 1e-3 and the FlagGems kernel answers
+  // 8.6e-6 against that same reference (see NATIVE_TRITON_GAPS in
+  // scripts/codegen/gen_vendor_confs.py). Leaving mm on the vendor route keeps
+  // the float failure; leaving every dtype of it on FlagGems turns working
+  // integral matmul into a compile error.
   struct OpDtypeGap {
     at::ScalarType dtype;
     const char* op_name;
   };
-  static constexpr OpDtypeGap kGaps[] = {{at::kBool, "neg"}};
+  static constexpr OpDtypeGap kGaps[] = {
+      {at::kBool, "neg"},
+      // Integral matmul: the four dtypes the Ascend dot intrinsic refuses.
+      // "mm.out" is its own conf key, so it needs its own entries.
+      {at::kLong, "mm"},
+      {at::kInt, "mm"},
+      {at::kShort, "mm"},
+      {at::kByte, "mm"},
+      {at::kLong, "mm.out"},
+      {at::kInt, "mm.out"},
+      {at::kShort, "mm.out"},
+      {at::kByte, "mm.out"},
+  };
 
   for (const OpDtypeGap& gap : kGaps) {
-    // dtype first, so the one-entry table costs a single enum compare on the
-    // common path -- this runs on every FlagGems dispatch.
+    // dtype first, so the common path costs one enum compare per entry before
+    // any strcmp -- this runs on every FlagGems dispatch.
     if (dtype == gap.dtype && std::strcmp(op_name, gap.op_name) == 0) {
       return true;
     }

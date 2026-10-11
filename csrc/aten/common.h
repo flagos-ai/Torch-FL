@@ -172,7 +172,10 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype);
 // The (op, dtype) form of the same escape, for the gaps where neither half
 // decides on its own: a FlagGems kernel that is unguarded about the element
 // type it code-generates, called with a dtype the reference implementation of
-// that op rejects outright. `neg` over bool is the entry in the table today.
+// that op rejects outright, or with one the platform's triton dot intrinsic
+// will not accept. Two shapes are in the table today: `neg` over bool, and
+// `mm` / `mm.out` over int64/int32/int16/uint8 -- integral matmul, where the
+// op must stay on FlagGems for float (see common.cc for both measurements).
 //
 // Both of the other mechanisms were measured against this gap and neither can
 // state it. A conf entry routes a whole op: `neg` over
