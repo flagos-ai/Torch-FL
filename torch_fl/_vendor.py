@@ -56,6 +56,7 @@ KNOWN_VENDORS = frozenset(
         "du",
         "thead",
         "cambricon",
+        "tsingmicro",
     }
 )
 

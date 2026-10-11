@@ -363,7 +363,9 @@ class Stream(torch.cuda.Stream):
 
     Where there is not, ``__new__`` falls back to ``object.__new__(cls)`` and
     ``__init__`` builds one of the ``torch_fl.accelerator`` vendor streams --
-    Enflame tops, MUSA, or Ascend ACL -- and delegates every method below to it.
+    Enflame tops, MUSA, or Ascend ACL -- or, on the TX runtime, the same
+    handle-only stand-in ``current_stream()`` returns -- and delegates every
+    method below to it.
     """
 
     def __new__(cls, device=None, priority=0, **kwargs):
@@ -395,6 +397,13 @@ class Stream(torch.cuda.Stream):
                 from torch_fl.accelerator.ascend.acl_stream import AclStream
 
                 self._stream = AclStream(device, priority)
+            elif vendor == "tsingmicro":
+                # The TX runtime exposes one queue -- the default stream, denoted
+                # by handle 0 -- and that is the same queue ``current_stream()``
+                # hands out here. FSDP builds four streams at startup and nothing
+                # owns a handle, so this is a borrowed view of that single queue,
+                # exactly as ``MusaStream`` is of MUSA's, not a second stream.
+                self._stream = _DefaultStreamHandle(_device_index(device))
             else:
                 # This arm used to be a bare ``else`` that meant Ascend, so any
                 # accelerator named neither "gcu" nor a CUDA runtime took it. MUSA
@@ -406,7 +415,8 @@ class Stream(torch.cuda.Stream):
                 # of on a missing vendor library.
                 raise RuntimeError(
                     f"torch_fl has no Stream implementation for the {vendor!r} "
-                    f"accelerator, only for 'gcu', 'musa' and 'ascend'"
+                    f"accelerator, only for 'gcu', 'musa', 'ascend' and "
+                    f"'tsingmicro'"
                 )
             # Set device attribute for __repr__ compatibility with torch.cuda.Stream
             self.device = self._stream.device
@@ -517,6 +527,31 @@ class _DefaultStreamHandle:
 
     def __int__(self) -> int:
         return 0
+
+    @property
+    def device(self) -> torch.device:
+        """The device whose queue this handle denotes.
+
+        ``Stream.__init__`` assigns ``self._stream.device`` to itself, so a stream
+        built on a backend with no CUDA runtime still has to name a device; the
+        handle's own is the flagos one, not the CUDA one ``torch.cuda.Stream``
+        would have defaulted to.
+        """
+        return torch.device("flagos", self.device_index)
+
+    @property
+    def handle(self) -> int:
+        """The raw handle, under the name ``Stream``'s properties read."""
+        return self.cuda_stream
+
+    @property
+    def stream_id(self) -> int:
+        """The handle, under the name ``torch.cuda.Stream`` uses for one.
+
+        These backends keep no stream registry to look an id up in, so the id is
+        the handle itself -- the only queue the device has.
+        """
+        return self.cuda_stream
 
     def synchronize(self):
         pass
