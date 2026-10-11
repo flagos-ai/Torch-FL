@@ -22,7 +22,9 @@ Three jobs:
       build-driven skip the mandate allows, keyed off the build record, not a
       platform name;
     * print exactly one comparable summary line (and the JSON doc it names) from
-      ``pytest_terminal_summary``.
+      ``pytest_terminal_summary`` -- and only when this suite's own tests ran, so
+      a broader session that merely collected this directory does not print a
+      line carrying that other selection's numbers.
 """
 
 from __future__ import annotations
@@ -40,6 +42,28 @@ import pytest
 _PACKAGE_DIR = str(Path(__file__).resolve().parent)
 if _PACKAGE_DIR not in sys.path:
     sys.path.insert(0, _PACKAGE_DIR)
+
+_PACKAGE_PATH = Path(__file__).resolve().parent
+
+#: Node IDs of this package's tests that survived selection in this session.
+#: ``pytest_configure`` registers the report plugin process-wide, and a conftest
+#: is loaded whenever its directory is *collected* -- so a broad
+#: ``pytest tests/integration`` run registers it too. Recording the items that
+#: actually ran lets the summary count only this suite's outcomes and stay
+#: silent when none of them ran, instead of printing a RUNTIME-CONFORMANCE line
+#: whose numbers belong to some unrelated selection.
+_RUNTIME_NODEIDS: set[str] = set()
+
+
+def _is_runtime_item(item: pytest.Item) -> bool:
+    """Whether an item belongs to this package's directory."""
+    path = getattr(item, "path", None)
+    if path is None:  # pytest < 7 fell back to fspath
+        path = Path(str(item.fspath))
+    try:
+        return _PACKAGE_PATH in path.resolve().parents
+    except OSError:  # a path that will not resolve is not ours
+        return False
 
 
 #: capability marker -> the kernel set the build record must list for it to run.
@@ -83,12 +107,22 @@ def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(_ConformanceReport(), "runtime-conformance-report")
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Skip a capability-marked test whose kernel set this wheel lacks."""
+    """Record this suite's selected tests, and skip capability-marked gaps.
+
+    ``trylast`` matters: pytest's ``-m`` deselection is another
+    ``pytest_collection_modifyitems`` implementation, and running after it means
+    the recorded node IDs are the tests this session will actually report on.
+    """
+    _RUNTIME_NODEIDS.clear()
     kernels: frozenset[str] | None = None
     for item in items:
+        if not _is_runtime_item(item):
+            continue
+        _RUNTIME_NODEIDS.add(item.nodeid)
         for marker_name, kernel in _CAPABILITY_KERNEL.items():
             if item.get_closest_marker(marker_name) is None:
                 continue
@@ -106,6 +140,23 @@ def pytest_collection_modifyitems(
             break
 
 
+def _count_outcomes(stats: dict, nodeids: set[str]) -> tuple[int, int, int, int]:
+    """(passed, failed, skipped, errors) among ``nodeids`` in a run's stats.
+
+    The stats belong to the whole session, so a session that ran other tests
+    alongside this suite still reports this suite's numbers.
+    """
+
+    def count(outcome: str) -> int:
+        return sum(
+            1
+            for report in stats.get(outcome, ())
+            if getattr(report, "nodeid", "") in nodeids
+        )
+
+    return count("passed"), count("failed"), count("skipped"), count("error")
+
+
 class _ConformanceReport:
     """Emit one comparable summary line plus the JSON doc it names."""
 
@@ -116,10 +167,13 @@ class _ConformanceReport:
         config: pytest.Config,
     ) -> None:
         stats = getattr(terminalreporter, "stats", {})
-        passed = len(stats.get("passed", ()))
-        failed = len(stats.get("failed", ()))
-        skipped = len(stats.get("skipped", ()))
-        errors = len(stats.get("error", ()))
+        passed, failed, skipped, errors = _count_outcomes(stats, _RUNTIME_NODEIDS)
+        if not (passed or failed or skipped or errors):
+            # None of this suite's tests ran in this session: a collection-only
+            # run, or a session that collected the directory but selected
+            # something else entirely. Printing a line here would file another
+            # selection's numbers under this suite's name.
+            return
         accel, kernels, total, routed, none = _conformance_facts()
         line = (
             f"RUNTIME-CONFORMANCE accel={accel} kernels={kernels} "
