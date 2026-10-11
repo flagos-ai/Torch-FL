@@ -530,6 +530,25 @@ class _DefaultStreamHandle:
     def wait_event(self, event):
         return None
 
+    def record_event(self, event=None):
+        """Return an event over the work submitted so far.
+
+        ``MusaStream`` is the native counterpart of this handle and carries the
+        same method; FSDP asks whichever object ``current_stream()`` returned for
+        an event it can later wait on, so the stand-in has to answer too. The
+        event is what ``flagos.Event`` already is on these backends -- the
+        vendor's own event where one exists, else the host-clock
+        ``_HostTimedEvent`` -- and recording it on this handle is the whole
+        contract, since every stream on the device *is* this one queue.
+        """
+        from torch_fl.flagos import Event
+
+        if event is None:
+            event = Event()
+        native = getattr(event, "_event", event)
+        native.record(self)
+        return event
+
 
 def _real_current_stream(device=None):
     """Resolve the actual current CUDA stream as a real ``torch.cuda.Stream``.

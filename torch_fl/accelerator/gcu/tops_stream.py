@@ -22,6 +22,7 @@ import torch
 
 _SUCCESS = 0
 _NOT_READY = 2
+_NOT_SUPPORTED = 5
 _EVENT_DISABLE_TIMING = 0
 _EVENT_ENABLE_TIMING = 1
 
@@ -97,9 +98,12 @@ class TopsEvent:
         )
 
     def __del__(self):
+        # ``_api`` is a module global and is torn down to None before the last
+        # TopsEvent is collected at interpreter exit, so read it defensively.
+        api = globals().get("_api")
         handle = getattr(self, "_handle", None)
-        if handle is not None and handle.value:
-            _api.EventDestroy(handle)
+        if api is not None and handle is not None and handle.value:
+            api.EventDestroy(handle)
             self._handle = ctypes.c_void_p()
 
     @property
@@ -126,6 +130,11 @@ class TopsEvent:
         result = _api.EventQuery(self._handle)
         if result == _NOT_READY:
             return False
+        if result == _NOT_SUPPORTED:
+            # No topsEventQuery in the installed runtime (801 for every event).
+            # The GCU op path drains the device after each op, so nothing is
+            # outstanding for this to report -- see TopsStream.query.
+            return True
         _check(result, "EventQuery")
         return True
 
@@ -182,9 +191,17 @@ class TopsStream:
         return cls(device=device, handle=handle, owns_handle=False)
 
     def __del__(self):
+        # ``_api`` is a module global and is torn down to None before the last
+        # TopsStream is collected at interpreter exit, so read it defensively.
+        api = globals().get("_api")
         handle = getattr(self, "_handle", None)
-        if handle is not None and handle.value and getattr(self, "_owns_handle", False):
-            _api.StreamDestroy(handle)
+        if (
+            api is not None
+            and handle is not None
+            and handle.value
+            and getattr(self, "_owns_handle", False)
+        ):
+            api.StreamDestroy(handle)
             self._handle = ctypes.c_void_p()
 
     @property
@@ -210,6 +227,13 @@ class TopsStream:
         result = _api.StreamQuery(self._handle)
         if result == _NOT_READY:
             return False
+        if result == _NOT_SUPPORTED:
+            # The installed tops runtime ships no topsStreamQuery: it answers 801
+            # (topsErrorNotSupported) for every handle, freshly created or not. It
+            # cannot say whether work is outstanding, and the GCU op path drains
+            # the device after each op, so the honest answer is "nothing is" --
+            # the same policy MusaStream.query documents for the same reason.
+            return True
         _check(result, "StreamQuery")
         return True
 

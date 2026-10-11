@@ -221,3 +221,5 @@ integration_tests:
       cd "$GITHUB_WORKSPACE" &&
       UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
       python .github/scripts/run_unit_tests.py --timeout 300
+  - name: Runtime conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/runtime -v -s --tb=short

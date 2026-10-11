@@ -164,6 +164,8 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
+  - name: Runtime conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/runtime -v -s --tb=short
 
   # Device-side contract cases run on Ascend now, not only CPU/Trace: kernel,
   # runtime, flow, metadata and linkage are capability rows the tracer

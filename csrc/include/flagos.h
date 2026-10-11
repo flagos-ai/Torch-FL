@@ -34,6 +34,11 @@ typedef enum Error_t {
   ErrorNotReady = 2,
   ErrorInvalidDevice = 3,
   ErrorMemoryAllocation = 4,
+  // The call was well-formed and the runtime is healthy, but the vendor runtime
+  // implements no counterpart for it. Distinct from ErrorUnknown on purpose: a
+  // query that returns this reports nothing outstanding, because the runtime has
+  // no way to report anything else (see the tops StreamQuery/EventQuery arms).
+  ErrorNotSupported = 5,
 } Error_t;
 
 typedef enum MemcpyKind {

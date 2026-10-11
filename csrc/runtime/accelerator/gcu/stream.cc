@@ -102,6 +102,13 @@ Error_t StreamQuery(Stream_t stream) {
     return Success;
   } else if (err == topsErrorNotReady) {
     return ErrorNotReady;
+  } else if (err == topsErrorNotSupported) {
+    // The installed tops runtime ships no topsStreamQuery: it answers 801
+    // (topsErrorNotSupported) for every handle, freshly created or not. It is
+    // not an error in the call -- the runtime is healthy and the handle is
+    // valid, it simply has no answer. Reporting it as its own status lets the
+    // Python wrapper apply the same "drained" policy MusaStream.query uses.
+    return ErrorNotSupported;
   }
   return ErrorUnknown;
 }
@@ -154,6 +161,9 @@ Error_t EventQuery(Event_t event) {
     return Success;
   } else if (err == topsErrorNotReady) {
     return ErrorNotReady;
+  } else if (err == topsErrorNotSupported) {
+    // Same as StreamQuery above: no topsEventQuery in the installed runtime.
+    return ErrorNotSupported;
   }
   return ErrorUnknown;
 }
