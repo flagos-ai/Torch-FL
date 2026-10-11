@@ -22,7 +22,8 @@ So ``torch.flagos.Stream()`` on MUSA imported
 ``FSDPCommContext.lazy_init`` asks for four streams and got that instead
 (current issue #451). The Ascend module must not be reachable from MUSA at all,
 which ``sys.modules`` is what these tests check; a vendor with no stream class of
-its own must fail on the missing implementation instead of on that library.
+its own must not reach that library, and gets the handle-only stand-in
+``current_stream()`` returns instead of whichever class the old ``else`` meant.
 
 The vendor branches are reached by calling ``Stream.__init__`` on an
 ``object.__new__(Stream)`` rather than ``Stream(...)``: ``Stream.__new__`` proxies
@@ -167,25 +168,34 @@ def test_stream_context_manager_is_a_no_op_on_musa(vendor):
     assert not _ascend_was_imported()
 
 
-def test_unlisted_vendor_refuses_instead_of_becoming_ascend(vendor):
-    """The bare ``else`` is gone: no vendor is handed another vendor's runtime."""
+def test_unlisted_vendor_gets_the_default_handle_instead_of_ascend(vendor):
+    """The bare ``else`` is gone: no vendor is handed another vendor's runtime.
+
+    Stream dispatch names the accelerators that have a stream class of their own
+    and routes everything else to ``_DefaultStreamHandle`` -- the same handle-only
+    stand-in ``current_stream()`` returns, denoting the one queue the runtime has
+    with handle 0. ``ppu`` is such an accelerator: it must build, must not carry
+    another vendor's handle, and must not import the Ascend module to do it.
+    """
     vendor("ppu")
 
-    with pytest.raises(RuntimeError) as excinfo:
-        _build_stream()
+    stream = _build_stream()
 
-    message = str(excinfo.value)
-    assert "ppu" in message
-    assert "ascend" in message
+    assert isinstance(stream._stream, flagos._DefaultStreamHandle)
+    assert stream.cuda_stream == 0
+    assert stream.stream_id == 0
+    assert stream.device == torch.device("flagos", 0)
     assert not _ascend_was_imported()
 
 
 def test_unlisted_vendor_event_degrades_to_the_host_clock(vendor):
-    """Events fail open where streams fail closed, deliberately.
+    """Where the stream arm borrows no runtime, the event arm borrows no clock.
 
     An event that cannot be the vendor's is still a usable event, because the host
-    clock is one; a stream that cannot be the vendor's has no handle to stand in
-    for it, and inventing one would point somewhere the device does not.
+    clock is one; a stream that cannot be the vendor's has no handle of its own to
+    borrow either, so it becomes the handle-only stand-in rather than a name from
+    the dispatch. Neither arm reaches the Ascend module -- that is the invariant
+    both tests exist for.
     """
     vendor("ppu")
 
