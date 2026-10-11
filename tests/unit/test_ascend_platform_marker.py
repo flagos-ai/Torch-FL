@@ -39,6 +39,11 @@ Retired opt-in variables must not divert the selection to a second conf:
 backends_ascend.conf is now the only Ascend conf and already states the
 FlagGems-first routing. The shadowing hazard remains worth pinning because the
 branch order that caused it is unchanged.
+
+Driving the selector directly rewrites the process-global
+torch_fl._BACKEND_CONFIG_PATH, which monkeypatch does not own -- see the
+restoring fixture in tests/unit/conftest.py and the leak check at the foot of
+this file.
 """
 
 import os
@@ -107,3 +112,26 @@ def test_explicit_backend_config_overrides_the_marker(monkeypatch, fake_ascend_i
     torch_fl._select_backend_config()
     assert torch_fl.backend_config_path() == "/tmp/explicit.conf"
     assert os.environ["FLAGOS_BACKEND_CONFIG"] == "/tmp/explicit.conf"
+
+
+def test_selection_does_not_leak_into_the_next_test():
+    """The selector must leave nothing behind for the rest of the process.
+
+    Every test above calls _select_backend_config(), which rewrites the
+    module-global torch_fl._BACKEND_CONFIG_PATH -- the last call here even clears
+    it, because the FLAGOS_BACKEND_CONFIG early return in
+    test_explicit_backend_config_overrides_the_marker runs after the reset at the
+    top of the function. Nothing in these tests owns that global, so without the
+    restoring fixture in tests/unit/conftest.py it stays empty for every test that
+    runs afterwards.
+
+    That is not academic: tests/unit/test_musa_rng_bridge.py reads the global
+    through _conf_routes_to_flaggems(), and an empty path closes the FlagGems
+    Philox gate, so its three symbol-gated tests fail in a whole-suite run while
+    passing on their own. Assert the resolved conf is still there, which holds
+    only because the fixture restores the import-time selection at teardown.
+    """
+    assert torch_fl.backend_config_path(), (
+        "a scratch-tree selection leaked into the process global; "
+        "the restoring fixture in tests/unit/conftest.py is missing or broken"
+    )
