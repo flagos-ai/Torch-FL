@@ -182,6 +182,12 @@ integration_tests:
       python -m pytest tests/integration/test_profiler_parity.py
       -v -m main_ops --tb=short
 
+  # Ahead of the unit group for the same reason the device groups above are:
+  # this is a measurement of DCU's own runtime, so it goes before the
+  # repository-wide check that can end the run on a failure no DCU code owns.
+  - name: Runtime conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/runtime -v -s --tb=short
+
   # Last on purpose. run_integration_tests.py returns as soon as one group
   # fails, so the order decides which signal a run produces: with the unit group
   # first, a repository-wide check that has nothing to do with DCU decides
@@ -221,5 +227,3 @@ integration_tests:
       cd "$GITHUB_WORKSPACE" &&
       UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
       python .github/scripts/run_unit_tests.py --timeout 300
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
