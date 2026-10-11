@@ -27,24 +27,40 @@ from . import meta  # noqa: F401
 
 _initialized = False
 
-# The accelerator marker is written at install time (`csrc/CMakeLists.txt`) and
-# cannot change while the process runs, so it is read once. The stream helpers
-# below consult it on every call, and a call happens once per FlagGems kernel
-# launch -- 483 a step on the Qwen-Image transformer. Each read costs a few
-# hundred microseconds on the repository filesystem, which made this 0.34 s of
-# every step before it was cached.
+# The platform cannot change while the process runs, so it is resolved once. The
+# stream helpers below consult it on every call, and a call happens once per
+# FlagGems kernel launch -- 483 a step on the Qwen-Image transformer -- while
+# detect_platform() stats the wheel on each call, which made this 0.34 s of every
+# step before it was cached.
 _platform_name: str | None = None
 
 
 def _platform() -> str:
+    """The accelerator this wheel was built for, as torch_fl itself names it.
+
+    Delegates to ``torch_fl._platform.detect_platform()`` -- the one detector
+    ``_select_backend_config()`` and the integration trees read too -- so the
+    stream helpers below cannot disagree with the conf this wheel routes its ops
+    through.
+
+    Reading ``lib/flagos_platform`` alone, as this used to, is wrong for every
+    CUDA-ABI boxing platform: ``cmake/flagos_platforms.json`` leaves
+    ``writes_platform_marker`` false for cuda, ppu, metax, kunlunxin and dcu,
+    because their conf follows from the build record rather than from a file the
+    build writes. On a DCU wheel the marker read therefore returned ``""`` -- an
+    accelerator no arm below knows -- while ``_select_backend_config()`` had
+    already resolved that same wheel to ``backends_dcu.conf``. That empty token
+    is what reached ``Stream.__init__``'s final arm and raised.
+
+    detect_platform() consults the marker too, but after the build record: the
+    marker names a native-kernel platform, and those are exactly the ones with a
+    stream class of their own.
+    """
     global _platform_name
     if _platform_name is None:
-        marker = os.path.join(os.path.dirname(__file__), "..", "lib", "flagos_platform")
-        try:
-            with open(marker) as stream:
-                _platform_name = stream.read().strip()
-        except OSError:
-            _platform_name = ""
+        from .._platform import detect_platform
+
+        _platform_name = detect_platform()
     return _platform_name
 
 
@@ -363,9 +379,9 @@ class Stream(torch.cuda.Stream):
 
     Where there is not, ``__new__`` falls back to ``object.__new__(cls)`` and
     ``__init__`` builds one of the ``torch_fl.accelerator`` vendor streams --
-    Enflame tops, MUSA, or Ascend ACL -- or, on the TX runtime, the same
-    handle-only stand-in ``current_stream()`` returns -- and delegates every
-    method below to it.
+    Enflame tops, MUSA, or Ascend ACL -- or, on any accelerator that has no
+    stream class of its own, the same handle-only stand-in ``current_stream()``
+    returns -- and delegates every method below to it.
     """
 
     def __new__(cls, device=None, priority=0, **kwargs):
@@ -397,27 +413,35 @@ class Stream(torch.cuda.Stream):
                 from torch_fl.accelerator.ascend.acl_stream import AclStream
 
                 self._stream = AclStream(device, priority)
-            elif vendor == "tsingmicro":
-                # The TX runtime exposes one queue -- the default stream, denoted
-                # by handle 0 -- and that is the same queue ``current_stream()``
-                # hands out here. FSDP builds four streams at startup and nothing
-                # owns a handle, so this is a borrowed view of that single queue,
-                # exactly as ``MusaStream`` is of MUSA's, not a second stream.
-                self._stream = _DefaultStreamHandle(_device_index(device))
             else:
+                # The accelerators with a stream class of their own are named
+                # above; everything else denotes its one queue with handle 0.
+                # That is the TX runtime, whose only stream *is* the default one
+                # -- FSDP builds four streams at startup and nothing owns a
+                # handle, so this is a borrowed view of that single queue -- and
+                # it is the CUDA-ABI boxing platforms (cuda, metax, ppu,
+                # kunlunxin, dcu), whose kernels are submitted through the C++
+                # runtime to the same default stream the boxing shim hands out.
+                # Those reach this arm with a real CUDA runtime absent from
+                # torch: their device library is dlopen'd by the compat layer
+                # rather than being the runtime ``torch.cuda.Stream`` was built
+                # for, so ``_has_cuda_runtime()`` is false for them here.
+                #
+                # The stand-in is deliberately the one ``current_stream()``
+                # returns (see _real_current_stream), which is what lets a
+                # stream built here stand in for the current one -- FSDP and the
+                # cross-stream-ordering contract both assume that.
+                #
                 # This arm used to be a bare ``else`` that meant Ascend, so any
-                # accelerator named neither "gcu" nor a CUDA runtime took it. MUSA
-                # did: constructing a stream imported
-                # torch_fl.accelerator.ascend.acl_stream -- whose first statement is
-                # ctypes.CDLL("libascendcl.so") -- on a host with no Ascend toolkit.
-                # Naming the vendor here makes the next accelerator that arrives
-                # without a stream class fail on the missing implementation instead
-                # of on a missing vendor library.
-                raise RuntimeError(
-                    f"torch_fl has no Stream implementation for the {vendor!r} "
-                    f"accelerator, only for 'gcu', 'musa', 'ascend' and "
-                    f"'tsingmicro'"
-                )
+                # accelerator named neither "gcu" nor a CUDA runtime took it.
+                # MUSA did: constructing a stream imported
+                # torch_fl.accelerator.ascend.acl_stream -- whose first statement
+                # is ctypes.CDLL("libascendcl.so") -- on a host with no Ascend
+                # toolkit. The named arms keep that from coming back, and the
+                # manual allowlist that replaced them is gone: an accelerator
+                # with no stream class of its own is a property of the runtime
+                # (one queue, handle 0), not a name to keep adding to a list.
+                self._stream = _DefaultStreamHandle(_device_index(device))
             # Set device attribute for __repr__ compatibility with torch.cuda.Stream
             self.device = self._stream.device
         elif not hasattr(torch._C, "_cuda_getCurrentStream"):
@@ -553,6 +577,19 @@ class _DefaultStreamHandle:
         """
         return self.cuda_stream
 
+    @property
+    def device_type(self) -> int:
+        """``at::DeviceType::CUDA``, matching what the shim reports.
+
+        ``Stream.device_type`` and ``stream()``'s CUDA path both read this off
+        whatever they wrap, so a stand-in without it turns a wrapper that was
+        otherwise complete into an AttributeError. It is the CUDA device type
+        even on a vendor backend because that is the ABI the boxing kernels and
+        ``_cuda_setStream`` speak; on a backend that reaches neither, nothing
+        reads it.
+        """
+        return 1
+
     def synchronize(self):
         pass
 
@@ -625,7 +662,11 @@ def _real_current_stream(device=None):
         # MUSA answers from the C++ runtime at the top of this function and never
         # arrives here; an accelerator with no stream class of its own has no
         # current stream to describe and gets this same handle-only stand-in,
-        # rather than being sent to Ascend for one.
+        # rather than being sent to Ascend for one. That is the TX runtime and the
+        # CUDA-ABI boxing platforms -- dcu arrives here because its device library
+        # is dlopen'd by the DCU compat layer, not built into the torch it runs
+        # against, so ``_has_cuda_runtime()`` reads false for it even though a
+        # DTK runtime is very much there. Same object ``Stream()`` wraps.
         return _DefaultStreamHandle(idx)
     if not hasattr(torch._C, "_cuda_getCurrentStream"):
         return _cuda_stream_shim(idx)
@@ -817,13 +858,16 @@ def stream(s):
 
             native_type = AclStream
         else:
-            # MUSA, and any accelerator with no stream class of its own: every
-            # stream on the device *is* the shared one, so there is nothing to
-            # switch to and nothing to restore. Running the body is the whole
-            # contract, and it keeps this call from reaching for Ascend. The
-            # restore below is also why MUSA cannot be routed through the arms
-            # above: the stream ``_real_current_stream`` returns there is a
-            # handle-only stand-in with no ``set_current`` to restore with.
+            # MUSA, and any accelerator with no stream class of its own -- the TX
+            # runtime and the CUDA-ABI boxing platforms (cuda, metax, ppu,
+            # kunlunxin, dcu, the last of which arrives here because its runtime
+            # is dlopen'd rather than built into torch): every stream on the
+            # device *is* the shared one, so there is nothing to switch to and
+            # nothing to restore. Running the body is the whole contract, and it
+            # keeps this call from reaching for Ascend. The restore below is also
+            # why MUSA cannot be routed through the arms above: the stream
+            # ``_real_current_stream`` returns there is a handle-only stand-in
+            # with no ``set_current`` to restore with.
             native_type = None
         if native_type is not None and isinstance(native, native_type):
             previous = _real_current_stream(native.device_index)
