@@ -145,6 +145,11 @@ jobs:
     needs: discover-platforms
     if: needs.discover-platforms.outputs.has_dcu == 'true'
     uses: ./.github/workflows/integration-test-dcu.yml
+    with:
+      # Matches timeout_minutes in .github/configs/dcu.yml, which this pipeline
+      # does not read: the dedicated pipelines take their timeout from the
+      # workflow input, and the reusable workflow's own default is 60.
+      timeout-minutes: 90
 
   metax-pipeline:
     name: Platform pipeline (metax)
