@@ -218,9 +218,9 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-enflame/simple}"
 install_flag_gems
 
-# The current TopsRider image is 1.9.7 and has no matching FlagCX wheel.
-# The published FlagOS 1.9.10 build image uses /flagos as its vendor Python;
-# only that upgraded toolchain may load the 1.9.10 native wheel.
+# The GCU host's TopsRider toolkit measures 1.9.10, the version the pinned
+# FlagCX wheel is built for. That wheel's _C extension links torch_gcu, so only
+# the FlagOS vendor-Python tree at /flagos -- which carries it -- can load it.
 if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
   FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_gcu}"
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \

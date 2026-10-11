@@ -201,8 +201,9 @@ def is_cuda_alias_vendor(vendor: str) -> bool:
 def _configure_flagcx_torch_backend(vendor: str) -> None:
     """Select torch-fl's FlagCX integration before importing the plugin."""
     if vendor == "enflame":
-        # The torch-fl-compatible FlagCX build uses its C ABI and does not
-        # import or link torch_gcu. Preserve an explicit user selection.
+        # The FlagCX wheel links torch_gcu from its _C extension, so importing
+        # it needs the FlagOS vendor tree at /flagos; its native libflagcx.so is
+        # the C ABI this backend uses. Preserve an explicit user selection.
         _env.set_foreign("FLAGCX_TORCH_BACKEND", "flagos")
 
 
