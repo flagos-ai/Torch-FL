@@ -1293,15 +1293,15 @@ void bufferCompleted(
 // Arm the device-side activity kinds, tolerating a vendor CUPTI compatibility
 // layer that refuses by THROWING rather than returning an error code.
 //
-// Real CUPTI reports every refusal as a CUptiResult and never throws, so on
-// cuda/metax/ppu this is a no-op wrapper. The Kunlun XPU SDK's libcupti is the
-// counter-example: its context manager (checkRuntimeProfilerEnv) throws a
-// std::runtime_error unless XPU_ENABLE_PROFILER_TRACING=1 is set. An exception
-// escaping a static initializer calls std::terminate, so on that platform a
-// plain `import torch_fl` killed the interpreter before any op ran. Catching
-// here degrades a misconfigured vendor profiler to "tracer not armed" instead
-// of taking the process down with it, and leaves the CUPTI arm usable when the
-// vendor runtime IS configured.
+// Real CUPTI reports every refusal as a CUptiResult and never throws, so on the
+// platforms this tracer is built for (cuda/metax/ppu) the try/catch below is a
+// no-op and is kept as a defensive guard. It matters because an exception
+// escaping the static initializer that arms the tracer at module load calls
+// std::terminate, killing `import torch_fl` before any op runs: a vendor CUPTI
+// shim that refuses by throwing (some do) would otherwise take the process down.
+// Catching here degrades a misconfigured vendor profiler to "tracer not armed"
+// instead of terminating, and leaves the CUPTI arm usable when the vendor
+// runtime IS configured.
 bool armDeviceActivities(CuptiShim& shim) {
   try {
     shim.ActivityRegisterCallbacks(bufferRequested, bufferCompleted);

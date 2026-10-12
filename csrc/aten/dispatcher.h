@@ -130,6 +130,7 @@ class Dispatcher {
       case Backend::kMetax:         metax_fn_ = fn;            break;
       case Backend::kTsingMicro:    tsingmicro_fn_ = fn;       break;
       case Backend::kGcu:           gcu_fn_ = fn;              break;
+      case Backend::kKunlunxin:     kunlunxin_fn_ = fn;        break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
       // Neither names a kernel set, so there is no slot to fill. kNone is the
       // conf's "no accelerated impl here" verdict; kUncached is the sentinel
@@ -221,6 +222,7 @@ class Dispatcher {
     if (musa_fn_)        return {musa_fn_,        Backend::kMusa};
     if (metax_fn_)       return {metax_fn_,       Backend::kMetax};
     if (gcu_fn_)         return {gcu_fn_,         Backend::kGcu};
+    if (kunlunxin_fn_)   return {kunlunxin_fn_,   Backend::kKunlunxin};
     if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
     if (cuda_fn_)        return {cuda_fn_,        Backend::kCuda};
     return {nullptr, Backend::kNone};
@@ -289,6 +291,7 @@ class Dispatcher {
       case Backend::kMetax:         return metax_fn_;
       case Backend::kTsingMicro:    return tsingmicro_fn_;
       case Backend::kGcu:           return gcu_fn_;
+      case Backend::kKunlunxin:     return kunlunxin_fn_;
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -356,6 +359,7 @@ class Dispatcher {
       case Backend::kMetax:
       case Backend::kTsingMicro:
       case Backend::kGcu:         return "vendor";
+      case Backend::kKunlunxin:   return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -375,6 +379,7 @@ class Dispatcher {
       case Backend::kMetax:         name = "metax"; break;
       case Backend::kTsingMicro:    name = "tsingmicro"; break;
       case Backend::kGcu:           name = "gcu"; break;
+      case Backend::kKunlunxin:     name = "kunlunxin"; break;
       case Backend::kTileOps:       name = "tileops"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
@@ -395,6 +400,7 @@ class Dispatcher {
   FnPtr metax_fn_          = nullptr;
   FnPtr tsingmicro_fn_     = nullptr;
   FnPtr gcu_fn_            = nullptr;
+  FnPtr kunlunxin_fn_      = nullptr;
   FnPtr tileops_fn_        = nullptr;
 };
 

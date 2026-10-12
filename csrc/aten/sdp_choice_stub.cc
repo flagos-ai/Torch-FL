@@ -67,8 +67,11 @@
 // Registered only on CUDA-boxing builds. Ascend (USE_ASCEND) keeps its own
 // PrivateUse1 _fused_sdp_choice stub (returns efficient_attention for its
 // aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc; MUSA, GCU,
-// TsingMicro and BPU do not run CUDA-compatible kernels and must keep their own
-// paths.
+// TsingMicro, BPU and Kunlunxin do not run CUDA-compatible kernels and must keep
+// their own paths. Kunlunxin registers nothing here: xdnn_pytorch exposes no
+// fused attention op, so it is left to ATen's decomposition (matmul, softmax
+// and the rest all route to the native XPU kernels), which is the same answer
+// MUSA's backend gives.
 // Without this guard the PrivateUse1 stub registration below would collide with
 // Ascend's registration of the same DispatchStub slot.
 
@@ -90,7 +93,7 @@
 #endif
 
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
 
 namespace at::flagos {
 namespace {

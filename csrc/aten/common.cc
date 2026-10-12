@@ -42,6 +42,8 @@ std::string DefaultConfigPath() {
       platform = "tsingmicro";
 #elif defined(USE_GCU)
       platform = "gcu";
+#elif defined(USE_KUNLUNXIN)
+      platform = "kunlunxin";
 #elif defined(USE_ASCEND)
       platform = "ascend";
 #elif defined(USE_MUSA)
@@ -107,6 +109,8 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kTsingMicro;
   } else if (val == "gcu") {
     *out = Backend::kGcu;
+  } else if (val == "kunlunxin") {
+    *out = Backend::kKunlunxin;
   } else if (val == "ascend") {
     *out = Backend::kAscend;
   } else if (val == "musa") {
@@ -136,6 +140,7 @@ const char* BackendName(Backend b) {
     case Backend::kMetax:        return "metax";
     case Backend::kTsingMicro:   return "tsingmicro";
     case Backend::kGcu:          return "gcu";
+    case Backend::kKunlunxin:    return "kunlunxin";
     case Backend::kTileOps:      return "tileops";
     case Backend::kNone:         return "none";
     default:                     return "unknown";

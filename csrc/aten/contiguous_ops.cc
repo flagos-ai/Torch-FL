@@ -10,11 +10,16 @@
 #include <ATen/ops/copy_native.h>
 #include <flagos.h>
 #include "device_boxing.h"
-// Included unconditionally: the #else branches below cover TsingMicro, GCU and
-// MUSA-without-mudnn as well as Ascend, and these headers supply inline no-op
-// fallbacks for every platform they do not implement.
+// ascend_copy.h and gcu_copy.h are included unconditionally: each supplies an
+// inline no-op fallback for the platforms it does not implement, so the other
+// #else branches below (TsingMicro, MUSA-without-mudnn) still compile. The
+// Kunlunxin header is native like them but has no such fallback, so it is
+// guarded and only pulled in for the platform that defines USE_KUNLUNXIN.
 #include "backends/ascend/ascend_copy.h"
 #include "backends/gcu/gcu_copy.h"
+#if defined(USE_KUNLUNXIN)
+#include "backends/kunlunxin/kunlunxin_copy.h"
+#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -96,17 +101,20 @@ at::Tensor contiguous(
       // intermediate buffer and no CPU round-trip.
       musa_ops::MudnnCopy(self, result);
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
       // CUDA platform: use DeviceBoxingGuard to invoke native CUDA strided copy
       // kernel on-device, avoiding expensive CPU round-trip.
       DeviceBoxingGuard guard(self, result);
       at::native::copy_(result, self, false);
 #else
       // Ascend copies the strided source into the contiguous result on-device
-      // via aclnnInplaceCopy, GCU via topsatenCopy. Falls back to a CPU
-      // round-trip only if that path is unavailable.
+      // via aclnnInplaceCopy, GCU via topsatenCopy, Kunlunxin via the XPU
+      // runtime's own strided copy. Falls back to a CPU round-trip only if that
+      // path is unavailable.
 #if defined(USE_GCU)
       const bool copied_on_device = gcu::StridedCopy(result, self);
+#elif defined(USE_KUNLUNXIN)
+      const bool copied_on_device = kunlunxin::StridedCopy(result, self);
 #else
       const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif
@@ -170,7 +178,7 @@ at::Tensor clone(
   // strided copy kernel instead of expensive CPU round-trip.
   if (self.is_privateuseone()) {
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
     auto result = at::empty(
         self.sizes(), self.options().memory_format(memory_format));
     DeviceBoxingGuard guard(self, result);
@@ -182,13 +190,16 @@ at::Tensor clone(
     auto result = at::empty(
         self.sizes(), self.options().memory_format(memory_format));
     // On-device strided copy -- aclnnInplaceCopy on Ascend, topsatenCopy on
-    // GCU -- instead of result.copy_(self), which would bounce through a CPU
-    // round-trip. This is the Qwen3 GQA repeat_kv hotspot (~59% of inference
-    // time before this change), and on GCU it is the `.expand(...).clone()` /
-    // `.contiguous()` pattern in Qwen-Image's attention: 975.6 ms per call at
-    // the (1, 24, 4114, 4114) fp32 shape against 4.6 ms for the vendor call.
+    // GCU, the XPU runtime's own copy on Kunlunxin -- instead of
+    // result.copy_(self), which would bounce through a CPU round-trip. This is
+    // the Qwen3 GQA repeat_kv hotspot (~59% of inference time before this
+    // change), and on GCU it is the `.expand(...).clone()` / `.contiguous()`
+    // pattern in Qwen-Image's attention: 975.6 ms per call at the
+    // (1, 24, 4114, 4114) fp32 shape against 4.6 ms for the vendor call.
 #if defined(USE_GCU)
     const bool copied_on_device = gcu::StridedCopy(result, self);
+#elif defined(USE_KUNLUNXIN)
+    const bool copied_on_device = kunlunxin::StridedCopy(result, self);
 #else
     const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif

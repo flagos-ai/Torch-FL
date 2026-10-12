@@ -18,11 +18,17 @@
 
 #include <optional>
 #include "device_boxing.h"
-// Included unconditionally: the #else branches below cover TsingMicro, GCU and
-// MUSA-without-mudnn as well as Ascend, and these headers supply inline no-op
-// fallbacks for every platform they do not implement.
+// ascend_copy.h and gcu_copy.h are included unconditionally: the #else
+// branches below cover TsingMicro, GCU and MUSA-without-mudnn as well as
+// Ascend, and these headers supply inline no-op fallbacks for every platform
+// they do not implement. kunlunxin_copy.h supplies the same fallbacks but is
+// pulled in only for the platform that defines USE_KUNLUNXIN, matching how
+// contiguous_ops.cc includes it.
 #include "backends/ascend/ascend_copy.h"
 #include "backends/gcu/gcu_copy.h"
+#if defined(USE_KUNLUNXIN)
+#include "backends/kunlunxin/kunlunxin_copy.h"
+#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -42,8 +48,14 @@
 // and c10::cuda::getCurrentCUDAStream would not link there anyway -- DTK exports
 // c10::hip with zero c10::cuda symbols. DCU still shares the vendor's streams,
 // so it needs *some* barrier; see BlockingCopyGuard below.
+// USE_KUNLUNXIN is excluded for the same reason runtime/guard.h does it: the
+// de-boxed XPU backend drives libxpurt directly and never enters the CUDA
+// dispatch key, so c10::cuda is a hollow shell in that build -- including
+// <c10/cuda/CUDAStream.h> there would resolve against headers the runtime does
+// not back with symbols. It still needs *some* barrier; see the arm below.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU)
+    !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
+    !defined(USE_KUNLUNXIN)
 #define FLAGOS_COPY_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -145,6 +157,14 @@ class BlockingCopyGuard {
     // `rsqrt(mean + eps)`, the next step of the RMSNorm it feeds, is a topsaten
     // op and was wrong in 40 of 40 rounds without the barrier.
     topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
+#elif defined(USE_KUNLUNXIN)
+    // Same shape as the DCU arm and for the same reason: no c10::cuda to ask
+    // which stream is current (see the guard above). The XPU SDK exports no
+    // stream query at all -- xpu_wait(nullptr) is its only synchronisation
+    // primitive -- and the runtime layer's DeviceSynchronize wraps that, so
+    // this is a device-wide drain: a superset of the per-stream wait, and so
+    // still correct, just coarser. Only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
 #endif
   }
 
@@ -379,15 +399,14 @@ at::Tensor _copy_from(
         at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
       }
 #else
-      // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy;
-      // both honor the src and dst strides and storage offset. Avoids the CPU
-      // round-trip below, which on GCU also D2H's the entire destination
-      // storage. Kunlunxin joins the CPU round-trip below: its vendor torch
-      // exposes CUDA-shaped copy kernels, but they are not guaranteed to
-      // support these AMP tensor-list operations, so it takes the portable
-      // path like the other non-CUDA backends.
+      // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy and
+      // Kunlunxin via the XPU op library's own strided copy; all honor the src
+      // and dst strides and storage offset. Avoids the CPU round-trip below,
+      // which on GCU also D2H's the entire destination storage.
 #if defined(USE_GCU)
       const bool copied_on_device = gcu::StridedCopy(dst, self);
+#elif defined(USE_KUNLUNXIN)
+      const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
 #else
       const bool copied_on_device = ascend::StridedCopy(dst, self);
 #endif
@@ -699,9 +718,7 @@ at::Tensor _to_copy(
 #elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN)
       // No CUDA runtime on these backends, so the CUDA TensorIterator cast
-      // below is unavailable. Kunlunxin does expose CUDA-shaped APIs, but its
-      // runtime rejects this cast kernel with cudaErrorInvalidDeviceFunction,
-      // so it uses the portable host-staged conversion below.
+      // below is unavailable.
 #ifdef USE_ASCEND
       // Ascend casts on-device via aclnnCast, avoiding the D2H->CPU->H2D
       // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).
@@ -714,10 +731,18 @@ at::Tensor _to_copy(
       // attention shape, against 5.6 ms for the vendor call.
       result = gcu::DtypeCast(self_contig, dtype);
 #endif
+#ifdef USE_KUNLUNXIN
+      // Kunlunxin casts on-device through the XPU op library's `cast`. That
+      // entry point takes no dtype argument -- the destination descriptor's
+      // declared type is the target -- so DtypeCast allocates the result at
+      // `dtype` and hands it over as the output operand.
+      result = kunlunxin::DtypeCast(self_contig, dtype);
+#endif
       if (!result.defined()) {
         // Fallback: CPU round-trip when no on-device cast is available
         // (TsingMicro / MUSA / BPU, a GCU dtype pair topsatenToCopy declines,
-        // or an Ascend dtype pair aclnnCast rejects).
+        // an Ascend dtype pair aclnnCast rejects, or a Kunlunxin pair its
+        // DtypeCast declines).
         size_t nbytes = self_contig.numel() * self_contig.element_size();
         at::Tensor cpu_tensor =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));

@@ -66,6 +66,34 @@ inline aclrtStream AscendStreamHandle(const c10::Stream& stream) {
 }
 #endif
 
+#ifdef USE_KUNLUNXIN
+// Kunlunxin needs no extra header here: the contract's GetDefaultStreamForDevice
+// / GetCurrentStreamForDevice / SetCurrentStreamForDevice already return and take
+// the `Stream_t` this interface traffics in, and those forward to the XPU
+// runtime's per-device streams (runtime/accelerator/kunlunxin/stream.cc). A
+// `c10::Stream` is a device/index pair plus a StreamId, and StreamId is a
+// uint64, so the handle rides in the id exactly as the Ascend arm does it.
+inline int ResolveKunlunxinDevice(c10::Device d) {
+  if (d.index() >= 0) {
+    return d.index();
+  }
+  int device = 0;
+  ::GetDevice(&device);
+  return device;
+}
+
+inline c10::Stream MakeKunlunxinStream(int device, Stream_t stream) {
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::DeviceType::PrivateUse1, device),
+      static_cast<c10::StreamId>(reinterpret_cast<uintptr_t>(stream)));
+}
+
+inline Stream_t KunlunxinStreamHandle(const c10::Stream& stream) {
+  return reinterpret_cast<Stream_t>(static_cast<uintptr_t>(stream.id()));
+}
+#endif
+
 struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   static constexpr c10::DeviceType static_type = c10::DeviceType::PrivateUse1;
 
@@ -132,6 +160,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return MakeAscendStream(
         device,
         at::native::flagos::ascend::GetCurrentAclStreamForDevice(device));
+#elif defined(USE_KUNLUNXIN)
+    auto device = ResolveKunlunxinDevice(d);
+    return MakeKunlunxinStream(device, GetCurrentStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -149,6 +180,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return MakeAscendStream(
         device,
         at::native::flagos::ascend::GetDefaultAclStreamForDevice(device));
+#elif defined(USE_KUNLUNXIN)
+    auto device = ResolveKunlunxinDevice(d);
+    return MakeKunlunxinStream(device, GetDefaultStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -166,6 +200,14 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
     return MakeAscendStream(device, stream);
+#elif defined(USE_KUNLUNXIN)
+    auto device = ResolveKunlunxinDevice(d);
+    // The XPU runtime has no stream pool, so "from the global pool" is a fresh
+    // stream. StreamCreateWithPriority would drop the priority anyway (the SDK
+    // exposes none), and `isHighPriority` is dropped here for the same reason.
+    Stream_t stream = nullptr;
+    ::StreamCreate(&stream);
+    return MakeKunlunxinStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -197,6 +239,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     at::native::flagos::ascend::SetCurrentAclStreamForDevice(
         device, AscendStreamHandle(s));
     return MakeAscendStream(device, old);
+#elif defined(USE_KUNLUNXIN)
+    auto device = ResolveKunlunxinDevice(s.device());
+    auto old = GetCurrentStreamForDevice(device);
+    SetCurrentStreamForDevice(device, KunlunxinStreamHandle(s));
+    return MakeKunlunxinStream(device, old);
 #else
     return c10::Stream(c10::Stream::UNSAFE, s.device(), 0);
 #endif
@@ -214,6 +261,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
     return MakeAscendStream(device, stream);
+#elif defined(USE_KUNLUNXIN)
+    auto device = ResolveKunlunxinDevice(d);
+    Stream_t stream = nullptr;
+    ::StreamCreateWithPriority(&stream, 0, priority);
+    return MakeKunlunxinStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -227,6 +279,13 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       return false;
     }
     return status == ACL_STREAM_STATUS_COMPLETE;
+#elif defined(USE_KUNLUNXIN)
+    // The XPU runtime ships no stream-status query, so StreamQuery answers
+    // ErrorNotSupported (runtime/accelerator/kunlunxin/stream.cc). Waiting on
+    // the stream and reporting completion is therefore the only state this
+    // interface can honestly report, and it is a stronger guarantee than the
+    // answer requires -- never "not done" for work that is done.
+    return ::StreamSynchronize(KunlunxinStreamHandle(stream)) == Success;
 #else
     ::DeviceSynchronize();
     return true;
@@ -236,6 +295,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void synchronizeStream(const c10::Stream& stream) const override {
 #ifdef USE_ASCEND
     aclrtSynchronizeStream(AscendStreamHandle(stream));
+#elif defined(USE_KUNLUNXIN)
+    ::StreamSynchronize(KunlunxinStreamHandle(stream));
 #else
     ::DeviceSynchronize();
 #endif
@@ -326,6 +387,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     ::EventRecord(*(Event_t*)event, (Stream_t)cs.stream());
 #elif defined(USE_ASCEND)
     ::EventRecord(*(Event_t*)event, (Stream_t)AscendStreamHandle(stream));
+#elif defined(USE_KUNLUNXIN)
+    ::EventRecord(*(Event_t*)event, KunlunxinStreamHandle(stream));
 #else
     ::EventRecord(*(Event_t*)event, nullptr);
 #endif
@@ -335,6 +398,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #ifdef USE_ASCEND
     ::StreamWaitEvent(
         (Stream_t)AscendStreamHandle(stream), (Event_t)event, 0);
+#elif defined(USE_KUNLUNXIN)
+    ::StreamWaitEvent(KunlunxinStreamHandle(stream), (Event_t)event, 0);
 #else
     ::StreamWaitEvent(nullptr, (Event_t)event, 0);
 #endif

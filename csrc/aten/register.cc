@@ -464,6 +464,18 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
     #include "backends/gcu/generated/gcu_flaggems_register.inc"
     #endif
+  #elif defined(USE_KUNLUNXIN)
+    // Kunlunxin owns its ops natively: it registers the xdnn_pytorch coverage
+    // set into the kKunlunxin slot rather than claiming every generated op.
+    // Claiming an op on PrivateUse1 with no kernel behind it raises "backend
+    // not registered" instead of boxing to CPU, so the list has to be exactly
+    // the set of ops backends/kunlunxin/generated/kunlunxin_kernels.cc
+    // implements -- which is also what gen_vendor_confs.py routes to
+    // "kunlunxin"; everything else in the conf says "none" and reaches
+    // cpu_fallback.
+    #if defined(FLAGOS_KUNLUNXIN_KERNEL)
+    #include "backends/kunlunxin/generated/kunlunxin_register.inc"
+    #endif
   #elif defined(USE_ASCEND)
     #include "backends/ascend/generated/ascend_register.inc"
   #elif defined(USE_MUSA)

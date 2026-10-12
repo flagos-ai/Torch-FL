@@ -29,6 +29,7 @@ enum class Backend {
   kMetax,
   kTsingMicro,
   kGcu,
+  kKunlunxin,
   kTileOps,
   // No accelerated implementation on this platform. The op is deliberately not
   // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
@@ -49,7 +50,7 @@ enum class Backend {
 //            "flaggems"     -- FlagGems Python (Triton) path
 //            "tileops"      -- TileOps Triton shims
 //            "<vendor>"     -- vendor-native kernel (cuda | ascend | musa |
-//                              metax | gcu | tsingmicro)
+//                              metax | gcu | tsingmicro | kunlunxin)
 //            "none"         -- no accelerated impl; reaches cpu_fallback
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);

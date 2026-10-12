@@ -9,7 +9,8 @@
 #include "backends/dcu_memory.h"
 #endif
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
-    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
+    !defined(USE_KUNLUNXIN)
 #include "backends/cuda_memory.h"
 #endif
 #if defined(USE_TSINGMICRO)
@@ -23,6 +24,9 @@
 #endif
 #if defined(USE_BPU)
 #include "backends/bpu_memory.h"
+#endif
+#if defined(USE_KUNLUNXIN)
+#include "backends/kunlunxin_memory.h"
 #endif
 
 #include <c10/util/Exception.h>
@@ -50,7 +54,8 @@ CachingDeviceAllocator::CachingDeviceAllocator(
 }
 
 CachingDeviceAllocator::~CachingDeviceAllocator() {
-#if !defined(USE_TSINGMICRO) && !defined(USE_BPU) && !defined(USE_GCU)
+#if !defined(USE_TSINGMICRO) && !defined(USE_BPU) && !defined(USE_GCU) && \
+    !defined(USE_KUNLUNXIN)
   // Release all cached memory on destruction.
   // On TsingMicro, skip this — the TX runtime may already be shut down
   // at process exit, causing segfaults in txFree.
@@ -70,6 +75,13 @@ CachingDeviceAllocator::~CachingDeviceAllocator() {
   // why CI (glibc, no tcache reuse to mask it) hit it while a bare local run
   // did not. `torch_fl._C._empty_cache()` before exit is clean here too, so as
   // above this is teardown ordering rather than a bad free.
+  //
+  // Kunlunxin is skipped on the same grounds, but defensively rather than from
+  // a measurement: the exit ordering between libxpurt.so.2's own teardown and
+  // this function-local static has not been exercised, and every vendored
+  // runtime in this file that has been exercised turned out to need the skip.
+  // Leaking at exit costs nothing -- the driver reclaims the allocation when
+  // the process and its file descriptors go away.
   for (auto& state_ptr : device_states_) {
     if (state_ptr) {
       release_cached_blocks(*state_ptr);
@@ -576,6 +588,12 @@ CachingDeviceAllocator* GetCachingAllocator() {
     // contract functions, which also own the virtual->physical map the
     // zero-copy inference path needs.
     auto backend = std::make_unique<BPUDeviceMemory>();
+    alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
+#elif defined(USE_KUNLUNXIN)
+    // Kunlunxin XPU: raw xpu_* runtime behind the flagos contract functions,
+    // with flagos's own caching on top. The XPU SDK ships no caching allocator
+    // to delegate to (see backends/kunlunxin_memory.h).
+    auto backend = std::make_unique<KunlunxinDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #else
     // CUDA (and Metax, which uses CUDA-compatible API)
