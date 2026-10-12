@@ -91,8 +91,9 @@ echo "XCUDART_ROOT=$XCUDART_ROOT"
 # to be located rather than derived. Same precedence as
 # setup.py::_kunlunxin_xdnn_root(): an explicit $XDNN_ROOT is validated and, if
 # it does not hold the library, is an error rather than a reason to keep
-# searching; then $FLAGOS_VENDOR_TORCH_LIB and its parent. A missing library is
-# a hard error here because FLAGOS_BUILD_VENDOR is pinned on for this platform.
+# searching; then $FLAGOS_VENDOR_TORCH_LIB and its parent; then the vendor torch
+# package in site-packages. A missing library is a hard error here because
+# FLAGOS_BUILD_VENDOR is pinned on for this platform.
 xdnn_root_is_complete() {
   local root="${1:-}"
   [[ -n "$root" ]] || return 1
@@ -106,9 +107,31 @@ if [[ -n "${XDNN_ROOT:-}" ]]; then
     exit 1
   fi
 else
-  for candidate in \
-    "${FLAGOS_VENDOR_TORCH_LIB:-}" \
-    "$(dirname "${FLAGOS_VENDOR_TORCH_LIB:-/nonexistent}")"; do
+  xdnn_candidates=(
+    "${FLAGOS_VENDOR_TORCH_LIB:-}"
+    "$(dirname "${FLAGOS_VENDOR_TORCH_LIB:-/nonexistent}")"
+  )
+  # torch_xmlir/ ships inside the image's own venv site-packages (VIRTUAL_ENV is
+  # /flagos in the runtime image), not the isolated build venv this hook creates
+  # below -- torch_xmlir is deliberately uninstalled from the build interpreter
+  # (see the assertion further down). Mirror setup.py::_kunlunxin_xdnn_root()'s
+  # site-packages fallback, retargeted at the image venv and so resolved here
+  # (before the build venv replaces VIRTUAL_ENV). The trailing python3 probe is
+  # the same site.getsitepackages() lookup setup.py performs, for an image that
+  # leaves VIRTUAL_ENV unset.
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    for sp in "$VIRTUAL_ENV"/lib/python*/site-packages; do
+      xdnn_candidates+=("$sp/torch_xmlir")
+    done
+  fi
+  if sp_site="$(python3 -c 'import site; print("\n".join(p for p in site.getsitepackages() if p))' 2>/dev/null)"; then
+    while IFS= read -r sp; do
+      if [[ -n "$sp" ]]; then
+        xdnn_candidates+=("$sp/torch_xmlir")
+      fi
+    done <<<"$sp_site"
+  fi
+  for candidate in "${xdnn_candidates[@]}"; do
     if xdnn_root_is_complete "$candidate"; then
       XDNN_ROOT="$candidate"
       break

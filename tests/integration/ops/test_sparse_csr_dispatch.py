@@ -52,7 +52,7 @@ DEVICE = "flagos:0"
 # DispatchStub CUDA slot the guarded registrations need.  This mirrors the
 # `#if !defined(USE_ASCEND) && ...` guard in csrc/aten/sparse_csr_ops.cc; the
 # C++ side is the source of truth and this only keeps the two in step.
-NOT_CUDA_BOXING = frozenset({"ascend", "gcu", "musa", "bpu"})
+NOT_CUDA_BOXING = frozenset({"ascend", "gcu", "musa", "bpu", "kunlunxin"})
 
 requires_cuda_boxing = pytest.mark.skipif(
     torch_fl._build_accelerator() in NOT_CUDA_BOXING,
