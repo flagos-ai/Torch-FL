@@ -43,13 +43,22 @@ follow-up (see [FlagGems on Kunlunxin](#flaggems-on-kunlunxin)).
 - The vendor xdnn op library (`libxdnn_pytorch.so` plus
   `include/xdnn_pytorch/xdnn_pytorch.h`); it ships inside the vendor torch
   package, not the XPU SDK.
-- Kunlun vendor PyTorch on the **2.10** line (torch-fl's supported minor)
-- Python 3.8 or later matching the vendor torch build
+- Kunlun vendor PyTorch, if you are taking the xdnn op library from a vendor
+  install. The build itself never imports it, so its version is not part of the
+  requirement (see below)
+- Python 3.8 or later, matching the FlagTree XPU wheel's interpreter (cp310 in
+  the pinned configuration)
 - `cmake >= 3.18`, `ninja`, and a host C++17 compiler
 
-The Python build environment must use the vendor torch. Do not replace it with an
-NVIDIA CUDA wheel: the vendor `torch_xmlir` package is where the xdnn op library
-and its headers live, so the native backend cannot be built without it.
+The build never imports or links the vendor torch. All a vendor install supplies
+is the xdnn op library and its header, and `setup.py` finds those two files by
+presence — `XDNN_ROOT`, then `FLAGOS_VENDOR_TORCH_LIB`, then the `torch_xmlir`
+package in site-packages — rather than by importing anything. Those files happen
+to ship inside `torch_xmlir`, but a plain CPU torch wheel is enough to build and
+run the backend, and the vendor `torch_xmlir` extension does not load in that
+interpreter. The vendor torch is therefore a convenient place to find xdnn, not a
+build requirement: any supported torch wheel works provided `XDNN_ROOT` (or
+`FLAGOS_VENDOR_TORCH_LIB`) resolves to the library.
 
 ## Build From Source
 
@@ -84,9 +93,10 @@ For an in-place source checkout, use `setup.py build_ext --inplace` instead of
 - **`XDNN_ROOT`** must contain `libxdnn_pytorch.so` (directly or one level down
   in `lib/`) and `include/xdnn_pytorch/xdnn_pytorch.h`. It is not derived from
   `XPU_ROOT` because the library ships inside the vendor torch package. If it is
-  unset, `setup.py` resolves it from `$XDNN_ROOT`, then
-  `$FLAGOS_VENDOR_TORCH_LIB`, then the `torch_xmlir` package in site-packages.
-  Set it, or use `-DFLAGOS_BUILD_VENDOR=OFF` to fall back to CPU for compute ops.
+  unset, `setup.py` probes `FLAGOS_VENDOR_TORCH_LIB` and then the `torch_xmlir`
+  package in site-packages, and the configure step fails early when none of them
+  holds the library. Only these two files are needed from a vendor install, so
+  any torch wheel can sit alongside them.
 - **`XCUDART_ROOT`** locates the CUDA-compat `libcudart.so*` shim (the SDK's own
   `so/` directory on a P800 install). This is the *only* remaining CUDA-shaped
   build input: `csrc/runtime/hooks.h`'s `isPinnedPtr()` probes
@@ -146,14 +156,20 @@ vendor xdnn op library behind the native `kunlunxin` route.
 An earlier revision of this guide recorded what a P800 OAM reported under the
 removed CUDA-boxing backend: 8 attached devices; XPU SDK / XPU-RT `5.37.1.0`
 (CUDA-compatible version `12.9`); the CUDA compatibility runtime resolving to
-`libcudart.so.12`; the vendor torch on the box at `2.9.0+cu129`; and a per-device
-memory size of 98304 MiB. The device layer it measured was the port's own CUDA
-sources over the XPU driver shim, and operators that reached ATen's CUDA dispatch
-were not validated. **That measurement does not transfer to the native backend**
-— the de-box replaces the runtime sources it exercised — so it is recorded here
-only as provenance for the 2026-10-11 entry in
+`libcudart.so.12`; and a per-device memory size of 98304 MiB. The device layer it
+measured was the port's own CUDA sources over the XPU driver shim, and operators
+that reached ATen's CUDA dispatch were not validated. **That measurement does not
+transfer to the native backend** — the de-box replaces the runtime sources it
+exercised — so it is recorded here only as provenance for the 2026-10-11 entry in
 [`operator-support.md`](../../reference/operator-support.md), not as evidence for
 the current route list.
+
+That baseline also quoted a vendor torch version (`2.9.0+cu129`) as if it were a
+requirement. It is not one: the de-boxed backend links only the xdnn op library
+and never imports the vendor torch, so the vendor torch's own version — and the
+CUDA-compat version it was built against — are details of the removed baseline.
+The XPU SDK / XPU-RT version above is the only version fact here that still
+applies.
 
 ## Operator Scope
 
@@ -201,11 +217,11 @@ for the pinned-pointer probe. Both live under `$XPU_ROOT/include`.
 
 ### The vendor xdnn op library is not found
 
-`FLAGOS_BUILD_VENDOR=ON` needs `libxdnn_pytorch.so` and
-`include/xdnn_pytorch/xdnn_pytorch.h`. Set `XDNN_ROOT` to the vendor torch
-package root (`torch_xmlir/`), or `FLAGOS_VENDOR_TORCH_LIB` to a directory
-holding the `.so`. Build with `-DFLAGOS_BUILD_VENDOR=OFF` to fall back to CPU for
-compute ops.
+`FLAGOS_BUILD_VENDOR` is pinned on for this platform, so the build needs
+`libxdnn_pytorch.so` and `include/xdnn_pytorch/xdnn_pytorch.h`. Set `XDNN_ROOT` to
+the directory holding them (the vendor torch package root `torch_xmlir/` is one
+such directory), or `FLAGOS_VENDOR_TORCH_LIB` to a directory holding the `.so`.
+The configure step fails early instead of falling back to CPU for compute ops.
 
 ### `libcudart.so*` is missing
 
