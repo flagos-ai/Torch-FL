@@ -103,10 +103,15 @@ For an in-place source checkout, use `setup.py build_ext --inplace` instead of
 
 ## Runtime Environment
 
-The build embeds both runtime paths (`libxpurt` and the xdnn directory) in the
-install RPATH, so `LD_LIBRARY_PATH` is normally not needed. If you run from a
-staged install, put the SDK `so/` directory and the xdnn directory on the loader
-path:
+The build embeds the runtime paths (the XPU SDK's `so/` directory, the xdnn
+directory, and the vendor torch package's nested dependency directory that
+`libxdnn_pytorch.so` itself needs) in the install RPATH, so `LD_LIBRARY_PATH` is
+normally not needed. `libxdnn_pytorch.so` is not self-contained: its `DT_NEEDED`
+names the vendor's CUDA-compat runtime and component libraries, which the vendor
+torch package keeps under `xhpc/*/dependency_so/` rather than next to the op
+library. `XCUDART_ROOT` does not cover that directory, because the XPU SDK ships
+only its own CUDA-11-shaped shim while the op library needs the CUDA-12-compat
+one. If you run from a staged install, put those directories on the loader path:
 
 ```bash
 export LD_LIBRARY_PATH=/usr/local/xpu/so:/usr/local/xpu/lib:$LD_LIBRARY_PATH

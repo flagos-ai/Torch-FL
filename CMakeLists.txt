@@ -508,6 +508,23 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
     get_filename_component(_kunlun_xdnn_libdir "${XDNN_PYTORCH_LIB}" DIRECTORY)
     list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_xdnn_libdir}")
     list(APPEND FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_xdnn_libdir}")
+
+    # libxdnn_pytorch.so is not self-contained: its DT_NEEDED names the vendor's
+    # own CUDA-compat runtime and its component libraries, which the vendor torch
+    # package keeps in a nested dependency directory rather than next to the op
+    # library. Without that directory on the runtime search path the flagos
+    # module fails to load (unresolved libcudart.so.12 / libxpuml.so.1) no matter
+    # what the kernels do. XCUDART_ROOT does not cover it: the XPU SDK ships only
+    # its own CUDA-11-shaped shim, so this is the one place the CUDA-12-compat
+    # runtime comes from.
+    file(GLOB _kunlun_xdnn_dep_dirs
+        "${_kunlun_xdnn_libdir}/xhpc/*/dependency_so")
+    foreach(_kunlun_dep_dir IN LISTS _kunlun_xdnn_dep_dirs)
+      if(IS_DIRECTORY "${_kunlun_dep_dir}")
+        list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_dep_dir}")
+        list(APPEND FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_dep_dir}")
+      endif()
+    endforeach()
   endif()
 
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
