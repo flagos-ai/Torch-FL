@@ -363,6 +363,15 @@ def _kunlunxin_roots() -> tuple[str, str]:
             f"found under {xpu_root}/include. Set XPU_ROOT to the Kunlunxin XPU "
             "SDK root."
         )
+    # CMakeLists.txt additionally requires the native xpu/ headers (the runtime
+    # the de-boxed backend actually calls); reject the same roots here so a
+    # CUDA-facade-only tree does not pass this precheck only to die at configure.
+    if not os.path.isfile(os.path.join(xpu_root, "include", "xpu", "runtime.h")):
+        raise RuntimeError(
+            "FLAGOS_ACCELERATOR=kunlunxin selected, but xpu/runtime.h was not "
+            f"found under {xpu_root}/include/xpu. Set XPU_ROOT to the Kunlunxin "
+            "XPU SDK root (the native libxpurt headers the backend links)."
+        )
     # The shim's soname tracks the SDK's CUDA-compat version (libcudart.so.11.0
     # on XPU SDK 5.0.21) rather than a fixed one, and it sits either directly in
     # XCUDART_ROOT or one level down in lib/, so match the whole family in both
@@ -380,9 +389,11 @@ def _kunlunxin_roots() -> tuple[str, str]:
 def _setup_kunlunxin_build_env(env: dict) -> tuple[str, str]:
     """CPATH/LIBRARY_PATH/LD_LIBRARY_PATH for the Kunlunxin XPU SDK.
 
-    Kunlunxin is a CUDA-boxing build: host g++ compiles the generated boxing
-    kernels against the SDK's CUDA-shaped headers and links the libcudart shim,
-    so both the include and lib directories have to be reachable. Returns
+    Kunlunxin is a native, de-boxed backend: no tensor is re-dispatched onto the
+    CUDA dispatch key, so nothing here compiles boxing kernels. The SDK's
+    ``include/`` and the libcudart shim's directory still have to be reachable
+    because the runtime sources link libxpurt and a hooks.h probe calls into the
+    CUDA-compat runtime; neither carries a kernel. Returns
     ``(XPU_ROOT, <directory holding libcudart.so*>)``.
     """
     xpu_root, xcudart_dir = _kunlunxin_roots()
@@ -392,6 +403,58 @@ def _setup_kunlunxin_build_env(env: dict) -> tuple[str, str]:
     _prepend_env_path(env, "LIBRARY_PATH", xcudart_dir)
     _prepend_env_path(env, "LD_LIBRARY_PATH", xcudart_dir)
     return xpu_root, xcudart_dir
+
+
+def _kunlunxin_xdnn_root() -> str:
+    """Resolve XDNN_ROOT: the vendor xdnn_pytorch op-library package root.
+
+    Expected layout, matching what CMakeLists.txt's find_library/find_path
+    consume: ``libxdnn_pytorch.so`` (under the root or its ``lib/``) and
+    ``include/xdnn_pytorch/xdnn_pytorch.h``. This library does not ship in the
+    XPU SDK root -- it is installed inside the vendor torch package
+    (``torch_xmlir/``) -- so XDNN_ROOT has to be discovered rather than derived
+    from XPU_ROOT. Precedence: ``$XDNN_ROOT`` (validated), then
+    ``$FLAGOS_VENDOR_TORCH_LIB``, then the vendor torch package in site-packages.
+    """
+
+    def _valid(root: str) -> bool:
+        return os.path.isfile(
+            os.path.join(root, "include", "xdnn_pytorch", "xdnn_pytorch.h")
+        ) and any(
+            os.path.isfile(os.path.join(root, sub, "libxdnn_pytorch.so"))
+            for sub in ("", "lib")
+        )
+
+    env_root = os.environ.get("XDNN_ROOT")
+    if env_root:
+        env_root = os.path.realpath(env_root)
+        if not _valid(env_root):
+            raise RuntimeError(
+                "XDNN_ROOT is set but does not contain libxdnn_pytorch.so and "
+                f"include/xdnn_pytorch/xdnn_pytorch.h: {env_root}"
+            )
+        return env_root
+
+    candidates: list[str] = []
+    hint = os.environ.get("FLAGOS_VENDOR_TORCH_LIB")
+    if hint:
+        hint = os.path.realpath(hint)
+        candidates.extend([hint, os.path.dirname(hint)])
+
+    import site
+
+    for sp in list(site.getsitepackages()) + [site.getusersitepackages()]:
+        if sp:
+            candidates.append(os.path.join(sp, "torch_xmlir"))
+    for root in candidates:
+        if _valid(root):
+            return os.path.realpath(root)
+    raise RuntimeError(
+        "FLAGOS_ACCELERATOR=kunlunxin needs the vendor xdnn op library "
+        "(libxdnn_pytorch.so + include/xdnn_pytorch/xdnn_pytorch.h), which ships "
+        "inside the vendor torch package (torch_xmlir/), not the XPU SDK. Set "
+        "XDNN_ROOT (or FLAGOS_VENDOR_TORCH_LIB) to that package root."
+    )
 
 
 # The values an explicit environment variable may not contradict, from the
@@ -553,6 +616,11 @@ def build_deps():
         xpu_root, xcudart_dir = _setup_kunlunxin_build_env(build_env)
         cmake_args.append(f"-DXPU_ROOT={xpu_root}")
         cmake_args.append(f"-DXCUDART_ROOT={xcudart_dir}")
+        # The vendor op library (xdnn) lives in the vendor torch package, not the
+        # XPU SDK, so CMake cannot derive it from XPU_ROOT. Resolve and pass it;
+        # without it a vendor build FATAL_ERRORs at configure.
+        if kernels["FLAGOS_BUILD_VENDOR"]:
+            cmake_args.append(f"-DXDNN_ROOT={_kunlunxin_xdnn_root()}")
 
     subprocess.check_call([cmake, BASE_DIR] + cmake_args, cwd=build_dir, env=build_env)
 

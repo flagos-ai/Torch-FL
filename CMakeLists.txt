@@ -403,8 +403,8 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   # Kunlunxin XPU SDK. The backend is native, not CUDA-boxing: the runtime
-  # sources under csrc/runtime/accelerator/kunlunxin/ and the op layer under
-  # csrc/aten/backends/kunlunxin/ call the SDK's own C API -- libxpurt
+  # sources under csrc/runtime/accelerator/kunlunxin/ and the native op wrappers
+  # call the SDK's own C API -- libxpurt
   # (<xpu/runtime.h>) for the runtime and the vendor xdnn library for compute --
   # so no tensor is ever re-dispatched onto the CUDA dispatch key. XPU_ROOT is
   # therefore resolved for the xpu/ headers (never copied into the wheel).
@@ -470,9 +470,11 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   # library -- the counterpart of topsaten on GCU and mudnn on MUSA. It does not
   # ship in the XPU SDK root: it is installed inside the vendor torch package
   # (torch_xmlir/), which is why XDNN_ROOT is its own knob rather than something
-  # derived from XPU_ROOT. setup.py passes it; a direct cmake invocation can set
-  # it, or point FLAGOS_VENDOR_TORCH_LIB at a directory holding the .so (the
-  # package root and the site-packages lib/ install both land that way).
+  # derived from XPU_ROOT. setup.py resolves it (from $XDNN_ROOT, else the vendor
+  # torch package in site-packages) and passes -DXDNN_ROOT; a direct cmake
+  # invocation can set it instead, or point FLAGOS_VENDOR_TORCH_LIB at a
+  # directory holding the .so (the package root and the site-packages lib/
+  # install both land that way).
   if(FLAGOS_BUILD_VENDOR)
     if(NOT DEFINED XDNN_ROOT)
       set(XDNN_ROOT "$ENV{XDNN_ROOT}")

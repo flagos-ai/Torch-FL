@@ -60,10 +60,38 @@ def test_unknown_vendor_falls_back_to_default_profile():
 
 
 def test_known_cuda_vendors():
-    for v in ("nvidia", "metax", "iluvatar", "kunlunxin", "du", "thead", "hygon"):
+    for v in ("nvidia", "metax", "iluvatar", "du", "thead", "hygon"):
         prof = pg._get_profile(v)
         assert prof.flagcx_dev == "cuda"
         assert prof.view == "_flagos_to_cuda_view"
+
+
+def test_kunlunxin_is_not_a_cuda_alias_vendor():
+    """Kunlunxin is de-boxed from the CUDA ABI to a native XPU backend, so its
+    flagos tensors are NOT a cuda alias: the profile must not claim the
+    zero-copy cuda view (that would reinterpret XPU storage as CUDA), and NCCL
+    is not its collective. Like ``musa`` it uses the identity view, with FlagCX
+    as the only route (no native ``_try_build_*`` fallback wired yet)."""
+    prof = pg._get_profile("kunlunxin")
+    assert prof.flagcx_dev == "kunlunxin"
+    assert prof.view == "_flagos_identity_view"
+    assert prof.native is None
+    assert not pg.is_cuda_alias_vendor("kunlunxin")
+
+
+def test_kunlunxin_flagcx_identity_view(monkeypatch):
+    """FlagCX's kunlunxin adaptor receives privateuseone tensors as-is; no
+    storage conversion, and no native fallback is attempted."""
+    obj, calls, _ = _make(
+        monkeypatch, "kunlunxin", flagcx_ok=True, native_ok=False, view_present=True
+    )
+    identity_marker = object()
+    fake_c = sys.modules["torch_fl._C"]
+    fake_c._flagos_identity_view = identity_marker
+
+    view_fn = obj._build_inner(None, 0, 1, None)
+    assert calls["flagcx"] and not calls["native"]
+    assert view_fn is identity_marker  # identity view resolved
 
 
 def test_thead_ppu_routes_without_warning():

@@ -77,7 +77,7 @@ def _select_backend_config() -> None:
       * a native-kernel vendor marker -> backends_<that platform>.conf
       * a MetaX build                 -> backends_metax.conf (boxing-only build)
       * a DCU build                   -> backends_dcu.conf
-      * a Kunlunxin build             -> backends_kunlunxin.conf (CUDA-ABI boxing)
+      * a Kunlunxin build             -> backends_kunlunxin.conf (native XPU)
       * a PPU wheel                   -> backends_ppu.conf
       * otherwise                     -> backends_cuda.conf
 

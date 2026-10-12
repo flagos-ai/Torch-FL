@@ -418,14 +418,19 @@ class Stream(torch.cuda.Stream):
                 # above; everything else denotes its one queue with handle 0.
                 # That is the TX runtime, whose only stream *is* the default one
                 # -- FSDP builds four streams at startup and nothing owns a
-                # handle, so this is a borrowed view of that single queue -- and
-                # it is the CUDA-ABI boxing platforms (cuda, metax, ppu,
-                # kunlunxin, dcu), whose kernels are submitted through the C++
-                # runtime to the same default stream the boxing shim hands out.
-                # Those reach this arm with a real CUDA runtime absent from
-                # torch: their device library is dlopen'd by the compat layer
-                # rather than being the runtime ``torch.cuda.Stream`` was built
-                # for, so ``_has_cuda_runtime()`` is false for them here.
+                # handle, so this is a borrowed view of that single queue -- the
+                # CUDA-ABI boxing platforms (cuda, metax, ppu, dcu), whose
+                # kernels are submitted through the C++ runtime to the same
+                # default stream the boxing shim hands out, and the de-boxed
+                # native kunlunxin backend, whose single queue is likewise
+                # denoted by handle 0.
+                # The CUDA-ABI platforms reach this arm with a real CUDA runtime
+                # absent from torch: their device library is dlopen'd by the
+                # compat layer rather than being the runtime ``torch.cuda.Stream``
+                # was built for, so ``_has_cuda_runtime()`` is false for them
+                # here. Kunlunxin has no CUDA runtime at all -- its native XPU
+                # backend deliberately routes around the CUDA-shaped surface the
+                # SDK ships -- so it is false for kunlunxin too.
                 #
                 # The stand-in is deliberately the one ``current_stream()``
                 # returns (see _real_current_stream), which is what lets a
@@ -858,14 +863,19 @@ def stream(s):
 
             native_type = AclStream
         else:
-            # MUSA, and any accelerator with no stream class of its own -- the TX
-            # runtime and the CUDA-ABI boxing platforms (cuda, metax, ppu,
-            # kunlunxin, dcu, the last of which arrives here because its runtime
-            # is dlopen'd rather than built into torch): every stream on the
-            # device *is* the shared one, so there is nothing to switch to and
-            # nothing to restore. Running the body is the whole contract, and it
-            # keeps this call from reaching for Ascend. The restore below is also
-            # why MUSA cannot be routed through the arms above: the stream
+            # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
+            # with no stream class of its own -- the TX runtime and the CUDA-ABI
+            # boxing platforms (cuda, metax, ppu, dcu, the last of which arrives
+            # here because its runtime is dlopen'd rather than built into torch):
+            # every stream on the device *is* the shared one, so there is nothing
+            # to switch to and nothing to restore. Running the body is the whole
+            # contract, and it keeps this call from reaching for Ascend.
+            # Kunlunxin is native (its flagos tensor is not a cuda alias): its
+            # per-device current stream is switched by the C++ StreamGuard in
+            # csrc/runtime/guard.h (SetCurrentStreamForDevice), not from Python,
+            # and the Python stream object here is a handle-only stand-in with no
+            # ``set_current`` to call. The restore below is also why MUSA cannot
+            # be routed through the arms above: the stream
             # ``_real_current_stream`` returns there is a handle-only stand-in
             # with no ``set_current`` to restore with.
             native_type = None
