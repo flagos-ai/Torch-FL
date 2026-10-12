@@ -1,0 +1,154 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Kunlun P800 XPU
+
+# Kunlunxin-specific environment preparation stays outside the common workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: kunlunxin
+
+# Pinned Kunlunxin XRE image (driver 5.37.1). The hook creates the isolated
+# Python 3.10 venv inside the job, reusing the image's TORCH_FL_PREBUILT_KUNLUNXIN_VENV
+# when it provides one; a derived CI image should bake python3.10-venv in to
+# avoid the apt fallback on every job.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-kunlunxin-xre5.37.1:2.2.0
+
+runner_labels:
+  - p800-8g-cicd-pytorch
+
+container_volumes: []
+
+integration_environment: {}
+
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+wheel_artifact_name: wheel-kunlunxin
+# The integration job tests the exact artifact produced by the build job.
+integration_wheel_source: artifact
+
+integration_tests:
+  - name: Check isolated Kunlunxin environment
+    command: |
+      python - <<'PY'
+      from pathlib import Path
+
+      import torch
+      import torch_fl
+      # torch_fl must precede flag_gems. FlagGems 5.x resolves its vendor from the
+      # torch_fl device surface, so importing it against stock CPU PyTorch raises
+      # "No device were detected on your machine !".
+      import triton
+
+      torch_path = Path(torch.__file__).resolve()
+
+      assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
+      assert torch.version.cuda is None, torch.version.cuda
+      assert "/usr/local/lib/python3.10/dist-packages" not in str(torch_path), torch_path
+      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
+      count = torch_fl.flagos.device_count()
+      assert count >= 1, f"expected at least one XPU device, got {count}"
+
+      # The FlagGems stack has to be the flagtree build, not a stock triton wheel
+      # left behind by the image: only flagtree carries the xpu backend the XPU
+      # kernels are compiled for.
+      assert "xpu" in triton.backends.backends, sorted(triton.backends.backends)
+
+      print(f"CPU PyTorch: {torch.__version__}")
+      print(f"torch path: {torch_path}")
+      print(f"torch_fl path: {torch_fl.__file__}")
+      print(f"XPU devices: {count}")
+      print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+      PY
+
+  # Issue #391: the multi-device contract files sit at the top level of
+  # tests/integration/, where no manifest sweeps by default -- a file added there
+  # reached no CI job at all. Selected by marker rather than by filename so the
+  # same step works on every platform and the 2+-device guard stays in the test.
+  - name: Backend autoload contract
+    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
+  - name: Multi-device contracts
+    command: >-
+      python -m pytest tests/integration/
+      -m "multi_device" -v -s --tb=short
+
+  # Issue #409: the remaining top-level files no manifest selected. They are
+  # single-device suites, so the multi_device sweep above does not reach them,
+  # and they are named here rather than selected by marker for the reason
+  # test_factory_ops.py is: each would need a marker invented for it, and a
+  # marker that exists only to be selected proves nothing about the file.
+  - name: Portable top-level contracts
+    command: >-
+      python -m pytest
+      tests/integration/test_clone_dispatch_case.py
+      tests/integration/test_dtype_coverage.py
+      tests/integration/test_ops.py
+      -v -s --tb=short
+
+  # Marker selection, not a file allowlist. Kunlunxin is a native-kernel vendor
+  # like musa/gcu/ascend: backends_kunlunxin.conf routes ops to the native
+  # `kunlunxin` key (the vendor xdnn op library) or leaves them at `none` (CPU
+  # fallback), with no `cuda` route, so the FlagGems runtime group below is the
+  # only route-specific split and there is no vendor-marker half to add here.
+  - name: Run operator tests (vendor backend, main ops)
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
+      -v -s --tb=short
+
+  # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX/GCU. The
+  # generator contract, the shared-state round trip, and the integer range
+  # semantics are implemented natively on the XPU, so this is a contract check
+  # rather than a gap detector.
+  - name: Run unified RNG tests
+    command: >-
+      python -m pytest tests/integration/ops/test_rng_dispatch.py
+      -m "main_ops" -v -s --tb=short
+
+  - name: Run general tests
+    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
+
+  # Lazy Conjugate/Negative bits are a dispatcher-level property, so every
+  # backend owes the same materialization contract. The complex cases skip
+  # themselves when the backend cannot allocate a complex tensor at all, which
+  # leaves the negative-bit cases (real dtypes) as the enforced minimum.
+  - name: Unified math-bits contract
+    command: >-
+      python -m pytest tests/integration/test_math_bits_contract.py
+      -v -m math_bits --tb=short
+
+  # torch.compile through the flagtree XPU backend.
+  - name: Run torch.compile tests
+    command: python -m pytest tests/integration/test_compile.py -v --tb=short
+  - name: Runtime conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Deliberately not included yet, so the gap is recorded rather than implied:
+  #   - the AMP contract and the FlagGems runtime-path operator group. The
+  #     FlagGems cohort has not been revalidated on the P800, so no `flaggems`
+  #     route is enabled in backends_kunlunxin.conf yet (the allowlist is a
+  #     follow-up); both ship with that work. See
+  #     docs/vendors/kunlunxin/installation.md.
+  #   - tests/integration/test_profiler_contract.py. Kunlunxin builds the
+  #     unavailable_device_tracer (the vendor's CUPTI-compatible shim
+  #     instruments the CUDA dispatch key the de-boxed backend no longer uses),
+  #     so device profiling is not available on this platform.
+  #   - Qwen3 inference/training smoke, pending a model mount on the runner.
+  # ---------------------------------------------------------------------------

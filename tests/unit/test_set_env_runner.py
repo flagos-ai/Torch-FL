@@ -34,7 +34,7 @@ RUNNER = SCRIPTS / "set_env.sh"
 HOOKS = SCRIPTS / "hooks"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
-PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "metax", "musa", "ppu"]
+PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu"]
 
 #: The named workflows that provision a platform themselves.
 NAMED_WORKFLOWS = ["cuda", "ascend", "dcu", "metax", "musa", "ppu"]

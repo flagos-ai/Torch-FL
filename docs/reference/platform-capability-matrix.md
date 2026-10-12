@@ -3,7 +3,7 @@
 The ten `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers seven of the ten — so this page is the authoritative
+is aten-only, and CI covers eight of the ten — so this page is the authoritative
 answer.
 
 The directory inventory at the end is machine-checked by
@@ -18,7 +18,7 @@ when a platform gains or loses one.
 | `ppu` | CUDA-ABI boxing (bundled PPU libtorch) | `cuda` (+ `lib_ppu/` bundle) | — (boxing) | `ppu` | 2037 | yes |
 | `metax` | CUDA-ABI boxing (bundled MACA libtorch) | `metax` | — (native retired) | `metax` | 2037 | yes |
 | `dcu` | CUDA-ABI boxing (hipified DTK torch) | `cuda` (+ `dcu` DTK-core shim) | — (boxing) | `dcu` | 2037 | yes |
-| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | no |
+| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
@@ -73,11 +73,11 @@ platform, not a per-build choice.
 - **Kunlunxin** (Kunlun P800 XPU) is a native vendor backend: its
   `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
   op library) and leaves the rest at `none`, with **no `cuda` boxing route**. It
-  has no CI job and no `torch_fl/accelerator/` module. Its FlagGems cohort has
+  has no `torch_fl/accelerator/` module. Its FlagGems cohort has
   not been revalidated on the P800, so no `flaggems` route is enabled yet and the
   platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`; the allowlist is a
   follow-up.
-- **CI covers 7 of 10**: TsingMicro, Kunlunxin and BPU have no
+- **CI covers 8 of 10**: TsingMicro and BPU have no
   `.github/configs/` entry.
 
 ## Directory inventory
