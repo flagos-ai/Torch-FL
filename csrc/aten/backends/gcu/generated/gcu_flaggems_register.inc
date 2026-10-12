@@ -73,6 +73,7 @@
 //   - bmm
 //   - bmm.out
 //   - bucketize.Tensor
+//   - cat
 //   - ceil
 //   - clamp.Tensor
 //   - constant_pad_nd

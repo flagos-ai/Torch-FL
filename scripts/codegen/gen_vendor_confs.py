@@ -1365,6 +1365,25 @@ NATIVE_TRITON_GAPS = {
         "cummin",
         "logcumsumexp",
         "logcumsumexp.out",
+        # `cat` reached FlagGems when the tensorlist_dim codegen category gave
+        # `aten::cat(Tensor[] tensors, int dim)` a Python route, and the FlagGems
+        # route does not compile on this vendor. Measured 2026-10-12 on Enflame
+        # GCU S60, GCU integration suite:
+        # tests/integration/ops/test_cat_dispatch.py::TestCatKvCacheAppend,
+        # `torch.cat([k_prefill, k_new], dim=-2)` over concatenands of differing
+        # sizes, raised
+        # `triton.compiler.errors.CompilationError: AssertionError('Mismatched
+        # type for dim_size_in between then block (int32) and else block
+        # (int64)')` out of
+        # flag_gems/runtime/backend/_enflame/gcu300/ops/cat.py:291
+        # (cat_copy_row_kernel_4). It is an Enflame-side compile bug in the
+        # FlagGems `cat` kernel, not a routing mistake: the kernel merges the two
+        # per-concatenand size scalars into one variable and the GCU300 front end
+        # rejects the int32/int64 join. Membership here closes the FlagGems route
+        # so `cat` falls back to the vendor kernel T_CAT in codegen_gcu.py --
+        # the route it took before the reroute, and one this suite measured
+        # working. Drop the entry if a later FlagGems fixes the kernel.
+        "cat",
         # Everything below comes from the full sweep rather than from targeted
         # probes: tests/manual/flaggems_overload_survey.py --conf
         # torch_fl/configs/backends_gcu.conf run on the S60 at FlagGems master
