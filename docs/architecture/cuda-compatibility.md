@@ -60,7 +60,7 @@ provide differs:
 |---|---|---|---|
 | Native NVIDIA CUDA | `cuda` | Real CUDA runtime and kernels | none needed (it *is* CUDA) |
 | Vendor CUDA-ABI | `dcu`, `metax`, `ppu` | Vendor forked libtorch; flagos storage is a zero-copy CUDA alias | `torch.cuda` shim |
-| Native non-CUDA | `ascend`, `gcu`, `musa`, `tsingmicro`, `bpu` | No CUDA runtime; vendor-native ops / CPU fallback | none (must not pretend CUDA) |
+| Native non-CUDA | `ascend`, `gcu`, `musa`, `kunlunxin`, `tsingmicro`, `bpu` | No CUDA runtime; vendor-native ops / CPU fallback | none (must not pretend CUDA) |
 
 A CUDA label or a zero-copy physical view does **not** make guards, allocator
 ownership, gradients, stream ordering or extension ABI automatically compatible; the

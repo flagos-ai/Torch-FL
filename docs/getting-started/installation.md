@@ -9,7 +9,7 @@
 | Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | [Ascend Installation](../vendors/ascend/installation.md) |
 | PPU | `FLAGOS_ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into `lib_ppu/` | [PPU Installation](../vendors/ppu/installation.md) |
 | Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | [DCU Installation](../vendors/dcu/installation.md) |
-| Kunlunxin (Kunlun P800) | `FLAGOS_ACCELERATOR=kunlunxin` | CUDA boxing against the Kunlun XPU SDK's CUDA-shaped runtime | [Kunlunxin Installation](../vendors/kunlunxin/installation.md) |
+| Kunlunxin (Kunlun P800) | `FLAGOS_ACCELERATOR=kunlunxin` | Native XPU backend over the vendor xdnn operator library | [Kunlunxin Installation](../vendors/kunlunxin/installation.md) |
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64 ops | [GCU Installation](../vendors/gcu/installation.md) |
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | FlagGems-first Triton kernels, native `mudnn` backend as fallback, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | [BPU Installation](../vendors/bpu/installation.md) |

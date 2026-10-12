@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run the measured Kunlunxin P800 runtime and CUDA-boxing smoke checks.
+"""Run the measured Kunlunxin P800 native runtime and operator smoke checks.
 
 This is a manual hardware test, not a pytest test. It intentionally checks the
-small runtime contract before broader operator surveys are attempted.
+small runtime contract before broader operator surveys are attempted. The
+backend is native (no tensor is re-dispatched onto the CUDA dispatch key), so
+every check below runs against the XPU runtime and the vendor xdnn library.
 
 Run: FLAGOS_ACCELERATOR=kunlunxin python tests/manual/kunlunxin_runtime_smoke.py
 """
@@ -60,7 +62,7 @@ def main() -> None:
 
     result = torch.mm(device_value, device_value)
     expected = torch.mm(source, source)
-    check("boxed_mm", lambda: bool(torch.allclose(result.cpu(), expected)))
+    check("mm", lambda: bool(torch.allclose(result.cpu(), expected)))
 
     check("stream_create", torch_fl.flagos.Stream)
     check("synchronize", torch_fl.flagos.synchronize)

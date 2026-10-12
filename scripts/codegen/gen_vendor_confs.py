@@ -2356,11 +2356,10 @@ def build_all(conf_dir: Path) -> dict:
         # Same gate as the native vendors below: a platform whose FlagGems
         # Python routes are not measured yet is not in FLAGGEMS_PYTHON_PLATFORMS,
         # so its conf routes nothing to flaggems and every covered op stays on
-        # the boxing kernel. Kunlunxin is the first such boxing platform -- the
-        # P800 port lands the boxing path only and its FlagGems allowlist is a
-        # follow-up -- and this gate is a no-op for metax/dcu/ppu, which are all
-        # in the set. Routing the shared ceiling here instead would claim
-        # coverage the P800 has not run.
+        # the boxing kernel. It is a no-op for the boxing platforms we build
+        # today (metax/dcu/ppu, all in the set); it exists so that a new boxing
+        # platform can join without claiming FlagGems coverage it has not run.
+        # Routing the shared ceiling here instead would claim exactly that.
         py_here = (fg_py if platform in FLAGGEMS_PYTHON_PLATFORMS else set()) | measured
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.

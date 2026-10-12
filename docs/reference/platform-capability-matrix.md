@@ -18,7 +18,7 @@ when a platform gains or loses one.
 | `ppu` | CUDA-ABI boxing (bundled PPU libtorch) | `cuda` (+ `lib_ppu/` bundle) | — (boxing) | `ppu` | 2037 | yes |
 | `metax` | CUDA-ABI boxing (bundled MACA libtorch) | `metax` | — (native retired) | `metax` | 2037 | yes |
 | `dcu` | CUDA-ABI boxing (hipified DTK torch) | `cuda` (+ `dcu` DTK-core shim) | — (boxing) | `dcu` | 2037 | yes |
-| `kunlunxin` | CUDA-ABI boxing (Kunlun XPU SDK) | `cuda` | — (boxing) | — (no dir) | 2037 | no |
+| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | no |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
@@ -31,8 +31,9 @@ Column notes:
   `cmake/flagos_platforms.json` for the per-platform kernel-switch defaults).
 - **runtime dir** is the `csrc/runtime/accelerator/<dir>` whose sources the
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
-  toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too, as
-  does `kunlunxin` (its XPU SDK ships a CUDA-shaped runtime).
+  toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
+  `kunlunxin` has its own `kunlunxin/` dir, built on the XPU SDK's native
+  `libxpurt` runtime rather than the CUDA-shaped surface.
 - **aten backend** is the `csrc/aten/backends/<dir>` vendor kernel tree, when one
   exists. `flagos/` (the Python op caller) and `soft_lowp/` (the software
   low-precision matmul path shared by DCU/MetaX) are shared, not per-platform.
@@ -69,12 +70,13 @@ platform, not a per-build choice.
   two of its tests need the memset category and one needs a `::`-qualified kernel name, which
   the vendor's `gemm_ktype0_*`/`sum_kernel_*` kernel set does not produce. It also ships no
   `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
-- **Kunlunxin** (Kunlun P800 XPU) routes every op to the CUDA boxing kernel: its
-  P800 port brings up the boxing path only, and the FlagGems Python allowlist is
-  a follow-up, so `backends_kunlunxin.conf` claims no FlagGems route and the
-  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`. It has no CI job, no
-  `torch_fl/accelerator/` module and no `csrc/runtime/accelerator/` directory
-  (its runtime dir is `cuda`).
+- **Kunlunxin** (Kunlun P800 XPU) is a native vendor backend: its
+  `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
+  op library) and leaves the rest at `none`, with **no `cuda` boxing route**. It
+  has no CI job and no `torch_fl/accelerator/` module. Its FlagGems cohort has
+  not been revalidated on the P800, so no `flaggems` route is enabled yet and the
+  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`; the allowlist is a
+  follow-up.
 - **CI covers 7 of 10**: TsingMicro, Kunlunxin and BPU have no
   `.github/configs/` entry.
 
@@ -83,6 +85,6 @@ platform, not a per-build choice.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, musa, tsingmicro
-- `csrc/aten/backends/`: ascend, flagos, gcu, musa, soft_lowp
+- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, kunlunxin, metax, musa, tsingmicro
+- `csrc/aten/backends/`: ascend, flagos, gcu, kunlunxin, musa, soft_lowp
 - `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, musa, ppu

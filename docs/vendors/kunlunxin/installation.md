@@ -2,50 +2,54 @@
 
 ## Overview
 
-Kunlunxin is a **CUDA-ABI boxing** platform, like DCU, PPU and MetaX. Two
-properties of the vendor stack make that route the right one:
+Kunlunxin is a **native PrivateUse1 backend**, shaped like the MUSA, GCU and
+Ascend backends: its own route key (`kunlunxin`) over the vendor XPU SDK
+operator library, and **no CUDA boxing**. Two properties of the vendor stack
+make that the right shape:
 
-- The Kunlun P800 XPU SDK exposes **CUDA-shaped headers** (`cuda_runtime.h`) and a
-  `libcudart.so*` compatibility runtime — the soname tracks the SDK's CUDA-compat
-  version (`libcudart.so.12` on XPU SDK 5.37.1.0, whose CUDA-compatible version is
-  12.9) — so the shared CUDA runtime sources compile against the vendor SDK with
-  plain host `g++`, no `nvcc`.
-- The Kunlun vendor `torch` registers its device kernels **under the CUDA
-  dispatch key**. The generated PrivateUse1 → CUDA boxing kernels dispatch into
-  the vendor's CUDA-ABI libtorch unchanged, so torch-fl adds no handwritten
-  per-operator kernels.
+- The Kunlun P800 XPU SDK ships a native C runtime — `libxpurt` (headers under
+  `<XPU_ROOT>/include/xpu/runtime.h`) — that the port's own runtime sources
+  (`csrc/runtime/accelerator/kunlunxin/`) call directly for device discovery,
+  allocation, host/device copies and streams. No tensor is re-dispatched onto
+  the CUDA dispatch key, so the build compiles no boxing kernels.
+- The vendor op library is a standalone xdnn library (`libxdnn_pytorch.so`,
+  headers under `include/xdnn_pytorch/`). It ships inside the vendor torch
+  package (`torch_xmlir/`), *not* the XPU SDK, and the native backend wraps it
+  behind the `kunlunxin` route key.
 
 `FLAGOS_ACCELERATOR=kunlunxin` selects this build and is recorded in
 `torch_fl/_build_config.py`, which is what selects
 `torch_fl/configs/backends_kunlunxin.conf` at runtime.
 
-**Status:** Experimental. The measured scope on a P800 OAM covers device
-discovery and indexing, allocation, host/device copies, a CUDA-shaped stream,
-synchronization, and cache release, driven by the port's own CUDA boxing device
-layer. Eager *operators* that reach ATen's CUDA dispatch (for example `torch.mm`
-into the vendor BLAS) are **not validated** here, because the vendor XPU runtime
-on the measured box is built against torch 2.9 and does not load against torch
-2.10 — see [Runtime measurement boundary](#runtime-measurement-boundary). Full
-operator coverage and FlagGems support are not claimed by this guide.
+**Status:** Experimental. The port implements the device layer natively: device
+discovery and indexing, allocation, host/device copies, an XPU stream,
+synchronization, and cache release all run through
+`csrc/runtime/accelerator/kunlunxin/` on the XPU SDK's own `libxpurt` runtime
+rather than the CUDA-shaped shim. Compute coverage comes from the vendor xdnn op
+library behind the `kunlunxin` route key. Neither the native device layer nor the
+vendor route has been measured on P800 hardware in this change — the checked-in
+harness to run it is
+[`tests/manual/kunlunxin_runtime_smoke.py`](../../../tests/manual/kunlunxin_runtime_smoke.py).
+The FlagGems cohort has **not** been revalidated on the P800 — its route is a
+follow-up (see [FlagGems on Kunlunxin](#flaggems-on-kunlunxin)).
 
 ## Prerequisites
 
-- Kunlun P800 hardware and XPU-RT driver
-- Kunlun XPU SDK, normally `/usr/local/xpu` (a versioned `xpu-<ver>` directory
-  symlinked from there; `5.37.1.0` on the measured install, CUDA-compatible
-  version 12.9)
-- XPU CUDA compatibility runtime, normally the SDK's own `/usr/local/xpu/so`
-  (`XCUDART_ROOT` may point at the SDK `so/` directory, or at a directory with
-  the shim one level down in `lib/`)
+- Kunlun P800 hardware and the XPU-RT driver
+- Kunlun XPU SDK, normally `/usr/local/xpu`. It must provide both the native
+  runtime headers (`include/xpu/runtime.h`) and the CUDA-shaped surface
+  (`include/cuda_runtime.h`) — see [Build Notes](#build-notes) for why the
+  latter is still needed on a de-boxed backend.
+- The vendor xdnn op library (`libxdnn_pytorch.so` plus
+  `include/xdnn_pytorch/xdnn_pytorch.h`); it ships inside the vendor torch
+  package, not the XPU SDK.
 - Kunlun vendor PyTorch on the **2.10** line (torch-fl's supported minor)
 - Python 3.8 or later matching the vendor torch build
 - `cmake >= 3.18`, `ninja`, and a host C++17 compiler
-- Optional: `XPU_ENABLE_PROFILER_TRACING=1` if you want the device tracer armed
-  (import no longer requires it — see [Runtime Environment](#runtime-environment))
 
 The Python build environment must use the vendor torch. Do not replace it with an
-NVIDIA CUDA wheel: the vendor CUDA registrations and the XPU runtime are the
-measured operator path.
+NVIDIA CUDA wheel: the vendor `torch_xmlir` package is where the xdnn op library
+and its headers live, so the native backend cannot be built without it.
 
 ## Build From Source
 
@@ -54,50 +58,66 @@ git clone https://github.com/flagos-ai/Torch-FL.git
 cd Torch-FL
 
 export XPU_ROOT=/usr/local/xpu
-export XCUDART_ROOT="$XPU_ROOT/so"
+# Optional: point XDNN_ROOT at the vendor torch package root explicitly.
+# Unset, setup.py discovers it (see Build Notes).
+# export XDNN_ROOT=/path/to/vendor/torch_xmlir
 
 FLAGOS_ACCELERATOR=kunlunxin \
   XPU_ROOT="$XPU_ROOT" \
-  XCUDART_ROOT="$XCUDART_ROOT" \
   pip install --no-build-isolation -vvv -e .
 ```
 
-The build uses the host compiler and does not require `nvcc`. It enables the
-generated CUDA boxing kernels. FlagGems C++ stays off by default because the
-Kunlun stack ships no `liboperators.so`. The SDK libraries remain supplied by the
-target installation; they are not copied into the wheel.
+The build uses the host compiler and does not require `nvcc` or a CUDA toolkit.
+It compiles the native XPU runtime layer and links the vendor xdnn op library.
+FlagGems C++ stays off by default because the XPU SDK ships no
+`liboperators.so`. The SDK and vendor libraries remain supplied by the target
+installation; they are not copied into the wheel.
 
 For an in-place source checkout, use `setup.py build_ext --inplace` instead of
 `pip install`.
 
 ### Build Notes
 
-- **`XPU_ROOT`** must contain `include/cuda_runtime.h`; **`XCUDART_ROOT`** must
-  contain a `libcudart.so*` shim, either directly or one level down in `lib/`. The
-  build fails early when either is invalid, and the build log reports the exact
-  runtime directory it resolved.
-- **`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`** for kunlunxin: the XPU SDK provides no
-  FlagGems `liboperators.so`.
-- The runtime default is CUDA boxing. No operator is rerouted to a vendor-native
-  or FlagGems backend by this port.
+- **`XPU_ROOT`** must contain `include/xpu/runtime.h` (the native `libxpurt`
+  headers the backend links) and `include/cuda_runtime.h`. The build fails early
+  when either is missing.
+- **`XDNN_ROOT`** must contain `libxdnn_pytorch.so` (directly or one level down
+  in `lib/`) and `include/xdnn_pytorch/xdnn_pytorch.h`. It is not derived from
+  `XPU_ROOT` because the library ships inside the vendor torch package. If it is
+  unset, `setup.py` resolves it from `$XDNN_ROOT`, then
+  `$FLAGOS_VENDOR_TORCH_LIB`, then the `torch_xmlir` package in site-packages.
+  Set it, or use `-DFLAGOS_BUILD_VENDOR=OFF` to fall back to CPU for compute ops.
+- **`XCUDART_ROOT`** locates the CUDA-compat `libcudart.so*` shim (the SDK's own
+  `so/` directory on a P800 install). This is the *only* remaining CUDA-shaped
+  build input: `csrc/runtime/hooks.h`'s `isPinnedPtr()` probes
+  `cudaPointerGetAttributes` as the DDP fallback for pointers the flagos host
+  allocator did not register. Neither the header nor the shim carries a kernel
+  and neither is reachable from the routing layer, so neither can re-introduce
+  boxing.
+- **`FLAGOS_BUILD_VENDOR=ON`** (pinned): xdnn is the only operator library the
+  XPU SDK provides.
+- **`FLAGOS_BUILD_BOXING=OFF`**: the conf routes nothing to the CUDA boxing
+  kernels.
+- **`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`** (pinned): no FlagGems `liboperators.so`
+  exists for the XPU SDK.
 
 ## Runtime Environment
 
-Set the compatibility runtime on the loader path before importing torch-fl:
+The build embeds both runtime paths (`libxpurt` and the xdnn directory) in the
+install RPATH, so `LD_LIBRARY_PATH` is normally not needed. If you run from a
+staged install, put the SDK `so/` directory and the xdnn directory on the loader
+path:
 
 ```bash
 export LD_LIBRARY_PATH=/usr/local/xpu/so:/usr/local/xpu/lib:$LD_LIBRARY_PATH
 ```
 
-`XPU_ENABLE_PROFILER_TRACING=1` is required only if you want the device tracer to
-run. The vendor CUPTI compatibility layer raises — rather than returning a
-`CUptiResult` — when the profiler is unconfigured, so
-`csrc/profiler/cupti_device_tracer.cc` arms the activity kinds inside a guarded
-helper and leaves the tracer *unarmed* when the vendor refuses. Import therefore
-succeeds either way; without the variable the tracer reports itself unavailable
-and `start()` is a no-op. `XPU_CUPTI_ENABLE_DEVICE` is likewise optional. If it is
-unset, XPU-RT emits a warning that no devices are selected for profiling; this
-does not prevent ordinary allocation or operator execution.
+Kunlunxin is not in the CUPTI tracer arm of the selection in `csrc/CMakeLists.txt`,
+so the build compiles the `unavailable_device_tracer`. The de-box is why: the
+vendor's CUPTI-compatible shim instruments the CUDA dispatch key, which the
+native backend no longer uses, so arming it would report an empty device timeline
+instead of the XPU one. Import is unaffected, and `start()` is a no-op; device
+profiling is not available on this platform.
 
 ## Verification
 
@@ -106,102 +126,50 @@ Run the checked-in smoke harness on the P800:
 ```bash
 FLAGOS_ACCELERATOR=kunlunxin \
   XPU_ROOT=/usr/local/xpu \
-  XCUDART_ROOT=/usr/local/xpu/so \
   LD_LIBRARY_PATH=/usr/local/xpu/so:/usr/local/xpu/lib:$LD_LIBRARY_PATH \
   /path/to/vendor/python tests/manual/kunlunxin_runtime_smoke.py
 ```
 
 The harness verifies device count, device index 1, allocation, host-to-device and
-device-to-host copies, a CUDA-shaped stream, synchronization, cache release, and
+device-to-host copies, an XPU stream, synchronization, cache release, and
 `torch.mm` against a CPU reference. It exits nonzero on the first failed check.
-Every check except `mm` runs through the port's own CUDA boxing *device* layer and
-is expected to pass on a stock-torch 2.10 build; `mm` reaches ATen's CUDA
-dispatch and needs a vendor torch 2.10 runtime — see
-[Runtime measurement boundary](#runtime-measurement-boundary).
+Every check runs through the port's own native XPU device layer; `mm` reaches the
+vendor xdnn op library behind the native `kunlunxin` route.
 
-The measured P800 environment reported:
+### Superseded CUDA-boxing baseline
 
-- Attached devices: `8`
-- XPU SDK / XPU-RT: `5.37.1.0` (CUDA-compatible version `12.9`)
-- CUDA compatibility runtime: `libcudart.so.12` → `libcudart.so.12.9.1.kunlun`
-- Vendor torch reported by the box: `2.9.0+cu129` (CUDA `12.9`)
-- Vendor device name: `GPU`; device memory: `98304 MiB` per reported device
-
-### Fleet environment status
-
-A 2.10 fleet environment was built from this port on shared storage: a
-`torch-fl-<vendor>-py<X>` conda environment carrying torch `2.10.0+cu129`,
-`flagtree` as the Triton provider, and `FLAGOS_ACCELERATOR=kunlunxin`. It is
-**build/import validated only**. The wheel builds from a clean tree, the
-`lib/flagos_platform` marker records `kunlunxin`, `import torch_fl` succeeds,
-torch-fl selects `backends_kunlunxin.conf`, and `device_count()` returns `8`.
-Runtime operator execution is gated on a vendor XPU-RT plus XMLIR overlay built
-against torch 2.10.
-
-Three independent layers were measured between the fleet environment and a
-working kernel launch, in order:
-
-1. **Runtime RPATH shadowing** — `libtorch_cuda.so` resolves `libcudart.so.12`
-   from a pip `nvidia/cuda_runtime` ahead of the SDK shim. Preloading the SDK
-   runtime (`LD_PRELOAD=/usr/local/xpu/so/libcudart.so.12`) clears the
-   driver-version gate and brings up `device_count() == 8`.
-2. **A stale error latch** — the SDK's `cudaDeviceGetStreamPriorityRange`
-   returns success while leaving `cudaErrorNotSupported` latched, which
-   `CUDACachingAllocator`'s defensive `cudaGetLastError()` check turns into a
-   failure on every allocation.
-3. **Kernel-launch refusal** — with both layers above addressed, allocation and
-   metadata operators succeed (`empty`, view/reshape/transpose, host→device
-   copy) but every kernel-launching operator fails with
-   `CUDA error: operation not supported` (`zeros`/`fill`, `add`, `mul`, `sum`,
-   `matmul`, `cat`, `softmax`, device→host copy).
-
-Layers 1 and 2 are runtime-configuration workarounds outside this port; layer 3
-is a vendor toolchain gap. Nothing in this port addresses layer 3, and the
-port's own verification scope is unaffected — it is a missing vendor torch 2.10
-runtime, not a defect in the CUDA-boxing port.
+An earlier revision of this guide recorded what a P800 OAM reported under the
+removed CUDA-boxing backend: 8 attached devices; XPU SDK / XPU-RT `5.37.1.0`
+(CUDA-compatible version `12.9`); the CUDA compatibility runtime resolving to
+`libcudart.so.12`; the vendor torch on the box at `2.9.0+cu129`; and a per-device
+memory size of 98304 MiB. The device layer it measured was the port's own CUDA
+sources over the XPU driver shim, and operators that reached ATen's CUDA dispatch
+were not validated. **That measurement does not transfer to the native backend**
+— the de-box replaces the runtime sources it exercised — so it is recorded here
+only as provenance for the 2026-10-11 entry in
+[`operator-support.md`](../../reference/operator-support.md), not as evidence for
+the current route list.
 
 ## Operator Scope
 
 The build selects
 [`torch_fl/configs/backends_kunlunxin.conf`](../../../torch_fl/configs/backends_kunlunxin.conf),
-a generated full-coverage config that routes every covered op to the `cuda`
-boxing key. This is intentional: the vendor torch exposes CUDA registrations, so
-a route to `cuda` reaches the vendor kernel through the generated boxing
-implementation. That mapping is audited by regenerating the config; executing the
-routed operators on the XPU requires a vendor torch 2.10 runtime (see below).
-
-## Runtime measurement boundary
-
-The vendor XPU runtime on the measured box is **torch-2.9-bound**: the vendor
-`torch/lib` plus the `torch_plugin` / `torch_xmlir` overlay are compiled against
-torch 2.9 internals. Its compiled module
-`torch_xmlir/_XMLIRC.cpython-310-x86_64-linux-gnu.so` fails to load against a
-stock torch 2.10 build with
-`undefined symbol: _ZN2at4_ops5triu_10redispatchEN3c1014DispatchKeySetERNS_6TensorEl`
-(`at::_ops::triu_::redispatch`, whose 2.10 signature differs from 2.9). The
-overlay's import hook catches that error and only warns, so `import torch_fl`
-still succeeds, but `torch_xmlir` stays uninitialized and eager operators that
-reach ATen's `CUDA` dispatch raise
-`NotImplementedError: Could not run 'aten::empty.memory_format' ... 'CUDA' backend`.
-
-What **is** measured on the ported 2.10 build therefore stops at the boxing
-device layer: `import torch_fl`, accelerator/conf selection
-(`backends_kunlunxin.conf`), `device_count() == 8`, and on `flagos:1`
-`set_device` / `current_device` / allocation / host↔device copy / `Stream` /
-`synchronize` / `empty_cache`. What is **not** validated is any operator that
-dispatches into ATen's CUDA backend, including the harness's `mm` check.
-Validating those requires a vendor torch 2.10 runtime with a matching overlay; a
-pip `nvidia-cublas-cu12` is not a substitute for the vendor BLAS.
+a generated full-coverage config. Kunlunxin is a native-kernel vendor like musa,
+gcu and ascend, so every covered op routes to the native `kunlunxin` key — which
+reaches the vendor xdnn op library — or is left at `none`, which sends the op to
+`cpu_fallback`. There is **no `cuda` route** in the conf. That mapping is audited
+by regenerating the config and by
+`tests/unit/test_conf_registration_consistency.py`, which checks that every
+accelerated route is an op the native registration claims.
 
 ## FlagGems on Kunlunxin
 
-FlagGems is **not** part of this port. Kunlunxin is deliberately absent from
-`FLAGGEMS_PYTHON_PLATFORMS` in
-[`scripts/codegen/gen_vendor_confs.py`](../../../scripts/codegen/gen_vendor_confs.py),
-so `backends_kunlunxin.conf` claims no FlagGems route and every covered operator
-stays on the CUDA boxing kernel. The FlagGems Python allowlist measured on the 2.9
-line is a follow-up PR: adding a route requires codegen coverage for kunlunxin,
-so the gate and the config must move together.
+The FlagGems cohort is **not revalidated** on the P800, so
+`backends_kunlunxin.conf` enables no `flaggems` route yet: the allowlist is a
+follow-up PR. Adding the route requires codegen coverage for kunlunxin (the
+generator's `FLAGGEMS_PYTHON_PLATFORMS`), so the gate and the config must move
+together, and the FlagGems Python overload survey has to be re-run on hardware
+before a route is enabled.
 
 Do not add a kunlunxin FlagGems route from FlagGems availability alone. Extend
 the generator, regenerate, and re-run the survey on hardware:
@@ -214,34 +182,34 @@ python tests/manual/flaggems_overload_survey.py \
 
 Record the torch-fl revision, FlagGems revision, hardware model, date, config
 hashes, harness version, and raw JSON evidence in
-[`operator-support.md`](../../reference/operator-support.md). Kunlunxin remains
-**not revalidated** against the aggregate FlagGems cohort; its measured scope is
-the CUDA-boxing route only.
+[`operator-support.md`](../../reference/operator-support.md). Until then
+Kunlunxin remains **not revalidated** against the aggregate FlagGems cohort; its
+measured scope is the native xdnn route only.
 
 ## Troubleshooting
 
-### Import exits with `Runtime profiler is disabled`
+### `xpu/runtime.h` or `cuda_runtime.h` is missing
 
-This was the original symptom of the vendor CUPTI layer throwing from a static
-initializer. `csrc/profiler/cupti_device_tracer.cc` now arms the activity kinds
-inside a try/catch, so `import torch_fl` succeeds whether or not the vendor
-profiler is configured. Set `XPU_ENABLE_PROFILER_TRACING=1` before the first
-`import torch` only when you actually want the tracer armed.
+Set `XPU_ROOT` to the XPU SDK root. The build fails early: `xpu/runtime.h` is the
+native `libxpurt` header the backend links, and `cuda_runtime.h` is still needed
+for the pinned-pointer probe. Both live under `$XPU_ROOT/include`.
 
-### `cuda_runtime.h` or `libcudart.so*` is missing
+### The vendor xdnn op library is not found
 
-Set `XPU_ROOT` to the directory containing `include/cuda_runtime.h` and
-`XCUDART_ROOT` to the directory containing the `libcudart.so*` shim (directly, or
-one level down in `lib/`). The build fails early when either path is invalid.
+`FLAGOS_BUILD_VENDOR=ON` needs `libxdnn_pytorch.so` and
+`include/xdnn_pytorch/xdnn_pytorch.h`. Set `XDNN_ROOT` to the vendor torch
+package root (`torch_xmlir/`), or `FLAGOS_VENDOR_TORCH_LIB` to a directory
+holding the `.so`. Build with `-DFLAGOS_BUILD_VENDOR=OFF` to fall back to CPU for
+compute ops.
+
+### `libcudart.so*` is missing
+
+Set `XCUDART_ROOT` to the directory containing the CUDA-compat shim (directly, or
+one level down in `lib/`). Only the pinned-pointer probe uses it; no kernel is
+compiled against it.
 
 ### Import cannot find `torch_fl._C`
 
 A plain `build_ext` command leaves the extension under setuptools' temporary
 build directory. Use `build_ext --inplace` or install the package before running
 from the source checkout.
-
-### Profiler warning about no selected devices
-
-Set `XPU_CUPTI_ENABLE_DEVICE` according to the vendor profiler documentation if
-profiling is required. The warning is not a runtime or operator failure when
-profiling is not under test.
