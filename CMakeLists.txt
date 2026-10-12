@@ -499,8 +499,9 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
         "not found: need libxdnn_pytorch.so and include/xdnn_pytorch/xdnn_pytorch.h "
         "under XDNN_ROOT (currently '${XDNN_ROOT}'). xdnn ships inside the vendor "
         "torch package, not the XPU SDK, so set XDNN_ROOT to that package root, or "
-        "FLAGOS_VENDOR_TORCH_LIB to a directory holding libxdnn_pytorch.so. Build "
-        "with -DFLAGOS_BUILD_VENDOR=OFF to fall back to CPU for compute ops.")
+        "FLAGOS_VENDOR_TORCH_LIB to a directory holding libxdnn_pytorch.so, or "
+        "choose another accelerator: xdnn_pytorch is the only operator library the "
+        "XPU SDK provides, so a kunlunxin build always has FLAGOS_BUILD_VENDOR=ON.")
     endif()
     set(XDNN_PYTORCH_INCLUDE_DIRS "${XDNN_PYTORCH_INCLUDE_DIR}")
     message(STATUS "xdnn op library: ${XDNN_PYTORCH_LIB}")
