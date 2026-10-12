@@ -32,17 +32,19 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 
 # Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
 # use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,
-# Kunlunxin uses it against the XPU SDK's CUDA-shaped runtime, DCU uses ROCtracer,
-# Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms without a supported
-# activity API use the unavailable implementation. Each source defines the same
-# factory.
+# DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms
+# without a supported activity API use the unavailable implementation -- that
+# includes Kunlunxin, whose native XPU backend keeps its kernels off the CUDA
+# dispatch key the CUPTI tracer reads, so the tracer would report an empty
+# device timeline rather than the XPU one.
+#
+# Each source defines the same factory.
 #
 # Every accelerator in cmake/flagos_platforms.json must land in exactly one arm;
 # tests/unit/test_device_tracer_selection.py pins the resulting mapping.
 if(FLAGOS_ACCELERATOR STREQUAL "cuda"
    OR FLAGOS_ACCELERATOR STREQUAL "metax"
-   OR FLAGOS_ACCELERATOR STREQUAL "ppu"
-   OR FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+   OR FLAGOS_ACCELERATOR STREQUAL "ppu")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
@@ -137,12 +139,14 @@ endif()
 # vendor is ever enabled per build.
 #
 # MetaX has no native kernel directory: it is a CUDA-boxing vendor, so the
-# hand-written mxcc kernels were removed (git history retains them).
+# hand-written mxcc kernels were removed (git history retains them). Kunlunxin
+# is native: aten/backends/kunlunxin/ wraps the XPU op library (xdnn_pytorch)
+# directly instead of boxing onto CUDA.
 if(NOT FLAGOS_BUILD_VENDOR)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|gcu|musa)/.*")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|gcu|kunlunxin|musa)/.*")
   message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
 else()
-  foreach(_vendor_dir ascend gcu musa)
+  foreach(_vendor_dir ascend gcu kunlunxin musa)
     if(NOT FLAGOS_ACCELERATOR STREQUAL _vendor_dir)
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
@@ -475,10 +479,21 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${ROCTRACER_LIBRARY})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
-  # Kunlunxin's vendor torch exposes CUDA registrations and uses the CUDA-shaped
-  # runtime, so the standard allocator and generated CUDA boxing path apply; the
-  # CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside ${_torch_fl_link_libs}.
+  # Kunlunxin is native, not CUDA-boxing: aten/backends/kunlunxin/ wraps the
+  # vendor xdnn op library directly, so no tensor reaches the CUDA dispatch key
+  # and the generated boxing kernels are not built. The runtime dependency is
+  # libxpurt (via ${CUDA_RUNTIME_LIB} in ${_torch_fl_link_libs}), not libcudart's
+  # kernels -- cudart is on that line only for hooks.h's pinned-pointer probe.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_KUNLUNXIN_KERNEL gates the m.impl subset in register.cc, mirroring
+    # FLAGOS_GCU_KERNEL and FLAGOS_MUSA_KERNEL: without the xdnn kernels there is
+    # nothing to register on PrivateUse1.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_KUNLUNXIN_KERNEL=1)
+    target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${XDNN_PYTORCH_INCLUDE_DIRS})
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
+  endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)

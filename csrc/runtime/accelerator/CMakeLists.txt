@@ -118,12 +118,17 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
       ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${HBUCP_LIB} ${LIBBPU_LIB})
 elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
-  # Kunlunxin XPU. Like DCU/MetaX the vendor SDK ships a CUDA-shaped runtime
-  # (cuda_runtime.h under XPU_ROOT/include, libcudart.so* under XCUDART_ROOT),
-  # so the runtime sources are the shared cuda/ ones
-  # (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda") and there is no kunlunxin/ subdir.
-  target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
-  target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
+  # Kunlunxin XPU. Native, like musa: the SDK ships no usable CUDA runtime for
+  # this backend (its cuda_runtime.h is a CUDA-shaped facade and the c10::cuda::
+  # C++ plumbing behind it is a hollow shell), so kunlunxin/ holds a native port
+  # of the CUDA runtime sources onto the pure-C xpu_* API. <xpu/runtime.h> is
+  # plain C -- host g++ compiles it, no CUDA language -- and libxpurt.so.2 is
+  # the only runtime dependency. XPU_LIB_DIR defaults to ${XPU_ROOT}/so in the
+  # top-level CMakeLists.
+  target_include_directories(${LIBRARY_NAME} PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${XPU_ROOT}/include)
+  target_link_directories(${LIBRARY_NAME} PRIVATE ${XPU_LIB_DIR})
+  target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
 else()
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
 

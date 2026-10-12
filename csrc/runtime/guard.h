@@ -26,9 +26,15 @@
 // resolve there even though DCU's CUDA-compat runtime satisfies plain
 // cudaStream_t calls. MUSA is excluded for the plainer reason that the Moore
 // Threads toolkit ships no CUDA runtime at all, so the header itself is absent
-// -- same exclusion as hooks.h and copy_ops.cc already carry.
+// -- same exclusion as hooks.h and copy_ops.cc already carry. Kunlunxin is
+// excluded because the de-boxed XPU backend drives libxpurt directly and never
+// puts a tensor on the CUDA dispatch key; the XPU SDK does ship a CUDA-shaped
+// cuda_runtime.h, but c10::cuda:: (the C++ stream plumbing this branch needs)
+// is a hollow shell in this build, which is exactly why the backend was
+// de-boxed.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
-    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU)
+    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
+    !defined(USE_KUNLUNXIN)
 #define FLAGOS_GUARD_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #else

@@ -402,17 +402,31 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
-  # Kunlunxin XPU SDK. The CUDA-shaped headers and the libcudart shim come from
-  # the driver installation and are never copied into the wheel: the SDK ships
-  # cuda_runtime.h under XPU_ROOT/include and libcudart.so* under XCUDART_ROOT
-  # (the SDK's own so/ directory on a P800), which is what the vendor torch
-  # links against.
+  # Kunlunxin XPU SDK. The backend is native, not CUDA-boxing: the runtime
+  # sources under csrc/runtime/accelerator/kunlunxin/ and the op layer under
+  # csrc/aten/backends/kunlunxin/ call the SDK's own C API -- libxpurt
+  # (<xpu/runtime.h>) for the runtime and the vendor xdnn library for compute --
+  # so no tensor is ever re-dispatched onto the CUDA dispatch key. XPU_ROOT is
+  # therefore resolved for the xpu/ headers (never copied into the wheel).
+  #
+  # The SDK's CUDA-shaped surface is kept for exactly one caller and one reason:
+  # csrc/runtime/hooks.h's isPinnedPtr() probes cudaPointerGetAttributes as the
+  # DDP fallback for pointers the flagos host allocator did not register, and
+  # that is why cuda_runtime.h and the libcudart shim are still on the include
+  # path and the link line. Neither carries a kernel and neither is reachable
+  # from the routing layer, so neither can re-introduce boxing.
   flagos_resolve_sdk_root(XPU_ROOT "/usr/local/xpu" XPU_ROOT)
   flagos_resolve_sdk_root(XCUDART_ROOT "${XPU_ROOT}/so" XCUDART_ROOT)
+  if(NOT EXISTS "${XPU_ROOT}/include/xpu/runtime.h")
+    message(FATAL_ERROR
+      "Kunlunxin XPU SDK not found: ${XPU_ROOT}/include/xpu/runtime.h does not "
+      "exist. Set XPU_ROOT to the Kunlun XPU SDK root.")
+  endif()
   if(NOT EXISTS "${XPU_ROOT}/include/cuda_runtime.h")
     message(FATAL_ERROR
       "Kunlunxin XPU SDK not found: ${XPU_ROOT}/include/cuda_runtime.h does not "
-      "exist. Set XPU_ROOT to the Kunlun XPU SDK root.")
+      "exist (hooks.h's isPinnedPtr probe needs the CUDA-shaped headers). Set "
+      "XPU_ROOT to the Kunlun XPU SDK root.")
   endif()
   # The shim's soname tracks the SDK's CUDA-compat version (libcudart.so.11.0 on
   # XPU SDK 5.0.21) rather than a fixed one, and it sits either directly in
@@ -431,21 +445,71 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   message(STATUS "Kunlunxin XPU SDK path: ${XPU_ROOT}")
   message(STATUS "Kunlun CUDA runtime path: ${_kunlun_cudart_dir}")
 
+  # -DXPU_LIB_DIR lets a target whose SDK keeps libxpurt elsewhere override the
+  # so/ directory; the P800 ships it at ${XPU_ROOT}/so next to the cudart shim.
+  set(XPU_LIB_DIR "${XPU_ROOT}/so" CACHE PATH "Kunlun XPU runtime library dir")
+
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
   set_target_properties(cuda_runtime_compat PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${XPU_ROOT}/include"
   )
-  target_link_directories(cuda_runtime_compat INTERFACE "${_kunlun_cudart_dir}")
-  target_link_libraries(cuda_runtime_compat INTERFACE cudart)
+  target_link_directories(cuda_runtime_compat INTERFACE
+      "${_kunlun_cudart_dir}" "${XPU_LIB_DIR}")
+  # xpurt is the native runtime the kunlunxin/ sources and the xdnn op library
+  # actually call; cudart is the pinned-pointer probe in hooks.h. libxpurt.so
+  # carries SONAME libxpurt.so.2, so plain `xpurt` resolves against the SDK.
+  target_link_libraries(cuda_runtime_compat INTERFACE cudart xpurt)
 
   set(CUDA_RUNTIME_LIB cuda_runtime_compat)
 
-  # Embed the CUDA-compat runtime path so LD_LIBRARY_PATH is not needed at runtime.
-  list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_cudart_dir}")
-  set(FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_cudart_dir}")
+  # Embed both runtime paths so LD_LIBRARY_PATH is not needed at runtime.
+  list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_cudart_dir}" "${XPU_LIB_DIR}")
+  set(FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_cudart_dir}" "${XPU_LIB_DIR}")
+
+  # Compute kernels come from xdnn (libxdnn_pytorch.so), the vendor's XPU op
+  # library -- the counterpart of topsaten on GCU and mudnn on MUSA. It does not
+  # ship in the XPU SDK root: it is installed inside the vendor torch package
+  # (torch_xmlir/), which is why XDNN_ROOT is its own knob rather than something
+  # derived from XPU_ROOT. setup.py passes it; a direct cmake invocation can set
+  # it, or point FLAGOS_VENDOR_TORCH_LIB at a directory holding the .so (the
+  # package root and the site-packages lib/ install both land that way).
+  if(FLAGOS_BUILD_VENDOR)
+    if(NOT DEFINED XDNN_ROOT)
+      set(XDNN_ROOT "$ENV{XDNN_ROOT}")
+    endif()
+    if(XDNN_ROOT STREQUAL "" AND DEFINED ENV{FLAGOS_VENDOR_TORCH_LIB})
+      set(_kunlun_xdnn_hint "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
+      if(EXISTS "${_kunlun_xdnn_hint}/libxdnn_pytorch.so")
+        set(XDNN_ROOT "${_kunlun_xdnn_hint}")
+      elseif(EXISTS "${_kunlun_xdnn_hint}/../libxdnn_pytorch.so")
+        get_filename_component(XDNN_ROOT "${_kunlun_xdnn_hint}/.." ABSOLUTE)
+      endif()
+    endif()
+    set(XDNN_ROOT "${XDNN_ROOT}" CACHE PATH "Kunlun xdnn (vendor op library) package root")
+
+    find_library(XDNN_PYTORCH_LIB xdnn_pytorch
+        PATHS "${XDNN_ROOT}" NO_DEFAULT_PATH)
+    find_path(XDNN_PYTORCH_INCLUDE_DIR xdnn_pytorch/xdnn_pytorch.h
+        PATHS "${XDNN_ROOT}/include" NO_DEFAULT_PATH)
+    if(NOT XDNN_PYTORCH_LIB OR NOT XDNN_PYTORCH_INCLUDE_DIR)
+      message(FATAL_ERROR
+        "FLAGOS_BUILD_VENDOR=ON for kunlunxin but the vendor xdnn op library was "
+        "not found: need libxdnn_pytorch.so and include/xdnn_pytorch/xdnn_pytorch.h "
+        "under XDNN_ROOT (currently '${XDNN_ROOT}'). xdnn ships inside the vendor "
+        "torch package, not the XPU SDK, so set XDNN_ROOT to that package root, or "
+        "FLAGOS_VENDOR_TORCH_LIB to a directory holding libxdnn_pytorch.so. Build "
+        "with -DFLAGOS_BUILD_VENDOR=OFF to fall back to CPU for compute ops.")
+    endif()
+    set(XDNN_PYTORCH_INCLUDE_DIRS "${XDNN_PYTORCH_INCLUDE_DIR}")
+    message(STATUS "xdnn op library: ${XDNN_PYTORCH_LIB}")
+    message(STATUS "xdnn include: ${XDNN_PYTORCH_INCLUDE_DIR}")
+    get_filename_component(_kunlun_xdnn_libdir "${XDNN_PYTORCH_LIB}" DIRECTORY)
+    list(APPEND CMAKE_INSTALL_RPATH "${_kunlun_xdnn_libdir}")
+    list(APPEND FLAGOS_VENDOR_RPATH_DIRS "${_kunlun_xdnn_libdir}")
+  endif()
 
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
-  # host-only boxing/runtime sources are compiled (no NVIDIA toolkit probe).
+  # host-only runtime/op sources are compiled (no NVIDIA toolkit probe).
   add_library(torch::cudart INTERFACE IMPORTED)
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
