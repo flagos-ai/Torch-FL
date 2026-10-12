@@ -71,6 +71,12 @@ jobs:
           # cupti_runtime_cbid.h at build time.
           echo "=== gen_cupti_runtime_cbid.py --check ==="
           python3 scripts/codegen/gen_cupti_runtime_cbid.py --check
+          # Reads only committed sources (the shared generated/register.inc and
+          # its own op table) and writes two files, so --check needs no vendor
+          # toolkit and no built torch_fl -- only the torchgen that ships with
+          # the CPU torch installed above.
+          echo "=== codegen_kunlunxin.py --check ==="
+          python3 scripts/codegen/codegen_kunlunxin.py --check
 
       - name: Run conf/registration consistency tests
         run: |

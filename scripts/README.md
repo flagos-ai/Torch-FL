@@ -26,6 +26,7 @@ Run every script from the repository root; the examples below assume that.
 | `codegen_ascend.py` | Ascend aclnn backend sources under `csrc/aten/backends/ascend/`, and appends the covered ops to `backends_ascend.conf`. | `python scripts/codegen/codegen_ascend.py [--category NAME] [--no-conf]` |
 | `codegen_gcu.py` | Enflame GCU (topsaten) backend sources, and the matching conf append. | `python scripts/codegen/codegen_gcu.py [--category NAME] [--no-conf]` |
 | `codegen_mudnn.py` | Moore Threads MUSA (mudnn) backend sources, and the matching conf append. | `python scripts/codegen/codegen_mudnn.py [--category NAME] [--no-conf]` |
+| `codegen_kunlunxin.py` | The Kunlunxin XPU (xdnn_pytorch) native backend: `csrc/aten/backends/kunlunxin/generated/{kunlunxin_kernels.cc,kunlunxin_register.inc}`. Emits only the ten runtime-conformance ops; `torch_fl/configs/backends_kunlunxin.conf` is derived from the emitted register file by `gen_vendor_confs.py`. | `python scripts/codegen/codegen_kunlunxin.py [--check]` |
 | `codegen_musa_flaggems.py` | The MUSA FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_musa_flaggems.py [--check]` |
 | `codegen_gcu_flaggems.py` | The GCU FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_gcu_flaggems.py [--check]` |
 | `codegen_autograd.py` | `csrc/aten/generated/variable_type.cc` — the `AutogradPrivateUse1` layer for ops a backend re-owns with a fused kernel. | `python scripts/codegen/codegen_autograd.py` |
@@ -106,6 +107,7 @@ require an empty diff before opening a PR that touches them.
 | `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc` | `codegen_gcu_flaggems.py` | `codegen_gcu_flaggems.py --check` — **CI** |
 | `csrc/aten/backends/musa/generated/{musa_kernels.cc,musa_register.inc}` | `codegen_mudnn.py` | **manual** (needs MUSA ATen headers) |
 | `csrc/aten/backends/musa/generated/musa_flaggems_register.inc` | `codegen_musa_flaggems.py` | `codegen_musa_flaggems.py --check` — **CI** |
+| `csrc/aten/backends/kunlunxin/generated/{kunlunxin_kernels.cc,kunlunxin_register.inc}` | `codegen_kunlunxin.py` | `codegen_kunlunxin.py --check` — **CI** |
 | `torch_fl/configs/backends_*.conf` | `gen_vendor_confs.py` | `gen_vendor_confs.py --check` — **CI**; `tests/unit/test_gen_vendor_confs.py` and `tests/unit/test_conf_registration_consistency.py` enforce the same contract |
 | `csrc/profiler/generated/cupti_runtime_cbid.txt` and `cupti_runtime_cbid_names.inc` | `gen_cupti_runtime_cbid.py` | `gen_cupti_runtime_cbid.py --check` — **CI**; `tests/unit/test_cupti_runtime_cbid_table.py` enforces the same contract |
 | `torch_fl/tileops/generated/*` | `codegen_tileops.py` | `codegen_tileops.py --check` — **manual** (needs torch + tileops) |
