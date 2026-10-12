@@ -21,16 +21,17 @@ with ``FLAGOS_LOG=dispatch``, then asserts two things at once:
       backend this platform's conf routes the op to (``runtime_caps.route_reason``);
     * the device numerics match a CPU reference (``cpu_reference_ok``).
 
-The only skip is data-driven: an op the conf routes to ``none`` is a deliberate
-cpu_fallback, so it emits no dispatch line and is skipped rather than failed.
-An op routed to a FlagGems backend is marked so the package conftest can skip it
-on a wheel whose build record lacks that kernel set -- the one build-driven skip
-allowed. No platform name gates anything here.
+The only skip is build-driven: an op routed to a FlagGems backend is marked so
+the package conftest can skip it on a wheel whose build record lacks that kernel
+set -- the one build-driven skip allowed. An op the conf routes to ``none`` is a
+generation gap and fails outright: every ``RUNTIME_OPS`` entry must reach an
+accelerator backend on every platform, so a ``none`` route is never an accepted
+terminal state. No platform name gates anything here.
 """
 
 import pytest
 
-from runtime_caps import RUNTIME_OPS, route_reason, skip_if_unrouted
+from runtime_caps import RUNTIME_OPS, require_routed, route_reason
 from runtime_probe import probe_ops
 
 
@@ -54,8 +55,8 @@ def _parametrized_ops() -> list:
 @pytest.mark.anyplatform
 @pytest.mark.parametrize("op", _parametrized_ops())
 def test_dispatch_matches_conf_route(op: str):
-    skip_if_unrouted(op)
-    backend, reason = route_reason(op)
+    backend = require_routed(op)
+    _, reason = route_reason(op)
     assert reason == "routed", f"{op} unexpectedly resolved to {reason}"
     report = probe_ops([op])
     assert len(report) == 1

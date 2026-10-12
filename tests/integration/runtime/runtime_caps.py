@@ -18,7 +18,8 @@ Nothing here decides anything from a platform name. The two kinds of fact the
 suite is allowed to branch on both live in files the wheel carries with it:
 
     * the op-routing conf (``backends_<platform>.conf``), which says which
-      backend each op reaches -- ``none`` meaning "deliberately cpu_fallback";
+      backend each op reaches -- for a ``RUNTIME_OPS`` entry, ``none`` is a
+      generation gap this suite rejects, not a permissible terminal state;
     * the build record (``torch_fl/_build_config.py``), which says which kernel
       sets were compiled into this wheel.
 
@@ -124,16 +125,20 @@ def flaggems_cpp_enabled() -> bool:
     return "flaggems_cpp" in build_kernels()
 
 
-def skip_if_unrouted(op: str) -> None:
-    """Skip the running test when the conf routes ``op`` to ``none``.
+def require_routed(op: str) -> str:
+    """Assert the conf routes ``op`` to an accelerator backend, and return it.
 
-    A ``none`` route is a deliberate cpu_fallback, so the op reaches ATen's CPU
-    kernel and never emits a dispatch line: a dispatch assertion for it would be
-    vacuous on this platform. This is a data-driven skip (the conf says so),
-    never a platform name.
+    A ``none`` route for a ``RUNTIME_OPS`` entry is a generation gap, not a
+    decision to accept: the suite exists to prove every one of these ten ops
+    reaches an accelerator backend on every platform. A platform that cannot
+    route one of them must be fixed in its conf/codegen -- so this raises rather
+    than skipping. The failure is data-driven (the conf says so), never a
+    platform name.
     """
-    import pytest
-
     backend, reason = route_reason(op)
     if backend is None and reason == "conf_route_none":
-        pytest.skip(f"{op} routes to none in {conf_path()} (cpu_fallback)")
+        raise AssertionError(
+            f"{op} routes to none in {conf_path()}: a RUNTIME_OP with no "
+            "accelerator backend is a generation gap, not an accepted route"
+        )
+    return backend
