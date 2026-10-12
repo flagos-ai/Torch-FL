@@ -41,10 +41,13 @@
 
 namespace at::native::flagos::kunlunxin {
 
-// Copies `src` into `dst` on the device, honoring sizes, strides and
-// storage_offset on both sides; `src` may be broadcast against `dst`. The two
-// dtypes must match. Returns false when the call is one this path declines, in
-// which case the caller must fall back to its host round-trip.
+// Copies `src` into `dst` on the device. The vendor entry point
+// (`xdnn_pytorch::contiguous`) materialises `src` through its own strides into
+// `dst`, so a strided `src` is served -- but it writes `dst` densely from
+// `dst.data_ptr()` and ignores the destination descriptor's strides, so `dst`
+// must be contiguous. Returns false when the call is one this path declines
+// (including any non-contiguous `dst` and any shape mismatch -- `src` is not
+// broadcast), in which case the caller must fall back to its host round-trip.
 bool StridedCopy(const at::Tensor& dst, const at::Tensor& src);
 
 // Returns a contiguous on-device copy of `src` converted to `dtype`, or an

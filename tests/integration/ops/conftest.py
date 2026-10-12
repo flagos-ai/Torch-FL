@@ -75,6 +75,11 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # runs the CUDA-marked tests and skips every other backend's.
     "cuda": ("metax", "ascend", "musa", "dcu"),
     "dcu": ("metax", "ascend", "musa", "gcu"),
+    # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
+    # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
+    # `none` (CPU fallback), with no `cuda` route, so a `-> cuda` dispatch assertion
+    # cannot hold. Every other backend's marker is skipped for the same reason.
+    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu"),
 }
 
 

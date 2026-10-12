@@ -320,6 +320,88 @@ BPUWrapperConvolutionBackwardOverrideable(
 }
 #endif // USE_BPU
 
+#if defined(USE_KUNLUNXIN)
+// Convolution on a device whose vendor SDK exposes no conv operator.
+//
+// Same shape as the BPU block above: aten::convolution dispatches PrivateUse1
+// to convolution_overrideable, whose only other kernel is a
+// CompositeExplicitAutograd stub that raises NotImplementedError, so the boxed
+// cpu_fallback (which moves the arguments to CPU and redispatches the *same*
+// op) lands back on that stub. The xdnn op library covers only the
+// runtime-conformance op set, so there is no vendor kernel to generate here --
+// these wrappers cross to CPU and call at::convolution, a different op with a
+// real CPU kernel.
+at::Tensor KunlunxinWrapperConvolutionOverrideable(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const ::std::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    bool transposed,
+    c10::SymIntArrayRef output_padding,
+    c10::SymInt groups) {
+  auto out = at::convolution_symint(
+      input.cpu(),
+      weight.cpu(),
+      bias.has_value() && bias->defined()
+          ? ::std::optional<at::Tensor>(bias->cpu())
+          : ::std::nullopt,
+      stride,
+      padding,
+      dilation,
+      transposed,
+      output_padding,
+      groups);
+  return out.to(input.device());
+}
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor>
+KunlunxinWrapperConvolutionBackwardOverrideable(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    bool transposed,
+    c10::SymIntArrayRef output_padding,
+    c10::SymInt groups,
+    ::std::array<bool, 3> output_mask) {
+  // convolution_backward wants the forward bias *sizes*, not the bias, and only
+  // to shape grad_bias -- which is a plain sum over the non-channel dims, so the
+  // channel count is all it needs.
+  ::std::optional<c10::SymIntArrayRef> bias_sizes = ::std::nullopt;
+  c10::SymInt out_channels =
+      transposed ? weight.sym_size(1) * groups : weight.sym_size(0);
+  ::std::vector<c10::SymInt> bias_shape{out_channels};
+  if (output_mask[2]) {
+    bias_sizes = c10::SymIntArrayRef(bias_shape);
+  }
+
+  auto out = at::convolution_backward_symint(
+      grad_output.cpu(),
+      input.cpu(),
+      weight.cpu(),
+      bias_sizes,
+      stride,
+      padding,
+      dilation,
+      transposed,
+      output_padding,
+      groups,
+      output_mask);
+
+  auto to_dev = [&](const at::Tensor& t) {
+    return t.defined() ? t.to(input.device()) : t;
+  };
+  return ::std::make_tuple(
+      to_dev(::std::get<0>(out)),
+      to_dev(::std::get<1>(out)),
+      to_dev(::std::get<2>(out)));
+}
+#endif // USE_KUNLUNXIN
+
 // ============================================================
 // Generated wrappers for 71 CUDA operators
 // ============================================================
@@ -476,6 +558,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_KUNLUNXIN_KERNEL)
     #include "backends/kunlunxin/generated/kunlunxin_register.inc"
     #endif
+    // The vendor SDK exposes no conv operator, so the *_overrideable ops cannot
+    // be generated (see the wrapper block above) -- they are the one pair of
+    // ops claimed here without an xdnn kernel, and they take the CPU route.
+    m.impl("convolution_overrideable", KunlunxinWrapperConvolutionOverrideable);
+    m.impl("convolution_backward_overrideable",
+        KunlunxinWrapperConvolutionBackwardOverrideable);
   #elif defined(USE_ASCEND)
     #include "backends/ascend/generated/ascend_register.inc"
   #elif defined(USE_MUSA)

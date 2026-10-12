@@ -82,21 +82,25 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
     return true;
   }
 
-  // A destination dim of stride 0 with extent > 1 aliases every element of that
-  // dim onto one address. The vendor descriptor carries strides, so it would
-  // happily write one element's worth and report success.
-  for (int64_t dim = 0; dim < dst.dim(); ++dim) {
-    if (dst.size(dim) > 1 && dst.stride(dim) == 0) {
-      return false;
-    }
+  // The vendor entry point is `contiguous`: it materialises the *source*
+  // through its own strides, but it writes the *destination* densely from
+  // `dst.data_ptr()` -- the destination descriptor's strides are ignored.
+  // Handing it a strided destination lands the source in the wrong elements
+  // (measured: `padded[:, 2:10].copy_(input)` wrote the source rows dense from
+  // the view's storage offset, so only the first rows of the padded output
+  // came out right and the rest kept the fill). A strided destination takes
+  // the caller's host round-trip instead. This also subsumes the aliasing
+  // guard a stride-0 dim would need: extent > 1 with stride 0 is never
+  // contiguous.
+  if (!dst.is_contiguous()) {
+    return false;
   }
 
-  // The vendor's strided copy is `contiguous`: it materialises the source
-  // through its own strides into the destination descriptor. That is not a
-  // general broadcast copy, so a source broadcasting against a differently
-  // shaped destination takes the caller's host round-trip instead. A rank-0
-  // pair still compares equal here, because XdnnTensorWrapper rewrites a
-  // scalar operand to the equivalent 1-element vector on both sides.
+  // Not a general broadcast copy, so a source broadcasting against a
+  // differently shaped destination takes the caller's host round-trip
+  // instead. A rank-0 pair still compares equal here, because
+  // XdnnTensorWrapper rewrites a scalar operand to the equivalent 1-element
+  // vector on both sides.
   if (dst.sizes() != src.sizes()) {
     return false;
   }

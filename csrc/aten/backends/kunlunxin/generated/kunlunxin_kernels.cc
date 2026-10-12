@@ -212,11 +212,15 @@ at::Tensor NegKernelKunlunxin(const at::Tensor& self) {
   if (!kunlunxin::KunlunxinSupportsUnaryDtype(self.scalar_type())) {
     return at::neg(self.cpu()).to(self.device());
   }
-  kunlunxin::KunlunxinDeviceGuard guard(self);
+  // neg reads its input densely, so a strided operand must be materialised
+  // before it is described to the vendor call -- the wrappers pass real
+  // strides through, but this entry point ignores them.
+  at::Tensor self_c = self.contiguous();
+  kunlunxin::KunlunxinDeviceGuard guard(self_c);
   xpytorch::xpu::api::Context* const context =
-      kunlunxin::GetKunlunxinContext(self);
-  at::Tensor out = at::empty(self.sizes(), self.options());
-  kunlunxin::XdnnTensorWrapper t_self(self);
+      kunlunxin::GetKunlunxinContext(self_c);
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  kunlunxin::XdnnTensorWrapper t_self(self_c);
   kunlunxin::XdnnTensorWrapper t_out(out);
   KUNLUNXIN_EXEC(
       neg, xdnn_pytorch::neg(context, t_self.get(), t_out.get()));

@@ -104,12 +104,21 @@ integration_tests:
   # Marker selection, not a file allowlist. Kunlunxin is a native-kernel vendor
   # like musa/gcu/ascend: backends_kunlunxin.conf routes ops to the native
   # `kunlunxin` key (the vendor xdnn op library) or leaves them at `none` (CPU
-  # fallback), with no `cuda` route, so the FlagGems runtime group below is the
-  # only route-specific split and there is no vendor-marker half to add here.
+  # fallback), with no `cuda` route, so the `-> cuda` dispatch assertions are
+  # skipped by the platform table in tests/integration/ops/conftest.py rather
+  # than run here.
+  #
+  # `not flaggems`: the FlagGems runtime group asserts a `-> flagos` (FlagGems)
+  # dispatch against the conf route, and the flaggems build of this image
+  # (flagtree XPU) cannot import flag_gems at all -- its XPU TLE backend raises
+  # NotImplementedError for `tle.device_mesh`, which pytest.importorskip does not
+  # catch. Same reason test_flaggems_device_name.py is ignored below; the vendor
+  # / FlagGems group split stays enforced on the platforms where FlagGems runs.
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      --ignore=tests/integration/ops/test_flaggems_device_name.py
       -v -s --tb=short
 
   # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX/GCU. The
