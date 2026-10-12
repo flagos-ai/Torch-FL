@@ -319,7 +319,7 @@ def test_conf_route_counts_are_stable():
         # on the gcu kernel. See the entry in scripts/codegen/gen_vendor_confs.py.
         "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
         "kunlunxin": {"cuda": 2037},
-        "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
+        "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
         "ppu": {"flaggems": 592, "cuda": 1445},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},

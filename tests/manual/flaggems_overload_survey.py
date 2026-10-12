@@ -23,7 +23,7 @@ An overload with no CPU-valid synthesized case is UNTESTED, never a failure or a
 pass. Raw per-case evidence is retained in JSON for later auditing.
 
 The full matrix is seven profiles per overload. On a large route set (MetaX's
-592, say) the ``2d-f32`` profile alone is the useful screening pass -- it is the
+594, say) the ``2d-f32`` profile alone is the useful screening pass -- it is the
 one that exercises ordinary arguments, including the negative values that expose
 a kernel computing a finite answer on a domain where ATen returns NaN -- and
 ``--profiles 2d-f32`` runs it without the five dtype/layout variants. A subset

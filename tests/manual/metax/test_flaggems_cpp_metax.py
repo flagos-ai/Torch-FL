@@ -114,18 +114,26 @@ print("CONF=" + (torch_fl.backend_config_path() or "<unset>"))
     check("CPP+boxing selects metax cpp conf", ok, conf or proc.stderr[-300:])
 
 
-def _routing_case(name, snippet, op_label):
-    """Assert the dispatch log shows op_label routed to the C++ 'flagos' backend."""
+def _routing_case(name, snippet, op_label, expected="flagos"):
+    """Assert the dispatch log shows op_label routed to the ``expected`` backend.
+
+    ``expected`` is the dispatch-log name, defaulting to the C++ backend's
+    ``flagos``. The Python path's log name is ``flagos_python``, which two cases
+    below pass: ``_softmax`` and ``embedding`` are not in
+    ``METAX_CPP_MEASURED`` while the MACA C++ build is not wired into CI, so this
+    build routes them to the Python path. They stay here so the C++ routing is
+    re-measured the moment that wiring restores them.
+    """
     proc = _run_snippet(_PREAMBLE + snippet)
     log = proc.stdout + proc.stderr
     # Dispatch log lines look like: "flagos dispatch: mm -> flagos"
     hit = [
         ln
         for ln in log.splitlines()
-        if op_label in ln and "->" in ln and ln.rstrip().endswith("flagos")
+        if op_label in ln and "->" in ln and ln.rstrip().endswith(expected)
     ]
     ok = bool(hit)
-    detail = hit[0].strip() if hit else f"no '-> flagos' line for {op_label}"
+    detail = hit[0].strip() if hit else f"no '-> {expected}' line for {op_label}"
     if not ok:
         # Surface what it actually routed to, to distinguish "fell back to
         # boxing" from "crashed".
@@ -134,7 +142,7 @@ def _routing_case(name, snippet, op_label):
             detail = f"routed elsewhere: {other[0].strip()}"
         elif proc.returncode != 0:
             detail = f"exit {proc.returncode}: {log.strip()[-300:]}"
-    check(f"{name} routes to C++ flagos", ok, detail)
+    check(f"{name} routes to {expected}", ok, detail)
 
 
 def test_mm_routes_to_boxing():
@@ -170,7 +178,12 @@ print("MM_OK=" + str(bool(torch.allclose(c.cpu(), ref, atol=1e-2, rtol=1e-2))))
 
 
 def test_routing():
-    """Each C++-backed op must log '-> flagos' (the kFlagGemsCpp backend)."""
+    """Each op must log the backend the conf routes it to.
+
+    That is `-> flagos` (kFlagGemsCpp) for the ops in METAX_CPP_MEASURED, and
+    `-> flagos_python` for the two the measured set does not carry yet. See
+    `_routing_case`.
+    """
     _routing_case(
         "bmm", "a = torch.randn(4, 32, 32, device=dev)\nc = torch.bmm(a, a)\n", "bmm"
     )
@@ -184,6 +197,7 @@ def test_routing():
         "_softmax",
         "a = torch.randn(32, 32, device=dev)\nc = torch.softmax(a, dim=-1)\n",
         "_softmax",
+        "flagos_python",
     )
     _routing_case("sum", "a = torch.randn(64, 64, device=dev)\nc = a.sum()\n", "sum")
     _routing_case(
@@ -192,6 +206,7 @@ def test_routing():
         "i = torch.randint(0, 16, (4,), device=dev)\n"
         "c = torch.nn.functional.embedding(i, w)\n",
         "embedding",
+        "flagos_python",
     )
     _routing_case("max", "a = torch.randn(64, device=dev)\nc = a.max()\n", "max")
     _routing_case(

@@ -530,8 +530,8 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
 
 def test_metax_conf_keeps_mm_boxed():
     """A measured exception, not a derivable one: mm is in the shared fg_cpp set
-    but only 17 of 18 verified on-device, mm/mm.out failing on shared-memory size.
-    METAX_CPP_VERIFIED encodes that measurement, so mm must stay on boxing."""
+    but was not measured servable on MetaX hardware, so it never entered
+    METAX_CPP_MEASURED and must stay on boxing."""
     routes = g.build_all(CONF_DIR)["metax"][1]
     assert routes["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
     # Must exist in METAX_CPP_MEASURED (test_metax_conf_keeps_mm_boxed ensures it

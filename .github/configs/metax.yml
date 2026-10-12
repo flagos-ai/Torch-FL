@@ -178,12 +178,15 @@ integration_tests:
   # tests/integration/ops/backend_conf.py:routed_backend -- never a hard-coded
   # backend name, which would describe whichever platform the test was written
   # on. That makes this group a routing measurement, not a FlagGems-only one:
-  # of the 13 cases, four are routed to the FlagGems Python path (abs, neg,
-  # silu, where.self), two to its C++ path (embedding, _softmax) and seven to
-  # the cuda boxing kernel (add.Tensor, bmm, cat, mean.dim, mm, mul.Tensor,
-  # sum.dim_IntList) because backends_metax.conf holds the triton-metax gaps
-  # off FlagGems. The group above excludes those cases for exactly that reason;
-  # this is where they are measured.
+  # of the 13 cases, six are routed to the FlagGems Python path (abs, neg,
+  # silu, where.self, embedding, _softmax) and seven to the cuda boxing kernel
+  # (add.Tensor, bmm, cat, mean.dim, mm, mul.Tensor, sum.dim_IntList) because
+  # backends_metax.conf holds the triton-metax gaps off FlagGems. Nothing here
+  # is left on the FlagGems C++ path: embedding and _softmax used to be, and
+  # moved to the Python path because the wheel this job installs is the
+  # pure-Python one with no C++ half to serve that route. The group above
+  # excludes those cases for exactly that reason; this is where they are
+  # measured.
   #
   # Measured on the eight-device C550 host on 2026-09-15: 13 passed, 1206
   # deselected, 1 xpassed in 251s.
@@ -193,7 +196,7 @@ integration_tests:
       -m "flaggems and main_ops" -v -s --tb=short
 
   # The MetaX counterpart of test_musa_dispatch.py. backends_metax.conf is
-  # FlagGems-first -- 592 of its 2036 ops go to the FlagGems Python path, 12 to
+  # FlagGems-first -- 594 of its 2037 ops go to the FlagGems Python path, 10 to
   # its C++ path, and the rest fall back to the cuda boxing kernel -- and this
   # file pins that decision on hardware: routing is read from the dispatch log in
   # a fresh subprocess (PythonOpCache memoizes the resolved FlagGems callable per

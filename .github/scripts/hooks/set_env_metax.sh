@@ -131,7 +131,7 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 # record. The retired FLAGOS_USE_FLAGGEMS switch
 # used to select a separate backends_flaggems.conf; nothing reads it any more,
 # so setting it here would misdescribe the build -- the FlagGems Python path is
-# on for the 592 ops the conf routes to it either way.
+# on for the 594 ops the conf routes to it either way.
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
 
@@ -181,7 +181,7 @@ PY
 # the MetaX FlagTree build -- the one whose "metax" backend is the one the
 # generated kernels were measured on -- rather than the triton-metax the image
 # carries beside its own MetaX torch install. FlagGems is required because
-# backends_metax.conf routes 592 ops to the Python FlagGems path by default
+# backends_metax.conf routes 594 ops to the Python FlagGems path by default
 # (FLAGOS_BUILD_FLAGGEMS=1 above compiles the dispatcher slot).
 #
 # Both are installed into the venv rather than linked out of the image, so the
@@ -352,7 +352,7 @@ if [[ "$CI_STAGE" == "integration" ]]; then
     FLAGGEMS_GAP="$(gems_cohort_gap python torch_fl || true)"
     if [[ -z "$FLAGGEMS_GAP" ]]; then
       echo "::error::The venv cannot import flag_gems even with torch_fl" \
-           "imported first; the 592 FlagGems routes in backends_metax.conf have" \
+           "imported first; the 594 FlagGems routes in backends_metax.conf have" \
            "nothing to call."
       exit 1
     fi

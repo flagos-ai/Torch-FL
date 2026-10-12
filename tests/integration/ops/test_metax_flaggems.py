@@ -15,8 +15,8 @@
 """
 Real MetaX coverage for the MetaX FlagGems hybrid path.
 
-``backends_metax.conf`` is FlagGems-first: 12 of the ops torch_fl can route go
-to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 592 go to
+``backends_metax.conf`` is FlagGems-first: 10 of the ops torch_fl can route go
+to ``flaggems_cpp`` (the C++ path, ``Backend::kFlagGemsCpp``), 594 go to
 ``flaggems`` (the FlagGems Python/Triton path, ``Backend::kFlagGems``), and only
 the ops measured not to work there fall back to the cuda boxing kernel (maca
 ``libtorch_cuda``). This file pins both halves of that decision on hardware, the
@@ -48,6 +48,18 @@ observed. A subprocess starts with an empty cache.
 
 Measured on MetaX C550 with flagtree 0.6.1+metax3.6 and FlagGems
 5.4.0rc2.post1+g5a58df410 (master @ 5a58df410, 2026-09-15).
+
+``_softmax`` and ``embedding`` were on the ``flaggems_cpp`` slot when that
+measurement was taken, on a host whose FlagGems build had its C++ half compiled
+in. They are off it now: the MetaX CI lane installs the pure-Python FlagGems
+wheel, which ships no ``liboperators.so``, so the dispatcher degraded both
+routes to the CUDA boxing kernel and neither could be served -- and both are in
+the runtime-conformance op set, so the suite could not go green. Both are also
+in ``FLAGGEMS_PYTHON_OPS``, so they took the Python route instead; the
+``embedding`` entry below asserts that, and ``_MEASURED_FLAGGEMS_ROUTES``
+counts both.
+Restoring the C++ routing is the follow-up PR that wires the MACA C++ build into
+the MetaX CI hook.
 
 Seven of the ops measured here were added to the conf by that re-measurement,
 not by the shared generator: they sit in ``flaggems_runtime_broken`` group (5)
@@ -142,12 +154,12 @@ _PRELUDE = (
 #
 # The expected backend is per entry because "on FlagGems" is two different log
 # names: `flagos_python` is the Python/Triton path (``flag_gems.<fn>``, conf key
-# `flaggems`) and `flagos` is the C++ path (conf key `flaggems_cpp`). Embedding
-# is in `_ROUTED_TO_FLAGGEMS` on the C++ slot; the other 30 are on the Python
-# one, which is the path whose 592 routes this file exists to guard. Seven of
-# the 30 -- the ones below the tensor-factory group -- come from
-# METAX_FLAGGEMS_MEASURED rather than the shared coverage set; see the module
-# docstring.
+# `flaggems`) and `flagos` is the C++ path (conf key `flaggems_cpp`). `embedding`
+# used to be the one entry on the C++ slot; it is on the Python slot now, so
+# every entry here names `flagos_python`, which is the path whose 594 routes this
+# file exists to guard. Seven of the entries -- the ones below the tensor-factory
+# group -- come from METAX_FLAGGEMS_MEASURED rather than the shared coverage set;
+# see the module docstring.
 #
 # Each call is asserted on *its own* op rather than on "nothing here ran on
 # cuda": every one of these calls also emits incidental routes -- `lift_fresh`,
@@ -180,7 +192,7 @@ _ROUTED_TO_FLAGGEMS = {
     # put it on the FlagGems path and Qwen-Image-2512's complex rotary-frequency
     # slice hit `flag_gems/ops/slice.py`'s complex64 assertion; see
     # `_FORCED_OFF_FLAGGEMS` group 4 and `_FORCED_OFF_DISPATCH`.
-    "embedding": ("torch.nn.functional.embedding(idx, w)", "flagos"),
+    "embedding": ("torch.nn.functional.embedding(idx, w)", "flagos_python"),
     "index_add_": ("x = a.clone()\nx.index_add_(0, idx, src)", "flagos_python"),
     "linspace": ("torch.linspace(0.0, 1.0, 8, device=DEVICE)", "flagos_python"),
     "full": ("torch.full((4, 4), 3.0, device=DEVICE)", "flagos_python"),
@@ -359,11 +371,13 @@ _FORCED_OFF_DISPATCH = {
 
 # Measured number of `flaggems` routes in backends_metax.conf. A regression guard
 # rather than an exact contract: the count only moves when an op is added,
-# removed, or re-measured, and each of those is a deliberate change. The 592nd is
-# `scaled_dot_product_attention`, the only composite in the count and the only
+# removed, or re-measured, and each of those is a deliberate change. The last two
+# added were `_softmax` and `embedding`, off the flaggems_cpp slot because the
+# MetaX build has no FlagGems C++ half; see the module docstring.
+# `scaled_dot_product_attention` is the only composite in the count and the only
 # entry whose route the dispatcher does not take on its own -- the kernel that
 # serves the conf key reads the key itself. See TestMetaXFlaggemsSdpaRoute.
-_MEASURED_FLAGGEMS_ROUTES = 592
+_MEASURED_FLAGGEMS_ROUTES = 594
 
 _DISPATCH_LINE = re.compile(r"\[flagos dispatch\] (\S+) -> (\S+)")
 

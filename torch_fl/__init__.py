@@ -99,13 +99,16 @@ def _select_backend_config() -> None:
     mode repins every op the conf annotates `# tileops` onto that path, which is
     the same op set backends_tileops.conf used to carry.
 
-    backends_metax.conf carries 15 of those ops on flaggems_cpp -- the 17 verified
-    on-device intersected with the current C++ set. mm/mm.out are excluded
-    deliberately: flag_gems' C++ mm_kernel_general requests 98304 bytes of shared
-    memory and MetaX C550 provides 65536 (mcErrorInvalidValue at launch), so they
-    stay on the cuda boxing kernel. Those 15 need a FlagGems built for MACA (cpp/
-    -DFLAGGEMS_BACKEND=MACA) linked in; without it Dispatcher::GetFn sees an empty
-    kFlagGemsCpp slot and boxes them, which is why one file is safe for both builds.
+    backends_metax.conf routes 10 ops to flaggems_cpp: the 15 in
+    METAX_CPP_MEASURED minus the five that also sit in MetaX's triton gap set,
+    which the dispatcher checks first. `mm` and `_softmax`/`embedding` are left
+    out of the measured set deliberately -- `mm` because flag_gems' C++ mm kernel
+    passes a SPLIT_K kwarg triton-metax rejects, the other two because the
+    FlagGems build the MetaX lane installs ships no C++ half, so those routes
+    could not be served, and both ops reach the flaggems Python path instead.
+    Those 10 need a FlagGems built for MACA (cpp/ -DFLAGGEMS_BACKEND=MACA) linked
+    in; without it Dispatcher::GetFn sees an empty kFlagGemsCpp slot and boxes
+    them, which is why one file is safe for both builds.
 
     Native-kernel vendors (musa, ascend, gcu, tsingmicro) do not take part in that
     choice; each takes backends_<platform>.conf directly. For musa, ascend and gcu
