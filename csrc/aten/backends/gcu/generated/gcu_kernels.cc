@@ -19,6 +19,7 @@
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/embedding.h>
 #include <ATen/ops/embedding_dense_backward.h>
 #include <ATen/ops/index.h>
 #include <ATen/ops/index_select.h>
@@ -2668,6 +2669,68 @@ at::Tensor& IndexFillIntTensorOutKernelGcu(const at::Tensor& self, int64_t dim, 
 }
 
 REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorOutFn, index_fill_int_tensor_out_dispatcher, Backend::kGcu, IndexFillIntTensorOutKernelGcu)
+
+at::Tensor EmbeddingKernelGcu(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
+  // padding_idx, scale_grad_by_freq and sparse are gradient-only arguments in
+  // ATen -- the forward output does not depend on any of them (measured: -1, 0,
+  // 1, 5 and 9 give the byte-identical result) -- while topsaten accepts only
+  // -1, false, false and returns a status error for anything else. Declining
+  // them routes those calls to ATen's own kernel, which answers them the same
+  // way this one would.
+  if (weight.dim() != 2 || indices.dim() == 0 || padding_idx != -1 ||
+      scale_grad_by_freq || sparse ||
+      !gcu::TopsatenSupportsDtype(weight.scalar_type()) ||
+      (indices.scalar_type() != at::kLong && indices.scalar_type() != at::kInt)) {
+    return at::embedding(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }
+  auto weight_c = weight.contiguous();
+  // The vendor detects an out-of-range index and then aborts the process with a
+  // device assert (`indice out of range!`), where ATen raises IndexError. This
+  // is the read-back that validates every entry first; it returns an undefined
+  // tensor for one it rejects, and the host path below raises ATen's message.
+  auto indices_i32 = gcu::TopsatenEmbeddingIndex(indices, weight_c.size(0), weight.device());
+  if (!indices_i32.defined()) {
+    return at::embedding(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }
+  auto out_sizes = indices.sizes().vec();
+  out_sizes.push_back(weight_c.size(1));
+  auto out = at::empty(out_sizes, weight_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  auto indices_shaped = indices_i32.reshape(indices.sizes());
+
+  gcu::TopsatenTensorWrapper t_weight(weight_c);
+  gcu::TopsatenTensorWrapper t_indices(indices_shaped);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenEmbedding, weight, t_out.get(), t_weight.get(), t_indices.get(), padding_idx, scale_grad_by_freq, sparse);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kGcu, EmbeddingKernelGcu)
+
+// The same guard _OUT_DEVICE_GUARD installs, spelled out because that snippet
+// names `self` and this kernel's first parameter is `weight`. See its comment
+// for why the resize below needs the device selected.
+at::Tensor& EmbeddingOutKernelGcu(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse, at::Tensor& out) {
+  gcu::TopsDeviceGuard out_guard(weight);
+  TORCH_CHECK(out.scalar_type() == weight.scalar_type(),
+              "Expected out tensor to have dtype ", weight.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result = EmbeddingKernelGcu(weight, indices, padding_idx, scale_grad_by_freq, sparse);
+  if (!out.sizes().equals(result.sizes())) {
+    out.resize_(result.sizes());
+  }
+  if (out.numel() == 0) {
+    return out;
+  }
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingOutFn, embedding_out_dispatcher, Backend::kGcu, EmbeddingOutKernelGcu)
 
 at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Tensor& indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
   // A padding_idx outside [-1, num_weights) has no vendor equivalent to lean

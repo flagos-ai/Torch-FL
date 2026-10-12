@@ -310,7 +310,10 @@ def test_conf_route_counts_are_stable():
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 454, "cuda": 1583},
-        "gcu": {"none": 1605, "gcu": 179, "flaggems": 253},
+        # embedding and embedding.out gained a native topsaten kernel and now
+        # route to gcu instead of falling through to none; see
+        # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
+        "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
         "kunlunxin": {"cuda": 2037},
         "metax": {"flaggems": 592, "cuda": 1433, "flaggems_cpp": 12},
         "musa": {"flaggems": 465, "none": 1518, "musa": 54},

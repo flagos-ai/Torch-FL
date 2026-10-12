@@ -1204,7 +1204,21 @@ NATIVE_TRITON_GAPS = {
         "zero_",
         "zeros",
         "zeros_like",
-        # Index/offset arithmetic that legalizes to a 64-bit extension.
+        # The rest of this group is here because what these ops legalize to
+        # cannot run on GCU either, but the two routes they land on are not the
+        # same one, so they are listed by what they fall through to.
+        #
+        # `embedding` is served natively: `topsatenEmbedding` is a pure gather
+        # and codegen_gcu.py emits the kernel for it, so its membership here is
+        # what keeps FlagGems off the route and lets route() fall through to
+        # `gcu` -- the same pairing as `new_ones` above. Before the native kernel
+        # existed the set closed the FlagGems route with nothing behind it, so
+        # the op routed to `none` and every lookup in a model reached the
+        # cpu_fallback.
+        #
+        # `floor_divide`, `index_add`, `nll_loss_backward`, `nll_loss_forward`
+        # and `sort` have no topsaten entry point, so they stay on `none` and
+        # reach that same cpu_fallback deliberately.
         "embedding",
         "floor_divide",
         "floor_divide_.Tensor",

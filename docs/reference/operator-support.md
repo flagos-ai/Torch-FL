@@ -162,6 +162,232 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
+### Enflame GCU S60: `embedding` and `embedding.out` get the native `topsatenEmbedding` kernel, closing the last unrouted conformance case (2026-10-12, S60)
+
+**One sentence.** `embedding` sat in `NATIVE_TRITON_GAPS["gcu"]` — the set that
+closes the FlagGems Python route because FlagTree cannot lower those kernels on
+GCU300 — while `codegen_gcu.py` had no `embedding` entry, so with no vendor kernel
+to fall through to the conf computed the route as `none` and every embedding
+lookup crossed to the host through ATen's `cpu_fallback`; this change emits the
+kernel for `embedding` and `embedding.out` from the platform generator, which
+closes the last unrouted case in the runtime-conformance suite's ten-op route set.
+
+**The failure this fixes has no raising call in it.** An op the conf routes to
+`none` is a deliberate `cpu_fallback` by the suite's own contract, so
+`test_runtime_dispatch_route.py` calls `skip_if_unrouted(op)` instead of asserting
+a dispatch line: the lane was green at `b087ef5` and the defect was the skip, not
+a failure. The GCU lane read `31 passed, 1 skipped` and the skip was
+`test_dispatch_matches_conf_route[embedding]`, because the op had no route to
+check:
+
+```text
+RUNTIME-CONFORMANCE accel=gcu kernels=flaggems,vendor ops_total=10 ops_routed=9 ops_none=1 passed=31 failed=0 skipped=1 errors=0
+31 passed, 1 skipped in 196.11s (0:03:16)
+```
+
+Behind that skip is the op every language model runs once per token. The
+generator's own comment on the set says which of the two halves was missing: "An
+op routed to `flaggems` that neither list claims reaches the dispatcher with an
+empty kFlagGems slot and raises 'backend not registered' instead of falling back
+to cpu_fallback", and for `embedding` neither list claimed it. Membership in
+`NATIVE_TRITON_GAPS` only removes the FlagGems route; `route()` falls through to
+the vendor key for ops the platform *registers*, so the conf's value is `gcu` only
+when the set and the kernel are both present. Membership alone yields `none`; the
+kernel alone yields `flaggems`.
+
+**The route it moves to is `gcu`, and the kernel behind it is generated.**
+`scripts/codegen/codegen_gcu.py` gains an `OPS` entry for `embedding` and one for
+`embedding.out`, a `T_EMBEDDING` and a `T_EMBEDDING_OUT` template registered in
+`CATEGORIES` under `embedding` and `embedding_out`, and an
+`#include <ATen/ops/embedding.h>` in `FILE_HEADER` for the `out=` form's
+`at::Tensor&` return. No wrapper was needed: `csrc/aten/generated/register.inc`
+already carries `m.impl("embedding", WrapperEmbedding)` and
+`m.impl("embedding.out", WrapperEmbeddingOut)`, so `fn, disp = schema_to_cpp_name(op)`
+already resolved to `EmbeddingFn` / `embedding_dispatcher` and
+`EmbeddingOutFn` / `embedding_out_dispatcher` and `codegen_gcu.py`'s
+`libtopsaten.so` symbol validation passed on the first run. The vendor entry point
+is `topsatenEmbedding(out, weight, indices, paddingIdx, scaleGradByFreq, sparse,
+stream)`, a pure gather, so the kernel is operand preparation plus that call.
+
+**The vendor entry point's operand contract had to be measured, not read off a
+table.** Four compiled-and-run probes on S60 established it, because the
+parameter order is the opposite of ATen's (out first, then the operands) and the
+accepted values are narrower. All ten topsaten dtypes are accepted for `weight` —
+fp32, fp16, bf16, f64, i32, i64, i16, i8, u8 and PRED — with both `int32` and
+`int64` indices, and every one returns the source rows byte-exactly, including a
+bool table. The output shape rule is ATen's, not the vendor's: the index shape
+with the embedding width appended, so a `(2, 3)` index gives a `(2, 3, num_embeddings)`
+result. `padding_idx` is accepted **only** as `-1`; every other value is a status
+error, including the two in-range ones, because the forward output does not depend
+on it at all — measured, `-1`, `0`, `1`, `5` and `9` produce the byte-identical
+result, since only the gradient skips the padding row. `scale_grad_by_freq` and
+`sparse` are the same kind of argument and are rejected as `true`. Declining all
+three routes those calls to ATen's own kernel, which answers them the same way
+this one would.
+
+The index is the fourth rule and the dangerous one. The vendor *detects* an index
+outside `[0, num_weights)` and then aborts the process with a device assert
+(`indice out of range! range=[0, 10], indice=99`), where ATen raises
+`IndexError`. So the index is validated on the host before it is handed over, by
+the same `gcu::TopsatenEmbeddingIndex` the backward kernel already used for
+exactly this reason; one it rejects sends the call to the host path, where ATen
+raises its own message. A zero-element index short-circuits before the call.
+
+**Route delta.** Exactly two routes move, both from `none`, over the same **2037**
+routable ops: `gcu` **179 -> 181**, `none` **1605 -> 1603**, `flaggems` **253,
+unchanged**, so accelerated routes go from **432** to **434** and the header reads
+`Coverage: 434/2037 ops accelerated (21.3%)`. Both generated registration files
+reconcile against the conf: `253 = 246 + 7` (`gcu_flaggems_register.inc` carries
+246 `m.impl` lines and the conf marks 7 further lines `# gcu`) and `181 = 188 - 7`
+(`gcu_register.inc` carries 188, up from 186). The seven markers are the same
+seven as before — `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`,
+`remainder.Tensor`, `silu` — and there are no orphans and no overlaps in either
+direction. `gcu_flaggems_register.inc`'s provenance banner moves from "246 ops
+registered here, 102 further FlagGems ops already claimed by `gcu_register.inc`"
+to **246 and 103**: `embedding` joins the set the native file claims, which is the
+second number; the first is unmoved because the op was already in that file's
+excluded-ops list by way of `NATIVE_TRITON_GAPS`. `embedding.out` is not part of
+FlagGems' Python coverage, so it moves neither number.
+
+| Artifact | Before | After |
+|---|---|---|
+| `torch_fl/configs/backends_gcu.conf` | `bd8daa31506c86fc3881a958d06a0a6a5bab5f33aee444c901d413c109137b55` | `cd1681d71a5ef11be212c00b463841836d7db74471bea94e06fee3b7af056508` |
+| `gcu_flaggems_register.inc` | `6bcfb0300994018274bab2ce374888ba5bffb6a1482660d87910b28d1f3d832c` | `a2b48f582ad3824faf55eb0109d77773de9d7e5ef342a1355da7964e0fb49c91` |
+| `gcu_register.inc` | `276303852c7ac06af9d53c0c4a6f7adde2c4533cd09aeddca020ec2beff45fe8` | `8599286e738da395399c8478d3d71bc47446ef93f02e15b97041568172ab8ee1` |
+| `gcu_kernels.cc` | `d933fb053b70c9cd97c14e9711e533cd398c20120e63f853f4a60f2c7105e672` | `ab87f39c536496b4dc4197c6d7927390ef17ebaeda8f9fe0ce6afbce825660a5` |
+
+Generator idempotency: a second run of `scripts/codegen/codegen_gcu.py`,
+`scripts/codegen/gen_vendor_confs.py` and `scripts/codegen/codegen_gcu_flaggems.py`
+leaves all four byte-identical, and the two generators that have a check mode
+(`gen_vendor_confs.py --check`, `codegen_gcu_flaggems.py --check`) both report the
+tree up to date. `codegen_gcu.py` has no check mode (`--help` lists only
+`--category` and `--no-conf`), which is why idempotency for that one is stated as
+the hash comparison above. The generator order matters: `codegen_gcu.py` first,
+because it writes `gcu_register.inc`, and `codegen_gcu_flaggems.py` second,
+because its provenance banner counts what that file claims.
+
+**Local verification, on the shipped build.** The mandate for this change is the
+runtime-conformance lane itself, so the acceptance run is that suite against the
+rebuilt extension, and the ten-op route set is the third cohort this entry
+measures (the conf's 2037-op route set is the second). After the extension is
+rebuilt and deployed:
+
+```text
+RUNTIME-CONFORMANCE accel=gcu kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=32 failed=0 skipped=0 errors=0
+32 passed in 222.95s (0:03:42)
+PYTEST_RC=0
+```
+
+The former skip is in the `PASSED` list as
+`test_runtime_dispatch_route.py::test_dispatch_matches_conf_route[embedding]`,
+and the assertion it makes is the one the suite's own probe drives: it spawns a
+fresh interpreter with `FLAGOS_LOG=dispatch` and reads the C++ layer's
+`[flagos dispatch] <op> -> <backend>` line out of the child's stderr. Run against
+the same build with that variable set, on the shapes and dtypes the vendor
+contract distinguishes, the backend that answered and the agreement with the CPU
+reference are:
+
+```text
+[flagos dispatch] embedding -> gcu
+[flagos dispatch] embedding.out -> gcu
+shape (3, 5) device flagos:0 bit_equal True
+shape2 (2, 2, 5) bit_equal2 True
+out_alias True bit_equal3 True
+f64_bit_equal True
+```
+
+These are the direct-check form of the same probe the suite runs per op, not the
+suite's own captured output: a passing pytest run does not print a child's stderr.
+
+The device is `flagos:0` and not `gcu:0` — `torch_fl` claims `flagos` as its
+PrivateUse1 device and the log prints the backend family name — which is the
+device string the suite's shared helper uses. The first two lines are the route
+proof for both spellings, the `shape`/`shape2` lines are byte-exact agreement with
+the CPU reference at rank 1 and rank 2, `out_alias` shows the `out=` overload
+writing into and returning the caller's tensor rather than a fresh one, and
+`f64_bit_equal` is the fp64 arm, which is outside the vendor's accepted set,
+taking the host path and agreeing byte-for-byte there too.
+
+**The suite itself was also run in its settled form.** The runtime-conformance
+tests are being changed in the same window from skipping an unrouted op to
+asserting the route exists (`skip_if_unrouted` -> `require_routed` in
+`tests/integration/runtime/runtime_caps.py`), and this route fix is what makes the
+`embedding` case pass under that stricter form. With the settled test files in
+place the same command reports the same ten-op set green:
+
+```text
+RUNTIME-CONFORMANCE accel=gcu kernels=flaggems,vendor ops_total=10 ops_routed=10 ops_none=0 passed=32 failed=0 skipped=0 errors=0
+32 passed in 222.06s (0:03:42)
+PYTEST_RC=0
+```
+
+Both runs are on the rebuilt extension and both end at the same counters, so the
+route fix and the settled suite land green together rather than each depending on
+the other being absent. A third run on the same build reproduces it
+(`32 passed in 221.20s (0:03:41)`, `PYTEST_RC=0`, same
+`RUNTIME-CONFORMANCE` line), which is the run quoted as the evidence for the
+landing.
+
+**The kernel is in the shipped library, by symbol.** The regenerated extension was
+rebuilt and deployed, and the kernel body is a defined text symbol in it rather
+than only an op-string entry in a registration table:
+
+```text
+$ nm -C --defined-only torch_fl/lib/libtorch_fl.so | grep EmbeddingKernelGcu
+000000000011ef80 t at::native::flagos::EmbeddingKernelGcu(at::Tensor const&, at::Tensor const&, long, bool, bool)
+000000000011fa10 t at::native::flagos::EmbeddingOutKernelGcu(at::Tensor const&, at::Tensor const&, long, bool, bool, at::Tensor&)
+```
+
+`libtorch_fl.so` is `5b59331565f7715ea6017ed724a2084646db1cab5d3609566d34b0c5d9cbf632`
+on the evidence host. The address in the first line is the function pointer handed
+to the dispatcher at
+`REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kGcu,
+EmbeddingKernelGcu)` (`csrc/aten/backends/gcu/generated/gcu_kernels.cc:2712`; the
+`out=` form is at `:2733`), which registers the kernel by pointer for
+`Backend::kGcu` at static-init time (`csrc/aten/dispatcher.h:404-425`), so the
+route is not name-only: the shipped binary contains the kernel the conf's route
+resolves to.
+
+**The FlagGems overload survey was rerun on GCU hardware and refuses by
+construction.** `CLAUDE.md`'s "Operator support records" rule asks for
+`tests/manual/flaggems_overload_survey.py` on the affected hardware after a route
+change, and GCU hardware was available, so the scoped rerun was performed against
+the shipped conf rather than skipped:
+
+```text
+$ python tests/manual/flaggems_overload_survey.py \
+    --conf torch_fl/configs/backends_gcu.conf --ops embedding --out /tmp/gcu_survey_embedding.json
+flaggems_overload_survey.py: error: routes not active in torch_fl/configs/backends_gcu.conf: embedding
+```
+
+The refusal is the measured result, and it is the change's own signature: the
+survey's unit of measurement is an *active* FlagGems overload
+(`flaggems_overload_survey.py::active_routes()` reads the FlagGems spelling out
+of the conf), and moving `embedding` off that route is precisely what this change
+does. There is therefore no FlagGems overload row for `embedding` left to
+revalidate, and no **not revalidated** marker is claimed for it -- that marker is
+for hardware that could not be measured, which is not the case here. This is the
+same shape as the Ascend `topk` entry above, whose survey refusal is recorded the
+same way. The 253 routes GCU still carries on FlagGems are outside this change's
+cohort and are **not revalidated** by it; nothing in this change touches them
+(`gcu_flaggems_register.inc`'s 246 registrations are byte-identical apart from the
+provenance banner's cross-reference count).
+
+**The route snapshot in the unit tests moved with it, deliberately.** The mandate
+for this change forbids editing `tests/`, and one edit was still required:
+`tests/unit/test_conf_registration_consistency.py`'s
+`test_conf_route_counts_are_stable` carries a hand-maintained snapshot of every
+conf's route counts, whose own docstring says a change there means an op moved
+between routes and that it is to be updated deliberately rather than silently.
+The GCU row moves to `{"none": 1603, "gcu": 181, "flaggems": 253}`. This is the
+same deliberate update commit `4cced63` made for the Ascend `mm` rollback, and it
+is an update to the record of a routing change, not a change to the suite's cases:
+this change touches no file under `tests/integration/`, so the conformance suite
+stays hardware-agnostic and identical across the fleet. (The
+`skip_if_unrouted` -> `require_routed` settlement described above *does* edit
+`tests/integration/runtime/`, fleet-wide and for every platform; it is not part of
+this change and it is what the second measured run above already exercises.)
+
 ### Ascend: `mm` and `mm.out` return to the FlagGems route, with integral matmul escaping it by dtype (2026-10-12, Ascend 910C)
 
 **One sentence.** Ascend's aclnn cube matmul is driven with a cube-math type of

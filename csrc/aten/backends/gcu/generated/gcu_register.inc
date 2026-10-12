@@ -66,6 +66,8 @@
   m.impl("cosh", WrapperCosh);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("embedding", WrapperEmbedding);
+  m.impl("embedding.out", WrapperEmbeddingOut);
   m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
   m.impl("embedding_dense_backward.out", WrapperEmbeddingDenseBackwardOut);
   m.impl("eq.Scalar", WrapperEqScalar);

@@ -209,11 +209,16 @@ OPS = {
         "convolution_backward",
         "ConvolutionBackward",
     ),
-    # ---- indexed reads and writes, and the embedding gradient ----
+    # ---- indexed reads and writes, and the embedding lookup ----
     # The inference census never reaches these; a *training* step does. Every
     # overload is listed, including the out= and non-in-place spellings, because
     # an overload left out keeps its `= none` route and reaches cpu_fallback on
     # its own.
+    #
+    # The forward `embedding` is in NATIVE_TRITON_GAPS['gcu'] in
+    # gen_vendor_confs.py, which closes FlagGems' Python route for it, and it had
+    # no native kernel to fall through to -- so it routed to `none` and the whole
+    # call reached cpu_fallback. The kernel below is that missing route.
     #
     # The four index_fill overloads already sit in FLAGGEMS_PENDING_NATIVE_OPS,
     # and that entry is what leaves them on these kernels: the set is subtracted
@@ -233,6 +238,8 @@ OPS = {
     "index_fill.int_Scalar_out": ("index_fill_scalar_out", None),
     "index_fill.int_Tensor": ("index_fill_tensor", None),
     "index_fill.int_Tensor_out": ("index_fill_tensor_out", None),
+    "embedding": ("embedding", None),
+    "embedding.out": ("embedding_out", None),
     "embedding_dense_backward": ("embedding_dense_backward", None),
     "embedding_dense_backward.out": ("embedding_dense_backward_out", None),
     # The VAE's upsampling block. The name needs no override: topsaten_name
@@ -2129,6 +2136,100 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
 )
 
+# embedding: the forward lookup, one row of weight copied per index.
+# topsatenEmbedding does the whole op, and it is a pure gather -- measured
+# row-for-row against the source table for all ten dtypes it accepts, including
+# a bool weight -- so this kernel is operand preparation plus the vendor's own
+# operand rules.
+#
+# Three of its parameters carry a narrower contract than ATen's, and all three
+# are backward-only arguments in ATen. padding_idx is accepted only as -1: the
+# forward output does not depend on it at all (measured -- -1, 0, 1, 5 and 9
+# produce the byte-identical result, because only the *gradient* skips the
+# padding row, see embedding_dense_backward), while topsaten rejects every other
+# value with a status error. scale_grad_by_freq and sparse are likewise
+# gradient-only and are rejected as `true`. Declining all three keeps ATen's own
+# answer for the calls the vendor would refuse rather than quietly disagreeing
+# with them.
+#
+# The index is the fourth rule and the dangerous one. The vendor *detects* an
+# index outside [0, num_weights) and then aborts the process with a device
+# assert (`indice out of range! range=[0, 10], indice=99`), where ATen raises
+# IndexError. So the index is validated on the host before it is handed over --
+# `TopsatenEmbeddingIndex` does exactly that, and narrows to the i32 the vendor
+# wants -- and one it rejects sends the call to the host path, where ATen raises
+# its own message.
+#
+# The output shape is ATen's rule, not the vendor's: the index shape with the
+# embedding width appended, so a (2, 3) index gives a (2, 3, embed_dim) result.
+# That is why the index keeps its own shape here, while TopsatenEmbeddingIndex
+# flattens it for the backward.
+T_EMBEDDING = """\
+at::Tensor {kernel}(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {{
+  // padding_idx, scale_grad_by_freq and sparse are gradient-only arguments in
+  // ATen -- the forward output does not depend on any of them (measured: -1, 0,
+  // 1, 5 and 9 give the byte-identical result) -- while topsaten accepts only
+  // -1, false, false and returns a status error for anything else. Declining
+  // them routes those calls to ATen's own kernel, which answers them the same
+  // way this one would.
+  if (weight.dim() != 2 || indices.dim() == 0 || padding_idx != -1 ||
+      scale_grad_by_freq || sparse ||
+      !gcu::TopsatenSupportsDtype(weight.scalar_type()) ||
+      (indices.scalar_type() != at::kLong && indices.scalar_type() != at::kInt)) {{
+    return at::{at_op}(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }}
+  auto weight_c = weight.contiguous();
+  // The vendor detects an out-of-range index and then aborts the process with a
+  // device assert (`indice out of range!`), where ATen raises IndexError. This
+  // is the read-back that validates every entry first; it returns an undefined
+  // tensor for one it rejects, and the host path below raises ATen's message.
+  auto indices_i32 = gcu::TopsatenEmbeddingIndex(indices, weight_c.size(0), weight.device());
+  if (!indices_i32.defined()) {{
+    return at::{at_op}(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }}
+  auto out_sizes = indices.sizes().vec();
+  out_sizes.push_back(weight_c.size(1));
+  auto out = at::empty(out_sizes, weight_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  auto indices_shaped = indices_i32.reshape(indices.sizes());
+
+  gcu::TopsatenTensorWrapper t_weight(weight_c);
+  gcu::TopsatenTensorWrapper t_indices(indices_shaped);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, weight, t_out.get(), t_weight.get(), t_indices.get(), padding_idx, scale_grad_by_freq, sparse);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
+T_EMBEDDING_OUT = """\
+// The same guard _OUT_DEVICE_GUARD installs, spelled out because that snippet
+// names `self` and this kernel's first parameter is `weight`. See its comment
+// for why the resize below needs the device selected.
+at::Tensor& {kernel}(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse, at::Tensor& out) {{
+  gcu::TopsDeviceGuard out_guard(weight);
+  TORCH_CHECK(out.scalar_type() == weight.scalar_type(),
+              "Expected out tensor to have dtype ", weight.scalar_type(),
+              ", but got ", out.scalar_type(), " instead");
+  auto result = EmbeddingKernelGcu(weight, indices, padding_idx, scale_grad_by_freq, sparse);
+  if (!out.sizes().equals(result.sizes())) {{
+    out.resize_(result.sizes());
+  }}
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  out.copy_(result);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+
 # embedding_dense_backward: the gradient of an embedding lookup, one row of
 # [num_weights, embed_dim] accumulated per (index, grad row) pair with the
 # padded row skipped. topsatenEmbeddingDenseBackward does the whole op --
@@ -3322,6 +3423,8 @@ CATEGORIES = {
     "index_fill_tensor": T_INDEX_FILL_TENSOR,
     "index_fill_scalar_out": T_INDEX_FILL_SCALAR_OUT,
     "index_fill_tensor_out": T_INDEX_FILL_TENSOR_OUT,
+    "embedding": T_EMBEDDING,
+    "embedding_out": T_EMBEDDING_OUT,
     "embedding_dense_backward": T_EMBEDDING_DENSE_BACKWARD,
     "embedding_dense_backward_out": T_EMBEDDING_DENSE_BACKWARD_OUT,
     "upsample_nearest_exact2d": T_UPSAMPLE_NEAREST_EXACT2D,
@@ -3378,6 +3481,7 @@ FILE_HEADER = """\
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/convolution_backward.h>
+#include <ATen/ops/embedding.h>
 #include <ATen/ops/embedding_dense_backward.h>
 #include <ATen/ops/index.h>
 #include <ATen/ops/index_select.h>
