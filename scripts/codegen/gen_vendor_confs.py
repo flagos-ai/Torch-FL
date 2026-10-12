@@ -139,6 +139,13 @@ VENDORS = {
         ("backends/gcu/generated/gcu_flaggems_register.inc",),
     ),
     "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
+    # Kunlunxin has no FlagGems .inc to fold in yet: the vendor torch shim on
+    # this SDK hardcodes the FlagGems runtime device name to "cuda" while the
+    # tensors dispatch on PrivateUse1, so flag_gems' own gate always falls
+    # through and every FlagGems Python route dies at its first op. Until that
+    # is fixed (or the SDK ships a PrivateUse1-named runtime), kunlunxin has a
+    # single native .inc and no extra registration file.
+    "kunlunxin": ("backends/kunlunxin/generated/kunlunxin_register.inc", ()),
 }
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
@@ -193,14 +200,6 @@ BOXING_PLATFORMS = {
     # every CUDA FlagGems route; a separate conf is what lets the two platforms
     # disagree about mm/bmm. Filed upstream as FlagGems issue #6225.
     "ppu": "backends_ppu.conf",
-    # Kunlunxin XPU is a CUDA-ABI boxing platform like dcu/ppu/metax: its SDK
-    # ships a CUDA-shaped runtime (cuda_runtime.h + libcudart.so.12) and the
-    # vendor torch registers kernels under the CUDA dispatch key, so every op
-    # routes to the shared CUDA boxing kernels. No FlagGems route is generated
-    # yet (kunlunxin is absent from FLAGGEMS_PYTHON_PLATFORMS /
-    # FLAGGEMS_CPP_PLATFORMS), which makes this conf uniformly BOXING_FALLBACK
-    # until the measured allowlist lands in a follow-up.
-    "kunlunxin": "backends_kunlunxin.conf",
 }
 BOXING_FALLBACK = "cuda"
 
@@ -628,11 +627,16 @@ FLAGGEMS_CPP_PLATFORMS = {"metax"}
 # including PPU, whose FlagTree install (triton with the `ppu` backend) is
 # what set_env_ppu.sh provisions.
 #
-# Kunlunxin is deliberately absent. Its P800 port brings up the CUDA boxing path
-# only; the FlagGems Python allowlist (5 measured routes on the 2.9 line) is a
-# follow-up, so backends_kunlunxin.conf routes every covered op to the boxing
-# kernel rather than claiming coverage the P800 has not run. Add kunlunxin here
-# only together with that measurement, so the gate and the conf stay in step.
+# Kunlunxin is deliberately absent, and a native vendor rather than a boxing
+# one: libxpuapi.so (baidu::xpu::api) has the operator surface, and there is no
+# FlagGems liboperators.so for the XPU SDK, so no FlagGems C++ wrapper can be
+# built either. The Python path is blocked by the SDK itself -- its torch shim
+# reports the FlagGems runtime device name as "cuda" while the tensors dispatch
+# on PrivateUse1, so flag_gems' device gate never matches and every route falls
+# through. backends_kunlunxin.conf therefore routes only the ops the native
+# kunlunxin kernels back, and everything else stays at `none` (cpu_fallback).
+# Add kunlunxin here only together with a measured FlagGems cohort, so the gate
+# and the conf stay in step.
 FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
@@ -1798,6 +1802,35 @@ METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # for what is still unmeasured on the shapes this route does not take.
 DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 
+# FlagGems Python routes a native-kernel vendor measured on top of the shared
+# coverage ceiling. The native twin of boxing_measured_python_ops(): same rule
+# -- a cohort claim only the platform holding the matching FlagGems build can
+# discharge -- for a platform whose routes are read from VENDORS rather than
+# BOXING_PLATFORMS.
+#
+# Kunlunxin is empty, and stays empty until a FlagGems build exists for this
+# SDK at all. The reason is not "not measured yet" but "not measurable today":
+# the vendor torch shim on this SDK answers torch.cuda for flag_gems' runtime
+# device probe while the tensors dispatch on PrivateUse1, so every FlagGems
+# Python route dies at its first op regardless of what a conf claims, and no
+# FlagGems liboperators.so exists for the XPU SDK either (see
+# FLAGGEMS_CPP_PLATFORMS). Both are stated on the vendor side of the fleet
+# already -- see torch_fl/accelerator/cuda/_cuda_compat.py's _ALIGNED_VENDORS
+# and the platform table's FLAGOS_BUILD_FLAGGEMS_CPP pin.
+#
+# Spelled out rather than left implicit so the extension point is obvious when
+# that changes: adding an op here routes it to `flaggems` in
+# backends_kunlunxin.conf even though kunlunxin is not in
+# FLAGGEMS_PYTHON_PLATFORMS, which is exactly the "route on measured evidence,
+# not on the shared ceiling" contract the other measured sets follow. The op
+# must also gain an m.impl() line in kunlunxin_register.inc (regenerate with
+# scripts/codegen/codegen_kunlunxin.py), or the route names an empty slot.
+KUNLUNXIN_FLAGGEMS_MEASURED = set()
+
+NATIVE_FLAGGEMS_MEASURED = {
+    "kunlunxin": KUNLUNXIN_FLAGGEMS_MEASURED,
+}
+
 # FlagGems coverage that arrived from a discovery widening rather than from a
 # measurement on the native-kernel vendors, and the vendors that therefore keep
 # the routes their own last FlagGems run measured.
@@ -2230,6 +2263,25 @@ def build_all(conf_dir: Path) -> dict:
             "run scripts/codegen/codegen_ops.py first"
         )
 
+    # A missing .inc is a silent disaster. registered_impls() returns the empty
+    # set for a path that does not exist, so that vendor's whole coverage set
+    # reads as empty, every one of its ops routes to `none`, and --check reports
+    # success -- while the C++ build fails on the very same #include register.cc
+    # emits. Fail loudly here instead: the VENDORS table names files that
+    # register.cc actually includes, so a name with no file behind it is always
+    # a bug, never a platform that happens to cover nothing. (A platform that
+    # genuinely covers nothing belongs in BOXING_PLATFORMS or has no row at all.)
+    for _vendor, (_native_inc, _extra_incs) in VENDORS.items():
+        for _inc in (_native_inc, *_extra_incs):
+            if not (CSRC_DIR / _inc).exists():
+                raise SystemExit(
+                    f"error: {_vendor}: {_inc} does not exist. Its coverage set "
+                    "would read as empty and every op would route to `none`, "
+                    "silently -- while register.cc fails to compile on the same "
+                    "include. Generate it (see scripts/codegen/) or remove the "
+                    "entry from VENDORS."
+                )
+
     fg_py = flaggems_python_ops(conf_dir)
     fg_cpp = flaggems_cpp_ops(conf_dir)
     tileops = tileops_ops(conf_dir)
@@ -2271,6 +2323,12 @@ def build_all(conf_dir: Path) -> dict:
         # vendor has no kernel for. See NATIVE_KERNEL_PREFERRED.
         if vendor in NATIVE_KERNEL_PREFERRED:
             py_here = py_here - natives[vendor]
+        # A measured FlagGems route this vendor owns beyond the shared ceiling
+        # outranks both holds above -- it is a hardware measurement, and the
+        # holds are heuristics about cohorts. See NATIVE_FLAGGEMS_MEASURED.
+        # Intersected with fg_py so an op dropped from the FlagGems set cannot
+        # linger here, the same guard boxing_cpp_ops() applies.
+        py_here |= NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & fg_py
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(

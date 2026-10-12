@@ -62,20 +62,25 @@ PLATFORM_REGISTRATION = {
         "backends/musa/generated/musa_flaggems_register.inc",
     ],
     "bpu": [],  # BPU registers no compute ops (register.cc:479-498)
-    # Boxing platforms (cuda, dcu, metax, ppu, kunlunxin) and tsingmicro fall
-    # through to generated/register.inc (register.cc:500-502), which claims
-    # every generated op.
+    # Kunlunxin is a native vendor backend like musa/gcu/ascend: it compiles its
+    # own generated registration, which claims exactly the ops it routes to the
+    # vendor XPU SDK operator library.  It no longer falls through to
+    # generated/register.inc.
+    "kunlunxin": ["backends/kunlunxin/generated/kunlunxin_register.inc"],
+    # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro fall through to
+    # generated/register.inc (register.cc:500-502), which claims every generated
+    # op.
     "cuda": ["generated/register.inc"],
     "dcu": ["generated/register.inc"],
-    "kunlunxin": ["generated/register.inc"],
     "metax": ["generated/register.inc"],
     "ppu": ["generated/register.inc"],
     "tsingmicro": ["generated/register.inc"],
 }
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in
-# gen_vendor_confs.py), not the platform name.
-BOXING_PLATFORMS = {"cuda", "dcu", "kunlunxin", "metax", "ppu"}
+# gen_vendor_confs.py), not the platform name.  Kunlunxin is no longer one of
+# them: it is a native vendor backend, so its route key is ``kunlunxin``.
+BOXING_PLATFORMS = {"cuda", "dcu", "metax", "ppu"}
 
 PLATFORMS = sorted(PLATFORM_REGISTRATION)
 
@@ -128,13 +133,13 @@ def test_full_coverage_confs_share_one_op_set():
     ``gen_vendor_confs.build_all()`` widens the CUDA-derived op list by the
     union of vendor-only ops (EXTRA_NATIVE + EXTRA_ROUTED) so the route counts
     in each header are commensurable.  The confs that get the full-coverage
-    treatment are the vendor confs (musa, gcu, ascend) and the CUDA-boxing
-    confs (dcu, metax, ppu, kunlunxin).  ``backends_cuda.conf`` is the *base*
+    treatment are the native vendor confs (ascend, gcu, kunlunxin, musa) and the
+    CUDA-boxing confs (dcu, metax, ppu).  ``backends_cuda.conf`` is the *base*
     list (the one ``codegen_ops.py`` rewrites) and therefore lacks the three
     widened ops; ``backends_bpu.conf`` is empty and ``backends_tsingmicro.conf``
     is hand-written and sparse.  Those three are asserted separately.
     """
-    full_coverage = {"ascend", "gcu", "musa", "dcu", "kunlunxin", "metax", "ppu"}
+    full_coverage = {"ascend", "gcu", "kunlunxin", "musa", "dcu", "metax", "ppu"}
     reference = _parse_conf(CONF_DIR / "backends_musa.conf")
     for platform in sorted(full_coverage):
         routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
@@ -195,7 +200,7 @@ def test_every_route_uses_an_allowed_backend_key(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
 def test_vendor_routes_are_registered(platform):
     """Every op routed to ``<vendor>`` must be in the platform's registration set.
 
@@ -216,7 +221,7 @@ def test_vendor_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
 def test_accelerated_routes_are_registered(platform):
     """Every non-``none`` route must be an op the platform registers.
 
@@ -237,7 +242,7 @@ def test_accelerated_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
 def test_registered_ops_are_never_left_at_none(platform):
     """A registered op left at ``none`` sends a real kernel to ``cpu_fallback``.
 
@@ -318,8 +323,14 @@ def test_conf_route_counts_are_stable():
         # does not compile on this vendor, so NATIVE_TRITON_GAPS["gcu"] keeps it
         # on the gcu kernel. See the entry in scripts/codegen/gen_vendor_confs.py.
         "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
-        "kunlunxin": {"cuda": 2037},
+        # kunlunxin is a native vendor backend: every op routes to the vendor
+        # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``
+        # route.  The ten ``kunlunxin`` routes are exactly the conformance op
+        # set that backends/kunlunxin/generated/kunlunxin_register.inc claims.
+        "kunlunxin": {"kunlunxin": 10, "none": 2027},
+        # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
+        # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
         "ppu": {"flaggems": 592, "cuda": 1445},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},

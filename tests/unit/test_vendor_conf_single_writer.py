@@ -139,6 +139,17 @@ def test_the_cuda_conf_is_not_a_generated_vendor_conf():
     assert set(built) == set(g.BOXING_PLATFORMS) | set(g.VENDORS)
 
 
+def test_vendors_and_boxing_platforms_are_disjoint():
+    """A platform in both sets silently shadows its native route with boxing.
+
+    The union above stays true for a platform that is a member of both sets, so
+    it is exactly the check that misses a platform moved from BOXING_PLATFORMS
+    to VENDORS without the removal sticking: the native ``<vendor>`` route would
+    be overridden by the ``cuda`` fallback and every other test would still pass.
+    """
+    assert set(g.VENDORS).isdisjoint(set(g.BOXING_PLATFORMS))
+
+
 def test_no_local_vendor_fallback_table_is_left_behind():
     """The policy sets that fed the deleted writers have no other reader.
 
