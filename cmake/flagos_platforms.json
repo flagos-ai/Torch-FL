@@ -137,15 +137,18 @@
 
     "kunlunxin": {
       "_comment": [
-        "Kunlunxin XPU: the vendor torch registers its kernels under the CUDA",
-        "dispatch key and drives the CUDA-shaped runtime the XPU SDK ships",
-        "(cuda_runtime.h from XPU_ROOT, libcudart.so.12 from XCUDART_ROOT), so the",
-        "generated boxing kernels re-dispatch PrivateUse1 -> CUDA into the vendor",
-        "libtorch unchanged. The runtime sources are the shared cuda/ ones. No",
-        "FlagGems liboperators exists for the XPU SDK, so the C++ wrappers stay off."
+        "Kunlunxin XPU: a native PrivateUse1 backend. The ops live in the vendor",
+        "op library (xdnn_pytorch) and the runtime sources under kunlunxin/ call",
+        "the XPU SDK's own C runtime (libxpurt) directly, so no tensor is ever",
+        "re-dispatched onto the CUDA dispatch key and boxing stays off. The SDK",
+        "also ships a CUDA-shaped surface (cuda_runtime.h from XPU_ROOT,",
+        "libcudart.so.12 from XCUDART_ROOT) which the vendor torch uses, but the",
+        "flagos runtime does not: it is what the de-boxed backend deliberately",
+        "routes around. No FlagGems liboperators exists for the XPU SDK, so the",
+        "C++ wrappers stay off."
       ],
       "project_languages": ["CXX", "C"],
-      "runtime_dir": "cuda",
+      "runtime_dir": "kunlunxin",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": true,
       "wheel_local": "",
@@ -156,11 +159,15 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
       "pins": {
+        "FLAGOS_BUILD_VENDOR": {
+          "value": true,
+          "reason": "xdnn_pytorch is the only operator library the XPU SDK provides"
+        },
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
           "value": false,
           "reason": "no FlagGems liboperators.so exists for the XPU SDK"
