@@ -118,11 +118,17 @@ inline void DrainXpuStream() {
   xpu_wait(nullptr);
 }
 
-// Exactly the aten dtypes `ToXdnnScalarType` below maps. Kernels test this
-// first and take the CPU round-trip for anything outside it, which in practice
-// means complex and the quantised dtypes: the op stays correct, and -- unlike
-// the CUDA-boxing path this backend replaces -- nothing CUDA-backed is left
-// behind to answer for it.
+// The base predicate: exactly the aten dtypes `ToXdnnScalarType` below maps.
+// It is necessary but not sufficient. Each vendor entry point validates the
+// scalar types it is handed and rejects the rest at run time --
+// xdnn_pytorch_wrapper/<op>.cpp raises "scalar type of ret : k<dtype> is
+// unsupported" -- so what the vendor actually computes is a per-op fact and the
+// per-op predicates below narrow this base set. A kernel tests the per-op
+// predicate first and takes the CPU round-trip for anything outside it, which
+// in practice means complex, the quantised dtypes and the vendor-rejected
+// members of the base set: the op stays correct, and -- unlike the CUDA-boxing
+// path this backend replaces -- nothing CUDA-backed is left behind to answer
+// for it.
 inline bool KunlunxinSupportsDtype(at::ScalarType type) {
   switch (type) {
     case at::kFloat:
@@ -139,6 +145,47 @@ inline bool KunlunxinSupportsDtype(at::ScalarType type) {
     default:
       return false;
   }
+}
+
+// Per-op dtype gates. Each names the scalar types the matching vendor entry
+// point accepts; a kernel routes everything outside it to the CPU round-trip.
+// They are measured against the vendor wrapper rather than inferred from the
+// base map, which carries float64 and int8 for every op: `add_tensor` rejects
+// both of those, `mul_tensor` rejects int16 as well, and `matmul`/`bmm` accept
+// none of them. Every gate still admits the common float32, which is the dtype
+// the runtime-conformance dispatch contract exercises.
+
+// `add_tensor` accepts every mapped dtype except float64 and int8.
+inline bool KunlunxinSupportsAddDtype(at::ScalarType type) {
+  return KunlunxinSupportsDtype(type) && type != at::kDouble &&
+      type != at::kChar;
+}
+
+// `mul_tensor` additionally rejects int16.
+inline bool KunlunxinSupportsMulDtype(at::ScalarType type) {
+  return KunlunxinSupportsDtype(type) && type != at::kDouble &&
+      type != at::kChar && type != at::kShort;
+}
+
+// `matmul`/`bmm` compute on the float types but reject bfloat16, so they
+// accept exactly float16 and float32. Wider operands (float64, the integer
+// types) take the CPU round-trip, as on Ascend, where aclnn likewise takes
+// matmul only up to float32.
+inline bool KunlunxinSupportsMatmulDtype(at::ScalarType type) {
+  return type == at::kHalf || type == at::kFloat;
+}
+
+// `neg` accepts every mapped dtype except float64.
+inline bool KunlunxinSupportsUnaryDtype(at::ScalarType type) {
+  return KunlunxinSupportsDtype(type) && type != at::kDouble;
+}
+
+// `sum_dim_IntList` accumulates on the float types and rejects float64. The
+// integral and bool inputs are already routed to the CPU round-trip by the
+// accumulating-dtype rule in the kernel, so only the float types are named
+// here: float16, bfloat16 and float32.
+inline bool KunlunxinSupportsReductionDtype(at::ScalarType type) {
+  return type == at::kHalf || type == at::kBFloat16 || type == at::kFloat;
 }
 
 // Which aten dtypes have a vendor scalar type. An unmapped dtype raises rather

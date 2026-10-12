@@ -49,7 +49,7 @@ namespace kunlunxin = at::native::flagos::kunlunxin;
 at::Tensor AddTensorKernelKunlunxin(
     const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   const at::ScalarType result_dtype = at::result_type(self, other);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {
+  if (!kunlunxin::KunlunxinSupportsAddDtype(result_dtype)) {
     return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
   }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
@@ -77,7 +77,7 @@ REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kKunlun
 
 at::Tensor MulTensorKernelKunlunxin(const at::Tensor& self, const at::Tensor& other) {
   const at::ScalarType result_dtype = at::result_type(self, other);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {
+  if (!kunlunxin::KunlunxinSupportsMulDtype(result_dtype)) {
     return at::mul(self.cpu(), other.cpu()).to(self.device());
   }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
@@ -104,7 +104,7 @@ REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kKunlun
 
 at::Tensor MmKernelKunlunxin(const at::Tensor& self, const at::Tensor& mat2) {
   const at::ScalarType result_dtype = at::result_type(self, mat2);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {
+  if (!kunlunxin::KunlunxinSupportsMatmulDtype(result_dtype)) {
     return at::mm(self.cpu(), mat2.cpu()).to(self.device());
   }
   // Matmul entry points in this SDK read their operands strictly, so both are
@@ -130,7 +130,7 @@ REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kKunlunxin, MmKernelKu
 
 at::Tensor BmmKernelKunlunxin(const at::Tensor& self, const at::Tensor& mat2) {
   const at::ScalarType result_dtype = at::result_type(self, mat2);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {
+  if (!kunlunxin::KunlunxinSupportsMatmulDtype(result_dtype)) {
     return at::bmm(self.cpu(), mat2.cpu()).to(self.device());
   }
   at::Tensor self_c = self.to(result_dtype).contiguous();
@@ -209,7 +209,7 @@ at::Tensor CatKernelKunlunxin(const at::ITensorListRef& tensors, int64_t dim) {
 REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kKunlunxin, CatKernelKunlunxin)
 
 at::Tensor NegKernelKunlunxin(const at::Tensor& self) {
-  if (!kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {
+  if (!kunlunxin::KunlunxinSupportsUnaryDtype(self.scalar_type())) {
     return at::neg(self.cpu()).to(self.device());
   }
   kunlunxin::KunlunxinDeviceGuard guard(self);
@@ -232,7 +232,7 @@ at::Tensor SumDimIntlistKernelKunlunxin(
     ::std::optional<at::ScalarType> dtype) {
   const at::ScalarType out_dtype =
       dtype.has_value() ? dtype.value() : self.scalar_type();
-  if (!kunlunxin::KunlunxinSupportsDtype(out_dtype) ||
+  if (!kunlunxin::KunlunxinSupportsReductionDtype(out_dtype) ||
       at::isIntegralType(self.scalar_type(), /*includeBool=*/true)) {
     return at::sum(self.cpu(), dim, keepdim, dtype).to(self.device());
   }

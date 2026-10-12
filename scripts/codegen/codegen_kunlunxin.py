@@ -82,6 +82,27 @@ AT_OP = {
     "where.self": "where",
 }
 
+# The per-op dtype predicate each kernel gates on (kunlunxin_common.h). The
+# base `KunlunxinSupportsDtype` is the vendor scalar-type map, which is
+# necessary but not sufficient: the vendor wrapper rejects a per-op subset of it
+# at run time, so each kernel tests the predicate for its own entry point and
+# sends everything outside it to the CPU round-trip. The two binary ops share a
+# template but not a predicate -- `mul_tensor` rejects int16 where `add_tensor`
+# does not -- which is why the predicate is a placeholder rather than baked into
+# the body.
+SUPPORTS = {
+    "add": "KunlunxinSupportsAddDtype",
+    "mul": "KunlunxinSupportsMulDtype",
+    "mm": "KunlunxinSupportsMatmulDtype",
+    "bmm": "KunlunxinSupportsMatmulDtype",
+    "cat": "KunlunxinSupportsDtype",
+    "neg": "KunlunxinSupportsUnaryDtype",
+    "sum_dim": "KunlunxinSupportsReductionDtype",
+    "softmax": "KunlunxinSupportsDtype",
+    "embedding": "KunlunxinSupportsDtype",
+    "where_self": "KunlunxinSupportsDtype",
+}
+
 # ==========================================================================
 # Templates
 #
@@ -105,7 +126,7 @@ AT_OP = {
 # copy only happens when the shapes actually differ.
 _BINARY_PROLOGUE = """\
   const at::ScalarType result_dtype = at::result_type(self, other);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {{
+  if (!kunlunxin::{supports}(result_dtype)) {{
     return at::{at_op}(self.cpu(), other.cpu(){alpha_fallback}).to(self.device());
   }}
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
@@ -165,7 +186,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 T_MM = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const at::ScalarType result_dtype = at::result_type(self, mat2);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {{
+  if (!kunlunxin::{supports}(result_dtype)) {{
     return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
   }}
   // Matmul entry points in this SDK read their operands strictly, so both are
@@ -193,7 +214,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 T_BMM = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const at::ScalarType result_dtype = at::result_type(self, mat2);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {{
+  if (!kunlunxin::{supports}(result_dtype)) {{
     return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
   }}
   at::Tensor self_c = self.to(result_dtype).contiguous();
@@ -232,7 +253,7 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
     if (t.numel() == 0 && t.dim() == 1) {{
       continue;
     }}
-    if (!kunlunxin::KunlunxinSupportsDtype(t.scalar_type())) {{
+    if (!kunlunxin::{supports}(t.scalar_type())) {{
       cpu_path = true;
     }}
     inputs.push_back(t);
@@ -285,7 +306,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 
 T_NEG = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
-  if (!kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {{
+  if (!kunlunxin::{supports}(self.scalar_type())) {{
     return at::{at_op}(self.cpu()).to(self.device());
   }}
   kunlunxin::KunlunxinDeviceGuard guard(self);
@@ -320,7 +341,7 @@ at::Tensor {kernel}(
     ::std::optional<at::ScalarType> dtype) {{
   const at::ScalarType out_dtype =
       dtype.has_value() ? dtype.value() : self.scalar_type();
-  if (!kunlunxin::KunlunxinSupportsDtype(out_dtype) ||
+  if (!kunlunxin::{supports}(out_dtype) ||
       at::isIntegralType(self.scalar_type(), /*includeBool=*/true)) {{
     return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
   }}
@@ -381,7 +402,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kKunlunxin, {kernel})
 T_SOFTMAX = """\
 at::Tensor {kernel}(
     const at::Tensor& self, int64_t dim, bool half_to_float) {{
-  if (!kunlunxin::KunlunxinSupportsDtype(self.scalar_type())) {{
+  if (!kunlunxin::{supports}(self.scalar_type())) {{
     return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
   }}
   const int64_t d = dim < 0 ? dim + self.dim() : dim;
@@ -416,7 +437,7 @@ at::Tensor {kernel}(
     int64_t padding_idx,
     bool scale_grad_by_freq,
     bool sparse) {{
-  if (!kunlunxin::KunlunxinSupportsDtype(weight.scalar_type())) {{
+  if (!kunlunxin::{supports}(weight.scalar_type())) {{
     return at::{at_op}(
                weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq,
                sparse)
@@ -459,7 +480,7 @@ T_WHERE_SELF = """\
 at::Tensor {kernel}(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {{
   const at::ScalarType result_dtype = at::result_type(self, other);
-  if (!kunlunxin::KunlunxinSupportsDtype(result_dtype)) {{
+  if (!kunlunxin::{supports}(result_dtype)) {{
     return at::{at_op}(condition.cpu(), self.cpu(), other.cpu())
         .to(self.device());
   }}
@@ -615,6 +636,7 @@ def render():
                 fn=fn,
                 disp=disp,
                 at_op=AT_OP[op],
+                supports=SUPPORTS[category],
                 alpha_fallback=", alpha" if op == "add.Tensor" else "",
             )
         )
