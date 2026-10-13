@@ -7306,11 +7306,13 @@ There is no `cuda` route in the file. Kunlunxin is deliberately absent from
 `FLAGGEMS_PYTHON_PLATFORMS`, so no op is claimed on the FlagGems route; adding one
 requires generator coverage for the platform, so the gate and the configuration
 must move in the same change. The route histogram is
-`{kunlunxin: 10, flaggems: 0, none: 2027}` over the 2037-op list: the ten
-`kunlunxin` routes are exactly the hardware-agnostic conformance op set
-(`tests/integration/runtime/runtime_caps.py` `RUNTIME_OPS`), which is also what
+`{kunlunxin: 57, flaggems: 0, none: 1980}` over the 2037-op list: the ten
+hardware-agnostic conformance ops (`tests/integration/runtime/runtime_caps.py`
+`RUNTIME_OPS`) plus the 47-overload unified RNG cohort, which is also what
 `backends/kunlunxin/generated/kunlunxin_register.inc` registers, so the
-generator cannot name a route this file does not back. Reproducible mechanically:
+generator cannot name a route this file does not back. See
+[**The unified RNG cohort**](#the-unified-rng-cohort) below for why the RNG
+overloads joined the vendor route. Reproducible mechanically:
 
 - `scripts/codegen/gen_vendor_confs.py` twice in a row produces an empty diff and
   `--check` exits 0.
@@ -7357,6 +7359,65 @@ check, executed either. Neither the native device layer nor any operator on the
 `tests/manual/kunlunxin_runtime_smoke.py` — device count, device index,
 allocation, host↔device round-trip, `Stream`, `synchronize`, `empty_cache`, `mm` —
 on a P800 before reading the route list as validated operator support.
+
+#### The unified RNG cohort
+
+**One sentence.** 47 RNG overloads that were previously left at `none` — and
+therefore took `cpu_fallback` — now route to `kunlunxin`, so
+`torch.flagos.manual_seed` / `get_rng_state` / `set_rng_state` / `manual_seed_all`
+own the stream the draws actually consume.
+
+**Why they were wrong at `none`.** A kunlunxin build left every RNG op
+unregistered on PrivateUse1, so `torch.rand` / `randn` / `normal_` /
+`bernoulli` / `randint` / `randperm` / `multinomial` / `native_dropout` and the
+rest fell through to ATen's generic CPU fallback. `torch.manual_seed` does reach
+that CPU fallback generator, which is why a whole-tensor reproducibility check
+passed, but the **flagos** PrivateUse1 generator (`torch_fl/flagos/random.py`)
+is a different state object: `torch.flagos.manual_seed`, `get_rng_state` and
+`set_rng_state` advanced nothing the fallback read, so the unified RNG dispatch
+suite went red. The native vendors avoid this because their conf routes the RNG
+ops to their own backend, each shipping a hand-written `rng.cc` that reserves its
+seed through `c10::flagos::ReserveSeed` (`csrc/aten/backends/ascend/rng.cc`,
+`gcu/rng.cc`, `musa/rng.cc`); the CUDA-compatible boxing platforms accept a flagos
+generator as well, through a generated per-call translation prelude.
+
+**The shape here.** `csrc/aten/backends/kunlunxin/rng.cc` is the "declined to the
+host" arm of the GCU file: the XPU op library exposes no RNG entry point, so each
+draw is taken on an `at::CPUGeneratorImpl` and copied back, but the seed is
+reserved from the flagos generator exactly as the native vendors do. It is
+self-contained (no `rng.h`), starts on
+`#if defined(USE_KUNLUNXIN) && defined(FLAGOS_KUNLUNXIN_KERNEL)`, and defines 47
+`*KernelKunlunxin` kernels plus 47
+`REGISTER_IMPL_TO_DISPATCHER(..., Backend::kKunlunxin, ...)` lines; the
+`m.impl` lines that name them are emitted by the platform generator (see
+`HANDWRITTEN_OPS` in
+[`scripts/codegen/codegen_kunlunxin.py`](../../scripts/codegen/codegen_kunlunxin.py)),
+not by the generated `kunlunxin_kernels.cc`, which is byte-unchanged. The
+`csrc/CMakeLists.txt` vendor glob already covers `backends/kunlunxin/`, so no
+build edit is needed. Because the backend's `torch.rand(..., device=DEVICE,
+generator=gen)` and the native `normal_` now accept a flagos generator, kunlunxin
+joins `_supports_flagos_generator()` in
+`tests/integration/ops/test_rng_dispatch.py`; the CPU-op rejection test
+(`test_flagos_generator_does_not_reroute_cpu_op`, asserting "device type for
+generator" on a CPU tensor) is satisfied by the same `next_seed()` device check
+the GCU file carries.
+
+**Handwritten-kernel justification (CLAUDE.md codegen rule).** This is the GCU
+`HANDWRITTEN_OPS` precedent: the platform codegen **cannot express** the required
+runtime behaviour here. The generated kernels are one-per-`OPS`-entry wrappers
+around an xdnn vendor call, and the RNG surface has no vendor call to wrap — its
+contract is seed provenance from `c10::flagos::ReserveSeed` and a host-side draw,
+which is not a shape the `{kernels}` template can emit. The generator therefore
+owns the **registration** (`m.impl` lines, so the route and the registration move
+together and the `test_conf_registration_consistency.py` invariants still hold)
+while the bodies live in the hand-written file, which is exactly how GCU's 48-op
+cohort is organised. Human approval for the hand-written `rng.cc` was given
+explicitly (the de-box direction itself — "wire the vendor SDK's operator library
++ FlagGems, like mthreads" — is the user's ruling, PR #502).
+
+**Not revalidated.** The RNG overloads are routed and registered; they are
+**not** measured on a P800 in this change. The 47 RNG routes and the ten
+conformance routes are the only ops on the `kunlunxin` route.
 
 ## TsingMicro FlagGems bring-up (2026-10-10)
 
@@ -9560,6 +9621,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin unified RNG cohort: 47 overloads rerouted from `none` to the native `kunlunxin` backend | **Rewires the RNG surface onto the flagos PrivateUse1 generator, so `torch.flagos.manual_seed` / `get_rng_state` / `set_rng_state` / `manual_seed_all` own the stream the draws consume.** The lane's operator step failed two `tests/integration/ops/test_rng_dispatch.py` cases (`TestRngSeedSource::test_rng_state_round_trip`, `TestRngMultiDevice::test_manual_seed_all_replays_each_device_independently`) because every RNG op was left at `none` and took `cpu_fallback`: `torch.manual_seed` reaches ATen's CPU fallback generator (so whole-tensor reproducibility checks passed), but the flagos PrivateUse1 generator is a different state object, so `torch.flagos.*` moved nothing the fallback read. `csrc/aten/backends/kunlunxin/rng.cc` is added — the "declined to the host" arm of the GCU file (`csrc/aten/backends/gcu/rng.cc`): the XPU op library exposes no RNG entry point, so each draw is taken on an `at::CPUGeneratorImpl` and copied back, while the seed is reserved through `c10::flagos::ReserveSeed`. It defines 47 `*KernelKunlunxin` kernels and 47 `REGISTER_IMPL_TO_DISPATCHER(..., Backend::kKunlunxin, ...)` lines. Route delta `kunlunxin` 10 -> **57**, `none` 2027 -> **1980**, `flaggems` 0 unchanged (no FlagGems route), zero `cuda` routes; total 2037. **This uses the GCU `HANDWRITTEN_OPS` precedent under the CLAUDE.md codegen rule:** the generator owns the `m.impl` registration (so route and registration move together and the consistency invariants hold) while the bodies live in the hand-written file, because the RNG surface's contract is seed provenance plus a host-side draw — a shape the one-per-op xdnn-wrapper `{kernels}` template cannot emit. No test case was modified except the platform registration of kunlunxin in `_supports_flagos_generator()` (identical test-case code across platforms is a fleet requirement). | Regeneration proofs: `codegen_kunlunxin.py --check` → `[check] 57 kernel(s) up to date` (10 generated + 47 handwritten, empty diff on a second run); `kunlunxin_kernels.cc` byte-unchanged; `gen_vendor_confs.py` twice → empty diff and `--check` exits 0. `tests/unit/test_conf_registration_consistency.py`'s census/route-count snapshot updated to `{"kunlunxin": 57, "none": 1980}`, and its `test_vendor_routes_are_registered` / `test_accelerated_routes_are_registered` / `test_registered_ops_are_never_left_at_none` invariants cover all 57 routes (parametrized over `["musa","gcu","ascend","kunlunxin"]`). The pre-fix failure is the lane's own integration-job log: `2 failed, 660 passed, 29 skipped, 834 deselected, 3 xpassed` with both failures in `test_rng_dispatch.py`. The 47 RNG routes and the ten conformance routes are **not measured on hardware** in this change — a `pytest tests/integration/ops/test_rng_dispatch.py -m main_ops` run on a P800 is the follow-up that closes the hardware-measurement gap. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin native backend dtype gates (the ten runtime-conformance ops: `add.Tensor`, `mul.Tensor`, `mm`, `bmm`, `neg`, `sum.dim_IntList`) | **Splits the native backend's single flat dtype gate into per-op gates measured against the vendor wrapper, so a dtype the vendor rejects takes the CPU round-trip instead of erroring inside the wrapper.** The lane's first run to reach the portable integration step failed ten `tests/integration/test_dtype_coverage.py` cases, every one of them a dtype the previous build sent straight to the vendor: the generated kernels gated on the flat `KunlunxinSupportsDtype`, whose dtype map admits float64 and int8 for every op, but `xdnn_pytorch_wrapper` validates the scalar types of each entry point at run time and rejects a per-op subset (`add.cpp:151`, `mul.cpp:189`, `neg.cpp:55`, `sum.cpp:81`, `matmul.cpp:106` raise "scalar type of ret : k<dtype> is unsupported", surfaced to the caller as `RuntimeError: <op> failed on the Kunlunxin XPU backend: Interrupted system call (4)`). Five new predicates in `csrc/aten/backends/kunlunxin/kunlunxin_common.h` now name each op's accepted set, each measured against the wrapper rather than inferred from the base map: `KunlunxinSupportsAddDtype` (base − float64 − int8), `KunlunxinSupportsMulDtype` (add − int16), `KunlunxinSupportsMatmulDtype` (exactly float16/float32), `KunlunxinSupportsUnaryDtype` (base − float64) and `KunlunxinSupportsReductionDtype` (float16/bfloat16/float32). The generator drives them through one `{supports}` placeholder and a `SUPPORTS` category→predicate map in `scripts/codegen/codegen_kunlunxin.py`, and `cat`, `_softmax`, `embedding` and `where.self` resolve to the base predicate through the same map (no change to their behaviour). `neg` on bool and the compact int/uint cases are unchanged. No test case was touched — the fleet requires identical test-case code across platforms; the gate is a per-op capability of the vendor wrapper, not a host accommodation. No operator reroutes: `backends_kunlunxin.conf` is byte-identical. | Regeneration is idempotent (`python scripts/codegen/codegen_kunlunxin.py --check` → `[check] 10 kernel(s) up to date`); the regenerated `kunlunxin_kernels.cc` changes exactly the six gate lines and `kunlunxin_register.inc` is byte-identical (the `m.impl` set did not move). The pre-fix failure is the lane's own integration-job log (`test_dtype_coverage.py` → `10 failed, 226 passed, 1 xfailed`). The runtime-conformance cohort this row names builds every operand via `_randn(...)` and is therefore **float32 only** (`tests/integration/runtime/runtime_probe.py`), so per-op gating cannot move it; a `pytest tests/integration/runtime` run on the P800 is the follow-up that closes the hardware-measurement gap — the new gates are **not revalidated** on hardware until the lane re-runs. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin CI lane (main) + compressed-sparse boxing-guard correction | **Adds the Kunlunxin CI lane on `main`, so the de-boxed backend is guarded like every other accelerator**, and closes the one spot the 2026-10-12 de-boxing missed. The lane (`.github/workflows` `Platform pipeline (kunlunxin)`, its config, and the `set_env` hook) builds a `FLAGOS_ACCELERATOR=kunlunxin` wheel and runs `import torch_fl` as a post-build smoke test. On the first run that smoke test failed on `csrc/aten/sparse_csr_ops.cc`: its two CUDA-boxing guards listed Ascend/GCU/MUSA/TsingMicro/BPU but not `USE_KUNLUNXIN`, so the wheel linked `libtorch_fl.so` and then died at import with `undefined symbol: _ZN2at6native32addmm_out_sparse_compressed_cuda…` — the de-boxed backend links neither the vendor torch nor CUDA kernels, so `at::native::addmm_out_sparse_compressed_cuda` has no definition to bind. Both guards now carry `!defined(USE_KUNLUNXIN)`, and `tests/integration/ops/test_sparse_csr_dispatch.py`'s `NOT_CUDA_BOXING` set matches (the C++ is the source of truth). The `SparseCsrflagos` key's `mm`/`addmm`/`flatten_indices` registrations are therefore not compiled into a Kunlunxin wheel and those ops are left **unimplemented** there (the stock wheel's "DispatchStub: missing kernel" / "Could not run" errors) instead of half-registered. **No operator reroutes:** `backends_kunlunxin.conf` is byte-identical, still zero `cuda` routes, and no other platform's cohort moves — this is a build/link correction plus a CI addition. The lane also locates the vendor `xdnn` op library inside the image venv (`site-packages/torch_xmlir`), where the SDK ships it rather than under a bare `XDNN_ROOT`. | `ruff check .` → "All checks passed!"; `ruff format --check .` → 358 files already formatted; `tests/unit/test_gen_vendor_confs.py test_vendor_conf_single_writer.py test_conf_registration_consistency.py test_setup_build.py test_platform_capability_matrix.py test_device_tracer_selection.py` → 146 passed. The pre-fix failure is the lane's own CI log (`ImportError: …/torch_fl/lib/libtorch_fl.so: undefined symbol: _ZN2at6native32addmm_out_sparse_compressed_cuda…` after `[100%] Built target torch_bindings` / `Linking CXX shared library libtorch_fl.so`). The compressed-sparse surface itself is **not revalidated** on the P800 — the lane proves the wheel builds, imports, and routes; a `pytest tests/integration/runtime` run on the P800 is the follow-up that closes the hardware-measurement gap. |
 | 2026-10-12 | MetaX | MetaX full-coverage conf (2037-route denominator), runtime-conformance subset | `_softmax` and `embedding` leave the `flaggems_cpp` route: both were in `METAX_CPP_MEASURED` (`scripts/codegen/gen_vendor_confs.py`) but the MetaX build carries no FlagGems C++ half, so `Dispatcher::GetFn` degraded the route to the CUDA boxing kernel rather than serving it, and both ops are in `RUNTIME_OPS`. Removed from the measured set; each falls through `route_boxing()` to `flaggems` (both are in `FLAGGEMS_PYTHON_OPS`), so no `none` entry appears on a boxing platform. Route delta `flaggems_cpp` 12 -> **10**, `flaggems` 592 -> **594**, `cuda` 1433 unchanged; total 2037, coverage 2037/2037. Every other platform's conf is byte-identical. Wiring the MACA FlagGems C++ build into the MetaX CI hook and restoring the two routes is a separate follow-up PR. | Conf SHA-256 `8af0f654bb27358c93444b5a1674d447d566f6d3c535d591ee80714da7e95a22` -> `8a3a2e686b2a89a26bfb367fcfabafb7da88b718362c5c69b7c6196e777cbf3f`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` exits 0; `tests/unit/test_conf_registration_consistency.py`, `tests/unit/test_gen_vendor_confs.py`, `tests/unit/test_vendor_conf_single_writer.py` and the full unit suite pass; the metax route counts and the `flaggems` landing are read from the regenerated conf. This unblocks the MetaX runtime-conformance run; no 32/32 result was measured on hardware here. |

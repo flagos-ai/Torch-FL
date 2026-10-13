@@ -103,6 +103,78 @@ SUPPORTS = {
     "where_self": "KunlunxinSupportsDtype",
 }
 
+# Handwritten RNG ops. Every category template above IS one vendor call through
+# KUNLUNXIN_EXEC; the xdnn_pytorch op library exposes no random-number entry
+# point, so there is no vendor call for codegen to emit and the RNG set cannot
+# be expressed as a category. The kernels live in
+# csrc/aten/backends/kunlunxin/rng.cc, take their draws on the host, and exist
+# for one reason: to reserve their seed from c10::flagos::ReserveSeed, so
+# torch.flagos.manual_seed / get_rng_state / set_rng_state / manual_seed_all own
+# the stream the ops consume. Left unrouted these ops fall through to ATen's
+# generic cpu_fallback, which draws from a generator torch.flagos.* never
+# touches -- the failure the RNG-dispatch suite reports.
+#
+# This is the documented exception to the codegen-only rule for non-CUDA
+# platforms (CLAUDE.md, "Operator integration on non-CUDA-compatible
+# platforms"): the concrete limitation is that the vendor op library has no RNG
+# entry point for a template to call, which the PR records and carries explicit
+# human approval for. GCU takes the same route (codegen_gcu.py HANDWRITTEN_OPS +
+# csrc/aten/backends/gcu/rng.cc); this set is that RNG subset verbatim.
+#
+# The ops still have to appear in the coverage include: gen_vendor_confs.route()
+# gates on the PrivateUse1 registration, so an op missing from
+# kunlunxin_register.inc routes to `none`, and the m.impl() line is also what
+# makes the kKunlunxin dispatcher slot the wrappers call reachable.
+HANDWRITTEN_OPS = {
+    "_sample_dirichlet",
+    "_standard_gamma",
+    "bernoulli",
+    "bernoulli_.float",
+    "bernoulli_.Tensor",
+    "binomial",
+    "exponential",
+    "exponential_",
+    "multinomial",
+    "native_dropout",
+    "native_dropout_backward",
+    "normal_",
+    "normal.float_float",
+    "normal.Tensor_float",
+    "normal.Tensor_Tensor",
+    "poisson",
+    "rand",
+    "rand.generator",
+    "rand.names_out",
+    "rand.out",
+    "rand_like",
+    "rand_like.generator",
+    "rand_like.out",
+    "randint",
+    "randint.generator",
+    "randint.low",
+    "randint.low_generator",
+    "randint.low_out",
+    "randint.out",
+    "randint_like",
+    "randint_like.low_dtype",
+    "randint_like.low_dtype_out",
+    "randint_like.out",
+    "randn",
+    "randn.generator",
+    "randn.names_out",
+    "randn_like",
+    "randn_like.generator",
+    "randn_like.generator_out",
+    "randn_like.out",
+    "randperm",
+    "randperm.generator",
+    "randperm.out",
+    "random_",
+    "random_.from",
+    "random_.to",
+    "uniform_",
+}
+
 # ==========================================================================
 # Templates
 #
@@ -645,6 +717,21 @@ def render():
             )
         )
         covered.append((op, category))
+
+    # Handwritten ops emit an m.impl() line only -- their bodies live in
+    # csrc/aten/backends/kunlunxin/rng.cc, not in the generated kernels.cc. They
+    # are collected after the OPS loop so an op that is both generated and
+    # handwritten is not duplicated.
+    for op in sorted(HANDWRITTEN_OPS):
+        if op not in wrappers:
+            raise SystemExit(
+                f"error: handwritten op {op} has no wrapper in "
+                f"{REGISTER_INC.relative_to(REPO)}; run "
+                "scripts/codegen/codegen_ops.py first"
+            )
+        if not any(item[0] == op for item in covered):
+            covered.append((op, "handwritten"))
+
     return (
         FILE_HEADER + "\n".join(bodies) + FILE_FOOTER,
         INC_HEADER

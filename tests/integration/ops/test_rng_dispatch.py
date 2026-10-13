@@ -51,7 +51,8 @@ def _is_musa() -> bool:
 
 
 def _supports_flagos_generator() -> bool:
-    # ascend/gcu/musa consume a flagos generator natively; the CUDA-compatible
+    # ascend/gcu/musa/kunlunxin consume a flagos generator natively (their
+    # rng.cc takes the seed from c10::flagos::ReserveSeed); the CUDA-compatible
     # boxing backends (cuda/dcu/metax/ppu) accept one because the generated
     # boxing prelude translates it per call (covered by the translation tests
     # below). aclnn-style CPU-seeded paths are not in this list and must keep
@@ -60,6 +61,7 @@ def _supports_flagos_generator() -> bool:
         "ascend",
         "gcu",
         "musa",
+        "kunlunxin",
         "cuda",
         "dcu",
         "metax",

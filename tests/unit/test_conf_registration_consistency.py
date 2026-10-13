@@ -325,9 +325,14 @@ def test_conf_route_counts_are_stable():
         "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``
-        # route.  The ten ``kunlunxin`` routes are exactly the conformance op
-        # set that backends/kunlunxin/generated/kunlunxin_register.inc claims.
-        "kunlunxin": {"kunlunxin": 10, "none": 2027},
+        # route.  The count is exactly what
+        # backends/kunlunxin/generated/kunlunxin_register.inc registers: the ten
+        # conformance ops with an xdnn_pytorch kernel, plus the RNG cohort the
+        # handwritten rng.cc covers (see HANDWRITTEN_OPS in
+        # scripts/codegen/codegen_kunlunxin.py).  Without that route the RNG ops
+        # fell through to cpu_fallback, which the flagos PrivateUse1 generator
+        # cannot steer -- the two failures the CI lane reported.
+        "kunlunxin": {"kunlunxin": 57, "none": 1980},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
