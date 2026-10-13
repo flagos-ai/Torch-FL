@@ -126,12 +126,30 @@ _GCU_PROFILE = PlatformProfile(
     vendor="gcu",
 )
 
+# Kunlunxin (Kunlun P800 XPU): the de-boxed native backend reaches Triton
+# through FlagTree's XPU backend. That backend registers its package under the
+# key "xpu", but its driver *reports* the target as "cuda" -- XPUDriver
+# .get_current_target() does GPUTarget(os.environ.get("TRITON_XPU_TARGET_BACKEND",
+# "cuda"), ...), because this stack presents the XPU under the torch.cuda
+# interface and downstream projects key their dispatch on target.backend ==
+# "cuda". So the reported device type is "cuda" while the package key is "xpu".
+# Like the three above it has no CUDA runtime -- its native XPU runtime routes
+# around the CUDA-shaped surface the SDK ships -- so device and stream queries
+# must go through torch_fl's own vendor runtime.
+_KUNLUNXIN_PROFILE = PlatformProfile(
+    triton_device_type="cuda",
+    triton_backend_key="xpu",
+    is_cuda_like=False,
+    vendor="kunlunxin",
+)
+
 _PROFILES = {
     "dcu": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
     "ascend": _ASCEND_PROFILE,
     "musa": _MUSA_PROFILE,
     "gcu": _GCU_PROFILE,
+    "kunlunxin": _KUNLUNXIN_PROFILE,
 }
 
 

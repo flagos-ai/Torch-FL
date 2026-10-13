@@ -96,6 +96,14 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_gcu_current_raw_stream as {name}"
             )
+        if ACCELERATOR == "kunlunxin":
+            # Same on Kunlunxin: FlagTree's XPU launcher takes a raw XPU stream
+            # handle and the de-boxed build has no CUDA runtime to import one
+            # from.
+            return (
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_kunlunxin_current_raw_stream as {name}"
+            )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 

@@ -182,6 +182,24 @@ def get_gcu_current_raw_stream(device: Any = None) -> int:
     return flagos.current_stream(index).gcu_stream
 
 
+def get_kunlunxin_current_raw_stream(device: Any = None) -> int:
+    """The raw XPU stream handle kernels must be launched on.
+
+    Kunlunxin's de-boxed backend has one queue per device, denoted by handle 0,
+    and ``torch.flagos.current_stream`` returns the stand-in that carries it
+    (there is no CUDA ``_cuda_getCurrentRawStream`` and no vendor raw-stream
+    binding in ``_C`` to read it from). This is the import target of the
+    raw-stream line inductor writes into generated code (see
+    ``inductor_codegen.py``), so a compiled kernel records the same default
+    stream the eager xdnn kernels submit to.
+    """
+    from torch_fl import flagos
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+    index = int(FlagOSDeviceInterface._vendor_device(device))
+    return flagos.current_stream(index).handle
+
+
 _musa_driver_bound = False
 
 

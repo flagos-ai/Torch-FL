@@ -62,10 +62,12 @@ DEVICE_TYPE = "flagos"
 # MUSA reaches Triton through MThreads FlagTree; GCU reaches it through
 # FlagTree's enflame backend (or Enflame's older triton_gcu plugin), already
 # redirected onto flagos by
-# torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). The
-# distinction that matters to this module is the same for both, so keep the
-# checks keyed on this set rather than on a vendor name.
-_NATIVE_ACCELERATORS = frozenset({"musa", "gcu"})
+# torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). Kunlunxin
+# reaches it through FlagTree's XPU backend and, like the other two, runs with no
+# CUDA runtime at all. The distinction that matters to this module is the same
+# for all of them, so keep the checks keyed on this set rather than on a vendor
+# name.
+_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin"})
 
 
 def is_native_accelerator() -> bool:
@@ -164,6 +166,10 @@ def _raw_stream(device_idx: int) -> int:
         from torch_fl.compile.flagtree_shim import get_gcu_current_raw_stream
 
         return get_gcu_current_raw_stream(device_idx)
+    if profile.vendor == "kunlunxin":
+        from torch_fl.compile.flagtree_shim import get_kunlunxin_current_raw_stream
+
+        return get_kunlunxin_current_raw_stream(device_idx)
 
     from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream
 
@@ -183,6 +189,10 @@ def _set_stream(stream: Any) -> None:
             return
         torch.cuda.set_stream(stream)
         return
+    if profile.vendor == "kunlunxin":
+        # The XPU runtime has one queue per device, denoted by handle 0, and the
+        # stream stand-in carries it; there is no other stream to switch to.
+        return
     native.set_current()
 
 
@@ -197,6 +207,10 @@ def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> No
         from torch_fl.accelerator.gcu.tops_stream import TopsStream
 
         TopsStream.borrowed(stream_id, device=device_index).set_current()
+        return
+    if profile.vendor == "kunlunxin":
+        # Single-queue device (handle 0): there is nothing else to switch to and
+        # no torch stream-id registry to switch it through.
         return
     # Native ACL streams have no torch stream-id registry; the id *is* the
     # aclrtStream handle (see AclStream.stream_id), so switch on it directly.
@@ -312,6 +326,12 @@ class FlagOSDeviceInterface(DeviceInterface):
         if profile.vendor in ("musa", "gcu"):
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
+        if profile.vendor == "kunlunxin":
+            # The XPU device reports no compute-capability pair of its own -- its
+            # properties fall back to the Ascend-shaped stand-in -- so read the
+            # arch FlagTree's XPU backend compiles for from its driver, the same
+            # number that backend puts in GPUTarget.arch.
+            return _kunlunxin_arch()
         # Ascend: `cc` reaches Triton as GPUTarget.arch, and the Ascend backend
         # expects a SoC name there (e.g. "Ascend910_9382"), not a number. That is
         # what its own driver reports, so read it from the same place.
@@ -369,6 +389,21 @@ def _ascend_arch(_cache: list = []) -> str:
         from triton.backends.ascend.driver import NPUUtils
 
         _cache.append(str(NPUUtils().get_arch()))
+    return _cache[0]
+
+
+def _kunlunxin_arch(_cache: list = []) -> int:
+    """Arch the FlagTree XPU backend compiles for, as ``GPUTarget.arch``.
+
+    Queried once from the installed backend's own driver so the value cannot
+    drift from what ``driver.active.get_current_target()`` would report. The XPU
+    device reports no compute-capability pair to derive it from, so the driver is
+    the only authority.
+    """
+    if not _cache:
+        from triton.runtime import driver
+
+        _cache.append(int(driver.active.get_current_target().arch))
     return _cache[0]
 
 
@@ -435,7 +470,7 @@ def _patch_device_properties() -> None:
             # runtimes keep the flagos device here: there is no torch.cuda to
             # look up, and our own interface is registered for flagos.
             device = torch.device("cuda", device.index or 0)
-        elif is_flagos and vendor in ("musa", "gcu"):
+        elif is_flagos and vendor in ("musa", "gcu", "kunlunxin"):
             # These vendor implementations of DeviceProperties.create cannot
             # read a flagos device, so build the record from our interface.
 
