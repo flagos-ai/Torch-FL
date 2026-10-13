@@ -76,6 +76,25 @@ def as_musa(monkeypatch):
     return pp._MUSA_PROFILE
 
 
+@pytest.fixture
+def as_kunlunxin(monkeypatch):
+    """Force every profile consumer onto the Kunlunxin profile.
+
+    The interesting one for the device registry: it is not CUDA-like, yet its
+    reported Triton device type *is* "cuda" (FlagTree's XPU backend presents the
+    target that way), so it is the only accelerator that lands on a name the
+    stock CudaInterface also claims.
+    """
+    for module in ("platform_profile", "device_interface", "inductor_codegen"):
+        monkeypatch.setattr(
+            f"torch_fl.compile.{module}.platform_profile",
+            lambda: pp._KUNLUNXIN_PROFILE,
+            raising=False,
+        )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "kunlunxin")
+    return pp._KUNLUNXIN_PROFILE
+
+
 # --- profile selection ------------------------------------------------------
 
 
@@ -227,6 +246,129 @@ def test_exchange_device_uses_flagos_state_on_ascend(as_ascend, monkeypatch):
     moved.clear()
     assert di._exchange_device(-1) == -1
     assert moved == []
+
+
+# --- device registry --------------------------------------------------------
+
+
+def _capture_registrations(di, monkeypatch):
+    """Record what `register_flagos_device_interface` registers.
+
+    Only the registry decision matters to the tests below; the other patch steps
+    rewrite global inductor state, so no-op them and intercept the one
+    registration call that is left.
+    """
+    for name in (
+        "_register_gpu_type",
+        "_patch_device_properties",
+        "_patch_inductor_benchmark_device",
+        "_repair_stock_cuda_interface",
+        "_patch_joint_graph_pattern_init",
+        "_patch_benchmarker",
+        "_prime_has_triton",
+    ):
+        monkeypatch.setattr(di, name, lambda: None, raising=False)
+    # Skip the has_triton override tail; it does not register anything.
+    monkeypatch.setattr(di, "is_native_accelerator", lambda: False)
+
+    registered = {}
+
+    import torch._dynamo.device_interface as dyn_di
+
+    monkeypatch.setattr(
+        dyn_di,
+        "register_interface_for_device",
+        lambda device, interface: registered.__setitem__(device, interface),
+    )
+    return registered
+
+
+@pytest.mark.anyplatform
+def test_native_accelerator_claims_the_reported_cuda_name(as_kunlunxin, monkeypatch):
+    """The reported device name must map to the flagos interface.
+
+    FlagTree's XPU backend reports the Kunlunxin target as "cuda", so inductor's
+    *runtime* launcher (`triton_heuristics.get_device_interface`, which looks up
+    ``device_props.type``) lands on the stock `CudaInterface` -- whose
+    ``exchange_device`` is ``torch.cuda._exchange_device``, raising "PyTorch was
+    compiled without CUDA support" on a build with no CUDA runtime. The reported
+    name has to be claimed for `FlagOSDeviceInterface` instead.
+    """
+    from torch_fl.compile import device_interface as di
+
+    registered = _capture_registrations(di, monkeypatch)
+    di.register_flagos_device_interface()
+
+    assert registered[di.DEVICE_TYPE] is di.FlagOSDeviceInterface
+    assert registered["cuda"] is di.FlagOSDeviceInterface
+
+
+@pytest.mark.anyplatform
+def test_cuda_like_build_leaves_the_cuda_name_alone(as_cuda, monkeypatch):
+    """On a real CUDA build the stock CudaInterface is the correct one."""
+    from torch_fl.compile import device_interface as di
+
+    registered = _capture_registrations(di, monkeypatch)
+    di.register_flagos_device_interface()
+
+    assert registered[di.DEVICE_TYPE] is di.FlagOSDeviceInterface
+    assert "cuda" not in registered
+
+
+@pytest.mark.anyplatform
+def test_stock_cuda_interface_leaves_exchange_device_on_cuda(as_cuda, monkeypatch):
+    """On a CUDA build the stock `exchange_device` is correct and stays untouched.
+
+    The repair splits: `exchange_device` dispatches to a real CUDA runtime, so the
+    stock binding must be left alone. `get_raw_stream` is bound at
+    `torch._dynamo.device_interface` import time from
+
+        get_cuda_stream = _cuda_getCurrentRawStream if torch.cuda._is_compiled() else None
+
+    which the flagos CPU wheel (plus torch_fl's own shim, installed later) misses,
+    so it is restored on every build -- gating it behind `is_cuda_like` is exactly
+    the regression from run 38354801090, where the CUDA lane died with
+    "'NoneType' object is not callable" at `get_raw_stream`.
+    """
+    import torch
+
+    from torch._dynamo import device_interface as dyn_di
+
+    from torch_fl.compile import device_interface as di
+
+    before_exchange = dyn_di.CudaInterface.exchange_device
+    before_maybe = dyn_di.CudaInterface.maybe_exchange_device
+    before_raw = dyn_di.CudaInterface.get_raw_stream
+    getter = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+    di._repair_stock_cuda_interface()
+
+    assert dyn_di.CudaInterface.exchange_device is before_exchange
+    assert dyn_di.CudaInterface.maybe_exchange_device is before_maybe
+    if getter is not None and before_raw is None:
+        assert dyn_di.CudaInterface.get_raw_stream is getter
+    else:
+        assert dyn_di.CudaInterface.get_raw_stream is before_raw
+
+
+@pytest.mark.anyplatform
+def test_stock_cuda_interface_exchange_device_rebound_on_native(as_kunlunxin):
+    """The runtime launcher resolves the stock class, so its entry point must work."""
+    from torch._dynamo import device_interface as dyn_di
+
+    from torch_fl.compile import device_interface as di
+
+    saved = {
+        name: getattr(dyn_di.CudaInterface, name)
+        for name in ("exchange_device", "maybe_exchange_device", "get_raw_stream")
+    }
+    try:
+        di._repair_stock_cuda_interface()
+        assert dyn_di.CudaInterface.exchange_device is di._exchange_device
+        assert dyn_di.CudaInterface.maybe_exchange_device is di._exchange_device
+    finally:
+        for name, value in saved.items():
+            setattr(dyn_di.CudaInterface, name, value)
 
 
 # --- autotune benchmarking --------------------------------------------------
