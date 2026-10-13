@@ -27,10 +27,13 @@ backend:
   and the only one that needs no vendor library (§0.4).
 
 - **Registration**: `import torch_fl` calls `register_flagos_backend()`, which runs
-  `Backend.register_backend("flagos", creator, devices=["privateuseone"])` and sets
-  `default_device_backend_map["privateuseone"] = "flagos"`. After that, the standard
+  `Backend.register_backend("flagos", creator, devices=[torch._C._get_privateuse1_backend_name()])`
+  and sets `default_device_backend_map[<the same runtime device type>] = "flagos"`. The key is the
+  runtime name the device is registered under (`flagos`), not the literal `privateuseone`: torch_fl
+  renames PrivateUse1 and every c10d lookup normalises to the renamed type, so keying by the
+  literal left `get_default_backend_for_device` unreachable (#506). After that, the standard
   `torch.distributed.init_process_group("flagos")` (or automatic detection via
-  `device_id=torch.device("privateuseone:0")`) works with no `torch.distributed.*` monkeypatching
+  `device_id=torch.device("flagos:0")`) works with no `torch.distributed.*` monkeypatching
   at all.
 
 - **DDP**: `import torch_fl` patches

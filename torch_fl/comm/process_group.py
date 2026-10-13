@@ -1176,16 +1176,24 @@ def register_flagos_backend() -> None:
     if "flagos" in dist.Backend.backend_list:
         return  # already registered
 
+    # The device type every c10d lookup normalises to.  torch_fl renames
+    # PrivateUse1 to "flagos", and even ``torch.device("privateuseone:0")``
+    # resolves to type ``"flagos"`` before the map lookup, so the literal
+    # ``"privateuseone"`` this registration used to carry was unreachable and
+    # ``get_default_backend_for_device`` raised for the device the plugin
+    # serves (#506).
+    device_type = torch._C._get_privateuse1_backend_name()
+
     dist.Backend.register_backend(
         "flagos",
         _create_flagos_pg,
         extended_api=False,
-        devices=["privateuseone"],
+        devices=[device_type],
     )
 
-    # Make `init_process_group(device_id=torch.device("privateuseone:0"))`
+    # Make `init_process_group(device_id=torch.device(f"{device_type}:0"))`
     # auto-select "flagos" without the user specifying a backend string.
-    dist.Backend.default_device_backend_map.setdefault("privateuseone", "flagos")
+    dist.Backend.default_device_backend_map.setdefault(device_type, "flagos")
 
     # Serve plain gloo requests with this backend instead (see
     # redirect_gloo_requests). Separate try/except on purpose: the backend above
