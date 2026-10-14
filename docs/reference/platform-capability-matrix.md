@@ -88,7 +88,7 @@ platform, not a per-build choice.
   vendor kernel library and no CUDA boxing path (boxing was explicitly ruled
   out), so all covered ops route to the FlagGems Python/Triton path through
   FlagTree's iluvatar backend and everything else falls back to `none`
-  (`cpu_fallback`). Its 639 FlagGems routes are the *shared* FlagGems Python
+  (`cpu_fallback`). Its 640 FlagGems routes are the *shared* FlagGems Python
   ceiling, not a measurement taken on BI-V150 hardware: no FlagGems overload
   survey has been run on a BI-V150 host yet, so the coverage is **provisional**
   until `tests/manual/flaggems_overload_survey.py` has been run there. It has no

@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -39,11 +40,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gen_vendor_confs as g  # noqa: E402
 from backend_coverage import FLAGGEMS_PYTHON_OPS  # noqa: E402
-from codegen_mudnn import REGISTER_INC, wrapper_map  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 VENDOR = "iluvatar"
 OUT_INC = REPO / f"csrc/aten/backends/{VENDOR}/generated/{VENDOR}_flaggems_register.inc"
+# The CUDA codegen's generated registration: the authoritative op -> Wrapper<Name>
+# map. Read directly rather than through codegen_mudnn.wrapper_map(), which drags
+# in codegen_ops -> torchgen (a module-level sys.exit without it) and would make
+# this generator's --check unrunnable in the lean codegen-checks CI job that its
+# siblings run in.
+REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
+
+
+def wrapper_map():
+    """op name -> Wrapper<Name>, read back from the CUDA codegen's register.inc."""
+    if not REGISTER_INC.exists():
+        return {}
+    text = REGISTER_INC.read_text()
+    return dict(re.findall(r'^\s*m\.impl\("([^"]+)",\s*(\w+)\);', text, flags=re.M))
+
 
 INC_HEADER = """\
 // Copyright (c) 2026, BAAI. All rights reserved.

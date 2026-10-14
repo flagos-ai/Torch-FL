@@ -18,7 +18,7 @@
 // list below is the shared FlagGems ceiling, not a measured BI-V150 result.
 // Excluded ops, left to cpu_fallback:
 //
-// Total: 639 ops registered here, 0 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 640 ops registered here, 0 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -167,6 +167,7 @@
   m.impl("bmm", WrapperBmm);
   m.impl("bmm.out", WrapperBmmOut);
   m.impl("bucketize.Tensor", WrapperBucketizeTensor);
+  m.impl("cat", WrapperCat);
   m.impl("ceil", WrapperCeil);
   m.impl("ceil.out", WrapperCeilOut);
   m.impl("ceil_", WrapperCeilInplace);
