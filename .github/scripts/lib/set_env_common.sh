@@ -41,7 +41,7 @@
 # --index-url/-i is inspected: every caller here passes it as a separate
 # argument, and --extra-index-url is not used anywhere in this directory.
 pip_index_host() {
-  local arg prev="" url host
+  local arg prev="" url="" host=""
   for arg in "$@"; do
     case "$arg" in
       --index-url=*|-i=*) url="${arg#*=}" ;;
@@ -146,11 +146,20 @@ pip_retry() {
   if [[ "${PIP_RETRY_NO_CACHE:-1}" == "1" ]]; then
     extra+=(--no-cache-dir)
   fi
-  local index_host log_file attempt=1
+  local index_host="" log_file="" attempt=1 resolve_status=0
   index_host="$(pip_index_host "$@")"
-  if [[ -n "$index_host" ]] && ! index_host_resolves "$index_host"; then
-    echo "::error::Cannot resolve the package index host '${index_host}'; not retrying, because name resolution does not recover inside a job pod. If this host is only reachable through the runner's HTTP proxy, check that proxy's allowlist and the pod's NO_PROXY (see .github/scripts/lib/proxy_route.sh)."
-    return 1
+  if [[ -n "$index_host" ]]; then
+    # Exit 1 is the check answering "this host does not resolve"; anything else
+    # means the check itself did not run (no interpreter on PATH, say), which
+    # says nothing about the index and must not stop a working install.
+    index_host_resolves "$index_host" || resolve_status=$?
+    if (( resolve_status == 1 )); then
+      echo "::error::Cannot resolve the package index host '${index_host}'; not retrying, because name resolution does not recover inside a job pod. If this host is only reachable through the runner's HTTP proxy, check that proxy's allowlist and the pod's NO_PROXY (see .github/scripts/lib/proxy_route.sh)."
+      return 1
+    fi
+    if (( resolve_status != 0 )); then
+      echo "::warning::Could not check whether the package index host '${index_host}' resolves (exit ${resolve_status}); installing without the check."
+    fi
   fi
   # Tee the output so each failed attempt can be classified without losing the
   # live log a human reads while the job runs.
@@ -313,7 +322,7 @@ PY
 # keeps the slower one from being used on a pod whose route to the mirror is
 # worse than its route offshore. Ties and probe failures keep the pin.
 faster_cpu_torch_index() {
-  local primary="$1" mirror="$2" primary_bps mirror_bps index
+  local primary="$1" mirror="$2" primary_bps="" mirror_bps="" index=""
   primary_bps="$(index_download_bps "$primary")"
   mirror_bps="$(index_download_bps "$mirror")"
   # The caller captures this function's stdout as the chosen index, so the

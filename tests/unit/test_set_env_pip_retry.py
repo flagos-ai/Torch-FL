@@ -97,6 +97,35 @@ def test_pip_retry_refuses_an_unresolvable_index_without_running_pip(tmp_path):
     assert not recorder.exists(), "pip ran for a host that does not resolve"
 
 
+def test_pip_retry_installs_when_the_index_check_cannot_run(tmp_path):
+    """Only a site that answers "does not resolve" may stop the install.
+
+    The check runs in the venv interpreter, so it cannot run before that venv
+    exists; its failure then says nothing about the index and must not replace a
+    working install with a network diagnosis.
+    """
+    recorder = tmp_path / "pip-invocations"
+    fake = tmp_path / "fake-python"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then\n'
+        f'  echo "$*" >> "{recorder}"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    done = _run_bash(
+        f'export PIP_RETRY_PYTHON="{fake}"\n'
+        "pip_retry --index-url https://example.invalid/simple somepkg && echo PIP-OK\n"
+    )
+    assert "::error::Cannot resolve the package index host" not in done.stdout
+    assert "::warning::Could not check whether the package index host" in done.stdout
+    assert "PIP-OK" in done.stdout
+    assert recorder.read_text(encoding="utf-8").count("-m pip") == 1
+
+
 def test_index_host_resolves_skips_a_host_the_runner_proxies():
     """The proxy looks the host up, so the pod's own resolution proves nothing."""
     done = _run_bash(

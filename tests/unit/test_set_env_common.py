@@ -117,3 +117,34 @@ def test_every_script_calls_the_common_phases():
             )
         if script.name != "set_env_metax.sh":
             assert re.search(r"^[ \t]*install_cpu_torch\b", text, re.M), script.name
+
+
+def test_every_local_in_the_library_is_initialized():
+    """Every `local` in the library names a value, not a slot.
+
+    The scripts run under `set -u` (`.github/scripts/set_env.sh`), and bash 5 --
+    what the runners use -- reports a bare `local` that has not been assigned
+    yet as an unbound variable the moment it is expanded. `local a b="" c` is
+    therefore safe for `b` and `c` and a landmine for `a`: the first PR to add
+    `pip_index_host` declared `local arg prev="" url host` and assigned `url`
+    inside a `case` branch, so the Ascend build job died with
+    `line 54: url: unbound variable` (run 38491036055) while the same code
+    passed on macOS, whose bash 3.2 expands an unassigned local to the empty
+    string instead. A name the `for` statement assigns every iteration is the
+    one shape a bare declaration may have.
+    """
+    text = LIB.read_text(encoding="utf-8")
+    functions = re.split(r"^([a-zA-Z_][a-zA-Z0-9_]*)\(\) \{", text, flags=re.M)
+    assert functions, "no functions parsed"
+    for name, body in zip(functions[1::2], functions[2::2], strict=True):
+        # A function body ends at the first closing brace in column 0.
+        body = body.split("\n}", 1)[0]
+        for declaration in re.finditer(r"^[ \t]*local ([^\n]*)$", body, re.M):
+            for word in declaration.group(1).split():
+                variable = word.split("=", 1)[0]
+                if "=" in word or not variable.isidentifier():
+                    continue
+                assert re.search(rf"\bfor\s+{variable}\s+in\b", body), (
+                    f"{name}: `local {variable}` has no initializer and is not a "
+                    f"for-loop variable; under `set -u` bash 5 fails on it"
+                )
