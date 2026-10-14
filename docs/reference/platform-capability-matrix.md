@@ -119,11 +119,13 @@ build opts into boxing.
   `csrc/aten/backends/iluvatar/`, whose kernels call corex's CUDA-named C ABI
   (ixdnn/ixblas) directly. Everything FlagGems covers still routes to the
   FlagGems Python/Triton path through FlagTree's iluvatar backend, and the rest
-  falls back to `none` (`cpu_fallback`). A BI-V150 overload survey (2026-10-14,
-  639-op cohort) measured **STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED
-  136** and left 37 defect ops off FlagGems (they route to the native slot or to
-  `cpu_fallback`), so the conf routes **603** `flaggems`, not the shared 640
-  ceiling (`cat` measured separately, STRICT). Most of the 37 are the
+  falls back to `none` (`cpu_fallback`). A BI-V150 overload survey (2026-10-15,
+  603-op cohort: the conf's own FlagGems routes) measured **STRICT 380 /
+  BASIC_ONLY 66 / FAILED 21 / UNTESTED 136**; the 37 defect ops the previous
+  639-op run measured failing are off the FlagGems route (to the native slot or
+  to `cpu_fallback`), so the conf routes **603** `flaggems`, not the shared 640
+  ceiling (`cat` measured separately in that earlier run, STRICT; in-band here).
+  Most of the 37 are the
   `device_name="cuda"` vs `flagos` mismatch the DCU `patch_flaggems_device_name()`
   realignment addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is
   the follow-up that would return them. It has no CI job and no runner lane — it

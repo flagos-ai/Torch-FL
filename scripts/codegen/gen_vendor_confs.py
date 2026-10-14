@@ -1712,6 +1712,14 @@ NATIVE_TRITON_GAPS = {
     # tested, STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED 136, plus `cat`
     # measured separately as STRICT on the 640-op conf.
     #
+    # Re-measured 2026-10-15 on the same host against THIS conf (conf_sha256
+    # 5b2ab727110268857c2e0f27cd7f5f84900f37614be1ae21ba098a2ce6a675bc): 603
+    # routes, 467 tested, STRICT 380 / BASIC_ONLY 66 / FAILED 21 / UNTESTED 136.
+    # No op newly failed -- the 37 the first run gapped are simply off the route,
+    # and `cat` (added to the ceiling by upstream #498 after the first conf) is
+    # now in-band. So this set is still the defect subset of the FIRST run's 58
+    # FAILED ops, and the second run neither adds to nor subtracts from it.
+    #
     # The set below is the subset of the 58 FAILED ops that are defects rather
     # than harness synthesis limits. Three failure families dominate:
     #

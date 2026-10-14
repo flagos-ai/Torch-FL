@@ -12,16 +12,23 @@
 // not registered" instead of falling back to cpu_fallback.
 //
 // Excluded ops come from NATIVE_TRITON_GAPS['iluvatar'] in
-// scripts/codegen/gen_vendor_confs.py. That set is the 37 defect ops a BI-V150
-// overload survey measured failing (tests/manual/flaggems_overload_survey.py,
-// 2026-10-14, 639-op cohort: STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED
-// 136); the other 21 FAILED were survey synthesis limits and stay here. The list
-// below is the shared FlagGems ceiling (640) minus those 37, so 603. Re-measure
-// and move entries in or out of that set only from BI-V150 results, never by
-// assumption -- and note the DCU precedent: most of the 37 are the device-name
-// mismatch that _ALIGNED_VENDORS (torch_fl/accelerator/cuda/_cuda_compat.py)
-// remediates, so an A/B survey after adding iluvatar there is the way most of
-// them come back.
+// scripts/codegen/gen_vendor_confs.py: the 37 defect ops a BI-V150 overload
+// survey measured failing (tests/manual/flaggems_overload_survey.py), now routed
+// off the FlagGems path to the native slot or to cpu_fallback. The list below is
+// the shared FlagGems ceiling (640) minus those 37, so 603.
+//
+// Measured twice against this same conf, 2026-10-14 over the 639-op cohort
+// (STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED 136) and 2026-10-15 over the
+// narrower 603-op cohort (STRICT 380 / BASIC_ONLY 66 / FAILED 21 / UNTESTED 136).
+// The FAILED drop is the cohort change, not a fix: the 37 gap ops carried most of
+// the old FAILED count, and no op newly failed between the runs. The remaining 21
+// are survey synthesis limits and stay here.
+//
+// Re-measure and move entries in or out of that set only from BI-V150 results,
+// never by assumption -- and note the DCU precedent: most of the 37 are the
+// device-name mismatch that _ALIGNED_VENDORS
+// (torch_fl/accelerator/cuda/_cuda_compat.py) remediates, so an A/B survey after
+// adding iluvatar there is the way most of them come back.
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update
 //   - _native_batch_norm_legit.no_stats
