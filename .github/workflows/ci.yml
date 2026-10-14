@@ -61,19 +61,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       platforms: ${{ steps.detect.outputs.platforms }}
-      has_cuda: ${{ steps.detect.outputs.has_cuda }}
-      has_ascend: ${{ steps.detect.outputs.has_ascend }}
-      has_dcu: ${{ steps.detect.outputs.has_dcu }}
-      has_metax: ${{ steps.detect.outputs.has_metax }}
-      has_ppu: ${{ steps.detect.outputs.has_ppu }}
-      has_musa: ${{ steps.detect.outputs.has_musa }}
-      has_gcu: ${{ steps.detect.outputs.has_gcu }}
-      has_kunlunxin: ${{ steps.detect.outputs.has_kunlunxin }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Emits `platforms` as a JSON array of the config basenames under
+      # .github/configs, narrowed to the platforms a pull request can affect.
+      # The pipeline below is dispatched from it directly, so there is no second
+      # list of platform names here to fall out of step with the configs.
       - name: Detect configured platforms
         id: detect
         run: |
@@ -83,81 +79,21 @@ jobs:
             --configs-dir .github/configs \
             >> "$GITHUB_OUTPUT"
 
-          platforms=$(grep '^platforms=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)
-
-          unsupported_platforms=$(jq -c 'map(select(. != "ascend" and . != "dcu" and . != "metax" and . != "cuda" and . != "ppu" and . != "musa" and . != "gcu" and . != "kunlunxin"))' <<<"$platforms")
-          if [[ "$unsupported_platforms" != '[]' ]]; then
-            echo "::error::No dedicated integration workflow configured for: $unsupported_platforms"
-            exit 1
-          fi
-          has_cuda=$(jq -r 'index("cuda") != null' <<<"$platforms")
-          has_ascend=$(jq -r 'index("ascend") != null' <<<"$platforms")
-          has_dcu=$(jq -r 'index("dcu") != null' <<<"$platforms")
-          has_metax=$(jq -r 'index("metax") != null' <<<"$platforms")
-          has_ppu=$(jq -r 'index("ppu") != null' <<<"$platforms")
-          has_musa=$(jq -r 'index("musa") != null' <<<"$platforms")
-          has_gcu=$(jq -r 'index("gcu") != null' <<<"$platforms")
-          has_kunlunxin=$(jq -r 'index("kunlunxin") != null' <<<"$platforms")
-          echo "has_cuda=$has_cuda" >> "$GITHUB_OUTPUT"
-          echo "has_ascend=$has_ascend" >> "$GITHUB_OUTPUT"
-          echo "has_dcu=$has_dcu" >> "$GITHUB_OUTPUT"
-          echo "has_metax=$has_metax" >> "$GITHUB_OUTPUT"
-          echo "has_ppu=$has_ppu" >> "$GITHUB_OUTPUT"
-          echo "has_musa=$has_musa" >> "$GITHUB_OUTPUT"
-          echo "has_gcu=$has_gcu" >> "$GITHUB_OUTPUT"
-          echo "has_kunlunxin=$has_kunlunxin" >> "$GITHUB_OUTPUT"
-
-  ascend-pipeline:
-    name: Platform pipeline (ascend)
+  # One hardware pipeline per platform, from the list discovery just emitted.
+  # There were eight spelled-out jobs here before, each naming a workflow file
+  # and, for Ascend and DCU, repeating a timeout that the config already carried:
+  # the only thing that differed was the platform, and the list had to be edited
+  # in three places to add one. The pipeline reads the platform's config now, so
+  # the runner label, image, mounts, timeout and test manifest all come from
+  # there, and `fail-fast: false` keeps a red platform from cancelling the eight
+  # others -- which is what the independent jobs did before.
+  platform-pipeline:
+    name: Platform pipeline (${{ matrix.platform }})
     needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_ascend == 'true'
-    uses: ./.github/workflows/integration-test-ascend.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
+    uses: ./.github/workflows/integration-tests.yml
     with:
-      timeout-minutes: 120
-
-  cuda-pipeline:
-    name: Platform pipeline (cuda)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_cuda == 'true'
-    uses: ./.github/workflows/integration-test-cuda.yml
-
-  dcu-pipeline:
-    name: Platform pipeline (dcu)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_dcu == 'true'
-    uses: ./.github/workflows/integration-test-dcu.yml
-    with:
-      # Matches timeout_minutes in .github/configs/dcu.yml, which this pipeline
-      # does not read: the dedicated pipelines take their timeout from the
-      # workflow input, and the reusable workflow's own default is 60.
-      timeout-minutes: 90
-
-  metax-pipeline:
-    name: Platform pipeline (metax)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_metax == 'true'
-    uses: ./.github/workflows/integration-test-metax.yml
-
-  musa-pipeline:
-    name: Platform pipeline (musa)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_musa == 'true'
-    uses: ./.github/workflows/integration-test-musa.yml
-
-  ppu-pipeline:
-    name: Platform pipeline (ppu)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_ppu == 'true'
-    uses: ./.github/workflows/integration-test-ppu.yml
-
-  gcu-pipeline:
-    name: Platform pipeline (gcu)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_gcu == 'true'
-    uses: ./.github/workflows/integration-test-gcu.yml
-
-  kunlunxin-pipeline:
-    name: Platform pipeline (kunlunxin)
-    needs: discover-platforms
-    if: needs.discover-platforms.outputs.has_kunlunxin == 'true'
-    uses: ./.github/workflows/integration-test-kunlunxin.yml
+      platform: ${{ matrix.platform }}

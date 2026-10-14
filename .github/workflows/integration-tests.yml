@@ -1,0 +1,200 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The one integration pipeline, parameterized by the platform it is handed.
+#
+# There used to be one file per platform under this name, each carrying its own
+# copy of the runner label, the image, the mounts and the step sequence -- eight
+# files that differed only in `.github/configs/<platform>.yml` and the two or
+# three commands whose absence an image hid. A step renamed in one of them, or a
+# platform added without the other seven, was invisible until a hardware job
+# went red. This pipeline reads every one of those values from the config
+# instead, through load-platform-config.yml, so the only per-platform artefact
+# left is the config file.
+#
+# The hardware job is unchanged in substance: it builds the wheel, validates it
+# against the platform's compatibility manifest, installs it, and runs the
+# platform's manifest of integration groups in the same job, against the
+# installed wheel rather than the checkout. Only the plumbing around it moved.
+#
+# What still differs per platform, and where it lives:
+#
+#   * runner label, image, volumes, options  -> .github/configs/<p>.yml
+#   * job timeout                            -> timeout_minutes, with
+#                                               integration_timeout_minutes to
+#                                               override it for this job alone
+#   * the stage set_env.sh is invoked as      -> setup_stage
+#   * a command its image is missing          -> integration_build_tools
+#                                               (before the build) or
+#                                               integration_test_dependencies
+#                                               (after the wheel install)
+#   * what runs                              -> integration_tests, the manifest
+#                                               the shared runner executes
+
+name: Platform integration tests
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: Config basename under .github/configs (without .yml)
+        required: true
+        type: string
+  # Kept from the per-platform pipelines: a single re-run of one platform, on
+  # its own hardware, without dispatching the whole matrix in ci.yml. The
+  # timeout and the test manifest come from the config either way.
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Config basename under .github/configs (without .yml)
+        required: true
+        type: string
+
+jobs:
+  configuration:
+    uses: ./.github/workflows/load-platform-config.yml
+    with:
+      platform: ${{ inputs.platform }}
+
+  integration-tests:
+    name: Build and test (${{ needs.configuration.outputs.display_name }})
+    needs: configuration
+    runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
+    timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
+    container:
+      image: ${{ needs.configuration.outputs.ci_image }}
+      volumes: ${{ fromJson(needs.configuration.outputs.container_volumes) }}
+      options: ${{ needs.configuration.outputs.container_options }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Discard host leftovers before restoring the managed pip download cache.
+      - name: Reset pip cache dir
+        shell: bash
+        run: |
+          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
+          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+
+      # Look up first: a transfer timeout can return success with no matched key.
+      # A cold miss may save later; a failed matched transfer must not upload.
+      #
+      # hashFiles cannot interpolate inputs.setup_script, but it does evaluate a
+      # format() argument, so the hook and config paths are built from the
+      # platform this job was handed -- the same shape build-wheel-common.yml
+      # uses. The dedicated per-platform pipelines this replaced hashed their own
+      # workflow file; the single pipeline hashes itself instead.
+      #
+      # The restore-keys keep a display-name fallback because that is the lane the
+      # shared common workflow used before every platform had its own pipeline
+      # (GCU was the last one on it), so a warm cache from that era is still
+      # found on the first run instead of being re-downloaded.
+      - name: Look up pip downloads
+        id: pip-cache-lookup
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 1
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ inputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.platform), format('.github/configs/{0}.yml', inputs.platform), '.github/workflows/integration-tests.yml') }}
+          lookup-only: true
+          restore-keys: |
+            ${{ inputs.platform }}-pip-${{ runner.os }}-
+            ${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-
+            ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
+            ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
+
+      # Cache downloads only; installation and tests always run.
+      - name: Restore pip downloads
+        id: pip-cache
+        if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+
+      # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
+      # prebuild the native library in place only at `build`, and this job needs
+      # that library before it builds the wheel. Every other platform provisions
+      # device-dependent pieces at `integration`, which is what a job named this
+      # used to pass. See setup_stage in .github/configs/<p>.yml.
+      - name: Prepare ${{ needs.configuration.outputs.display_name }} build environment
+        env:
+          CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
+        run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
+
+      # Kunlunxin's image ships no `build` module, and a missing one does not
+      # fail cleanly: the checkout's own CMake `build/` directory shadows it as
+      # a namespace package. Empty for every other platform.
+      - name: Install build tools
+        if: needs.configuration.outputs.integration_build_tools != ''
+        run: ${{ needs.configuration.outputs.integration_build_tools }}
+
+      - name: Build wheel
+        run: python -m build --wheel --no-isolation
+
+      - name: Validate wheel compatibility manifest
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
+
+      - name: Install wheel
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+
+      # pytest, where the image does not already have it: GCU installs it here,
+      # Kunlunxin additionally upgrades pip first, and Ascend gets it from its
+      # own hook. A multi-line list of commands, one per line.
+      - name: Install test dependencies
+        if: needs.configuration.outputs.integration_test_dependencies != ''
+        run: ${{ needs.configuration.outputs.integration_test_dependencies }}
+
+      - name: Prepare wheel-only test workspace
+        run: |
+          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-${{ inputs.platform }}.XXXXXX")
+          # The runner executes each configured command with this directory as
+          # its cwd, so what it holds is what those commands can reach. Keep it
+          # wheel-only: `Run unit tests (per file)` is a source-tree suite and
+          # changes back to the checkout itself, and every group that stays here
+          # runs against the installed wheel rather than the checkout it was
+          # built from. tests/unit/test_integration_workdir.py holds both ends of
+          # that arrangement.
+          cp -a tests pyproject.toml "$TEST_ROOT/"
+          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
+
+      - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
+        env:
+          INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
+          INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+        run: python .github/scripts/run_integration_tests.py
+
+      # Save outside post-job cleanup so the upload has its own deadline.
+      # Keep downloaded dependencies even if a later build/test step fails:
+      # !cancelled() intentionally permits saving after failure (no success()).
+      # Skip exact hits, failed lookups/transfers and cancelled jobs.
+      # Cache errors must not change the build/test result.
+      - name: Save pip downloads
+        if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}

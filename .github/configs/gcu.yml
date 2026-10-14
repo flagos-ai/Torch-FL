@@ -31,6 +31,12 @@ container_volumes: []
 
 integration_environment: {}
 
+# GCU builds and tests the same wheel in one hardware job, against the isolated
+# CPU-PyTorch environment set_env.sh provisions. That environment does not carry
+# pytest, so the pipeline installs it after the wheel.
+integration_test_dependencies:
+  - python -m pip install pytest
+
 container_options: >-
   --privileged
   --ipc=host

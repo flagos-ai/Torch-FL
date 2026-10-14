@@ -25,9 +25,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = ROOT / ".github/workflows"
+# The two reusable entrypoints that carry a pip download cache: the shared wheel
+# build, and the single parameterized integration pipeline that replaced the
+# per-platform integration-test-<platform>.yml files.
 WORKFLOWS = [
     "build-wheel-common.yml",
-    *sorted(path.name for path in WORKFLOW_DIR.glob("integration-test-*.yml")),
+    "integration-tests.yml",
 ]
 
 
@@ -239,16 +242,11 @@ def test_cache_transfer_decisions(
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_cache_failure_budgets_do_not_gate_installation(workflow):
-    # One bounded warm-cache trial; DCU and release/manual builds retain their
-    # previous budgets. Keep these caps explicit so tuning cannot become an
-    # unbounded wait for a stalled cache service.
-    restore_maximum, segment_maximum = {
-        "integration-test-cuda.yml": (3, 2),
-        "integration-test-dcu.yml": (2, 2),
-        "integration-test-gcu.yml": (5, 3),
-        "build-wheel-common.yml": (3, 2),
-    }.get(workflow, (4, 3))
-    save_maximum = 5 if workflow == "integration-test-kunlunxin.yml" else 3
+    # Every transfer is bounded so a stalled cache service cannot turn into an
+    # unbounded wait before the install and the tests. Keep these caps explicit
+    # so tuning stays visible.
+    restore_maximum, segment_maximum = 3, 2
+    save_maximum = 3
     for step in _steps(workflow):
         if step.get("uses", "").startswith("actions/cache/"):
             assert step["continue-on-error"] is True
@@ -267,13 +265,15 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
 
 
 def test_every_routed_integration_workflow_is_covered():
+    # ci.yml dispatches one platform pipeline per discovered platform through the
+    # single integration-tests.yml; that file is what must carry the cache.
     document = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     routed = {
         Path(job["uses"]).name
         for job in document["jobs"].values()
-        if job.get("uses", "").startswith("./.github/workflows/integration-test-")
+        if job.get("uses", "").startswith("./.github/workflows/integration-tests")
     }
-    assert routed
+    assert routed == {"integration-tests.yml"}
     assert routed <= set(WORKFLOWS)
 
 
@@ -292,28 +292,38 @@ def test_cache_key_tracks_the_effective_dependencies(workflow):
         ".github/scripts/lib/set_env_common.sh",
     ):
         assert dependency in key
+    # The hook and the config are named through format() rather than baked in,
+    # because hashFiles does not interpolate the raw input string but does
+    # evaluate a format() argument.
     assert "set_env_*.sh" not in key
     assert f".github/workflows/{workflow}" in key
+    assert "format('.github/scripts/hooks/set_env_{0}.sh'" in key
     if workflow == "build-wheel-common.yml":
         assert "inputs.setup_platform" in key
         assert "format('.github/configs/{0}.yml', inputs.setup_platform)" in key
     else:
-        platform = workflow.removeprefix("integration-test-").removesuffix(".yml")
-        assert f".github/scripts/hooks/set_env_{platform}.sh" in key
-        assert f".github/configs/{platform}.yml" in key
+        assert "inputs.platform" in key
+        assert "format('.github/configs/{0}.yml', inputs.platform)" in key
 
 
 def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
+    # GCU was the last platform on the shared common workflow, whose cache keys
+    # were built from the display name. The unified pipeline keeps those prefixes
+    # as restore-keys so the first run after the collapse still finds them.
     lookup = next(
         step
-        for step in _steps("integration-test-gcu.yml")
+        for step in _steps("integration-tests.yml")
         if step.get("id") == "pip-cache-lookup"
     )
-    assert lookup["with"]["key"].startswith("gcu-pip-")
+    assert lookup["with"]["key"].startswith("${{ inputs.platform }}-pip-")
     for prefix in (
-        "Enflame GCU-pip-",
-        "Enflame GCU-build-pip-",
-        "Enflame GCU-integration-pip-",
+        "${{ inputs.platform }}-pip-${{ runner.os }}-",
+        "${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-",
+        "${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-",
+        (
+            "${{ needs.configuration.outputs.display_name }}"
+            "-integration-pip-${{ runner.os }}-"
+        ),
     ):
         assert prefix in lookup["with"]["restore-keys"]
 

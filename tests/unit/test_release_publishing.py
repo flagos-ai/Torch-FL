@@ -29,6 +29,7 @@ Nothing here touches the network.
 
 import importlib.util
 import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -90,23 +91,34 @@ def _release_jobs(text: str) -> dict:
     return {name: "\n".join(body) for name, body in jobs.items()}
 
 
-def test_every_publishing_platform_has_a_build_job_in_the_release_workflow():
-    """A platform that publishes but has no job would ship nothing, quietly.
+def _release_matrix_platforms() -> list[str]:
+    """The platforms in release.yml's build matrix, in the order written."""
+    match = re.search(
+        r"^\s*platform:\s*\[([^\]]*)\]\s*$",
+        RELEASE.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert match is not None, "release.yml has no `platform: [...]` matrix list"
+    return [name.strip() for name in match.group(1).split(",") if name.strip()]
 
-    Scanned as text rather than parsed: this asserts that every platform is
-    named somewhere in the workflow, which a regex answers, and tests/unit has
-    no YAML parser dependency to add for it. The two spellings it looks for are
-    the two the file actually uses -- a platform's own wrapper, and the explicit
-    `platform:` input that drives all-tests-common.yml.
+
+def test_every_publishing_platform_has_a_build_job_in_the_release_workflow():
+    """The matrix and the platform table have to name the same platforms.
+
+    Both directions matter. A platform that carries a `pypi_lane` but is absent
+    from the matrix ships a release with that lane quietly missing; a matrix
+    entry for a platform with no lane builds a wheel that goes nowhere. The
+    matrix is one `platform: [...]` line now, and the checks below read it.
     """
-    text = RELEASE.read_text(encoding="utf-8")
-    missing = [
-        platform
-        for platform in publishing_platforms()
-        if f"build-wheel-{platform}.yml" not in text
-        and f"platform: {platform}" not in text
-    ]
-    assert not missing, f"release.yml has no build job for: {sorted(missing)}"
+    matrix = _release_matrix_platforms()
+    publishing = publishing_platforms()
+    missing = sorted(set(publishing) - set(matrix))
+    extra = sorted(set(matrix) - set(publishing))
+    assert not missing, f"release.yml's matrix has no job for: {missing}"
+    assert not extra, (
+        f"release.yml's matrix builds {extra}, which carry no pypi_lane, so "
+        "those wheels would go nowhere"
+    )
 
 
 def test_every_publishing_platform_has_a_ci_config():
@@ -274,36 +286,50 @@ def test_the_build_workflow_derives_the_pre_release_from_the_tag():
 
 
 def test_every_release_build_job_carries_the_upload():
+    """The one matrix job builds and uploads every publishing platform.
+
+    There were seven spelled-out jobs before, each holding its own `publish:`
+    and `NEXUS_TOKEN`; a platform wired without them produced a green release
+    with a wheel silently missing. There is one job now, so the upload is
+    checked once, and the matrix it fans out over is held to the publishing
+    platforms so a platform cannot drop out of the release unnoticed.
+    """
     jobs = _release_jobs(RELEASE.read_text(encoding="utf-8"))
     builds = {
         name: body
         for name, body in jobs.items()
-        if "build-wheel-" in body or "all-tests-common.yml" in body
+        if ".github/workflows/build-wheel.yml" in body
     }
-    assert len(builds) == len(publishing_platforms()), sorted(builds)
-    for name, body in builds.items():
-        assert "publish: true" in body, f"{name} builds a wheel but does not publish it"
-        assert "NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}" in body, name
+    assert len(builds) == 1, sorted(builds)
+    name, body = next(iter(builds.items()))
+    assert "publish: true" in body, f"{name} builds a wheel but does not publish it"
+    assert "NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}" in body, name
+    assert set(_release_matrix_platforms()) == set(publishing_platforms())
 
 
 def test_ci_still_builds_without_publishing():
     """The release flag must be opt-in, or every push would try to upload.
 
-    Manual wheel builds can call all-tests-common.yml without publishing or
-    passing secrets. Hardware CI uses dedicated integration workflows and must
-    never request a release upload.
+    Manual wheel builds call build-wheel.yml without publishing or passing
+    secrets. Hardware CI runs the integration pipeline and must never request a
+    release upload.
     """
-    common = (REPO_ROOT / ".github" / "workflows" / "all-tests-common.yml").read_text(
+    common = (REPO_ROOT / ".github" / "workflows" / "build-wheel.yml").read_text(
         encoding="utf-8"
     )
-    interfaces = common[common.index("on:") : common.index("\njobs:")]
-    publish_at = interfaces.index("publish:")
-    assert "type: boolean" in interfaces[publish_at : publish_at + 120]
-    assert "default: false" in interfaces[publish_at : publish_at + 120]
+    interfaces = common[common.index("\non:") : common.index("\njobs:")]
+    # The workflow_call interface alone: workflow_dispatch has its own inputs,
+    # and one of them (`platform`) is `required: true`, which is not the secret.
+    call = interfaces[: interfaces.index("\n  workflow_dispatch:")]
+    publish_at = call.index("publish:")
+    # `publish` is the last workflow_call input, so the secret block ends it.
+    publish_block = call[publish_at : call.index("    secrets:")]
+    assert "type: boolean" in publish_block
+    assert "default: false" in publish_block
 
-    secrets_at = interfaces.index("    secrets:")
-    assert "NEXUS_TOKEN:" in interfaces[secrets_at:]
-    assert "required: true" not in interfaces[secrets_at:], (
+    secrets_at = call.index("    secrets:")
+    assert "NEXUS_TOKEN:" in call[secrets_at:]
+    assert "required: true" not in call[secrets_at:], (
         "an optional secret must not become required: manual builds may pass none"
     )
 

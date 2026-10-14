@@ -21,11 +21,11 @@
 # `torch_fl-2.10.0+cuda13.3`, `torch_fl-2.10.0+dtk2604`, and so on: one release,
 # one artifact per platform.
 #
-# The build jobs reuse the `build-wheel-*.yml` wrappers the CI pipelines already
-# call, so a release builds exactly what CI verified (same image, same setup
-# hook, same wheel build, and the same `Verify wheel` step that re-installs the
-# artifact before it is offered here). Nothing about the build is release-only;
-# `publish: true` is the only release-specific input.
+# The build reuses `build-wheel.yml`, the one wheel build, with the platform's
+# own config, so a release builds exactly what CI verified (same image, same
+# setup hook, same wheel build, and the same `Verify wheel` step that re-installs
+# the artifact before it is offered here). Nothing about the build is
+# release-only; `publish: true` is the only release-specific input.
 #
 # Uploading from the platform's own job is deliberate, and is how
 # flagos-ai/build-infra releases its own wheels. The other shape -- one
@@ -129,74 +129,25 @@ jobs:
             echo "::notice::Non-release tag '${REF_NAME}' - building nothing. Re-run this workflow with workflow_dispatch to release it deliberately."
           fi
 
-  # One job per publishing platform, spelled out rather than a matrix: each has
-  # its own runner label, image and timeout, which is the shape ci.yml uses too.
-  # Every one of them carries the upload with it.
-  build-cuda:
+  # One job per publishing platform, as a matrix rather than seven spelled-out
+  # blocks: the runner label, image, mounts and timeout each one used to name
+  # come from `.github/configs/<platform>.yml` through build-wheel.yml. The list
+  # below is what a release ships, so it is held to the platforms that carry a
+  # `pypi_lane` in cmake/flagos_platforms.json, in both directions, by
+  # tests/unit/test_release_publishing.py. `fail-fast: false` so one vendor's
+  # runner cannot cancel another vendor's build -- the blocks were independent
+  # before. Every job carries the upload with it.
+  build:
+    name: Build wheel (${{ matrix.platform }})
     if: needs.guard.outputs.publish == 'true'
     needs: guard
-    uses: ./.github/workflows/build-wheel-cuda.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ascend, cuda, dcu, gcu, metax, musa, ppu]
+    uses: ./.github/workflows/build-wheel.yml
     with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  build-dcu:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/build-wheel-dcu.yml
-    with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  build-musa:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/build-wheel-musa.yml
-    with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  build-ascend:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/build-wheel-ascend.yml
-    with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  build-metax:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/build-wheel-metax.yml
-    with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  build-ppu:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/build-wheel-ppu.yml
-    with:
-      publish: true
-    secrets:
-      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
-
-  # GCU has no build-wheel-* wrapper, so release reads its build configuration
-  # directly through the shared wheel-build workflow. Hardware CI uses the
-  # separate integration-test-gcu.yml build-and-test job.
-  build-gcu:
-    if: needs.guard.outputs.publish == 'true'
-    needs: guard
-    uses: ./.github/workflows/all-tests-common.yml
-    with:
-      platform: gcu
-      run_build: true
-      upload_artifact: true
+      platform: ${{ matrix.platform }}
       publish: true
     secrets:
       NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}

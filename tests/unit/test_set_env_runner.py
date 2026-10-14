@@ -17,9 +17,9 @@
 `.github/scripts/set_env.sh --platform <p>` owns the boilerplate every platform
 shares and sources `hooks/set_env_<p>.sh`, which is the platform-specific part.
 The old `set_env_<p>.sh` files are thin wrappers around the runner, and the
-named integration workflows call the runner directly. This pins that shape: the
-runner dispatches, every platform has a hook and a wrapper, and the workflows
-use the parameterized entrypoint.
+integration pipeline calls the runner directly. This pins that shape: the runner
+dispatches, every platform has a hook and a wrapper, and the pipeline uses the
+parameterized entrypoint.
 
 The runner is exercised with `--help`/an unknown platform, which return before
 any provisioning runs.
@@ -35,9 +35,6 @@ HOOKS = SCRIPTS / "hooks"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
 PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu"]
-
-#: The named workflows that provision a platform themselves.
-NAMED_WORKFLOWS = PLATFORMS
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -78,22 +75,29 @@ def test_every_wrapper_routes_to_the_runner():
         assert "set_env.sh" in text and f"--platform {platform}" in text, platform
 
 
-def test_named_workflows_use_the_parameterized_entrypoint():
-    for platform in NAMED_WORKFLOWS:
-        text = (WORKFLOWS / f"integration-test-{platform}.yml").read_text(
-            encoding="utf-8"
-        )
-        assert f"bash .github/scripts/set_env.sh --platform {platform}" in text, (
-            platform
-        )
+def test_the_parameterized_workflow_provisions_every_platform():
+    """One workflow provisions every platform, from that platform's config.
+
+    There used to be a file per platform under `integration-test-<p>.yml`, each
+    repeating `bash .github/scripts/set_env.sh --platform <p>` and hard-coding
+    its stage. The pipeline reads setup_script/setup_platform/setup_stage from
+    the config now, so a platform that needs the `build` stage (Ascend,
+    Kunlunxin) is no longer the only shape the file can express.
+    """
+    text = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
+    assert (
+        'bash "${{ needs.configuration.outputs.setup_script }}" '
+        '--platform "${{ needs.configuration.outputs.setup_platform }}"' in text
+    )
+    assert "CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}" in text
 
 
 def test_config_driven_path_uses_the_runner():
     """The configs name the runner and the platform, so no wrapper hop.
 
-    `all-tests-common.yml` reads setup_script/setup_platform from the config and
-    runs `bash set_env.sh --platform <p>`; the wrappers stay only for the docs
-    and local use.
+    The pipeline reads setup_script/setup_platform from the config and runs
+    `bash set_env.sh --platform <p>`; the wrappers stay only for the docs and
+    local use.
     """
     for platform in PLATFORMS:
         text = (REPO_ROOT / ".github" / "configs" / f"{platform}.yml").read_text(
@@ -114,18 +118,15 @@ def test_common_workflows_pass_the_platform():
 
 
 def test_config_discovery_exports_the_platform():
-    """all-tests-common.yml must declare setup_platform as a job output.
+    """load-platform-config.yml must declare setup_platform as a job output.
 
     It is read into the config step's GITHUB_OUTPUT, but `needs.<job>.outputs`
-    only exposes what the job's `outputs:` block lists; without this the common
-    workflows receive an empty platform and the runner exits 2.
+    only exposes what the job's `outputs:` block lists; without this the
+    pipeline receives an empty platform and the runner exits 2.
     """
-    text = (WORKFLOWS / "all-tests-common.yml").read_text(encoding="utf-8")
+    text = (WORKFLOWS / "load-platform-config.yml").read_text(encoding="utf-8")
     assert "setup_platform: ${{ steps.config.outputs.setup_platform }}" in text
-    assert (
-        'printf \'%s=%s\\n\' setup_platform "$SETUP_PLATFORM" >> "$GITHUB_OUTPUT"'
-        in text
-    )
+    assert 'emit setup_platform "$SETUP_PLATFORM"' in text
 
 
 def test_runner_applies_the_pip_constraints():

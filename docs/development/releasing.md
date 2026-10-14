@@ -32,13 +32,13 @@ git push upstream v2.10.0
    `pip install torch_fl==2.10.0` does not pick the candidate up. The uploader
    then requires the tag and the wheel to name the same version, which is what
    stops a candidate being published under the release's name or the reverse.
-2. **Builds and uploads on every platform**, one job each, on the platform's own
-   runner. Release uses the `build-wheel-*.yml` wrapper (or
-   `all-tests-common.yml` for GCU, which has no wrapper), the platform's configured
-   image and setup hook, and a `Verify wheel` step that installs the fresh artifact
-   before it is offered to the uploader. Hardware CI uses separate dedicated
-   build-and-test workflows. The upload happens in the release build job, so
-   the wheel never leaves the platform's own network.
+2. **Builds and uploads on every platform**, one matrix job per platform, on the
+   platform's own runner. Release calls `build-wheel.yml` -- the one parameterized
+   wheel build -- with the platform's config, so the image, setup hook and wheel
+   build are the same ones hardware CI used, plus a `Verify wheel` step that
+   installs the fresh artifact before it is offered to the uploader. Hardware CI
+   runs the separate `integration-tests.yml` pipeline. The upload happens in the
+   release build job, so the wheel never leaves the platform's own network.
 3. **Uploads each wheel to its lane** with
    `.github/scripts/publish_wheels.py`, run by `build-wheel-common.yml` on the
    build runner. It reads the target from the `pypi_lane` column of
@@ -133,8 +133,8 @@ country; the guards that travel with it are the version check in
 the ref check in the upload step, which lets nothing but a tag ref publish.
 
 The secret is declared and mapped explicitly at every `uses:` hop —
-`release.yml` → `build-wheel-<vendor>.yml` → `all-tests-common.yml` →
-`build-wheel-common.yml` — because `secrets: inherit` is not transitive. Nothing
+`release.yml` → `build-wheel.yml` → `build-wheel-common.yml` — because
+`secrets: inherit` is not transitive. Nothing
 per-repository needs configuring as long as the organization secret is visible to
 this repository. If it is not, each build job fails on an empty token *before* it
 builds anything, rather than uploading nothing quietly.
@@ -150,9 +150,8 @@ missing:
 
 1. `pypi_lane` in `cmake/flagos_platforms.json`.
 2. A `.github/configs/<platform>.yml`, since a release reuses that pipeline.
-3. A job in `.github/workflows/release.yml` — either a
-   `build-wheel-<platform>.yml` wrapper or an explicit `platform:` input to
-   `all-tests-common.yml`.
+3. The platform's name in the `platform:` matrix of the `build` job in
+   `.github/workflows/release.yml`.
 4. `publish: true` on that job, with the `NEXUS_TOKEN` mapping beside it. Without
    them the platform still builds and the release is green, but that wheel never
    reaches its lane — which nothing else would catch, so

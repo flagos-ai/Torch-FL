@@ -58,7 +58,7 @@ The check below requires every integration test file to be reachable from at
 least one manifest, against an explicit list of the ones that are known not to
 be, so the next orphan fails instead of hiding.
 
-Nothing here imports a YAML parser, for the reason ``load-platform-tests.yml``
+Nothing here imports a YAML parser, for the reason ``load-platform-config.yml``
 gives for running its own parsing off the vendor image: the accelerator
 containers are not required to carry a YAML dependency, and this file runs
 inside one of them.
@@ -79,8 +79,6 @@ _CONFIG_DIR = _REPO_ROOT / ".github/configs"
 _INTEGRATION_DIR = _REPO_ROOT / "tests/integration"
 
 _PREPARE_STEP = "Prepare wheel-only test workspace"
-# `platform: dcu`, the input the workflow passes to load-platform-tests.yml.
-_PLATFORM_RE = re.compile(r"^\s*platform:\s*([A-Za-z0-9_]+)\s*$", re.MULTILINE)
 # A column-0 YAML key, used to delimit a top-level block.
 _TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*:")
 # A `command:` key and its value. The value is either a block indicator, as in
@@ -93,23 +91,6 @@ _BLOCK_INDICATOR_RE = re.compile(r"[>|][-+]?")
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 # A command that leaves the prepared workspace for the checkout.
 _CHECKOUT_CD_RE = re.compile(r"""\bcd\s+["']?\$GITHUB_WORKSPACE["']?""")
-
-
-def _platform_of(workflow: Path) -> str | None:
-    """The manifest a workflow runs, or None if it declares none.
-
-    The declared input has to agree with the filename, because together they
-    are what connects a workflow to the config this module checks it against.
-    """
-    declared = _PLATFORM_RE.search(workflow.read_text(encoding="utf-8"))
-    if declared is None:
-        return None
-    expected = workflow.stem.removeprefix("integration-test-")
-    assert declared.group(1) == expected, (
-        f"{workflow.name} declares platform '{declared.group(1)}' but is named "
-        f"for '{expected}'"
-    )
-    return expected
 
 
 def _indent(line: str) -> int:
@@ -148,19 +129,25 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
     return None
 
 
+def _manifest_platforms() -> list[str]:
+    """Every platform manifest, by the name its file carries."""
+    return sorted(path.stem for path in _CONFIG_DIR.glob("*.yml"))
+
+
 def _prepare_steps() -> list[tuple[str, str, str]]:
-    """Every prepare step: ``(workflow name, platform, run script)``."""
-    found = []
-    for workflow in sorted(_WORKFLOW_DIR.glob("integration-test-*.yml")):
-        platform = _platform_of(workflow)
-        if platform is None:
-            continue
-        script = _run_script_of_step(
-            workflow.read_text(encoding="utf-8"), _PREPARE_STEP
-        )
-        if script is not None:
-            found.append((workflow.name, platform, script))
-    return found
+    """Every prepare step: ``(workflow name, platform, run script)``.
+
+    There used to be a workflow per platform under ``integration-test-<p>.yml``,
+    each with its own copy of the step, and the platform came off the file's
+    name and its ``platform:`` input. The pipeline is one file now and the step
+    body is identical for every platform, so each platform's manifest is paired
+    with that one script.
+    """
+    workflow = _WORKFLOW_DIR / "integration-tests.yml"
+    script = _run_script_of_step(workflow.read_text(encoding="utf-8"), _PREPARE_STEP)
+    if script is None:
+        return []
+    return [(workflow.name, platform, script) for platform in _manifest_platforms()]
 
 
 def _logical_lines(script: str) -> list[str]:
@@ -480,11 +467,6 @@ def _manifest_selections(platform: str) -> list[_Selection]:
         if selection is not None:
             selections.append(selection)
     return selections
-
-
-def _manifest_platforms() -> list[str]:
-    """Every platform manifest, by the name its file carries."""
-    return sorted(path.stem for path in _CONFIG_DIR.glob("*.yml"))
 
 
 def _marks_of(test_file: Path) -> set[str]:

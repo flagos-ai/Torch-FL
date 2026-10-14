@@ -18,6 +18,12 @@ display_name: Kunlun P800 XPU
 setup_script: .github/scripts/set_env.sh
 setup_platform: kunlunxin
 
+# Kunlunxin's hook prebuilds the native library in place and probes the device
+# only when it is invoked as `build`; called as `integration` it skips both, and
+# the wheel build then finds no library to link. Every other platform provisions
+# at `integration`, so this is the one stage that is not the default.
+setup_stage: build
+
 # Pinned Kunlunxin XRE image (driver 5.37.1). The hook creates the isolated
 # Python 3.10 venv inside the job, reusing the image's TORCH_FL_PREBUILT_KUNLUNXIN_VENV
 # when it provides one; a derived CI image should bake python3.10-venv in to
@@ -30,6 +36,18 @@ runner_labels:
 container_volumes: []
 
 integration_environment: {}
+
+# The image ships no `build` module, and a missing one does not fail cleanly: the
+# checkout's own CMake `build/` directory shadows it as a namespace package, so
+# `python -m build` resolves to the wrong module. Upgrade it before the build.
+integration_build_tools:
+  - python -m pip install --upgrade build
+
+# The isolated venv carries neither an upgraded pip nor pytest; the pipeline
+# installs both after the wheel.
+integration_test_dependencies:
+  - python -m pip install --upgrade pip
+  - python -m pip install pytest
 
 container_options: >-
   --privileged

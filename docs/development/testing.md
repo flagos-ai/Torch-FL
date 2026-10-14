@@ -351,15 +351,19 @@ GitHub Actions CI runs a subset of tests based on pytest marks:
 To replicate CI behavior locally, use the same mark expressions shown above.
 
 `.github/configs/<platform>.yml` is the only place that defines what a platform runs. Ascend,
-cuda, dcu, gcu, metax, musa, ppu, and kunlunxin use dedicated pipelines (hardcoded runner labels and container
-images). Each dedicated pipeline has two jobs: `load-tests` calls `load-platform-tests.yml`, an
-`ubuntu-latest` job that parses the config with `yq`, and `integration-tests` builds, installs,
-and tests the wheel in the same hardware job without transferring a wheel artifact. Adding or
-renaming a step means editing only the config: nothing lists tests inline. Keeping `yq` off the vendor images is deliberate, so no
-accelerator container needs a YAML dependency.
+cuda, dcu, gcu, metax, musa, ppu, and kunlunxin all use one parameterized pipeline,
+`integration-tests.yml`, dispatched as a matrix from `ci.yml` (one job per platform the discovery
+step reports). Each platform's job reads its config through `load-platform-config.yml`, an
+`ubuntu-latest` job that parses the config with `yq`, then builds, installs, and tests the wheel
+in the same hardware job without transferring a wheel artifact. The runner label, image, mounts,
+timeout, provisioning stage, and test manifest all come from the config, so adding or renaming a
+step means editing only the config: nothing lists tests inline, and there is no per-platform
+workflow to copy. Keeping `yq` off the vendor images is deliberate, so no accelerator container
+needs a YAML dependency.
 
-There is no generic integration fallback. A selected platform without a dedicated
-pipeline fails discovery instead of being silently omitted. `all-tests-common.yml`
-and `build-wheel-common.yml` remain for release/manual wheel builds only; they do
-not run integration tests. `wheel_artifact_name` is used by those build callers,
-while hardware CI builds and tests its wheel in the same job.
+There is no generic integration fallback. A selected platform without a config fails discovery
+instead of being silently omitted. `build-wheel.yml` -- the one parameterized wheel build, used by
+`release.yml` and manual dispatches -- and `build-wheel-common.yml`, the single implementation it
+calls, remain for release/manual wheel builds only; they do not run integration tests.
+`wheel_artifact_name` is used by those build callers, while hardware CI builds and tests its wheel
+in the same job.
