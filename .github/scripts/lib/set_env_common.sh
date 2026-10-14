@@ -29,10 +29,11 @@
 # `install_cpu_torch` measures both CPU-torch indexes before it installs from
 # one, and honours TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL (an empty value disables
 # the mirror and pins the install to CPU_TORCH_INDEX_URL).
-# `pip_retry` refuses to retry an index host that the pod cannot resolve and
-# does not reach through the runner's HTTP proxy, because the retry loop
-# otherwise turns a network error the job cannot recover from into what looks
-# like a hang.
+# `pip_retry` refuses to retry an index host that nothing in the job can reach --
+# the pod cannot resolve it and the runner does not proxy it -- because the retry
+# loop otherwise turns a network error the job cannot recover from into what
+# looks like a hang. A host that only fails to resolve because the runner
+# exempted it from its proxy is un-exempted and installed from normally.
 #
 # The scripts must keep `set -euo pipefail` in effect; every variable read here
 # is either set by the caller or has a default.
@@ -62,25 +63,41 @@ pip_index_host() {
   return 0
 }
 
-# Succeeds when pip will be able to look up what it needs to reach $1. A pod
-# that dials the index itself and cannot resolve it will never install from it,
-# and unlike a dropped connection the condition does not clear while the job
-# runs, so it must never reach the retry loop: five attempts against the
-# unresolvable resource.flagos.net in run 38409565812 spent 21.5 minutes -- most
-# of a 27.9-minute Ascend job -- before reporting it.
+# Make sure pip will be able to look up the index host $1, and leave the
+# environment able to. Three cases, and only the last one stops the install.
 #
-# A host pip reaches through the runner's HTTP proxy (see proxy_route.sh) is
-# looked up by the proxy, so the result here would say nothing and the check is
-# skipped. Reading the proxy variables directly rather than asking urllib keeps
-# the answer the same on a Linux pod and on a developer's laptop, where a
-# system-wide proxy setting would otherwise decide the test's outcome.
-index_host_resolves() {
-  "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" - "$1" <<'PY'
+#   * The runner proxies the host: the proxy does the lookup, so the pod's own
+#     resolution proves nothing and is not consulted. Reading the proxy variables
+#     directly rather than asking urllib keeps the answer the same on a Linux pod
+#     and on a developer's laptop, where a system-wide proxy setting would
+#     otherwise decide the outcome.
+#   * The pod resolves the host for itself and can: nothing to do.
+#   * The pod must resolve the host for itself and cannot, because the runner
+#     exempted it from the proxy. The exemption is then the whole problem, and it
+#     is worth undoing rather than reporting: the Ascend runner at
+#     /root/flagcicd carries NO_PROXY=...,resource.flagos.net,*.flagos.net, and
+#     resource.flagos.net does not resolve there at all (run 38478507163, and
+#     again on this branch's run 38491926656), while the sibling Ascend runner --
+#     same proxy, no exemption -- fetched the 535.9 MB FlagTree wheel through it
+#     in 22 s. So print "re-route" with the un-exempted NO_PROXY/no_proxy for the
+#     caller to adopt. Only a pod with no proxy to fall back on, or one whose list
+#     is bypassed wholesale ("*"), is reported unreachable.
+#
+# A host that a retry cannot help must never reach pip_retry's loop: five attempts
+# against the unresolvable resource.flagos.net in run 38409565812 spent 21.5
+# minutes -- most of a 27.9-minute Ascend job -- before reporting it.
+#
+# Prints nothing when nothing has to change, and exits 1 for the unreachable case
+# with the reason on stderr.
+ensure_index_host_route() {
+  local out="" status=0
+  out="$("${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" - "$1" <<'PY'
 import os
 import socket
 import sys
 
 host = sys.argv[1]
+SEP = "\x1f"
 
 
 def first_env(*names):
@@ -91,33 +108,91 @@ def first_env(*names):
     return ""
 
 
-def bypasses_proxy(host, no_proxy):
+def covers(entry, host):
+    """True when one NO_PROXY entry exempts `host` from the proxy.
+
+    Accepts the spellings the runner lists use: a bare host, a ``.domain`` or
+    ``*.domain`` suffix, and the list-wide ``*``. The Ascend runner carries both
+    ``resource.flagos.net`` and ``*.flagos.net`` for the same host, so matching
+    only the exact entry would leave the wildcard behind and pip would still
+    dial it directly.
+    """
+    entry = entry.strip()
+    if not entry:
+        return False
+    if entry == "*" or entry == host or entry == f"{host}:443":
+        return True
+    domain = entry.split(":")[0].lstrip(".")
+    if domain.startswith("*."):
+        domain = domain[2:]
+    return bool(domain) and (host == domain or host.endswith(f".{domain}"))
+
+
+def exempt(no_proxy, host):
+    return any(covers(entry, host) for entry in no_proxy.split(","))
+
+
+def without(no_proxy, host):
+    """`no_proxy` with every host-specific entry that exempts `host` removed.
+
+    A list-wide "*" stays: it bypasses the proxy for every host, and dropping it
+    to route one host would send the whole job through the proxy. The caller
+    reports that case instead of rewriting the list.
+    """
+    kept = []
     for entry in no_proxy.split(","):
         entry = entry.strip()
-        if not entry:
-            continue
-        if entry == "*" or entry == host or entry == f"{host}:443":
-            return True
-        domain = entry.split(":")[0].lstrip(".")
-        if domain and host.endswith(f".{domain}"):
-            return True
-    return False
-
+        if entry and (entry == "*" or not covers(entry, host)):
+            kept.append(entry)
+    return ",".join(kept)
 
 proxy = first_env(
     "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"
 )
 no_proxy = first_env("NO_PROXY", "no_proxy")
-if proxy and not bypasses_proxy(host, no_proxy):
-    print(f"{host} is reached through the runner's HTTP proxy; not resolving it here")
+if proxy and not exempt(no_proxy, host):
+    print(
+        f"{host} is reached through the runner's HTTP proxy; not resolving it here",
+        file=sys.stderr,
+    )
     sys.exit(0)
 
 try:
     socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
 except OSError as exc:
-    print(f"{host} does not resolve from this runner: {exc}")
-    sys.exit(1)
+    if not proxy:
+        print(f"{host} does not resolve from this runner: {exc}", file=sys.stderr)
+        sys.exit(1)
+    upper, lower = os.environ.get("NO_PROXY", ""), os.environ.get("no_proxy", "")
+    new_upper, new_lower = without(upper, host), without(lower, host)
+    if exempt(new_upper, host) or exempt(new_lower, host):
+        # A list-wide entry ("*") exempts the host whatever else is dropped, so
+        # the proxy is not a route this check can open.
+        print(f"{host} does not resolve from this runner: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"{host} does not resolve directly ({exc}); it is exempted from the "
+        "runner's HTTP proxy, so the proxy is used for it instead",
+        file=sys.stderr,
+    )
+    print(SEP.join(("re-route", new_upper, new_lower)))
 PY
+)" || status=$?
+  if (( status != 0 )); then
+    return "$status"
+  fi
+  [[ -n "$out" ]] || return 0
+  # The two new lists are separator-delimited rather than quoted: an NO_PROXY
+  # value is a comma-separated host list, so it holds neither a newline nor this
+  # separator, and the caller has to print it back verbatim.
+  local IFS=$'\x1f'
+  local directive="" upper="" lower=""
+  read -r directive upper lower <<< "$out"
+  if [[ "$directive" == "re-route" ]]; then
+    export NO_PROXY="$upper"
+    export no_proxy="$lower"
+  fi
+  return 0
 }
 
 # True when pip's own output shows an error that a retry cannot fix: the pod
@@ -146,19 +221,21 @@ pip_retry() {
   if [[ "${PIP_RETRY_NO_CACHE:-1}" == "1" ]]; then
     extra+=(--no-cache-dir)
   fi
-  local index_host="" log_file="" attempt=1 resolve_status=0
+  local index_host="" log_file="" attempt=1 route_status=0
   index_host="$(pip_index_host "$@")"
   if [[ -n "$index_host" ]]; then
-    # Exit 1 is the check answering "this host does not resolve"; anything else
-    # means the check itself did not run (no interpreter on PATH, say), which
-    # says nothing about the index and must not stop a working install.
-    index_host_resolves "$index_host" || resolve_status=$?
-    if (( resolve_status == 1 )); then
-      echo "::error::Cannot resolve the package index host '${index_host}'; not retrying, because name resolution does not recover inside a job pod. If this host is only reachable through the runner's HTTP proxy, check that proxy's allowlist and the pod's NO_PROXY (see .github/scripts/lib/proxy_route.sh)."
+    # Exit 1 is the route check answering "nothing in this job can reach that
+    # host"; anything else means the check itself did not run (no interpreter on
+    # PATH, say), which says nothing about the index and must not stop a working
+    # install. A zero exit may have un-exempted the host from the proxy, which is
+    # why the check is asked before pip runs rather than after it fails.
+    ensure_index_host_route "$index_host" || route_status=$?
+    if (( route_status == 1 )); then
+      echo "::error::Cannot reach the package index host '${index_host}': it does not resolve from this pod and no HTTP proxy is configured to look it up. Not retrying, because name resolution does not recover inside a job pod. If this host is only reachable through the runner's HTTP proxy, check that proxy's allowlist and the pod's NO_PROXY (see .github/scripts/lib/proxy_route.sh)."
       return 1
     fi
-    if (( resolve_status != 0 )); then
-      echo "::warning::Could not check whether the package index host '${index_host}' resolves (exit ${resolve_status}); installing without the check."
+    if (( route_status != 0 )); then
+      echo "::warning::Could not check how this pod reaches the package index host '${index_host}' (exit ${route_status}); installing without the check."
     fi
   fi
   # Tee the output so each failed attempt can be classified without losing the

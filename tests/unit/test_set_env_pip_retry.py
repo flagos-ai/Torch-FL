@@ -21,6 +21,12 @@ Both behaviours come from run 38409565812 (Ascend build, 2026-10-13):
   error that cannot clear inside a pod. The index host is now checked before the
   first attempt, and an unresolvable host ends the call immediately -- unless
   the runner proxies that host, in which case the proxy does the lookup.
+* The same run's runner carried ``NO_PROXY=...,resource.flagos.net,*.flagos.net``,
+  exempting the index host from the proxy, and then could not resolve it
+  directly. The exemption is what broke it -- the sibling Ascend runner, same
+  proxy and no exemption, fetched the 535.9 MB FlagTree wheel through it -- so
+  ``ensure_index_host_route`` drops the exemption and lets pip fall back to the
+  proxy, rather than reporting a host the job can in fact reach.
 * ``install_cpu_torch`` pulled a 146-190 MB wheel from an offshore index at
   150-480 kB/s. It now measures the pin against a mirror and installs from the
   faster one, keeping the pin when the mirror is not faster or the probe fails.
@@ -90,9 +96,19 @@ def test_pip_retry_refuses_an_unresolvable_index_without_running_pip(tmp_path):
     done = _run_bash(
         f'export PIP_RETRY_PYTHON="{fake}"\n'
         "if pip_retry --index-url https://no-such-host.invalid/simple somepkg; "
-        "then echo UNEXPECTED-SUCCESS; fi\n"
+        "then echo UNEXPECTED-SUCCESS; fi\n",
+        env={
+            "HTTPS_PROXY": "",
+            "HTTP_PROXY": "",
+            "ALL_PROXY": "",
+            "https_proxy": "",
+            "http_proxy": "",
+            "all_proxy": "",
+            "NO_PROXY": "",
+            "no_proxy": "",
+        },
     )
-    assert "::error::Cannot resolve the package index host" in done.stdout
+    assert "::error::Cannot reach the package index host" in done.stdout
     assert "UNEXPECTED-SUCCESS" not in done.stdout
     assert not recorder.exists(), "pip ran for a host that does not resolve"
 
@@ -120,32 +136,103 @@ def test_pip_retry_installs_when_the_index_check_cannot_run(tmp_path):
         f'export PIP_RETRY_PYTHON="{fake}"\n'
         "pip_retry --index-url https://example.invalid/simple somepkg && echo PIP-OK\n"
     )
-    assert "::error::Cannot resolve the package index host" not in done.stdout
-    assert "::warning::Could not check whether the package index host" in done.stdout
+    assert "::error::Cannot reach the package index host" not in done.stdout
+    assert "::warning::Could not check how this pod reaches" in done.stdout
     assert "PIP-OK" in done.stdout
     assert recorder.read_text(encoding="utf-8").count("-m pip") == 1
 
 
-def test_index_host_resolves_skips_a_host_the_runner_proxies():
+def test_ensure_index_host_route_leaves_a_proxied_host_to_the_proxy():
     """The proxy looks the host up, so the pod's own resolution proves nothing."""
     done = _run_bash(
-        "index_host_resolves no-such-host.invalid && echo NOT-CHECKED\n",
+        "ensure_index_host_route no-such-host.invalid && echo NOT-CHECKED\n",
         env={"HTTPS_PROXY": "http://proxy.invalid:8080", "NO_PROXY": ""},
     )
     assert "NOT-CHECKED" in done.stdout
-    assert "proxy" in done.stdout
+    assert "proxy" in done.stderr
 
 
-def test_index_host_resolves_still_checks_a_host_exempted_from_the_proxy():
+def test_ensure_index_host_route_unexempts_a_host_the_runner_exempted():
+    """An exemption that makes the host unreachable is undone, not reported.
+
+    This is the Ascend runner: ``NO_PROXY`` names the index host, the pod cannot
+    resolve it directly, and the proxy -- which the sibling runner uses for the
+    same host -- can. Both the exact entry and the ``*.invalid`` wildcard the
+    runner also lists are dropped, so pip falls back to the proxy.
+    """
     done = _run_bash(
-        "if index_host_resolves no-such-host.invalid; then echo RESOLVED; fi\n",
+        "ensure_index_host_route no-such-host.invalid && echo NOT-CHECKED\n"
+        'echo "NO_PROXY=${NO_PROXY:-}|no_proxy=${no_proxy:-}"\n',
         env={
             "HTTPS_PROXY": "http://proxy.invalid:8080",
-            "NO_PROXY": "localhost,127.0.0.1,.invalid",
+            "NO_PROXY": "localhost,127.0.0.1,no-such-host.invalid,*.invalid",
+            "no_proxy": "localhost,127.0.0.1,no-such-host.invalid,*.invalid",
         },
     )
+    assert "NOT-CHECKED" in done.stdout
+    assert "NO_PROXY=localhost,127.0.0.1|no_proxy=localhost,127.0.0.1" in done.stdout
+    assert "exempted from the" in done.stderr
+
+
+def test_ensure_index_host_route_still_fails_with_no_proxy_to_fall_back_on():
+    """Without a proxy the pod itself must resolve the host, or nothing can."""
+    blank = {
+        name: ""
+        for name in (
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "ALL_PROXY",
+            "https_proxy",
+            "http_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        )
+    }
+    done = _run_bash(
+        "if ensure_index_host_route no-such-host.invalid; then echo RESOLVED; fi\n",
+        env=blank,
+    )
     assert "RESOLVED" not in done.stdout
-    assert "does not resolve from this runner" in done.stdout
+    assert "does not resolve from this runner" in done.stderr
+
+
+def test_ensure_index_host_route_reports_a_wildcard_exemption():
+    """``NO_PROXY=*`` exempts the host whatever else is dropped."""
+    done = _run_bash(
+        "if ensure_index_host_route no-such-host.invalid; then echo RESOLVED; fi\n",
+        env={"HTTPS_PROXY": "http://proxy.invalid:8080", "NO_PROXY": "*"},
+    )
+    assert "RESOLVED" not in done.stdout
+    assert "does not resolve from this runner" in done.stderr
+
+
+def test_ensure_index_host_route_leaves_a_resolvable_host_alone():
+    done = _run_bash(
+        "ensure_index_host_route 127.0.0.1 && echo OK\n",
+        env={
+            "HTTPS_PROXY": "http://proxy.invalid:8080",
+            "NO_PROXY": "localhost,127.0.0.1",
+        },
+    )
+    assert "OK" in done.stdout
+    assert done.stderr.strip() == ""
+
+
+def test_pip_retry_unexempts_the_index_host_before_installing(tmp_path):
+    """The Ascend case end to end: a proxy-reachable host installs from the proxy."""
+    fake, recorder = _fake_interpreter(tmp_path, "exit 0\n")
+    done = _run_bash(
+        f'export PIP_RETRY_PYTHON="{fake}"\n'
+        'export HTTPS_PROXY="http://proxy.invalid:8080"\n'
+        'export NO_PROXY="localhost,127.0.0.1,no-such-host.invalid,*.invalid"\n'
+        "unset no_proxy\n"
+        "pip_retry --index-url https://no-such-host.invalid/simple somepkg\n"
+        'echo "NO_PROXY=${NO_PROXY}"\n'
+    )
+    assert "::error::Cannot reach the package index host" not in done.stdout
+    assert "NO_PROXY=localhost,127.0.0.1" in done.stdout
+    assert recorder.read_text(encoding="utf-8").count("-m pip") == 1
 
 
 def test_pip_retry_stops_after_one_attempt_on_a_dns_failure(tmp_path):
