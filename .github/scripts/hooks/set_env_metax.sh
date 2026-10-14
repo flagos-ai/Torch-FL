@@ -77,6 +77,16 @@ PY
 # whereas the older CI image carries a prebuilt CPU venv in /opt/venv. Prepare
 # the same isolated layout when the image is upgraded; keep vendor libtorch as
 # a link input and never import its Python package in the build/test venv.
+#
+# MetaX provisions the CPU torch through the shared install_cpu_torch phase like
+# every other platform, so the mirror probe and the index-route check apply here
+# too. VENV_PYTHON names the image's /opt/venv interpreter that the shared
+# helpers use: this script does not create a job-local venv, and the venv is not
+# on PATH yet at this point, so the bare `python` they would otherwise fall back
+# to is the image's own interpreter rather than the one being provisioned.
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+VENV_PYTHON=/opt/venv/bin/python
 if [[ ! -x /opt/venv/bin/python && -x /flagos/bin/python ]]; then
   FLAGOS_VENDOR_TORCH_LIB="$(/flagos/bin/python - <<'PY'
 from pathlib import Path
@@ -90,9 +100,8 @@ PY
   if ! /flagos/bin/python -m venv /opt/venv; then
     uv venv --clear --seed --python /flagos/bin/python /opt/venv
   fi
-  PIP_RETRY_PYTHON=/opt/venv/bin/python pip_retry --index-url "$CPU_TORCH_INDEX_URL_DEFAULT" \
-    "torch==$CPU_TORCH_VERSION_DEFAULT"
-  PIP_RETRY_PYTHON=/opt/venv/bin/python pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
+  install_cpu_torch
+  pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
     build cmake ninja setuptools wheel pytest patchelf
   export PYTHONPATH=""
 else

@@ -19,9 +19,9 @@
 # in five slightly different spellings, `flag_gems_installed`/`install_flag_gems`
 # in six copies -- so a fix had to be applied seven times and was easy to miss.
 #
-# The interpreter is taken from `${VENV_PYTHON:-python}`: every script but MetaX
-# sets VENV_PYTHON to its job-local venv; MetaX runs the image's /opt/venv via
-# PATH and falls through to `python`. `pip_retry` additionally honours
+# The interpreter is taken from `${VENV_PYTHON:-python}`: every script sets
+# VENV_PYTHON, to its job-local venv except MetaX, which points it at the image's
+# /opt/venv it provisions in place. `pip_retry` additionally honours
 # PIP_RETRY_PYTHON (a per-call override, used by the CUDA script's several
 # interpreters), PIP_RETRY_TIMEOUT (default 300s) and PIP_RETRY_NO_CACHE
 # (default 1; the CUDA script turns it off to reuse its build cache).

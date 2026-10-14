@@ -104,19 +104,22 @@ def test_no_script_redefines_a_shared_phase():
 
 
 def test_every_script_calls_the_common_phases():
-    """The three phases every platform runs, called by name.
+    """The four phases every platform runs, called by name.
 
-    install_cpu_torch is separate: MetaX provisions its interpreter differently
-    (the image's /opt/venv, not a job-local venv) and keeps its own call.
+    install_flagcx is defined for the platforms whose hook installs a published
+    FlagCX wheel, which is not every one of them, so it is not asserted here.
     """
     for script in _scripts():
         text = script.read_text(encoding="utf-8")
-        for phase in ("install_flagtree", "build_flagos_inplace", "export_ci_env"):
+        for phase in (
+            "install_cpu_torch",
+            "install_flagtree",
+            "build_flagos_inplace",
+            "export_ci_env",
+        ):
             assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
                 f"{script.name}: {phase}"
             )
-        if script.name != "set_env_metax.sh":
-            assert re.search(r"^[ \t]*install_cpu_torch\b", text, re.M), script.name
 
 
 def test_every_local_in_the_library_is_initialized():
