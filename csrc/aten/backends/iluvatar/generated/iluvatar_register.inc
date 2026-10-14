@@ -10,8 +10,9 @@
 // op in both is a duplicate m.impl and a compile/load error. The cohort ops
 // FlagGems already claims (mm, bmm, addmm and the two
 // _native_batch_norm_legit* variants) therefore keep their FlagGems
-// registration; their kernels in iluvatar_kernels.cc are reached only by the
-// dispatcher's dtype escape.
+// registration; their kernels in iluvatar_kernels.cc are reached only by an
+// explicit override (FLAGOS_FORCE_BACKEND=vendor / FLAGOS_OP_<name>=iluvatar),
+// not by the runtime dtype escape -- see the header of iluvatar_kernels.cc.
 //
 // This file is also what scripts/codegen/gen_vendor_confs.py reads to decide
 // which ops backends_iluvatar.conf may route to `iluvatar`, so the conf cannot

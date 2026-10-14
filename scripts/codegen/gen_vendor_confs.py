@@ -183,16 +183,26 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # claim no m.impl of their own and the .inc scan cannot see them: the FlagGems
 # .inc is included into the same PrivateUse1 TORCH_LIBRARY_IMPL body, and a
 # second m.impl for one op is a duplicate registration. They are not routed --
-# FlagGems stays the route -- but they are reachable, through the dispatcher's
-# dtype escape (ResolveFn in dispatcher.h, which hands an op whose operand
-# FlagGems rejects to the vendor slot) and through FLAGOS_FORCE_BACKEND=vendor
-# (which moves an op only when it is annotated as a vendor candidate).
+# FlagGems stays the route. They are reachable through FLAGOS_FORCE_BACKEND=vendor
+# and per-op FLAGOS_OP_*_=<vendor> overrides, which move an op only when it is
+# annotated as a vendor candidate; the annotation is therefore load-bearing.
 #
-# Listing them here is what makes the annotation truthful. Without it an op like
-# `mm` reads "= flaggems" with no marker, the same line a platform with no GEMM
-# kernel at all would emit, and the escape into iluvatar_kernels.cc becomes
-# undocumented dead code -- the exact failure the generator's own header warns
-# against.
+# They are NOT reachable through the dispatcher's runtime dtype escape, despite
+# the shape of that mechanism: ResolveFn (dispatcher.h) substitutes the vendor
+# slot only when FlagGemsRejectsArgs() says yes, and that predicate is compiled
+# per vendor -- its `#else` arm (common.cc) returns false, and iluvatar has no
+# arm. So for an iluvatar build the escape never fires and the force/override
+# routes above are the only ones. (The escape's other prerequisite is present:
+# WrapperMm & co. register into the vendor slot, so VendorSlot() resolves.)
+# Adding a USE_ILUVATAR arm is a per-dtype decision that needs a BI-V150
+# measurement of a FlagGems gap, which does not exist yet; until then this
+# comment must not describe the kernels as escape-reachable.
+#
+# Listing them here is what keeps the annotation truthful. Without it an op like
+# `mm` reads "= flaggems" with no marker -- the same line a platform with no GEMM
+# kernel at all would emit -- and a kernel that only a force/override can reach
+# would be indistinguishable from one that is unreachable. The generator's own
+# header warns against exactly that documentation failure.
 #
 # Deliberately folded into NEITHER vendoring function. `vendor_native_ops()` is
 # what the per-vendor generators subtract from their own registration set, so

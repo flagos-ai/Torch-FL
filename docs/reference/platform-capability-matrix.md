@@ -55,8 +55,10 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   (`cudnn.h` → ixdnn, `cublas_v2.h` → ixblas) directly on the flagos
   `data_ptr()`, with no device retag and no CUDA dispatch key. The two sets are
   disjoint: FlagGems stays primary (an op in the FlagGems ceiling routes
-  `flaggems` and is only reached by the native slot through the dispatcher's
-  dtype escape), and the native kernels serve the ops FlagGems does not cover.
+  `flaggems`, and its native kernel is reachable only through an explicit
+  `FLAGOS_FORCE_BACKEND=vendor` / `FLAGOS_OP_<name>=iluvatar` override — the
+  runtime dtype escape has no `USE_ILUVATAR` arm), and the native kernels serve
+  the ops FlagGems does not cover.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
   and 53 are the by-design BPU/MPS and hand-written TsingMicro files.

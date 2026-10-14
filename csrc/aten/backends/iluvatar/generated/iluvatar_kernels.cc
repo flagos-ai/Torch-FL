@@ -15,8 +15,10 @@
 // corex re-exports for its own libraries.
 //
 // Two sets are generated from one op registry. Every op gets a kernel and a
-// kIluvatar dispatcher registration here, so all of them are reachable through
-// the dispatcher's dtype escape (ResolveFn / FLAGOS_FORCE_BACKEND=vendor). Only
+// kIluvatar dispatcher registration here, so all of them are reachable by an
+// explicit override (FLAGOS_FORCE_BACKEND=vendor or FLAGOS_OP_<name>=iluvatar);
+// the runtime dtype escape does not apply to this build, since
+// FlagGemsRejectsArgs() has no USE_ILUVATAR arm. Only
 // the ops FlagGems does not already claim get an m.impl in iluvatar_register.inc
 // -- the FlagGems .inc is included into the same library body and a duplicate
 // m.impl is rejected at load. Whatever routes here without a kernel falls

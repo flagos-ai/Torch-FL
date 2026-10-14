@@ -77,15 +77,21 @@ FLAGGEMS_INC = (
 # wrapper -- see the conflict note in the PR.
 #
 # KERNELS vs CLAIMS. Every op here gets a kernel in iluvatar_kernels.cc and a
-# kIluvatar dispatcher registration, because each is reachable through the
-# dispatcher's dtype escape (ResolveFn / FLAGOS_FORCE_BACKEND=vendor). But only
-# the ops FlagGems does *not* already claim get an m.impl line in
+# kIluvatar dispatcher registration, because each is reachable by an explicit
+# override -- FLAGOS_FORCE_BACKEND=vendor, or a per-op FLAGOS_OP_<name>=iluvatar.
+# But only the ops FlagGems does *not* already claim get an m.impl line in
 # iluvatar_register.inc: the FlagGems .inc is included into the same library
 # body, and torch rejects a duplicate m.impl at load. The GEMM trio and the two
 # `_native_batch_norm_legit*` variants are already claimed there (route=flaggems
 # today), so they keep their FlagGems registration and their kernel here is
-# reached only by the escape. That the conf cannot move them is intended --
+# reached only by an override. That the conf cannot move them is intended --
 # FlagGems is the primary path and `route()` gives it priority.
+#
+# The runtime dtype escape is a THIRD mechanism and it does NOT reach them:
+# ResolveFn substitutes the vendor slot only when FlagGemsRejectsArgs() fires,
+# and that predicate is compiled per vendor with a `return false` fallback --
+# there is no USE_ILUVATAR arm, so the escape never fires on this build. Adding
+# one is a per-dtype decision that needs a measured BI-V150 FlagGems gap.
 # ---------------------------------------------------------------------------
 OPS = {
     "_convolution": "conv",
@@ -947,8 +953,10 @@ FILE_HEADER = """\
 // corex re-exports for its own libraries.
 //
 // Two sets are generated from one op registry. Every op gets a kernel and a
-// kIluvatar dispatcher registration here, so all of them are reachable through
-// the dispatcher's dtype escape (ResolveFn / FLAGOS_FORCE_BACKEND=vendor). Only
+// kIluvatar dispatcher registration here, so all of them are reachable by an
+// explicit override (FLAGOS_FORCE_BACKEND=vendor or FLAGOS_OP_<name>=iluvatar);
+// the runtime dtype escape does not apply to this build, since
+// FlagGemsRejectsArgs() has no USE_ILUVATAR arm. Only
 // the ops FlagGems does not already claim get an m.impl in iluvatar_register.inc
 // -- the FlagGems .inc is included into the same library body and a duplicate
 // m.impl is rejected at load. Whatever routes here without a kernel falls
@@ -1038,8 +1046,9 @@ INC_HEADER = """\
 // op in both is a duplicate m.impl and a compile/load error. The cohort ops
 // FlagGems already claims (mm, bmm, addmm and the two
 // _native_batch_norm_legit* variants) therefore keep their FlagGems
-// registration; their kernels in iluvatar_kernels.cc are reached only by the
-// dispatcher's dtype escape.
+// registration; their kernels in iluvatar_kernels.cc are reached only by an
+// explicit override (FLAGOS_FORCE_BACKEND=vendor / FLAGOS_OP_<name>=iluvatar),
+// not by the runtime dtype escape -- see the header of iluvatar_kernels.cc.
 //
 // This file is also what scripts/codegen/gen_vendor_confs.py reads to decide
 // which ops backends_iluvatar.conf may route to `iluvatar`, so the conf cannot
