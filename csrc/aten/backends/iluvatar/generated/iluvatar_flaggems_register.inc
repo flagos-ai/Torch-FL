@@ -60,7 +60,7 @@
 //   - unique_consecutive
 //   - upsample_bicubic2d
 //
-// Total: 603 ops registered here, 0 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 603 ops registered here, 1 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);

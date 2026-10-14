@@ -194,9 +194,16 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # undocumented dead code -- the exact failure the generator's own header warns
 # against.
 #
-# Deliberately NOT folded into EXTRA_NATIVE: that set is also what
-# vendor_registered_ops adds to the registration closure, and these ops are
-# claimed by FlagGems, not by the vendor's own registration.
+# Deliberately folded into NEITHER vendoring function. `vendor_native_ops()` is
+# what the per-vendor generators subtract from their own registration set, so
+# adding these there would make codegen_iluvatar_flaggems.py drop mm/bmm/addmm
+# and the two _native_batch_norm_legit* variants from the FlagGems `.inc` -- and
+# because codegen_iluvatar.py omits exactly those ops from the native `.inc`
+# (that is what keeps the two files disjoint), the ops would end up registered
+# nowhere and every call would raise "backend not registered".
+# `vendor_registered_ops()` is the registration closure the conf's `none` gate
+# reads; these ops are registered by FlagGems, so widening that set would change
+# no route. They are used only by render(), to annotate the route line.
 # XLA/musa/gcu/ascend/kunlunxin have no escape-only kernels.
 ESCAPE_NATIVE = {
     "iluvatar": {
@@ -2153,14 +2160,13 @@ def vendor_native_ops(vendor: str) -> set:
 
     The annotation is still *emitted* -- it is what tells a reader (and
     FLAGOS_FORCE_BACKEND=vendor) that a kernel exists behind an op FlagGems
-    currently wins.
+    currently wins. ESCAPE_NATIVE ops (a kernel with no `m.impl` of its own) are
+    annotated by render(), not added here: this function is what each vendor's
+    own generator subtracts from its registration set, so it must stay equal to
+    the ops that generator actually emits an `m.impl` for.
     """
     native_inc, _ = VENDORS[vendor]
-    return (
-        registered_impls(CSRC_DIR / native_inc)
-        | EXTRA_NATIVE.get(vendor, set())
-        | ESCAPE_NATIVE.get(vendor, set())
-    )
+    return registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
 
 
 def vendor_registered_ops(vendor: str) -> set:
@@ -2323,12 +2329,29 @@ def route(
     return "none"
 
 
-def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> str:
+def render(
+    platform: str,
+    vendor: str,
+    routes: dict,
+    boxing: bool = False,
+    escape: set = frozenset(),
+) -> str:
     """Build the conf text for one platform.
 
     `platform` names the conf (backends_<platform>.conf); `vendor` is the key in
     the third slot -- a native kernel name, or "cuda" for a boxing platform.
+    `escape` is ESCAPE_NATIVE[vendor]: ops with a vendor kernel but no `m.impl`
+    of their own, which route() cannot see. They are backfilled with the vendor
+    annotation here, so the line still says a kernel exists behind the winning
+    route -- and FLAGOS_FORCE_BACKEND=vendor can still reach it -- without
+    widening `natives[vendor]`, which the routing priority and each vendor's own
+    registration generator both depend on.
     """
+    if escape:
+        routes = {
+            op: (f"{value}  # {vendor}" if op in escape else value)
+            for op, value in routes.items()
+        }
     counts = {}
     for value in routes.values():
         backend = value.split("#", 1)[0].strip()
@@ -2509,7 +2532,16 @@ def build_all(conf_dir: Path) -> dict:
             )
             for op in sorted(all_ops)
         }
-        out[vendor] = (render(vendor, vendor, routes), routes, vendor)
+        out[vendor] = (
+            render(
+                vendor,
+                vendor,
+                routes,
+                escape=ESCAPE_NATIVE.get(vendor, frozenset()),
+            ),
+            routes,
+            vendor,
+        )
 
     for platform, sparse_conf in BOXING_PLATFORMS.items():
         gaps = boxing_triton_gaps(conf_dir, sparse_conf, fg_py, fg_cpp)
