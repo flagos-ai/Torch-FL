@@ -4,11 +4,12 @@
 //
 // m.impl() lines for the FlagGems Python ops Iluvatar routes to the `flaggems`
 // backend. Included by register.cc inside TORCH_LIBRARY_IMPL(aten, PrivateUse1)
-// when USE_ILUVATAR and FLAGOS_FLAGGEMS_PYTHON are set. Iluvatar has no vendor
-// kernel library, so this file is the *entire* set of ops the platform claims on
-// PrivateUse1: an op routed to `flaggems` that is not claimed here reaches the
-// dispatcher with an empty kFlagGems slot and raises "backend not registered"
-// instead of falling back to cpu_fallback.
+// when USE_ILUVATAR and FLAGOS_FLAGGEMS_PYTHON are set. Iluvatar also has a
+// vendor-native iluvatar_register.inc (from codegen_iluvatar.py), so this is one
+// half of the platform's PrivateUse1 surface, disjoint from the native half and
+// generated to stay that way: an op routed to `flaggems` that is not claimed
+// here reaches the dispatcher with an empty kFlagGems slot and raises "backend
+// not registered" instead of falling back to cpu_fallback.
 //
 // Excluded ops come from NATIVE_TRITON_GAPS['iluvatar'] in
 // scripts/codegen/gen_vendor_confs.py. That set is the 37 defect ops a BI-V150
