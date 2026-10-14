@@ -156,16 +156,13 @@ integration_tests:
   # not accept: KeyError at triton/runtime/jit.py:_pack_args for mm, and bmm
   # hits the same kernel and times out at 60s inside triton compilation. Filed
   # upstream as FlagGems issue #6225. backends_ppu.conf pins mm/bmm to the
-  # vendor kernel, so these deselects now only cover the two dispatch-log
-  # tests that assert the FlagGems route itself. The remaining flaggems
-  # main_ops pass.
+  # vendor kernel, so the two dispatch-log cases that assert the FlagGems route
+  # for them skip themselves through routed_backend_or_none rather than being
+  # named here; every other flaggems main_ops case passes.
   - name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops"
-      --deselect tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_runtime
-      --deselect tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_runtime
-      -v -s --tb=short
+      -m "flaggems and main_ops" -v -s --tb=short
 
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
@@ -221,3 +218,10 @@ integration_tests:
       --model "$MODEL_PATH" -v -s --tb=short
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short

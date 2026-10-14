@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -127,11 +127,15 @@ class TestMeanDimDispatch:
         MetaX keeps mean.dim on the cuda boxing kernel because gems' non-inner-dim
         path uses a CUDA context triton-metax rejects. Asserting the conf's own
         value keeps this test meaningful on every platform rather than pinning it
-        to the one it was written on.
+        to the one it was written on: kunlunxin lists no accelerated mean.dim at
+        all and hands it to cpu_fallback, where there is no dispatch to assert,
+        so the case skips there instead of raising.
         """
+        expected = routed_backend_or_none("mean.dim")
+        if expected is None:
+            pytest.skip("mean.dim is routed to 'none' on this platform")
         result = _run_mean_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        expected = routed_backend("mean.dim")
         assert f"[flagos dispatch] mean.dim -> {expected}" in result.stderr
 
     @pytest.mark.cuda

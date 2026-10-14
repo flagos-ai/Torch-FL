@@ -158,6 +158,10 @@ integration_tests:
   # carry @pytest.mark.anyplatform. The platform gate (conftest.py) skips the
   # cuda/metax/ascend/dcu/flaggems_python-marked cases on MUSA, so this selects
   # the anyplatform/main_ops subset that routes to the native mudnn backend.
+  # `and not flaggems` keeps the vendor/FlagGems group split every other
+  # platform uses: the flaggems-marked cases are measured by the FlagGems group
+  # below, not here (no switch exists any more to skip them -- see
+  # ops/conftest.py).
   #
   # Ordered AFTER the contract groups (general/AMP/math-bits) because
   # run_integration_tests.py stops on the first non-zero group, so a backend gap
@@ -191,8 +195,21 @@ integration_tests:
     command: >-
       python -m pytest tests/integration/ops/
       --ignore=tests/integration/ops/test_rng_dispatch.py
-      -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
       -v -s --tb=short
+
+  # The FlagGems runtime-path group, byte-identical on every platform: it
+  # measures the @pytest.mark.flaggems cases, each of which asserts the conf's
+  # own route (through ops/backend_conf.py) rather than a hard-coded backend
+  # name. MUSA routes 466 of its 2037 ops to the FlagGems Python path; a case
+  # whose op this conf keeps on the native mudnn kernel, or hands to
+  # cpu_fallback, skips itself. This is also where test_musa_flaggems_device.py
+  # lands -- the MUSA hardware behaviour of the route, which cannot be restated
+  # generically -- and where the MetaX SDPA route cases land on MetaX.
+  - name: Run operator tests (FlagGems runtime path, main ops)
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "flaggems and main_ops" -v -s --tb=short
 
   # Triage phase: ordered last so a murand failure cannot block the functional
   # groups above. As of 2026-08-28 the CI runner's murand (vendor RNG library)
@@ -212,11 +229,18 @@ integration_tests:
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops"
+      -m "main_ops and not flaggems"
       -k "not TestRngSeedSource and not TestRngMultiDevice and not TestRngDistribution and not TestRngDropout"
       -v -s --tb=line
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
@@ -230,10 +254,6 @@ integration_tests:
   #     installed wheel and cannot hold in a build-tree run). Add this group when
   #     the image bakes the vendor triton stack; it is an image gap, not a code
   #     one.
-  #   - tests/integration/ops/test_musa_flaggems.py (hybrid route). Same
-  #     vendor-triton prerequisite as compile: its two cases skip without
-  #     FlagGems installed, so adding the group to this image would record a
-  #     pass that measured nothing.
   #   - tests/integration/test_profiler_parity.py. Unlike the contract group
   #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
   #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,

@@ -391,9 +391,10 @@ BOXING_GAP_NOTES = {
         "of the 166 ops MetaX gained at the FlagGems 5.4.0rc2.post1 ceiling,",
         "which reached each op on both routes with one host-built operand pair.",
         "The per-op verdicts, and the five flagged ops that fail on both routes",
-        "and are therefore not held, are grouped in",
-        "tests/integration/ops/test_metax_flaggems.py; the survey itself is in",
-        "docs/reference/operator-support.md.",
+        "and are therefore not held, are pinned by the route each op takes in",
+        "this file; the differential survey that produced them is recorded in",
+        "docs/reference/operator-support.md, and the routing itself is now",
+        "asserted for every platform by tests/integration/flaggems/.",
         "This set is not restated here: gen_vendor_confs.py reads it back from",
         "backends_metax.conf on every run (see BOXING_PLATFORMS), so a pin is",
         "recorded by the route it takes in this file, and the gap does not",
@@ -1849,8 +1850,8 @@ NATIVE_FLAGGEMS_MEASURED = {
 # The 2026-09-15 run (FlagGems master 5a58df410, whose entry points now resolve
 # at package level as `flag_gems.<name>` instead of through `flag_gems.ops.*`)
 # took the ceiling from 482 to 639 ops. MetaX measured the widened set --
-# tests/integration/ops/test_metax_flaggems.py routes and executes 592 of them on
-# C550 -- and so takes the ceiling whole. MUSA, GCU and Ascend have not re-run,
+# its FlagGems suite routes and executes 592 of them on C550 -- and so takes the
+# ceiling whole. MUSA, GCU and Ascend have not re-run,
 # and their shipped confs were generated against the 482-op cohort, so their
 # routes stay where those runs left them.
 #

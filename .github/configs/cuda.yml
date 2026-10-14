@@ -189,3 +189,10 @@ integration_tests:
       --model "$MODEL_PATH" -v -s --tb=short
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short

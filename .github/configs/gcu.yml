@@ -110,7 +110,8 @@ integration_tests:
   # Marker selection, not a file allowlist: the earlier nine-file list was a
   # bring-up scaffold, and pinning an allowlist hides every operator added
   # after it. The FlagGems Python routes are exercised by their own group below,
-  # the same split CUDA/DCU use.
+  # the same split CUDA/DCU use -- `and not flaggems` keeps the two groups
+  # disjoint, so a flaggems-marked case is measured once, in the FlagGems group.
   #
   # Issue #409: `gcu` is in the accepting half because the sweep required
   # `anyplatform` or `main_ops`, so a test whose only selecting mark is `gcu`
@@ -120,7 +121,7 @@ integration_tests:
   - name: Run operator tests (vendor backend, main ops)
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(anyplatform or main_ops or gcu) and not flaggems_python and not flaggems_cpp"
+      -m "(anyplatform or main_ops or gcu) and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # This group is a contract check on the ops that select a FlagGems route
@@ -135,11 +136,12 @@ integration_tests:
   # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX. The generator
   # contract, the shared-state round trip, and the integer range semantics are
   # implemented natively on GCU, so this is a contract check rather than a gap
-  # detector.
+  # detector. `and not flaggems` drops the flaggems-marked cases, which the
+  # FlagGems group above already measures.
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
 
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
@@ -173,6 +175,13 @@ integration_tests:
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short
 
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:

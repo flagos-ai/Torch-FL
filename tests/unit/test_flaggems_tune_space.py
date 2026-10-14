@@ -38,7 +38,8 @@ check, so all of them are pinned off hardware:
 
 That the repair is *enough* on this hardware -- float64 ``mm`` exact across the
 tile boundary, and every repaired space inside the limit -- is a measured claim,
-and it is asserted in ``tests/integration/ops/test_musa_flaggems.py`` instead.
+and it is asserted in ``tests/integration/ops/test_musa_flaggems_device.py``
+instead.
 """
 
 import importlib

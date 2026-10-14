@@ -28,6 +28,18 @@ contracts `tests/integration/test_amp_contract.py` (`-m amp`) and
 `tests/integration/test_profiler_contract.py` (`-m profiler`); the recorded
 results are unchanged.
 
+The FlagGems integration is single-sourced in the same way. Historical evidence
+entries cite `tests/integration/ops/test_metax_flaggems.py` and
+`tests/integration/ops/test_musa_flaggems.py` under the names used when the
+measurement was taken. Their routing, execution and exclusion cases asserted the
+FlagGems integration itself and now run once for every platform from
+`tests/integration/flaggems/`, selected by the identical
+`-m "flaggems and main_ops"` step in each platform manifest; the operator
+behaviour that cannot be restated generically stays in
+`tests/integration/ops/test_metax_sdpa_route.py` and
+`tests/integration/ops/test_musa_flaggems_device.py`. The recorded results are
+unchanged.
+
 ## Verdicts
 
 The manual survey first rejects synthesized invocations that are invalid on the

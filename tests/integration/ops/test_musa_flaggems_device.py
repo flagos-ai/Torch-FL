@@ -1,13 +1,24 @@
-"""Real MTT S5000 coverage for the MThreads FlagGems hybrid path."""
+"""MUSA hardware behaviour of the FlagGems route.
 
-import importlib
+The device half of the MThreads FlagGems coverage that used to live in
+``test_musa_flaggems.py``. That file's route-execution case asserted the FlagGems
+integration itself and is now expressed once for every platform by
+``tests/integration/flaggems/``; what is left here needs an MTT S5000 and cannot
+be restated generically -- the float64 ``mm`` tune-space limit, the shared
+generator the FlagGems and native RNG entry points both draw from.
+
+The file carries the same ``flaggems``/``main_ops`` marks as the platform-neutral
+FlagGems group, so it is collected by the identical ``-m "flaggems and main_ops"``
+step on every platform and skips itself off MUSA, rather than needing a step of
+its own.
+"""
 
 import pytest
 import torch
 import torch_fl
 
 
-pytestmark = pytest.mark.musa
+pytestmark = [pytest.mark.musa, pytest.mark.flaggems, pytest.mark.main_ops]
 DEVICE = torch.device("flagos:0")
 
 
@@ -33,75 +44,6 @@ def _require_flaggems_mthreads():
     if "mthreads" not in triton.backends.backends:
         pytest.skip("the installed Triton does not provide the MThreads backend")
     flag_gems.enable()
-
-
-def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
-    _require_flaggems_mthreads()
-    calls = []
-
-    def track(qualname):
-        """Patch the entry point the generated kernel actually calls.
-
-        The codegen freezes the *package-level* name -- ``flag_gems.<fn>``, see
-        ``_normalize_flaggems_qualname`` in scripts/codegen_ops.py -- and
-        ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
-        the attribute. So the observable call site is ``flag_gems.<fn>``.
-        Patching ``flag_gems.ops.<module>.<fn>`` instead writes to a different
-        attribute slot that happens to hold the same object, and the wrapper is
-        never entered.
-        """
-        module_path, _, function_name = qualname.rpartition(".")
-        module = importlib.import_module(module_path)
-        original = getattr(module, function_name)
-
-        def wrapper(*args, **kwargs):
-            calls.append(function_name)
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(module, function_name, wrapper)
-
-    track("flag_gems.all")
-    track("flag_gems.all_dims")
-    track("flag_gems.any")
-    track("flag_gems.any_dims")
-    track("flag_gems.repeat_interleave_tensor")
-    track("flag_gems.index_add")
-    track("flag_gems.index_add_")
-
-    values = torch.tensor([[1, 0, 1], [1, 1, 1]], device=DEVICE)
-    assert torch.equal(torch.all(values).cpu(), torch.all(values.cpu()))
-    assert torch.equal(
-        torch.all(values, dim=(1,)).cpu(), torch.all(values.cpu(), dim=(1,))
-    )
-    assert torch.equal(torch.any(values).cpu(), torch.any(values.cpu()))
-    assert torch.equal(
-        torch.any(values, dim=(1,)).cpu(), torch.any(values.cpu(), dim=(1,))
-    )
-
-    repeats = torch.tensor([1, 2, 1], device=DEVICE)
-    assert torch.equal(
-        torch.repeat_interleave(repeats).cpu(),
-        torch.repeat_interleave(repeats.cpu()),
-    )
-
-    base = torch.zeros(4, 3, device=DEVICE)
-    index = torch.tensor([1, 1, 3], device=DEVICE)
-    source = torch.ones(3, 3, device=DEVICE)
-    expected = torch.index_add(base.cpu(), 0, index.cpu(), source.cpu())
-    assert torch.equal(torch.index_add(base, 0, index, source).cpu(), expected)
-
-    inplace = torch.zeros(4, 3, device=DEVICE)
-    inplace.index_add_(0, index, source)
-    assert torch.equal(inplace.cpu(), expected)
-    assert calls == [
-        "all",
-        "all_dims",
-        "any",
-        "any_dims",
-        "repeat_interleave_tensor",
-        "index_add",
-        "index_add_",
-    ]
 
 
 def test_flaggems_randn_shares_native_generator_reservations():

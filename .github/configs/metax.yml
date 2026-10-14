@@ -195,26 +195,6 @@ integration_tests:
       python -m pytest tests/integration/ops/
       -m "flaggems and main_ops" -v -s --tb=short
 
-  # The MetaX counterpart of test_musa_dispatch.py. backends_metax.conf is
-  # FlagGems-first -- 594 of its 2037 ops go to the FlagGems Python path, 10 to
-  # its C++ path, and the rest fall back to the cuda boxing kernel -- and this
-  # file pins that decision on hardware: routing is read from the dispatch log in
-  # a fresh subprocess (PythonOpCache memoizes the resolved FlagGems callable per
-  # qualname, so an in-session patch is not observable), execution is compared
-  # against a host-built CPU reference, and the ops measured to fail on a flagos
-  # tensor are held off the FlagGems path.
-  #
-  # It is marked flaggems_python rather than flaggems on purpose: the FlagGems
-  # route on MetaX is a property of the conf, and this file runs in every job
-  # with no switch involved. The @pytest.mark.flaggems cohort is measured by
-  # the group above.
-  #
-  # Measured on the eight-device C550 host on 2026-09-15: 90 passed in 756s.
-  - name: Run MetaX FlagGems hybrid path tests
-    command: >-
-      python -m pytest tests/integration/ops/test_metax_flaggems.py
-      -v -s --tb=short
-
   # Measured on the eight-device C550 host on 2026-09-15: 30 passed, 7 deselected.
   - name: Run MetaX low-precision matrix tests
     command: >-
@@ -266,3 +246,10 @@ integration_tests:
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short

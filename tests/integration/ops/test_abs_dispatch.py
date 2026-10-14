@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -141,11 +141,15 @@ class TestAbsDispatch:
         carries a 64-bit type the GCU300 front end rejects for an int64 operand
         (see NATIVE_TRITON_GAPS["gcu"]). Asserting the conf's own value keeps
         this test meaningful on every platform rather than pinning it to the one
-        it was written on.
+        it was written on: kunlunxin lists no accelerated abs at all and hands
+        it to cpu_fallback, where there is no dispatch to assert, so the case
+        skips there instead of raising.
         """
+        expected = routed_backend_or_none("abs")
+        if expected is None:
+            pytest.skip("abs is routed to 'none' on this platform")
         result = _run_abs_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        expected = routed_backend("abs")
         assert f"[flagos dispatch] abs -> {expected}" in result.stderr
 
     @pytest.mark.cuda

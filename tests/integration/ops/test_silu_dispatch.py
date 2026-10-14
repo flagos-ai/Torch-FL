@@ -33,6 +33,8 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
+from backend_conf import routed_backend_or_none
+
 
 DEVICE = "flagos:0"
 
@@ -104,10 +106,20 @@ class TestSiluDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """With the FlagGems runtime path on, silu routes to flagos_python."""
+        """silu dispatches to whatever backend this platform's conf lists.
+
+        FlagGems-first is the generated default, but it is not unconditional,
+        so the case reads the conf's own value instead of pinning itself to the
+        platform it was written on: kunlunxin lists no accelerated silu at all
+        and hands it to cpu_fallback, where there is no dispatch to assert, so
+        the case skips there rather than failing on a route that does not exist.
+        """
+        expected = routed_backend_or_none("silu")
+        if expected is None:
+            pytest.skip("silu is routed to 'none' on this platform")
         result = _run_silu_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] silu -> flagos_python" in result.stderr
+        assert f"[flagos dispatch] silu -> {expected}" in result.stderr
 
     @pytest.mark.cuda
     @pytest.mark.main_ops

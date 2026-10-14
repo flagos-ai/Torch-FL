@@ -118,16 +118,29 @@ integration_tests:
       -m "ascend"
       -v -s --tb=short
 
+  # The FlagGems runtime-path group, byte-identical on every platform: it
+  # measures the @pytest.mark.flaggems cases, each of which asserts the conf's
+  # own route (through ops/backend_conf.py) rather than a hard-coded backend
+  # name. Ascend routes 224 of its 2037 ops to the FlagGems Python path; a case
+  # whose op this conf keeps on the native ACLNN kernel, or hands to
+  # cpu_fallback, skips itself.
+  - name: Run operator tests (FlagGems runtime path, main ops)
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "flaggems and main_ops" -v -s --tb=short
+
   # The full RNG dispatch suite is exercised, not an allowlist. Upstream #70
   # implemented the remaining Ascend RNG overloads (normal_ / uniform_ /
   # exponential_ / bernoulli_ / randperm / native_dropout / *_like / *.out
   # variants, plus poisson / binomial / _standard_gamma / _sample_dirichlet via
   # CPU round-trip), so every test_rng_dispatch.py case now passes on Ascend.
-  # Run the whole file instead of pinning a shrinking allowlist.
+  # Run the whole file instead of pinning a shrinking allowlist. `and not
+  # flaggems` drops the flaggems-marked cases, which the FlagGems group above
+  # already measures.
   - name: Run Ascend RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops"
+      -m "main_ops and not flaggems"
       -v -s --tb=short
 
   - name: Run general factory ops
@@ -166,6 +179,13 @@ integration_tests:
       -v -m profiler --tb=short
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
+
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short
 
   # Device-side contract cases run on Ascend now, not only CPU/Trace: kernel,
   # runtime, flow, metadata and linkage are capability rows the tracer

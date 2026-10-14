@@ -122,14 +122,24 @@ integration_tests:
       --ignore=tests/integration/ops/test_flaggems_device_name.py
       -v -s --tb=short
 
+  # The FlagGems runtime-path group, byte-identical on every platform. The
+  # conf routes no op through FlagGems yet, so every case here skips itself
+  # rather than being withheld: the case set is the same on every platform and
+  # the conf, not the manifest, decides which of them have something to assert.
+  - name: Run operator tests (FlagGems runtime path, main ops)
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "flaggems and main_ops" -v -s --tb=short
+
   # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX/GCU. The
   # generator contract, the shared-state round trip, and the integer range
   # semantics are implemented natively on the XPU, so this is a contract check
-  # rather than a gap detector.
+  # rather than a gap detector. `and not flaggems` drops the flaggems-marked
+  # cases, which the FlagGems group above already measures.
   - name: Run unified RNG tests
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops" -v -s --tb=short
+      -m "main_ops and not flaggems" -v -s --tb=short
 
   - name: Run general tests
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
@@ -149,12 +159,22 @@ integration_tests:
   - name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
 
+  # Byte-identical on every platform: one shared FlagGems suite that asserts the
+  # routing contract and self-skips the execution cases a wheel without the
+  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
+  # before it.
+  - name: FlagGems conformance (hardware-agnostic)
+    command: python -m pytest tests/integration/flaggems -v -s --tb=short
+
   # ---------------------------------------------------------------------------
   # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - the AMP contract and the FlagGems runtime-path operator group. The
-  #     FlagGems cohort has not been revalidated on the P800, so no `flaggems`
-  #     route is enabled in backends_kunlunxin.conf yet (the allowlist is a
-  #     follow-up); both ship with that work. See
+  #   - the AMP contract. The FlagGems cohort has not been revalidated on the
+  #     P800, so no `flaggems` route is enabled in backends_kunlunxin.conf yet
+  #     (the allowlist is a follow-up), and the contract ships with that work.
+  #     The FlagGems runtime-path group and the shared FlagGems conformance
+  #     suite above are not withheld for that reason: they are byte-identical on
+  #     every platform, run here like anywhere else, and skip their cases
+  #     because the conf routes nothing through FlagGems yet. See
   #     docs/vendors/kunlunxin/installation.md.
   #   - tests/integration/test_profiler_contract.py. Kunlunxin builds the
   #     unavailable_device_tracer (the vendor's CUPTI-compatible shim
