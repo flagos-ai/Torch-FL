@@ -64,6 +64,7 @@ _ACCELERATOR_TO_PLATFORM = {
     "gcu": "gcu",
     "ppu": "ppu",
     "kunlunxin": "kunlunxin",
+    "iluvatar": "iluvatar",
 }
 
 #: Conf-name fragments, matched in order, for the last-resort case where the
@@ -77,6 +78,7 @@ _CONF_PLATFORM_FRAGMENTS = (
     "dcu",
     "ppu",
     "kunlunxin",
+    "iluvatar",
     "cuda",
 )
 

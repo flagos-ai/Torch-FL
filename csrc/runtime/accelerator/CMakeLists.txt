@@ -129,6 +129,15 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${XPU_ROOT}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${XPU_LIB_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
+elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  # Iluvatar corex: unlike kunlunxin the SDK ships a *usable* CUDA runtime
+  # (cuda_runtime.h + libcudart.so.10.2 at /usr/local/corex) and corex's torch is
+  # a real CUDA build exporting c10::cuda, so the runtime sources are the shared
+  # cuda/ ones (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda") and there is no iluvatar/
+  # subdir. Link the shim rather than find_package, which would want a CUDA
+  # toolkit the corex-only host does not provide.
+  target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 else()
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
 

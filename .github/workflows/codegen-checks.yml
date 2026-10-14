@@ -65,6 +65,8 @@ jobs:
           python3 scripts/codegen/codegen_gcu_flaggems.py --check
           echo "=== codegen_musa_flaggems.py --check ==="
           python3 scripts/codegen/codegen_musa_flaggems.py --check
+          echo "=== codegen_iluvatar_flaggems.py --check ==="
+          python3 scripts/codegen/codegen_iluvatar_flaggems.py --check
           # Re-renders the CUPTI cbid -> name table's .inc from the committed
           # .txt, so it needs no vendor header and no GPU -- which is the reason
           # the table is committed as two artifacts rather than parsed from

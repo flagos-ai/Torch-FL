@@ -50,6 +50,8 @@ std::string DefaultConfigPath() {
       platform = "musa";
 #elif defined(USE_BPU)
       platform = "bpu";
+#elif defined(USE_ILUVATAR)
+      platform = "iluvatar";
 #endif
       if (platform) {
         // dir is <prefix>/torch_fl/lib, configs are at <prefix>/torch_fl/configs/

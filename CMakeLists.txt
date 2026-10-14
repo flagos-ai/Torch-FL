@@ -14,7 +14,7 @@
 
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
-set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, or bpu")
+set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, iluvatar, or bpu")
 
 # Vendor driver/runtime dirs to embed in RUNPATH. Never bundled into the wheel
 # (a machine with the card has the driver), mirroring MetaX's /opt/maca.
@@ -531,6 +531,83 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
   # host-only runtime/op sources are compiled (no NVIDIA toolkit probe).
   add_library(torch::cudart INTERFACE IMPORTED)
+  if(NOT TARGET CUDA::nvToolsExt)
+    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  # Iluvatar corex SDK. Like the Kunlunxin XPU SDK it is CUDA-shaped and ships
+  # everything already: cuda_runtime.h under <corex>/include and
+  # libcudart.so.10.2 / libcupti.so.10.2 under <corex>/lib64 (corex 4.5.0).
+  # Nothing is copied into the wheel -- the vendor torch links the same files.
+  # Crucially, project_languages stays CXX/C: there is no project(CUDA) and so
+  # no nvcc compiler-id probe. That probe is what fails here, because corex's
+  # /usr/local/corex/bin/nvcc is a 194-byte banner stub and the real device
+  # compiler (clang, triple bi-iluvatar-ilurt) is not a CUDA compiler id.
+  flagos_resolve_sdk_root(COREX_PATH "/usr/local/corex" COREX_PATH COREX_HOME)
+  if(NOT EXISTS "${COREX_PATH}/include/cuda_runtime.h")
+    message(FATAL_ERROR
+      "Iluvatar corex SDK not found: ${COREX_PATH}/include/cuda_runtime.h does "
+      "not exist. Set COREX_PATH to the corex SDK root.")
+  endif()
+  file(GLOB _iluvatar_cudart_libs
+    "${COREX_PATH}/lib64/libcudart.so*" "${COREX_PATH}/lib/libcudart.so*")
+  if(NOT _iluvatar_cudart_libs)
+    message(FATAL_ERROR
+      "Iluvatar CUDA runtime not found: no libcudart.so* under ${COREX_PATH}/lib64 "
+      "or ${COREX_PATH}/lib. Set COREX_PATH to the corex SDK root.")
+  endif()
+  list(GET _iluvatar_cudart_libs 0 _iluvatar_cudart_lib)
+  get_filename_component(_iluvatar_cudart_dir "${_iluvatar_cudart_lib}" DIRECTORY)
+  message(STATUS "Iluvatar corex SDK path: ${COREX_PATH}")
+  message(STATUS "Iluvatar CUDA runtime path: ${_iluvatar_cudart_dir}")
+
+  add_library(cuda_runtime_compat INTERFACE IMPORTED)
+  set_target_properties(cuda_runtime_compat PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${COREX_PATH}/include"
+  )
+  target_link_directories(cuda_runtime_compat INTERFACE "${_iluvatar_cudart_dir}")
+  target_link_libraries(cuda_runtime_compat INTERFACE cudart)
+
+  set(CUDA_RUNTIME_LIB cuda_runtime_compat)
+
+  # Embed the CUDA-compat runtime path so LD_LIBRARY_PATH is not needed at runtime.
+  list(APPEND CMAKE_INSTALL_RPATH "${_iluvatar_cudart_dir}")
+  set(FLAGOS_VENDOR_RPATH_DIRS "${_iluvatar_cudart_dir}")
+
+  # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
+  # host-only runtime sources are compiled (no NVIDIA toolkit probe).
+  add_library(torch::cudart INTERFACE IMPORTED)
+  # corex's torch is a real CUDA build, but a pre-cxx11-ABI one: it reports
+  # torch._C._GLIBCXX_USE_CXX11_ABI == False, so libtorch_cpu.so defines e.g.
+  # c10::ivalue::ConstantString::create(std::basic_string) and not the
+  # __cxx11:: form. GCC 13 defaults to the new ABI, so an unqualified build emits
+  # ~40 new-ABI references in libtorch_fl.so that no vendor library satisfies and
+  # the import dies with "undefined symbol:
+  # _ZN3c106ivalue14ConstantString6createENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE".
+  # Match the vendor ABI explicitly. -D_GLIBCXX_USE_CXX11_ABI=0 is the value
+  # corex's own headers are built with; hardcode it rather than reading
+  # torch._C at configure time so the CMake and setup.py paths agree.
+  add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+  # corex's torch headers and libraries are a matched pair built with __ILUVATAR__
+  # defined, and c10/cuda/CUDAException.h keys C10_CUDA_CHECK on it: the
+  # `#ifndef __ILUVATAR__` arm calls the 5-argument
+  # c10_cuda_check_implementation, the `#else` arm the 6-argument one that
+  # libc10_cuda.so actually exports (with the stringified expression as a 6th
+  # parameter). Without the define a consumer compiles the 5-arg call and the
+  # import dies with "undefined symbol:
+  # _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb". Every translation unit
+  # that goes through a c10/cuda exception macro needs it.
+  add_compile_definitions(__ILUVATAR__)
+  # corex's torch exports an `c10_cuda` whose INTERFACE_LINK_LIBRARIES names
+  # caffe2::cuda, but that target is created only inside Caffe2/public/cuda.cmake
+  # -- the file the torch::cudart guard above returns out of. find_package(Torch)
+  # therefore fails with "The link interface of target c10_cuda contains:
+  # caffe2::cuda but the target was not found". Pre-create it here, empty of a
+  # link library (the CUDA::cuda_driver cuda.cmake would give it is the NVIDIA
+  # driver, which corex neither ships nor needs), so the export resolves.
+  if(NOT TARGET caffe2::cuda)
+    add_library(caffe2::cuda INTERFACE IMPORTED)
+  endif()
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()

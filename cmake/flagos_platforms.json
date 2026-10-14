@@ -175,6 +175,48 @@
       }
     },
 
+    "iluvatar": {
+      "_comment": [
+        "Iluvatar BI-V150 (Tianshu), corex 4.5.0 SDK. The SDK is CUDA-shaped",
+        "(cuda_runtime.h, libcudart.so.10.2, libcupti.so.10.2) and the vendor",
+        "torch is a real CUDA build exporting c10::cuda, so the runtime sources",
+        "are the shared cuda/ ones and c10/cuda headers compile. But this is NOT",
+        "a boxing platform: there is no FlagGems liboperators.so for corex, and",
+        "ops route to the FlagGems Python path (FlagTree Triton, iluvatar",
+        "backend) through backends_iluvatar.conf. Boxing stays off, so the CUDA",
+        "boxing kernels and the flaggems_cpp/tileops modes are all disabled.",
+        "The wheel carries a local version segment (corex4.5.0) but no pypi_lane:",
+        "there is no self-hosted iluvatar CI runner yet, so the platform builds",
+        "and installs locally without being published."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "cuda",
+      "bundle_libdir": "lib",
+      "vendor_torch_libraries": true,
+      "wheel_local": "corex4.5.0",
+      "pypi_lane": "",
+      "use_macro": "USE_ILUVATAR",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": false,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for corex"
+        },
+        "FLAGOS_BUILD_BOXING": {
+          "value": false,
+          "reason": "FlagGems-primary: ops route to the FlagTree Triton iluvatar backend, not the CUDA boxing kernels"
+        }
+      }
+    },
+
     "ascend": {
       "_comment": [
         "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",

@@ -36,7 +36,7 @@ IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
 # Accelerator platform: "cuda" (default), "ppu", "metax", "kunlunxin",
-# "ascend", "tsingmicro", "dcu", "gcu", "musa", or "bpu"
+# "iluvatar", "ascend", "tsingmicro", "dcu", "gcu", "musa", or "bpu"
 FLAGOS_ACCELERATOR = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
 
 # Where the sources live. Distinct from BASE_DIR, which is repointed at a
@@ -405,6 +405,49 @@ def _setup_kunlunxin_build_env(env: dict) -> tuple[str, str]:
     return xpu_root, xcudart_dir
 
 
+def _iluvatar_roots() -> str:
+    """Return the validated Iluvatar corex SDK root.
+
+    corex is CUDA-shaped: ``cuda_runtime.h`` under ``COREX_PATH/include`` and
+    ``libcudart.so.10.2`` under ``COREX_PATH/lib64`` (corex 4.5.0). Both are
+    host-only build inputs -- the runtime libraries are already installed on any
+    machine with the card and are never copied into the wheel -- so this only
+    locates them. Iluvatar is not a boxing build, so no toolchain probe is done;
+    the host g++ compiles the runtime shim against these headers.
+    """
+    corex_root = os.path.realpath(os.environ.get("COREX_PATH", "/usr/local/corex"))
+    if not os.path.isfile(os.path.join(corex_root, "include", "cuda_runtime.h")):
+        raise RuntimeError(
+            "FLAGOS_ACCELERATOR=iluvatar selected, but cuda_runtime.h was not "
+            f"found under {corex_root}/include. Set COREX_PATH to the corex SDK "
+            "root."
+        )
+    for lib_dir in (os.path.join(corex_root, "lib64"), os.path.join(corex_root, "lib")):
+        if glob.glob(os.path.join(lib_dir, "libcudart.so*")):
+            return corex_root
+    raise RuntimeError(
+        "FLAGOS_ACCELERATOR=iluvatar selected, but no libcudart.so* was found "
+        f"under {corex_root}/lib64 or {corex_root}/lib. Set COREX_PATH to the "
+        "corex SDK root."
+    )
+
+
+def _setup_iluvatar_build_env(env: dict) -> str:
+    """CPATH/LIBRARY_PATH/LD_LIBRARY_PATH for the Iluvatar corex SDK.
+
+    The host g++ compiles the shared cuda/ runtime sources against corex's
+    CUDA-shaped headers and links its libcudart shim, so both the include and lib
+    directories have to be reachable. Returns the corex root.
+    """
+    corex_root = _iluvatar_roots()
+    env.setdefault("COREX_PATH", corex_root)
+    _prepend_env_path(env, "CPATH", os.path.join(corex_root, "include"))
+    for lib_dir in (os.path.join(corex_root, "lib64"), os.path.join(corex_root, "lib")):
+        _prepend_env_path(env, "LIBRARY_PATH", lib_dir)
+        _prepend_env_path(env, "LD_LIBRARY_PATH", lib_dir)
+    return corex_root
+
+
 def _kunlunxin_xdnn_root() -> str:
     """Resolve XDNN_ROOT: the vendor xdnn_pytorch op-library package root.
 
@@ -621,6 +664,9 @@ def build_deps():
         # without it a vendor build FATAL_ERRORs at configure.
         if kernels["FLAGOS_BUILD_VENDOR"]:
             cmake_args.append(f"-DXDNN_ROOT={_kunlunxin_xdnn_root()}")
+    elif FLAGOS_ACCELERATOR == "iluvatar":
+        corex_root = _setup_iluvatar_build_env(build_env)
+        cmake_args.append(f"-DCOREX_PATH={corex_root}")
 
     subprocess.check_call([cmake, BASE_DIR] + cmake_args, cwd=build_dir, env=build_env)
 

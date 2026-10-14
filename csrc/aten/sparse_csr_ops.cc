@@ -204,7 +204,7 @@ using ToSparseSparseDimFn = Tensor (*)(const Tensor&, int64_t);
 // at::native::addmm_out_sparse_compressed_cuda has no definition to bind.  This
 // is the same predicate csrc/aten/sdp_choice_stub.cc uses, for the same reason.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR)
 
 namespace {
 
@@ -324,7 +324,7 @@ TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // one frame, and the CSC inputs _sparse_csr_mm accepts would reach
   // _to_sparse_csr first anyway.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR)
   m.impl("mm", at::native::_sparse_csr_mm);
   m.impl("mm.out", at::native::_sparse_csr_mm_out);
   m.impl("addmm", at::native::addmm_sparse_compressed_dense);

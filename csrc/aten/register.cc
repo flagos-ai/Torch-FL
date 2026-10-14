@@ -577,6 +577,17 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
     #include "backends/musa/generated/musa_flaggems_register.inc"
     #endif
+  #elif defined(USE_ILUVATAR)
+    // Iluvatar is FlagGems-primary: there is no vendor kernel library, so the
+    // only registrations are the FlagGems dispatcher slots. This arm must exist
+    // even though it claims nothing else -- without it iluvatar would fall to
+    // the generic #else below, which includes the full generated register.inc
+    // and claims every generated op, making `none` in backends_iluvatar.conf a
+    // "backend not registered" raise instead of a cpu_fallback. That is the same
+    // defect the Ascend comment above records.
+    #if defined(FLAGOS_FLAGGEMS_PYTHON)
+    #include "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
+    #endif
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator

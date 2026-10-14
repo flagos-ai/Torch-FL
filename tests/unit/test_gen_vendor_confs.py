@@ -487,7 +487,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     kunlunxin *is* a native-kernel vendor (its own generated registration claims
     only the ops it routes to the vendor XPU SDK), so it belongs in VENDORS.
     """
-    assert set(g.VENDORS) == {"musa", "gcu", "ascend", "kunlunxin"}
+    assert set(g.VENDORS) == {"musa", "gcu", "ascend", "kunlunxin", "iluvatar"}
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS
     # backends_metax.conf is now AUTO-GENERATED (boxing conf), so skip that check

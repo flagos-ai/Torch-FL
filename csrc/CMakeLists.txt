@@ -32,19 +32,27 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 
 # Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
 # use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,
-# DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Platforms
-# without a supported activity API use the unavailable implementation -- that
-# includes Kunlunxin, whose native XPU backend keeps its kernels off the CUDA
-# dispatch key the CUPTI tracer reads, so the tracer would report an empty
-# device timeline rather than the XPU one.
+# DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Iluvatar uses
+# the CUPTI-compatible tracer against corex's CUDA-shaped runtime
+# (libcupti.so.10.2 + cupti_activity.h; the shim dlopens CUPTI, so there is no
+# link-time dependency). Platforms without a supported activity API use the
+# unavailable implementation -- that includes Kunlunxin, whose native XPU backend
+# keeps its kernels off the CUDA dispatch key the CUPTI tracer reads, so the
+# tracer would report an empty device timeline rather than the XPU one.
 #
 # Each source defines the same factory.
 #
 # Every accelerator in cmake/flagos_platforms.json must land in exactly one arm;
 # tests/unit/test_device_tracer_selection.py pins the resulting mapping.
+# Iluvatar's corex SDK ships a CUPTI-named facade over IXPTI whose cuptiGetVersion
+# reports CUPTI API 13 -- the record layout cupti_shim.h assumes -- and it dlopens
+# by the bare soname `libcupti.so`, which corex provides. Measured on a BI-V150
+# (ub22): the shim binds and cuptiActivityRegisterCallbacks resolves, so the CUPTI
+# arm is the correct one for iluvatar.
 if(FLAGOS_ACCELERATOR STREQUAL "cuda"
    OR FLAGOS_ACCELERATOR STREQUAL "metax"
-   OR FLAGOS_ACCELERATOR STREQUAL "ppu")
+   OR FLAGOS_ACCELERATOR STREQUAL "ppu"
+   OR FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
@@ -494,6 +502,13 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
         ${XDNN_PYTORCH_INCLUDE_DIRS})
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
   endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  # Iluvatar's vendor torch is a real CUDA build over the corex CUDA-shaped
+  # runtime, so the standard allocator and the c10/cuda stream path apply and the
+  # CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside ${_torch_fl_link_libs}.
+  # Unlike kunlunxin there is no FLAGOS_BUILD_VENDOR arm: ops route to FlagGems,
+  # not to a vendor kernel library, so nothing vendor-specific is linked here.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)

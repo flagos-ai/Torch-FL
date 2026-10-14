@@ -146,6 +146,14 @@ VENDORS = {
     # is fixed (or the SDK ships a PrivateUse1-named runtime), kunlunxin has a
     # single native .inc and no extra registration file.
     "kunlunxin": ("backends/kunlunxin/generated/kunlunxin_register.inc", ()),
+    # Iluvatar is FlagGems-primary with no vendor kernel library, so there is no
+    # native .inc at all: the native slot is empty by declaration. The FlagGems
+    # .inc is the whole registration -- backends_iluvatar.conf routes the ops it
+    # claims to `flaggems` and everything else to `none` (cpu_fallback).
+    "iluvatar": (
+        "",
+        ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
+    ),
 }
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
@@ -637,7 +645,13 @@ FLAGGEMS_CPP_PLATFORMS = {"metax"}
 # kunlunxin kernels back, and everything else stays at `none` (cpu_fallback).
 # Add kunlunxin here only together with a measured FlagGems cohort, so the gate
 # and the conf stay in step.
-FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu"}
+#
+# Iluvatar is in the set from the start: it has no boxing path at all, so the
+# FlagGems Python route is the only route its conf can emit, and everything it
+# does not claim falls to `none` (cpu_fallback). The allowlist it registers is
+# the FLAGGEMS_PYTHON_OPS ceiling; per-op pruning follows the survey measurement
+# the way kunlunxin's entry above is waiting on, not a guess.
+FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu", "iluvatar"}
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
 # triton backend cannot compile the FlagGems kernel. The boxing platforms express
@@ -1994,8 +2008,11 @@ def registered_impls(inc_path: Path) -> set:
     the same list the compiler sees -- the authoritative answer to "is this op
     registered on this platform", which is what decides whether `none` boxes to
     CPU or raises.
+
+    An empty ``inc_path`` (a FlagGems-primary vendor with no native kernels, see
+    VENDORS) claims nothing, the same as a file that is not there.
     """
-    if not inc_path.exists():
+    if not inc_path.name or not inc_path.is_file():
         return set()
     return set(re.findall(r'm\.impl\(\s*"([^"]+)"', inc_path.read_text()))
 
@@ -2194,6 +2211,14 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
     else:
         vendor_desc = "vendor-native kernel"
 
+    # A FlagGems-primary platform with no vendor kernel library (iluvatar) has
+    # no native `.inc`, so no op routes to the vendor slot. Its conf must not
+    # advertise a backend nothing selects -- the legend and the routing-priority
+    # line are the only places the vendor name appears, and both would otherwise
+    # describe a route that does not exist. Every other vendor (and every boxing
+    # platform) has at least one native route, so this only changes that conf.
+    has_vendor_slot = boxing or counts.get(vendor, 0) > 0
+
     lines = [LICENSE.rstrip("\n"), ""]
     lines += [
         f"# flagos op backend config for {platform} -- AUTO-GENERATED.",
@@ -2207,8 +2232,9 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
         "#   flaggems_cpp  FlagGems C++ runtime (liboperators.so)",
         "#   flaggems      FlagGems Python/Triton path",
         "#   tileops       TileOPs Triton shims (needs FLAGOS_BUILD_TILEOPS=ON + SM90)",
-        f"#   {vendor:<13} {vendor_desc}",
     ]
+    if has_vendor_slot:
+        lines.append(f"#   {vendor:<13} {vendor_desc}")
     if boxing:
         lines += [
             "#",
@@ -2218,10 +2244,13 @@ def render(platform: str, vendor: str, routes: dict, boxing: bool = False) -> st
             "#",
         ]
     else:
+        lines.append(
+            "#   none          no accelerated impl here -> reaches cpu_fallback"
+        )
         lines += [
-            "#   none          no accelerated impl here -> reaches cpu_fallback",
             "#",
-            f"# Routing priority: flaggems_cpp > flaggems > tileops > {vendor} > none.",
+            "# Routing priority: flaggems_cpp > flaggems > tileops > "
+            + (f"{vendor} > none." if has_vendor_slot else "none."),
             "#",
         ]
     lines += [
@@ -2271,8 +2300,16 @@ def build_all(conf_dir: Path) -> dict:
     # register.cc actually includes, so a name with no file behind it is always
     # a bug, never a platform that happens to cover nothing. (A platform that
     # genuinely covers nothing belongs in BOXING_PLATFORMS or has no row at all.)
+    #
+    # The one documented exception is a FlagGems-primary vendor: iluvatar has no
+    # vendor kernel library, so its native slot is the empty string -- an explicit
+    # "no native kernels" declaration, not a file that should exist. Only the
+    # extra (FlagGems) paths are real includes for such a vendor, and they are
+    # checked like any other.
     for _vendor, (_native_inc, _extra_incs) in VENDORS.items():
         for _inc in (_native_inc, *_extra_incs):
+            if not _inc:
+                continue
             if not (CSRC_DIR / _inc).exists():
                 raise SystemExit(
                     f"error: {_vendor}: {_inc} does not exist. Its coverage set "

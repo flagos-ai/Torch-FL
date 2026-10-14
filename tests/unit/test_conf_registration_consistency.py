@@ -50,7 +50,7 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
 # Platform -> registration ``.inc`` set that ``csrc/aten/register.cc`` compiles
 # for that platform (the ``#include`` lines under each ``USE_*`` guard,
-# register.cc:455-502).  Paths are relative to ``csrc/aten``.
+# register.cc:549-614).  Paths are relative to ``csrc/aten``.
 PLATFORM_REGISTRATION = {
     "ascend": ["backends/ascend/generated/ascend_register.inc"],
     "gcu": [
@@ -61,14 +61,20 @@ PLATFORM_REGISTRATION = {
         "backends/musa/generated/musa_register.inc",
         "backends/musa/generated/musa_flaggems_register.inc",
     ],
-    "bpu": [],  # BPU registers no compute ops (register.cc:479-498)
+    "bpu": [],  # BPU registers no compute ops (register.cc:591-613)
     # Kunlunxin is a native vendor backend like musa/gcu/ascend: it compiles its
     # own generated registration, which claims exactly the ops it routes to the
     # vendor XPU SDK operator library.  It no longer falls through to
     # generated/register.inc.
     "kunlunxin": ["backends/kunlunxin/generated/kunlunxin_register.inc"],
+    # Iluvatar is FlagGems-primary with no vendor kernel library, so its ONLY
+    # registration is the FlagGems dispatcher list -- there is no native .inc.
+    # register.cc has an arm of its own precisely so it does not reach the
+    # generated/register.inc fallback below, which would claim every op and turn
+    # its `none` entries into "backend not registered" instead of cpu_fallback.
+    "iluvatar": ["backends/iluvatar/generated/iluvatar_flaggems_register.inc"],
     # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro fall through to
-    # generated/register.inc (register.cc:500-502), which claims every generated
+    # generated/register.inc (register.cc:610-613), which claims every generated
     # op.
     "cuda": ["generated/register.inc"],
     "dcu": ["generated/register.inc"],
@@ -133,13 +139,23 @@ def test_full_coverage_confs_share_one_op_set():
     ``gen_vendor_confs.build_all()`` widens the CUDA-derived op list by the
     union of vendor-only ops (EXTRA_NATIVE + EXTRA_ROUTED) so the route counts
     in each header are commensurable.  The confs that get the full-coverage
-    treatment are the native vendor confs (ascend, gcu, kunlunxin, musa) and the
-    CUDA-boxing confs (dcu, metax, ppu).  ``backends_cuda.conf`` is the *base*
+    treatment are the native vendor confs (ascend, gcu, kunlunxin, musa), the
+    # FlagGems-primary conf (iluvatar) and the CUDA-boxing confs (dcu, metax,
+    # ppu).  ``backends_cuda.conf`` is the *base*
     list (the one ``codegen_ops.py`` rewrites) and therefore lacks the three
     widened ops; ``backends_bpu.conf`` is empty and ``backends_tsingmicro.conf``
     is hand-written and sparse.  Those three are asserted separately.
     """
-    full_coverage = {"ascend", "gcu", "kunlunxin", "musa", "dcu", "metax", "ppu"}
+    full_coverage = {
+        "ascend",
+        "gcu",
+        "kunlunxin",
+        "musa",
+        "dcu",
+        "metax",
+        "ppu",
+        "iluvatar",
+    }
     reference = _parse_conf(CONF_DIR / "backends_musa.conf")
     for platform in sorted(full_coverage):
         routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
@@ -200,7 +216,7 @@ def test_every_route_uses_an_allowed_backend_key(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
 def test_vendor_routes_are_registered(platform):
     """Every op routed to ``<vendor>`` must be in the platform's registration set.
 
@@ -221,7 +237,7 @@ def test_vendor_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
 def test_accelerated_routes_are_registered(platform):
     """Every non-``none`` route must be an op the platform registers.
 
@@ -242,7 +258,7 @@ def test_accelerated_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin"])
+@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
 def test_registered_ops_are_never_left_at_none(platform):
     """A registered op left at ``none`` sends a real kernel to ``cpu_fallback``.
 
@@ -280,7 +296,7 @@ def test_boxing_platforms_have_no_none_entries(platform):
 
 @pytest.mark.anyplatform
 def test_bpu_conf_is_empty():
-    """BPU registers no compute ops (register.cc:479-498), so its conf must
+    """BPU registers no compute ops (register.cc:591-613), so its conf must
     list no routes: every op falls through to ``cpu_fallback`` and acceleration
     comes from the ``torch.compile`` backend.
     """
@@ -338,6 +354,11 @@ def test_conf_route_counts_are_stable():
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
         "ppu": {"flaggems": 592, "cuda": 1445},
+        # Iluvatar boxes nothing: every covered op is on the FlagGems Python
+        # path, and the rest fall to cpu_fallback. The 639 is the shared FlagGems
+        # ceiling, provisional until flaggems_overload_survey.py is run on a
+        # BI-V150 host; shrinking it is a deliberate move, not drift.
+        "iluvatar": {"flaggems": 639, "none": 1398},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():

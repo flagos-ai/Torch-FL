@@ -387,7 +387,8 @@ at::Tensor _copy_from(
       // this platform.
       musa_ops::MudnnCopy(self, const_cast<at::Tensor&>(dst));
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_ILUVATAR)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
       // strided copy kernel (handles strides, dtype casts on-device). The
       // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
@@ -513,7 +514,8 @@ at::Tensor _copy_from(
       auto tmp = at::empty(self_contig.sizes(), dst.options());
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN)
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -553,7 +555,8 @@ at::Tensor _copy_from(
       auto tmp = at::empty(self_contig.sizes(), dst.options());
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN)
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -716,7 +719,8 @@ at::Tensor _to_copy(
           .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
       musa_ops::MudnnCopy(self_contig, result);
 #elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN)
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR)
       // No CUDA runtime on these backends, so the CUDA TensorIterator cast
       // below is unavailable.
 #ifdef USE_ASCEND
