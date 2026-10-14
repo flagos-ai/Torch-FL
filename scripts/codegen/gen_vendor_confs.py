@@ -146,12 +146,16 @@ VENDORS = {
     # is fixed (or the SDK ships a PrivateUse1-named runtime), kunlunxin has a
     # single native .inc and no extra registration file.
     "kunlunxin": ("backends/kunlunxin/generated/kunlunxin_register.inc", ()),
-    # Iluvatar is FlagGems-primary with no vendor kernel library, so there is no
-    # native .inc at all: the native slot is empty by declaration. The FlagGems
-    # .inc is the whole registration -- backends_iluvatar.conf routes the ops it
-    # claims to `flaggems` and everything else to `none` (cpu_fallback).
+    # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
+    # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
+    # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where
+    # FlagGems covers it, to `iluvatar` where only the vendor kernel does, and to
+    # `none` otherwise (cpu_fallback). The two .inc files are included into the
+    # same PrivateUse1 TORCH_LIBRARY_IMPL body, so they must be disjoint -- the
+    # generator (scripts/codegen/codegen_iluvatar.py) intersects its claims
+    # against the FlagGems .inc for exactly that reason.
     "iluvatar": (
-        "",
+        "backends/iluvatar/generated/iluvatar_register.inc",
         ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
     ),
 }
@@ -174,6 +178,35 @@ EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}}
 # fused-backend selection runs *inside* the composite and then branches on
 # query.device().type(), so on PrivateUse1 the leaves are never consulted.
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
+
+# Native kernels that exist behind an op FlagGems currently *wins*, so they
+# claim no m.impl of their own and the .inc scan cannot see them: the FlagGems
+# .inc is included into the same PrivateUse1 TORCH_LIBRARY_IMPL body, and a
+# second m.impl for one op is a duplicate registration. They are not routed --
+# FlagGems stays the route -- but they are reachable, through the dispatcher's
+# dtype escape (ResolveFn in dispatcher.h, which hands an op whose operand
+# FlagGems rejects to the vendor slot) and through FLAGOS_FORCE_BACKEND=vendor
+# (which moves an op only when it is annotated as a vendor candidate).
+#
+# Listing them here is what makes the annotation truthful. Without it an op like
+# `mm` reads "= flaggems" with no marker, the same line a platform with no GEMM
+# kernel at all would emit, and the escape into iluvatar_kernels.cc becomes
+# undocumented dead code -- the exact failure the generator's own header warns
+# against.
+#
+# Deliberately NOT folded into EXTRA_NATIVE: that set is also what
+# vendor_registered_ops adds to the registration closure, and these ops are
+# claimed by FlagGems, not by the vendor's own registration.
+# XLA/musa/gcu/ascend/kunlunxin have no escape-only kernels.
+ESCAPE_NATIVE = {
+    "iluvatar": {
+        "mm",
+        "bmm",
+        "addmm",
+        "_native_batch_norm_legit",
+        "_native_batch_norm_legit_no_training",
+    }
+}
 
 # CUDA-boxing platforms use the same four-key shape. Their fallback kernel is the
 # CUDA boxing kernel, so the `<vendor>` slot is spelled "cuda" and it covers
@@ -2123,7 +2156,11 @@ def vendor_native_ops(vendor: str) -> set:
     currently wins.
     """
     native_inc, _ = VENDORS[vendor]
-    return registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
+    return (
+        registered_impls(CSRC_DIR / native_inc)
+        | EXTRA_NATIVE.get(vendor, set())
+        | ESCAPE_NATIVE.get(vendor, set())
+    )
 
 
 def vendor_registered_ops(vendor: str) -> set:

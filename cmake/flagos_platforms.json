@@ -207,9 +207,11 @@
         "(cuda_runtime.h, libcudart.so.10.2, libcupti.so.10.2) and the vendor",
         "torch is a real CUDA build exporting c10::cuda, so the runtime sources",
         "are the shared cuda/ ones and c10/cuda headers compile. But this is NOT",
-        "a boxing platform: there is no FlagGems liboperators.so for corex, and",
-        "ops route to the FlagGems Python path (FlagTree Triton, iluvatar",
-        "backend) through backends_iluvatar.conf. Boxing stays off, so the CUDA",
+        "a boxing platform: the FlagGems Python path (FlagTree Triton, iluvatar",
+        "backend) stays primary through backends_iluvatar.conf, and the ops",
+        "FlagGems does not cover route to a native, non-boxing vendor kernel in",
+        "aten/backends/iluvatar/ that calls corex's CUDA-shaped C ABI (cudnn.h -> ",
+        "ixdnn, cublas_v2.h -> ixblas) directly. Boxing stays off, so the CUDA",
         "boxing kernels and the flaggems_cpp/tileops modes are all disabled.",
         "The wheel carries a local version segment (corex4.5.0) but no pypi_lane:",
         "there is no self-hosted iluvatar CI runner yet, so the platform builds",
@@ -225,13 +227,17 @@
       "writes_platform_marker": true,
       "c10_cuda_no_cmake_configure": true,
       "kernel_defaults": {
-        "FLAGOS_BUILD_VENDOR": false,
+        "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
       "pins": {
+        "FLAGOS_BUILD_VENDOR": {
+          "value": true,
+          "reason": "corex's CUDA-named C ABI (cudnn/ixdnn + cublas/ixblas) is the only vendor operator library the SDK provides"
+        },
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
           "value": false,
           "reason": "no FlagGems liboperators.so exists for corex"

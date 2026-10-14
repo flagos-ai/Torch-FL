@@ -574,6 +574,39 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   list(APPEND CMAKE_INSTALL_RPATH "${_iluvatar_cudart_dir}")
   set(FLAGOS_VENDOR_RPATH_DIRS "${_iluvatar_cudart_dir}")
 
+  # Native, non-boxing vendor kernels. corex's CUDA-named C ABI *is* the vendor
+  # implementation: cudnn.h maps to ixdnn (198 exported ixdnn* symbols in
+  # libcudnn.so.7) and cublas_v2.h to ixblas (272 in libcublas), so
+  # aten/backends/iluvatar/ includes <cudnn.h>/<cublas_v2.h> and calls the C API
+  # directly against the flagos tensor's data_ptr() -- no device retag, no CUDA
+  # dispatch key. Both live in the same corex lib64 the cudart shim does, so the
+  # directory is already on the RPATH; -lcudnn/-lcublas resolve there.
+  if(FLAGOS_BUILD_VENDOR)
+    find_library(FLAGOS_ILUVATAR_CUDNN_LIB cudnn
+        PATHS "${COREX_PATH}/lib64" "${COREX_PATH}/lib" NO_DEFAULT_PATH)
+    find_library(FLAGOS_ILUVATAR_CUBLAS_LIB cublas
+        PATHS "${COREX_PATH}/lib64" "${COREX_PATH}/lib" NO_DEFAULT_PATH)
+    find_path(FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR cudnn.h
+        PATHS "${COREX_PATH}/include" NO_DEFAULT_PATH)
+    if(NOT FLAGOS_ILUVATAR_CUDNN_LIB OR NOT FLAGOS_ILUVATAR_CUBLAS_LIB
+       OR NOT FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR)
+      message(FATAL_ERROR
+        "FLAGOS_BUILD_VENDOR=ON for iluvatar but the corex vendor op libraries "
+        "were not found: need libcudnn.so + libcublas.so under "
+        "${COREX_PATH}/lib64 (or lib) and cudnn.h under ${COREX_PATH}/include. "
+        "corex's CUDA-named C ABI (ixdnn/ixblas) is the only operator library "
+        "the SDK provides, so set COREX_PATH to the corex SDK root, or build "
+        "with -DFLAGOS_BUILD_VENDOR=OFF to route every op to FlagGems/CPU.")
+    endif()
+    message(STATUS "Iluvatar vendor cudnn: ${FLAGOS_ILUVATAR_CUDNN_LIB}")
+    message(STATUS "Iluvatar vendor cublas: ${FLAGOS_ILUVATAR_CUBLAS_LIB}")
+    message(STATUS "Iluvatar vendor include: ${FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR}")
+    get_filename_component(_iluvatar_vendor_libdir
+        "${FLAGOS_ILUVATAR_CUDNN_LIB}" DIRECTORY)
+    list(APPEND CMAKE_INSTALL_RPATH "${_iluvatar_vendor_libdir}")
+    list(APPEND FLAGOS_VENDOR_RPATH_DIRS "${_iluvatar_vendor_libdir}")
+  endif()
+
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
   # host-only runtime sources are compiled (no NVIDIA toolkit probe).
   add_library(torch::cudart INTERFACE IMPORTED)

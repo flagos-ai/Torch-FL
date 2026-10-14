@@ -437,7 +437,12 @@ def _setup_iluvatar_build_env(env: dict) -> str:
 
     The host g++ compiles the shared cuda/ runtime sources against corex's
     CUDA-shaped headers and links its libcudart shim, so both the include and lib
-    directories have to be reachable. Returns the corex root.
+    directories have to be reachable. The same two directories carry the vendor
+    op libraries: ``include/cudnn.h`` + ``include/cublas_v2.h`` (thin umbrellas
+    over ``IX/ixdnn`` + ``IX/ixblas``) and ``lib64/libcudnn.so`` +
+    ``lib64/libcublas.so``, which CMakeLists.txt's iluvatar arm locates under
+    ``COREX_PATH`` -- so a FLAGOS_BUILD_VENDOR build compiles and links with no
+    extra paths. Returns the corex root.
     """
     corex_root = _iluvatar_roots()
     env.setdefault("COREX_PATH", corex_root)

@@ -578,13 +578,26 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #include "backends/musa/generated/musa_flaggems_register.inc"
     #endif
   #elif defined(USE_ILUVATAR)
-    // Iluvatar is FlagGems-primary: there is no vendor kernel library, so the
-    // only registrations are the FlagGems dispatcher slots. This arm must exist
-    // even though it claims nothing else -- without it iluvatar would fall to
-    // the generic #else below, which includes the full generated register.inc
-    // and claims every generated op, making `none` in backends_iluvatar.conf a
-    // "backend not registered" raise instead of a cpu_fallback. That is the same
-    // defect the Ascend comment above records.
+    // Iluvatar is FlagGems-primary, with a vendor-native slot alongside it: the
+    // corex ixdnn/ixblas libraries (the CUDA-named C API) back the ops the conf
+    // routes to "iluvatar", and FlagGems stays the default for everything else.
+    // The native set is claimed only under FLAGOS_ILUVATAR_KERNEL so a
+    // FlagGems-only build still compiles; the two .inc files are disjoint, as
+    // both are included into the same PrivateUse1 TORCH_LIBRARY_IMPL body and a
+    // duplicate m.impl for one op is a compile error.
+    //
+    // This arm must exist even when it claimed nothing else -- without it
+    // iluvatar would fall to the generic #else below, which includes the full
+    // generated register.inc and claims every generated op, making `none` in
+    // backends_iluvatar.conf a "backend not registered" raise instead of a
+    // cpu_fallback. That is the same defect the Ascend comment above records.
+    #if defined(FLAGOS_ILUVATAR_KERNEL)
+    #include "backends/iluvatar/generated/iluvatar_register.inc"
+    #endif
+    // Registered whenever the FlagGems Python path is compiled in, not only
+    // under FLAGOS_ILUVATAR_KERNEL: backends_iluvatar.conf routes ops to
+    // FlagGems by default, so these kFlagGems dispatcher slots must exist or
+    // those routes raise "backend not registered". Same contract as MUSA.
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
     #include "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
     #endif

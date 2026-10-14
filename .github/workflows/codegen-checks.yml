@@ -85,6 +85,12 @@ jobs:
           # the CPU torch installed above.
           echo "=== codegen_kunlunxin.py --check ==="
           python3 scripts/codegen/codegen_kunlunxin.py --check
+          # Same contract as kunlunxin: reads the shared generated/register.inc
+          # plus the committed iluvatar_flaggems_register.inc and its own op
+          # table, writes iluvatar_kernels.cc / iluvatar_register.inc. No vendor
+          # toolkit and no built torch_fl -- only the CPU torchgen above.
+          echo "=== codegen_iluvatar.py --check ==="
+          python3 scripts/codegen/codegen_iluvatar.py --check
 
       - name: Run conf/registration consistency tests
         run: |

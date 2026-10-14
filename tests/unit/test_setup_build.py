@@ -195,6 +195,10 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
         ("tsingmicro", {"vendor", "flaggems", "flaggems_cpp"}),
         ("gcu", {"vendor", "flaggems"}),
         ("musa", {"vendor", "flaggems"}),
+        # Iluvatar is FlagGems-primary but no longer vendor-less: the native,
+        # non-boxing kernels under aten/backends/iluvatar/ wrap corex's
+        # CUDA-named C ABI (ixdnn/ixblas) for the ops FlagGems does not cover.
+        ("iluvatar", {"vendor", "flaggems"}),
         # BPU keeps the FLAGOS_BUILD_VENDOR default, but csrc/aten/backends/bpu/ does
         # not exist, so "vendor" here records a switch that is on rather than a
         # kernel set that is present.

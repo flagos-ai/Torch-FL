@@ -24,7 +24,7 @@ when a platform gains or loses one.
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 53 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
-| `iluvatar` | FlagGems-primary (no vendor kernels, no boxing) | `cuda` | `iluvatar` (generated FlagGems register only) | — (no dir) | 2037 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `cuda` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | — (MPSGraph-first, none yet) | `mps` (stream/event only) | 0 | no |
 
 Column notes:
@@ -48,9 +48,15 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
 - **aten backend** is the `csrc/aten/backends/<dir>` vendor kernel tree, when one
   exists. `flagos/` (the Python op caller) and `soft_lowp/` (the software
   low-precision matmul path shared by DCU/MetaX) are shared, not per-platform.
-  `iluvatar` has a directory but no vendor `.cc` kernel source: it holds only
-  `generated/iluvatar_flaggems_register.inc`, the generated FlagGems registration
-  for the Python/Triton routes.
+  `iluvatar` has a directory holding two registration `.inc` files — the
+  generated `iluvatar_flaggems_register.inc` (the FlagGems Python/Triton routes,
+  the platform default) and the native `iluvatar_register.inc` backed by
+  `generated/iluvatar_kernels.cc` — whose kernels call corex's CUDA-named C ABI
+  (`cudnn.h` → ixdnn, `cublas_v2.h` → ixblas) directly on the flagos
+  `data_ptr()`, with no device retag and no CUDA dispatch key. The two sets are
+  disjoint: FlagGems stays primary (an op in the FlagGems ceiling routes
+  `flaggems` and is only reached by the native slot through the dispatcher's
+  dtype escape), and the native kernels serve the ops FlagGems does not cover.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
   and 53 are the by-design BPU/MPS and hand-written TsingMicro files.
@@ -105,20 +111,24 @@ build opts into boxing.
   not been revalidated on the P800, so no `flaggems` route is enabled yet and the
   platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`; the allowlist is a
   follow-up.
-- **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary: it has no
-  vendor kernel library and no CUDA boxing path (boxing was explicitly ruled
-  out), so all covered ops route to the FlagGems Python/Triton path through
-  FlagTree's iluvatar backend and everything else falls back to `none`
-  (`cpu_fallback`). A BI-V150 overload survey (2026-10-14, 639-op cohort) measured
-  **STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED 136** and left 37 defect ops
-  on `cpu_fallback`, so the conf routes **603**, not the shared 640 ceiling
-  (`cat` measured separately, STRICT). Most of the 37 are the `device_name="cuda"`
-  vs `flagos` mismatch the DCU `patch_flaggems_device_name()` realignment
-  addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is the follow-up
-  that would return them. It has no CI job and no runner lane — it builds locally
-  only — and its wheel carries the local version segment `corex4.5.0`. It is also
-  the first entry in `FLAGGEMS_PYTHON_PLATFORMS` with no native `.inc` in its
-  `csrc/aten/backends/iluvatar/` tree.
+- **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary with a
+  native, non-boxing vendor slot alongside it. Boxing with the CUDA kernels was
+  explicitly ruled out; instead the ops FlagGems does not cover route to
+  `csrc/aten/backends/iluvatar/`, whose kernels call corex's CUDA-named C ABI
+  (ixdnn/ixblas) directly. Everything FlagGems covers still routes to the
+  FlagGems Python/Triton path through FlagTree's iluvatar backend, and the rest
+  falls back to `none` (`cpu_fallback`). A BI-V150 overload survey (2026-10-14,
+  639-op cohort) measured **STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED
+  136** and left 37 defect ops off FlagGems (they route to the native slot or to
+  `cpu_fallback`), so the conf routes **603** `flaggems`, not the shared 640
+  ceiling (`cat` measured separately, STRICT). Most of the 37 are the
+  `device_name="cuda"` vs `flagos` mismatch the DCU `patch_flaggems_device_name()`
+  realignment addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is
+  the follow-up that would return them. It has no CI job and no runner lane — it
+  builds locally only — and its wheel carries the local version segment
+  `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
+  ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
+  BI-V150) but the full cohort has not been re-measured.
 - **CI covers 8 of 12**: TsingMicro, BPU, Iluvatar and MPS have no
   `.github/configs/` entry.
 
