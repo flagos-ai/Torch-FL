@@ -29,6 +29,16 @@ file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/*.cc"
 )
 
+# Apple Metal is an Objective-C API, so the mps runtime is Objective-C++ (.mm).
+# Objective-C++ is an Apple-only language, so the glob is gated on the platform
+# rather than run for every build.
+if(FLAGOS_ACCELERATOR STREQUAL "mps")
+  file(GLOB_RECURSE MPS_OBJCXX_SOURCES
+      "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/*.mm"
+  )
+  list(APPEND SOURCE_FILES ${MPS_OBJCXX_SOURCES})
+endif()
+
 add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 
 # The platform's USE_* macro (USE_ASCEND, USE_DCU, ...), from the table: the
@@ -138,6 +148,16 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   # toolkit the corex-only host does not provide.
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
+elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+  # Apple Metal. There is no vendor SDK to find: Metal and Foundation ship with
+  # the macOS SDK, and torch's own MPS support is already in the macOS torch
+  # wheel. The only requirement is an Apple host, checked where the weak symbol
+  # actually comes from (the top-level CMakeLists).
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
+  target_link_libraries(${LIBRARY_NAME} PRIVATE
+      ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
 else()
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
 

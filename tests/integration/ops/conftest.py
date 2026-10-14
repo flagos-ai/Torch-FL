@@ -79,7 +79,20 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
     # `none` (CPU fallback), with no `cuda` route, so a `-> cuda` dispatch assertion
     # cannot hold. Every other backend's marker is skipped for the same reason.
-    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu"),
+    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
+    # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
+    # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
+    # Metal line, so every other backend's marked tests are skipped here.
+    "mps": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "ppu",
+        "flaggems_python",
+    ),
 }
 
 
@@ -158,6 +171,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")
+    config.addinivalue_line("markers", "mps: requires Apple Silicon (Metal) platform")
     config.addinivalue_line(
         "markers", "soft_lowp: requires the DCU or MetaX software lowp path"
     )

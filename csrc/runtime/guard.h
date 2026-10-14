@@ -34,7 +34,7 @@
 // de-boxed.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
     !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
 #define FLAGOS_GUARD_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #else

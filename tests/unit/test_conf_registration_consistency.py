@@ -76,6 +76,7 @@ PLATFORM_REGISTRATION = {
     # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro fall through to
     # generated/register.inc (register.cc:610-613), which claims every generated
     # op.
+    "mps": [],  # MPS registers no compute ops yet (register.cc USE_MPS arm)
     "cuda": ["generated/register.inc"],
     "dcu": ["generated/register.inc"],
     "metax": ["generated/register.inc"],
@@ -307,6 +308,18 @@ def test_bpu_conf_is_empty():
 
 
 @pytest.mark.anyplatform
+def test_mps_conf_is_empty():
+    """MPS registers no compute ops yet, so its conf must list no routes: every
+    op falls through to ``cpu_fallback`` until the MPSGraph-first operator layer
+    lands. See docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md.
+    """
+    routes = _parse_conf(CONF_DIR / "backends_mps.conf")
+    assert not routes, (
+        f"backends_mps.conf lists {len(routes)} routes but MPS registers none"
+    )
+
+
+@pytest.mark.anyplatform
 def test_tsingmicro_conf_is_hand_written_and_sparse():
     """``backends_tsingmicro.conf`` is deliberately hand-written and covers
     only the ops tsingmicro routes; it is not a generated full-coverage conf.
@@ -361,6 +374,7 @@ def test_conf_route_counts_are_stable():
         # not drift -- re-running the survey and moving ops in or out of that
         # set is what changes this number.
         "iluvatar": {"flaggems": 603, "none": 1434},
+        "mps": {},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():

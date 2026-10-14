@@ -388,6 +388,41 @@
           "reason": "the BPU executes compiled graphs and has no per-operator kernels at all"
         }
       }
+    },
+
+    "mps": {
+      "_comment": [
+        "Apple Silicon (M-series) via Metal. A native backend, not a boxing one:",
+        "no CUDA runtime exists and none is faked, so boxing, FlagGems and FlagTree",
+        "are all off (there is no Metal Triton line to build against).",
+        "csrc/runtime/accelerator/mps/ is Objective-C++ (OBJCXX) because Metal is an",
+        "Objective-C API; the runtime links -framework Metal/-framework Foundation.",
+        "FLAGOS_BUILD_VENDOR is ON so the stage-1 operator tree (backends/mps/, an",
+        "MPSGraph-first wrapper set) compiles once it exists; with no such directory",
+        "yet it is a no-op, exactly as for bpu."
+      ],
+      "project_languages": ["OBJCXX", "CXX", "C"],
+      "runtime_dir": "mps",
+      "bundle_libdir": "lib",
+      "vendor_torch_libraries": false,
+      "wheel_local": "",
+      "pypi_lane": "",
+      "use_macro": "USE_MPS",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": false,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for the Metal stack"
+        }
+      }
     }
   }
 }

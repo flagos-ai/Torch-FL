@@ -46,7 +46,7 @@ _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
 # Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
 # only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
 # into the stream id (MakeAscendStream), while every other accelerator macro --
-# USE_TSINGMICRO, USE_DCU, USE_GCU, USE_MUSA, USE_BPU -- falls through to
+# USE_TSINGMICRO, USE_DCU, USE_GCU, USE_MUSA, USE_BPU, USE_MPS -- falls through to
 # `c10::Stream(UNSAFE, d, 0)`, an id of exactly zero. DCU is the clearest case:
 # its hipified wheel exports c10::hip::HIPCachingAllocator with zero c10::cuda
 # symbols, so the c10::cuda delegation at the top of that function cannot even
@@ -57,6 +57,7 @@ _GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
     "gcu",
     "musa",
     "bpu",
+    "mps",
 )
 
 

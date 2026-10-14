@@ -10,7 +10,7 @@
 #endif
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
     !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
 #include "backends/cuda_memory.h"
 #endif
 #if defined(USE_TSINGMICRO)
@@ -27,6 +27,9 @@
 #endif
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin_memory.h"
+#endif
+#if defined(USE_MPS)
+#include "backends/mps_memory.h"
 #endif
 
 #include <c10/util/Exception.h>
@@ -55,7 +58,7 @@ CachingDeviceAllocator::CachingDeviceAllocator(
 
 CachingDeviceAllocator::~CachingDeviceAllocator() {
 #if !defined(USE_TSINGMICRO) && !defined(USE_BPU) && !defined(USE_GCU) && \
-    !defined(USE_KUNLUNXIN)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
   // Release all cached memory on destruction.
   // On TsingMicro, skip this — the TX runtime may already be shut down
   // at process exit, causing segfaults in txFree.
@@ -82,6 +85,13 @@ CachingDeviceAllocator::~CachingDeviceAllocator() {
   // runtime in this file that has been exercised turned out to need the skip.
   // Leaking at exit costs nothing -- the driver reclaims the allocation when
   // the process and its file descriptors go away.
+  //
+  // MPS joins them for the same reason in a different runtime: freeing a cached
+  // block sends -release to an MTLBuffer, and this destructor runs from
+  // __run_exit_handlers, after the Objective-C runtime and the Metal device the
+  // buffers came from have begun tearing down. `torch_fl._C._empty_cache()`
+  // before exit frees them cleanly while the runtime is still up; leaking the
+  // remainder lets the OS reclaim the pages at process exit.
   for (auto& state_ptr : device_states_) {
     if (state_ptr) {
       release_cached_blocks(*state_ptr);
@@ -594,6 +604,13 @@ CachingDeviceAllocator* GetCachingAllocator() {
     // with flagos's own caching on top. The XPU SDK ships no caching allocator
     // to delegate to (see backends/kunlunxin_memory.h).
     auto backend = std::make_unique<KunlunxinDeviceMemory>();
+    alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
+#elif defined(USE_MPS)
+    // Apple Metal: MTLBuffers from the accelerator/mps contract functions, with
+    // flagos's own block pool on top. There is no Apple caching allocator to
+    // delegate to (MPSDeviceMemory leaves provides_caching() at the default
+    // false), and torch's own MPS allocator claims a different slot entirely.
+    auto backend = std::make_unique<MpsDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #else
     // CUDA (and Metax, which uses CUDA-compatible API)

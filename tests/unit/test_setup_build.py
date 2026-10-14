@@ -155,6 +155,10 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
         # not exist, so "vendor" here records a switch that is on rather than a
         # kernel set that is present.
         ("bpu", {"vendor", "boxing"}),
+        # MPS is native (no CUDA runtime to box onto) and has no FlagGems/Triton
+        # line, so only FLAGOS_BUILD_VENDOR is on; as for BPU its operator tree
+        # does not exist yet, so "vendor" is a switch rather than a present set.
+        ("mps", {"vendor"}),
     ],
 )
 def test_default_kernel_set_per_accelerator(
@@ -281,10 +285,14 @@ def test_platform_table_is_internally_consistent():
             assert name in switches, (accelerator, name)
             assert pin["value"] is row["kernel_defaults"][name], (accelerator, name)
             assert pin["reason"], (accelerator, name)
-        assert "CUDA" in row["project_languages"] or row["project_languages"] == [
-            "CXX",
-            "C",
-        ], accelerator
+        # CUDA-toolchain platforms enable CUDA; every other platform builds host
+        # C++ only. Objective-C++ joins the list for platforms whose runtime is a
+        # native Objective-C API (Metal on Apple Silicon).
+        languages = row["project_languages"]
+        assert "CUDA" in languages or languages in (
+            ["CXX", "C"],
+            ["OBJCXX", "CXX", "C"],
+        ), accelerator
 
 
 def test_cmake_declares_every_kernel_switch():

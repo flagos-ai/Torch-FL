@@ -413,6 +413,13 @@ class Stream(torch.cuda.Stream):
                 from torch_fl.accelerator.ascend.acl_stream import AclStream
 
                 self._stream = AclStream(device, priority)
+            elif vendor == "mps":
+                # Apple Silicon (M-series). Metal has real command queues, so
+                # this is an owning stream rather than the handle-0 stand-in the
+                # unnamed arms below get -- see torch_fl/accelerator/mps/.
+                from torch_fl.accelerator.mps.mps_stream import MpsStream
+
+                self._stream = MpsStream(device, priority)
             else:
                 # The accelerators with a stream class of their own are named
                 # above; everything else denotes its one queue with handle 0.
@@ -664,6 +671,10 @@ def _real_current_stream(device=None):
                 return current_acl_stream(idx)
             except RuntimeError:
                 return _DefaultStreamHandle(idx)
+        if _platform() == "mps":
+            from torch_fl.accelerator.mps.mps_stream import current_mps_stream
+
+            return current_mps_stream(idx)
         # MUSA answers from the C++ runtime at the top of this function and never
         # arrives here; an accelerator with no stream class of its own has no
         # current stream to describe and gets this same handle-only stand-in,
@@ -765,6 +776,14 @@ class Event(torch.cuda.Event):
                     return obj
                 except RuntimeError:
                     return _HostTimedEvent(**host_timed)
+            if _platform() == "mps":
+                # Apple Silicon: MTLSharedEvent is a real device event, so timing
+                # is measured on the queue rather than on the host clock.
+                from torch_fl.accelerator.mps.mps_stream import MpsEvent
+
+                obj = object.__new__(cls)
+                obj._event = MpsEvent(**host_timed)
+                return obj
             # MUSA, whose vendor events live behind the shared C ABI: its timing
             # flags are not musa_runtime's, so there is nothing here to wrap and
             # the host clock is the clock that is left. Any other accelerator with
@@ -862,6 +881,13 @@ def stream(s):
             from torch_fl.accelerator.ascend.acl_stream import AclStream
 
             native_type = AclStream
+        elif vendor == "mps":
+            # Apple Silicon: Metal command queues and a thread-local current
+            # stream, so this really switches rather than running the body in
+            # place -- see torch_fl/accelerator/mps/mps_stream.py.
+            from torch_fl.accelerator.mps.mps_stream import MpsStream
+
+            native_type = MpsStream
         else:
             # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
             # with no stream class of its own -- the TX runtime and the CUDA-ABI

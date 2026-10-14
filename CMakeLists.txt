@@ -639,6 +639,26 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+  # Apple Silicon (M-series) via Metal. There is no vendor SDK to locate and no
+  # CUDA-compat layer: the runtime talks to Metal/Foundation, which the macOS
+  # SDK provides, and there is no library under the wheel to link against. So
+  # there is no CUDA_RUNTIME_LIB to hand the other targets.
+  if(NOT APPLE)
+    message(FATAL_ERROR
+        "FLAGOS_ACCELERATOR=mps selects the Metal backend, which builds only on "
+        "an Apple host with the macOS SDK.")
+  endif()
+
+  set(CUDA_RUNTIME_LIB "")
+
+  # Pre-create torch::cudart so PyTorch's cuda.cmake returns early
+  # (guard: if(TARGET torch::cudart) return()) rather than probing for an NVIDIA
+  # toolkit that is not there.
+  add_library(torch::cudart INTERFACE IMPORTED)
+  if(NOT TARGET CUDA::nvToolsExt)
+    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+  endif()
 else()
   # Workaround for CUDA 12.x where nvToolsExt is header-only (no separate library)
   # PyTorch's CMake expects CUDA::nvToolsExt target which doesn't exist in CUDA 12.x

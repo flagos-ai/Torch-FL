@@ -1,9 +1,9 @@
 # Platform capability matrix
 
-The eleven `FLAGOS_ACCELERATOR` values, what each is, and what it actually
+The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers eight of the eleven — so this page is the
+is aten-only, and CI covers eight of the twelve — so this page is the
 authoritative answer.
 
 The directory inventory at the end is machine-checked by
@@ -25,6 +25,7 @@ when a platform gains or loses one.
 | `tsingmicro` | CUDA-ABI boxing (Kuiper) | `tsingmicro` | — | — (no dir) | 53 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary (no vendor kernels, no boxing) | `cuda` | `iluvatar` (generated FlagGems register only) | — (no dir) | 2037 | no |
+| `mps` | vendor-native (Metal / MPSGraph) | `mps` | — (MPSGraph-first, none yet) | `mps` (stream/event only) | 0 | no |
 
 Column notes:
 
@@ -46,7 +47,7 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   for the Python/Triton routes.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
-  and 53 are the by-design BPU and hand-written TsingMicro files.
+  and 53 are the by-design BPU/MPS and hand-written TsingMicro files.
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
   exist.
 
@@ -63,6 +64,18 @@ platform, not a per-build choice.
 - **BPU** has no aten backend and an empty conf: its unit of execution is a whole
   compiled graph, so eager ops reach `cpu_fallback` and acceleration comes from
   the `torch.compile(backend="bpu")` path.
+- **MPS** (Apple Silicon) has the device runtime floor only: allocate, copy,
+  synchronize and real Metal streams/events work, but no operator is claimed
+  yet, so every aten op reaches `cpu_fallback` and its conf is empty. The
+  operator layer is MPSGraph-first with a hand-written MSL fallback (see
+  `docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`), and
+  it is native — no dispatch re-tag onto `DispatchKey::MPS`/`CUDA` and no CUDA
+  boxing kernels (`FLAGOS_BUILD_BOXING` is pinned off). It has a
+  `torch_fl/accelerator/mps/` directory holding only `mps_stream.py` (the
+  stream/event wrappers `torch.flagos.Stream` dispatches to), so the Python
+  compat column reads "stream/event only". There is no CI job: the pipeline is
+  container-based on self-hosted runners, and a macOS arm64 runner has not been
+  wired in.
 - **TsingMicro** has a sparse hand-written conf (53 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
@@ -98,7 +111,7 @@ platform, not a per-build choice.
   only — and its wheel carries the local version segment `corex4.5.0`. It is also
   the first entry in `FLAGGEMS_PYTHON_PLATFORMS` with no native `.inc` in its
   `csrc/aten/backends/iluvatar/` tree.
-- **CI covers 8 of 11**: TsingMicro, BPU and Iluvatar have no
+- **CI covers 8 of 12**: TsingMicro, BPU, Iluvatar and MPS have no
   `.github/configs/` entry.
 
 ## Directory inventory
@@ -106,6 +119,6 @@ platform, not a per-build choice.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, kunlunxin, metax, musa, tsingmicro
+- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, kunlunxin, metax, mps, musa, tsingmicro
 - `csrc/aten/backends/`: ascend, flagos, gcu, iluvatar, kunlunxin, musa, soft_lowp
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, musa, ppu
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, mps, musa, ppu

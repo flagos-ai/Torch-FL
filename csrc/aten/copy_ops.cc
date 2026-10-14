@@ -55,7 +55,7 @@
 // not back with symbols. It still needs *some* barrier; see the arm below.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
 #define FLAGOS_COPY_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -388,7 +388,7 @@ at::Tensor _copy_from(
       musa_ops::MudnnCopy(self, const_cast<at::Tensor&>(dst));
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR)
+    !defined(USE_ILUVATAR) && !defined(USE_MPS)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
       // strided copy kernel (handles strides, dtype casts on-device). The
       // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
@@ -515,7 +515,7 @@ at::Tensor _copy_from(
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR)
+    defined(USE_ILUVATAR) || defined(USE_MPS)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -556,7 +556,7 @@ at::Tensor _copy_from(
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR)
+    defined(USE_ILUVATAR) || defined(USE_MPS)
       at::native::flagos::_copy_from(tmp, dst, false);
 #else
       DeviceBoxingGuard guard(tmp, dst);
@@ -671,7 +671,7 @@ at::Tensor _to_copy(
         device.index() >= 0 ? device.index()
                             : (self.device().index() >= 0 ? self.device().index() : 0);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
-    defined(USE_MUSA)
+    defined(USE_MUSA) || defined(USE_MPS)
     // No CUDA runtime on these platforms: keep the explicit contiguous + memcpy
     // path (a "CUDA" destination here is only reachable via shared-memory tricks
     // that don't exist without cudart).
@@ -720,7 +720,7 @@ at::Tensor _to_copy(
       musa_ops::MudnnCopy(self_contig, result);
 #elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR)
+    defined(USE_ILUVATAR) || defined(USE_MPS)
       // No CUDA runtime on these backends, so the CUDA TensorIterator cast
       // below is unavailable.
 #ifdef USE_ASCEND

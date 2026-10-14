@@ -607,6 +607,18 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("convolution_overrideable", BPUWrapperConvolutionOverrideable);
     m.impl("convolution_backward_overrideable",
         BPUWrapperConvolutionBackwardOverrideable);
+  #elif defined(USE_MPS)
+    // MPS registers no compute ops at this stage. Per the design doc
+    // (docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md,
+    // section 6) the Apple backend is MPSGraph-first: kernels are added to
+    // csrc/aten/backends/mps/ as MSL/MPSGraph implementations, and each op is
+    // claimed only once its kernel exists. Claiming an op here without a kernel
+    // behind it raises "backend not registered" instead of falling back, so the
+    // empty list keeps every op on cpu_fallback until the kernel lands.
+    //
+    // This is a native backend: it does NOT re-tag onto DispatchKey::MPS or
+    // CUDA and does not build the CUDA boxing kernels (FLAGOS_BUILD_BOXING is
+    // pinned off in cmake/flagos_platforms.json).
   #else
   #define FLAGOS_GEN_IMPLS
   #include "generated/register.inc"

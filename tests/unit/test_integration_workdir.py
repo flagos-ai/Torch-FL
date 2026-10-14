@@ -644,6 +644,13 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
         "exclusion until one job opts into that build"
     ),
+    "tests/integration/test_mps_runtime.py": (
+        "the MPS runtime floor (device, stream, event, memory) has no CI job: "
+        "the pipeline runs accelerator container images on self-hosted Linux "
+        "runners and no macOS arm64 runner is wired in, so the file is run by "
+        "hand on an M-series host. Accepted exclusion until such a runner and "
+        "an mps manifest exist"
+    ),
 }
 
 

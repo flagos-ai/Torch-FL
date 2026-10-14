@@ -991,6 +991,16 @@ def _patch_flaggems_codegen_config():
     # later. Unknown values raise; unset/blank returns None.
     _explicit_vendor = _vendor.validate_explicit(os.environ.get("GEMS_VENDOR"))
 
+    # --- Apple MPS branch ---
+    # The Metal backend ships no FlagGems route at all (the platform table turns
+    # FLAGOS_BUILD_FLAGGEMS off and backends_mps.conf is empty; there is no Metal
+    # Triton line to build against), so there is no vendor to name and no codegen
+    # config to patch. Keyed on the build accelerator because, unlike every other
+    # branch below, MPS has no vendor runtime probe that could have failed --
+    # reaching the ascend fallback would mislabel the vendor and abort the import.
+    if _build_accelerator() == "mps":
+        return
+
     # --- Moore Threads MUSA branch ---
     if _build_accelerator() == "musa":
         _env.set_foreign("GEMS_VENDOR", "mthreads")

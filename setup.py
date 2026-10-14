@@ -871,11 +871,21 @@ def _nccl_ext_extension():
 
 
 def _verify_built_native_libs() -> None:
-    lib = os.path.join(BASE_DIR, "torch_fl", "lib", "libtorch_fl.so")
-    if not os.path.isfile(lib):
+    lib_dir = os.path.join(BASE_DIR, "torch_fl", "lib")
+    # macOS names shared libraries .dylib; every Linux platform the build targets
+    # uses .so. Prefer the native suffix so the same check serves both. The
+    # setuptools -ltorch_bindings lookup that links _C already follows the host
+    # suffix, so this is the only place that has to know the difference.
+    lib = None
+    for suffix in (".dylib", ".so") if IS_DARWIN else (".so",):
+        candidate = os.path.join(lib_dir, f"libtorch_fl{suffix}")
+        if os.path.isfile(candidate):
+            lib = candidate
+            break
+    if lib is None:
         raise RuntimeError(
-            f"Native build finished but {lib} is missing. "
-            "Check cmake/ninja output above."
+            f"Native build finished but no libtorch_fl.(so|dylib) is present in "
+            f"{lib_dir}. Check cmake/ninja output above."
         )
     if FLAGOS_ACCELERATOR == "dcu":
         shim = os.path.join(
@@ -1274,6 +1284,13 @@ def _version_pins() -> dict:
 
 def _flagos_sibling_requires() -> list:
     """FlagTree, FlagGems and FlagCX at the versions this wheel was built against."""
+    if FLAGOS_ACCELERATOR == "mps":
+        # Apple Silicon (Metal) is a native backend with no vendor operator
+        # library: no FlagTree/Triton line exists for Metal, and the platform
+        # table turns FlagGems and FlagCX off too (backends_mps.conf is empty).
+        # Declaring Triton here would be unsatisfiable -- it publishes no macOS
+        # wheel -- so the MPS wheel ships with only torch and packaging.
+        return []
     pins = _version_pins()
     reqs = []
     flagtree = pins.get(f"FLAGTREE_VERSION_{FLAGOS_ACCELERATOR}")

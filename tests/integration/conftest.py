@@ -60,6 +60,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ascend: requires Ascend NPU hardware")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA hardware")
     config.addinivalue_line("markers", "gcu: requires Enflame GCU hardware")
+    config.addinivalue_line("markers", "mps: requires Apple Silicon (Metal) hardware")
     # `dcu` is registered in ops/conftest.py too, where the per-platform skip
     # table reads it. A DCU-only contract at the top level of tests/integration/
     # (test_comm_native_bridge.py) needs it registered here as well: ops/conftest

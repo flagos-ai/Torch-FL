@@ -144,6 +144,16 @@ TRITON_AND_FLAGTREE = (
     "chance"
 )
 
+# The one platform whose wheel declares no operator cohort at all. Apple
+# Silicon ships the Metal runtime floor and no operator kernels: there is no
+# Metal FlagTree/FlagGems line, and PyPI publishes no `triton` wheel for macOS
+# (zero macosx files across every release), so the rule enforced below --
+# FlagTree or Triton, plus FlagGems -- cannot be met without an unsatisfiable
+# requirement. setup.py's mps arm returns torch and packaging only, and
+# backends_mps.conf is empty; the absent operator source is the design of the
+# platform rather than the omission this check exists to catch.
+NO_OPERATOR_COHORT = {"mps"}
+
 
 def _platforms_in_the_table() -> list:
     table = json.loads(PLATFORM_TABLE.read_text(encoding="utf-8"))
@@ -190,6 +200,8 @@ def test_flag_gems_is_declared_everywhere_at_the_pinned_version():
     pins = _pins()
     version = pins["FLAGGEMS_VERSION_DEFAULT"]
     for platform in _platforms_in_the_table():
+        if platform in NO_OPERATOR_COHORT:
+            continue
         assert f"flag_gems=={version}" in _declared(platform), platform
 
 
@@ -207,6 +219,8 @@ def test_flagcx_is_declared_exactly_where_the_pin_file_has_a_version():
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
     pins = _pins()
     for platform in _platforms_in_the_table():
+        if platform in NO_OPERATOR_COHORT:
+            continue
         declared = _declared(platform)
         flagtree = any(r.startswith("flagtree==") for r in declared)
         assert flagtree == bool(pins.get(f"FLAGTREE_VERSION_{platform}")), platform

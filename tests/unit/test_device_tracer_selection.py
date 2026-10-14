@@ -63,6 +63,7 @@ EXPECTED_TRACER = {
     "musa": "musa_mupti_device_tracer",
     "tsingmicro": "unavailable_device_tracer",
     "bpu": "unavailable_device_tracer",
+    "mps": "unavailable_device_tracer",
 }
 
 
