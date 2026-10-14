@@ -104,16 +104,15 @@ MUSA. The MUSA routing changes recorded under **Native Backend Route Changes** a
 mc550, 810e or bw1000 by that work, and no MUSA row exists here to update. The
 same caveat applies to the raw case counts below.
 
-Iluvatar (BI-V150 / Tianshu) is likewise absent from this table, and its coverage
-is **not revalidated** — the evidence gap is that **no FlagGems overload survey
-has ever been run on BI-V150 hardware**. Its configuration routes 640 ops to the
-FlagGems Python path, but that 640 is the *shared* FlagGems master coverage set
-described above, inherited from the generator, not a measured BI-V150 result: no
-`STRICT` / `BASIC_ONLY` / `FAILED` / `UNTESTED` split exists for it, so no `Total`,
-`Basic rate` or `Strict rate` can be stated. Running
-`tests/manual/flaggems_overload_survey.py` on a BI-V150 host and recording the row
-against the cohort that run pins is what fills the gap; until then its coverage
-must be read as provisional. The same applies to the raw case table below.
+Iluvatar (BI-V150 / Tianshu) has now been surveyed, but its **own** cohort is 639
+routes (the conf predates `cat` joining the ceiling), not the 546 of the table
+above, so it is kept off the cross-hardware rows rather than entered with a
+different denominator. Its measured split is **STRICT 379 / BASIC_ONLY 66 /
+FAILED 58 / UNTESTED 136 over 639** (445 basic-executable, 69.6% basic, 59.3%
+strict); the detail and the `NATIVE_TRITON_GAPS["iluvatar"]` gap set are in the
+Iluvatar route-change section below and in the raw case table. It is the platform
+the shared FlagGems ceiling is *not* an answer for: 37 measured failures route to
+`cpu_fallback`, so the conf carries 603 `flaggems` routes, not 640.
 
 ## Raw Case Evidence
 
@@ -127,6 +126,11 @@ summary.
 | MetaX mc550 | 1597 | 1309 | 0 | 812 | 90 | 14 | 0 | 0 |
 | PPU 810e | 2158 | 1305 | 0 | 184 | 154 | 21 | 0 | 0 |
 | Hygon DCU bw1000 | 2016 | 1309 | 0 | 337 | 146 | 14 | 0 | 0 |
+| Iluvatar BI-V150 | 2344 | 1695 | 0 | 235 | 178 | 21 | 0 | 0 |
+
+The Iluvatar row is the 639-route cohort of the section below (4473 cases), not
+the 546-op cohort of the rows above, so its PASS/INVALID_CASE volume is larger and
+must not be compared against them directly.
 
 The bw1000 baseline excludes 108 initial records that failed before operator
 execution because the child process could not load its MPI runtime. Exactly
@@ -173,14 +177,16 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
-### Iluvatar (BI-V150 / Tianshu): a new FlagGems-primary platform with no vendor kernel library and no boxing path (2026-10-14, not hardware-revalidated)
+### Iluvatar (BI-V150 / Tianshu): a new FlagGems-primary platform, measured on BI-V150 to 603 FlagGems routes (2026-10-14)
 
 **One sentence.** `FLAGOS_ACCELERATOR=iluvatar` is a new accelerator whose
 generated full-coverage configuration
 [`backends_iluvatar.conf`](../../torch_fl/configs/backends_iluvatar.conf) routes
-640 of 2037 ops to the FlagGems Python/Triton key and the remaining 1397 to
+603 of 2037 ops to the FlagGems Python/Triton key and the remaining 1434 to
 `none` (`cpu_fallback`), because the platform has **neither a vendor kernel
-library nor a CUDA boxing path** — boxing was explicitly ruled out for it.
+library nor a CUDA boxing path** — boxing was explicitly ruled out for it. The
+603 is the shared 640-overload FlagGems ceiling minus the 37 ops a BI-V150
+overload survey measured failing (see **Coverage is measured** below).
 
 **Why there is no third route.** Every other `FLAGGEMS_PYTHON_PLATFORMS` entry
 sits on top of a vendor-native tree or a boxing fallback: `ascend` and `gcu` have
@@ -194,7 +200,7 @@ shared `csrc/runtime/accelerator/cuda/` sources are built as-is and no
 
 **The `csrc/aten/backends/iluvatar/` directory holds no kernel source.** It is the
 first `FLAGGEMS_PYTHON_PLATFORMS` entry with no native `.inc`: the whole tree is
-`generated/iluvatar_flaggems_register.inc` (640 `m.impl()` lines), included by
+`generated/iluvatar_flaggems_register.inc` (603 `m.impl()` lines), included by
 `register.cc` inside `TORCH_LIBRARY_IMPL(aten, PrivateUse1)` under
 `USE_ILUVATAR` + `FLAGOS_FLAGGEMS_PYTHON`. Its header states the consequence
 plainly — an op routed to `flaggems` there but *not* claimed in the file reaches
@@ -209,31 +215,65 @@ and the `build_all()` existence guard both treat the empty path as the empty set
 [`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py)
 from `FLAGGEMS_PYTHON_PLATFORMS` minus `NATIVE_TRITON_GAPS["iluvatar"]`, in the
 same full-coverage shape as the other FlagGems-primary platforms: all 2037 ops
-listed exactly once, **640 `flaggems` / 0 vendor / 1397 `none`**, which the file's
-own banner reports as 31.4% coverage.
+listed exactly once, **603 `flaggems` / 0 vendor / 1434 `none`**, which the file's
+own banner reports as 29.6% coverage.
 
-**Coverage is provisional: nothing has been measured on BI-V150.**
+**Coverage is measured on BI-V150, over the 639-op pre-`cat` cohort.**
 
-This is the load-bearing caveat for this row. `FLAGGEMS_PYTHON_OPS` is a *shared*
-coverage set — it is generated from the FlagGems master cohort, the same widened
-640-overload set the MetaX configuration is measured against — so 640 describes
-what FlagGems covers, not what Iluvatar runs. **No FlagGems overload survey has
-been run on BI-V150 hardware**, so for this platform there is no
-`STRICT` / `BASIC_ONLY` / `FAILED` / `UNTESTED` split, no `Basic rate`, and no
-evidence that any individual route executes correctly. The row must not be read
-against the 546-overload tables above, nor as validated operator support.
+`tests/manual/flaggems_overload_survey.py` (harness version 6) was run on a
+BI-V150 host (`ub22`, `lvyufeng-torch-fl` container, corex 4.5.0, flag_gems 5.3.5
++ flagtree/triton 3.6.0) against `backends_iluvatar.conf` at conf SHA-256
+`f08d420acf4d39104bb6c49db1c72c76513fc82e0509dba5173d6e484739046d`. That conf
+predates the `cat` op joining the ceiling (upstream #498), so the measured cohort
+is **639** routes; `cat` was then measured separately against the 640-route conf
+as **STRICT** (all seven profiles `PASS`). The 639-op result, seven profiles per
+overload:
 
-The generated artifacts state this caveat in the same words rather than implying a
-measurement that was never taken. `iluvatar_flaggems_register.inc`'s header says
-`NATIVE_TRITON_GAPS['iluvatar']` is **empty today** — no BI-V150 survey has run, so
-no op has been measured failing and none is excluded — and that the list it emits
-is the *shared* FlagGems ceiling, not a measured BI-V150 result. The generator has
-no `NATIVE_TRITON_GAPS["iluvatar"]` key at all, which `NATIVE_TRITON_GAPS.get(...)`
-reads as the empty set the header describes, so the banner and the code agree.
+| Total | STRICT | BASIC_ONLY | FAILED | UNTESTED | Tested | Basic executable | Basic rate | Strict rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 639 | 379 | 66 | 58 | 136 | 503 | 445 | 69.6% | 59.3% |
 
-Running `tests/manual/flaggems_overload_survey.py` on a BI-V150 host is the tool
-that closes this; the per-overload JSON from that run fixes the cohort and the gap
-set and becomes this platform's evidence.
+`STRICT + BASIC_ONLY + FAILED + UNTESTED = 639` and
+`Basic executable = STRICT + BASIC_ONLY`. The 4473 synthesized cases resolve as
+**2344 `PASS` / 1695 `INVALID_CASE` / 235 `ERROR` / 178 `WRONG` / 21 `CRASH`**,
+with no `TIMEOUT`, no `UNVERIFIABLE` and no context poison. This is a
+provisional-cohort caveat on the *route set*, not on the run: 639 of the conf's
+now-640 routes were covered, and the one-op margin is `cat`, measured separately.
+
+`NATIVE_TRITON_GAPS["iluvatar"]` records the **37 of the 58 FAILED ops that are
+defects** rather than harness synthesis limits; those 37 leave the FlagGems route
+for `cpu_fallback`, which is what shrinks the conf to 603. The remaining 21
+FAILED are survey artifacts — the CPU reference itself rejects or segfaults on
+the synthesized call — and stay on FlagGems; the gap entry lists them by name
+with the reason. Three failure families dominate the 37: a **device-name
+mismatch** (below), real **kernel/compile defects** (`randint`, `randint_like`,
+`norm.Scalar`, `norm.ScalarOpt_dim`, `unique_consecutive`, the wrong-value
+`special_*` family, `histc`, `gcd_`, and the three CRASHing batch-norm arms), and
+**`out`-variant / shim bugs** in the torch_fl Python-kernel path
+(`linalg_matrix_exp.out`, `nansum.out`, `sum.out`, `range`, `mse_loss_backward`).
+
+**The device-name mismatch is the platform's known, remediated defect.** The
+`_iluvatar` backend declares `device_name="cuda"`
+(`flag_gems/runtime/backend/_iluvatar/__init__.py`) while torch_fl registers the
+device as `flagos`, so every op that compares the two
+(`i0`, `special_i0e`, `special_i1`, `special_scaled_modified_bessel_k1`,
+`soft_margin_loss`, …) or reads `Tensor.is_cuda`
+(`special_modified_bessel_k0`, `upsample_bicubic2d`) or calls
+`torch_device_fn.get_device_properties` (`masked_scatter_backward`) rejects every
+tensor the platform can hand it. This is exactly the defect the **DCU** section
+below remediates with `patch_flaggems_device_name()`, whose admission list is
+`torch_fl/accelerator/cuda/_cuda_compat.py`'s `_ALIGNED_VENDORS = ("nvidia",
+"hygon")`. Filed upstream as
+[FlagGems #7135](https://github.com/flagos-ai/FlagGems/issues/7135). That section names **iluvatar** among the vendors that "declare the
+same `device_name="cuda"` and carry the same guards, so they have the same
+defect", and states the remedy is "an edit to that constant plus a survey run on
+its hardware". This survey is that run; **the constant edit is the delivered
+next step**, not part of this change. It is deliberately not applied here
+because it would newly enable every guarded FlagGems kernel on a platform whose
+guarded routes have not yet been A/B measured — the same reasoning that keeps
+the other four `cuda`-named vendors out. Applying it and re-running the survey is
+the measured follow-up; the `is_cuda` readers and the `torch_device_fn` user are
+not reachable by the realignment and stay gapped either way.
 
 **The FlagGems cohort above is not revalidated.** No route in the 546-overload
 baseline cohort (A100, mc550, 810e, bw1000) moved in this change, and no route in

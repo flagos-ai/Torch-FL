@@ -88,13 +88,15 @@ platform, not a per-build choice.
   vendor kernel library and no CUDA boxing path (boxing was explicitly ruled
   out), so all covered ops route to the FlagGems Python/Triton path through
   FlagTree's iluvatar backend and everything else falls back to `none`
-  (`cpu_fallback`). Its 640 FlagGems routes are the *shared* FlagGems Python
-  ceiling, not a measurement taken on BI-V150 hardware: no FlagGems overload
-  survey has been run on a BI-V150 host yet, so the coverage is **provisional**
-  until `tests/manual/flaggems_overload_survey.py` has been run there. It has no
-  CI job and no runner lane — it builds locally only — and its wheel carries the
-  local version segment `corex4.5.0`. It is also the first entry in
-  `FLAGGEMS_PYTHON_PLATFORMS` with no native `.inc` in its
+  (`cpu_fallback`). A BI-V150 overload survey (2026-10-14, 639-op cohort) measured
+  **STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED 136** and left 37 defect ops
+  on `cpu_fallback`, so the conf routes **603**, not the shared 640 ceiling
+  (`cat` measured separately, STRICT). Most of the 37 are the `device_name="cuda"`
+  vs `flagos` mismatch the DCU `patch_flaggems_device_name()` realignment
+  addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is the follow-up
+  that would return them. It has no CI job and no runner lane — it builds locally
+  only — and its wheel carries the local version segment `corex4.5.0`. It is also
+  the first entry in `FLAGGEMS_PYTHON_PLATFORMS` with no native `.inc` in its
   `csrc/aten/backends/iluvatar/` tree.
 - **CI covers 8 of 11**: TsingMicro, BPU and Iluvatar have no
   `.github/configs/` entry.

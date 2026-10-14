@@ -355,11 +355,12 @@ def test_conf_route_counts_are_stable():
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
         "ppu": {"flaggems": 592, "cuda": 1445},
         # Iluvatar boxes nothing: every covered op is on the FlagGems Python
-        # path, and the rest fall to cpu_fallback. The 640 is the shared FlagGems
-        # ceiling (cat included since #498), provisional until
-        # flaggems_overload_survey.py is run on a BI-V150 host; shrinking it is a
-        # deliberate move, not drift.
-        "iluvatar": {"flaggems": 640, "none": 1397},
+        # path, and the rest fall to cpu_fallback. 603 of the shared FlagGems
+        # ceiling's 640 ops route here; the 37-op difference is the measured
+        # BI-V150 overload survey's defect set (NATIVE_TRITON_GAPS['iluvatar']),
+        # not drift -- re-running the survey and moving ops in or out of that
+        # set is what changes this number.
+        "iluvatar": {"flaggems": 603, "none": 1434},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():

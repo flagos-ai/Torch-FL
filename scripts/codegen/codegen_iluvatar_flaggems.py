@@ -74,11 +74,16 @@ INC_HEADER = """\
 // instead of falling back to cpu_fallback.
 //
 // Excluded ops come from NATIVE_TRITON_GAPS['iluvatar'] in
-// scripts/codegen/gen_vendor_confs.py. That set is EMPTY today: no FlagGems
-// overload survey has been run on BI-V150, so no op has been measured failing and
-// none is excluded. Add an entry there only from a BI-V150 measurement
-// (tests/manual/flaggems_overload_survey.py), never by assumption -- the whole
-// list below is the shared FlagGems ceiling, not a measured BI-V150 result.
+// scripts/codegen/gen_vendor_confs.py. That set is the 37 defect ops a BI-V150
+// overload survey measured failing (tests/manual/flaggems_overload_survey.py,
+// 2026-10-14, 639-op cohort: STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED
+// 136); the other 21 FAILED were survey synthesis limits and stay here. The list
+// below is the shared FlagGems ceiling (640) minus those 37, so 603. Re-measure
+// and move entries in or out of that set only from BI-V150 results, never by
+// assumption -- and note the DCU precedent: most of the 37 are the device-name
+// mismatch that _ALIGNED_VENDORS (torch_fl/accelerator/cuda/_cuda_compat.py)
+// remediates, so an A/B survey after adding iluvatar there is the way most of
+// them come back.
 """
 
 

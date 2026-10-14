@@ -1654,6 +1654,98 @@ NATIVE_TRITON_GAPS = {
         # entry are two halves of one claim.
         "where.self_out",
     },
+    # Measured on a BI-V150 (ub22) with flag_gems 5.3.5 + flagtree/triton 3.6.0
+    # (corex 4.5.0), 2026-10-14. Harness: tests/manual/flaggems_overload_survey.py,
+    # seven profiles per overload, 639-op cohort (conf_sha256
+    # f08d420acf4d39104bb6c49db1c72c76513fc82e0509dba5173d6e484739046d): 503
+    # tested, STRICT 379 / BASIC_ONLY 66 / FAILED 58 / UNTESTED 136, plus `cat`
+    # measured separately as STRICT on the 640-op conf.
+    #
+    # The set below is the subset of the 58 FAILED ops that are defects rather
+    # than harness synthesis limits. Three failure families dominate:
+    #
+    #  - **device-guard mismatch.** The `_iluvatar` backend declares
+    #    `device_name="cuda"` (flag_gems/runtime/backend/_iluvatar/__init__.py),
+    #    but this platform's device is `flagos`, so every op that asserts
+    #    `x.device.type != flag_gems.device` (i0, the special_* Bessel/Chebyshev
+    #    family, soft_margin_loss) or that calls `torch_device_fn.get_device_properties`
+    #    (masked_scatter_backward, upsample_bicubic2d's `is_cuda` guard) rejects
+    #    every tensor the platform can hand it. Filed upstream as FlagGems #7135;
+    #    gapped here so the calls fall back to cpu_fallback instead of raising.
+    #  - **real kernel/compile defects.** randint / randint_like (Python int
+    #    reaches the Triton front end as `int.to()`), norm.Scalar / norm.ScalarOpt_dim,
+    #    unique_consecutive (dim set recurses through torch.unique_consecutive),
+    #    special_shifted_chebyshev_polynomial_w (a runtime `if` around tl.constexpr),
+    #    the wrong-value family (histc, gcd_, elu's iluvatar acos misuse,
+    #    special_chebyshev_polynomial_u/v, special_hermite_polynomial_h,
+    #    special_shifted_chebyshev_polynomial_u), and the CRASHing batch-norm
+    #    arm (native_batch_norm, _batch_norm_no_update,
+    #    _native_batch_norm_legit.no_stats).
+    #  - **out-variant / shim bugs in the torch_fl Python-kernel path.**
+    #    linalg_matrix_exp.out, nansum.out and sum.out do not forward `out` (or
+    #    do not resize it); range returns float64 for a float32 request;
+    #    mse_loss_backward indexes past the flattened target.
+    #
+    # Deliberately NOT gapped (harness synthesis limits, op left on FlagGems):
+    # `elu`/`elu_`/`elu_backward` (the harness fills elu's `scale`/`input_scale`
+    # Scalars with 0.5, a form no torch.nn caller produces -- F.elu passes only
+    # `alpha`, and with a coherent triple the kernel matches to 6e-8), `_unique2`
+    # (the faithful 3-tuple shim vs the harness's single-tensor compare),
+    # `_adaptive_avg_pool3d_backward`/`.grad_input` (only the 4-D profile is
+    # contract-valid; a 5-D path would need re-measuring), `lu_unpack.out`
+    # (harness synthesis of the schema-default bool flags), `_pdist_backward` /
+    # `igamma` / `igamma_` / `logit_backward` (ATen's reference is NaN on the
+    # synthesized domain; finite elements agree), `_compute_linear_combination`
+    # / `.out` (SPLIT_K kwarg the harness cannot construct), `_cdist_forward`,
+    # `dequantize.self` (`int_repr` absent on the CPU reference),
+    # `fake_quantize_per_channel_affine_cachemask`, `linalg_eig` (eigenvalue
+    # ordering is unspecified), `linalg_lstsq` (metadata shape), `_softmax_backward_data`
+    # / `_log_softmax_backward_data` (device returns int8 -- needs one targeted
+    # probe before gapping) and `unique_dim` (return-metadata).
+    "iluvatar": {
+        # device-guard mismatch (cuda vs flagos)
+        "i0",
+        "i0.out",
+        "special_i0e",
+        "special_i0e.out",
+        "special_i1",
+        "special_i1e",
+        "special_i1e.out",
+        "special_modified_bessel_k0",
+        "special_modified_bessel_k0.out",
+        "special_scaled_modified_bessel_k1",
+        "special_scaled_modified_bessel_k1.out",
+        "special_chebyshev_polynomial_w",
+        "special_chebyshev_polynomial_w.out",
+        "soft_margin_loss",
+        "masked_scatter_backward",
+        "upsample_bicubic2d",
+        # wrong values
+        "histc",
+        "gcd_",
+        "special_chebyshev_polynomial_u",
+        "special_chebyshev_polynomial_v",
+        "special_hermite_polynomial_h",
+        "special_shifted_chebyshev_polynomial_u",
+        # Triton compile / structural defects
+        "norm.Scalar",
+        "norm.ScalarOpt_dim",
+        "randint",
+        "randint_like",
+        "randperm",
+        "special_shifted_chebyshev_polynomial_w",
+        "unique_consecutive",
+        # CRASH (context poison)
+        "native_batch_norm",
+        "_batch_norm_no_update",
+        "_native_batch_norm_legit.no_stats",
+        # out-variant / shim bugs in the torch_fl Python-kernel path
+        "linalg_matrix_exp.out",
+        "nansum.out",
+        "sum.out",
+        "range",
+        "mse_loss_backward",
+    },
 }
 
 # Vendors whose native kernel outranks FlagGems for any op that has both, until a
