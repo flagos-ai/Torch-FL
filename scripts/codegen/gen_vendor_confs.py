@@ -1287,6 +1287,19 @@ NATIVE_TRITON_GAPS = {
         "mul_.Tensor",
         "rsqrt",
         "rsqrt_",
+        # `rsub` fails on the int64 operand, not on the scalar: it is reached
+        # from `pad_token_id * (1 - unfinished_sequences)` in
+        # `transformers/generation/utils.py`, where the tensor on the right is
+        # the int64 `unfinished_sequences`, so the FlagGems pointwise kernel
+        # instantiates for an i64 pointer parameter and the GCU300 front end
+        # rejects it (`Pipeline run failed: PassManager execution failed`).
+        # Both overloads had to move for that one call -- `rsub.Scalar` is the
+        # one the expression reaches. codegen_gcu.py claims them now, so they
+        # route to `gcu` rather than `none`: topsatenSub with its operands
+        # exchanged is the same kernel ATen's `rsub` denotes, and it has
+        # topsaten's own dtype test as the fallback for a dtype it cannot take.
+        "rsub.Scalar",
+        "rsub.Tensor",
         "sub.Tensor",
         "sub_.Tensor",
         # `rsub` is the reflected `other - self` and belongs to the same family:

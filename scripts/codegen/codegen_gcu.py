@@ -108,6 +108,13 @@ OPS = {
     # ---- binary_alpha: topsaten<Name>(out, self, other, alpha) ----
     "add.Tensor": ("binary_alpha", None),
     "sub.Tensor": ("binary_alpha", None),
+    # ---- binary_alpha_swapped: topsatenSub(out, other, self, alpha) ----
+    #
+    # `rsub.Tensor` moved to `binary_rsub` below when the reflected form got its
+    # own topsaten entry point (`topsatenRsub`); the swapped `topsatenSub`
+    # spelling this slot used to carry is superseded. ATen defines
+    # `rsub(self, other, alpha) = other - alpha*self`, which is exactly what
+    # `topsatenRsub` computes -- see the `rsub` section below.
     # ---- the out= forms, which are also what the in-place ops box onto ----
     "mul.out": ("binary_out", None),
     "add.out": ("binary_alpha_out", None),
