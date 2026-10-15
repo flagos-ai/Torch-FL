@@ -1696,7 +1696,7 @@ pays nothing for this capability.
 
 **Inputs widened, inputs still refused.** `attn_bias` may now be bool, float16, bfloat16 or float32, and may carry 2,
 3 or 4 dimensions to broadcast against `[B, N, S, S_kv]` (the rank is right-aligned, as PyTorch broadcasts it).
-Dropout keeps its unchanged explicit error, `SDPA Ascend: dropout not yet supported`.
+Dropout no longer takes this path: since `fused_sdp_choice_ascend` returns `SDPBackend::math` when `dropout_p != 0.0`, a dropout-bearing call is served by ATen's composite math decomposition (which applies the dropout) and only `dropout_p == 0.0` still selects the fused aclnn kernel. The fused kernel keeps its explicit `TORCH_CHECK(dropout_p == 0.0, ...)` guard for a direct call that bypasses the selector.
 
 **A backward gap is recorded rather than closed, and no gradient through the bias is claimed.** On the shipped conf
 the backward op is FlagGems' — `_scaled_dot_product_efficient_attention_backward = flaggems  # ascend`

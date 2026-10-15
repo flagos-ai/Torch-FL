@@ -17,6 +17,22 @@
 // (our aclnnFlashAttentionScore kernel) instead of the math decomposition.
 // Must live in at::native for REGISTER_PRIVATEUSE1_DISPATCH (the macro references
 // the unqualified stub symbol and declares its registrar in the enclosing ns).
+//
+// The aclnn fused kernel has no dropout plumbing: dropout_p is passed through as
+// keep_prob but no drop_mask / seed / offset is ever supplied, so a fused call
+// with dropout_p > 0 would silently run *without* dropout -- a correctness hole,
+// not just an unimplemented feature. The forward and backward kernels therefore
+// reject dropout_p != 0. Since the composite asks this selector which backend to
+// use before it reaches that check, a fused choice here turns every
+// dropout-bearing training forward (e.g. a default BertConfig, whose
+// attention_probs_dropout_prob is 0.1) into a hard RuntimeError.
+//
+// Decline the fused backend instead when dropout is requested: returning math
+// sends the call to ATen's composite math decomposition
+// (_scaled_dot_product_attention_math), which applies dropout correctly. This
+// mirrors how a backend declines an unsupported case rather than hard-failing.
+// dropout_p == 0.0 (inference, and the eval-mode BERT suite) still takes the
+// fused aclnn path unchanged.
 namespace at::native {
 static int64_t fused_sdp_choice_ascend(
     const at::Tensor& query,
@@ -27,6 +43,9 @@ static int64_t fused_sdp_choice_ascend(
     bool is_causal,
     std::optional<double> scale,
     bool enable_gqa) {
+  if (dropout_p != 0.0) {
+    return static_cast<int64_t>(at::SDPBackend::math);
+  }
   return static_cast<int64_t>(at::SDPBackend::efficient_attention);
 }
 
@@ -59,7 +78,12 @@ PrivScaledDotProductEfficientAttentionKernelAscend(
   TORCH_CHECK(query.dim() == 4, "query must be 4D [B, N, S, D]");
   TORCH_CHECK(key.dim() == 4 && value.dim() == 4, "key/value must be 4D [B, N, S, D]");
   TORCH_CHECK(query.is_privateuseone(), "SDPA Ascend: inputs must be on NPU");
-  TORCH_CHECK(dropout_p == 0.0, "SDPA Ascend: dropout not yet supported (aclnn requires explicit mask handling)");
+  // The aclnn fused kernel does not plumb dropout (no drop_mask/seed/offset), so
+  // fused_sdp_choice_ascend declines this backend whenever dropout_p != 0 and
+  // the composite takes its math decomposition instead. Reaching this line with
+  // dropout therefore means the fused kernel was called directly, bypassing the
+  // selector -- keep it as a guard rather than silently ignoring the dropout.
+  TORCH_CHECK(dropout_p == 0.0, "SDPA Ascend: the fused aclnn path does not support dropout; dropout_p > 0 must go through the math backend (see fused_sdp_choice_ascend)");
 
   int64_t B = query.size(0);
   int64_t N = query.size(1);  // num query heads
@@ -317,7 +341,9 @@ PrivScaledDotProductEfficientAttentionBackwardKernelAscend(
   // Input validation
   TORCH_CHECK(query.dim() == 4, "query must be 4D [B, N, S, D]");
   TORCH_CHECK(query.is_privateuseone(), "SDPA Ascend backward: inputs must be on NPU");
-  TORCH_CHECK(dropout_p == 0.0, "SDPA Ascend backward: dropout not yet supported");
+  // Same invariant as the forward: fused_sdp_choice_ascend declines the fused
+  // backend for dropout_p != 0, so this is only reachable on a direct call.
+  TORCH_CHECK(dropout_p == 0.0, "SDPA Ascend backward: the fused aclnn path does not support dropout; dropout_p > 0 must go through the math backend (see fused_sdp_choice_ascend)");
 
   int64_t B = query.size(0);
   int64_t N = query.size(1);
