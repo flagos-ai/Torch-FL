@@ -116,6 +116,12 @@ bool LogEnabled(const char* item);
 // The same calls reach aclnn kernels through the vendor slot and return the
 // right float64 answer, so the fallback is a gain rather than a loss.
 //
+// On MetaX the broad gap is complex64/complex128. Its Triton backend has no
+// complex pointer type, so a FlagGems kernel instantiated from either dtype
+// fails during compilation with ``KeyError: 'complex64'`` (or complex128).
+// The CUDA-ABI boxing kernels reach MetaX torch's native complex support, so
+// the vendor slot is both available and the correct fallback for these calls.
+//
 // On GCU the same shape of gap exists for int64, and it fails in two
 // different places on the way to the same non-existent kernel. A kernel whose
 // operand is i64 makes flag_gems' pointwise codegen request a pass option the

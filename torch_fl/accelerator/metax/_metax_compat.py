@@ -783,9 +783,12 @@ def _patch_cuda_tensor_ops(metax_path):
 
     _orig_zero = torch.Tensor.zero_
 
+    def _is_metax_device_tensor(tensor):
+        return tensor.is_cuda or tensor.device.type in ("flagos", "privateuseone")
+
     def _metax_zero_(self):
-        """zero_() using cudaMemsetAsync for CUDA tensors on MetaX."""
-        if not self.is_cuda:
+        """zero_() using cudaMemsetAsync for MetaX-backed tensors."""
+        if not _is_metax_device_tensor(self):
             return _orig_zero(self)
         if not self.is_contiguous():
             raise NotImplementedError(
@@ -805,8 +808,8 @@ def _patch_cuda_tensor_ops(metax_path):
     _orig_fill = torch.Tensor.fill_
 
     def _metax_fill_(self, value):
-        """fill_() for CUDA tensors on MetaX."""
-        if not self.is_cuda:
+        """fill_() for MetaX-backed tensors."""
+        if not _is_metax_device_tensor(self):
             return _orig_fill(self, value)
         if value == 0 and self.is_contiguous():
             return _metax_zero_(self)

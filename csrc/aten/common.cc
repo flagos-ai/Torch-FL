@@ -489,7 +489,17 @@ bool HasBackendForOp(const std::string& op_name) {
 }
 
 bool FlagGemsRejectsDtype(at::ScalarType dtype) {
-#if defined(USE_ASCEND)
+#if defined(FLAGOS_ACCEL_METAX)
+  // Triton's MetaX backend cannot lower complex pointers. FlagGems kernels
+  // therefore fail before launch for every complex-valued op measured here
+  // (the first FlagQuantum failure is flip):
+  //
+  //   KeyError: 'complex64'
+  //
+  // MetaX is CUDA ABI compatible, and boxing the same calls into the vendor
+  // torch kernels preserves both the complex dtype and device residency.
+  return dtype == at::kComplexFloat || dtype == at::kComplexDouble;
+#elif defined(USE_ASCEND)
   // See the declaration in common.h for the measurement. float64 is the only
   // dtype FlagGems' Ascend route could not serve across the pointwise family;
   // fp32/fp16/bf16/int64/bool all compile and run.
