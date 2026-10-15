@@ -188,6 +188,129 @@ record.
 
 ## Native Backend Route Changes
 
+### Enflame GCU S60: `rsub` gains a native kernel, and COMPILE_ARCH stops splitting the launch stream (2026-10-16)
+
+**Two failures, one change.** The BERT cohort on GCU ran **146 passed / 5 failed**, and the
+five were two different problems. Four were `runtime_error: Pipeline run failed: PassManager
+execution failed`, raised at `triton/backends/enflame/toolkit.py:146` under the compiler's own
+`loc(...): error: 64-bit data type not supported on GCU300!`; the fifth was `AttributeError:
+module 'torch' has no attribute 'gcu'` raised inside an inductor compile worker. The first
+half of the change removes the four; the second removes the fifth and, in doing so, exposes a
+third defect that the four were masking.
+
+**Failure 1 — `rsub` on int64 had no vendor kernel and no FlagGems gap marker.** The failing
+module is
+`..._rsub_func_tensor_scalar_kernel_rank_1_bptr_t4096.py:61:0`, so the op is `aten::rsub.Scalar`
+on a rank-1 bfloat-pointing tensor — the reflected `other - self` that the generation loop
+reaches through `pad_token_id * (1 - unfinished_sequences)` at
+`transformers/generation/utils.py:3257`, where `unfinished_sequences` is int64. The route was
+`flaggems`, and flag_gems' pointwise template lowers that int64 instantiation to a
+`tensor<...x!tt.ptr<i64>>` the GCU300 backend refuses — the same wall the seven
+already-marked ops (`clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor`,
+`silu`) carry a `# gcu` marker for. `rsub.Scalar` and `rsub.Tensor` were simply missing from
+`NATIVE_TRITON_GAPS["gcu"]`.
+
+Unlike that earlier group, `rsub` has a vendor entry point of its own — `topsatenRsub` has
+three overloads at `topsaten_ops.h:3157/3174/3191`, all computing `output = rhs - lhs * alpha`
+— so gapping it can route to `gcu` rather than to `none`, provided the generator emits a
+kernel. Both halves are required and neither works alone: gapping without the kernel raises
+`RuntimeError: rsub.Scalar: backend not registered` (measured with
+`FLAGOS_OP_rsub__Scalar=gcu`), and the kernel without the gap is never reached because
+FlagGems still wins the route. `codegen_gcu.py` gains `T_BINARY_RSUB_SCALAR` and
+`T_BINARY_RSUB`, which issue the *reflected* argument order
+(`EXEC_TOPSATEN_CMD(topsatenRsub, self, out, other, self, alpha)`); both are gated on
+`TopsatenSupportsDtype`, so the i64 operand that motivated the change still takes the host
+fallback the other binary templates use, and the vendor call is pure addition.
+
+**Failure 2 — `COMPILE_ARCH` was never derived on the FlagTree path, and the fix for it split
+the launch stream.** The reading frame of the `AttributeError` is
+`triton/backends/enflame/backend.py:745`, `self.get_current_device = lambda:
+torch.device(f"{device_name}:{torch.gcu.current_device()}").index`, reached from
+`GCUDriver.__init__`'s non-`COMPILE_ARCH` branch. That frame runs inside inductor's compile
+worker — a fresh `subprocess.Popen` (`torch/_inductor/compile_worker/subproc_pool.py`) that
+inherits `os.environ` but imports torch only, never torch_fl — so the in-process
+`torch.gcu = flagos` redirect does not exist there. `COMPILE_ARCH` is the designed
+cross-process channel: `GCUDriver.__init__` short-circuits to `lambda idx=0: 0` when it is set,
+avoiding `torch.gcu` entirely. `patch_flagtree_enflame_for_flagos()` never called
+`_derive_compile_arch()`, so on this box (FlagTree, not `triton_gcu`) it stayed unset and every
+worker died the same way.
+
+Deriving it is not sufficient on its own, and this is the part that mattered. The same
+`COMPILE_ARCH` branch hardcodes **both** lambda accessors, and the second is the stream:
+`self.get_current_stream = lambda idx=0: 0`. The device literal is harmless in-process because
+`_pin_vendor_driver_to_flagos` already pins the device; the stream literal is not, because
+every triton and FlagGems launch reads that accessor
+(`triton/runtime/jit.py:747` and `triton/compiler/compiler.py:550` both call
+`driver.active.get_current_stream`), while torch_fl's topsaten dispatch submits to and drains
+`GetCurrentTopsStream()`. Left at `0` the two stop being ordered against each other. So
+`_pin_vendor_driver_to_flagos` now pins `get_current_stream` to
+`flagos.current_stream(idx).gcu_stream` alongside `get_current_device`, and drops the instance
+attribute after each constructor for the same reason it already did for the device. Measured on
+the S60, same binary, only `COMPILE_ARCH` differing:
+
+| | `driver.get_current_stream(0)` | tops stream | `nonzero` failures |
+|---|---|---|---|
+| `COMPILE_ARCH` unset | `110237588187728` | `0x6442b048ea50` (= `110237588187728`) | 0 / 80000 |
+| `COMPILE_ARCH=gcu300` | `0` | `0x587ac6bbedf0` | 1 / 8000 |
+| `COMPILE_ARCH=gcu300`, stream pinned | `108832387592992` | `0x62fb83cd7320` (= `108832387592992`) | 0 / 40000 |
+
+**The masked defect: `topsatenNonzero` races when the streams diverge.** The stream split was
+not visible until failure 1 was fixed. On the base build the four assisted-decoding tests abort
+before they reach a later `nonzero` call; once `rsub` routes to `gcu` they run to completion,
+device state advances, and with `COMPILE_ARCH` set the split made the `nonzero` kernel read a
+count before the kernel producing its operand had finished:
+
+```
+transformers/generation/candidate_generator.py:1091: in get_candidates
+    match_indices = matches.nonzero(as_tuple=True)[1]
+E   RuntimeError: topsatenNonzero failed: BAD_PARAM
+```
+
+The operand is an ordinary contiguous bool tensor (`(1,10)`, PRED), and the kernel sizes its
+output from a device `topsatenCountNonzero` readback, so a stale count is exactly a BAD_PARAM.
+A diagnostic run that synchronised before each `nonzero` — no other change — turned the rsub
+build's `150 passed / 1 failed` into **`151 passed / 0 failed`**, confirming the race rather
+than a shape or dtype gap. The stream pin is the actual fix; the diagnostic was not shipped.
+
+**Result.** The full BERT cohort
+(`tests/models/bert/test_modeling_bert.py -k "not model_parallelism and not model_parallel_beam_search"`,
+device spec `hf_device_spec.py`, `HF_HUB_OFFLINE=1`) goes from **146 passed / 5 failed** to
+**151 passed / 0 failed**, three consecutive runs. The base build is flaky on the same command
+— 4 or 5 failures across runs, with `test_eager_padding_matches_padding_free_with_position_ids`
+appearing in one — so the comparison that pins the change is the fixed worktree's stability
+across runs, not a single tally. `rsub` was verified against CPU on the failing shapes and
+dtypes: `1 - int64_tensor`, `10 - int64_tensor`, `torch.rsub(a, b)`, and `1 - float32_tensor`
+all match; the dispatch log shows `rsub.Scalar -> gcu` and `rsub.Tensor -> gcu`.
+
+**Route delta.** Exactly two routes move: `rsub.Scalar` and `rsub.Tensor`, both `flaggems` ->
+`gcu`. GCU `flaggems` **253 -> 251**, `gcu` **179 -> 181**, `none` **1605 -> 1605, unchanged**,
+over the same **2037** routable ops, so accelerated routes stay at **432**
+(`Coverage: 432/2037 ops accelerated (21.2%)`). Both generated registration files move with the
+conf and agree with it: `gcu_flaggems_register.inc` carries **248 -> 246** `m.impl` lines and
+`gcu_register.inc` carries **187 -> 189**, the two-line exchange the route change implies. The
+seven `# gcu` markers in the conf — `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`,
+`remainder.Tensor`, `silu` — are unmoved: `rsub` did not have a marker, it had a vendor kernel
+to route to. The `gcu_flaggems_register.inc` provenance banner moves from "246 ops registered
+here, 102 further FlagGems ops already claimed by `gcu_register.inc`" to **244 and 104**: the
+two `rsub` lines leave that file and join the set the native file claims.
+
+| Artifact | Before | After |
+|---|---|---|
+| `torch_fl/configs/backends_gcu.conf` | `de28e45e7f3b5ffa28f4eb7417f33c25` | `f2feb1a83b22844076821035f57af9ce` |
+| `gcu_flaggems_register.inc` | `a36ce6dc1af9bab716a36db1bfdd7130` | `f707eb7e0d069ca07933caac079f3a26` |
+| `gcu_register.inc` | `394c7120e18bf21ea1a8e28b1c4aa9db` | `4412bc17196f53365bfb46975a0e98ec` |
+| `gcu_kernels.cc` | `1d809ba6ee0df26750890fabfe43bee7` | `d5ed651a4bedfaf63e1632b119afd0d9` |
+
+Generator idempotency: a second run of `scripts/codegen/codegen_gcu.py` and
+`scripts/codegen/gen_vendor_confs.py` leaves all four artifacts byte-identical, and
+`gen_vendor_confs.py --check` reports "all vendor confs up to date". `_gcu_compat.py` and the
+two generator scripts are the only source edits; the four artifacts are generated from them.
+
+**Other platforms.** `NATIVE_TRITON_GAPS` is per-vendor and the `rsub` entry was added to the
+`gcu` set only; MUSA, MetaX, Ascend, DCU, PPU and Tsingmicro confs are untouched, and
+`codegen_gcu.py` writes only GCU artifacts. The `_gcu_compat.py` stream pin is likewise
+GCU-only: the same `COMPILE_ARCH` branch is enflame-specific.
+
 The generic FlagGems survey above does not exercise vendor-native routes such as
 `ascend` or `gcu`. Native route changes are tracked here separately so they are
 not misrepresented as part of the 546-overload FlagGems cohort. A change against

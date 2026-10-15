@@ -329,20 +329,32 @@ def _pin_vendor_driver_to_flagos(flagos, inner_driver_cls, wrapper_driver_cls) -
 
     2. ``get_active_torch_device`` builds ``torch.device("gcu", ...)`` directly.
 
-    3. Patching the classes is not enough, and this is the subtle part:
-       ``GCUDriver.__init__`` assigns ``self.get_current_device = lambda ...``
-       as an *instance attribute*, which shadows anything set on the class, and
-       the wrapper's ``__init__`` then copies that attribute onto itself. The
-       wrapper caches only its instance (in ``__new__``), so ``__init__`` -- and
-       with it a fresh inner driver -- re-runs on every ``_GCUDriver()`` call,
-       undoing a class patch. So wrap both constructors and drop the attribute
-       after each one runs.
+    3. ``get_current_stream`` has the same shape of problem as (1), and the same
+       ``COMPILE_ARCH`` branch is where it comes from: that branch sets the
+       stream accessor to the literal ``0``. A launch on the vendor's null stream
+       is not ordered against torch_fl's tops stream, which is the stream the
+       topsaten dispatch drains, so a consumer can read a producer's buffer
+       before it has been written. See the inline comment at the pin.
 
-    Symptom when this is wrong: >=3 kernel launches on device 0 followed by one
-    on another device kills the driver outright ("Receive Sip error message",
-    then "Receive Abort message from KMD: Sip exception"), taking the process
-    with it. Fewer than three launches survive, which is what made this look
-    like a bug in whichever op happened to run first.
+    4. Patching the classes is not enough, and this is the subtle part:
+       ``GCUDriver.__init__`` assigns ``self.get_current_device = lambda ...``
+       and ``self.get_current_stream = lambda ...`` as *instance attributes*,
+       which shadow anything set on the class, and the wrapper's ``__init__``
+       then copies those attributes onto itself. The wrapper caches only its
+       instance (in ``__new__``), so ``__init__`` -- and with it a fresh inner
+       driver -- re-runs on every ``_GCUDriver()`` call, undoing a class patch.
+       So wrap both constructors and drop the attributes after each one runs.
+
+    Symptom when the device pin is wrong: >=3 kernel launches on device 0
+    followed by one on another device kills the driver outright ("Receive Sip
+    error message", then "Receive Abort message from KMD: Sip exception"), taking
+    the process with it. Fewer than three launches survive, which is what made
+    this look like a bug in whichever op happened to run first.
+
+    Symptom when the stream pin is wrong: an intermittent
+    ``topsatenNonzero failed: BAD_PARAM`` on a perfectly ordinary bool operand,
+    from the kernel having sized its output off a count it read before the
+    kernel producing the operand had finished.
     """
     import torch
 
@@ -353,6 +365,32 @@ def _pin_vendor_driver_to_flagos(flagos, inner_driver_cls, wrapper_driver_cls) -
         "flagos", flagos.current_device()
     )
 
+    # The stream accessor needs the same in-process pin as the device one, and
+    # the reason is the COMPILE_ARCH constructor branch (see
+    # ``_derive_compile_arch``). That branch exists so an inductor compile worker
+    # -- a child process that imports torch but never torch_fl -- can build a
+    # driver without a ``torch.gcu`` to ask, and it hardcodes *both* lambdas:
+    # ``get_current_stream = lambda idx=0: 0`` beside ``get_current_device``.
+    # The device literal is harmless here because the same running process
+    # already pins the device above. The stream literal is not: every triton and
+    # FlagGems launch reads this accessor
+    # (``triton/runtime/jit.py`` and ``triton/compiler/compiler.py`` both call
+    # ``driver.active.get_current_stream``), while torch_fl's topsaten dispatch
+    # submits to, and drains, ``GetCurrentTopsStream()``. Left at ``0`` the two
+    # stop being ordered against each other, and an op that reads a value another
+    # kernel produced -- ``nonzero`` reads the count it then sizes an output from
+    # -- can be handed a half-written buffer. That is the racy
+    # ``topsatenNonzero failed: BAD_PARAM`` measured on the S60: 1 failure per
+    # 8000 iterations whenever COMPILE_ARCH was set, 0 per 80000 when it was not,
+    # with no other difference between the two runs.
+    #
+    # Pinning in-process is exactly what keeps the child correct: the worker never
+    # imports torch_fl, so it sees the unpatched class and its ``0`` branch --
+    # which is what it needs, since it compiles but never launches.
+    current_stream = staticmethod(lambda idx=0: flagos.current_stream(idx).gcu_stream)
+    inner_driver_cls.get_current_stream = current_stream
+    wrapper_driver_cls.get_current_stream = current_stream
+
     def _patch_init(cls):
         original = cls.__init__
         if getattr(original, "_flagos_patched", False):
@@ -361,9 +399,11 @@ def _pin_vendor_driver_to_flagos(flagos, inner_driver_cls, wrapper_driver_cls) -
         @functools.wraps(original)
         def __init__(self, *args, **kwargs):
             original(self, *args, **kwargs)
-            # Drop the instance attribute so the class-level staticmethod above
-            # is what lookups find.
+            # Drop the instance attributes so the class-level staticmethods
+            # above are what lookups find. Both are assigned as instance
+            # attributes by the vendor constructors.
             self.__dict__.pop("get_current_device", None)
+            self.__dict__.pop("get_current_stream", None)
 
         __init__._flagos_patched = True
         cls.__init__ = __init__
@@ -371,13 +411,15 @@ def _pin_vendor_driver_to_flagos(flagos, inner_driver_cls, wrapper_driver_cls) -
     _patch_init(inner_driver_cls)
     _patch_init(wrapper_driver_cls)
 
-    # An instance built before this point still holds the copied attribute.
+    # An instance built before this point still holds the copied attributes.
     existing = getattr(wrapper_driver_cls, "instance", None)
     if existing is not None:
         existing.__dict__.pop("get_current_device", None)
+        existing.__dict__.pop("get_current_stream", None)
         inner = getattr(existing, "_driver", None)
         if inner is not None:
             inner.__dict__.pop("get_current_device", None)
+            inner.__dict__.pop("get_current_stream", None)
 
 
 def _derive_compile_arch(get_arch) -> None:
