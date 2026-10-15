@@ -661,6 +661,28 @@ def _prime_has_triton() -> None:
         di.device_interfaces.update(saved)
 
 
+def _torch_has_cuda_kernels() -> bool:
+    """Whether this torch can actually allocate a CUDA tensor.
+
+    `torch._C._cuda_getDeviceCount` is compiled in only for a CUDA-enabled torch
+    build, so it answers the one question `platform_profile().is_cuda_like` cannot:
+    where the *torch* stands, not where the platform stands. A CUDA-like platform
+    can still link the CPU-only pip wheel -- the default FlagGems-primary build
+    does, on the cuda platform -- and there `aten::empty` has no CUDA kernel at
+    all, while `torch.cuda.is_available()` still answers True from torch_fl's own
+    shim (accelerator/cuda/_cuda_compat.py) because FlagGems' Triton kernels never
+    go through torch's CUDA layer and the probe has to report a real device for
+    them.
+
+    The probe is deliberately read off torch rather than off
+    `torch_fl._env.build_kernels()`: a source-tree run has no build record, so an
+    empty kernel set would read as "boxing off" on a wheel that does have it. The
+    same question is asked by `inductor_backend._patch_cuda_rng_for_cpu_torch`,
+    which keys on the sibling `torch._C._cuda_getDevice` binding.
+    """
+    return hasattr(torch._C, "_cuda_getDeviceCount")
+
+
 def _patch_joint_graph_pattern_init() -> None:
     """Pre-trace inductor's replacement patterns on CPU, not on absent CUDA.
 
@@ -685,13 +707,19 @@ def _patch_joint_graph_pattern_init() -> None:
     afterwards, and cpu is what upstream uses on any non-CUDA build). So the fix
     is to make the probe answer honestly for the duration of that one call.
 
+    The gate is `_torch_has_cuda_kernels()`, not `platform_profile()
+    .is_cuda_like`: the CUDA platform on the default FlagGems-primary wheel is
+    CUDA-like (the flagos device is the same physical GPU) while the torch it
+    links is the CPU-only pip wheel, so the trace dies there too, now with
+    `NotImplementedError: Could not run 'aten::empty.memory_format' with
+    arguments from the 'CUDA' backend` out of `_pad_mm_init`.
+
     `lazy_init` is `functools.cache`d, so this is a one-shot priming: after it,
     the patterns are registered and the real probe is back in place.
     """
-    if platform_profile().is_cuda_like:
-        return
-    if hasattr(torch._C, "_cuda_getDeviceCount"):
-        # A genuine CUDA-enabled torch: the upstream cuda trace works.
+    if _torch_has_cuda_kernels():
+        # A torch that can allocate a CUDA tensor: the upstream cuda trace works,
+        # on the CUDA-ABI vendor wheels as well.
         return
 
     from torch._inductor.fx_passes import joint_graph
@@ -710,19 +738,24 @@ def _patch_joint_graph_pattern_init() -> None:
 def _patch_benchmarker() -> None:
     """Point inductor's autotune benchmarking at APIs this build actually has.
 
-    Only needed where there is no CUDA runtime; CUDA-like builds keep the stock
-    behaviour. Two things break otherwise:
+    Gated on `_torch_has_cuda_kernels()`, the same probe the joint-graph priming
+    uses: a CUDA-like build that links a CUDA-enabled torch keeps the stock
+    behaviour, while a CUDA-like platform on the default FlagGems-primary wheel
+    needs the patches as much as Ascend does. Two things break otherwise:
 
     * The `benchmarking.benchmarker` singleton is chosen at import time as
       `InductorBenchmarker() if use_experimental_benchmarker else
       TritonBenchmarker()`, and that flag is `config.use_experimental_benchmarker
       and torch.cuda.is_available()` -- True here, because torch_fl aliases
       `torch.cuda.is_available` to the flagos device count (__init__.py
-      _alias_cuda_to_flagos). `InductorBenchmarker` times with
-      `torch.cuda.Event(enable_timing=True)` and reads `props.L2_cache_size`, and
-      the CPU torch wheel has neither -- Event is a dummy base class that raises
-      on construction. `TritonBenchmarker` instead defers to triton's own
-      `do_bench`, which takes its events from
+      _alias_cuda_to_flagos). `InductorBenchmarker` then wants two things a
+      CUDA-less build cannot give it: `torch.cuda.Event(enable_timing=True)`,
+      which is a dummy base class that raises on construction on the CPU torch
+      wheel, and the `torch.empty(L2_size // 4, device="cuda")` it flushes the
+      L2 cache with, which no shim can cover for -- a CUDA-like platform's shim
+      does install a working Event from torch.flagos (_cuda_compat.py), and no
+      more. `TritonBenchmarker` instead defers to triton's own `do_bench`, which
+      takes its events from
       `driver.active.get_device_interface()` (torch.flagos, so real ACL events).
 
     * `CachingAutotuner.bench` passes `device=self.device_props.type`, which is
@@ -738,7 +771,7 @@ def _patch_benchmarker() -> None:
     inductor modules do `from .runtime.benchmarking import benchmarker`, so
     rebinding the module attribute would miss every binding already imported.
     """
-    if platform_profile().is_cuda_like:
+    if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
         return
 
     from torch._inductor.runtime import benchmarking

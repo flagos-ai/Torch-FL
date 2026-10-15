@@ -487,11 +487,119 @@ def test_benchmarker_untouched_on_cuda_like(as_cuda, monkeypatch):
 
     from torch_fl.compile import device_interface as di
 
+    # A CUDA-enabled torch, which is what "CUDA-like and nothing to fix" means:
+    # InductorBenchmarker can allocate its own L2-flush buffer there.
+    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
     obj = benchmarking.TritonBenchmarker()
     monkeypatch.setattr(benchmarking, "benchmarker", obj)
 
     di._patch_benchmarker()
     assert not getattr(obj, "_flagos_patched", False)
+
+
+@pytest.mark.anyplatform
+def test_benchmarker_patch_reaches_the_default_cuda_wheel(as_cuda, monkeypatch):
+    """A CUDA-like build without CUDA kernels needs the same fallback as Ascend.
+
+    That is the default FlagGems-primary wheel: the singleton is still an
+    `InductorBenchmarker` (selected from `torch.cuda.is_available()`, which
+    _cuda_compat.py answers True), and its `benchmark_gpu` flushes the L2 cache
+    with `torch.empty(..., device="cuda")` -- a kernel this wheel does not have.
+    """
+    from torch._inductor.runtime import benchmarking
+
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    obj = benchmarking.InductorBenchmarker()
+    monkeypatch.setattr(benchmarking, "benchmarker", obj)
+
+    di._patch_benchmarker()
+
+    assert obj.benchmark_gpu.__func__ is benchmarking.TritonBenchmarker.benchmark_gpu
+
+
+# --- joint_graph pattern priming --------------------------------------------
+
+
+class _RecordedCacheInfo:
+    def __init__(self, currsize):
+        self.currsize = currsize
+
+
+class _RecordingLazyInit:
+    """Stand-in for `joint_graph.lazy_init` that records the probe it saw."""
+
+    def __init__(self, currsize=0):
+        self.calls = 0
+        self.probe = None
+        self._currsize = currsize
+
+    def cache_info(self):
+        return _RecordedCacheInfo(self._currsize)
+
+    def __call__(self):
+        self.calls += 1
+        self.probe = torch.cuda.is_available()
+
+
+def _stand_in_for_joint_graph_lazy_init(monkeypatch, currsize=0):
+    joint_graph = pytest.importorskip("torch._inductor.fx_passes.joint_graph")
+    recorder = _RecordingLazyInit(currsize)
+    monkeypatch.setattr(joint_graph, "lazy_init", recorder)
+    return recorder
+
+
+@pytest.mark.anyplatform
+def test_joint_graph_patterns_keep_the_cuda_trace_on_a_cuda_torch(as_cuda, monkeypatch):
+    """A CUDA-enabled torch traces the replacement patterns on cuda, as upstream."""
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
+    recorder = _stand_in_for_joint_graph_lazy_init(monkeypatch)
+
+    di._patch_joint_graph_pattern_init()
+
+    assert recorder.calls == 0
+
+
+@pytest.mark.anyplatform
+def test_joint_graph_patterns_primed_off_cuda_without_cuda_kernels(
+    as_cuda, monkeypatch
+):
+    """The CUDA platform on the default wheel traces them on cpu instead.
+
+    Both conditions hold at once there, which is why the platform profile cannot
+    decide it: the platform is CUDA (the flagos device is the same physical GPU,
+    so `is_cuda_like`), and the torch is the CPU-only pip wheel, so `_pad_mm_init`
+    dies with `NotImplementedError: Could not run 'aten::empty.memory_format' with
+    arguments from the 'CUDA' backend`. The probe answers False for the one call
+    that picks the trace device, then goes back to reporting the shim's device.
+    """
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    recorder = _stand_in_for_joint_graph_lazy_init(monkeypatch)
+
+    di._patch_joint_graph_pattern_init()
+
+    assert recorder.calls == 1
+    assert recorder.probe is False
+    assert torch.cuda.is_available() is True
+
+
+@pytest.mark.anyplatform
+def test_joint_graph_pattern_priming_is_one_shot(as_cuda, monkeypatch):
+    """`lazy_init` is `functools.cache`d; an already-primed table is left alone."""
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    recorder = _stand_in_for_joint_graph_lazy_init(monkeypatch, currsize=1)
+
+    di._patch_joint_graph_pattern_init()
+
+    assert recorder.calls == 0
 
 
 # --- has_triton -------------------------------------------------------------
