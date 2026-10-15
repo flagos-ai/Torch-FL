@@ -947,6 +947,77 @@ class TestMusaMixedDeviceOperandOrder:
         torch.testing.assert_close(out.cpu(), fn(scalar, t_cpu))
 
 
+class TestMusaConvMixedDeviceOperands:
+    """A CPU weight/bias/grad must not reach mudnn as device memory (#524).
+
+    ATen's `_convolution` Overrideable arm is the only conv backend that does
+    not call `check_input_same_type_as_parameters`, so an unmoved CPU operand
+    reaches the kernel. `mudnn_conv.cc` dereferences `data_ptr()` through
+    `MudnnTensorWrapper`, so before the fix a CPU weight faulted an illegal
+    memory access and poisoned the context for every later op -- the failure
+    is not a clean error. The kernel must instead route the whole call to the
+    CPU round-trip and return a correct device result.
+    """
+
+    @pytest.mark.musa
+    def test_conv2d_cpu_weight(self):
+        x_cpu = torch.randn(2, 3, 8, 8)
+        w_cpu = torch.randn(4, 3, 3, 3)
+        out = torch.nn.functional.conv2d(x_cpu.to(DEVICE), w_cpu)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(
+            out.cpu(),
+            torch.nn.functional.conv2d(x_cpu, w_cpu),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+    @pytest.mark.musa
+    def test_conv2d_cpu_bias(self):
+        """Device input/weight with a CPU bias exercises the second gate:
+        `ConvSupported` passes, but `AddBias` would read a host pointer."""
+        x_cpu = torch.randn(2, 3, 8, 8)
+        w_cpu = torch.randn(4, 3, 3, 3)
+        b_cpu = torch.randn(4)
+        out = torch.nn.functional.conv2d(x_cpu.to(DEVICE), w_cpu.to(DEVICE), b_cpu)
+        assert out.device.type == "flagos"
+        torch.testing.assert_close(
+            out.cpu(),
+            torch.nn.functional.conv2d(x_cpu, w_cpu, b_cpu),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+    @pytest.mark.musa
+    def test_conv2d_backward_cpu_input(self):
+        """The backward gate has a third operand: a CPU `input` alongside a
+        device `grad_output`/`weight`."""
+        x_cpu = torch.randn(2, 3, 8, 8)
+        w_cpu = torch.randn(4, 3, 3, 3)
+        go = torch.randn(2, 4, 6, 6, device=DEVICE)
+        grad_input, grad_weight, grad_bias = (
+            torch.ops.aten.convolution_backward_overrideable(
+                go,
+                x_cpu,
+                w_cpu.to(DEVICE),
+                [1, 1],
+                [0, 0],
+                [1, 1],
+                False,
+                [0, 0],
+                1,
+                [True, True, True],
+            )
+        )
+        assert grad_input.device.type == "flagos"
+        assert grad_weight.device.type == "flagos"
+        x_ref = x_cpu.clone().requires_grad_(True)
+        w_ref = w_cpu.clone().requires_grad_(True)
+        torch.nn.functional.conv2d(x_ref, w_ref).backward(go.cpu())
+        torch.testing.assert_close(grad_weight.cpu(), w_ref.grad, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(grad_input.cpu(), x_ref.grad, rtol=1e-3, atol=1e-3)
+
+
 class TestMusaDegenerateStride:
     """A transpose of a size-1 dimension is still `is_contiguous() == True`
     (issue #240): PyTorch's contiguity check ignores the stride of any
