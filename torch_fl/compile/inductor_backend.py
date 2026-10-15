@@ -525,7 +525,6 @@ def flagos_compile_backend(
         register_flagos_codegen,
     )
     from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
-    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
     from torch_fl.compile.triton_libdevice import patch_triton_libdevice_module_map
     from torch_fl.compile.triton_resource_limits import (
         patch_triton_resource_limit_errors,
@@ -536,7 +535,6 @@ def flagos_compile_backend(
     register_flagos_codegen()
     patch_triton_libdevice_module_map()
     patch_triton_resource_limit_errors()
-    patch_triton_byte_load_workarounds()
 
     # A GCU300 64-bit kernel aborts the process inside the vendor pass manager,
     # which no Python handler can catch, so it has to be refused beforehand.

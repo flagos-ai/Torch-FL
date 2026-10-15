@@ -752,25 +752,68 @@ def test_libdevice_patch_skipped_on_cuda(as_cuda):
 
 
 @pytest.mark.anyplatform
-def test_byte_load_workaround_skipped_on_cuda(as_cuda, monkeypatch):
-    """The masked byte-load miscompile is Ascend's; CUDA signatures must not move."""
-    triton = pytest.importorskip("triton")
+def test_vendor_libdevice_candidates_cover_the_cann_package(monkeypatch):
+    """Ascend's implementations live under the CANN package, not the backend key.
 
-    monkeypatch.setattr(
-        "torch_fl.compile.triton_byte_loads.platform_profile",
-        lambda: pp._CUDA_PROFILE,
-    )
+    ``triton.language.extra.ascend`` does not exist in FlagTree, so a lookup that
+    only tries the backend key resolves to nothing, the module-map patch becomes
+    a no-op, and inductor's ``libdevice.rsqrt`` stays a stub.
+    """
+    import importlib
 
-    from torch._inductor.codegen import triton_utils
+    from torch_fl.compile import triton_libdevice as tld
 
-    from torch_fl.compile import triton_byte_loads as tbl
+    sentinel = object()
+    tried = []
 
-    before_signature = triton_utils.signature_of
-    before_compile = triton.compile
-    tbl.patch_triton_byte_load_workarounds()
+    def fake_import(name):
+        tried.append(name)
+        if name == "triton.language.extra.cann.libdevice":
+            return sentinel
+        raise ModuleNotFoundError(name)
 
-    assert triton_utils.signature_of is before_signature
-    assert triton.compile is before_compile
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    assert tld._vendor_libdevice("ascend") is sentinel
+    assert tried == [
+        "triton.language.extra.ascend.libdevice",
+        "triton.language.extra.cann.libdevice",
+    ]
+
+
+@pytest.mark.anyplatform
+def test_vendor_libdevice_prefers_the_backend_named_module(monkeypatch):
+    """A backend that ships ``extra.<key>.libdevice`` wins before any alias."""
+    import importlib
+
+    from torch_fl.compile import triton_libdevice as tld
+
+    sentinel = object()
+    tried = []
+
+    def fake_import(name):
+        tried.append(name)
+        return sentinel
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    assert tld._vendor_libdevice("cuda") is sentinel
+    assert tried == ["triton.language.extra.cuda.libdevice"]
+
+
+@pytest.mark.anyplatform
+def test_vendor_libdevice_is_none_without_a_vendor_module(monkeypatch):
+    """Nothing to route to means no patch, not a crash."""
+    import importlib
+
+    from torch_fl.compile import triton_libdevice as tld
+
+    def fake_import(name):
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    assert tld._vendor_libdevice("nvidia") is None
 
 
 if __name__ == "__main__":
