@@ -177,6 +177,11 @@ def _lazy_init():
     # which needs to be pointed at torch_fl before the first launch.
     _install_flagtree_ascend_policy()
 
+    # FlagGems reads a FlagTree autotuning knob by a name 0.7.0 removed, and
+    # raises on the read instead of falling through. Restore the name before the
+    # first FlagGems kernel; see the function for the exact build mapping.
+    _align_flagtree_autotuning_knobs()
+
     # FlagGems' Ascend backend imports triton.experimental.tle.language at module
     # scope, and on FlagTree that import cannot complete without AscendSHMEM,
     # which no FlagTree wheel ships. Left alone, `import flag_gems` fails and
@@ -1841,6 +1846,84 @@ def _hygon_tensor_specialization(gems_device):
         return None
     specialization = getattr(HIPBackend, "get_tensor_specialization", None)
     return specialization if callable(specialization) else None
+
+
+def _align_flagtree_autotuning_knobs():
+    """Give FlagGems back the FlagTree autotuning knob name 0.7.0 removed.
+
+    flag_gems 5.4.0's small-sequence flash-attention backward
+    (``flag_gems/ops/flash_attention_backward.py``,
+    ``_disable_aabs_for_small_seqlen``) saves and restores a FlagTree knob it
+    calls ``adjust_block_size``::
+
+        previous = _autotuning_knobs.adjust_block_size          # <-- :52
+        _autotuning_knobs.adjust_block_size = False
+        try: yield
+        finally: _autotuning_knobs.adjust_block_size = previous
+
+    Its only guard is ``if _autotuning_knobs is None`` -- a *module* presence
+    test, not an attribute one. FlagTree 0.7.0 still ships ``triton.knobs`` but
+    renamed the knob away (``autotuning_knobs`` now declares only ``cache``,
+    ``print`` and ``use_backend_autotuning``), so the import succeeds, the
+    ``None`` guard does not fire, and the first line raises ``AttributeError:
+    'autotuning_knobs' object has no attribute 'adjust_block_size'``. The
+    consumer is FlagGems' decoder path -- ``_scaled_dot_product_efficient_
+    attention_backward`` is routed to ``flaggems`` in backends_ascend.conf -- so
+    every attention backward with ``min(seqlen_q, seqlen_k) < 16`` dies here.
+    Measured on Ascend 910C (FlagTree 0.7.0+ascend3.5, flag_gems 5.4.0): a
+    standalone ``scaled_dot_product_attention`` backward at seqlen 8 raises
+    exactly this; the transformers BERT suite fails 24 tests on it.
+
+    The restoration the compiler can act on is already in effect on 0.7.0. The
+    knob FlagGems is reaching for is what FlagTree calls "adjust a tl.load-driven
+    BLOCK to next_power_of_2(seqlen)"; 0.7.0 split that behaviour out into
+    ``use_backend_autotuning`` (default False, i.e. FlagTree does not adjust)
+    plus the ``auto_blockify_size`` compile meta-parameter, and gates the
+    auto-blockify pass on the ``TRITON_ALL_BLOCKS_PARALLEL`` environment variable
+    (``triton/backends/ascend/utils.py::_is_auto_map_parallel_blocks_enabled``,
+    default false). FlagGems' intent -- do not let an adjustment run for a short
+    sequence -- is therefore the state 0.7.0 is already in, and an attribute
+    *alias* is a pure no-op that only stops the AttributeError. That was checked,
+    not assumed: ``adjust_block_size`` has no reader anywhere in the installed
+    triton (0 hits in ``libtriton.so``, 0 in its Python, absent from
+    ``knob_descriptors`` and ``knobs``), and the backward passes even when the
+    attribute is set to a non-boolean sentinel -- so the value is never consumed
+    and the alias does not change the code path a reader would select.
+
+    A knob-name restore is the minimal lever with a defined upstream owner. The
+    alternative -- moving ``_scaled_dot_product_efficient_attention_backward``
+    off the FlagGems route in the generated conf -- would trade a first-call
+    AttributeError for the ``ascend`` aclnn path that
+    ``docs/reference/operator-support.md`` records as never revalidated and
+    known to rebuild a non-square causal mask as ``{S, S}`` (ret=161001), so it
+    is a fresh correctness risk in place of a name-mediated crash.
+
+    Scoped to the build whose knob set this tests for, read from the attribute
+    (never a version string), and to an Ascend FlagTree with FlagGems routed.
+    Best-effort like its neighbours: the attribute is only ever added when it is
+    absent, so a build whose knob already exists is untouched.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "ascend" or not _conf_routes_to_flaggems():
+            return
+
+        triton_knobs = importlib.import_module("triton.knobs")
+        autotuning = getattr(triton_knobs, "autotuning", None)
+        if autotuning is None or hasattr(autotuning, "adjust_block_size"):
+            return
+
+        # False is the value FlagGems itself assigns inside the context manager,
+        # which it intends as "do not adjust". It matches 0.7.0's own default
+        # state (use_backend_autotuning and the auto-blockify gate both false),
+        # so making the restore a no-op leaves the code path FlagTree already
+        # selected. Any value would stop the AttributeError -- it is unread --
+        # but this is the one that would also be correct if a future FlagTree
+        # reintroduced a reader.
+        autotuning.adjust_block_size = False
+    except Exception:
+        pass
 
 
 def _enable_flaggems_autotune_cache():
