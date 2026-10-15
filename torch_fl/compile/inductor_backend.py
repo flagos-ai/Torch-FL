@@ -116,7 +116,16 @@ def _patch_native_cuda_probe() -> None:
     if not torch.flagos.is_available():
         return
 
-    original = torch.cuda.is_available
+    # Only the first writer may claim the slot. The ``cuda`` device alias
+    # (``torch_fl._alias_cuda_to_flagos``) records torch's own probe there too
+    # when it runs first, which is the order on kunlunxin: this module is
+    # imported from the optional-integration step of ``_phase_ecosystem``, after
+    # that call. Overwriting it there would replace torch's answer with the
+    # alias's lambda and make ``torch_fl._real_cuda_is_available`` report a CUDA
+    # device on a build that has none.
+    original = getattr(torch.cuda, "_flagos_original_is_available", None)
+    if original is None:
+        original = torch.cuda.is_available
     torch.cuda.is_available = torch.flagos.is_available
     # Read back by torch_fl._real_cuda_is_available, which has to tell this
     # redirect from a real CUDA runtime; the alias's guard depends on it.

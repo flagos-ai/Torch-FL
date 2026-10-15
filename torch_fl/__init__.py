@@ -1399,8 +1399,12 @@ def _real_cuda_is_available() -> bool:
     the flagos device count so that Inductor's CUDA-shaped FakeTensor probe finds
     the accelerator on a build that has no CUDA runtime, and saves the function
     it replaced as ``torch.cuda._flagos_original_is_available``. That import
-    lands before ``_phase_ecosystem`` reaches ``_alias_cuda_to_flagos``, so the
-    saved function is the only remaining answer to "is there real CUDA here".
+    does not always land before the alias -- it depends on which phase first
+    pulls ``torch_fl.compile`` in, and on kunlunxin it is the
+    optional-integration step of ``_phase_ecosystem``, after
+    ``_alias_cuda_to_flagos`` -- so whichever of the two runs first claims that
+    slot and neither overwrites the other. Either way the saved function is the
+    only remaining answer to "is there real CUDA here".
 
     Reading the redirected probe instead answers yes on exactly the builds the
     alias exists for. Measured on MUSA with the redirect in place and this guard
@@ -1445,6 +1449,19 @@ def _alias_cuda_to_flagos():
         return
     if not _env.flag("FLAGOS_ALIAS_CUDA", True):
         return
+
+    # Record what torch answers *before* this alias overwrites the probe, so the
+    # saved copy keeps meaning "torch's own answer" no matter which side of this
+    # call the torch_fl.compile import lands on. `_patch_native_cuda_probe` saves
+    # the attribute it replaces, and on kunlunxin that import runs *after* this
+    # alias (it is reached from the optional-integration step of
+    # `_phase_ecosystem`, which follows this call), so without this the patch
+    # would save the alias's own lambda and `_real_cuda_is_available` would answer
+    # True for the rest of the process on a build that has no CUDA device at all.
+    # In the MUSA/GCU order the patch has already run and saved torch's own probe,
+    # so this is then a no-op.
+    if not hasattr(torch.cuda, "_flagos_original_is_available"):
+        torch.cuda._flagos_original_is_available = torch.cuda.is_available
 
     # From here on, every "cuda" this process sees is this alias. Anything that
     # treats torch.cuda as a hardware probe has to be told, because it can no

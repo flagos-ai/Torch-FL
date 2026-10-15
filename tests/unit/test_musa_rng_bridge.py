@@ -37,6 +37,14 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
         },
     )
     monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "musa")
+    # The bridge is gated on the selected conf routing at least one op to a
+    # FlagGems path (`_conf_routes_to_flaggems`), which is a property of the
+    # wheel's conf rather than of the patch under test: kunlunxin's conf has no
+    # FlagGems route, so the bridge would take its early return there and every
+    # assertion below would fail for a reason that has nothing to do with the
+    # bridge. Force the route on so the cases run the same code on every
+    # platform the unit step covers.
+    monkeypatch.setattr(torch_fl, "_conf_routes_to_flaggems", lambda: True)
     return random_utils
 
 
