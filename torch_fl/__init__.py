@@ -2292,6 +2292,18 @@ def _phase_ecosystem() -> None:
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()
 
+    # GCU and MUSA import flag_gems *during* `import torch_fl` -- the GCU runtime
+    # shims and the MUSA Philox bridge respectively -- and that import re-enters
+    # device init while `flag_gems/__init__.py` is still executing. The FlagGems
+    # patches flagos installs are a no-op against that half-built module and
+    # latch nothing, so the first point at which they can be installed on those
+    # two platforms is here, with the eager import above finished. It is a
+    # no-op on every other platform, where the import happens later and
+    # `flagos._lazy_init` installs the patches itself.
+    from . import flagos
+
+    flagos._install_flaggems_patches()
+
     from . import quantization  # noqa: E402, F401
 
     _register_distributed_backend()
