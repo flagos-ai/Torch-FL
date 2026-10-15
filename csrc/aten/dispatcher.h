@@ -276,10 +276,9 @@ class Dispatcher {
       // whose boxing kernel is absent is otherwise reachable only through the
       // registration FlagGems installs itself, and returning nullptr there
       // turns "this build does not box" into a dispatch error for ops that ran
-      // before the route moved.
+      // before the route moved. Same shape as the kFlagGems arm below.
       case Backend::kCuda:
-        if (cuda_fn_) return cuda_fn_;
-        return flaggems_fn_ ? flaggems_fn_ : flaggems_cpp_fn_;
+        return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
       // FlagGems C++ runtime is only compiled in for a FLAGOS_BUILD_FLAGGEMS_CPP=ON
       // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
       // liboperators.so built for the vendor. A platform ships ONE conf, so the
