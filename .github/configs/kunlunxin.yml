@@ -60,141 +60,20 @@ timeout_minutes: 60
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-kunlunxin
 
-integration_tests:
-  - name: Check isolated Kunlunxin environment
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-
-      import torch
-      import torch_fl
-      # torch_fl must precede flag_gems. FlagGems 5.x resolves its vendor from the
-      # torch_fl device surface, so importing it against stock CPU PyTorch raises
-      # "No device were detected on your machine !".
-      import triton
-
-      torch_path = Path(torch.__file__).resolve()
-
-      assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
-      assert "/usr/local/lib/python3.10/dist-packages" not in str(torch_path), torch_path
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      count = torch_fl.flagos.device_count()
-      assert count >= 1, f"expected at least one XPU device, got {count}"
-
-      # The FlagGems stack has to be the flagtree build, not a stock triton wheel
-      # left behind by the image: only flagtree carries the xpu backend the XPU
-      # kernels are compiled for.
-      assert "xpu" in triton.backends.backends, sorted(triton.backends.backends)
-
-      print(f"CPU PyTorch: {torch.__version__}")
-      print(f"torch path: {torch_path}")
-      print(f"torch_fl path: {torch_fl.__file__}")
-      print(f"XPU devices: {count}")
-      print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
-      PY
-
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-
-  # Marker selection, not a file allowlist. Kunlunxin is a native-kernel vendor
-  # like musa/gcu/ascend: backends_kunlunxin.conf routes ops to the native
-  # `kunlunxin` key (the vendor xdnn op library) or leaves them at `none` (CPU
-  # fallback), with no `cuda` route, so the `-> cuda` dispatch assertions are
-  # skipped by the platform table in tests/integration/ops/conftest.py rather
-  # than run here.
-  #
-  # `not flaggems`: the FlagGems runtime group asserts a `-> flagos` (FlagGems)
-  # dispatch against the conf route, and the flaggems build of this image
-  # (flagtree XPU) cannot import flag_gems at all -- its XPU TLE backend raises
-  # NotImplementedError for `tle.device_mesh`, which pytest.importorskip does not
-  # catch. Same reason test_flaggems_device_name.py is ignored below; the vendor
-  # / FlagGems group split stays enforced on the platforms where FlagGems runs.
-  - name: Run operator tests (vendor backend, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
-      --ignore=tests/integration/ops/test_flaggems_device_name.py
-      -v -s --tb=short
-
-  # The FlagGems runtime-path group, byte-identical on every platform. The
-  # conf routes no op through FlagGems yet, so every case here skips itself
-  # rather than being withheld: the case set is the same on every platform and
-  # the conf, not the manifest, decides which of them have something to assert.
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-
-  # The whole RNG dispatch file, matching Ascend/CUDA/DCU/MetaX/GCU. The
-  # generator contract, the shared-state round trip, and the integer range
-  # semantics are implemented natively on the XPU, so this is a contract check
-  # rather than a gap detector. `and not flaggems` drops the flaggems-marked
-  # cases, which the FlagGems group above already measures.
-  - name: Run unified RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops and not flaggems" -v -s --tb=short
-
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-
-  # Lazy Conjugate/Negative bits are a dispatcher-level property, so every
-  # backend owes the same materialization contract. The complex cases skip
-  # themselves when the backend cannot allocate a complex tensor at all, which
-  # leaves the negative-bit cases (real dtypes) as the enforced minimum.
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-
-  # torch.compile through the flagtree XPU backend.
-  - name: Run torch.compile tests
-    command: python -m pytest tests/integration/test_compile.py -v --tb=short
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
-
-  # ---------------------------------------------------------------------------
-  # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - the AMP contract. The FlagGems cohort has not been revalidated on the
-  #     P800, so no `flaggems` route is enabled in backends_kunlunxin.conf yet
-  #     (the allowlist is a follow-up), and the contract ships with that work.
-  #     The FlagGems runtime-path group and the shared FlagGems conformance
-  #     suite above are not withheld for that reason: they are byte-identical on
-  #     every platform, run here like anywhere else, and skip their cases
-  #     because the conf routes nothing through FlagGems yet. See
-  #     docs/vendors/kunlunxin/installation.md.
-  #   - tests/integration/test_profiler_contract.py. Kunlunxin builds the
-  #     unavailable_device_tracer (the vendor's CUPTI-compatible shim
-  #     instruments the CUDA dispatch key the de-boxed backend no longer uses),
-  #     so device profiling is not available on this platform.
-  #   - Qwen3 inference/training smoke, pending a model mount on the runner.
-  # ---------------------------------------------------------------------------
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# The FlagGems stack has to be the flagtree build, not a stock triton wheel left
+# behind by the image: only flagtree carries the xpu backend the XPU kernels are
+# compiled for. One P800 is enough for the suites that run here.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /usr/local/lib/python3.10/dist-packages
+  flagos_devices:
+    at_least: 1
+  triton_backend: xpu

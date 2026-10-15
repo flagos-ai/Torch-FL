@@ -68,157 +68,27 @@ timeout_minutes: 60
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-ppu
 
-# The dedicated integration workflow executes this test manifest.
-integration_tests:
-  - name: Check model availability
-    command: test -d "$MODEL_PATH"
-
-  # PPU is a CUDA-ABI boxing backend, so the CUDA dispatch key carries vendor
-  # kernels and torch.cuda.is_available() reflects the real PPU devices.
-  # Pod probe found 16 /dev/alixcu_ppu nodes; CI runner device count may
-  # differ. Adjust the literal after the first green run.
-  - name: Check device availability
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-
-      import torch_fl
-      import torch
-
-      torch_fl_path = Path(torch_fl.__file__).resolve()
-      torch_path = Path(torch.__file__).resolve()
-      ppu_bundle = torch_fl_path.parent / "lib_ppu"
-
-      # PPU runs in an isolated venv with stock +cpu torch (the link target).
-      # Core replacement cannot change __version__, so it remains stock +cpu.
-      # Importing torch_fl loads the bundled PPU libtorch and reconciles the
-      # stale torch/version.py CUDA value with that live runtime, which is 13.0
-      # in this pinned environment. The other PPU-takeover signals remain
-      # torch.cuda availability and the device counts below.
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert torch.version.cuda == "13.0", torch.version.cuda
-      assert "/opt/conda/" not in str(torch_path), torch_path
-      assert (ppu_bundle / "libtorch_cuda.so").is_file(), ppu_bundle
-      assert torch.cuda.is_available(), "PPU devices are unavailable"
-      assert torch.cuda.device_count() > 0, torch.cuda.device_count()
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      assert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()
-
-      print(f"PyTorch: {torch.__version__}")
-      print(f"torch: {torch_path}")
-      print(f"torch_fl: {torch_fl_path}")
-      print(f"PPU bundle: {ppu_bundle}")
-      print(f"PPU devices: {torch.cuda.device_count()}")
-      print(f"flagos devices: {torch_fl.flagos.device_count()}")
-      PY
-
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-
-  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
-  # cases are measured by the group below, not here (no switch exists any more
-  # to skip them -- see ops/conftest.py).
-  - name: Run operator tests (vendor backend, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
-
-  # The venv triton is FlagTree's ppu build (triton 3.6.0, backends {'ppu'}),
-  # not the vendor 3.5.0+v0.2.0.ppu2.1.0 (backends {'amd','nvidia'}) -- see
-  # set_env_ppu.sh, which installs flagtree==0.7.0rc1+ppu3.6 plus FlagGems 5.4.0
-  # into the job venv. mm/bmm stay on the vendor route because FlagGems' _hygon
-  # mm kernel passes a `num_ldmatrixes` keyword that the triton mm_kernel does
-  # not accept: KeyError at triton/runtime/jit.py:_pack_args for mm, and bmm
-  # hits the same kernel and times out at 60s inside triton compilation. Filed
-  # upstream as FlagGems issue #6225. backends_ppu.conf pins mm/bmm to the
-  # vendor kernel, so the two dispatch-log cases that assert the FlagGems route
-  # for them skip themselves through routed_backend_or_none rather than being
-  # named here; every other flaggems main_ops case passes.
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-
-  # GPU profiling on this platform went from nothing to the shared contract:
-  # until issue #411, `ppu` fell through csrc/CMakeLists.txt's tracer selection
-  # into the unavailable implementation, so no device activity was ever
-  # registered and every trace carried CPU records only. The capability table in
-  # tests/integration/profiler_support.py is what makes this step expressible on
-  # a CUDA-ABI platform that emits no memsets -- the memset case skips on its
-  # declared capability instead of failing.
-  #
-  # Measured on a 16x PPU-ZW810E host (torch 2.10.0): 10 passed, 1 skipped, 1
-  # xpassed.
-  - name: Unified profiler contract
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
-
-  # ---------------------------------------------------------------------------
-  # Deliberately still out: structural comparison against the stock torch+cuda
-  # baseline. Not for the reason recorded here before #411 -- "PPU CUPTI
-  # Activity API is defective ... collects no device-side events" was a symptom
-  # of the tracer never being built, and is now measurably false: with the tracer
-  # selected, a 512x512 matmul trace carries
-  # ['Trace','cpu_op','gpu_memcpy','kernel','privateuse1_runtime'], PPU's real
-  # gemm/sum kernel names, and 73/73 link candidates resolved. The
-  # "bufferCompleted called with unknown buffer" line no longer appears either.
-  #
-  # What is left is platform shape, measured with `-m main_ops`: 3 passed, 1
-  # xpassed, 3 failed, and all three failures want something PPU's vendor kernels
-  # do not produce, so re-adding this step needs a per-platform gate in the test
-  # rather than another tracer fix:
-  #   - test_category_coverage and test_arg_key_supersets need a gpu_memset
-  #     record, and PPU emits none -- the same memset capability the shared
-  #     contract above already declares off for this platform.
-  #   - test_kernel_names_are_demangled needs a '::'-qualified kernel name, and
-  #     this platform's are gemm_ktype0_*/sum_kernel_*.
-  # ---------------------------------------------------------------------------
-  - name: Run inference tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_infer.py
-      --model "$MODEL_PATH" -v -s --tb=short
-
-  - name: Run training tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_train.py
-      --model "$MODEL_PATH" -v -s --tb=short
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# PPU takes the CUDA dispatch key over with its own bundled libtorch_cuda.so
+# under lib_ppu, which is why torch.version.cuda reads 13.0 in a stock +cpu
+# wheel, and why both the torch.cuda and the flagos device surfaces have to
+# report devices. The Qwen3 groups are the two steps that need the mounted
+# checkpoint, so the mount is asserted here.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: "13.0"
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib_ppu/libtorch_cuda.so
+  flagos_devices:
+    more_than: 0
+  cuda_available: true
+  cuda_devices:
+    more_than: 0
+  model_dir: true

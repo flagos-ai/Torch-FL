@@ -47,150 +47,25 @@ timeout_minutes: 60
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-cuda
 
-# The dedicated integration workflow executes this test manifest.
-integration_tests:
-  - name: Check model availability
-    command: test -d "$MODEL_PATH"
-  - name: Check device availability
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-
-      import torch_fl
-      import torch
-
-      torch_path = Path(torch.__file__).resolve()
-      package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
-
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
-      assert "/opt/conda/" not in str(torch_path), torch_path
-      assert (package_lib / "libtorch_cuda.so").is_file(), package_lib
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      print(f"CPU PyTorch: {torch.__version__}")
-      print(f"torch path: {torch_path}")
-      print(f"CUDA assets: {package_lib}")
-      print(f"flagos devices: {torch_fl.flagos.device_count()}")
-      PY
-  - name: Check FlagTree and FlagGems
-    command: |
-      python - <<'PY'
-      import importlib.metadata
-      import os
-      from pathlib import Path
-
-      import torch_fl
-      import flag_gems
-      import triton
-      from torch_fl.compile.flagtree_shim import is_flagtree_active
-
-      # The FlagTree wheel is source-free: it ships its own Triton, and the
-      # expected version comes from the setup script so the two stay in step.
-      expected = os.environ.get("FLAGTREE_VERSION", "0.7.0rc2")
-      distribution = importlib.metadata.distribution("flagtree")
-      assert distribution.version == expected, distribution.version
-      assert is_flagtree_active(), triton.__file__
-
-      triton_root = Path(triton.__file__).resolve().parent
-      assert Path(distribution.locate_file("triton")).resolve() == triton_root, triton_root
-      assert triton.__version__.startswith("3.6."), triton.__version__
-      print(f"FlagTree: {expected}")
-      print(f"Triton: {triton.__version__} ({triton_root})")
-      print(f"FlagGems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
-      print(f"torch_fl: {torch_fl.__file__}")
-      PY
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
-  # cases are measured by the group below, not here (no switch exists any more
-  # to skip them -- see ops/conftest.py).
-  #
-  # Issue #409: `cuda` is in the accepting half because the sweep required
-  # `main_ops`, so a test whose only selecting mark is `cuda` -- every
-  # `*_matches_cuda_ref` case, and the whole of ops/test_full_cuda_coverage.py --
-  # was collected by this job and then deselected. Collection is the check:
-  # `-m "(cuda or main_ops) ..." --collect-only -q` selects 400 of the 1446
-  # ops/ cases where the old expression selected 132, in 21 files the old one
-  # did not reach.
-  - name: Run operator tests (vendor backend, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "(cuda or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-  # `and not flaggems` here for the same reason: the multinomial case is
-  # measured in the FlagGems group above, where it belongs.
-  - name: Run unified RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops and not flaggems" -v -s --tb=short
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-  - name: Unified AMP contract
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-  - name: Unified profiler contract
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
-
-  # Structural comparison against tests/data/profiler_cuda_baseline.json, which
-  # the shared contract does not cover: it asserts the public API surface, while
-  # this checks tracer output against stock torch+cuda. Carried over from the
-  # inline step this manifest replaces.
-  - name: Profiler parity test
-    command: >-
-      python -m pytest tests/integration/test_profiler_parity.py
-      -v -m main_ops --tb=short
-
-  - name: Run inference tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_infer.py
-      --model "$MODEL_PATH" -v -s --tb=short
-  - name: Run torch.compile tests with FlagTree
-    command: >-
-      FLAGOS_USE_FLAGTREE=1
-      python -m pytest tests/integration/test_compile.py
-      -v -s --tb=short
-  - name: Run training tests
-    command: >-
-      python -m pytest tests/integration/test_qwen3_train.py
-      --model "$MODEL_PATH" -v -s --tb=short
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# CUDA boxes onto the CUDA dispatch key, so the wheel ships libtorch_cuda.so,
+# and the Triton that compiles its routes is the flagtree build the setup script
+# installs. Failing here names an image with the wrong Triton once, instead of
+# ninety errors into the FlagGems group.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib/libtorch_cuda.so
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0rc2
+    triton_prefix: "3.6."
+  model_dir: true

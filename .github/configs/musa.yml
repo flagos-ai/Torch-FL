@@ -45,218 +45,23 @@ timeout_minutes: 60
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-musa
 
-integration_tests:
-  # Preflight: the isolated venv must hold CPU torch 2.10 with no torch_musa
-  # leak and no libtorch_cuda.so, and the flagos device must be up. This runs
-  # first because run_integration_tests.py stops on the first non-zero group.
-  - name: Check isolated MUSA environment
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-      import importlib.util
-      import sys
-
-      import torch_fl
-      import torch
-
-      torch_path = Path(torch.__file__).resolve()
-      package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
-
-      # Print diagnostics first
-      print("=== sys.path ===")
-      for p in sys.path:
-          print(f"  {p}")
-
-      torch_musa_spec = importlib.util.find_spec("torch_musa")
-      if torch_musa_spec:
-          print(f"\n=== torch_musa found ===")
-          print(f"  Location: {torch_musa_spec.origin}")
-          print(f"  Submodule search locations: {torch_musa_spec.submodule_search_locations}")
-          # torch_fl creates a shim with origin="torch_fl_shim" - that's expected.
-          # Only fail if torch_musa comes from the real vendor package.
-          if torch_musa_spec.origin != "torch_fl_shim":
-              raise AssertionError(
-                  f"vendor torch_musa leaked into the isolated venv (ABI mismatch): {torch_musa_spec.origin}"
-              )
-          print("  OK: This is torch_fl's shim, not the vendor package")
-
-      assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
-      assert "/opt/conda/" not in str(torch_path), torch_path
-      assert not (package_lib / "libtorch_cuda.so").is_file(), package_lib
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      assert torch_fl.flagos.device_count() > 0, torch_fl.flagos.device_count()
-
-      print(f"\nCPU PyTorch: {torch.__version__}")
-      print(f"torch path: {torch_path}")
-      print(f"torch_fl: {torch_fl.__file__}")
-      print(f"MUSA devices: {torch_fl.flagos.device_count()}")
-      PY
-
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-
-  - name: Run MUSA dispatch tests
-    command: >-
-      python -m pytest tests/integration/ops/test_musa_dispatch.py
-      -m musa -v -s --tb=short
-
-  - name: Run general tests
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-
-  - name: Unified AMP contract
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
-
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-
-  # Measured on the MTT S5000 on 2026-08-29: 11 passed, 1 skipped. The old
-  # withheld note incorrectly applied GCU's limitation to MUSA -- a CPU-only
-  # PyTorch/Kineto build supplying no PrivateUse1 resolver, so no device events
-  # reach the profiler. That does not hold here: the MUPTI tracer resolves
-  # device activity on this CPU 2.10 wheel, and the kernel, runtime, flow,
-  # linkage, metadata, demangling and capture-window cases all pass.
-  #
-  # Only gpu_memset skips, through the capability table in
-  # tests/integration/profiler_support.py rather than a deselect: MUPTI emits no
-  # memset records. gpu_memcpy is claimed for MUSA in that table because it is
-  # measured, so the memcpy case runs rather than skipping.
-  - name: Unified profiler contract
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
-
-  # Marker selection, not a file allowlist: the generic per-op dispatch files
-  # carry @pytest.mark.anyplatform. The platform gate (conftest.py) skips the
-  # cuda/metax/ascend/dcu/flaggems_python-marked cases on MUSA, so this selects
-  # the anyplatform/main_ops subset that routes to the native mudnn backend.
-  # `and not flaggems` keeps the vendor/FlagGems group split every other
-  # platform uses: the flaggems-marked cases are measured by the FlagGems group
-  # below, not here (no switch exists any more to skip them -- see
-  # ops/conftest.py).
-  #
-  # Ordered AFTER the contract groups (general/AMP/math-bits) because
-  # run_integration_tests.py stops on the first non-zero group, so a backend gap
-  # here would stop the pipeline before those go green.
-  #
-  # This group used to deselect test_mm_still_runs[dtype3] for a float64 mm gap
-  # attributed to "mudnn GEMM has no double-precision path". The attribution was
-  # wrong and the case is deselected no longer: float64 mm on this platform routes
-  # to FlagGems, not to mudnn, and the case measures `32x48x16`, whose aligned tile
-  # stays inside the device's 196608 B static shared-memory limit. What fails is a
-  # float64 mm whose M, K and N all exceed 32, where the mthreads `mm` tune space
-  # asks 262144 B at num_stages 5 and exactly 196608 B at num_stages 4 -- fixed in
-  # torch_fl/flagos/__init__.py, which fits the tune space to the limit. The case
-  # passes on S5000 on the unmodified tree as well, so the deselect had been dead
-  # weight and the two changes are independent.
-  #
-  # test_rng_dispatch.py is explicitly ignored here even though its tests carry
-  # @pytest.mark.(anyplatform + main_ops) and would otherwise be collected:
-  #   1. It has its own dedicated group (Run unified RNG tests, last) where a
-  #      murand failure is isolated and --tb=line capped.
-  #   2. murand's seed-source / multi-device generator path is broken on this
-  #      runner (err 700, illegal memory access). The first such failure poisons
-  #      the MUSA context for the rest of the pytest session, so every later
-  #      kernel -- rsqrt, silu, sin, softmax, sum, where, zeros, ... -- fails
-  #      with the same illegal-memory-access symptom even though those ops are
-  #      healthy (they pass before the poisoning and in isolation). Running RNG
-  #      here would inflate the group from ~1 real failure to ~80 collateral
-  #      ones.
-  # Restore this ignore only after murand's seed-source path is fixed.
-  - name: Run operator tests (native mudnn, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      --ignore=tests/integration/ops/test_rng_dispatch.py
-      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
-      -v -s --tb=short
-
-  # The FlagGems runtime-path group, byte-identical on every platform: it
-  # measures the @pytest.mark.flaggems cases, each of which asserts the conf's
-  # own route (through ops/backend_conf.py) rather than a hard-coded backend
-  # name. MUSA routes 466 of its 2037 ops to the FlagGems Python path; a case
-  # whose op this conf keeps on the native mudnn kernel, or hands to
-  # cpu_fallback, skips itself. This is also where test_musa_flaggems_device.py
-  # lands -- the MUSA hardware behaviour of the route, which cannot be restated
-  # generically -- and where the MetaX SDPA route cases land on MetaX.
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-
-  # Triage phase: ordered last so a murand failure cannot block the functional
-  # groups above. As of 2026-08-28 the CI runner's murand (vendor RNG library)
-  # is broken -- murandGenerateUniform/Normal fail with LAUNCH_FAILURE and
-  # randperm returns garbage (err 700 illegal memory access), while single-
-  # device reproducibility is healthy. docs/vendors/musa/installation.md
-  # recorded the RNG suite passing on S5000 on 2026-08-17, so this is a
-  # driver/toolkit/image regression on this runner, not a torch_fl code defect.
-  #
-  # To let the pipeline complete end to end, -k deselects the four classes
-  # that exercise murand's seed-source / multi-device / distribution / dropout
-  # paths (TestRngSeedSource, TestRngMultiDevice, TestRngDistribution,
-  # TestRngDropout) -- 37 items, 25 of them real failures. The 80-item
-  # TestRngReproducible (single-device same-seed / different-seed) still runs
-  # and stays green. Drop the -k line once murand is fixed. --tb=line stays
-  # to cap any future randperm assert diff.
-  - name: Run unified RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops and not flaggems"
-      -k "not TestRngSeedSource and not TestRngMultiDevice and not TestRngDistribution and not TestRngDropout"
-      -v -s --tb=line
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
-
-  # ---------------------------------------------------------------------------
-  # Deliberately not included yet, so the gap is recorded rather than implied:
-  #   - tests/integration/test_compile.py. torch.compile needs the vendor
-  #     flagtree (flagtree-0.5.0+mthreads3.1, Triton 3.1, backend "mthreads");
-  #     set_env_musa.sh deliberately does not link one, and stock PyPI triton is
-  #     not a substitute -- it ships no mthreads backend and cannot compile a
-  #     MUSA kernel at all. The suite itself is green on the MTT S5000 with that
-  #     runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1 failed, the
-  #     failure being the torch.backends entry-point case, which asserts an
-  #     installed wheel and cannot hold in a build-tree run). Add this group when
-  #     the image bakes the vendor triton stack; it is an image gap, not a code
-  #     one.
-  #   - tests/integration/test_profiler_parity.py. Unlike the contract group
-  #     above, parity diffs the flagos trace against a *torch-cuda baseline*, so
-  #     it is only meaningful on the CUDA-boxing platforms that run it (cuda,
-  #     dcu). Measured here on 2026-08-29 for completeness: 5 passed, 2 failed,
-  #     both on capabilities MUPTI does not report rather than on a torch_fl
-  #     defect -- no gpu_memset category, and no occupancy-derived kernel args
-  #     ('blocks per SM', 'warps per SM', 'est. achieved occupancy %').
-  #   - Qwen3 inference/training smoke, pending a model mount on the runner.
-  # ---------------------------------------------------------------------------
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# The isolated venv must hold CPU torch 2.10 with no libtorch_cuda.so and no
+# torch_musa leak: torch_fl installs a shim under that name, so the real vendor
+# package in the same interpreter means an ABI mismatch, which is worth failing
+# on here rather than as a device error later.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    more_than: 0
+  torch_musa_shim_only: true

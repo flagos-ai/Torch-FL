@@ -64,153 +64,20 @@ timeout_minutes: 120
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-ascend
 
-integration_tests:
-  - name: Check device availability
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-
-      import torch_fl
-      import torch
-
-      torch_path = Path(torch.__file__).resolve()
-      package_lib = Path(torch_fl.__file__).resolve().parent / "lib"
-
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert torch.version.cuda is None, torch.version.cuda
-      assert "/opt/conda/" not in str(torch_path), torch_path
-      # Ascend has no CUDA assets; the CUDA dispatcher library must NOT ship.
-      assert not (package_lib / "libtorch_cuda.so").is_file(), package_lib
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      n = torch_fl.flagos.device_count()
-      assert n >= 8, f"expected at least 8 Ascend logical devices, got {n}"
-      print(f"CPU PyTorch: {torch.__version__}")
-      print(f"torch path: {torch_path}")
-      print(f"flagos logical devices: {n}")
-      PY
-
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-
-  # Exercise the tests authored for the pure ACLNN backend (marked `ascend`),
-  # kept separate from the RNG dispatch suite which carries the `main_ops`
-  # marker and is driven by its own step below.
-  - name: Run Ascend backend operator tests
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "ascend"
-      -v -s --tb=short
-
-  # The FlagGems runtime-path group, byte-identical on every platform: it
-  # measures the @pytest.mark.flaggems cases, each of which asserts the conf's
-  # own route (through ops/backend_conf.py) rather than a hard-coded backend
-  # name. Ascend routes 224 of its 2037 ops to the FlagGems Python path; a case
-  # whose op this conf keeps on the native ACLNN kernel, or hands to
-  # cpu_fallback, skips itself.
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-
-  # The full RNG dispatch suite is exercised, not an allowlist. Upstream #70
-  # implemented the remaining Ascend RNG overloads (normal_ / uniform_ /
-  # exponential_ / bernoulli_ / randperm / native_dropout / *_like / *.out
-  # variants, plus poisson / binomial / _standard_gamma / _sample_dirichlet via
-  # CPU round-trip), so every test_rng_dispatch.py case now passes on Ascend.
-  # Run the whole file instead of pinning a shrinking allowlist. `and not
-  # flaggems` drops the flaggems-marked cases, which the FlagGems group above
-  # already measures.
-  - name: Run Ascend RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops and not flaggems"
-      -v -s --tb=short
-
-  - name: Run general factory ops
-    command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
-
-  - name: Unified AMP contract
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
-
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-
-  # Byte-identical to every other platform's profiler step. Ascend's extra
-  # prerequisite -- the process-start libmspti.so that CANN 9.0 needs for
-  # aclrtMemcpy*/aclrtMemset* interposition, which a later dlopen cannot supply
-  # -- is attached as data to this process by the common integration runner, so
-  # no vendor detail leaks into the command and unrelated Ascend processes do
-  # not inherit CANN 9.0's unstable interposer. See docs/architecture/profiler.md.
-  #
-  # INTEGRATION_ALLOW_TEARDOWN_CRASH is the second half of that instability:
-  # the same interposer faults sporadically during interpreter teardown, after
-  # pytest has printed a complete, clean summary (first observed following a
-  # clean "2 passed, 10 skipped" summary, then SIGSEGV seconds later). The
-  # runner forgives a fatal signal only on top of such a summary -- a signal
-  # before it, or a summary reporting failures, still fails. Quoted "1": the
-  # manifest validates environment values as strings.
-  - name: Unified profiler contract
-    environment:
-      LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
-      INTEGRATION_ALLOW_TEARDOWN_CRASH: "1"
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
-
-  # Device-side contract cases run on Ascend now, not only CPU/Trace: kernel,
-  # runtime, flow, metadata and linkage are capability rows the tracer
-  # satisfies, and the step below was measured on 910 with CANN 9.0 at
-  # "11 passed, 1 skipped". The skip is memset (see below); the eleven include
-  # test_profiler_device_time_linkage, whose xfail #425 retired by fixing the
-  # tracer -- popCorrelation passed a null out-parameter, which CANN rejects
-  # without unwinding the external-correlation stack, so every launch was
-  # stamped with the id pushed after it. The marker now names cuda alone, so on
-  # this platform the case asserts rather than reporting.
-  # The runtime `cbid` argument stays off: MSPTI runtime records carry the
-  # vendor-resolved API name and no callback id.
-  #
-  # Memset stays off even with MSPTI loaded: torch.zeros() -- the only zeroing
-  # op reachable from the shared profile_result() workload -- routes through the
-  # aclnnInplaceZero kernel, not the allocator's aclrtMemset calls, because that
-  # kernel was measured far faster (12.7us vs 133us at 1 MiB on 910). The
-  # missing gpu_memset record is a consequence of that routing choice.
-  # ---------------------------------------------------------------------------
-  # Follow-up (not part of first-version acceptance). Tracked here so the
-  # upstream gaps not yet covered by CI are not lost:
-  #   - Qwen3 inference/training smoke once a model is mounted on the Ascend
-  #     runner (deferred; not required for the first-version op contract).
-  # ---------------------------------------------------------------------------
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# Ascend is a pure ACLNN build: no CUDA dispatcher library ships in the wheel,
+# and CANN exposes eight logical devices on the 910C runner.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    at_least: 8

@@ -16,13 +16,21 @@
 #
 # Everything that differs between platforms lives in that one file: the runner
 # label, the container image with its options and mounts, the provisioning hook
-# with the stage it is invoked as, the timeouts, the manifest of integration
-# groups, and the few commands an image is missing. This job is the only place
+# with the stage it is invoked as, the timeouts, the environment its check
+# asserts, and the few commands an image is missing. This job is the only place
 # those keys are parsed. The integration pipeline (integration-tests.yml) and
 # the wheel build (build-wheel.yml) both call it and take their job shape from
 # its outputs, so adding a platform is adding a config file and nothing else --
 # there is no per-platform workflow to copy, and no second copy of the image or
 # the runner label to drift.
+#
+# The integration groups are NOT one of those per-platform keys any more. They
+# live in .github/integration-manifest.yml -- outside .github/configs/, because
+# every `*.yml` in that directory is a platform to schedule -- one ordered list
+# for every platform, and this job composes it against the config it just read
+# (compose_integration_manifest.py). A config that still carries a step list of
+# its own is refused rather than merged: that is the shape this job exists to
+# have removed.
 #
 # It runs on ubuntu-latest on purpose: `yq` and the parsing stay off the vendor
 # images, so no accelerator container needs a YAML dependency, and a config that
@@ -123,10 +131,32 @@ jobs:
             echo "::error::Platform config not found: $CONFIG_FILE"
             exit 1
           fi
+          MANIFEST_FILE=".github/integration-manifest.yml"
+          if [[ ! -f "$MANIFEST_FILE" ]]; then
+            echo "::error::Integration manifest not found: $MANIFEST_FILE"
+            exit 1
+          fi
 
           sudo wget -qO /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+
+          # The manifest and the config reach the composer as JSON, and `yq`
+          # is the YAML reader here for the reason the header states: this is
+          # the one job that parses YAML, and it runs off the vendor images.
+          MANIFEST_JSON="${RUNNER_TEMP:-/tmp}/integration-manifest.json"
+          CONFIG_JSON="${RUNNER_TEMP:-/tmp}/${PLATFORM}-config.json"
+          yq -o=json -I=0 '.' "$MANIFEST_FILE" > "$MANIFEST_JSON"
+          yq -o=json -I=0 '.' "$CONFIG_FILE" > "$CONFIG_JSON"
+
+          # A config that still defines its own step list would be silently
+          # ignored from here on -- the pipeline would run the shared manifest
+          # and the leftover list would read as if it were running too. Refuse
+          # it, so the migration is complete rather than half-done.
+          if [[ "$(yq -r '.integration_tests | type' "$CONFIG_FILE")" != '!!null' ]]; then
+            echo "::error::$CONFIG_FILE still defines its own integration_tests; the groups live in $MANIFEST_FILE"
+            exit 1
+          fi
 
           DISPLAY_NAME=$(yq -r '.display_name' "$CONFIG_FILE")
           SETUP_SCRIPT=$(yq -r '.setup_script' "$CONFIG_FILE")
@@ -139,8 +169,12 @@ jobs:
           TIMEOUT_MINUTES=$(yq -r '.timeout_minutes' "$CONFIG_FILE")
           INTEGRATION_TIMEOUT=$(yq -r '.integration_timeout_minutes // .timeout_minutes' "$CONFIG_FILE")
           ARTIFACT_NAME=$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")
-          INTEGRATION_TESTS=$(yq -o=json -I=0 '.integration_tests // []' "$CONFIG_FILE")
           INTEGRATION_ENVIRONMENT=$(yq -o=json -I=0 '.integration_environment // {}' "$CONFIG_FILE")
+          INTEGRATION_TESTS=$(python .github/scripts/compose_integration_manifest.py \
+            --platform "$PLATFORM" \
+            --manifest "$MANIFEST_JSON" \
+            --platform-config "$CONFIG_JSON" \
+            --config-dir .github/configs)
 
           # The two command lists reach the hardware job as one line per
           # command, so anything that is not a list of strings would be read as
@@ -215,10 +249,11 @@ jobs:
             exit 1
           fi
 
-          # Every config defines the manifest its pipeline runs, and it is
-          # validated here -- off the vendor image, before a hardware job is
-          # scheduled -- so a step renamed in the repo cannot survive as a
-          # command that no longer exists.
+          # The composed list is validated here -- off the vendor image, before
+          # a hardware job is scheduled -- so a step renamed in the repo cannot
+          # survive as a command that no longer exists. The composer has
+          # already read the manifest and the config; this is the consumer's
+          # own reading of the same JSON.
           INTEGRATION_TESTS="$INTEGRATION_TESTS" \
           INTEGRATION_ENVIRONMENT="$INTEGRATION_ENVIRONMENT" \
             python .github/scripts/run_integration_tests.py --validate-only

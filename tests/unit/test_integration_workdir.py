@@ -58,10 +58,11 @@ The check below requires every integration test file to be reachable from at
 least one manifest, against an explicit list of the ones that are known not to
 be, so the next orphan fails instead of hiding.
 
-Nothing here imports a YAML parser, for the reason ``load-platform-config.yml``
-gives for running its own parsing off the vendor image: the accelerator
-containers are not required to carry a YAML dependency, and this file runs
-inside one of them.
+The commands are read through ``manifest_composer``, so this file and the
+loader answer "what does this platform run?" the same way. That reader parses
+YAML, which costs nothing here: this file also runs inside the DCU container, and
+that environment already carries PyYAML for ``test_ci_pip_cache.py`` and for
+FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
 """
 
 import itertools
@@ -71,22 +72,14 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from manifest_composer import composed_steps, platform_names
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_DIR = _REPO_ROOT / ".github/workflows"
-_CONFIG_DIR = _REPO_ROOT / ".github/configs"
 _INTEGRATION_DIR = _REPO_ROOT / "tests/integration"
 
 _PREPARE_STEP = "Prepare wheel-only test workspace"
-# A column-0 YAML key, used to delimit a top-level block.
-_TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*:")
-# A `command:` key and its value. The value is either a block indicator, as in
-# `command: >-` or `command: |`, or a plain scalar on the same line. Both forms
-# are in use, and a reader that knew only one would silently skip whole steps.
-_COMMAND_KEY_RE = re.compile(r"\s*command:\s*(\S.*?)\s*$")
-# A block scalar indicator: `>`, `>-`, `|`, `|+`.
-_BLOCK_INDICATOR_RE = re.compile(r"[>|][-+]?")
 # A repository script named by a manifest command.
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 # A command that leaves the prepared workspace for the checkout.
@@ -131,7 +124,7 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
 
 def _manifest_platforms() -> list[str]:
     """Every platform manifest, by the name its file carries."""
-    return sorted(path.stem for path in _CONFIG_DIR.glob("*.yml"))
+    return platform_names()
 
 
 def _prepare_steps() -> list[tuple[str, str, str]]:
@@ -181,39 +174,17 @@ def _copied_paths(run_script: str) -> list[str]:
 
 
 def _manifest_commands(platform: str) -> list[str]:
-    """The command of every entry in one platform's ``integration_tests`` block.
+    """The command of every group one platform runs, in the order it runs them.
 
-    Only that block is read. The neighbouring top-level ``setup_script`` key
-    names a script too, but that one is not executed from this workspace, so
-    requiring it to be copied would be wrong.
-
-    Both scalar forms are read. A step written as a plain ``command: python -m
-    pytest ...`` is as much of an instruction as the folded one beside it, and
-    reading only the folded form drops it -- which for the reachability check
-    below means a file named solely by such a step looks like an orphan.
+    Composed from the shared manifest rather than read out of the platform's
+    config, which is what the pipeline itself does: the loader job calls
+    ``compose_integration_manifest.py`` and hands the result to the hardware
+    job, so asking the same composer is what keeps this file about the commands
+    that actually run. ``setup_script`` lives in the same config and names a
+    script too, but the workflow runs that one outside this workspace, so it is
+    not among these.
     """
-    config = _CONFIG_DIR / f"{platform}.yml"
-    if not config.is_file():
-        return []
-    lines = config.read_text(encoding="utf-8").splitlines()
-    commands = []
-    in_tests = False
-    for index, line in enumerate(lines):
-        if _TOP_LEVEL_KEY_RE.match(line):
-            in_tests = line.startswith("integration_tests:")
-            continue
-        if not in_tests:
-            continue
-        key = _COMMAND_KEY_RE.fullmatch(line)
-        if key is None:
-            continue
-        value = key.group(1)
-        if not _BLOCK_INDICATOR_RE.fullmatch(value):
-            commands.append(value)
-            continue
-        body = _block_after(lines, index, _indent(line))
-        commands.append(" ".join(row.strip() for row in body if row.strip()))
-    return commands
+    return [group["command"] for group in composed_steps(platform)]
 
 
 def _script_references(platform: str) -> list[tuple[str, str]]:
@@ -270,16 +241,24 @@ def test_dcu_manifest_still_runs_a_repository_script():
     )
 
 
-def test_the_manifest_reader_sees_only_the_integration_tests_block():
-    """The block delimiter holds, so the check is not off by a section.
+def test_the_manifest_reader_reads_the_composed_groups():
+    """The reader asks the composer, so it sees the pipeline's own commands.
 
-    ``setup_script`` sits at the same level as ``integration_tests`` and names
-    a script the workspace is not expected to contain; if the reader leaked
-    into it, the DCU case below would judge a command nothing runs.
+    Two ways to get this wrong, and both are checked: a reader that silently
+    found nothing would make the checks below vacuous, and one that swept the
+    config file would collect the provisioning hook the workflow runs outside
+    this workspace -- and then hold a command to a workspace requirement
+    nothing has.
     """
     commands = _manifest_commands("dcu")
     assert commands, "the reader found no commands at all, which cannot be right"
-    assert not any("set_env_dcu.sh" in command for command in commands)
+    assert not any("set_env" in command for command in commands), commands
+    # The environment check is the group that replaced the per-platform
+    # heredocs, and it is composed rather than copied from the config.
+    assert any(
+        ".github/scripts/check_platform_environment.py" in command
+        for command in commands
+    ), commands
 
 
 @pytest.mark.parametrize(
@@ -643,12 +622,10 @@ def test_the_reachability_reader_sees_what_the_manifests_actually_ask_for():
     them -- or one that stopped seeing ``-m`` -- has to fail here rather than
     report a clean tree.
 
-    Both scalar forms have to be read too. ``command: python -m pytest ...`` on
-    one line is as much of an instruction as the folded ``>-`` form beside it,
-    and this reader used to know only the folded one -- which mattered as soon
-    as the check below started asking the same reader which files run, because a
-    file named solely by a plain-scalar step then reads as an orphan. The
-    Ascend manifest names ``test_factory_ops.py`` that way and in no other.
+    The Ascend manifest names ``test_factory_ops.py`` in a plain scalar entry
+    and in no other, so a reader that lost that entry -- or one that stopped
+    composing the manifest at all -- has to fail here rather than report a
+    clean tree.
     """
     commands = _manifest_commands("ascend")
     assert commands, "the reader found no command at all in the Ascend manifest"

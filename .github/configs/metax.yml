@@ -60,194 +60,28 @@ timeout_minutes: 60
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-metax
 
-integration_tests:
-  - name: Diagnose bundled MetaX ELF symbols (temporary)
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-      import sysconfig
-
-      package_root = Path(sysconfig.get_paths()["purelib"]) / "torch_fl"
-      symbol = "_ZN2at6native6flagos29GetFlagosDefaultCudaGeneratorEl"
-      libraries = [package_root / "lib" / "libtorch_fl.so"]
-      libraries.extend(sorted((package_root / "lib_maca").glob("*.so*")))
-
-      print(f"package_root={package_root}")
-      print(f"symbol={symbol}")
-      for library in libraries:
-          print(f"--- {library}")
-          print(f"exists={library.is_file()}")
-      PY
-      SYM='_ZN2at6native6flagos29GetFlagosDefaultCudaGeneratorEl'
-      ROOT="$(python -c 'import sysconfig; from pathlib import Path; print(Path(sysconfig.get_paths()["purelib"]) / "torch_fl")')"
-      for lib in "$ROOT/lib/libtorch_fl.so" "$ROOT"/lib_maca/*.so*; do
-        [[ -f "$lib" ]] || continue
-        echo "--- $lib"
-        nm -D --defined-only "$lib" 2>/dev/null | grep "$SYM" || true
-      done
-      for lib in "$ROOT/lib"/libflagos.so* "$ROOT/lib"/libtorch_bindings.so* \
-                 /opt/maca/lib/*.so* /opt/maca/tools/cu-bridge/lib/*.so*; do
-        [[ -f "$lib" ]] || continue
-        nm -D --defined-only "$lib" 2>/dev/null | grep "$SYM" && echo "provider=$lib" || true
-      done
-      readelf -d "$ROOT/lib/libtorch_fl.so" | grep 'NEEDED\|RPATH\|RUNPATH' || true
-
-  - name: Check isolated MetaX environment
-    command: |
-      python - <<'PY'
-      from pathlib import Path
-
-      import torch_fl
-      import torch
-
-      torch_fl_path = Path(torch_fl.__file__).resolve()
-      torch_path = Path(torch.__file__).resolve()
-
-      assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-      assert str(torch_path).startswith("/opt/venv/"), torch_path
-      assert "/opt/conda/" not in str(torch_path), torch_path
-      assert torch.cuda.is_available(), "MetaX devices are unavailable"
-      assert torch.cuda.device_count() == 8, torch.cuda.device_count()
-      assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-      assert torch_fl.flagos.device_count() == 8, torch_fl.flagos.device_count()
-
-      # The FlagGems group below cannot run without both halves: the generated
-      # kernels call `flag_gems.<name>` on the package-level namespace, and the
-      # Triton that compiles them has to be the vendor one carrying the `metax`
-      # backend. Failing here names the gap once instead of as 90 errors.
-      import triton
-      import flag_gems
-
-      assert "metax" in triton.backends.backends, sorted(triton.backends.backends)
-
-      print(f"PyTorch: {torch.__version__}")
-      print(f"torch: {torch_path}")
-      print(f"torch_fl: {torch_fl_path}")
-      print(f"Triton: {triton.__version__} ({triton.__file__})")
-      print(f"FlagGems: {flag_gems.__version__} ({flag_gems.__file__})")
-      print(f"MetaX devices: {torch.cuda.device_count()}")
-      print(f"flagos devices: {torch_fl.flagos.device_count()}")
-      PY
-
-  # Issue #391: the multi-device contract files sit at the top level of
-  # tests/integration/, where no manifest sweeps by default -- a file added there
-  # reached no CI job at all. Selected by marker rather than by filename so the
-  # same step works on every platform and the 2+-device guard stays in the test.
-  - name: Backend autoload contract
-    command: python -m pytest tests/unit/test_startup_subprocess.py -v --tb=short
-  - name: Multi-device contracts
-    command: >-
-      python -m pytest tests/integration/
-      -m "multi_device" -v -s --tb=short
-
-  # Issue #409: the remaining top-level files no manifest selected. They are
-  # single-device suites, so the multi_device sweep above does not reach them,
-  # and they are named here rather than selected by marker for the reason
-  # test_factory_ops.py is: each would need a marker invented for it, and a
-  # marker that exists only to be selected proves nothing about the file.
-  - name: Portable top-level contracts
-    command: >-
-      python -m pytest
-      tests/integration/test_clone_dispatch_case.py
-      tests/integration/test_dtype_coverage.py
-      tests/integration/test_ops.py
-      -v -s --tb=short
-
-  # Marker selection, not a file allowlist: the generic per-op dispatch files
-  # carry @pytest.mark.main_ops, and the platform gate (tests/integration/ops/
-  # conftest.py) already skips the cuda/metax/ascend/dcu-marked cases for a MetaX
-  # boxing build, so the remaining failures are real. The FlagGems-marked cases
-  # are excluded here and measured by the dedicated group below.
-  #
-  # Measured on the eight-device C550 host on 2026-09-15: 113 passed, 28 skipped,
-  # 1059 deselected, 1 xpassed.
-  #
-  # `and not flaggems` keeps the vendor/FlagGems group split: flaggems-marked
-  # cases are measured by the group below, not here (no switch exists any more
-  # to skip them -- see ops/conftest.py).
-  - name: Run operator tests (cuda boxing backend, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
-      -v -s --tb=short
-
-  # This group measures the @pytest.mark.flaggems cases: each one asserts that
-  # a FlagGems-marked op dispatches to whatever the conf routes it to, through
-  # tests/integration/ops/backend_conf.py:routed_backend -- never a hard-coded
-  # backend name, which would describe whichever platform the test was written
-  # on. That makes this group a routing measurement, not a FlagGems-only one:
-  # of the 13 cases, six are routed to the FlagGems Python path (abs, neg,
-  # silu, where.self, embedding, _softmax) and seven to the cuda boxing kernel
-  # (add.Tensor, bmm, cat, mean.dim, mm, mul.Tensor, sum.dim_IntList) because
-  # backends_metax.conf holds the triton-metax gaps off FlagGems. Nothing here
-  # is left on the FlagGems C++ path: embedding and _softmax used to be, and
-  # moved to the Python path because the wheel this job installs is the
-  # pure-Python one with no C++ half to serve that route. The group above
-  # excludes those cases for exactly that reason; this is where they are
-  # measured.
-  #
-  # Measured on the eight-device C550 host on 2026-09-15: 13 passed, 1206
-  # deselected, 1 xpassed in 251s.
-  - name: Run operator tests (FlagGems runtime path, main ops)
-    command: >-
-      python -m pytest tests/integration/ops/
-      -m "flaggems and main_ops" -v -s --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 30 passed, 7 deselected.
-  - name: Run MetaX low-precision matrix tests
-    command: >-
-      python -m pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py
-      -m "soft_lowp" -v -s --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 113 passed, 2 skipped,
-  # 1 deselected, 1 xpassed.
-  #
-  # `and not flaggems` here for the same reason as the vendor group: the
-  # multinomial case is measured in the FlagGems group, where it belongs.
-  - name: Run unified RNG tests
-    command: >-
-      python -m pytest tests/integration/ops/test_rng_dispatch.py
-      -m "main_ops and not flaggems" -v -s --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 46 passed.
-  - name: Run general factory and autograd tests
-    command: >-
-      python -m pytest
-      tests/integration/test_factory_ops.py
-      -v -s --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 27 passed.
-  - name: Unified AMP contract
-    command: >-
-      python -m pytest tests/integration/test_amp_contract.py
-      -v -m amp --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 12 passed.
-  - name: Unified math-bits contract
-    command: >-
-      python -m pytest tests/integration/test_math_bits_contract.py
-      -v -m math_bits --tb=short
-
-  # All 12 cases skip on MetaX: the suite's platform table gates them on
-  # "MetaX profiler trace export is currently unstable". The group is kept so the
-  # gate is exercised and its removal is what unblocks real coverage here.
-  - name: Unified profiler contract
-    command: >-
-      python -m pytest tests/integration/test_profiler_contract.py
-      -v -m profiler --tb=short
-
-  # Measured on the eight-device C550 host on 2026-09-15: 25 passed, 21 skipped,
-  # 1 failed -- test_torch_backends_entry_point_is_registered, which asserts an
-  # installed torch.backends entry point and cannot hold in this build-tree run
-  # (the same image gap set_env_musa.sh documents).
-  - name: Run torch.compile tests
-    command: python -m pytest tests/integration/test_compile.py -v --tb=short
-  - name: Runtime conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/runtime -v -s --tb=short
-
-  # Byte-identical on every platform: one shared FlagGems suite that asserts the
-  # routing contract and self-skips the execution cases a wheel without the
-  # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
-  # before it.
-  - name: FlagGems conformance (hardware-agnostic)
-    command: python -m pytest tests/integration/flaggems -v -s --tb=short
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# MetaX runs in an isolated /opt/venv with stock +cpu torch, and reads its
+# devices through BOTH surfaces: torch.cuda (the MACA shim) and the flagos
+# device. The FlagGems group cannot run without both halves -- the generated
+# kernels call flag_gems.<name>, and the Triton that compiles them has to be the
+# vendor one carrying the metax backend. `require_imports` is where that second
+# half is stated: the import itself is the check.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  torch_path_prefix: /opt/venv/
+  torch_path_forbidden:
+    - /opt/conda/
+  flagos_devices:
+    exactly: 8
+  cuda_available: true
+  cuda_devices:
+    exactly: 8
+  triton_backend: metax
+  require_imports:
+    - flag_gems
