@@ -74,6 +74,17 @@ NON_FLAGGEMS_ROUTES = ("cuda", "none", "")
 # here. A FlagGems route means "claim this op on PrivateUse1 so its kFlagGems
 # slot is reachable"; a vendor route needs no such claim, and emitting one for
 # it would hand the op a kFlagGems dispatcher the runtime cannot fill.
+#
+# THIS IS NOT A NO-OP. Do not delete it as an unused guard. Removing the
+# `tsingmicro` entry makes every `= tsingmicro` op count as a FlagGems route;
+# six of the fourteen view ops happen to have a kFlagGems dispatcher in
+# generated/flaggems_python_kernels.cc (alias, _conj, _unsafe_view,
+# slice.Tensor, transpose.int, unsqueeze), so the generator emits an m.impl()
+# for them and register_flaggems_tsingmicro.inc grows from 51 to 57 entries --
+# claims on exactly the kFlagGems slot that has no kernel behind it, which is
+# the defect this file's exclusion exists to prevent. (The file is byte-identical
+# across the routing commits only because the entry is present; compare
+# with/without the entry to see the delta, not one commit against the next.)
 VENDOR_ROUTES = {"tsingmicro": ("tsingmicro",)}
 
 HEADER = """\
