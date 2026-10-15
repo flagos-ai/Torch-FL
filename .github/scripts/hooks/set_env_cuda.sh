@@ -461,11 +461,27 @@ fi
 
 # Install the published FlagGems wheel after FlagTree. --no-deps keeps the
 # CPU-only torch ABI intact; install its non-torch dependencies explicitly.
-PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+# numpy is pinned <2 like every other hook pins it: the stock CPU torch wheel is
+# built against the NumPy 1.x ABI and 2.x breaks its C extensions at import
+# (.github/constraints.txt).
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy<2'
 install_flag_gems
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers
+  # The model-test stack, the same set every other platform's hook or config
+  # installs: pytest plus what the shared `inference` and `training` manifest
+  # entries need. Every platform loads Qwen3-0.6B through transformers off the
+  # same mount, so a platform that does not provision this fails at import
+  # rather than at an operator. The mount carries no tokenizer.json -- following
+  # the reason set_env_ppu.sh records -- so AutoTokenizer converts the slow
+  # sentencepiece form, which needs one of the two backends (sentencepiece here)
+  # and protobuf for the spm proto; tiktoken is the other backend. transformers
+  # stays in [4.51, 5): 4.51 is where Qwen3 model_type support landed, and 5.x
+  # breaks the slow-to-fast conversion even with sentencepiece installed. An
+  # unpinned install picks whichever of the two failure modes is currently
+  # latest on the index.
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry \
+    pytest "transformers>=4.51,<5" sentencepiece tiktoken protobuf
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
