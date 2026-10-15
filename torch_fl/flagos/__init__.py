@@ -255,6 +255,15 @@ def _lazy_init():
     # repaired rather than retried. See the function for the measurement.
     _patch_flaggems_tune_space()
 
+    # Two more of the same window and the same caching rule, but these are
+    # contract repairs rather than host-cost ones: FlagGems' `where` never grows
+    # an `out=` destination the way ATen's overload does, and its
+    # `slice_backward` walks its operand as if it were contiguous when autograd
+    # hands it an expanded or strided gradient. Both are reached through the
+    # cached callable, so both have to be in place before the first routed op.
+    _patch_flaggems_where_out()
+    _patch_flaggems_slice_backward()
+
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from
     # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
@@ -2531,6 +2540,144 @@ def _patch_flaggems_tune_space():
         run.__wrapped__ = original_run
         libtuner.run = run
         setattr(libtuner, _TUNE_SPACE_PATCHED, True)
+    except Exception:
+        pass
+
+
+def _patch_flaggems_where_out():
+    """Grow an ``out=`` destination the way ATen's ``where`` does, not reject it.
+
+    ``flag_gems.ops.where.where_self_out`` only computes the broadcast shape
+    when ``out is None``; when the caller supplies one it hands it straight to
+    ``where_inner(..., out0=out)``, and ``pointwise_dynamic.prepare_args``
+    validates that destination instead of resizing it. ATen's own overload does
+    the opposite: ``torch.where(cond, a, b, out=torch.empty(0))`` grows the
+    destination to the broadcast shape and returns it. On the FlagGems route the
+    same call raises
+
+        RuntimeError: out tensor at index 0 shape is invalid,
+        should be (2, 4) but is torch.Size([0])!
+
+    measured on the PPU lane of the unify-coverage run (job 116296487481,
+    ``tests/integration/ops/test_where_dispatch.py::TestWhereOutCorrectness::
+    test_out_grows_from_empty``). The destination is resized to the broadcast
+    shape before the call when the two differ, which is the same tensor ATen
+    would have handed the kernel. CPU reference: on torch 2.10.0 the ATen
+    spelling leaves ``out.shape == (2, 4)`` over an ``empty(0)`` destination.
+
+    The gap is not PPU's: the conf routes ``where.self_out`` to FlagGems on
+    ``cuda``, ``dcu``, ``metax`` and ``ppu`` alike, so every one of them fails
+    the case. MUSA met it first and moved the overload off FlagGems onto a
+    generated native kernel (see the MUSA entry in
+    ``docs/reference/operator-support.md``), leaving the same gap latent on the
+    four FlagGems-first confs; this fixes the shared cause once instead of
+    pinning each conf away from FlagGems in turn.
+
+    Gated on ``_conf_routes_to_flaggems`` rather than on a platform name: the
+    wrapper is only ever reached through the generated bridge for an op whose
+    route *is* FlagGems, so a conf that sends the overload elsewhere (``musa``,
+    ``gcu``, ``ascend``, ``kunlunxin``) never calls it. Best-effort, like the
+    patches around it: this must not be able to take down device init.
+    """
+    try:
+        from .. import _conf_routes_to_flaggems
+
+        if not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        original = getattr(flag_gems, "where_self_out", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_grows_where_out", False):
+            return
+
+        def where_self_out(condition, self, other, out=None):
+            if isinstance(out, torch.Tensor):
+                # ATen broadcasts all three operands, not just the ones that
+                # are tensors, so a scalar-only spelling still has a shape.
+                shapes = [
+                    tuple(operand.shape)
+                    for operand in (condition, self, other)
+                    if isinstance(operand, torch.Tensor)
+                ]
+                try:
+                    want = torch.broadcast_shapes(*shapes) if shapes else None
+                except Exception:
+                    # Not broadcastable: ATen's own overload raises the same
+                    # error out of the original, so let it.
+                    want = None
+                if want is not None and tuple(out.shape) != tuple(want):
+                    out.resize_(want)
+            return original(condition, self, other, out)
+
+        where_self_out.__wrapped__ = original
+        where_self_out._torch_fl_grows_where_out = True
+        _rebind_flag_gems_name("where_self_out", original, where_self_out)
+    except Exception:
+        pass
+
+
+def _patch_flaggems_slice_backward():
+    """Give FlagGems' ``slice_backward`` a contiguous operand to walk.
+
+    ``slice_backward_kernel`` loads ``grad_output_ptr + offsets`` and derives the
+    destination index with
+    ``outer_idx * dim_size * inner + dim_index * inner + inner_idx``, both of
+    which assume the operand's storage is exactly ``numel`` contiguous elements.
+    It never consults a stride, so anything else is read as the wrong element --
+    or past the end of the storage entirely.
+
+    The gradients autograd hands this op are not contiguous, and the common
+    spelling is not merely strided: ``(x[:, 2:6]).sum().backward()`` arrives as
+    an *expanded* expansion of a single element -- shape ``(4, 4)`` with stride
+    ``(0, 0)`` over a one-element storage (verified against torch 2.10.0 on the
+    CPU), so ``numel`` is 16 while the allocation holds 1 and 15 of the 16 reads
+    are out of bounds. ``torch.narrow(x.t(), 0, 1, 5)`` arrives as shape
+    ``(5, 4)``, stride ``(1, 5)``, where the storage is large enough to be read
+    and the kernel silently returns the wrong gradient -- the 18-of-32 mismatch
+    the PPU lane of the unify-coverage run reports for
+    ``tests/integration/ops/test_narrow_dispatch.py::TestNarrowAutograd::
+    test_narrow_backward_non_contiguous`` (job 116296487481), and the reason the
+    three ``TestSliceBackwardCorrectness`` cases in
+    ``tests/integration/ops/test_slice_backward_dispatch.py`` are marked xfail.
+
+    Materialising the operand with ``.contiguous()`` when it is not contiguous
+    is what the kernel was written against, and it reproduces ATen's
+    ``slice_backward`` element for element on all three layouts above
+    (``index_copy_`` reference). Contiguous callers -- ``x[:, 1:4]``,
+    ``x[:, ::3]`` -- are left alone and pay nothing.
+
+    Gated on ``_conf_routes_to_flaggems`` rather than on a platform name: the
+    overload is FlagGems-routed on ``cuda``, ``musa``, ``ascend``, ``gcu`` and
+    ``ppu``, and pinned to ``cuda`` on ``dcu``/``metax`` and to ``none`` on
+    ``kunlunxin``, where the wrapper is never reached. Best-effort, like the
+    patches around it: this must not be able to take down device init.
+    """
+    try:
+        from .. import _conf_routes_to_flaggems
+
+        if not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        original = getattr(flag_gems, "slice_backward", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_contiguous_slice_backward", False):
+            return
+
+        def slice_backward(grad_output, input_sizes, dim, start, end, step):
+            if (
+                isinstance(grad_output, torch.Tensor)
+                and not grad_output.is_contiguous()
+            ):
+                grad_output = grad_output.contiguous()
+            return original(grad_output, input_sizes, dim, start, end, step)
+
+        slice_backward.__wrapped__ = original
+        slice_backward._torch_fl_contiguous_slice_backward = True
+        _rebind_flag_gems_name("slice_backward", original, slice_backward)
     except Exception:
         pass
 
