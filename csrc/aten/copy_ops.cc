@@ -262,12 +262,17 @@ void CrossDeviceMemcpy(
   SyncPeerCopyVisibility(src, dst);
 }
 
+#if defined(FLAGOS_BOXING_BUILD)
 // The maca CUDA copy kernel (reached via DeviceBoxingGuard + at::native::copy_)
 // has no UInt16/UInt32/UInt64 case in its dtype dispatch, so any dtype *cast*
 // to or from those types raises `"copy_" not implemented for 'UInt32'`. The
 // host copy kernel supports the full set, so route those casts through a CPU
 // round-trip instead. Same-dtype copies are unaffected: they take the direct
 // memcpy path and never reach a dtype dispatch.
+//
+// Only the boxing arms ask this question: without the boxing kernels every copy
+// goes through strided_copy_cast_via_cpu below, which is a host round-trip
+// already.
 bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
   if (src == dst) {
     return false;
@@ -277,6 +282,7 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
   };
   return is_unsigned(src) || is_unsigned(dst);
 }
+#endif
 
 // Copy `src` (a flagos device tensor) into `dst` (a flagos device tensor),
 // casting dtype and honoring both tensors' strides, via a host round-trip.
@@ -414,6 +420,7 @@ at::Tensor _copy_from(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
+#if defined(FLAGOS_BOXING_BUILD)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
       // strided copy kernel (handles strides, dtype casts on-device). The
       // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
@@ -424,6 +431,13 @@ at::Tensor _copy_from(
         DeviceBoxingGuard guard(self, dst);
         at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
       }
+#else
+      // CUDA platform without the boxing kernels: the native CUDA strided copy
+      // kernel is not in this wheel (the CUDA DispatchStub is empty), so every
+      // strided or dtype-casting copy goes through host memory, which handles
+      // strides, storage offsets and dtype casts in one pass.
+      strided_copy_cast_via_cpu(self, dst);
+#endif
 #else
       // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy and
       // Kunlunxin via the XPU op library's own strided copy; all honor the src
@@ -542,9 +556,14 @@ at::Tensor _copy_from(
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS)
       at::native::flagos::_copy_from(tmp, dst, false);
-#else
+#elif defined(FLAGOS_BOXING_BUILD)
       DeviceBoxingGuard guard(tmp, dst);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+#else
+      // CUDA platform without the boxing kernels: there is no native CUDA copy
+      // kernel to scatter `tmp` into the strided `dst` with, so take the flagos
+      // copy path, which gathers through host memory.
+      at::native::flagos::_copy_from(tmp, dst, false);
 #endif
     }
   } else if (self.is_privateuseone() && dst.is_cpu()) {
@@ -583,9 +602,13 @@ at::Tensor _copy_from(
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS)
       at::native::flagos::_copy_from(tmp, dst, false);
-#else
+#elif defined(FLAGOS_BOXING_BUILD)
       DeviceBoxingGuard guard(tmp, dst);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+#else
+      // CUDA platform without the boxing kernels: as above, scatter through the
+      // flagos copy path instead of the absent native CUDA copy kernel.
+      at::native::flagos::_copy_from(tmp, dst, false);
 #endif
     }
   } else {
@@ -798,26 +821,27 @@ at::Tensor _to_copy(
         }
       }
 #else
+      result = at::empty(
+          self_contig.sizes(),
+          self_contig.options()
+              .dtype(dtype)
+              .device(c10::Device(c10::kPrivateUse1, device_index)));
+#if defined(FLAGOS_BOXING_BUILD)
       // CUDA platform: use DeviceBoxingGuard + CUDA TensorIterator copy kernel
       // for dtype cast on-device, avoiding costly CPU round-trip. The native
       // copy kernel has no UInt16/UInt32/UInt64 case, so those casts take the
       // host round-trip instead.
       if (cast_needs_cpu_roundtrip(self_contig.scalar_type(), dtype)) {
-        result = at::empty(
-            self_contig.sizes(),
-            self_contig.options()
-                .dtype(dtype)
-                .device(c10::Device(c10::kPrivateUse1, device_index)));
         strided_copy_cast_via_cpu(self_contig, result);
       } else {
-        result = at::empty(
-            self_contig.sizes(),
-            self_contig.options()
-                .dtype(dtype)
-                .device(c10::Device(c10::kPrivateUse1, device_index)));
         DeviceBoxingGuard guard(self_contig, result);
         at::native::copy_(result, self_contig, false);
       }
+#else
+      // CUDA platform without the boxing kernels: there is no native CUDA
+      // TensorIterator cast to dispatch to, so cast through host memory.
+      strided_copy_cast_via_cpu(self_contig, result);
+#endif
 #endif
     } else {
       result = at::empty(
