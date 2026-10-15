@@ -1965,9 +1965,6 @@ def _register_compile_backend():
         from torch_fl.compile.triton_libdevice import (
             patch_triton_libdevice_module_map,
         )
-        from torch_fl.compile.triton_byte_loads import (
-            patch_triton_byte_load_workarounds,
-        )
         from torch_fl.compile.triton_resource_limits import (
             patch_triton_resource_limit_errors,
         )
@@ -1978,7 +1975,6 @@ def _register_compile_backend():
         register_flagos_codegen()
         patch_triton_libdevice_module_map()
         patch_triton_resource_limit_errors()
-        patch_triton_byte_load_workarounds()
 
         # The default `backend="inductor"` path bypasses `flagos_compile_backend`
         # entirely, and a GCU300 64-bit kernel kills the process from inside the
