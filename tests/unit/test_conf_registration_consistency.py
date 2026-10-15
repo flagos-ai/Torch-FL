@@ -94,7 +94,12 @@ PLATFORM_REGISTRATION = {
         "generated/register.inc",
         "generated/register_flaggems_tsingmicro.inc",
     ],
-    "mps": [],  # MPS registers no compute ops yet (register.cc USE_MPS arm)
+    # MPS is a native vendor backend: register.cc's USE_MPS arm includes the
+    # codegen'd apple registration, which claims only the ops with a MPSGraph
+    # kernel (the `unary`, `binary`, `binary_scalar` and `reduce` categories so
+    # far).  Note this is a PrivateUse1-dispatched include, not built-in MPS --
+    # so the conf routes those ops to ``mps``, and the rest to ``none``.
+    "mps": ["backends/mps/generated/mps_register.inc"],
 }
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in
@@ -230,7 +235,9 @@ def test_every_route_uses_an_allowed_backend_key(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
+@pytest.mark.parametrize(
+    "platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar", "mps"]
+)
 def test_vendor_routes_are_registered(platform):
     """Every op routed to ``<vendor>`` must be in the platform's registration set.
 
@@ -251,7 +258,9 @@ def test_vendor_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
+@pytest.mark.parametrize(
+    "platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar", "mps"]
+)
 def test_accelerated_routes_are_registered(platform):
     """Every non-``none`` route must be an op the platform registers.
 
@@ -272,7 +281,9 @@ def test_accelerated_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar"])
+@pytest.mark.parametrize(
+    "platform", ["musa", "gcu", "ascend", "kunlunxin", "iluvatar", "mps"]
+)
 def test_registered_ops_are_never_left_at_none(platform):
     """A registered op left at ``none`` sends a real kernel to ``cpu_fallback``.
 
@@ -321,15 +332,29 @@ def test_bpu_conf_is_empty():
 
 
 @pytest.mark.anyplatform
-def test_mps_conf_is_empty():
-    """MPS registers no compute ops yet, so its conf must list no routes: every
-    op falls through to ``cpu_fallback`` until the MPSGraph-first operator layer
-    lands. See docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md.
+def test_mps_conf_is_a_generated_full_coverage_conf():
+    """``backends_mps.conf`` is a generated full-coverage conf like the vendor
+    backends: it lists every routable op exactly once, routing only the
+    MPSGraph-kernel cohort to ``mps`` and the rest to ``none``.  See
+    docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md.
     """
     routes = _parse_conf(CONF_DIR / "backends_mps.conf")
-    assert not routes, (
-        f"backends_mps.conf lists {len(routes)} routes but MPS registers none"
+    assert routes, "backends_mps.conf lists no routes"
+    assert set(routes.values()) <= {"mps", "none"}, (
+        "backends_mps.conf may only route ops to 'mps' or 'none'"
     )
+    # One op per MPSGraph category the codegen emits (unary, binary,
+    # binary_scalar, reduce). A category whose entry silently dropped would leave
+    # its ops on cpu_fallback and be invisible in a count-only check.
+    for op in (
+        "abs",
+        "add.Tensor",
+        "sub.Scalar",
+        "mul.Tensor",
+        "mean.dim",
+        "sum.dim_IntList",
+    ):
+        assert routes.get(op) == "mps", f"the {op} kernel must be routed to mps"
 
 
 @pytest.mark.anyplatform
@@ -420,7 +445,11 @@ def test_conf_route_counts_are_stable():
         # the native .inc, since a second m.impl in the same PrivateUse1 body is a
         # duplicate-registration error. See _derived_iluvatar_counts().
         "iluvatar": _derived_iluvatar_counts(),
-        "mps": {},
+        # MPS is a native vendor backend at stage 2: the codegen'd
+        # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
+        # ``binary_scalar`` and ``reduce`` categories generate (9 ops so far), so
+        # the conf routes those to ``mps`` and every other op to ``none``.
+        "mps": {"mps": 9, "none": 2028},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2},
     }
     for platform, exp in expected.items():

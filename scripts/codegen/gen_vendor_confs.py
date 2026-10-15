@@ -146,6 +146,14 @@ VENDORS = {
     # is fixed (or the SDK ships a PrivateUse1-named runtime), kunlunxin has a
     # single native .inc and no extra registration file.
     "kunlunxin": ("backends/kunlunxin/generated/kunlunxin_register.inc", ()),
+    # Apple Silicon (Metal). Like kunlunxin this is a native backend with a
+    # single registration .inc and no FlagGems file to fold in: no Metal
+    # FlagTree/Triton line exists, so backends_mps.conf routes the ops
+    # backends/mps/generated/mps_register.inc claims to the `mps` kernel and
+    # everything else to `none` (cpu_fallback). After stage 2 that is the
+    # `unary`, `binary`, `binary_scalar` and `reduce` categories; see
+    # scripts/codegen/codegen_mps.py.
+    "mps": ("backends/mps/generated/mps_register.inc", ()),
     # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
     # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
     # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where

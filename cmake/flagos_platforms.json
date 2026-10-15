@@ -440,9 +440,9 @@
         "are all off (there is no Metal Triton line to build against).",
         "csrc/runtime/accelerator/mps/ is Objective-C++ (OBJCXX) because Metal is an",
         "Objective-C API; the runtime links -framework Metal/-framework Foundation.",
-        "FLAGOS_BUILD_VENDOR is ON so the stage-1 operator tree (backends/mps/, an",
-        "MPSGraph-first wrapper set) compiles once it exists; with no such directory",
-        "yet it is a no-op, exactly as for bpu."
+        "FLAGOS_BUILD_VENDOR is ON so the operator tree (backends/mps/, an",
+        "MPSGraph-first wrapper set) compiles; it is Objective-C++ and links",
+        "MetalPerformanceShadersGraph on top of the runtime's Metal/Foundation."
       ],
       "project_languages": ["OBJCXX", "CXX", "C"],
       "runtime_dir": "mps",

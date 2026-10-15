@@ -25,6 +25,18 @@ file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
 )
 
+# Apple Metal. The operator layer under aten/backends/mps/ is Objective-C++
+# (.mm) because MPSGraph is an Objective-C API, and the globs above only pick up
+# *.cc/*.cu. Objective-C++ is an Apple-only language, so this is gated on the
+# platform rather than run for every build -- exactly as the runtime's own .mm
+# glob is (csrc/runtime/accelerator/CMakeLists.txt).
+if(FLAGOS_ACCELERATOR STREQUAL "mps")
+  file(GLOB_RECURSE MPS_ATEN_OBJCXX_SOURCES
+      "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/mps/*.mm"
+  )
+  list(APPEND SOURCE_FILES ${MPS_ATEN_OBJCXX_SOURCES})
+endif()
+
 # Exclude runtime/accelerator (built separately as subdirectory)
 list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/.*")
 # stream_api is built as a separate shared lib
@@ -577,9 +589,25 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
   # Apple Metal. The operator layer (backends/mps/, an MPSGraph-first wrapper
-  # set) is a later stage; with no such directory yet there is nothing vendor-
-  # specific to link here, and every op reaches cpu_fallback.
+  # set) is Objective-C++ and links the Metal frameworks on top of the
+  # Metal/Foundation pair the runtime already links: MPSNDArray (the
+  # offset-capable tensor description) lives in MetalPerformanceShaders, and the
+  # graph itself in MetalPerformanceShadersGraph. All four ship with the macOS
+  # SDK, so there is no vendor toolkit to find.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_MPS_KERNEL is not needed: register.cc gates the m.impl subset on
+    # USE_MPS alone, which the platform table sets for every mps build.
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    # MPSNDArray/MPSNDArrayDescriptor (the offset-capable tensor description
+    # the marshalling layer uses) live in MetalPerformanceShaders, while the
+    # graph itself is MetalPerformanceShadersGraph. Both are needed.
+    find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
+    find_library(MPSGRAPH_FRAMEWORK MetalPerformanceShadersGraph REQUIRED)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${MPS_FRAMEWORK} ${MPSGRAPH_FRAMEWORK})
+  endif()
 else()
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 endif()

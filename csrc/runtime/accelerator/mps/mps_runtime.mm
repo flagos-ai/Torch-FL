@@ -23,6 +23,7 @@
 // +1 object stored in those tables is retained on the way in and released on the
 // way out.
 
+#include "mps.h"
 #include "mps_runtime.h"
 
 #include <mutex>
@@ -164,3 +165,13 @@ EventState* AsEvent(Event_t event) {
 }
 
 } // namespace torch_fl_mps
+
+// Non-contract helper for the operator layer. Declared in mps.h. The operator
+// layer is Objective-C++ and could reach AsStream itself if it included this
+// header, but it lives in a different component (csrc/aten/) that must not
+// depend on the runtime's internal header, so the one call it needs is exported
+// through the same side door as FlagosMPSDeviceMemoryInfo.
+extern "C" void* FlagosMPSCommandQueue(Stream_t stream) {
+  torch_fl_mps::StreamState* state = torch_fl_mps::AsStream(stream);
+  return state == nullptr ? nullptr : (void*)state->queue;
+}

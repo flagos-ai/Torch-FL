@@ -91,6 +91,13 @@ jobs:
           # toolkit and no built torch_fl -- only the CPU torchgen above.
           echo "=== codegen_iluvatar.py --check ==="
           python3 scripts/codegen/codegen_iluvatar.py --check
+          # The Apple Metal (MPSGraph) operator layer. Reads only committed
+          # sources (generated/register.inc to cross-check the op names) and
+          # imports codegen_ops for the dispatcher naming, so --check needs no
+          # vendor toolkit, no macOS and no built torch_fl -- only the torchgen
+          # that ships with the CPU torch installed above.
+          echo "=== codegen_mps.py --check ==="
+          python3 scripts/codegen/codegen_mps.py --check
 
       - name: Run conf/registration consistency tests
         run: |

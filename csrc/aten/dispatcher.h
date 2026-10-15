@@ -133,6 +133,7 @@ class Dispatcher {
       case Backend::kKunlunxin:     kunlunxin_fn_ = fn;        break;
       case Backend::kIluvatar:      iluvatar_fn_ = fn;         break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
+      case Backend::kMps:           mps_fn_ = fn;              break;
       // Neither names a kernel set, so there is no slot to fill. kNone is the
       // conf's "no accelerated impl here" verdict; kUncached is the sentinel
       // operator() uses before it has resolved the op. Listed explicitly rather
@@ -226,6 +227,7 @@ class Dispatcher {
     if (kunlunxin_fn_)   return {kunlunxin_fn_,   Backend::kKunlunxin};
     if (iluvatar_fn_)    return {iluvatar_fn_,    Backend::kIluvatar};
     if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
+    if (mps_fn_)         return {mps_fn_,         Backend::kMps};
     if (cuda_fn_)        return {cuda_fn_,        Backend::kCuda};
     return {nullptr, Backend::kNone};
   }
@@ -295,6 +297,7 @@ class Dispatcher {
       case Backend::kGcu:           return gcu_fn_;
       case Backend::kKunlunxin:     return kunlunxin_fn_;
       case Backend::kIluvatar:      return iluvatar_fn_;
+      case Backend::kMps:           return mps_fn_;
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -364,6 +367,7 @@ class Dispatcher {
       case Backend::kGcu:         return "vendor";
       case Backend::kKunlunxin:   return "vendor";
       case Backend::kIluvatar:    return "vendor";
+      case Backend::kMps:         return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -386,6 +390,7 @@ class Dispatcher {
       case Backend::kKunlunxin:     name = "kunlunxin"; break;
       case Backend::kIluvatar:      name = "iluvatar"; break;
       case Backend::kTileOps:       name = "tileops"; break;
+      case Backend::kMps:           name = "mps"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }
@@ -408,6 +413,7 @@ class Dispatcher {
   FnPtr kunlunxin_fn_      = nullptr;
   FnPtr iluvatar_fn_       = nullptr;
   FnPtr tileops_fn_        = nullptr;
+  FnPtr mps_fn_            = nullptr;
 };
 
 namespace detail {

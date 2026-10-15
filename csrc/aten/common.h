@@ -32,6 +32,7 @@ enum class Backend {
   kKunlunxin,
   kIluvatar,
   kTileOps,
+  kMps,            // Apple Metal / MPSGraph (conf key: mps)
   // No accelerated implementation on this platform. The op is deliberately not
   // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
   // arriving here with an empty kernel slot. Recorded explicitly (rather than

@@ -185,6 +185,30 @@ class MemoryManager {
     return Success;
   }
 
+  // The MTLBuffer backing `ptr` and how far into it `ptr` starts. Returns
+  // nullptr for a host allocation, a pointer this runtime never handed out, or
+  // one whose allocation has since been freed -- the operator layer treats all
+  // three the same way (fall back to a CPU round-trip) rather than guessing.
+  //
+  // Non-const only because the registry scan shares getBlockInfoNoLock, which
+  // reads m_registry under m_mutex; the lookup itself mutates nothing.
+  void* bufferForPointer(const void* ptr, size_t* byteOffset) {
+    if (!ptr) {
+      return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const Block* info = getBlockInfoNoLock(ptr);
+    if (info == nullptr || info->buffer == nil) {
+      return nullptr;
+    }
+    if (byteOffset != nullptr) {
+      const char* p = static_cast<const char*>(ptr);
+      const char* base = static_cast<const char*>(info->buffer.contents);
+      *byteOffset = static_cast<size_t>(p - base);
+    }
+    return (void*)info->buffer;
+  }
+
  private:
   MemoryManager() = default;
 
@@ -248,6 +272,11 @@ Error_t MemcpyAsync(
 
 Error_t PointerGetAttributes(PointerAttributes* attributes, const void* ptr) {
   return MemoryManager::getInstance().getPointerAttributes(attributes, ptr);
+}
+
+// Non-contract helper for the operator layer. Declared in mps.h.
+extern "C" void* FlagosMPSBufferForPointer(const void* ptr, size_t* byteOffset) {
+  return MemoryManager::getInstance().bufferForPointer(ptr, byteOffset);
 }
 
 Error_t Memset(void* devPtr, int value, size_t count) {

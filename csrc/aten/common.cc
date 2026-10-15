@@ -123,6 +123,8 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kMusa;
   } else if (val == "tileops") {
     *out = Backend::kTileOps;
+  } else if (val == "mps") {
+    *out = Backend::kMps;
   } else if (val == "flaggems_cpp" || val == "flagos") {
     *out = Backend::kFlagGemsCpp;
   } else if (val == "flaggems" || val == "flaggems_python" ||
@@ -149,6 +151,7 @@ const char* BackendName(Backend b) {
     case Backend::kKunlunxin:    return "kunlunxin";
     case Backend::kIluvatar:     return "iluvatar";
     case Backend::kTileOps:      return "tileops";
+    case Backend::kMps:          return "mps";
     case Backend::kNone:         return "none";
     default:                     return "unknown";
   }

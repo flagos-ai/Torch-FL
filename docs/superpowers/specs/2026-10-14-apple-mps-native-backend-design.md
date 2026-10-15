@@ -180,6 +180,23 @@ The recommended path is C first (it is stage 0 of both A and B and is verifiable
 end to end on any Apple Silicon machine), then A, widening the op set by category
 from `unary` outward and filling gaps with B.
 
+**Marshalling contract (measured on an M5).** MPSNDArray is not a dense view of a
+buffer once it has more than one dimension: it rounds the stride between rows up
+to 16 bytes. A `(4, 5)` float32 operand, whose rows are 20 bytes, is therefore
+read as four 32-byte rows and every row after the first comes from the wrong
+offset — under the first implementation row 1 compared as
+`[0, 0, 0, 0.4681, 0.1577]` against a torch row of
+`[-1.5551, -0.3414, 1.853, 0.4681, -0.1577]`, and the same arithmetic is what
+`initWithBuffer:offset:descriptor:` reports as "buffer is not large enough. Must
+be 128 bytes" when a small buffer is passed. The pitch cannot be corrected from
+the outside: `rowBytes` is not a public property of `MPSNDArrayDescriptor` and
+reads back 0. Buffers are therefore always described to MPSGraph as a 1-D array
+of `numel` elements and the aten shape is applied inside the graph, where a
+reshape is a metadata operation (`MpsFlatPlaceholder`, `MpsReshape`,
+`MpsFlatten` in `mps_common.h`). Stages 2 and 3 inherit the rule, and
+`tests/integration/ops/test_mps_unary.py` pins it on the shapes -- and the
+aligned controls -- that an aten-shaped descriptor would get wrong.
+
 ## 7. Staged delivery
 
 | Stage | Content | Exit criteria |
@@ -192,6 +209,28 @@ from `unary` outward and filling gaps with B.
 
 Each stage ends with a green build and a measured result; operator support is
 recorded only from measurements, per CLAUDE.md.
+
+Status: stage 0 landed with the `mps` platform row; stage 1 landed with `abs`
+as the first `unary` op (`csrc/aten/backends/mps/`, `scripts/codegen/codegen_mps.py`,
+`backends_mps.conf` routing `abs` to `mps`), verified on an M-series host with
+`tests/integration/ops/test_mps_unary.py` (matches CPU across f32/f16/bf16 and
+the integer dtypes at row widths that are not multiples of 16 bytes as well as
+aligned ones, bool declined to the same `NotImplementedError` as CPU).
+Stage 2 landed with the `binary`, `binary_scalar` and `reduce` categories --
+`add`/`sub`/`mul` over two tensors and over a tensor and a host scalar, and
+`sum.dim_IntList`/`mean.dim` -- verified with
+`tests/integration/ops/test_mps_binary.py` and
+`tests/integration/ops/test_mps_reduce.py` (CPU-equal across f32/f16/bf16 and
+the integer dtypes at unaligned row widths, broadcasting inside the graph,
+`alpha` folded in as a constant, and the declined cases -- mixed dtypes,
+fractional scalars and alphas on integral operands, int64 beyond +/-2^53,
+integer/bool/float64 reductions, empty operands, repeated or out-of-range axes
+-- taking the annotated CPU round-trip). `max.dim`/`min.dim` stay on the
+fallback: MPSGraph's argmax selector has no documented tie-break and the
+reference has an answer. Stages 3-4 are open. There is still no CI job: the lane
+below needs a
+GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
+yet use, so the operator suite is run by hand until that lands.
 
 ## 8. Conformance surface (files added or changed)
 
@@ -211,6 +250,8 @@ recorded only from measurements, per CLAUDE.md.
 | `torch_fl/_platform.py`, `torch_fl/accelerator/mps/` | detection + compat |
 | `setup.py` | `mps` arm |
 | `tests/integration/test_mps_runtime.py` | smoke test, `@pytest.mark.mps` |
+| `tests/integration/ops/test_mps_unary.py` | stage-1 unary op suite, `@pytest.mark.mps` |
+| `tests/integration/ops/test_mps_binary.py`, `test_mps_reduce.py` | stage-2 elementwise and reduction suites, `@pytest.mark.mps` |
 | `tests/unit/test_platform_capability_matrix.py` inventory lines | add `mps` to the three inventories |
 | `docs/reference/{compatibility,platform-capability-matrix,operator-support}.md`, `docs/vendors/mps/installation.md` | platform rows and guide |
 | `.github/configs/mps.yml` + workflow job | CI on a GitHub-hosted `macos-14`/`macos-15` arm64 runner |
