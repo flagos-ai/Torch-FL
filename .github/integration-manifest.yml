@@ -72,6 +72,7 @@ steps:
   #   cuda_version                                torch.version.cuda, or null
   #   torch_path_prefix / torch_path_forbidden    where torch must (not) live
   #   require_package_files / forbid_package_files  vendor bundles in the wheel
+  #   require_build_kernels / forbid_build_kernels  kernel sets in the build record
   #   flagos_devices / cuda_devices               {at_least|more_than|exactly: N}
   #   cuda_available                              torch.cuda must see devices
   #   triton_backend / flaggems_vendor            the vendor the stack resolves
@@ -124,19 +125,21 @@ steps:
   # flaggems-marked cases are measured by the group below, not here (no switch
   # exists any more to skip them -- see tests/integration/ops/conftest.py).
 
-  # CUDA: issue #409. `cuda` is in the accepting half because the sweep required
-  # `main_ops`, so a test whose only selecting mark is `cuda` -- every
-  # `*_matches_cuda_ref` case, and the whole of ops/test_full_cuda_coverage.py --
-  # was collected by this job and then deselected. Collection is the check:
-  # `-m "(cuda or main_ops) ..." --collect-only -q` selects 400 of the 1446
-  # ops/ cases where the old expression selected 132, in 21 files the old one did
-  # not reach.
+  # CUDA: issue #409 put `cuda` in the accepting half, because a test whose only
+  # selecting mark was `cuda` -- every `*_matches_cuda_ref` case, and the whole
+  # of ops/test_full_cuda_coverage.py -- was collected by this job and then
+  # deselected. It is gone again because this lane builds the default wheel,
+  # which has no CUDA boxing kernels: ops/conftest.py skips exactly those cases
+  # here, so keeping the mark in the expression would select a set that reports
+  # as skipped instead of adding a measurement. The cases that assert `-> cuda`
+  # routing are the ones the boxing-off wheel cannot answer -- that gap is what
+  # the lane's follow-up re-wires to a vendor or FlagGems route.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [cuda]
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(cuda or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # DCU: issue #409. `dcu` is in the accepting half because the sweep required

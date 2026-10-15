@@ -313,6 +313,10 @@ export FLAGOS_ACCELERATOR=dcu
 # the bundle and asserts libtorch_hip.so/libc10_hip.so. Boxing is off by default
 # for every accelerator now (cmake/flagos_platforms.json), so the lane opts in
 # explicitly; otherwise the wheel would compile no CUDA boxing kernels.
+# The CUDA lane no longer opts in -- it measures the FlagGems-primary default a
+# `pip install` gets. DCU keeps the vendor path until the ops backends_dcu.conf
+# routes to `cuda` have a FlagGems or DTK-native route of their own; flipping it
+# first would leave those ops on cpu_fallback.
 export FLAGOS_BUILD_BOXING=1
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is

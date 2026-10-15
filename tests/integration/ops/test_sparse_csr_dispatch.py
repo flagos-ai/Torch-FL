@@ -48,14 +48,22 @@ import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
-# The accelerators whose libtorch does not carry the cuSPARSE symbols or the
-# DispatchStub CUDA slot the guarded registrations need.  This mirrors the
-# `#if !defined(USE_ASCEND) && ...` guard in csrc/aten/sparse_csr_ops.cc; the
-# C++ side is the source of truth and this only keeps the two in step.
-NOT_CUDA_BOXING = frozenset({"ascend", "gcu", "musa", "bpu", "kunlunxin"})
+# The guarded registrations need two things the default wheel does not have:
+# an accelerator whose libtorch carries the cuSPARSE symbols and the
+# DispatchStub CUDA slot, and the boxing build switch.  The `#if !defined(
+# USE_ASCEND) && ... && defined(FLAGOS_BOXING_BUILD)` guard in
+# csrc/aten/sparse_csr_ops.cc is the source of truth; this only keeps the test
+# in step with it.
+#
+# The switch half is read from the build record rather than inferred from the
+# accelerator name, because the two stopped being interchangeable when boxing
+# became an opt-in (#520): a FlagGems-primary cuda wheel compiles this block no
+# more than the MUSA one does, and naming a platform list here would have
+# claimed otherwise.
+HAS_CUDA_BOXING = "boxing" in torch_fl._env.build_kernels()
 
 requires_cuda_boxing = pytest.mark.skipif(
-    torch_fl._build_accelerator() in NOT_CUDA_BOXING,
+    not HAS_CUDA_BOXING,
     reason="csrc/aten/sparse_csr_ops.cc compiles this for CUDA-boxing only",
 )
 

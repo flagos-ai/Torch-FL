@@ -77,6 +77,15 @@ build opts into boxing.
 
 ## Known gaps
 
+- **CUDA** is where the gap between the conf and the default wheel is widest.
+  `backends_cuda.conf` routes 416 ops to `flaggems` and 1618 to `cuda`, and the
+  default wheel compiles the generated FlagGems register list only, so those
+  1618 ops are unregistered on PrivateUse1 and reach `cpu_fallback`. Of them,
+  247 are FlagGems-capable on at least one of `metax`/`dcu`/`ppu` (251 counting
+  `tsingmicro` and `iluvatar`) and are the cheap re-wire candidates; the other
+  1367 have no FlagGems route on any platform and need a native CUDA backend
+  (cuBLAS/cuDNN/ATen CUDA) or an opt-in boxing build. The CUDA lane builds and
+  tests the default wheel, so a case asserting a `-> cuda` route skips there.
 - **BPU** has no aten backend and an empty conf: its unit of execution is a whole
   compiled graph, so eager ops reach `cpu_fallback` and acceleration comes from
   the `torch.compile(backend="bpu")` path.

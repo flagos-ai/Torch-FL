@@ -17,7 +17,7 @@
 Three jobs:
 
     * register the package's markers (``backend_route``, ``anyplatform``,
-      ``flaggems_cpp``, ``flaggems_python``);
+      ``flaggems_cpp``, ``flaggems_python``, ``boxing``);
     * skip a test that needs a kernel set this wheel did not compile -- the one
       build-driven skip the mandate allows, keyed off the build record, not a
       platform name;
@@ -67,9 +67,16 @@ def _is_runtime_item(item: pytest.Item) -> bool:
 
 
 #: capability marker -> the kernel set the build record must list for it to run.
+#:
+#: ``boxing`` is here for the ``cuda`` conf route: on this project's CPU-torch
+#: wheels that dispatch key is provided by the generated CUDA boxing kernels, so
+#: a ``= cuda`` route with no boxing in the build record has no kernel to reach
+#: and the op lands on cpu_fallback instead. Same build-driven skip, same source
+#: of truth as the two FlagGems entries.
 _CAPABILITY_KERNEL = {
     "flaggems_cpp": "flaggems_cpp",
     "flaggems_python": "flaggems",
+    "boxing": "boxing",
 }
 
 #: The JSON doc's directory. Overridable so a CI job can route it into its
@@ -103,6 +110,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers", "flaggems_python: requires the FlagGems Python kernel set"
+    )
+    config.addinivalue_line(
+        "markers",
+        "boxing: requires the generated CUDA boxing kernel set "
+        "(built with FLAGOS_BUILD_BOXING=ON)",
     )
     config.pluginmanager.register(_ConformanceReport(), "runtime-conformance-report")
 

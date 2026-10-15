@@ -57,6 +57,8 @@ SUPPORTED_KEYS = frozenset(
         "torch_path_forbidden",
         "require_package_files",
         "forbid_package_files",
+        "require_build_kernels",
+        "forbid_build_kernels",
         "flagos_devices",
         "cuda_available",
         "cuda_devices",
@@ -191,6 +193,35 @@ def assert_torch_path(spec, torch_path):
         assert forbidden not in str(torch_path), f"{forbidden} in {torch_path}"
 
 
+def assert_build_kernels(spec, torch_fl):
+    """The kernel sets the wheel was built with, from the build record.
+
+    `require_package_files` says what the wheel ships, which is one step removed
+    from what it dispatches to: a platform whose accelerator kernels are opt-in
+    builds the same wheel name either way. This reads `torch_fl/_build_config.py`
+    through `torch_fl._env.build_kernels()`, so a lane that means to test the
+    default wheel can say so as an expectation and fail naming the kernel set it
+    found rather than as an op that reached no kernel.
+
+    A checkout that was never built records no kernel set at all, so a platform
+    requiring one fails here instead of passing on an empty tuple.
+    """
+    required = spec.get("require_build_kernels") or []
+    forbidden = spec.get("forbid_build_kernels") or []
+    if not required and not forbidden:
+        return None
+    kernels = torch_fl._env.build_kernels()
+    for name in required:
+        assert name in kernels, (
+            f"expected the {name!r} kernel set, found {sorted(kernels)}"
+        )
+    for name in forbidden:
+        assert name not in kernels, (
+            f"the {name!r} kernel set is built into this wheel: {sorted(kernels)}"
+        )
+    return kernels
+
+
 def assert_package_files(spec, package_root):
     """The vendor libraries the wheel is expected to ship, and not to ship."""
     for relative in spec.get("require_package_files") or []:
@@ -287,6 +318,7 @@ def main():
     package_root = torch_fl_path.parent
     assert_torch_path(spec, torch_path)
     assert_package_files(spec, package_root)
+    build_kernels = assert_build_kernels(spec, torch_fl)
 
     if spec.get("torch_musa_shim_only"):
         assert_torch_musa_shim()
@@ -321,6 +353,8 @@ def main():
     print(f"torch_fl path: {torch_fl_path}")
     print(f"torch.version.cuda: {torch.version.cuda}")
     print(f"flagos devices: {flagos_devices}")
+    if build_kernels is not None:
+        print(f"Kernel sets: {sorted(build_kernels)}")
     if cuda_available or spec.get("cuda_devices") is not None:
         print(f"torch.cuda devices: {torch.cuda.device_count()}")
     if dependencies.triton is not None:

@@ -350,6 +350,11 @@ export FLAGOS_ACCELERATOR=ppu
 # and asserts the bundle, so it builds the boxing wheel. Boxing is off by default
 # for every accelerator now (cmake/flagos_platforms.json); without this the
 # default FlagGems-primary wheel would bundle no libtorch_cuda.so.
+#
+# The CUDA lane no longer opts in: it measures the FlagGems-primary default a
+# `pip install` gets. PPU keeps the vendor path until the ops backends_ppu.conf
+# routes to `cuda` have a FlagGems route of their own -- flipping it first would
+# leave them on cpu_fallback.
 export FLAGOS_BUILD_BOXING=1
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
