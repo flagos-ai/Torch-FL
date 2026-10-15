@@ -222,3 +222,37 @@ def test_no_platform_skips_the_plain_flaggems_mark():
     are unaffected by this invariant.)"""
     for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
         assert "flaggems" not in markers, platform
+
+
+# The four backend markers the manifest's vendor_ops group can select on any
+# platform (`.github/integration-manifest.yml`, id `vendor_ops`). Because one
+# command collects them everywhere, this table -- and nothing else -- decides
+# which platform each one actually runs on. A marker missing from a platform's
+# skip tuple means that platform runs another backend's route assertions.
+_ACCEPTING_PLATFORMS: dict[str, frozenset[str]] = {
+    # CUDA-ABI wheels box onto the CUDA dispatch key, so the `-> cuda` routing
+    # assertions hold on all three; MetaX is excluded because its builds are
+    # boxing-only with the metax key, and `dcu` is not in its own tuple because
+    # DCU is the only platform that routes into the DTK hcu kernel set.
+    "cuda": frozenset({"cuda", "dcu", "ppu"}),
+    "dcu": frozenset({"dcu"}),
+    # Ascend and GCU are native-kernel backends with a marker of their own and
+    # no other platform's kernel library.
+    "ascend": frozenset({"ascend"}),
+    "gcu": frozenset({"gcu"}),
+}
+
+
+def test_backend_marker_acceptance_is_the_recorded_table():
+    """Each backend marker runs exactly where the table says it does.
+
+    This is the guard the `gcu` regression needed: `gcu` was added to the
+    vendor_ops selection without being added to the other seven platforms' skip
+    tuples, so `TestNewOnesGcuRoute` and `TestGcuInt64Fallback` ran on Ascend
+    and PPU -- where the topsaten route does not exist -- and failed there.
+    """
+    for marker, accepting in _ACCEPTING_PLATFORMS.items():
+        for platform, skip_markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
+            assert (marker not in skip_markers) == (platform in accepting), (
+                f"{platform} / {marker}"
+            )
