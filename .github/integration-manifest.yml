@@ -329,14 +329,17 @@ steps:
   # profiler trace export is currently unstable". The group is kept so the gate
   # is exercised and its removal is what unblocks real coverage there.
   #
-  # GCU and Kunlunxin gate the device cases the same way, through the `device`
-  # row of the capability table rather than by leaving the step out -- GCU's
-  # TOPSPTI collects activities on S60 (229 for a three-iteration matmul loop)
-  # but none reach the profiler as device events on a CPU-only PyTorch/Kineto
-  # build, which supplies no PrivateUse1 resolver, and Kunlunxin builds the
-  # unavailable_device_tracer, because the vendor's CUPTI-compatible shim
-  # instruments the CUDA dispatch key the de-boxed backend no longer uses. The
-  # CPU-side case still runs on both, so the step is a check rather than nothing.
+  # GCU and Kunlunxin gate cases through the capability table rather than by
+  # leaving the step out, and they gate different rows for different measured
+  # reasons. Kunlunxin builds the unavailable_device_tracer -- the vendor's
+  # CUPTI-compatible shim instruments the CUDA dispatch key the de-boxed backend
+  # no longer uses -- so it declares no device activity at all and only the
+  # CPU-side case runs there. GCU does emit device events: TOPSPTI delivers
+  # them, the capture window contains them, and the kernel/runtime/flow/metadata
+  # rows are claimed and pass. What it does not do is attribute them, so its
+  # `linkage` row is off (both `aten::matmul` and `aten::mm` report
+  # `self_device_time_total == 0.0`), and its kernel names arrive as raw
+  # topsaten template symbols, which is its own `demangled` row.
   #
   # Ascend's extra prerequisite -- the process-start libmspti.so that CANN 9.0
   # needs for aclrtMemcpy*/aclrtMemset* interposition, which a later dlopen cannot
