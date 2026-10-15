@@ -164,9 +164,15 @@ def test_sdpa_causal_with_finite_additive_bias():
 
 
 @pytest.mark.ascend
-def test_sdpa_rejects_dropout():
+def test_sdpa_runs_dropout():
+    # dropout_p > 0 must not raise: fused_sdp_choice_ascend declines the fused
+    # aclnn backend (it has no dropout plumbing) and returns SDPBackend::math, so
+    # the composite takes its math decomposition and applies dropout. The value
+    # is not compared to a reference -- the point is that the training forward
+    # completes instead of hard-failing, which is what broke the BERT suite.
     query, key, value = _inputs()
-    with pytest.raises(RuntimeError, match="dropout not yet supported"):
-        F.scaled_dot_product_attention(
-            query.to(DEVICE), key.to(DEVICE), value.to(DEVICE), dropout_p=0.5
-        )
+    out = F.scaled_dot_product_attention(
+        query.to(DEVICE), key.to(DEVICE), value.to(DEVICE), dropout_p=0.5
+    )
+    assert out.device.type == "flagos"
+    assert out.shape == query.shape
