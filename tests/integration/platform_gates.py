@@ -72,6 +72,9 @@ class Gate(NamedTuple):
 
 _EVERY_PLATFORM_BUT_MUSA = tuple(p for p in ALL_PLATFORMS if p != "musa")
 _EVERY_PLATFORM_BUT_DCU = tuple(p for p in ALL_PLATFORMS if p != "dcu")
+_EVERY_PLATFORM_BUT_DCU_AND_METAX = tuple(
+    p for p in ALL_PLATFORMS if p not in ("dcu", "metax")
+)
 
 
 _GATES: tuple[Gate, ...] = (
@@ -173,6 +176,23 @@ _GATES: tuple[Gate, ...] = (
             "bridge has one shared entry to extend rather than a private one"
         ),
         platforms=_EVERY_PLATFORM_BUT_DCU,
+    ),
+    Gate(
+        step="flaggems_conformance",
+        target="flaggems/test_flaggems_sdpa_route.py",
+        reason=(
+            "only the confs that name scaled_dot_product_attention have a "
+            "FlagGems SDPA route to assert: backends_dcu.conf and "
+            "backends_metax.conf route it to `flaggems`, cuda and ppu route it "
+            "to `cuda`, and ascend, gcu, kunlunxin and musa leave it at `none` "
+            "-- so the wrapper in csrc/aten/sdp_choice_stub.cc keeps the boxed "
+            "composite and the suite skips with the conf's own route as the "
+            "reason. The case set is one list in "
+            "tests/integration/flaggems/sdpa_caps.py that every platform "
+            "carrying the route runs whole; removing the gate means a platform "
+            "whose conf grows the route, which is one row in that table"
+        ),
+        platforms=_EVERY_PLATFORM_BUT_DCU_AND_METAX,
     ),
 )
 

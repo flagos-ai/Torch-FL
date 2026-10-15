@@ -177,14 +177,14 @@ the manifest, to the eight platforms and to the whitelist below.
 
 | platform | steps whose target still skips |
 |---|---|
-| ascend | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
-| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge |
+| ascend | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
+| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
 | dcu | rng, musa_dispatch |
-| gcu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
-| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| gcu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
+| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
 | metax | rng, musa_dispatch, profiler_parity, native_comm_bridge |
-| musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge |
-| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
+| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
 
 The recorded skips, with the measured reason each is still there:
 
@@ -240,6 +240,18 @@ The recorded skips, with the measured reason each is still there:
   because the groups it asserts are the ones the DCU image stages. The step is
   kept universal so a platform that grows an equivalent bridge has one shared
   entry to extend rather than a private one.
+- `flaggems_conformance` — its `sdpa` cases
+  (`tests/integration/flaggems/test_flaggems_sdpa_route.py`) on Ascend, CUDA,
+  GCU, Kunlunxin, MUSA and PPU. Only a conf that names
+  `scaled_dot_product_attention` has a FlagGems SDPA route to assert:
+  `backends_dcu.conf` and `backends_metax.conf` route it to `flaggems`, CUDA and
+  PPU route it to `cuda`, and the other four leave it at `none`, so the wrapper
+  in `csrc/aten/sdp_choice_stub.cc` keeps the boxed composite and the suite
+  skips with the conf's own route as the reason. The case set is one list in
+  `tests/integration/flaggems/sdpa_caps.py` that every platform carrying the
+  route runs whole, and the per-chip numbers are a row in the same table, so a
+  platform whose conf grows the route picks up every case by adding that one
+  row.
 
 ## Directory inventory
 
