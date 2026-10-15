@@ -276,11 +276,21 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
 fi
 
 cd "$REPO_ROOT"
-if [[ "$CI_STAGE" == "build" ]]; then
-  # Prebuild so package_data contains the generated libtorch_fl.so before the
-  # common wheel workflow stages the final artifact.
-  build_flagos_inplace
+# GCU builds and tests the same wheel in one hardware job, so this has to run in
+# both stages, the same way set_env_musa.sh documents it. Two things need it:
+# package_data has to contain the generated libtorch_fl.so before the wheel is
+# staged, and the checkout itself has to hold torch_fl/_C, because the manifest's
+# `Run unit tests (per file)` group runs in $GITHUB_WORKSPACE rather than in the
+# wheel-only workspace (see tests/unit/test_integration_workdir.py) and imports
+# torch_fl from there. Gating it on CI_STAGE=build left that group importing a
+# checkout with no extension module: 50 of its 83 files died on
+# "No module named 'torch_fl._C'" in run 38723076856.
+build_flagos_inplace
 
+if [[ "$CI_STAGE" == "build" ]]; then
+  # Build-stage device probe. The integration stage asserts the same thing from
+  # the manifest's first group, which runs check_platform_environment.py against
+  # the installed wheel, so this stays with the stage that has no other check.
   python - <<'PY'
 import torch_fl
 
