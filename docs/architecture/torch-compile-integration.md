@@ -294,31 +294,35 @@ torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and
 matmul+normalization graphs all compile and match eager. The suite has since been
 re-run on the toolchain Ascend now ships -- FlagTree ascend3.5 with
 torch 2.10.0+cpu -- by the CI compile job, which exercises the whole file on
-every commit. That re-run retired the first workaround below; the rest still
-apply. Support is
+every commit. That re-run moved the libdevice workaround to the module FlagTree
+actually ships, retired half of the byte-load workaround, and confirmed the rest
+of the table below still applies. Support is
 **experimental** — each vendor-toolchain defect worked around here is a place
 where a toolchain upgrade should let us delete code:
 
 | Defect | Symptom | Workaround |
 |---|---|---|
 | The Ascend backend returns an empty libdevice module map | Inductor's generated `libdevice.*` calls resolve to the generic module's `...` stubs, so the trace fails inside Triton's semantics layer with `AttributeError: 'NoneType' object has no attribute 'type'` and no mention of the op | `triton_libdevice.py`: fill the map with the vendor's `triton.language.extra.cann.libdevice` |
+| A masked, strided 2-D load of 8-bit data is miscompiled when the pointer is declared `*i1` | Silently reads only the first two elements of each row, repeated, with no error raised. Surfaced as wrong `relu` gradients (4094 of 4096 elements off, max abs diff 3.824), no error raised | `triton_bool_pointers.py`: rewrite bool kernel-argument pointers from `*i1` to `*i8`. The identical bytes read correctly through the wider pointer |
 | `ub overflow` is raised as a generic compilation error | An oversized autotune config fails the whole compile instead of being dropped | `triton_resource_limits.py`: parse `requires N bits while M bits available` and re-raise as Triton's `OutOfResources`, which inductor already knows to skip |
 | A kernel built in a compile worker segfaults when the parent launches it | Crash in `NPULauncher.__call__` (`triton/backends/ascend/driver.py`), only with a cold inductor cache and two or more compiles in one process | `inductor_backend.py` defaults Ascend to `compile_threads=1`. `fork` and `spawn` both crash, so this is not the CUDA-after-fork problem the PPU path above hits |
 
-The retired workaround was for a masked, strided 2-D load of an 8-bit dtype that
-returned only the first two elements of each row, repeated, with no error raised;
-`torch.compile` of `Linear -> ReLU` produced wrong gradients (4090 of 4096
-elements off, max abs diff 3.05) rather than failing. triton-ascend 3.2.0 needed
-`enable_linearize=True` in the compile options plus a bool `*i1` -> `*i8` kernel
-signature rewrite, and the file that installed both carried a canary test
-asserting the miscompile was *still present* -- a scheduled failure that named
-the workaround to delete once it fired. On FlagTree ascend3.5 it fired: the same
-kernel reads correct data with no options set, and `enable_linearize` no longer
-exists in the vendor compiler (`NPUOptions` has no such field, and
-`parse_options` drops keys it does not know), so injecting it had become a no-op.
-`test_ascend_masked_byte_load_is_not_miscompiled` now asserts the correct data
-instead, and `test_ascend_compile_backward_stays_on_flagos` keeps the end-to-end
-gradient guard.
+The masked byte-load workaround started as two halves and has since lost one.
+triton-ascend 3.2.0 needed `enable_linearize=True` in the compile options *and*
+the bool `*i1` -> `*i8` signature rewrite, and the file that installed both
+carried a canary test asserting the miscompile was *still present* -- a scheduled
+failure that named the workaround to delete once it fired. On FlagTree ascend3.5
+it fired: the same kernel reads correct data with no options set, and
+`enable_linearize` no longer exists in the vendor compiler (`NPUOptions` has no
+such field, and `parse_options` drops keys it does not know), so injecting it had
+become a no-op. That half and the canary are gone;
+`test_ascend_masked_byte_load_is_not_miscompiled` asserts the correct data
+instead. The signature rewrite is still load-bearing: dropping it along with the
+option half took `test_ascend_compile_backward_stays_on_flagos` and
+`test_ascend_oversized_config_does_not_fail_compile` red on the FlagTree
+toolchain, with the same wrong-`Linear -> ReLU`-gradient signature the original
+measurement recorded, which is why it survives as
+`triton_bool_pointers.py`.
 
 ## Architecture
 

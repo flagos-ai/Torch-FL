@@ -80,15 +80,19 @@ registration route.
 
 ### Vendor toolchain workarounds
 
-Three modules exist only to compensate for the active Triton build and are no-ops
+Four modules exist only to compensate for the active Triton build and are no-ops
 on CUDA-like profiles. `triton_libdevice.py` fills the Ascend backend's empty
-libdevice module map; `triton_resource_limits.py` translates `ub overflow` into
-Triton's `OutOfResources` so inductor drops an oversized autotune config instead
-of failing the compile; `triton_64bit_guard.py` refuses a kernel that needs a
-64-bit value on GCU, where the vendor compiler aborts the process on one. All
-three are idempotent — registration runs before every `compile_fx` — with their
-flags on the module that owns the wrapped entry point (`triton` for the first
-two, `triton_heuristics` for the guard) rather than on the wrapped function,
+libdevice module map; `triton_bool_pointers.py` declares boolean tensor arguments
+as `*i8` rather than `*i1`, because the Ascend codegen reads wrong data through
+the narrower pointer and `relu` backward reduces over exactly that;
+`triton_resource_limits.py` translates `ub overflow` into Triton's
+`OutOfResources` so inductor drops an oversized autotune config instead of failing
+the compile; `triton_64bit_guard.py` refuses a kernel that needs a 64-bit value on
+GCU, where the vendor compiler aborts the process on one. All four are idempotent
+— registration runs before every `compile_fx` — with their flags on the object
+that owns the wrapped entry point (the vendor backend class for the module map,
+`triton` for the resource-limit wrapper, `triton_heuristics` for the guard,
+`triton_utils` for the signature rewrite) rather than on the wrapped function,
 since they sit on shared entry points.
 
 The guard is the one that runs *before* the compiler rather than translating its

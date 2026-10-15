@@ -307,13 +307,15 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest tests/integration/test_compile.py -v
 Three triton-ascend defects are worked around in
 `torch_fl/compile/`, each documented with its measured evidence in
 [`docs/architecture/torch-compile-integration.md`](../../architecture/torch-compile-integration.md):
-a masked 2-D byte load that silently reads wrong data (this produced incorrect
-`relu` gradients), `ub overflow` raised as a hard compile error rather than a
+a masked 2-D byte load that silently reads wrong data when the pointer is declared
+`*i1` (this produced incorrect `relu` gradients; `triton_bool_pointers.py` widens
+the declared pointer), `ub overflow` raised as a hard compile error rather than a
 resource limit, and a segfault when the parent process launches a kernel built in
 an inductor compile worker. The last one makes Ascend default to
 `compile_threads=1`; an explicit `compile_threads` option or
-`TORCHINDUCTOR_COMPILE_THREADS` still wins. Whether any of the three still apply
-to FlagTree is unmeasured.
+`TORCHINDUCTOR_COMPILE_THREADS` still wins. All three have since been re-checked
+on FlagTree ascend3.5 by the CI compile job: the byte-load workaround lost its
+`enable_linearize` half there, and the other two still apply.
 
 ## Limitations
 

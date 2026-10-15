@@ -1965,6 +1965,9 @@ def _register_compile_backend():
         from torch_fl.compile.triton_libdevice import (
             patch_triton_libdevice_module_map,
         )
+        from torch_fl.compile.triton_bool_pointers import (
+            patch_triton_bool_pointer_signatures,
+        )
         from torch_fl.compile.triton_resource_limits import (
             patch_triton_resource_limit_errors,
         )
@@ -1974,6 +1977,7 @@ def _register_compile_backend():
         publish_codegen_on_device_module()
         register_flagos_codegen()
         patch_triton_libdevice_module_map()
+        patch_triton_bool_pointer_signatures()
         patch_triton_resource_limit_errors()
 
         # The default `backend="inductor"` path bypasses `flagos_compile_backend`

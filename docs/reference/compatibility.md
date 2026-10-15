@@ -184,18 +184,15 @@ measured on a 910/910B host.
 `torch.compile(backend="flagos")` is experimentally validated on Ascend through
 `triton-ascend` 3.2.0. Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0,
 torch 2.10.0+cpu, Python 3.10): `tests/integration/test_compile.py` passes 30 of 32 with a
-cold inductor cache, the two skips being the FlagTree-only and MetaX-only cases. That
-measurement predates the move of Ascend's FlagGems route to FlagTree, and no CI step
-or hand run has re-measured the compile path on the current toolchain, so treat these
-numbers as unvalidated there. Forward, backward, fused
+cold inductor cache, the two skips being the FlagTree-only and MetaX-only cases. Forward, backward, fused
 elementwise and matmul+normalization graphs match eager. Three triton-ascend defects are
-worked around rather than avoided — a miscompiled masked byte load, `ub overflow` raised as
-a hard error, and a compile-worker/parent launch segfault — so the platform compiles
-serially by default and has no C++ wrapper codegen; see
+worked around rather than avoided — a masked byte load miscompiled for `*i1` pointers,
+`ub overflow` raised as a hard error, and a compile-worker/parent launch segfault — so the
+platform compiles serially by default and has no C++ wrapper codegen; see
 [`docs/architecture/torch-compile-integration.md`](../architecture/torch-compile-integration.md).
-Whether any of the three still applies to FlagTree is unmeasured.
-This is not in CI: the Ascend runner image does not carry the Triton toolchain, so the
-compile suite must be run by hand on hardware that does.
+All three have since been re-checked on FlagTree ascend3.5 by the CI compile job, which
+runs `tests/integration/test_compile.py` on every commit; the 30-of-32 numbers above were
+taken on the older triton-ascend toolchain and are stale.
 
 FlagTree's Ascend backend resolves its host runtime through `torch_npu`, which claims
 PrivateUse1 and so would prevent `torch_fl` from registering `flagos` at all.

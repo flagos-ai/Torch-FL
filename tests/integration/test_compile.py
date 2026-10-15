@@ -1213,7 +1213,9 @@ def test_ascend_masked_byte_load_is_not_miscompiled(device):
     failing. torch_fl worked around it with `enable_linearize=True` plus a bool
     ``*i1`` -> ``*i8`` signature rewrite (this file's historic canary asserted the
     bug was *still* present, so that a vendor fix would surface as a failure).
-    FlagTree ascend3.5 fixed the codegen, so both halves and the canary are gone.
+    FlagTree ascend3.5 fixed the codegen, so the option half and the canary are
+    gone; the pointer-type half is still needed and lives in
+    torch_fl/compile/triton_bool_pointers.py.
 
     This is that reduction, kept as a plain regression test on the vendor path:
     a bare `@triton.jit` launch, no options, correct data required. End-to-end
@@ -1231,6 +1233,42 @@ def test_ascend_masked_byte_load_is_not_miscompiled(device):
     masked_byte_row_load[(4,)](source, out, 128, XBLOCK=32, R0_BLOCK=32)
 
     torch.testing.assert_close(out.cpu(), expected.to(torch.float32))
+
+
+@pytest.mark.ascend
+@ascend_only
+def test_ascend_bool_tensors_declared_as_byte_pointers():
+    """Bool tensor args must reach Triton as ``*i8``, not ``*i1``.
+
+    This is the half of the masked byte-load workaround that FlagTree ascend3.5
+    still needs: the access pattern above reads correct data there without
+    `enable_linearize`, but a bool mask loaded through a declared ``*i1`` pointer
+    does not, and `relu` backward reduces over exactly that.
+    """
+    pytest.importorskip("triton")
+    from torch._inductor.codegen import triton_utils
+    from torch._inductor.codegen.common import TensorArg
+    from torch._inductor.virtualized import V
+
+    from torch_fl.compile.triton_bool_pointers import (
+        patch_triton_bool_pointer_signatures,
+    )
+
+    patch_triton_bool_pointer_signatures()
+
+    class _Graph:
+        """`signature_of` asks the graph whether an arg was an unspec scalar."""
+
+        def is_unspec_arg(self, name):
+            return False
+
+    with V.set_graph_handler(_Graph()):
+        bool_arg = TensorArg(name="in_ptr0", buffer="buf0", dtype=torch.bool)
+        assert triton_utils.signature_of(bool_arg, size_dtype=None) == "*i8"
+
+        # Only bool changes; every other dtype keeps its own pointer type.
+        float_arg = TensorArg(name="in_ptr1", buffer="buf1", dtype=torch.float32)
+        assert triton_utils.signature_of(float_arg, size_dtype=None) == "*fp32"
 
 
 @pytest.mark.ascend

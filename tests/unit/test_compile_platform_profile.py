@@ -752,6 +752,26 @@ def test_libdevice_patch_skipped_on_cuda(as_cuda):
 
 
 @pytest.mark.anyplatform
+def test_bool_pointer_rewrite_is_skipped_on_cuda(as_cuda, monkeypatch):
+    """The masked byte-load miscompile is Ascend's; CUDA signatures must not move."""
+    pytest.importorskip("triton")
+
+    monkeypatch.setattr(
+        "torch_fl.compile.triton_bool_pointers.platform_profile",
+        lambda: pp._CUDA_PROFILE,
+    )
+
+    from torch._inductor.codegen import triton_utils
+
+    from torch_fl.compile import triton_bool_pointers as tbp
+
+    before_signature = triton_utils.signature_of
+    tbp.patch_triton_bool_pointer_signatures()
+
+    assert triton_utils.signature_of is before_signature
+
+
+@pytest.mark.anyplatform
 def test_vendor_libdevice_candidates_cover_the_cann_package(monkeypatch):
     """Ascend's implementations live under the CANN package, not the backend key.
 
