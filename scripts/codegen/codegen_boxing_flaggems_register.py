@@ -66,6 +66,16 @@ PLATFORMS = ("cuda", "metax", "dcu", "ppu", "tsingmicro")
 # `none` is cpu_fallback, and the empty value is a malformed line.
 NON_FLAGGEMS_ROUTES = ("cuda", "none", "")
 
+# Per-platform values that name the platform's own vendor backend rather than a
+# FlagGems one. TsingMicro's conf routes its metadata-only view ops to
+# `tsingmicro` (csrc/aten/strided_ops.cc registers the at::native:: stride
+# helpers under Backend::kTsingMicro); those resolve through the dispatcher's
+# vendor slot, not kFlagGems, so they must not be treated as FlagGems routes
+# here. A FlagGems route means "claim this op on PrivateUse1 so its kFlagGems
+# slot is reachable"; a vendor route needs no such claim, and emitting one for
+# it would hand the op a kFlagGems dispatcher the runtime cannot fill.
+VENDOR_ROUTES = {"tsingmicro": ("tsingmicro",)}
+
 HEADER = """\
 // Copyright (c) 2026, BAAI. All rights reserved.
 //
@@ -133,9 +143,8 @@ def conf_routes(platform):
 def target_ops(platform, wrappers, kernel_ops):
     """(sorted registered ops, sorted FlagGems-routed ops with no kernel)."""
     routes = conf_routes(platform)
-    flaggems_routed = {
-        op for op, value in routes.items() if value not in NON_FLAGGEMS_ROUTES
-    }
+    non_flaggems = NON_FLAGGEMS_ROUTES + VENDOR_ROUTES.get(platform, ())
+    flaggems_routed = {op for op, value in routes.items() if value not in non_flaggems}
     registered = sorted(flaggems_routed & set(wrappers) & kernel_ops)
     unserved = sorted(flaggems_routed & kernel_ops - set(wrappers))
     no_kernel = sorted(flaggems_routed - kernel_ops)

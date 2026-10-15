@@ -450,7 +450,7 @@ def test_conf_route_counts_are_stable():
         # ``binary_scalar`` and ``reduce`` categories generate (9 ops so far), so
         # the conf routes those to ``mps`` and every other op to ``none``.
         "mps": {"mps": 9, "none": 2028},
-        "tsingmicro": {"flaggems": 51, "flagos_python": 2},
+        "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 13},
     }
     for platform, exp in expected.items():
         routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")

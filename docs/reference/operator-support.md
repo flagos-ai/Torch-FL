@@ -195,6 +195,101 @@ a platform's own full-coverage configuration is a third cohort again — its
 denominator is that file's active route set, not 546 — and the entry states which
 one it measured.
 
+### TsingMicro TX8110: the metadata-only view family moves from the dead CUDA boxing slot to the `tsingmicro` vendor slot (2026-10-16, TX8110 / Kuiper)
+
+**One sentence.** 13 pure-metadata view ops
+(`alias`, `detach`, `select.int`, `slice.Tensor`, `squeeze`, `squeeze.dim`, `t`,
+`transpose.int`, `unbind.int`, `unsqueeze`, `_conj`, `_neg_view`, `_unsafe_view`)
+move from the conf's `flaggems` default to the `tsingmicro` vendor slot on the
+TX8110 build, because the FlagGems route they used to take has no kernel behind
+it and degraded to a CUDA boxing kernel this wheel cannot run.
+
+**Route change.** `backends_tsingmicro.conf` gains 13 explicit
+`= tsingmicro` entries (previously unlisted, i.e. the default `flaggems`).
+`csrc/aten/strided_ops.cc` registers the corresponding
+`at::native::flagos::*` metadata helpers under `Backend::kTsingMicro`; they were
+previously registered for `Backend::kAscend` only. The list is now emitted once
+per accelerator from a single macro, so an op added for one platform cannot be
+forgotten for the other.
+
+**Why the FlagGems route was wrong here.** Two separate gaps had to line up.
+First, the generated FlagGems kernel set has no entry for any view op — they are
+stride arithmetic with no device kernel to write — so
+`Dispatcher::GetFn(Backend::kFlagGems)` took its documented empty-slot arm and
+degraded to `cuda_fn_` (`csrc/aten/dispatcher.h`). Second, the TX8110 dev build
+has `FLAGOS_BUILD_BOXING:BOOL=ON` in its `CMakeCache.txt` and
+`KERNELS = ("boxing", "flaggems", "vendor")` in `torch_fl/_build_config.py`, so
+that CUDA boxing slot is populated with kernels that need a vendor CUDA runtime
+the wheel does not link. The call therefore died in `torch/cuda/__init__.py`
+with
+
+```
+NotImplementedError: Could not run 'aten::as_strided' with arguments from the
+'CUDA' backend
+```
+
+raised from `torch_fl/__init__.py:1411`. Every `attn_mask[:, 0] = 1`
+(`tests/test_modeling_common.py:6533`), every `select` and every slicing index
+reduces to `aten::as_strided`, so this was one defect with a wide blast radius:
+160 of the 161 failures in the pre-fix transformers-5.19.0 `bert` run carried it
+(320 raises across 161 failing tests).
+
+**Measured.** On the TX8110 host, with no conf override and the rebuilt
+`libtorch_fl.so`:
+
+```
+[flagos dispatch] select.int -> tsingmicro
+PROBE: slice-assign OK
+PROBE: slice OK flagos:0
+PROBE: select OK
+PROBE: squeeze OK
+PROBE: unbind OK
+PROBE: squeeze.dim ok (3, 1)
+PROBE: squeeze ok (3,)
+```
+
+**What is NOT claimed.** The fix was not observed through a completed `bert`
+suite. The post-fix `bert` run does clear the `as_strided`/CUDA defect — but it
+then stalls inside the TX8110 runtime on the second test, before a tally is
+produced:
+
+```
+[flagos dispatch] ... ids_tensor (tests/test_modeling_common.py:6526)
+    txr::Event::awaitCompletion (libhpgr.so)
+    itxMemcpy (libhpgr.so)
+    tx::runtime::txMemcpy (libhpgr.so)
+    Memcpy (libflagos.so)
+    at::native::flagos::_to_copy (libtorch_fl.so)
+```
+
+with the device reporting
+
+```
+accel 0000:cf:00.0: ctx is busy, does not support multi process job
+accel 0000:cf:00.0: failed to acquire kcq job channel: 0
+accel 0000:cf:00.0: ctx[python] failed to submit no.0 compute job: -110
+```
+
+so the hang is a device-runtime limitation, not this route. The TX8110 board
+went into a hardware-exception state while this change was being measured and
+could not be brought back in software (the `accel` driver is built into the
+kernel, dmesg reports `failed to startup rv cores: -110` and every card reports
+`CachingDeviceAllocator: invalid device index`), so the end-to-end per-test tally
+for this change is **not revalidated** and no raw `bert` case results are added.
+The 13-op matrix above and the `bert: 161 failed → 145 failed` transition from an
+earlier override-based run of the same routing are the evidence.
+
+**The other platforms are not revalidated** by this change. The `kAscend`
+registration list is textually unchanged (it is now emitted through a macro, and
+the pre-macro and post-macro expansions are identical).
+
+**Generator coupling.** `scripts/codegen/codegen_boxing_flaggems_register.py`
+classifies a conf value as a FlagGems route unless it is `cuda`, `none` or
+empty, and emits an `m.impl()` for every such op — a slot the runtime cannot
+fill for these 13 ops. It gains a `VENDOR_ROUTES` table so the per-platform
+vendor key is excluded. All five `register_flaggems_*.inc` files are byte-
+identical after the change and `--check` passes.
+
 ### Iluvatar (BI-V150 / Tianshu): a new FlagGems-primary platform, measured on BI-V150 to 603 FlagGems routes (2026-10-14; cohort re-measured 2026-10-15)
 
 **One sentence.** `FLAGOS_ACCELERATOR=iluvatar` is an accelerator whose generated
@@ -7328,15 +7423,19 @@ compiler sees — and every accelerated route is required to be in it.
 | Ascend 910 | 248 | 126 | 1662 | 374 / 2036 (18%) |
 | Enflame GCU S60 | 88 | 64 | 1884 | 152 / 2036 (7%) |
 | MTT S5000 (MUSA) | 122 | 36 | 1878 | 158 / 2036 (7%) |
-| TsingMicro TX8 | 53 | 0 | 0 | 51 / 2036 (2.5%) |
+| TsingMicro TX8 | 53 | 13 | 0 | 51 / 2036 (2.5%) |
 
 The TsingMicro row is not comparable to the other three: its `flaggems` column is not
 a route count and its registered ratio is not coverage. TsingMicro has no
-vendor-native kernel set, so
+accelerator kernel set, so
 [`backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf) names 53
-ops as `flaggems`/`flagos_python` and leaves every other op on the default, which is
-also `flaggems`; nothing is routed to a vendor backend or to `none`. Reachability is
-decided by registration instead:
+ops as `flaggems`/`flagos_python`, routes 13 metadata-only view ops to the
+`tsingmicro` slot (2026-10-16 — see "TsingMicro TX8110: the metadata-only view
+family moves from the dead CUDA boxing slot to the `tsingmicro` vendor slot"
+above; those 13 are stride arithmetic served by `at::native::` metadata helpers,
+so the column is a route count but not a kernel count), and leaves every other op
+on the default, which is also `flaggems`; nothing is routed to `none`.
+Reachability is decided by registration instead:
 [`csrc/aten/generated/register_flaggems_tsingmicro.inc`](../../csrc/aten/generated/register_flaggems_tsingmicro.inc)
 claims the 51 of those ops that have a `kFlagGems` Python kernel, and every other op
 is unregistered and boxes to CPU. See "TsingMicro device name, FlagGems import order,

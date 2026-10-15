@@ -254,91 +254,54 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 }
 
 // View ops are pure metadata (stride) operations; they route through the
-// generated dispatchers but need a backend kernel registered. Register them
-// for the Ascend backend so the generated wrappers in register.inc resolve.
-REGISTER_IMPL_TO_DISPATCHER(
-    TransposeIntFn,
-    transpose_int_dispatcher,
-    Backend::kAscend,
-    transpose_int)
+// generated dispatchers but need a backend kernel registered.
+//
+// The list is emitted once per accelerator whose conf routes these ops to it.
+// Ascend has done so since the native backend landed. TsingMicro joins it
+// because it has no accelerator kernel for any of them: its non-FlagGems
+// implementations *are* the CUDA boxing kernels, and those need a vendor CUDA
+// runtime the TX8110 wheel does not link (FLAGOS_BUILD_BOXING is off). A view
+// op the conf leaves unlisted therefore falls through the FlagGems default to
+// Backend::kFlagGems, whose slot has no kernel -- Dispatcher::GetFn degrades
+// that to cuda_fn_, and the call dies in torch/cuda with
+//
+//   NotImplementedError: Could not run 'aten::as_strided' with arguments
+//   from the 'CUDA' backend
+//
+// which is what every slicing index, `mask[:, 0] = 1` and `select` reduce to.
+// Routing them to kTsingMicro reaches the same at::native:: metadata helpers
+// the Ascend build uses, so the tensor stays on flagos.
+#define FLAGOS_REGISTER_METADATA_VIEW_OPS(device)                             \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      TransposeIntFn, transpose_int_dispatcher, device, transpose_int)        \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      PermuteFn, permute_dispatcher, device, permute)                         \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      SelectIntFn, select_int_dispatcher, device, select_int)                 \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      SliceTensorFn, slice_tensor_dispatcher, device, slice_tensor)           \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      SqueezeFn, squeeze_dispatcher, device, squeeze)                         \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      SqueezeDimFn, squeeze_dim_dispatcher, device, squeeze_dim)              \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      UnsqueezeFn, unsqueeze_dispatcher, device, unsqueeze)                   \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      PrivUnsafeViewFn, priv_unsafe_view_dispatcher, device, unsafe_view)     \
+  REGISTER_IMPL_TO_DISPATCHER(DetachFn, detach_dispatcher, device, detach)    \
+  REGISTER_IMPL_TO_DISPATCHER(TFn, t_dispatcher, device, t)                   \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      UnbindIntFn, unbind_int_dispatcher, device, unbind_int)                 \
+  REGISTER_IMPL_TO_DISPATCHER(AliasFn, alias_dispatcher, device, alias)       \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      PrivConjFn, priv_conj_dispatcher, device, _conj)                        \
+  REGISTER_IMPL_TO_DISPATCHER(                                                \
+      PrivNegViewFn, priv_neg_view_dispatcher, device, _neg_view)
 
-REGISTER_IMPL_TO_DISPATCHER(
-    PermuteFn,
-    permute_dispatcher,
-    Backend::kAscend,
-    permute)
+FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kAscend)
+FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kTsingMicro)
 
-REGISTER_IMPL_TO_DISPATCHER(
-    SelectIntFn,
-    select_int_dispatcher,
-    Backend::kAscend,
-    select_int)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    SliceTensorFn,
-    slice_tensor_dispatcher,
-    Backend::kAscend,
-    slice_tensor)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    SqueezeFn,
-    squeeze_dispatcher,
-    Backend::kAscend,
-    squeeze)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    SqueezeDimFn,
-    squeeze_dim_dispatcher,
-    Backend::kAscend,
-    squeeze_dim)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    UnsqueezeFn,
-    unsqueeze_dispatcher,
-    Backend::kAscend,
-    unsqueeze)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    PrivUnsafeViewFn,
-    priv_unsafe_view_dispatcher,
-    Backend::kAscend,
-    unsafe_view)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    DetachFn,
-    detach_dispatcher,
-    Backend::kAscend,
-    detach)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    TFn,
-    t_dispatcher,
-    Backend::kAscend,
-    t)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    UnbindIntFn,
-    unbind_int_dispatcher,
-    Backend::kAscend,
-    unbind_int)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    AliasFn,
-    alias_dispatcher,
-    Backend::kAscend,
-    alias)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    PrivConjFn,
-    priv_conj_dispatcher,
-    Backend::kAscend,
-    _conj)
-
-REGISTER_IMPL_TO_DISPATCHER(
-    PrivNegViewFn,
-    priv_neg_view_dispatcher,
-    Backend::kAscend,
-    _neg_view)
+#undef FLAGOS_REGISTER_METADATA_VIEW_OPS
 
 // The two complex views are registered for GCU only. Ascend has the identical
 // gap in its conf (both ops route to `none`), but that platform was not
