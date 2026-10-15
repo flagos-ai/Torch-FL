@@ -199,6 +199,10 @@ FOREIGN: dict[str, str] = {
     "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER": (
         "Inductor's choice between its static Triton launcher and Triton's own"
     ),
+    "TORCHINDUCTOR_COMPILE_THREADS": (
+        "Inductor's compile-thread pool size, and the long form of "
+        "``config.compile_threads``"
+    ),
 }
 
 

@@ -708,6 +708,25 @@ def _repair_stock_cuda_interface() -> None:
         di.get_cuda_stream = getter
         di.CudaInterface.get_raw_stream = staticmethod(getter)  # type: ignore[assignment]
 
+    # `get_device_properties` shares the raw-stream binding's shape one step
+    # further along: `torch._dynamo.device_interface` snapshots
+    # `torch.cuda.get_device_properties` into the class at import time, and on a
+    # CUDA-like build torch_fl then replaces the *module* attribute with a vendor
+    # getter that does not call `_lazy_init` (metax's
+    # `_patched_get_device_properties`, dcu/ppu's equivalent). When dynamo is
+    # imported before torch_fl -- the normal order in any pytest/transformers run
+    # -- the class keeps the stock getter, which on a vendor torch reaches
+    # `_lazy_init()` and then an undefined `_get_device_properties`
+    # (NameError). `_patch_device_properties` reports a flagos device as
+    # `torch.device("cuda", i)`, so `DeviceProperties.create` (and through it
+    # flex_attention's lowering, hints.py) resolves exactly this class. Repair it
+    # unconditionally -- the two bindings agree on an untouched torch, so this is
+    # a no-op there.
+    if di.CudaInterface.get_device_properties is not torch.cuda.get_device_properties:
+        di.CudaInterface.get_device_properties = staticmethod(  # type: ignore[assignment]
+            torch.cuda.get_device_properties
+        )
+
     if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
         return
 

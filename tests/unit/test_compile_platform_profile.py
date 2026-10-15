@@ -1123,3 +1123,128 @@ def test_byte_load_workaround_skipped_on_cuda(as_cuda, monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_repair_stock_cuda_interface_repoints_a_stale_device_properties(
+    as_cuda, monkeypatch
+):
+    """A CudaInterface bound before torch_fl's patch must be re-pointed.
+
+    `DeviceInterface` snapshots `torch.cuda.get_device_properties` at import
+    time, so importing `torch._dynamo.device_interface` before torch_fl freezes
+    the stock CPU-wheel getter -- the one that calls `_lazy_init()` and then an
+    undefined `_get_device_properties`. `_patch_device_properties` rewrites a
+    flagos device to `cuda`, so `DeviceProperties.create` resolves exactly that
+    class, and flex_attention's lowering dies with the NameError (measured on
+    metax, flagos-ai/Torch-FL). The repair is in the unconditional block, so it
+    runs for a CUDA-like build too.
+    """
+    import torch._dynamo.device_interface as dyn_di
+
+    from torch_fl.compile import device_interface as di
+
+    def stale_cuda_getter(device=None):
+        raise NotImplementedError("stock torch.cuda.get_device_properties")
+
+    def vendor_getter(device=None):
+        return "vendor-props"
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", vendor_getter)
+    monkeypatch.setattr(
+        dyn_di.CudaInterface, "get_device_properties", staticmethod(stale_cuda_getter)
+    )
+
+    di._repair_stock_cuda_interface()
+
+    assert dyn_di.CudaInterface.get_device_properties is vendor_getter
+
+
+@pytest.mark.anyplatform
+def test_repair_stock_cuda_interface_leaves_a_live_device_properties(
+    as_cuda, monkeypatch
+):
+    """An already-correct binding is left alone.
+
+    On a torch whose cuda module is untouched the class attribute and the module
+    attribute are the same object, so the repair is a no-op and the CUDA-like
+    hardware proxy is unchanged.
+    """
+    import torch._dynamo.device_interface as dyn_di
+
+    from torch_fl.compile import device_interface as di
+
+    def getter(device=None):
+        return "props"
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", getter)
+    monkeypatch.setattr(
+        dyn_di.CudaInterface, "get_device_properties", staticmethod(getter)
+    )
+
+    di._repair_stock_cuda_interface()
+
+    assert dyn_di.CudaInterface.get_device_properties is getter
+
+
+# --- import-time compile-thread pin -----------------------------------------
+
+_COMPILE_THREADS_ENV = "TORCHINDUCTOR_COMPILE_THREADS"
+
+
+def _run_threads_pin(monkeypatch, *, backend, env=None, threads=32):
+    """Point the pin at a vendor backend and a fresh inductor config, then run it."""
+    from torch._inductor import config as inductor_config
+
+    from torch_fl.compile import inductor_backend
+
+    if env is None:
+        monkeypatch.delenv(_COMPILE_THREADS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_COMPILE_THREADS_ENV, env)
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: backend
+    )
+    monkeypatch.setattr(inductor_config, "compile_threads", threads)
+
+    applied = inductor_backend.pin_compile_threads()
+    return applied, inductor_config.compile_threads
+
+
+@pytest.mark.anyplatform
+def test_pin_compile_threads_on_musa(as_musa, monkeypatch):
+    """The pin must reach `backend="inductor"`, not only `backend="flagos"`.
+
+    transformers' `CompiledFlexAttention` (and much ecosystem code) compiles with
+    the stock backend name, so `_patch_vendor_flagtree_compile_workers` -- which
+    only runs inside `flagos_compile_backend` -- never sees it. Ordered
+    compilation then spawns `python -m torch._inductor.compile_worker`, which
+    imports torch+triton but not torch_fl, and on MUSA the FlagTree/`mthreads`
+    driver finds no active backend there ("Could not find an active GPU
+    backend"). Pinning the *config* value at import is what makes the default
+    backend serial too.
+    """
+    applied, threads = _run_threads_pin(monkeypatch, backend="mthreads")
+    assert applied is True
+    assert threads == 1
+
+
+@pytest.mark.anyplatform
+def test_pin_compile_threads_leaves_a_cuda_like_build_alone(as_cuda, monkeypatch):
+    """CUDA-like builds keep upstream's parallel compile."""
+    applied, threads = _run_threads_pin(monkeypatch, backend="cuda")
+    assert applied is False
+    assert threads == 32
+
+
+@pytest.mark.anyplatform
+def test_pin_compile_threads_respects_the_env_override(as_musa, monkeypatch):
+    """`TORCHINDUCTOR_COMPILE_THREADS` stays authoritative."""
+    applied, threads = _run_threads_pin(
+        monkeypatch, backend="mthreads", env="8", threads=8
+    )
+    assert applied is False
+    assert threads == 8
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

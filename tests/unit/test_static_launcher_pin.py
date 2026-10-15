@@ -43,6 +43,7 @@ ENV = "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"
 #: The module-level probes, in the order the call site must run them.
 PROBES = [
     "pin_static_cuda_launcher",
+    "pin_compile_threads",
     "_patch_native_cuda_probe",
     "_patch_native_triton_autotune",
     "_patch_native_cache_system_key",

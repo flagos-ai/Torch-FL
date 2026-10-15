@@ -242,6 +242,7 @@ def _patch_cuda_rng_for_cpu_torch():
 
 
 _STATIC_LAUNCHER_ENV = "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"
+_COMPILE_THREADS_ENV = "TORCHINDUCTOR_COMPILE_THREADS"
 
 
 def _static_cuda_launcher_available() -> bool:
@@ -298,12 +299,73 @@ def pin_static_cuda_launcher() -> bool:
     return True
 
 
+def pin_compile_threads() -> bool:
+    """Keep vendor-driver compilation in one process on a native accelerator.
+
+    ``flagos_compile_backend`` scopes ``compile_threads = 1`` into its own
+    compiles, which covers ``torch.compile(backend="flagos")`` but *not*
+    Inductor's default entry point. ``transformers``' ``CompiledFlexAttention``
+    -- and ``backend="inductor"`` generally -- reaches the default, and a
+    parallel compile then spawns ``python -m torch._inductor.compile_worker``
+    subprocesses that import ``torch`` and ``triton`` but never ``torch_fl``. On
+    MThreads FlagTree the driver there finds no active backend and the compile
+    dies in ``triton_helpers.set_driver_to_gpu()`` with "Could not find an active
+    GPU backend"; on all of them the vendor driver is unsafe to initialize in a
+    forked worker. Reading the capability once at import and writing it where
+    Inductor and its compile workers both read it is what makes the default
+    entry point work, exactly as ``pin_static_cuda_launcher`` above does for the
+    launcher.
+
+    ``compile_threads`` is a plain Inductor config value that decides the pool at
+    read time, so assigning it here needs no config attribute of torch's -- and
+    the per-compile ``_patch_vendor_flagtree_compile_workers`` cannot reach a
+    compile that never names this backend. Serial compilation costs compile time
+    and nothing else.
+
+    An explicit ``TORCHINDUCTOR_COMPILE_THREADS`` stays authoritative: Inductor
+    turns it into the very config value this would write, so the pin steps aside
+    either way. Only the vendor compilers that need it are pinned -- GCU, PPU,
+    and MThreads FlagTree on MUSA -- so a CUDA-like build keeps upstream's
+    parallel compile. The pin is needed for the CUDA-shaped PPU too, which is why
+    the test is the vendor backend and not ``is_native_accelerator()``.
+
+    Returns whether the pin applied a value.
+    """
+    if os.environ.get(_COMPILE_THREADS_ENV) is not None:
+        return False
+
+    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.flagtree_shim import flagtree_backend
+
+    if ACCELERATOR == "gcu":
+        vendor_pinned = True
+    else:
+        backend = flagtree_backend()
+        vendor_pinned = backend == "ppu" or (
+            ACCELERATOR == "musa" and backend == "mthreads"
+        )
+    if not vendor_pinned:
+        return False
+
+    # Write both places, for the same reason `pin_static_cuda_launcher` does:
+    # Inductor's config may already have been imported (and would have read the
+    # environment at its own import, too late), or it may not be imported yet (and
+    # would otherwise start from the CPU-count default). The environment also
+    # reaches a compile worker that Inductor spawns fresh.
+    _env.set_foreign(_COMPILE_THREADS_ENV, "1")
+    config = sys.modules.get("torch._inductor.config")
+    if config is not None:
+        config.compile_threads = 1
+    return True
+
+
 # Apply runtime probes at module load time, before FakeTensor is imported by
 # the first compile. Native MUSA and GCU are not CUDA, but Inductor's GPU probe
 # is the shared gate for CUDA-shaped GPU devices. The static-launcher pin goes
 # first because it is the only one that has to be in place before any earlier
 # ``torch._inductor`` import can cache Inductor's answer.
 pin_static_cuda_launcher()
+pin_compile_threads()
 _patch_native_cuda_probe()
 _patch_native_triton_autotune()
 _patch_native_cache_system_key()
