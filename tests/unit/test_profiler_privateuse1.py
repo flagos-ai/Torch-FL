@@ -43,6 +43,16 @@ from torch.profiler import ProfilerActivity, profile
 
 _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
 
+# Which kernel name counts as "the matmul this loop launched" is a property of
+# the platform's route, not of the profiler. The CUDA build is FlagGems-first
+# (torch_fl/configs/backends_cuda.conf routes the ops FlagGems can serve, and
+# `mm` is among them), so `x @ x` lands on FlagGems' Triton kernel and CUPTI
+# decodes the event as `mm_kernel_general`; the MetaX build reaches the vendor
+# BLAS and reports a `*gemm*` name. Matching the union keeps the assertion
+# about "the trace names real kernels with real durations" instead of about one
+# vendor's spelling.
+_MATMUL_NAME_HINTS = ("gemm", "mm_kernel", "matmul")
+
 # Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
 # only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
 # into the stream id (MakeAscendStream), while every other accelerator macro --
@@ -190,7 +200,7 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
     CUPTI-decoded names and non-zero durations. This is the core Stage B goal --
     torch.profiler capturing the CUDA kernel timeline via our dlopen'd CUPTI
     child profiler, on the CPU-torch + external libtorch_cuda stack (no CUDA
-    wheel). Running N matmuls must surface N sgemm kernels, not just one.
+    wheel). Running N matmuls must surface N matmul kernels, not just one.
     """
     N = 10
     x = torch.randn(1024, 1024, device="flagos")
@@ -230,19 +240,18 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
     assert named, (
         f"kernel events have no real names: {[e.get('name') for e in kernel_like][:5]}"
     )
-    sgemm = [
+    matmul = [
         e
         for e in named
-        if "sgemm" in str(e.get("name", "")).lower()
-        or "gemm" in str(e.get("name", "")).lower()
+        if any(hint in str(e.get("name", "")).lower() for hint in _MATMUL_NAME_HINTS)
     ]
-    assert sgemm, (
-        f"no matmul (sgemm) kernel captured; names={[e.get('name') for e in named][:5]}"
+    assert matmul, (
+        f"no matmul kernel captured; names={[e.get('name') for e in named][:5]}"
     )
-    # We launched N matmuls; expect roughly N sgemm launches (allow some slack).
-    assert len(sgemm) >= N // 2, f"expected ~{N} sgemm kernels, got {len(sgemm)}"
-    assert any(e.get("dur", 0) > 0 for e in sgemm), (
-        "all sgemm kernel durations are zero"
+    # We launched N matmuls; expect roughly N kernel launches (allow some slack).
+    assert len(matmul) >= N // 2, f"expected ~{N} matmul kernels, got {len(matmul)}"
+    assert any(e.get("dur", 0) > 0 for e in matmul), (
+        "all matmul kernel durations are zero"
     )
 
 

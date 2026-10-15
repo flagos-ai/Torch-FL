@@ -25,11 +25,12 @@ which ``sys.modules`` is what these tests check; a vendor with no stream class o
 its own must not reach that library, and gets the handle-only stand-in
 ``current_stream()`` returns instead of whichever class the old ``else`` meant.
 
-The vendor branches are reached by calling ``Stream.__init__`` on an
-``object.__new__(Stream)`` rather than ``Stream(...)``: ``Stream.__new__`` proxies
-``torch.cuda.Stream`` and only falls back to ``object.__new__`` where there is no
-CUDA runtime, so constructing the class directly would test the host rather than
-the dispatch. Nothing here needs a MUSA device or the extension's real bindings.
+The vendor branches are reached by calling ``Stream.__init__`` on an instance
+that skipped ``Stream.__new__`` rather than on ``Stream(...)``: ``Stream.__new__``
+proxies ``torch.cuda.Stream`` and only falls back to ``object.__new__`` where
+there is no CUDA runtime, so constructing the class directly would test the host
+rather than the dispatch. Nothing here needs a MUSA device or the extension's
+real bindings.
 """
 
 import sys
@@ -71,7 +72,16 @@ def _ascend_was_imported() -> bool:
 
 def _build_stream(device=None, priority=0):
     """Run ``Stream.__init__`` without ``Stream.__new__``'s CUDA inheritance."""
-    stream = object.__new__(flagos.Stream)
+    try:
+        stream = object.__new__(flagos.Stream)
+    except TypeError:
+        # On a CUDA-shaped build (MetaX, PPU) the most derived static base is
+        # torch._C._CudaStreamBase, and its tp_new refuses object.__new__ with
+        # "use torch._C._CudaStreamBase.__new__()". Every keyword of that
+        # tp_new is optional, so calling it with the class alone allocates an
+        # instance without inheriting torch.cuda.Stream's device logic, and the
+        # __init__ below replaces whatever it picked with the vendor stream.
+        stream = torch._C._CudaStreamBase.__new__(flagos.Stream)
     flagos.Stream.__init__(stream, device, priority)
     return stream
 

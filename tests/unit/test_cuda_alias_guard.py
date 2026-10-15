@@ -131,8 +131,14 @@ _CHILD = textwrap.dedent(
     import json
     import os
 
-    import torch
+    # torch_fl before torch, the same order tests/unit/conftest.py uses and the
+    # only order a vendor-core build supports: torch_fl has to select its forked
+    # libtorch core before torch starts. Reaching ``import torch`` first maps the
+    # upstream libtorch, and PPU's own ``_preload_global`` then aborts the
+    # process while static init registers the Conjugate dispatch fallback a
+    # second time (run 38723076856, test_cuda_alias_guard).
     import torch_fl
+    import torch
 
     def device_type(dev):
         try:
@@ -178,13 +184,19 @@ _CHILD = textwrap.dedent(
 
 
 def _child_state(alias_env: str) -> dict:
-    """Import torch and torch_fl in a fresh interpreter, and report the result.
+    """Import torch_fl and torch in a fresh interpreter, and report the result.
 
     `TORCH_DEVICE_BACKEND_AUTOLOAD` is cleared for the same reason
     `tests/manual/transformers_hf_tests.py` clears it for its children: torch_fl
     then runs from an explicit `import torch_fl` rather than from inside
     `import torch`, which is the order the ecosystem reaches it in -- a
     transformers script imports torch_fl last, and MUSA never autoloads at all.
+
+    The child still imports torch_fl *before* torch, because that is what the
+    explicit-import path has to look like on a vendor-core build: PPU, DCU and
+    MetaX relink their forked libtorch core from `torch_fl/__init__.py`, and an
+    upstream libtorch mapped first cannot be replaced afterwards. The alias has
+    to install on that path too, which is what these tests assert.
     """
     env = {
         **os.environ,
