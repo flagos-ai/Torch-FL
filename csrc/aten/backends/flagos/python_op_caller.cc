@@ -277,22 +277,43 @@ py::object OptionalIntArrayRefToPython(at::OptionalIntArrayRef arr) {
 }
 
 // Convert optional<ScalarType> to Python
+//
+// Every ScalarType this build can build a FlagGems call for has an arm here.
+// The `default` is reserved for a dtype this switch genuinely does not name,
+// and it must NOT silently become Python `None`: a factory op reads `None` as
+// "use torch.get_default_dtype()", so an unnamed dtype came back as float32
+// rather than failing (issue #540).
+//
+// complex64/complex128 are named here so the requested dtype reaches FlagGems
+// intact. Whether FlagGems can then serve it is a separate question, asked
+// before the call rather than by lossily dropping the dtype here: a
+// CUDA-ABI boxing build (MetaX, DCU) reroutes the complex call to its vendor
+// kernels, and a wheel with no complex-capable route now fails loudly inside
+// FlagGems instead of returning a real tensor for a complex request.
 py::object OptionalDtypeToPython(std::optional<at::ScalarType> dtype) {
   if (!dtype.has_value()) return py::none();
   // Import torch and get the dtype object
   static py::module_ torch_mod = py::module_::import("torch");
   switch (*dtype) {
-    case at::ScalarType::Float:   return torch_mod.attr("float32");
-    case at::ScalarType::Double:  return torch_mod.attr("float64");
-    case at::ScalarType::Half:    return torch_mod.attr("float16");
-    case at::ScalarType::BFloat16: return torch_mod.attr("bfloat16");
-    case at::ScalarType::Int:     return torch_mod.attr("int32");
-    case at::ScalarType::Long:    return torch_mod.attr("int64");
-    case at::ScalarType::Short:   return torch_mod.attr("int16");
-    case at::ScalarType::Byte:    return torch_mod.attr("uint8");
-    case at::ScalarType::Char:    return torch_mod.attr("int8");
-    case at::ScalarType::Bool:    return torch_mod.attr("bool");
-    default: return py::none();
+    case at::ScalarType::Float:        return torch_mod.attr("float32");
+    case at::ScalarType::Double:       return torch_mod.attr("float64");
+    case at::ScalarType::Half:         return torch_mod.attr("float16");
+    case at::ScalarType::BFloat16:     return torch_mod.attr("bfloat16");
+    case at::ScalarType::Int:          return torch_mod.attr("int32");
+    case at::ScalarType::Long:         return torch_mod.attr("int64");
+    case at::ScalarType::Short:        return torch_mod.attr("int16");
+    case at::ScalarType::Byte:         return torch_mod.attr("uint8");
+    case at::ScalarType::Char:         return torch_mod.attr("int8");
+    case at::ScalarType::Bool:         return torch_mod.attr("bool");
+    case at::ScalarType::ComplexFloat: return torch_mod.attr("complex64");
+    case at::ScalarType::ComplexDouble: return torch_mod.attr("complex128");
+    default:
+      TORCH_CHECK(false,
+                  "OptionalDtypeToPython has no Python dtype for ScalarType ",
+                  static_cast<int>(*dtype),
+                  "; add it rather than letting the caller fall back to the "
+                  "default dtype");
+      return py::none();  // unreachable: TORCH_CHECK above always throws
   }
 }
 

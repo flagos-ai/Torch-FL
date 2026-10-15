@@ -122,6 +122,14 @@ bool LogEnabled(const char* item);
 // fails during compilation with ``KeyError: 'complex64'`` (or complex128).
 // The CUDA-ABI boxing kernels reach MetaX torch's native complex support, so
 // the vendor slot is both available and the correct fallback for these calls.
+// DCU is the same gap and the same fallback, measured separately on its own
+// shipped wheel (see common.cc); the difference is that DCU reached it through
+// a silent dtype loss first, because its dtype converter had no complex arm
+// either (issue #540), so the symptom there was a complex request quietly
+// returning float32 rather than a KeyError. The converter is fixed alongside
+// the escape, and the diversion then carries the factory family (`zeros`,
+// `ones`, `randn`, `abs`) to the vendor kernels with dtype and device intact.
+// See the measurement in common.cc.
 //
 // On GCU the same shape of gap exists for int64, and it fails in two
 // different places on the way to the same non-existent kernel. A kernel whose
