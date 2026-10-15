@@ -1300,6 +1300,59 @@ def test_ascend_defaults_to_serial_compile():
             os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = saved
 
 
+def test_cuda_wheel_without_cuda_kernels_defaults_to_serial_compile(monkeypatch):
+    """The default FlagGems-primary CUDA wheel compiles in the parent process.
+
+    Its compile worker is a fresh interpreter with no torch_fl, so
+    `torch.cuda.is_available()` is False there, Triton's NVIDIA driver reports
+    itself inactive, and `triton_helpers.set_driver_to_gpu` raises "Could not
+    find an active GPU backend" while precompiling. Serial compilation moves that
+    work into the parent, where torch_fl's torch.cuda shim answers.
+    """
+    from torch_fl.compile import inductor_backend
+    from torch_fl.compile import platform_profile as pp
+
+    monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    monkeypatch.setattr(
+        "torch_fl.compile.platform_profile.platform_profile", lambda: pp._CUDA_PROFILE
+    )
+    monkeypatch.setattr(
+        "torch_fl.compile.device_interface._torch_has_cuda_kernels", lambda: False
+    )
+
+    patches = {}
+    inductor_backend._patch_cuda_compile_workers(patches)
+    assert patches["compile_threads"] == 1
+
+    # An explicit request still wins, as it does for the other vendors.
+    explicit = {"compile_threads": 4}
+    inductor_backend._patch_cuda_compile_workers(explicit)
+    assert explicit["compile_threads"] == 4
+
+    monkeypatch.setenv("TORCHINDUCTOR_COMPILE_THREADS", "4")
+    from_env = {}
+    inductor_backend._patch_cuda_compile_workers(from_env)
+    assert "compile_threads" not in from_env
+
+
+def test_cuda_torch_keeps_default_compile_threads(monkeypatch):
+    """A CUDA-*enabled* torch needs no worker workaround: its driver is active."""
+    from torch_fl.compile import inductor_backend
+    from torch_fl.compile import platform_profile as pp
+
+    monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    monkeypatch.setattr(
+        "torch_fl.compile.platform_profile.platform_profile", lambda: pp._CUDA_PROFILE
+    )
+    monkeypatch.setattr(
+        "torch_fl.compile.device_interface._torch_has_cuda_kernels", lambda: True
+    )
+
+    patches = {}
+    inductor_backend._patch_cuda_compile_workers(patches)
+    assert "compile_threads" not in patches
+
+
 def test_compile_fallback_eager():
     """Test fallback to eager mode when compilation fails."""
     # Set fallback env var

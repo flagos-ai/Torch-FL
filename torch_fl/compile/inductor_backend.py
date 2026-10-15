@@ -444,6 +444,37 @@ def _patch_ascend_compile_workers(config_patches: Dict[str, Any]) -> None:
         config_patches["compile_threads"] = 1
 
 
+def _patch_cuda_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Keep compilation in-process on a CUDA-like platform without CUDA bindings.
+
+    The compile worker is a *fresh interpreter* (subproc_pool spawns it as a
+    subprocess), so it only has what `import torch` gives it. On the default
+    FlagGems-primary wheel that is a torch with no CUDA bindings and no torch_fl
+    (with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`, which the wheel's own harness sets to
+    keep a vendor backend from claiming PrivateUse1): `torch.cuda.is_available()`
+    is False there, so Triton's NVIDIA driver reports itself inactive and
+    `triton_helpers.set_driver_to_gpu` -- which `_precompile_config` calls for any
+    non-CPU device type -- dies with "Could not find an active GPU backend".
+
+    Nothing can be installed into that interpreter: it never loads torch_fl, so
+    there is no hook to run before the compile. Compiling in the parent, where
+    torch_fl *is* imported and its `torch.cuda` shim answers, is therefore the
+    fix, and it is the same remedy `_patch_ascend_compile_workers` uses for the
+    same class of problem. An explicit `compile_threads` or
+    `TORCHINDUCTOR_COMPILE_THREADS` still wins.
+    """
+    if "compile_threads" in config_patches:
+        return
+    if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
+        return
+
+    from torch_fl.compile.device_interface import _torch_has_cuda_kernels
+    from torch_fl.compile.platform_profile import platform_profile
+
+    if platform_profile().is_cuda_like and not _torch_has_cuda_kernels():
+        config_patches["compile_threads"] = 1
+
+
 def flagos_compile_backend(
     gm: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor],
@@ -506,6 +537,7 @@ def flagos_compile_backend(
     _bind_musa_flagtree_runtime()
     _patch_vendor_flagtree_compile_workers(config_patches)
     _patch_ascend_compile_workers(config_patches)
+    _patch_cuda_compile_workers(config_patches)
 
     # Make inductor treat flagos as a GPU device. Order matters: is_gpu() must
     # answer True and the device interface must be resolvable before the

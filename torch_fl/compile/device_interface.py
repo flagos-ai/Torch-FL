@@ -115,6 +115,68 @@ def _native_warp_size(props: Any) -> int:
     return 32
 
 
+def _triton_current_target() -> Any:
+    """The active Triton driver's ``GPUTarget``, or None.
+
+    Split out so tests can substitute a target: ``triton.runtime.driver.active``
+    is a read-only property on the driver config object, so it cannot be
+    monkeypatched at the use site.
+    """
+    try:
+        from triton.runtime import driver
+
+        return driver.active.get_current_target()
+    except Exception:
+        return None
+
+
+def _triton_driver_props(props: Any) -> dict:
+    """Layout fields no torch binding supplies, read off the Triton driver.
+
+    ``DeviceProperties.create`` tells Triton how to shape the kernel it is about
+    to compile, and inductor's own implementation fills the layout fields from
+    ``torch.cuda`` -- `cc` from ``get_compute_capability`` (which reports the
+    *arch*, as in ``GPUTarget.arch``) and the rest as optional ``getattr``s off
+    the device properties. A build whose torch has no CUDA bindings has neither,
+    so the fields have to come from somewhere that does. The Triton driver is
+    the authority for exactly this reason: it is what compiles the kernel, and
+    its own ``get_current_target()`` already reports ``GPUTarget``, whose
+    ``arch`` is the same sm number inductor would have passed.
+
+    Only the fields ``torch.cuda`` would have supplied are returned, so a driver
+    that answers nothing degrades to the upstream defaults rather than to a
+    wrong number.
+    """
+    layout: dict = {}
+    target = _triton_current_target()
+    if target is not None:
+        arch = getattr(target, "arch", None)
+        if arch is not None:
+            # In 64-bit mode arch is "sm_80" rather than 80; keep the number
+            # inductor would have handed Triton.
+            digits = str(arch).rsplit("_", 1)[-1]
+            if digits.isdigit():
+                layout["cc"] = int(digits)
+        warp_size = getattr(target, "warp_size", None)
+        if warp_size is not None:
+            layout["warp_size"] = int(warp_size)
+
+    # Prefer the device properties when they carry the value; they are a field
+    # of the device itself, the driver target is global.
+    for src, dst in (
+        ("multi_processor_count", "multi_processor_count"),
+        ("major", "major"),
+        ("warp_size", "warp_size"),
+        ("regs_per_multiprocessor", "regs_per_multiprocessor"),
+        ("max_threads_per_multi_processor", "max_threads_per_multi_processor"),
+        ("max_threads_per_block", "max_threads_per_block"),
+    ):
+        value = getattr(props, src, None)
+        if value is not None:
+            layout[dst] = value
+    return layout
+
+
 def _device_index(device: Any) -> Optional[int]:
     """Normalize str / torch.device / int into a plain device index."""
     if device is None:
@@ -220,7 +282,13 @@ def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> No
 
 
 def _exchange_device(device_idx: int) -> int:
-    if platform_profile().is_cuda_like:
+    # `torch.cuda._exchange_device` is only the same thing as switching the
+    # flagos device where there is a CUDA runtime for them to agree on. A
+    # CUDA-like platform can run the CPU-only pip torch (the default
+    # FlagGems-primary wheel), where the call raises "PyTorch was compiled
+    # without CUDA support" -- so gate on the torch, not the platform, and go
+    # through the flagos runtime otherwise.
+    if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
         return torch.cuda._exchange_device(device_idx)
     if device_idx < 0:
         return -1
@@ -320,9 +388,23 @@ class FlagOSDeviceInterface(DeviceInterface):
     @staticmethod
     def get_compute_capability(device: Any = None) -> Union[int, str]:
         profile = platform_profile()
-        if profile.is_cuda_like:
+        if profile.is_cuda_like and _torch_has_cuda_kernels():
             major, minor = torch.cuda.get_device_capability(_device_index(device))
             return major * 10 + minor
+        if profile.is_cuda_like:
+            # CUDA-like platform on the CPU-only pip torch: `torch.cuda` has no
+            # capability to report. The Triton driver is the authority for the
+            # arch the kernels are actually compiled for, and on this build the
+            # active backend *is* NVIDIA's, so its target carries the same sm
+            # number. Fall back to the shared `cc`-from-driver read used for the
+            # other vendors that report their capability natively.
+            target = _triton_current_target()
+            arch = getattr(target, "arch", None)
+            digits = str(arch).rsplit("_", 1)[-1] if arch is not None else ""
+            if digits.isdigit():
+                return int(digits)
+            props = torch.flagos.get_device_properties(_vendor_device(device))
+            return props.major * 10 + props.minor
         if profile.vendor in ("musa", "gcu"):
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
@@ -447,6 +529,10 @@ def _patch_device_properties() -> None:
     ``cuda`` elsewhere (triton's NVIDIA backend). The interface lookup and every
     other property stay on torch.cuda -- flagos shares the same physical GPU.
 
+    On a CUDA-like platform whose torch has no CUDA bindings (the default
+    FlagGems-primary wheel) torch.cuda cannot answer those property queries at
+    all, so the record is built from ``FlagOSDeviceInterface`` instead.
+
     We wrap ``create`` and rewrite the ``type`` of the result (rather than only
     editing the read sites) so the functools cache and every other field keep
     working unchanged.
@@ -464,6 +550,38 @@ def _patch_device_properties() -> None:
 
     def create(device: Any) -> Any:
         is_flagos = device is not None and getattr(device, "type", None) == DEVICE_TYPE
+        if is_flagos and cuda_like and not _torch_has_cuda_kernels():
+            # A CUDA-like platform can still link the CPU-only pip torch -- the
+            # default FlagGems-primary wheel does. `torch.cuda` answers nothing
+            # there while still looking available (torch_fl aliases the probe to
+            # the flagos device count, see accelerator/cuda/_cuda_compat.py), so
+            # the translation below sends inductor into `torch.cuda`'s own
+            # property path. That path only ever works on a CUDA-enabled torch:
+            # `_lazy_init` raises "Torch not compiled with CUDA enabled" before
+            # it defines the module-level `_get_device_properties` that
+            # `get_device_properties` then calls -- and torch_fl itself sets
+            # `torch.cuda._initialized`, so the guard that would have raised is
+            # skipped and the call instead dies with
+            # "NameError: name '_get_device_properties' is not defined".
+            #
+            # Build the record from our own interface, which reads the same
+            # physical device through torch.flagos, exactly as the native
+            # runtimes below do. Only the layout fields differ from what
+            # torch.cuda would have returned on a CUDA torch: `cc` and the
+            # warp/register counts come off the Triton driver instead.
+            interface = FlagOSDeviceInterface
+            props = interface.get_device_properties(device)
+            layout = _triton_driver_props(props)
+            return DeviceProperties(
+                type=device_type,
+                index=device.index,
+                # Required, unlike the layout fields below: a device that does
+                # not report it still has to produce a record, and 1 is the
+                # value inductor's own CpuProperties uses.
+                multi_processor_count=layout.pop("multi_processor_count", 1),
+                cc=layout.pop("cc", interface.get_compute_capability(device)),
+                **layout,
+            )
         if is_flagos and cuda_like:
             # Interface/property lookup goes through torch.cuda (same GPU); only
             # the type reported onward becomes `maca`/`cuda`. The non-CUDA
@@ -556,11 +674,13 @@ def _repair_stock_cuda_interface() -> None:
     "cuda" (see `_patch_device_properties`), so inductor reaches the stock
     `CudaInterface` rather than `FlagOSDeviceInterface`.
 
-    Kunlunxin is the one non-CUDA platform that also reports "cuda"; there
-    `register_flagos_device_interface` claims that name for `FlagOSDeviceInterface`,
-    and this function is the safety net for the paths that hold a direct
-    reference to the stock class instead of going through the registry. Two of
-    its members are bound at import time from a `torch.cuda` probe:
+    The platforms that report "cuda" without being able to use it are Kunlunxin
+    and a CUDA-like platform whose torch has no CUDA bindings -- the default
+    FlagGems-primary wheel. There `register_flagos_device_interface` claims the
+    name for `FlagOSDeviceInterface`, and this function is the safety net for the
+    paths that hold a direct reference to the stock class instead of going
+    through the registry. Two of its members are bound at import time from a
+    `torch.cuda` probe:
 
     * `get_raw_stream` -> None when `torch.cuda._is_compiled()` is false, so the
       autotuner raises "'NoneType' object is not callable";
@@ -577,8 +697,9 @@ def _repair_stock_cuda_interface() -> None:
     torch.cuda probe at import time -- before that shim lands -- so it is left at
     None even where a CUDA runtime exists. It is therefore repaired
     unconditionally. `exchange_device` is only wrong where there is no CUDA
-    runtime to dispatch to, so on a CUDA-like build the stock binding is already
-    correct and is left alone.
+    runtime to dispatch to: on a CUDA-enabled torch the stock binding is already
+    correct and is left alone, and the gate is therefore the torch, not the
+    platform.
     """
     import torch._dynamo.device_interface as di
 
@@ -587,7 +708,7 @@ def _repair_stock_cuda_interface() -> None:
         di.get_cuda_stream = getter
         di.CudaInterface.get_raw_stream = staticmethod(getter)  # type: ignore[assignment]
 
-    if platform_profile().is_cuda_like:
+    if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
         return
 
     di.CudaInterface.exchange_device = staticmethod(_exchange_device)  # type: ignore[assignment]
@@ -800,7 +921,19 @@ def register_flagos_device_interface() -> None:
 
     Idempotent; called by the compile backend before each compile_fx.
     """
+    import torch._dynamo.device_interface as dyn_di
     from torch._dynamo.device_interface import register_interface_for_device
+
+    # Populate inductor's table *before* publishing anything into it.
+    # `init_device_reg` writes the built-in rows unconditionally --
+    # `register_interface_for_device("cuda", CudaInterface)` among them -- and
+    # runs lazily on the first `get_interface_for_device`/`get_registered_...`
+    # call. Registering first and letting that run later silently discards the
+    # claim: the table holds FlagOSDeviceInterface for "cuda" right after
+    # registration and CudaInterface by the time the runtime launcher asks. It is
+    # only ever entered when the flag is unset, so this is a no-op once inductor
+    # has been initialised (`_prime_has_triton` relies on the same property).
+    dyn_di.get_interface_for_device("cpu")
 
     _register_gpu_type()
     _patch_device_properties()
@@ -814,18 +947,24 @@ def register_flagos_device_interface() -> None:
     # launcher resolves via `triton_heuristics.get_device_interface`, so that
     # name needs an interface too. It proxies the same hardware as flagos.
     #
-    # On a CUDA build that name is "cuda" and inductor has already registered
-    # the stock CudaInterface for it, which is correct there and must be left
-    # alone. Kunlunxin is the one platform where the two collide: FlagTree's XPU
-    # backend *reports* the target as "cuda" (see platform_profile), yet the
-    # build has no CUDA runtime, so the stock CudaInterface is wrong for it.
-    # Its exchange_device is `torch.cuda._exchange_device`, which on the
-    # CPU-wheel fallback raises "PyTorch was compiled without CUDA support" --
-    # and the runtime launcher calls exactly that from DeviceGuard.__enter__
-    # before every kernel launch (_make_launchers in triton_heuristics). So for
-    # a native (non-CUDA-like) accelerator, claim the reported name as well.
+    # On a CUDA-enabling torch that name is "cuda" and inductor has already
+    # registered the stock CudaInterface for it, which is correct there and must
+    # be left alone. The collision is between the *platform* and the *torch*:
+    # flagos reports the target as "cuda" wherever the vendor Triton backend is
+    # NVIDIA's -- Kunlunxin's XPU backend, and a CUDA-like platform whose torch is
+    # the CPU-only pip wheel (the default FlagGems-primary build). Neither has a
+    # CUDA runtime, so the stock CudaInterface is wrong for both: it binds a dozen
+    # members straight off `torch.cuda` at import time (current_device, synchronize,
+    # get_device_properties, exchange_device, ...), and the runtime launcher calls
+    # several of them before every kernel launch -- `_make_launchers` alone does
+    # `DeviceGuard(device_interface, ...)` (exchange_device) followed by
+    # `synchronize(current_device())`. On a CPU torch those die with "PyTorch was
+    # compiled without CUDA support" / "module 'torch._C' has no attribute
+    # '_cuda_getDevice'". The gate is therefore the torch, not the platform.
     device_type, _ = _triton_backend()
-    if device_type != "cuda" or not platform_profile().is_cuda_like:
+    if device_type != "cuda" or not (
+        platform_profile().is_cuda_like and _torch_has_cuda_kernels()
+    ):
         register_interface_for_device(device_type, FlagOSDeviceInterface)
 
     # torch.utils._triton caches this result and may have been queried during

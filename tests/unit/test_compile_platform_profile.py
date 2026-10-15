@@ -95,6 +95,25 @@ def as_kunlunxin(monkeypatch):
     return pp._KUNLUNXIN_PROFILE
 
 
+def _cuda_platform_without_cuda_torch(monkeypatch) -> None:
+    """Pin the exact shape of the default FlagGems-primary CUDA wheel.
+
+    The recurring bug is a site gated on the *platform* (``is_cuda_like``) when
+    the question it is really asking is where the *torch* stands -- the torch
+    that wheel links is the CPU-only pip wheel, with no CUDA bindings at all.
+
+    Tests simulate that by deleting ``torch._C._cuda_getDeviceCount``, which is
+    the probe ``_torch_has_cuda_kernels()`` reads. That is only reliable when the
+    probe is *not* stubbed: on this machine it answers False (CPU torch) but on a
+    CUDA CI runner it would answer True. Pin both halves so the test means the
+    same thing wherever it runs.
+    """
+    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    monkeypatch.setattr(
+        "torch_fl.compile.device_interface._torch_has_cuda_kernels", lambda: False
+    )
+
+
 # --- profile selection ------------------------------------------------------
 
 
@@ -248,6 +267,158 @@ def test_exchange_device_uses_flagos_state_on_ascend(as_ascend, monkeypatch):
     assert moved == []
 
 
+@pytest.mark.anyplatform
+def test_exchange_device_uses_flagos_state_without_cuda_kernels(as_cuda, monkeypatch):
+    """The CUDA-like/CPU-torch wheel must switch the flagos device, not torch.cuda.
+
+    `FlagOSDeviceInterface.exchange_device` is this helper, and the runtime
+    launcher calls it from `DeviceGuard.__enter__` before every kernel launch.
+    On the default FlagGems-primary wheel `torch.cuda._exchange_device` raises
+    "PyTorch was compiled without CUDA support", so the platform gate has to be
+    paired with the torch probe.
+    """
+    from torch_fl.compile import device_interface as di
+
+    _cuda_platform_without_cuda_torch(monkeypatch)
+    monkeypatch.setattr(torch.flagos, "current_device", lambda: 2)
+    moved = []
+    monkeypatch.setattr(torch.flagos, "set_device", moved.append)
+
+    assert di._exchange_device(5) == 2
+    assert moved == [5]
+
+
+@pytest.mark.anyplatform
+def test_compute_capability_comes_from_the_driver_without_cuda_kernels(
+    as_cuda, monkeypatch
+):
+    """No `torch.cuda.get_device_capability` on this wheel; the driver has the arch."""
+    from torch_fl.compile import device_interface as di
+
+    class _Target:
+        arch = "sm_80"
+
+    _cuda_platform_without_cuda_torch(monkeypatch)
+    monkeypatch.setattr(di, "_triton_current_target", lambda: _Target())
+
+    assert di.FlagOSDeviceInterface.get_compute_capability() == 80
+
+
+# --- device properties on a CUDA-like build with no CUDA torch --------------
+
+
+class _StubProps:
+    """The subset of a device-properties record the layout fields read."""
+
+    def __init__(self, **overrides):
+        self.multi_processor_count = 108
+        self.major = 8
+        self.warp_size = 32
+        for name, value in overrides.items():
+            setattr(self, name, value)
+
+
+def _stub_flagos_properties(monkeypatch, props):
+    """Make `FlagOSDeviceInterface.get_device_properties` answer `props`."""
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(
+        di.FlagOSDeviceInterface, "get_device_properties", lambda device=None: props
+    )
+
+
+@pytest.mark.anyplatform
+def test_device_properties_avoid_torch_cuda_on_a_cpu_torch(as_cuda, monkeypatch):
+    """A CUDA-like platform over a CPU-only torch must not query torch.cuda.
+
+    The default FlagGems-primary wheel is exactly that shape. Delegating to
+    upstream's `DeviceProperties.create` sends the lookup into
+    `torch.cuda.get_device_properties`, which on a torch with no CUDA bindings
+    calls `_get_device_properties` after a `_lazy_init` that never defines it
+    (torch_fl sets `torch.cuda._initialized`, so the guard that would have
+    raised "Torch not compiled with CUDA enabled" is skipped) -- inductor then
+    dies with `NameError: name '_get_device_properties' is not defined`, which
+    is how `test_flex_attention_with_grads` failed on the A100.
+    """
+    from torch._inductor.runtime.hints import DeviceProperties
+
+    from torch_fl.compile import device_interface as di
+
+    _cuda_platform_without_cuda_torch(monkeypatch)
+    _stub_flagos_properties(monkeypatch, _StubProps())
+    monkeypatch.setattr(
+        di.FlagOSDeviceInterface,
+        "get_compute_capability",
+        staticmethod(lambda device=None: 80),
+    )
+    monkeypatch.setattr(di, "_triton_current_target", lambda: None)
+
+    def _torch_cuda_must_not_be_reached(device):
+        raise AssertionError("DeviceProperties.create delegated to torch.cuda")
+
+    monkeypatch.setattr(DeviceProperties, "create", _torch_cuda_must_not_be_reached)
+    # `_patch_device_properties` keys off the attribute marker, and the stub
+    # above replaced the classmethod wholesale.
+    monkeypatch.delattr(DeviceProperties.create, "_flagos_patched", raising=False)
+
+    di._patch_device_properties()
+
+    record = DeviceProperties.create(torch.device("flagos", 0))
+    assert record.type == "cuda"
+    assert record.index == 0
+    assert record.multi_processor_count == 108
+    assert record.cc == 80
+    assert record.warp_size == 32
+
+
+@pytest.mark.anyplatform
+def test_device_properties_keep_the_torch_cuda_path_on_a_cuda_torch(
+    as_cuda, monkeypatch
+):
+    """A CUDA-enabled torch keeps upstream's lookup, as the vendor wheels do."""
+    from torch._inductor.runtime.hints import DeviceProperties
+
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
+    _stub_flagos_properties(monkeypatch, _StubProps())
+
+    delegated = []
+
+    def _record(device):
+        delegated.append(device)
+        raise AssertionError("stop here; the delegation is what is under test")
+
+    monkeypatch.setattr(DeviceProperties, "create", _record)
+    monkeypatch.delattr(DeviceProperties.create, "_flagos_patched", raising=False)
+
+    di._patch_device_properties()
+
+    with pytest.raises(AssertionError, match="the delegation is what is under test"):
+        DeviceProperties.create(torch.device("flagos", 0))
+    # Translated to the cuda device, which is where torch.cuda looks up the
+    # properties of the same physical GPU.
+    assert [d.type for d in delegated] == ["cuda"]
+
+
+@pytest.mark.anyplatform
+def test_triton_driver_props_reads_arch_and_warp_size(monkeypatch):
+    """The layout fields fall back to the Triton driver, which is authoritative."""
+
+    class _Target:
+        arch = "sm_80"
+        warp_size = 32
+
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(di, "_triton_current_target", lambda: _Target())
+
+    layout = di._triton_driver_props(_StubProps(warp_size=None))
+    assert layout["cc"] == 80
+    assert layout["warp_size"] == 32
+    assert layout["multi_processor_count"] == 108
+
+
 # --- device registry --------------------------------------------------------
 
 
@@ -305,14 +476,45 @@ def test_native_accelerator_claims_the_reported_cuda_name(as_kunlunxin, monkeypa
 
 @pytest.mark.anyplatform
 def test_cuda_like_build_leaves_the_cuda_name_alone(as_cuda, monkeypatch):
-    """On a real CUDA build the stock CudaInterface is the correct one."""
+    """On a CUDA-*enabled* torch the stock CudaInterface is the correct one.
+
+    "CUDA build" means a torch that carries the CUDA bindings, not merely the
+    CUDA platform: that is what makes the members CudaInterface binds off
+    ``torch.cuda`` answerable. The platform-with-CPU-torch shape -- the default
+    FlagGems-primary wheel -- is the opposite case, covered by
+    `test_cuda_wheel_without_cuda_kernels_claims_the_reported_cuda_name`.
+    """
     from torch_fl.compile import device_interface as di
 
+    monkeypatch.setattr(di, "_torch_has_cuda_kernels", lambda: True)
     registered = _capture_registrations(di, monkeypatch)
     di.register_flagos_device_interface()
 
     assert registered[di.DEVICE_TYPE] is di.FlagOSDeviceInterface
     assert "cuda" not in registered
+
+
+@pytest.mark.anyplatform
+def test_cuda_wheel_without_cuda_kernels_claims_the_reported_cuda_name(
+    as_cuda, monkeypatch
+):
+    """The default FlagGems-primary CUDA wheel has no CUDA bindings in its torch.
+
+    It reports the Triton target as "cuda" (NVIDIA's backend) exactly as a CUDA
+    build does, so the launcher lands on the stock `CudaInterface` -- but that
+    class was bound from a `torch.cuda` that cannot answer, and `_make_launchers`
+    calls `exchange_device` then `synchronize(current_device())` before every
+    kernel launch. On this build both must resolve to `FlagOSDeviceInterface`,
+    which reads the same physical device through torch.flagos.
+    """
+    from torch_fl.compile import device_interface as di
+
+    _cuda_platform_without_cuda_torch(monkeypatch)
+    registered = _capture_registrations(di, monkeypatch)
+    di.register_flagos_device_interface()
+
+    assert registered[di.DEVICE_TYPE] is di.FlagOSDeviceInterface
+    assert registered["cuda"] is di.FlagOSDeviceInterface
 
 
 @pytest.mark.anyplatform
@@ -329,12 +531,18 @@ def test_stock_cuda_interface_leaves_exchange_device_on_cuda(as_cuda, monkeypatc
     so it is restored on every build -- gating it behind `is_cuda_like` is exactly
     the regression from run 38354801090, where the CUDA lane died with
     "'NoneType' object is not callable" at `get_raw_stream`.
+
+    "CUDA build" here means a torch that carries the CUDA bindings: the default
+    FlagGems-primary wheel is CUDA-*like* without them, and is covered by
+    `test_stock_cuda_interface_rebinds_exchange_device_without_cuda_kernels`.
     """
     import torch
 
     from torch._dynamo import device_interface as dyn_di
 
     from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
 
     before_exchange = dyn_di.CudaInterface.exchange_device
     before_maybe = dyn_di.CudaInterface.maybe_exchange_device
@@ -349,6 +557,38 @@ def test_stock_cuda_interface_leaves_exchange_device_on_cuda(as_cuda, monkeypatc
         assert dyn_di.CudaInterface.get_raw_stream is getter
     else:
         assert dyn_di.CudaInterface.get_raw_stream is before_raw
+
+
+@pytest.mark.anyplatform
+def test_stock_cuda_interface_rebinds_exchange_device_without_cuda_kernels(
+    as_cuda, monkeypatch
+):
+    """A CUDA-like platform over a CPU-only torch needs the same repair as Kunlunxin.
+
+    `_patch_device_properties` reports the flagos device as "cuda" there too, so
+    the runtime launcher resolves the stock `CudaInterface` -- whose
+    `exchange_device` is `torch.cuda._exchange_device` and raises "PyTorch was
+    compiled without CUDA support" from `DeviceGuard.__enter__` before every
+    launch. `test_flex_attention_with_grads` on the A100 reached exactly that
+    call after codegen succeeded.
+    """
+    from torch._dynamo import device_interface as dyn_di
+
+    from torch_fl.compile import device_interface as di
+
+    _cuda_platform_without_cuda_torch(monkeypatch)
+
+    saved = {
+        name: getattr(dyn_di.CudaInterface, name)
+        for name in ("exchange_device", "maybe_exchange_device", "get_raw_stream")
+    }
+    try:
+        di._repair_stock_cuda_interface()
+        assert dyn_di.CudaInterface.exchange_device is di._exchange_device
+        assert dyn_di.CudaInterface.maybe_exchange_device is di._exchange_device
+    finally:
+        for name, value in saved.items():
+            setattr(dyn_di.CudaInterface, name, value)
 
 
 @pytest.mark.anyplatform
@@ -510,7 +750,7 @@ def test_benchmarker_patch_reaches_the_default_cuda_wheel(as_cuda, monkeypatch):
 
     from torch_fl.compile import device_interface as di
 
-    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    _cuda_platform_without_cuda_torch(monkeypatch)
     obj = benchmarking.InductorBenchmarker()
     monkeypatch.setattr(benchmarking, "benchmarker", obj)
 
@@ -578,7 +818,7 @@ def test_joint_graph_patterns_primed_off_cuda_without_cuda_kernels(
     """
     from torch_fl.compile import device_interface as di
 
-    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    _cuda_platform_without_cuda_torch(monkeypatch)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     recorder = _stand_in_for_joint_graph_lazy_init(monkeypatch)
 
@@ -594,7 +834,7 @@ def test_joint_graph_pattern_priming_is_one_shot(as_cuda, monkeypatch):
     """`lazy_init` is `functools.cache`d; an already-primed table is left alone."""
     from torch_fl.compile import device_interface as di
 
-    monkeypatch.delattr(torch._C, "_cuda_getDeviceCount", raising=False)
+    _cuda_platform_without_cuda_torch(monkeypatch)
     recorder = _stand_in_for_joint_graph_lazy_init(monkeypatch, currsize=1)
 
     di._patch_joint_graph_pattern_init()
