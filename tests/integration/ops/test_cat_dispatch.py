@@ -34,7 +34,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import route_is_served, routed_backend
 
 
 DEVICE = "flagos:0"
@@ -484,11 +484,25 @@ class TestCatDispatchLog:
     def test_dispatch_log_flaggems_runtime(self):
         """cat dispatches to whatever backend this platform's conf lists.
 
-        FlagGems has no Triton kernel for cat, so every generated conf keeps it
-        on that platform's vendor kernel -- ``cuda`` on CUDA/DCU/PPU, ``musa`` on
-        MUSA. Reading the conf keeps the assertion true on all of them and still
-        checks the real property: the runtime honours the table it was given.
+        The conf decides the route and it differs per platform -- ``cuda`` on
+        CUDA/DCU/MetaX, ``gcu`` on GCU, ``kunlunxin`` on Kunlunxin, the native
+        ``ascend`` kernel on Ascend, and the FlagGems Python path on
+        MUSA/PPU/Iluvatar/TsingMicro -- so reading the conf keeps the assertion
+        true on all of them and still checks the real property: the runtime
+        honours the table it was given.
+
+        Skipped where this wheel did not compile the backend the conf names. The
+        default FlagGems-primary wheel is that case for the ``cuda`` route: it
+        links no CUDA boxing kernels, so ``cat`` is never claimed on PrivateUse1,
+        reaches cpu_fallback and logs no dispatch at all. That gap is what this
+        lane's follow-up re-wires to a vendor or FlagGems route.
         """
+        if not route_is_served("cat"):
+            pytest.skip(
+                f"the conf routes cat to {routed_backend('cat')}, a backend this "
+                "wheel did not compile (see KERNELS in torch_fl/_build_config.py): "
+                "the call reaches cpu_fallback and logs no dispatch"
+            )
         result = _run_cat_subprocess({"FLAGOS_LOG": "dispatch"})
         expected = routed_backend("cat")
         assert f"[flagos dispatch] cat -> {expected}" in result.stderr, (
