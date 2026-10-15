@@ -260,10 +260,10 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 // Ascend has done so since the native backend landed. TsingMicro joins it
 // because it has no accelerator kernel for any of them: its non-FlagGems
 // implementations *are* the CUDA boxing kernels, and those need a vendor CUDA
-// runtime the TX8110 wheel does not link (FLAGOS_BUILD_BOXING is off). A view
-// op the conf leaves unlisted therefore falls through the FlagGems default to
-// Backend::kFlagGems, whose slot has no kernel -- Dispatcher::GetFn degrades
-// that to cuda_fn_, and the call dies in torch/cuda with
+// runtime the TX8110 wheel does not link. A view op the conf leaves unlisted
+// therefore falls through the FlagGems default to Backend::kFlagGems, whose
+// slot has no kernel -- Dispatcher::GetFn degrades that to cuda_fn_, and the
+// call dies in torch/cuda with
 //
 //   NotImplementedError: Could not run 'aten::as_strided' with arguments
 //   from the 'CUDA' backend
@@ -271,6 +271,27 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 // which is what every slicing index, `mask[:, 0] = 1` and `select` reduce to.
 // Routing them to kTsingMicro reaches the same at::native:: metadata helpers
 // the Ascend build uses, so the tensor stays on flagos.
+//
+// NOTE (reachability): REGISTER_IMPL_TO_DISPATCHER only fills this dispatcher's
+// backend slot -- it is NOT an m.impl() claim on PrivateUse1. The op still has
+// to be claimed by the build's generated registration for the dispatcher to be
+// consulted at all, and the two platforms get there differently:
+//
+//   * Ascend ships its own private registration set,
+//     csrc/aten/backends/ascend/generated/ascend_register.inc (374 m.impl, incl.
+//     `select.int` and `permute`), included at csrc/aten/register.cc:568 under
+//     `#elif defined(USE_ASCEND)`. That claim is what makes the kAscend slots
+//     here reachable.
+//   * TsingMicro has NO equivalent .inc. It takes register.cc's `#else` arm:
+//     with FLAGOS_BUILD_BOXING=ON the generated/register.inc claims these ops
+//     and the kTsingMicro slots here are reachable; with boxing OFF (the
+//     in-tree default) only generated/register_flaggems_tsingmicro.inc is
+//     included, and it lists the ops the conf routes to `flaggems` -- the
+//     `tsingmicro`-routed view ops are not in it. On that build they are
+//     unclaimed, reach cpu_fallback, and the handlers below are dead code.
+//
+// So this registration is correct, and necessary for the boxing-ON TX8110 build
+// the fleet measured; it is inert (not harmful) on a boxing-OFF wheel.
 #define FLAGOS_REGISTER_METADATA_VIEW_OPS(device)                             \
   REGISTER_IMPL_TO_DISPATCHER(                                                \
       TransposeIntFn, transpose_int_dispatcher, device, transpose_int)        \

@@ -197,20 +197,50 @@ one it measured.
 
 ### TsingMicro TX8110: the metadata-only view family moves from the dead CUDA boxing slot to the `tsingmicro` vendor slot (2026-10-16, TX8110 / Kuiper)
 
-**One sentence.** 13 pure-metadata view ops
-(`alias`, `detach`, `select.int`, `slice.Tensor`, `squeeze`, `squeeze.dim`, `t`,
-`transpose.int`, `unbind.int`, `unsqueeze`, `_conj`, `_neg_view`, `_unsafe_view`)
-move from the conf's `flaggems` default to the `tsingmicro` vendor slot on the
-TX8110 build, because the FlagGems route they used to take has no kernel behind
-it and degraded to a CUDA boxing kernel this wheel cannot run.
+**One sentence.** 14 pure-metadata view ops
+(`alias`, `detach`, `permute`, `select.int`, `slice.Tensor`, `squeeze`,
+`squeeze.dim`, `t`, `transpose.int`, `unbind.int`, `unsqueeze`, `_conj`,
+`_neg_view`, `_unsafe_view`) move from the conf's `flaggems` default to the
+`tsingmicro` vendor slot on the TX8110 build, because the FlagGems route they
+used to take has no kernel behind it and degraded to a CUDA boxing kernel this
+wheel cannot run.
 
-**Route change.** `backends_tsingmicro.conf` gains 13 explicit
+**Route change.** `backends_tsingmicro.conf` gains 14 explicit
 `= tsingmicro` entries (previously unlisted, i.e. the default `flaggems`).
 `csrc/aten/strided_ops.cc` registers the corresponding
 `at::native::flagos::*` metadata helpers under `Backend::kTsingMicro`; they were
 previously registered for `Backend::kAscend` only. The list is now emitted once
 per accelerator from a single macro, so an op added for one platform cannot be
-forgotten for the other.
+forgotten for the other. `permute` is included here: it is in the macro's list
+but was initially left out of the conf, so it kept the `flaggems` default and
+still hit the empty-slot degrade on a boxing-ON build.
+
+**Reachability depends on the build (boxing ON vs OFF).**
+`REGISTER_IMPL_TO_DISPATCHER` (`csrc/aten/dispatcher.h`) only fills this
+dispatcher's backend slot — it is **not** an `m.impl()` claim on PrivateUse1. The
+op must additionally be claimed by the build's generated registration for the
+dispatcher to be consulted at all, and the two platforms get there differently:
+
+* **Ascend** ships a private registration set,
+  `csrc/aten/backends/ascend/generated/ascend_register.inc` (374 `m.impl`, incl.
+  `select.int` and `permute`), included at `csrc/aten/register.cc:568` under
+  `#elif defined(USE_ASCEND)`. That claim is what makes the `kAscend` slots
+  reachable.
+* **TsingMicro has no equivalent `.inc`.** It takes `register.cc`'s `#else` arm.
+  With `FLAGOS_BUILD_BOXING=ON` the generated `register.inc` claims these ops and
+  the `kTsingMicro` slots are reachable. With boxing OFF — the in-tree default in
+  `cmake/flagos_platforms.json`, and what `_kernel_switches("tsingmicro")`
+  returns — only `register_flaggems_tsingmicro.inc` is included, which lists the
+  ops the conf routes to `flaggems`; the `tsingmicro`-routed view ops are not in
+  it. On that build they are unclaimed, reach `cpu_fallback`, and the handlers
+  are dead code.
+
+The TX8110 build the fleet measured is **boxing ON** (non-default): the live
+`[flagos dispatch] select.int -> tsingmicro` line below can only be printed when
+`select.int` is claimed on PrivateUse1, and `select.int` is absent from
+`register_flaggems_tsingmicro.inc`. So this change is necessary and correct for
+that build, and inert (not harmful) on a boxing-OFF wheel. The target build must
+be chosen deliberately.
 
 **Why the FlagGems route was wrong here.** Two separate gaps had to line up.
 First, the generated FlagGems kernel set has no entry for any view op — they are
@@ -286,9 +316,15 @@ the pre-macro and post-macro expansions are identical).
 **Generator coupling.** `scripts/codegen/codegen_boxing_flaggems_register.py`
 classifies a conf value as a FlagGems route unless it is `cuda`, `none` or
 empty, and emits an `m.impl()` for every such op — a slot the runtime cannot
-fill for these 13 ops. It gains a `VENDOR_ROUTES` table so the per-platform
-vendor key is excluded. All five `register_flaggems_*.inc` files are byte-
-identical after the change and `--check` passes.
+fill for these view ops. It gains a `VENDOR_ROUTES` table so the per-platform
+vendor key is excluded: without it the generator treats `permute`,
+`slice.Tensor`, `transpose.int`, `unsqueeze`, `alias`, `_conj` and
+`_unsafe_view` as FlagGems routes (the six of the fourteen that happen to have a
+kFlagGems dispatcher in `flaggems_python_kernels.cc`) and grows
+`register_flaggems_tsingmicro.inc` from 51 to 57 `m.impl` — claims on the very
+slot that has no kernel, which is the defect this change is fixing. The table is
+therefore load-bearing, not cosmetic. The five `register_flaggems_*.inc` files
+are unchanged by the change as committed and `--check` passes.
 
 ### Iluvatar (BI-V150 / Tianshu): a new FlagGems-primary platform, measured on BI-V150 to 603 FlagGems routes (2026-10-14; cohort re-measured 2026-10-15)
 
@@ -7423,16 +7459,16 @@ compiler sees — and every accelerated route is required to be in it.
 | Ascend 910 | 248 | 126 | 1662 | 374 / 2036 (18%) |
 | Enflame GCU S60 | 88 | 64 | 1884 | 152 / 2036 (7%) |
 | MTT S5000 (MUSA) | 122 | 36 | 1878 | 158 / 2036 (7%) |
-| TsingMicro TX8 | 53 | 13 | 0 | 51 / 2036 (2.5%) |
+| TsingMicro TX8 | 53 | 14 | 0 | 51 / 2036 (2.5%) |
 
 The TsingMicro row is not comparable to the other three: its `flaggems` column is not
 a route count and its registered ratio is not coverage. TsingMicro has no
 accelerator kernel set, so
 [`backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf) names 53
-ops as `flaggems`/`flagos_python`, routes 13 metadata-only view ops to the
+ops as `flaggems`/`flagos_python`, routes 14 metadata-only view ops to the
 `tsingmicro` slot (2026-10-16 — see "TsingMicro TX8110: the metadata-only view
 family moves from the dead CUDA boxing slot to the `tsingmicro` vendor slot"
-above; those 13 are stride arithmetic served by `at::native::` metadata helpers,
+above; those 14 are stride arithmetic served by `at::native::` metadata helpers,
 so the column is a route count but not a kernel count), and leaves every other op
 on the default, which is also `flaggems`; nothing is routed to `none`.
 Reachability is decided by registration instead:
