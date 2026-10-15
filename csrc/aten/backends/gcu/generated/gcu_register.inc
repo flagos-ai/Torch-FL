@@ -174,6 +174,8 @@
   m.impl("remainder.Scalar", WrapperRemainderScalar);
   m.impl("remainder.Tensor", WrapperRemainderTensor);
   m.impl("rsqrt", WrapperRsqrt);
+  m.impl("rsub.Scalar", WrapperRsubScalar);
+  m.impl("rsub.Tensor", WrapperRsubTensor);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("sign", WrapperSign);
   m.impl("silu", WrapperSilu);

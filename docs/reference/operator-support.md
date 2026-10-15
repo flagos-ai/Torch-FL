@@ -283,28 +283,42 @@ dtypes: `1 - int64_tensor`, `10 - int64_tensor`, `torch.rsub(a, b)`, and `1 - fl
 all match; the dispatch log shows `rsub.Scalar -> gcu` and `rsub.Tensor -> gcu`.
 
 **Route delta.** Exactly two routes move: `rsub.Scalar` and `rsub.Tensor`, both `flaggems` ->
-`gcu`. GCU `flaggems` **253 -> 251**, `gcu` **179 -> 181**, `none` **1605 -> 1605, unchanged**,
-over the same **2037** routable ops, so accelerated routes stay at **432**
-(`Coverage: 432/2037 ops accelerated (21.2%)`). Both generated registration files move with the
-conf and agree with it: `gcu_flaggems_register.inc` carries **248 -> 246** `m.impl` lines and
-`gcu_register.inc` carries **187 -> 189**, the two-line exchange the route change implies. The
-seven `# gcu` markers in the conf — `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`,
-`remainder.Tensor`, `silu` — are unmoved: `rsub` did not have a marker, it had a vendor kernel
-to route to. The `gcu_flaggems_register.inc` provenance banner moves from "246 ops registered
-here, 102 further FlagGems ops already claimed by `gcu_register.inc`" to **244 and 104**: the
-two `rsub` lines leave that file and join the set the native file claims.
+`gcu`. GCU `flaggems` **253 -> 251**, `gcu` **181 -> 183**, `none` **1603 -> 1603, unchanged**,
+over the same **2037** routable ops, so accelerated routes stay at **434** and the conf's own
+`Coverage:` line is unchanged at `434/2037 ops accelerated (21.3%)` — the two ops change
+backend, not acceleration. Both generated registration files move with the conf and agree with
+it: `gcu_flaggems_register.inc` carries **246 -> 244** `m.impl` lines and `gcu_register.inc`
+carries **188 -> 190**, the two-line exchange the route change implies. The seven `# gcu`
+markers in the conf — `clamp`, `fmod.Tensor`, `gelu`, `mean`, `mean.dim`, `remainder.Tensor`,
+`silu` — are unmoved: `rsub` did not have a marker, it had a vendor kernel to route to. The
+`gcu_flaggems_register.inc` provenance banner moves from "246 ops registered here, 104 further
+FlagGems ops already claimed by `gcu_register.inc`" to **244 and 106**: the two `rsub` lines
+leave that file and join the set the native file claims.
 
-| Artifact | Before | After |
+| Artifact | Before (`637d68c`) | After |
 |---|---|---|
-| `torch_fl/configs/backends_gcu.conf` | `de28e45e7f3b5ffa28f4eb7417f33c25` | `f2feb1a83b22844076821035f57af9ce` |
-| `gcu_flaggems_register.inc` | `a36ce6dc1af9bab716a36db1bfdd7130` | `f707eb7e0d069ca07933caac079f3a26` |
-| `gcu_register.inc` | `394c7120e18bf21ea1a8e28b1c4aa9db` | `4412bc17196f53365bfb46975a0e98ec` |
-| `gcu_kernels.cc` | `1d809ba6ee0df26750890fabfe43bee7` | `d5ed651a4bedfaf63e1632b119afd0d9` |
+| `torch_fl/configs/backends_gcu.conf` | `d47bddfabea19a0abf7a9c884eedf444` | `b0f8edefe1a7901f21d169145d2eb04d` |
+| `gcu_flaggems_register.inc` | `1b811b1ef1854e127b47375f87e0a007` | `b1910dedc9ed13a9ec335250d6d68929` |
+| `gcu_register.inc` | `a04816b47e5a62ef8b03a738c128a7be` | `51f7abed2d08b94f8d1d86578419dc51` |
+| `gcu_kernels.cc` | `3ad49073bac0baed13b9bfd1667decfb` | `97e0fb84d7ea048b90d07e20d8e01821` |
 
-Generator idempotency: a second run of `scripts/codegen/codegen_gcu.py` and
-`scripts/codegen/gen_vendor_confs.py` leaves all four artifacts byte-identical, and
-`gen_vendor_confs.py --check` reports "all vendor confs up to date". `_gcu_compat.py` and the
-two generator scripts are the only source edits; the four artifacts are generated from them.
+The hashes above are md5 of the *committed* artifacts on the rebased base and after the change.
+An earlier revision of this entry carried a table measured on a different base and a
+"four artifacts byte-identical over two runs" claim that had been checked in a scratch tree
+rather than against the committed artifacts; both are corrected here.
+
+Generator idempotency. **Three** generators write this platform's artifacts and the order
+matters — `codegen_gcu.py` emits the native kernels and their registrations, then
+`codegen_gcu_flaggems.py` subtracts what the native file now claims, then
+`gen_vendor_confs.py` rewrites the conf from both `.inc` files. Starting from a clean checkout
+`637d68c` (all four artifacts at their committed content) and running the three in that order
+reproduces the four hashes above exactly; running the three a second time changes nothing
+(`empty second diff`), and each generator's `--check` mode is clean
+(`gcu_flaggems_register.inc is up to date`, `all vendor confs up to date`). Running
+`gen_vendor_confs.py` alone on the base leaves `rsub.Scalar` at `none` rather than `gcu`,
+because `gcu_register.inc` does not yet claim it — the conf is derived, not authoritative, and
+a partial run produces a conf that disagrees with the sources. `_gcu_compat.py` and the three
+generator scripts are the only source edits; the four artifacts are generated from them.
 
 **Other platforms.** `NATIVE_TRITON_GAPS` is per-vendor and the `rsub` entry was added to the
 `gcu` set only; MUSA, MetaX, Ascend, DCU, PPU and Tsingmicro confs are untouched, and

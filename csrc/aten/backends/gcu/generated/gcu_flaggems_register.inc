@@ -201,6 +201,8 @@
 //   - repeat_interleave.Tensor
 //   - rsqrt
 //   - rsqrt_
+//   - rsub.Scalar
+//   - rsub.Tensor
 //   - scalar_tensor
 //   - scatter.src
 //   - scatter_.src
@@ -249,7 +251,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 246 ops registered here, 104 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 244 ops registered here, 106 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);
@@ -444,8 +446,6 @@
   m.impl("round.out", WrapperRoundOut);
   m.impl("round_", WrapperRoundInplace);
   m.impl("rrelu_with_noise_backward", WrapperRreluWithNoiseBackward);
-  m.impl("rsub.Scalar", WrapperRsubScalar);
-  m.impl("rsub.Tensor", WrapperRsubTensor);
   m.impl("scatter.reduce", WrapperScatterReduce);
   m.impl("scatter_.reduce", WrapperScatterInplaceReduce);
   m.impl("scatter_reduce.two", WrapperScatterReduceTwo);

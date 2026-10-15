@@ -419,7 +419,12 @@ def test_conf_route_counts_are_stable():
         # cat is the exception to the cat-flaggems reroute: the FlagGems route
         # does not compile on this vendor, so NATIVE_TRITON_GAPS["gcu"] keeps it
         # on the gcu kernel. See the entry in scripts/codegen/gen_vendor_confs.py.
-        "gcu": {"none": 1603, "gcu": 181, "flaggems": 253},
+        #
+        # rsub.Scalar / rsub.Tensor moved flaggems -> gcu: FlagGems' rsub Triton
+        # kernel is rejected by the Enflame front end (64-bit data type not
+        # supported on GCU300), so they are served by the native topsaten kernel
+        # instead. See NATIVE_TRITON_GAPS["gcu"].
+        "gcu": {"none": 1603, "gcu": 183, "flaggems": 251},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``
         # route.  The count is exactly what
