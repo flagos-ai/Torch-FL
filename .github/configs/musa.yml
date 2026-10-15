@@ -59,7 +59,12 @@ container_options: >-
   --cap-add=SYS_PTRACE
   --env MTHREADS_VISIBLE_DEVICES=all
 
-timeout_minutes: 60
+# 90, not the 60 the other platforms use, for the same reason as MetaX: the
+# unified manifest puts 37m36s of tests behind 17m30s of environment setup and
+# wheel build, so a green run measured 56m08s of a 60m budget
+# (2026-10-15T22:29Z). Four minutes is inside the run-to-run spread that
+# cancelled MetaX, so this carries the same 90 rather than the 60.
+timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-musa
 
