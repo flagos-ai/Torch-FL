@@ -438,6 +438,10 @@ def test_conf_route_counts_are_stable():
         # kernel is rejected by the Enflame front end (64-bit data type not
         # supported on GCU300), so they are served by the native topsaten kernel
         # instead. See NATIVE_TRITON_GAPS["gcu"].
+        # rsub.Scalar and rsub.Tensor moved from flaggems to gcu: the FlagGems
+        # pointwise kernel fails to compile on an int64 operand and
+        # codegen_gcu.py claims them now, as topsatenSub with the operands
+        # exchanged. See NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
         "gcu": {"none": 1603, "gcu": 183, "flaggems": 251},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``

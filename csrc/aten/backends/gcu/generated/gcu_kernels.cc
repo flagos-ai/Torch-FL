@@ -615,6 +615,29 @@ at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
 
 REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kGcu, SubTensorKernelGcu)
 
+at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  auto result_dtype = at::result_type(self, other);
+  if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
+      !gcu::TopsatenSupportsDtype(result_dtype)) {
+    return at::rsub(self.cpu(), other.cpu(), alpha).to(self.device());
+  }
+  auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+  auto other_c = other.to(self.device(), result_dtype);
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto self_b = gcu::BroadcastTo(self_c, out_shape);
+  auto other_b = gcu::BroadcastTo(other_c, out_shape);
+  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD(topsatenSub, self, t_out.get(), t_other.get(), t_self.get(), t_alpha);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(RsubTensorFn, rsub_tensor_dispatcher, Backend::kGcu, RsubTensorKernelGcu)
+
 at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
   TORCH_CHECK(
@@ -1085,6 +1108,7 @@ at::Tensor RsubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, 
 
 REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kGcu, RsubScalarKernelGcu)
 
+<<<<<<< HEAD
 at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1108,6 +1132,8 @@ at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, 
 
 REGISTER_IMPL_TO_DISPATCHER(RsubTensorFn, rsub_tensor_dispatcher, Backend::kGcu, RsubTensorKernelGcu)
 
+=======
+>>>>>>> c03a3d9 (fix: serve GCU rsub from topsatenSub after FlagGems fails on an int64 operand)
 at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||

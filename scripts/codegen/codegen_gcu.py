@@ -108,6 +108,13 @@ OPS = {
     # ---- binary_alpha: topsaten<Name>(out, self, other, alpha) ----
     "add.Tensor": ("binary_alpha", None),
     "sub.Tensor": ("binary_alpha", None),
+    # ---- binary_alpha_swapped: topsatenSub(out, other, self, alpha) ----
+    #
+    # `rsub.Tensor` moved to `binary_rsub` below when the reflected form got its
+    # own topsaten entry point (`topsatenRsub`); the swapped `topsatenSub`
+    # spelling this slot used to carry is superseded. ATen defines
+    # `rsub(self, other, alpha) = other - alpha*self`, which is exactly what
+    # `topsatenRsub` computes -- see the `rsub` section below.
     # ---- the out= forms, which are also what the in-place ops box onto ----
     "mul.out": ("binary_out", None),
     "add.out": ("binary_alpha_out", None),
@@ -694,6 +701,34 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 """
 )
 
+# `rsub` as topsatenSub with the operands exchanged: ATen's
+# `rsub(self, other, alpha)` is `other - alpha*self`, which is what this call
+# computes because topsatenSub(out, A, B, alpha) is `A - alpha*B`. Everything
+# else is T_BINARY_ALPHA verbatim -- `_BINARY_PROLOGUE` broadcasts both operands
+# to the common shape and both directions pick the same result dtype through
+# `at::result_type`, so swapping at the call is the whole difference. See the
+# `rsub.Tensor` entry in OPS for why the FlagGems route cannot serve this op.
+T_BINARY_ALPHA_SWAPPED = (
+    """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {{
+"""
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}", alpha=True))
+    + _BINARY_PROLOGUE
+    + """\
+  auto out = at::empty(out_shape, self.options().dtype(result_dtype));
+  auto t_alpha = gcu::ToTopsatenScalar(alpha, result_dtype);
+
+  gcu::TopsatenTensorWrapper t_self(self_b);
+  gcu::TopsatenTensorWrapper t_other(other_b);
+  gcu::TopsatenTensorWrapper t_out(out);
+  EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_other.get(), t_self.get(), t_alpha);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+"""
+)
+
 # topsaten<Name>(out, self, other [, alpha]) with the output supplied by the
 # caller. ATen gives the in-place arithmetic ops no PrivateUse1 registration of
 # their own: `add_.Tensor`, `sub_.Tensor` and `mul_.Tensor` are structured
@@ -943,6 +978,11 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
 # tensor-staged variants are what the shipped scalar arithmetic routes to, so a
 # new op follows the measured-working form rather than the untested one.
 T_BINARY_RSUB_SCALAR = (
+# The scalar spelling of T_BINARY_ALPHA_SWAPPED: the operand exchange is the
+# same one, and the staging of the Python number into a device tensor is
+# unchanged -- `other_t` holds the number that ATen puts on the left of the
+# subtraction. The host fallback keeps `at::{at_op}`'s own argument order.
+T_BINARY_SCALAR_ALPHA_AS_TENSOR_SWAPPED = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {{
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -3474,6 +3514,7 @@ CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
     "binary_alpha": T_BINARY_ALPHA,
+    "binary_alpha_swapped": T_BINARY_ALPHA_SWAPPED,
     "binary_out": T_BINARY_OUT,
     "binary_alpha_out": T_BINARY_ALPHA_OUT,
     "binary_cmp": T_BINARY_CMP,
@@ -3483,6 +3524,7 @@ CATEGORIES = {
     "binary_scalar_alpha_as_tensor": T_BINARY_SCALAR_ALPHA_AS_TENSOR,
     "binary_rsub_scalar": T_BINARY_RSUB_SCALAR,
     "binary_rsub": T_BINARY_RSUB,
+    "binary_scalar_alpha_as_tensor_swapped": T_BINARY_SCALAR_ALPHA_AS_TENSOR_SWAPPED,
     "binary_scalar_cmp": T_BINARY_SCALAR_CMP,
     "matmul": T_MATMUL,
     "matmul_out": T_MATMUL_OUT,
