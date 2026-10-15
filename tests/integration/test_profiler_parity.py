@@ -42,6 +42,7 @@ import torch
 
 import torch_fl  # noqa: F401  (registers the flagos PrivateUse1 backend)
 
+from platform_support import detect_platform
 from profiler_support import append_boxing_path_probe
 
 _BASELINE_PATH = (
@@ -59,6 +60,26 @@ GENERIC_RUNTIME_NAMES = {"cudaRuntime", "cudaLaunchKernel"}
 # come back with status=-2 and are kept verbatim, so the check is "not mangled",
 # not "was transformed".
 MANGLED_PREFIX = "_ZN"
+
+# The comparison is against a stock torch+cuda trace, so it is only meaningful
+# on the CUDA-boxing platforms whose tracer emits the same record shape. Every
+# other platform has a measured reason: MUSA's MUPTI reports no gpu_memset
+# category and no occupancy-derived kernel args (2026-08-29: 5 passed, 2
+# failed), PPU's vendor kernels produce no gpu_memset record and no
+# '::'-qualified kernel name (3 passed, 1 xpassed, 3 failed), and
+# Ascend/GCU/Kunlunxin gate the device cases through the capability table in
+# tests/integration/profiler_support.py. The structural contract every platform
+# does owe is the shared `profiler_contract` step; this file is the CUDA-baseline
+# comparison on top of it. Recorded in tests/integration/platform_gates.py.
+_BASELINE_COMPARISON_PLATFORMS = ("cuda", "dcu")
+
+pytestmark = pytest.mark.skipif(
+    detect_platform() not in _BASELINE_COMPARISON_PLATFORMS,
+    reason=(
+        "the profiler baseline comparison needs a CUDA-boxing tracer; see "
+        "tests/integration/platform_gates.py and the profiler_contract step"
+    ),
+)
 
 
 @pytest.fixture(scope="module")

@@ -50,9 +50,29 @@ paths_watch:
   - scripts/vendor/patch_triton_ascend.py
   - scripts/codegen/codegen_ascend.py
 
-container_volumes: []
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH, asserted
+# by environment_check.model_dir below. A runner that lost the mount fails the
+# environment step rather than the inference step.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
+
+# Environment one step alone needs on this platform, keyed by manifest step id.
+# LD_PRELOAD has to be set before the process starts -- CANN 9.0's
+# aclrtMemcpy*/aclrtMemset* interposition needs the libmspti.so that CANN's own
+# start-up supplies, which a later dlopen cannot -- and set_env_ascend.sh stores
+# the prepared value under the inert ASCEND_MSPTI_PRELOAD so it reaches only this
+# step. INTEGRATION_ALLOW_TEARDOWN_CRASH is the other half: the same interposer
+# faults sporadically during interpreter teardown, after pytest has already
+# printed a complete, clean summary, and the runner forgives a fatal signal only
+# on top of such a summary. See docs/architecture/profiler.md.
+step_environment:
+  profiler_contract:
+    LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
+    INTEGRATION_ALLOW_TEARDOWN_CRASH: "1"
 
 container_options: >-
   --privileged
@@ -94,3 +114,4 @@ environment_check:
     - lib/libtorch_cuda.so
   flagos_devices:
     at_least: 8
+  model_dir: true

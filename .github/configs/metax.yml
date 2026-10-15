@@ -35,7 +35,11 @@ paths_watch:
   - .github/scripts/set_env_metax.sh
   - scripts/vendor/bundle_maca_libtorch.sh
 
-container_volumes: []
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH below,
+# asserted by environment_check.model_dir.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 # Issue #253. The MetaX image exports TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, which
 # ATen reads while it initialises its TF32 state, so
@@ -61,6 +65,7 @@ container_volumes: []
 # silently.
 integration_environment:
   TORCH_ALLOW_TF32_CUBLAS_OVERRIDE: "0"
+  MODEL_PATH: /models/Qwen3-0.6B
 
 container_options: >-
   --privileged
@@ -98,3 +103,4 @@ environment_check:
   triton_backend: metax
   require_imports:
     - flag_gems
+  model_dir: true
