@@ -75,6 +75,9 @@ _EVERY_PLATFORM_BUT_DCU = tuple(p for p in ALL_PLATFORMS if p != "dcu")
 _EVERY_PLATFORM_BUT_DCU_AND_METAX = tuple(
     p for p in ALL_PLATFORMS if p not in ("dcu", "metax")
 )
+_EVERY_PLATFORM_BUT_ASCEND_AND_GCU = tuple(
+    p for p in ALL_PLATFORMS if p not in ("ascend", "gcu")
+)
 
 
 _GATES: tuple[Gate, ...] = (
@@ -176,6 +179,23 @@ _GATES: tuple[Gate, ...] = (
             "bridge has one shared entry to extend rather than a private one"
         ),
         platforms=_EVERY_PLATFORM_BUT_DCU,
+    ),
+    Gate(
+        step="sdpa_lanes",
+        target="vendor_lanes/test_sdpa_lanes.py",
+        reason=(
+            "only two confs reach scaled_dot_product_attention through a vendor "
+            "lane of their own: backends_ascend.conf runs the ACLNN entry point "
+            "and backends_gcu.conf the fused _scaled_dot_product_efficient_"
+            "attention leaf. The other six have no vendor SDPA lane row in "
+            "tests/integration/vendor_lanes/sdpa_lane_caps.py -- where a conf "
+            "routes the operator to a FlagGems backend (dcu, metax) the "
+            "flaggems_conformance step asserts that route instead, and where it "
+            "keeps the boxed composite (cuda, kunlunxin, musa, ppu) there is no "
+            "vendor lane to declare. A chip that grows one adds a row to that "
+            "table, which is what removes the gate"
+        ),
+        platforms=_EVERY_PLATFORM_BUT_ASCEND_AND_GCU,
     ),
     Gate(
         step="flaggems_conformance",

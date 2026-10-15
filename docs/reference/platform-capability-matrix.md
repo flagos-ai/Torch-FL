@@ -142,7 +142,7 @@ build opts into boxing.
 ## Integration coverage
 
 The eight platforms with a `.github/configs/<platform>.yml` run one integration
-pipeline: a single ordered list of 21 groups in
+pipeline: a single ordered list of 22 groups in
 `.github/integration-manifest.yml`, composed for each platform by
 `.github/scripts/compose_integration_manifest.py` in the loader job. There is
 no per-platform step list any more, so the eight run the same groups in the
@@ -178,13 +178,13 @@ the manifest, to the eight platforms and to the whitelist below.
 | platform | steps whose target still skips |
 |---|---|
 | ascend | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
-| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
-| dcu | rng, musa_dispatch |
+| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge, sdpa_lanes, flaggems_conformance |
+| dcu | rng, musa_dispatch, sdpa_lanes |
 | gcu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
-| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
-| metax | rng, musa_dispatch, profiler_parity, native_comm_bridge |
-| musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
-| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, flaggems_conformance |
+| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, sdpa_lanes, flaggems_conformance |
+| metax | rng, musa_dispatch, profiler_parity, native_comm_bridge, sdpa_lanes |
+| musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge, sdpa_lanes, flaggems_conformance |
+| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge, sdpa_lanes, flaggems_conformance |
 
 The recorded skips, with the measured reason each is still there:
 
@@ -240,6 +240,19 @@ The recorded skips, with the measured reason each is still there:
   because the groups it asserts are the ones the DCU image stages. The step is
   kept universal so a platform that grows an equivalent bridge has one shared
   entry to extend rather than a private one.
+- `sdpa_lanes` — `tests/integration/vendor_lanes/test_sdpa_lanes.py` on CUDA,
+  DCU, Kunlunxin, MetaX, MUSA and PPU. Only two confs reach
+  `scaled_dot_product_attention` through a vendor lane of their own:
+  `backends_ascend.conf` runs the ACLNN entry point and `backends_gcu.conf` the
+  fused `_scaled_dot_product_efficient_attention` leaf. The suite reads the row
+  for the conf the wheel resolved, so a platform without one skips rather than
+  running a subset. DCU and MetaX route the operator to a FlagGems backend
+  instead, which the `flaggems_conformance` step asserts; CUDA, Kunlunxin, MUSA
+  and PPU keep the boxed composite, so there is no vendor lane to declare. The
+  case set is one list in
+  `tests/integration/vendor_lanes/sdpa_lane_caps.py` that every platform
+  carrying a lane runs whole, and a chip that grows one adds a row there, which
+  is what removes the gate.
 - `flaggems_conformance` — its `sdpa` cases
   (`tests/integration/flaggems/test_flaggems_sdpa_route.py`) on Ascend, CUDA,
   GCU, Kunlunxin, MUSA and PPU. Only a conf that names

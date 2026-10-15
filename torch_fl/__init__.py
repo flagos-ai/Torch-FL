@@ -2313,8 +2313,6 @@ def _phase_ecosystem() -> None:
     # two platforms is here, with the eager import above finished. It is a
     # no-op on every other platform, where the import happens later and
     # `flagos._lazy_init` installs the patches itself.
-    from . import flagos
-
     flagos._install_flaggems_patches()
 
     from . import quantization  # noqa: E402, F401

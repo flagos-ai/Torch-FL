@@ -418,6 +418,28 @@ steps:
     name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
 
+  # The per-platform vendor-lane suite: one case set per lane, keyed by the conf
+  # the wheel resolved, byte-identical on every platform. Ascend's ACLNN lane and
+  # GCU's fused lane used to be two files under tests/integration/ops/ named after
+  # the chip that needed them (test_ascend_sdpa_mask_bias.py,
+  # test_gcu_sdpa_mask.py): each stated the cases the contract is about, the lane
+  # its vendor was measured to take, and the account of why, so a third chip
+  # reaching the operator would have authored a third file and inherited neither.
+  # The cases are stated once now, in
+  # tests/integration/vendor_lanes/sdpa_lane_caps.py, and what genuinely differs
+  # per chip is a row of that table.
+  #
+  # One command for eight platforms because the row is read from the conf rather
+  # than from a platform name (vendor_lanes/vendor_caps.py:accel_label): where the
+  # conf reaches scaled_dot_product_attention through a vendor lane of its own the
+  # row's whole case set runs, and where it does not the suite skips with that
+  # conf's route as the reason -- six confs have no row, and the skip is recorded
+  # in tests/integration/platform_gates.py. Where a conf hands the operator to a
+  # FlagGems backend, the flaggems_conformance step below asserts that route.
+  - id: sdpa_lanes
+    name: Vendor SDPA lanes (per-platform)
+    command: python -m pytest tests/integration/vendor_lanes -v -s --tb=short
+
   # Byte-identical on every platform: one shared FlagGems suite that asserts the
   # routing contract and self-skips the execution cases a wheel without the
   # FlagGems kernels cannot measure. Last, so a gap in it cannot mask the groups
