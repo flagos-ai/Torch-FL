@@ -54,6 +54,16 @@ from pathlib import Path
 #: bucket must name it itself rather than rely on this falling through.
 DEFAULT_PLATFORM = "cuda"
 
+#: Where a PPU container keeps its SDK. This is the fallback signal for a PPU
+#: wheel that predates the "ppu" value in its own build record, so it is a
+#: statement about the *host* rather than about the wheel the process is running
+#: from -- and that makes it the one input a test cannot state. Three unit files
+#: model wheels for other platforms on a machine where this directory exists, so
+#: the probe reads a module-level name they can point at a path that does not.
+#: Written as a path rather than as ``os.environ.get("PPU_SDK")`` because a
+#: container always has the directory and usually does not export the variable.
+PPU_SDK_DIR = Path("/usr/local/PPU_SDK")
+
 #: Build-record accelerator -> platform name. "maca" is the older MetaX spelling.
 _ACCELERATOR_TO_PLATFORM = {
     "ascend": "ascend",
@@ -146,7 +156,7 @@ def detect_platform() -> str:
     # value reports cuda and ships no lib/flagos_platform marker (CMake writes that
     # only for gcu/musa/bpu/ascend), so PPU_SDK and the lib_ppu/ bundle are what
     # identify it.
-    if os.environ.get("PPU_SDK") or Path("/usr/local/PPU_SDK").is_dir():
+    if os.environ.get("PPU_SDK") or PPU_SDK_DIR.is_dir():
         return "ppu"
 
     package = _torch_fl_package_dir()

@@ -53,6 +53,11 @@ ops_conftest = _load_ops_conftest()
 def _clean_env(monkeypatch):
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
+    # See test_platform_detect.py: neutralise the host probe so a stub wheel for
+    # another platform is not shadowed by this machine's /usr/local/PPU_SDK.
+    monkeypatch.setattr(
+        ops_conftest._platform, "PPU_SDK_DIR", Path("/nonexistent/ppu-sdk")
+    )
 
 
 @pytest.fixture

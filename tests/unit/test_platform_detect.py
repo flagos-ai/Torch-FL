@@ -53,6 +53,11 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
     monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
+    # The host probe is the one signal a stub wheel cannot describe, and this
+    # machine may be a PPU container that has /usr/local/PPU_SDK. Point it at a
+    # path that does not exist so "no PPU signal" means what these tests model;
+    # the tests that want PPU identified say so through the record or the env.
+    monkeypatch.setattr(platform, "PPU_SDK_DIR", Path("/nonexistent/ppu-sdk"))
 
 
 @pytest.fixture
@@ -146,6 +151,23 @@ def test_lib_ppu_bundle_identifies_ppu(isolated_torch_fl, tmp_path):
 def test_ppu_sdk_env_wins_over_the_marker(isolated_torch_fl, tmp_path, monkeypatch):
     _install_wheel(tmp_path, marker="ascend")
     monkeypatch.setenv("PPU_SDK", "/opt/ppu")
+    try:
+        assert platform.detect_platform() == "ppu"
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_ppu_sdk_directory_on_the_host_identifies_ppu(
+    isolated_torch_fl, tmp_path, monkeypatch
+):
+    """The directory probe, for a PPU runtime that does not export PPU_SDK.
+
+    A PPU container has /usr/local/PPU_SDK whether or not the variable reached
+    the process, which is why the probe reads the path; ``PPU_SDK_DIR`` is the
+    seam the tests above use to say "no PPU signal here" on exactly such a host.
+    """
+    _install_wheel(tmp_path, marker="ascend")
+    monkeypatch.setattr(platform, "PPU_SDK_DIR", tmp_path)
     try:
         assert platform.detect_platform() == "ppu"
     finally:
