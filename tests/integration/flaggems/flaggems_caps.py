@@ -165,7 +165,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ascend": 223,
     "cuda": 416,
     "dcu": 454,
-    "gcu": 253,
+    "gcu": 251,
     "kunlunxin": 0,
     "metax": 594,
     "musa": 466,
