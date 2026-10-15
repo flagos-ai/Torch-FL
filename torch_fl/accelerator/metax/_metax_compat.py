@@ -732,6 +732,28 @@ def _get_cudart():
     return _cudart
 
 
+def _is_metax_device_tensor(tensor):
+    """Whether a tensor is one the `_metax_zero_`/`_metax_fill_` stand-ins in
+    `_patch_cuda_tensor_ops` may serve with the MetaX runtime API.
+
+    Strided layouts only. Those replacements derive a byte range from
+    `data_ptr()` + `nelement() * element_size()`, which describes a dense buffer
+    and nothing else, and they ask `is_contiguous()` before they do it -- a
+    question a sparse tensor refuses to answer at all ("RuntimeError: Sparse CSR
+    tensors do not have is_contiguous"). A sparse tensor on a flagos device used
+    to fall through to stock torch because the guard read `is_cuda`, which is
+    false for it; #539 widened the guard to the device type and pulled it into
+    the memset path, which is why `TestBufferMovement::test_zero_empties_the_structure`
+    and `test_zeroed_structure_densifies_to_zeros` in
+    tests/integration/ops/test_sparse_csr_dispatch.py pass on `4ca671b` and fail
+    on top of `cc290c4`. #539's own pipeline ran a 58-case selection on MetaX
+    that did not include that file.
+    """
+    return tensor.layout == torch.strided and (
+        tensor.is_cuda or tensor.device.type in ("flagos", "privateuseone")
+    )
+
+
 def _patch_cuda_tensor_ops(metax_path):
     """
     Patch PyTorch's CUDA tensor ops to use MetaX runtime API instead of
@@ -782,9 +804,6 @@ def _patch_cuda_tensor_ops(metax_path):
         cudaStreamSynchronize(None)
 
     _orig_zero = torch.Tensor.zero_
-
-    def _is_metax_device_tensor(tensor):
-        return tensor.is_cuda or tensor.device.type in ("flagos", "privateuseone")
 
     def _metax_zero_(self):
         """zero_() using cudaMemsetAsync for MetaX-backed tensors."""
