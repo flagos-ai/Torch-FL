@@ -61,7 +61,7 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   the ops FlagGems does not cover.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
-  and 53 are the by-design BPU/MPS and hand-written TsingMicro files.
+  and 67 are the by-design BPU/MPS and hand-written TsingMicro files.
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
   exist.
 
@@ -95,7 +95,7 @@ build opts into boxing.
   compat column reads "stream/event only". There is no CI job: the pipeline is
   container-based on self-hosted runners, and a macOS arm64 runner has not been
   wired in.
-- **TsingMicro** has a sparse hand-written conf (53 routes) and no CI job; its
+- **TsingMicro** has a sparse hand-written conf (67 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
   `torch_fl/accelerator/musa/` directory, but it holds only `musa_stream.py` (the
