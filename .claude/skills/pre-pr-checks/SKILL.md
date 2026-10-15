@@ -109,12 +109,19 @@ everything, so run it before you push, not after CI complains.
 tool version:
 
 ```bash
-pip install ruff==0.15.12       # pin matters: formatting rules shift between
-                                # ruff releases, so an unpinned local ruff can
-                                # disagree with CI in both directions
+pip install ruff==0.15.12       # a different version refuses to run: pyproject
+                                # sets `required-version`, so the pin is enforced
+                                # rather than a convention you have to remember
 ruff check .                    # lint rules
 ruff format --check .           # formatting
 ```
+
+If ruff exits with `Required version ... does not match the running version ...`
+before printing anything else, your `ruff` is not the gate's — install the
+version it names. That error is the guard, not a broken install. The formatter
+is where versions disagree: 0.17.0 formats code fences inside Markdown, so on a
+tree the gate calls clean it names 18 Markdown files as unformatted, and
+`ruff format .` under it rewrites all 18.
 
 Both must pass. Run them from the repo root — the config lives in
 `pyproject.toml` and the paths are relative.

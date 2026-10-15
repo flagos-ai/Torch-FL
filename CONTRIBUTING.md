@@ -97,6 +97,12 @@ Install the pinned ruff version CI uses:
 pip install ruff==0.15.12
 ```
 
+The pin is enforced, not just documented: `pyproject.toml` sets ruff's
+`required-version` to the same number, so a different `ruff` exits immediately
+with `Required version ... does not match the running version ...` instead of
+reporting a tree the gate calls clean. That error is the pin working — install
+the version it names.
+
 ## Releasing
 
 A release is a tag: pushing `v2.10.0` builds a wheel on every publishing

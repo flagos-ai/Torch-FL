@@ -95,6 +95,17 @@ pythonpath = ["."]
 # which is what CI ran before this config existed, so committing it is
 # behavior-neutral for the existing tree. A stricter profile lands separately.
 line-length = 88
+# The gate's tool version, enforced rather than documented: ruff refuses to run
+# under any other version, so a local run cannot disagree with CI. The lint
+# *rules* are already frozen by `select` below, but the formatter has no
+# equivalent switch, so what a newer ruff wants to reformat and what the gate
+# checks stop being the same set. Measured with 0.17.0 on this tree: `format
+# --check` names 18 Markdown files, because it formats code fences inside them
+# (448 files scanned against the gate's 377), and `ruff format .` rewrites all
+# 18. Keep this equal to the `dev` extra below and to what
+# `.github/workflows/lint.yml` installs; tests/unit/test_ruff_version_pin.py
+# fails if the three drift apart.
+required-version = "0.15.12"
 # Inferred from requires-python; stated explicitly so local runs and CI agree
 # even if the interpreter or ruff default changes.
 target-version = "py38"

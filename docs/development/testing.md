@@ -325,6 +325,9 @@ git diff --check
 ```
 
 **Required ruff version**: `0.15.12` (pinned in CI; install with `pip install ruff==0.15.12`).
+`pyproject.toml` enforces this through ruff's `required-version`, so a different
+version stops with `Required version ... does not match the running version ...`
+and names both numbers, instead of reporting files the gate never reads.
 
 Fix formatting issues automatically:
 
