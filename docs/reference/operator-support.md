@@ -7296,19 +7296,26 @@ compiler sees — and every accelerated route is required to be in it.
 | Ascend 910 | 248 | 126 | 1662 | 374 / 2036 (18%) |
 | Enflame GCU S60 | 88 | 64 | 1884 | 152 / 2036 (7%) |
 | MTT S5000 (MUSA) | 122 | 36 | 1878 | 158 / 2036 (7%) |
-| TsingMicro TX8 | 55 | 0 | 0 | 2034 / 2036 (99.9%) |
+| TsingMicro TX8 | 53 | 0 | 0 | 51 / 2036 (2.5%) |
 
-The TsingMicro row is not comparable to the other three, and its registered ratio is
-not coverage. TsingMicro has no vendor-native kernel set, so
-[`backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf) lists 55
-ops as `flaggems` and leaves every other op on the default, which is also `flaggems`;
-nothing is routed to a vendor backend or to `none`. All ~2034 generated ops are
-registered on PrivateUse1 through the `#else` branch of
-[`csrc/aten/register.cc`](../../csrc/aten/register.cc), so the registration gate the
-other rows rely on does not apply. See "TsingMicro FlagGems bring-up" below for the
-measured per-op behavior: the routes reach FlagGems where a kernel exists, but an op
-with no FlagGems kernel behind it resolves to a CUDA boxing kernel that a CPU-only
-torch build cannot run.
+The TsingMicro row is not comparable to the other three: its `flaggems` column is not
+a route count and its registered ratio is not coverage. TsingMicro has no
+vendor-native kernel set, so
+[`backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf) names 53
+ops as `flaggems`/`flagos_python` and leaves every other op on the default, which is
+also `flaggems`; nothing is routed to a vendor backend or to `none`. Reachability is
+decided by registration instead:
+[`csrc/aten/generated/register_flaggems_tsingmicro.inc`](../../csrc/aten/generated/register_flaggems_tsingmicro.inc)
+claims the 51 of those ops that have a `kFlagGems` Python kernel, and every other op
+is unregistered and boxes to CPU. See "TsingMicro device name, FlagGems import order,
+and a TX8 re-measurement (2026-10-15)" below, including the one op this leaves broken
+(`mean` with no dim).
+
+**This row supersedes the 2026-10-10 measurement**, which read `55 | 0 | 0 | 2034 /
+2036` — the platform then claimed the full generated list on PrivateUse1 and an op
+with no FlagGems kernel resolved to a CUDA boxing kernel a CPU-only torch build cannot
+run. That measurement is not revalidated against this cohort and its per-op results
+stand only for the ops listed there; the ones that raised now run.
 
 **The Enflame GCU S60 row was superseded on 2026-09-15** — a generated FlagGems
 registration for GCU took the platform to 255 `flaggems` / 145 `gcu` / 1636
@@ -7348,12 +7355,14 @@ every op); Tsingmicro's remains hand-written, and FlagGems is its supported path
 Relative to the sparse files this is not a regression for MUSA/GCU/Ascend — an
 absent op reached the same fallback, it just could not be counted.
 
-The TsingMicro case is where this stops being a bookkeeping distinction. `none`
+The TsingMicro case is where this stopped being a bookkeeping distinction. `none`
 is unreachable there for a second reason as well: with no vendor kernel set at
-all, there is no accelerated route to leave out. An op FlagGems does not cover
-therefore falls to `kFlagGems` with an empty slot, which `Dispatcher::GetFn`
-degrades to the CUDA boxing kernel — and a CPU-only torch build cannot run it.
-See "TsingMicro FlagGems bring-up (2026-10-10)" below.
+all, there is no accelerated route to leave out, so an op FlagGems does not cover
+fell to `kFlagGems` with an empty slot, which `Dispatcher::GetFn` degraded to the
+CUDA boxing kernel — and a CPU-only torch build cannot run it. The fix was not a
+`none` route but registration subsetting: TsingMicro now claims only the ops with
+a FlagGems kernel, and the rest fall to `cpu_fallback`. See "TsingMicro
+registration subsetting (2026-10-14)" below.
 
 The two boxing configurations (`metax`, `dcu`) are generated in the same
 full-coverage shape, but their fallback key is `cuda` and they contain no `none`:
@@ -7649,6 +7658,74 @@ above stand unchanged. The change was verified at the link level only
 after, via `nm --undefined-only`); `tests/manual/flaggems_overload_survey.py` was
 not re-run against the new cohort because the excluded ops cannot run here in
 either arm. That evidence gap is recorded here and in the PR.
+
+## TsingMicro device name, FlagGems import order, and a TX8 re-measurement (2026-10-15)
+
+The registration subsetting the bring-up section asked for has landed
+(`csrc/aten/generated/register_flaggems_tsingmicro.inc`,
+`scripts/codegen/codegen_boxing_flaggems_register.py`), and the default
+FlagGems-primary build now compiles it instead of the full `generated/register.inc`.
+Two further defects kept the route from being exercised on a TX8 at all, and this
+section records what the platform does on hardware once all three are in place.
+
+**Device name.** FlagTree's TsingMicro Triton driver resolves its active device as
+`torch.device("txda", ...)`, and FlagGems' tsingmicro descriptor names the device
+`"txda"` too. torch_fl registers PrivateUse1 as `"flagos"` and never imports
+`torch_txda`, so `"txda"` was not a valid device type and `import flag_gems`
+itself raised `RuntimeError: ... device type at start of device string: txda`.
+`_VENDOR_DEVICE_ALIASES` in `torch_fl/__init__.py` now maps the vendor's own
+device name per accelerator (`"musa"`, `"txda"`) alongside the existing `"cuda"`
+alias.
+
+**Also fixed here, in `torch_fl/__init__.py`**: `cat` and `randn`. Both failed
+because `_patch_flaggems_philox` imported `flag_gems` from
+`_phase_vendor_compat`, which runs *before* `_alias_cuda_to_flagos` and before
+`flagos._stand_down_foreign_triton_drivers`. The import therefore raised —
+first on `torch.device("txda", ...)` from FlagTree's TsingMicro driver, then, with
+the alias in place but the stand-down not yet run, on `RuntimeError: 2 active
+drivers ([CudaDriver, TXDADriver])`. A failed import leaves every flag_gems
+submodule that loaded in `sys.modules` bound to the abandoned half-initialised
+package; FlagGems' own `utils/tensor_wrapper.py` and `utils/pointwise_dynamic.py`
+read `flag_gems.vendor_name` off that binding, so `cat` raised `module 'flag_gems'
+has no attribute 'vendor_name'`, and the philox bridge never installed, so `randn`
+raised `ValueError: too many values to unpack`. Both patches now run in
+`_phase_ecosystem` after `_alias_cuda_to_flagos`, with the stand-down in between.
+Measured after: `cat` -> `(8, 4)`, `randn` -> `(4,)`, both correct.
+
+**FlagGems must be 5.4.0.** Against the `5.4.0.dev732` snapshot this host first
+had, 190 of the 667 `flag_gems.*` callables the generated tables reference do not
+resolve — neither `flag_gems.<name>` nor `flag_gems.ops.<name>` exists — and
+`unsqueeze`, `erfc` and `slice` raised `AttributeError: module 'flag_gems.ops' has
+no attribute ...`. With the pinned 5.4.0 all 667 resolve and those three work.
+This is table/FlagGems-revision alignment, not a routing change.
+
+**Measured** on one TX8 device, 2026-10-15, torch 2.10.0+cpu, Kuiper runtime,
+vendor FlagTree + FlagGems 5.4.0, `GEMS_VENDOR=tsingmicro`,
+`FLAGOS_TORCH_BACKEND=flagos`, `FLAGOS_BUILD_BOXING=OFF`, with the conf-derived
+registration subset in place. Called on a `flagos` tensor and compared against the
+CPU reference: `empty_like`, `ones_like`, `zeros_like`, `sum` (both forms),
+`std`, `var`, `prod`, `norm`, `amax`, `logsumexp`, `any`, `all`, `exp`, `relu`,
+`clone`, `reshape`, `mm`, `bmm`, `add`, `mul`, `sub`, `silu`, `softmax`, `rsqrt`,
+`cat`, `randn`, `unsqueeze`, `slice` — all correct. `empty_like` and the other
+no-FlagGems-kernel ops return a `flagos` tensor via `cpu_fallback`. Before this
+cohort, `empty_like` raised `RuntimeError: empty_like: backend not registered` and
+so did every pointwise op that allocates through it.
+
+**`torch.mean(a)` with no dim still fails** on this build:
+`RuntimeError: a Tensor with 16 elements cannot be converted to Scalar`. `mean`
+has a `kFlagGems` slot but is not named in `backends_tsingmicro.conf`, so the
+conf-derived list leaves it unregistered and it lands on `cpu_fallback`, where the
+full reduction to a 0-dim tensor does not survive. `mean(a, 0)` works, and so does
+every other no-dim reduction measured (`sum`, `std`, `var`, `prod`, `norm`,
+`amax`, `logsumexp`, `any`, `all`), so the rest of the set is sufficient; `mean`
+is the one op this cohort leaves broken. Widening the derivation to every op with
+a `kFlagGems` slot — rather than only the conf's routes — would cover it, and is
+what an earlier revision of this work did (689 ops, `mean` included).
+
+**Evidence gaps.** One device, one host; no multi-device or model-level run.
+`tests/manual/flaggems_overload_survey.py` was **not** re-run against this cohort,
+so the per-overload verdicts above are **not revalidated** and no row of theirs is
+revised. There is no TsingMicro CI lane.
 
 ## `cat` route changes (2026-10-12)
 

@@ -192,7 +192,11 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
         ("ascend", {"vendor", "flaggems"}),
         ("dcu", {"vendor", "flaggems"}),
         ("ppu", {"vendor", "flaggems"}),
-        ("tsingmicro", {"vendor", "flaggems", "flaggems_cpp"}),
+        # tsingmicro has no FlagGems C++ library to link: flag_gems ships
+        # py3-none-any, and CMakeLists.txt treats a missing FlagGems_DIR as a
+        # FATAL_ERROR, so leaving FLAGOS_BUILD_FLAGGEMS_CPP on would make a
+        # default `pip install` fail at configure. Nothing routes to it here.
+        ("tsingmicro", {"vendor", "flaggems"}),
         ("gcu", {"vendor", "flaggems"}),
         ("musa", {"vendor", "flaggems"}),
         # BPU keeps the FLAGOS_BUILD_VENDOR default, but csrc/aten/backends/bpu/ does

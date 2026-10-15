@@ -18,7 +18,11 @@ What exists today is an **input alias**, not a compatibility contract:
 
 - `torch_fl.__init__._alias_cuda_to_flagos` conditionally remaps `cuda` device
   arguments through a `TorchFunctionMode`, wraps the `torch.device` constructor, and
-  redirects `Tensor.cuda()` / `Module.cuda()`.
+  redirects `Tensor.cuda()` / `Module.cuda()`. The remap is table-driven by
+  `_VENDOR_DEVICE_ALIASES`: `cuda` on every row, plus the vendor's *own* device
+  name where torch_fl does not register it — `musa` (torch_musa) and `txda`
+  (FlagTree's TsingMicro Triton driver, which resolves its active device that way
+  while `flag_gems` is being imported).
 - It stands down when the original PyTorch probe reports real CUDA, and can be
   disabled with `FLAGOS_ALIAS_CUDA=0`; `torch_fl._cuda_alias_active` reports whether
   it is on.

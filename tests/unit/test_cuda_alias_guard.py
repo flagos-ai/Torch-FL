@@ -105,6 +105,24 @@ def test_the_helper_falls_back_when_nothing_redirected(monkeypatch):
     assert calls == [1]
 
 
+def test_vendor_device_aliases_cover_every_native_vendor():
+    """A vendor's own device name must map to flagos on that vendor's build.
+
+    torch_fl never imports the vendor package (torch_musa / torch_txda), so the
+    privateuse1 backend is registered as "flagos" and the vendor's name is not a
+    valid device type here. That is not cosmetic: FlagTree's TsingMicro Triton
+    driver resolves its active device as `torch.device("txda", ...)` while
+    Triton's hint manager is imported, and FlagGems' tsingmicro descriptor names
+    the device "txda" too, so an unmapped name makes `import flag_gems` raise.
+    """
+    assert torch_fl._VENDOR_DEVICE_ALIASES["musa"] == ("cuda", "musa")
+    assert torch_fl._VENDOR_DEVICE_ALIASES["tsingmicro"] == ("cuda", "txda")
+    # Every accelerator with a vendor-private device name is listed; the rest
+    # (nvidia/ascend/...) only ever see "cuda" or a name torch already knows.
+    for accelerator, aliases in torch_fl._VENDOR_DEVICE_ALIASES.items():
+        assert aliases[0] == "cuda", accelerator
+
+
 _CHILD = textwrap.dedent(
     """
     import json
@@ -140,6 +158,14 @@ _CHILD = textwrap.dedent(
         ),
         "device_cuda": device_type("cuda"),
         "device_cuda_1": device_type("cuda:1"),
+        # The vendor's own name for the row this build takes, spelled out here
+        # rather than read from _VENDOR_DEVICE_ALIASES: the test has to state
+        # what "txda" *should* resolve to, not ask the code under test.
+        "vendor_device": device_type(
+            {"musa": "musa", "tsingmicro": "txda"}.get(
+                torch_fl._build_accelerator(), "cuda"
+            )
+        ),
         "randn_cuda": probe(lambda: torch.randn(2, device="cuda")),
         "zeros_cuda": probe(lambda: torch.zeros(2).cuda()),
     }
@@ -206,3 +232,28 @@ def test_the_alias_stays_off_when_it_is_opted_out_of():
     assert state["alias_active"] is False, state
     assert state["device_is_wrapped"] is False, state
     assert state["device_cuda"] == "cuda", state
+
+
+@pytest.mark.parametrize("alias_env", ["1", ""])
+def test_the_vendor_device_name_is_aliased_on_a_native_vendor_build(alias_env):
+    """A vendor's own device name resolves to flagos, without needing the
+    CUDA-probe redirect the test above gates on.
+
+    Asserted from the alias table rather than from a fixed name because this
+    suite runs on every platform: only a build with a vendor-private device
+    name (musa, tsingmicro) has an alias to check, and on any other build the
+    probe is the only alias and this passes trivially.
+    """
+    state = _child_state(alias_env)
+    if not state["alias_active"]:
+        # Genuine CUDA, or the alias is opted out: nothing is remapped, so the
+        # vendor name is either real or invalid and not this test's business.
+        # `alias_active` and not the post-import `real_cuda`: the guard decides
+        # during import, and torch_fl repoints `torch.cuda.is_available` at the
+        # flagos device count later in the same import, so reading it here
+        # answers a question the guard never asked.
+        pytest.skip("alias not installed on this host")
+    assert state["device_cuda"] == "flagos", state
+    if state["vendor_device"] == "cuda":
+        pytest.skip("build has no vendor-private device name to alias")
+    assert state["vendor_device"] == "flagos", state

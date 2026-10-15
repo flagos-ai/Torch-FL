@@ -276,11 +276,15 @@
     "tsingmicro": {
       "_comment": [
         "TsingMicro Kuiper: no vendor backend directory exists, so FLAGOS_BUILD_VENDOR",
-        "is a no-op. FlagGems Python and C++ stay on; boxing is now an explicit",
-        "opt-in, so the default wheel compiles no CUDA boxing kernels. Nothing",
-        "routes to them anyway -- backends_tsingmicro.conf names no `cuda` entry",
-        "and leaves unlisted ops on the conf's default flaggems route -- but the",
-        "switch no longer compiles kernels the conf never selects."
+        "is a no-op. FlagGems Python is the operator path; boxing is an explicit opt-in,",
+        "so the default wheel compiles no CUDA boxing kernels. Nothing routes to them",
+        "anyway -- backends_tsingmicro.conf names no `cuda` entry -- but the switch no",
+        "longer compiles kernels the conf never selects.",
+        "FlagGems C++ is OFF, unlike cuda: it links liboperators.so, and no FlagGems",
+        "wheel carries one (flag_gems ships py3-none-any). CMakeLists.txt makes a",
+        "missing FlagGems_DIR a FATAL_ERROR, so leaving it on turns `pip install` for",
+        "this platform into a configure failure unless the user has built FlagGems",
+        "from source. Nothing routes to flaggems_cpp here either. Same as dcu/musa/bpu."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "tsingmicro",
@@ -295,7 +299,7 @@
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
-        "FLAGOS_BUILD_FLAGGEMS_CPP": true,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
       "pins": {}

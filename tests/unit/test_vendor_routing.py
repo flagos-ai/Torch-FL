@@ -397,6 +397,7 @@ def test_direct_is_opt_in_per_vendor():
     vendor that merely lacks a view must NOT silently inherit it. Guards against
     flipping the default and handing raw flagos tensors to HCCL/MUSA/CNCL."""
     assert pg._VENDOR_PROFILES["enflame"].direct is True
+    assert pg._VENDOR_PROFILES["tsingmicro"].direct is True
     for v in ("ascend", "musa", "cambricon"):
         assert pg._VENDOR_PROFILES[v].direct is False, (
             f"{v} has no flagos->device view; direct=True would pass it a raw "
@@ -425,3 +426,66 @@ def test_enflame_no_fallback_when_flagcx_missing(monkeypatch):
     with pytest.raises(RuntimeError, match="no suitable inner backend.*none wired"):
         obj._build_inner(None, 0, 1, None)
     assert calls["flagcx"] and not calls["native"]
+
+
+def test_tsingmicro_profile():
+    """TsingMicro's torch-fl FlagCX build registers device 'flagos' and consumes
+    privateuseone tensors directly, with no native fallback. Same shape as
+    enflame: flagos memory here is txMalloc'd XPU storage, not a cuda alias, so
+    no view applies and FlagCX is the only vendor route."""
+    prof = pg._get_profile("tsingmicro")
+    assert prof.flagcx_dev == "flagos"
+    assert prof.view is None
+    assert prof.native is None
+    assert prof.direct is True
+
+
+def test_tsingmicro_flagcx_selects_flagos_backend(monkeypatch):
+    """TsingMicro defaults to the torch-fl FlagCX mode before importing flagcx.
+
+    Without it flagcx's runtime loader probes torch_txda instead of torch_fl."""
+    monkeypatch.setenv("GEMS_VENDOR", "tsingmicro")
+    monkeypatch.delenv("FLAGCX_TORCH_BACKEND", raising=False)
+
+    pg._configure_flagcx_torch_backend("tsingmicro")
+    assert pg.os.environ["FLAGCX_TORCH_BACKEND"] == "flagos"
+
+
+def test_tsingmicro_flagcx_preserves_explicit_backend(monkeypatch):
+    """An explicit FlagCX backend selection remains authoritative."""
+    monkeypatch.setenv("GEMS_VENDOR", "tsingmicro")
+    monkeypatch.setenv("FLAGCX_TORCH_BACKEND", "torch_txda")
+
+    pg._configure_flagcx_torch_backend("tsingmicro")
+    assert pg.os.environ["FLAGCX_TORCH_BACKEND"] == "torch_txda"
+
+
+def test_tsingmicro_flagcx_returns_identity_view(monkeypatch):
+    """TsingMicro is direct=True, so _resolve_view returns the identity rather
+    than raising for the absent view."""
+    obj, calls, _ = _make(
+        monkeypatch, "tsingmicro", flagcx_ok=True, native_ok=False, view_present=False
+    )
+    view_fn = obj._build_inner(None, 0, 1, None)
+    assert calls["flagcx"] and not calls["native"]
+    sentinel = object()
+    assert view_fn(sentinel) is sentinel
+
+
+def test_tsingmicro_no_fallback_when_flagcx_missing(monkeypatch):
+    """TsingMicro has no native fallback; if FlagCX is unavailable, init fails."""
+    obj, calls, _ = _make(
+        monkeypatch, "tsingmicro", flagcx_ok=False, native_ok=False, view_present=False
+    )
+    with pytest.raises(RuntimeError, match="no suitable inner backend.*none wired"):
+        obj._build_inner(None, 0, 1, None)
+    assert calls["flagcx"] and not calls["native"]
+
+
+def test_device_scoped_guard_covers_exactly_the_device_scoped_vendors():
+    """The guard keeps FlagCX's lazily-created comm stream from binding to the
+    wrong device. It is opt-in per vendor on purpose: applying it to a vendor
+    whose backend binds the device itself would set a device it does not own,
+    and omitting it for one that needs it fails silently (zeros, not an error).
+    """
+    assert pg._DEVICE_SCOPED_VENDORS == ("enflame", "tsingmicro")

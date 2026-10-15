@@ -93,6 +93,18 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
         "ppu",
         "flaggems_python",
     ),
+    # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
+    # vendor op library, so `-> cuda` and every other backend's dispatch
+    # assertions cannot hold. Without this row the platform fell through to the
+    # empty skip set and the cuda/ascend-marked tests ran here and failed.
+    #
+    # `flaggems`/`flaggems_python` are deliberately NOT skipped: this platform
+    # does build the FlagGems Python path, so those tests are real coverage. They
+    # still fail on a TsingMicro host for an unrelated reason -- the TX runtime
+    # allows one process per device, and the tests that spawn a subprocess leave
+    # it on the device the parent already holds, so the child blocks until the
+    # test's 60 s subprocess timeout. Skipping them would hide that.
+    "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
 }
 
 

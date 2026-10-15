@@ -55,6 +55,11 @@ def _run_add_subprocess(
         env=env,
         capture_output=True,
         text=True,
+        # The child binds the same flagos device this process already holds. On
+        # a runtime that allows one process per device (TsingMicro's TX) it
+        # never gets it, so without a timeout the suite hangs instead of
+        # reporting a failure. test_cat_dispatch.py already carried this.
+        timeout=60,
     )
 
 

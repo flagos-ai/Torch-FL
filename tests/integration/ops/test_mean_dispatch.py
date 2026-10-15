@@ -53,6 +53,9 @@ def _run_mean_subprocess(
         env=env,
         capture_output=True,
         text=True,
+        # Same-device child; see test_add_dispatch.py for why this needs a
+        # timeout on a one-process-per-device runtime.
+        timeout=60,
     )
 
 

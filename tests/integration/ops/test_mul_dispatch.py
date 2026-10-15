@@ -58,6 +58,9 @@ def _run_mul_subprocess(
         env=env,
         capture_output=True,
         text=True,
+        # Same-device child; see test_add_dispatch.py for why this needs a
+        # timeout on a one-process-per-device runtime.
+        timeout=60,
     )
 
 
@@ -217,7 +220,12 @@ def _run_complex64_subprocess(transposed: bool) -> subprocess.CompletedProcess:
         "'the device product differs from the host product'"
     )
     return subprocess.run(
-        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        # Same-device child; see test_add_dispatch.py.
+        timeout=60,
     )
 
 

@@ -279,6 +279,7 @@ this is the first thing to verify.
 | metax   | should be reusable | "nccl"@maca | flagos→cuda (via maca) | mccl needs measuring |
 | ascend  | **recommended primary path** | hccl (CUSTOM) | **flagos→npu missing** | either the view or native registration |
 | enflame | primary path (2026-08) | none (FlagCX only) | none needed (`direct=True`) | P2P, root-based collectives, and larger deployments remain unvalidated |
+| tsingmicro | primary path, measured on 2 devices (2026-10-15) | none (FlagCX only) | none needed (`direct=True`); FlagCX's tsmicro adaptor drives `tx_runtime` on the tensor's own `data_ptr` | `all_reduce`/`broadcast`/`all_gather`/`all_gather_into_tensor`/`reduce_scatter_tensor`/`barrier` and DDP forward/backward verified on a TX8; no multi-node or FSDP2 run |
 
 ---
 

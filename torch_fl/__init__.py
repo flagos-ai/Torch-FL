@@ -828,6 +828,25 @@ def _patch_flaggems_philox():
         return
 
     try:
+        # Import the *package* first, then the submodule. ``flag_gems.utils.
+        # random_utils`` does ``import flag_gems`` at module scope, and
+        # ``flag_gems/__init__.py`` imports ``flag_gems.ops``, which imports
+        # ``random_utils`` back -- so entering through the submodule runs that
+        # cycle with ``random_utils`` half-built and raises ImportError. The
+        # package entry point has ``random_utils`` already loaded by then and
+        # completes.
+        #
+        # This is not merely "the bridge fails to install". A failed import
+        # leaves the submodules that *did* load in ``sys.modules`` while
+        # removing ``flag_gems`` itself, so every one of them keeps a reference
+        # to the abandoned half-initialised package object. The next
+        # ``import flag_gems`` (the dispatcher's, on first op) builds a fresh
+        # module with ``vendor_name`` set, but those stale bindings still read
+        # the orphan -- and FlagGems' own ``tensor_wrapper``/``pointwise_dynamic``
+        # read ``flag_gems.vendor_name``, so ops that go through them (``cat``
+        # among them) die with ``module 'flag_gems' has no attribute
+        # 'vendor_name'``.
+        import flag_gems  # noqa: F401
         from flag_gems.utils import random_utils
 
         _orig = random_utils.philox_backend_seed_offset
@@ -1351,6 +1370,27 @@ def _keep_device_identity_checks_working(real_device, shim):
 _cuda_alias_active = False
 
 
+# Device strings that have to mean the flagos device on this build, keyed by
+# accelerator. "cuda" is on every row: it is the name the ecosystem hardcodes.
+# The second entry on a row is the vendor's *own* torch device name, which the
+# vendor's Triton/FlagGems integration hands to torch.device but which is not
+# registered here -- torch_fl claims PrivateUse1 as "flagos" and never imports
+# the vendor package (torch_musa / torch_txda) that would register it.
+#
+#   musa       torch_musa's device, and FlagGems' own device.name.
+#   tsingmicro FlagTree's TsingMicro Triton driver resolves its active device as
+#              torch.device("txda", ...) (triton/backends/tsingmicro/driver.py),
+#              and FlagGems' tsingmicro VendorDescriptor names the device "txda"
+#              too. That call happens at *import* of flag_gems, from Triton's
+#              hint manager, so leaving "txda" out does not merely mistype a
+#              tensor: `import flag_gems` raises and every flaggems-routed op
+#              on TsingMicro is unreachable.
+_VENDOR_DEVICE_ALIASES = {
+    "musa": ("cuda", "musa"),
+    "tsingmicro": ("cuda", "txda"),
+}
+
+
 def _real_cuda_is_available() -> bool:
     """Whether *torch* reports a CUDA device, not whether torch_fl redirected it.
 
@@ -1421,7 +1461,7 @@ def _alias_cuda_to_flagos():
     def _remap(dev):
         """Vendor accelerator aliases -> flagos; everything else untouched."""
         if isinstance(dev, str):
-            aliases = ("cuda", "musa") if _build_accelerator() == "musa" else ("cuda",)
+            aliases = _VENDOR_DEVICE_ALIASES.get(_build_accelerator(), ("cuda",))
             for alias in aliases:
                 if dev == alias:
                     return _flagos_type
@@ -2198,7 +2238,10 @@ def _phase_vendor_compat() -> None:
 
     # Patch FlagGems codegen config before any FlagGems code is imported
     _patch_flaggems_codegen_config()
-    _patch_flaggems_philox()
+    # _patch_flaggems_philox() is deliberately NOT called here: it imports
+    # flag_gems, and on a build where the vendor's own device name has to be
+    # aliased first (TsingMicro) that import needs _alias_cuda_to_flagos to have
+    # run. See its call site in _phase_ecosystem.
 
 
 def _phase_ecosystem() -> None:
@@ -2225,6 +2268,26 @@ def _phase_ecosystem() -> None:
         torch.cuda.init()
 
     _alias_cuda_to_flagos()
+
+    # Both of these have to precede the flag_gems import below, which happens
+    # here rather than in _phase_vendor_compat for exactly that reason. That
+    # import reaches Triton's hint manager, which asks the driver factory to
+    # resolve -- and the factory refuses while two backends claim to be active.
+    # On a FlagTree wheel the alias installed just above is what makes the stock
+    # nvidia backend claim that (its probe is `torch.cuda.is_available()`), so
+    # the foreign driver has to be stood down first; `flagos._lazy_init` does
+    # this too, but only on the first device operation, which is after this.
+    # FlagTree's TsingMicro driver then answers `torch.device("txda", ...)`,
+    # which resolves only once the alias has mapped "txda" to flagos.
+    #
+    # Getting either wrong makes the import raise, and a failed import leaves
+    # every flag_gems submodule that *did* load in sys.modules bound to the
+    # abandoned half-initialised package. FlagGems' own tensor_wrapper and
+    # pointwise_dynamic read `flag_gems.vendor_name` off that binding, so ops
+    # going through them (`cat` among them) then fail with `module 'flag_gems'
+    # has no attribute 'vendor_name'` for the life of the process.
+    flagos._stand_down_foreign_triton_drivers()
+    _patch_flaggems_philox()
 
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()

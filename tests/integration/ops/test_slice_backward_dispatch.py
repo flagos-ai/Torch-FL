@@ -50,6 +50,9 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
         env=env,
         capture_output=True,
         text=True,
+        # Same-device child; see test_add_dispatch.py for why this needs a
+        # timeout on a one-process-per-device runtime.
+        timeout=60,
     )
 
 

@@ -332,12 +332,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     ),
     "FLAGOS_BUILD_FLAGGEMS_CPP": (
         SCOPE_BUILD,
-        "ON on cuda and tsingmicro, off elsewhere",
+        "ON on cuda, off elsewhere",
         "Compile the FlagGems C++ wrapper, which links liboperators.so. Defaults "
-        "OFF outside cuda/tsingmicro because that library has to be built for "
-        "the vendor's own toolkit and pointed at with FLAGGEMS_DIR; a build with "
-        "one may turn this ON explicitly (MetaX's MACA build is the case). "
-        "Pinned OFF for dcu, musa and bpu, where no such library exists at all",
+        "OFF outside cuda because that library has to be built for the vendor's "
+        "own toolkit and pointed at with FLAGGEMS_DIR; a build with one may turn "
+        "this ON explicitly (MetaX's MACA build is the case). Pinned OFF for dcu, "
+        "musa and bpu, where no such library exists at all; tsingmicro defaults "
+        "OFF for the same reason and does not pin it",
     ),
     "FLAGOS_BUILD_TILEOPS": (
         SCOPE_BUILD,
