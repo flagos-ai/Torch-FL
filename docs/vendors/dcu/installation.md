@@ -2,12 +2,12 @@
 
 ## Overview
 
-Hygon DCU (DTK) reuses the **CUDA boxing route** with a dedicated `FLAGOS_ACCELERATOR=dcu` branch. Two properties of the vendor stack enable this:
+Hygon DCU (DTK) is **FlagGems-primary by default** and additionally supports an opt-in **CUDA boxing route** through its dedicated `FLAGOS_ACCELERATOR=dcu` branch. Two properties of the vendor stack make the boxing route possible:
 
 - The DCU `torch` wheel is a **hipified** build: it registers HIP kernels under the `CUDA` dispatch key and its tensors report `DeviceType::CUDA` (`torch.version.cuda is None`, `torch.version.hip == '6.3.x'`). Generated PrivateUse1 → CUDA boxing kernels dispatch into `libtorch_hip.so` unchanged.
 - DTK ships a **CUDA compatibility toolkit** at `$ROCM_PATH/cuda/cuda-*` whose `libcudart.so.12` is a thin shim over `libgalaxyhip.so` — the same runtime `libtorch_hip.so` uses. Runtime sources compile as-is with plain host `g++`; no `nvcc`, no `hipcc`, no hipify pass.
 
-The build is **pure boxing**: no vendor kernels (`FLAGOS_BUILD_VENDOR` has no DCU backend directory to enable), the generated PrivateUse1 → CUDA boxing kernels compile by default, FlagGems Python is on by default and only the C++ path stays off (`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so).
+The default build compiles the FlagGems Python path and leaves the rest of the conf on `cpu_fallback`, with no vendor torch package. Setting `FLAGOS_BUILD_BOXING=1` builds the **boxing** wheel instead: the generated PrivateUse1 → CUDA boxing kernels compile and dispatch into `libtorch_hip.so`. `FLAGOS_BUILD_VENDOR` stays a no-op either way (there is no DCU backend directory to enable) and the FlagGems C++ path stays off (`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so). Unless a section says otherwise, the rest of this guide describes the boxing build.
 
 **Status:** Beta. CI validates vendor-backend and FlagGems-runtime operator suites, general tests, and profiler parity on DCU runners. Inference and training smoke tests are deferred pending model mount and card-count confirmation.
 
@@ -33,15 +33,19 @@ cd PyTorch-Plugin-FL
 # Source DTK environment (exports ROCM_PATH and other variables)
 source /opt/dtk/env.sh
 
-# Build with FLAGOS_ACCELERATOR=dcu (pure boxing, no FlagGems by default)
+# Default build: FlagGems-primary, no boxing kernels, no vendor libtorch
 FLAGOS_ACCELERATOR=dcu pip install --no-build-isolation -vvv -e .
+
+# Boxing build (opt-in): generated CUDA boxing kernels + bundled DTK libtorch
+FLAGOS_ACCELERATOR=dcu FLAGOS_BUILD_BOXING=1 \
+  pip install --no-build-isolation -vvv -e .
 ```
 
 `ROCM_PATH` (what DTK's `env.sh` exports) selects the DTK root; the default is `/opt/dtk`. Pass it explicitly if DTK lives elsewhere.
 
 ### Build Notes
 
-- **`FLAGOS_ACCELERATOR=dcu` forces boxing mode:** `FLAGOS_BUILD_VENDOR` has no DCU backend directory and `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` in `setup.py`. The generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`) plus the FlagGems Python path are the kernel sets compiled.
+- **Boxing is opt-in:** the default `FLAGOS_ACCELERATOR=dcu` build compiles the FlagGems Python path and no boxing kernels. `FLAGOS_BUILD_BOXING=1` adds the generated PrivateUse1 → CUDA boxing kernels (`csrc/aten/generated/cuda_kernels.cc`). `FLAGOS_BUILD_VENDOR` has no DCU backend directory and `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` in `setup.py` in both builds.
 - **No `nvcc` or `hipcc` needed:** CUDA runtime sources compile with plain `g++` using DTK's CUDA compatibility toolkit headers.
 - **MIOpen CMake config fix:** DTK's exported MIOpen config bakes in `/usr/lib/x86_64-linux-gnu/librt.so`, which no longer exists on glibc ≥ 2.34 (librt was folded into libc). The `FLAGOS_ACCELERATOR=dcu` branch rewrites that dangling path to `-lrt`.
 

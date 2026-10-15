@@ -24,8 +24,8 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 |--------|---------|-------------|
 | `main_ops` | Representative operator in the CI smoke subset | Applied to frequently-used ops (add, matmul, conv, etc.) for fast feedback |
 | `anyplatform` | Runs on any accelerator backend | Device-agnostic tests (operator registration, dispatch routing) |
-| `cuda` | Requires CUDA boxing kernels or NVIDIA hardware | Tests asserting `-> cuda` backend routing |
-| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (boxing-only build) |
+| `cuda` | Requires a CUDA boxing build (`FLAGOS_BUILD_BOXING=1`) or NVIDIA hardware | Tests asserting `-> cuda` backend routing |
+| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (its lane builds the boxing wheel) |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
@@ -303,6 +303,7 @@ This reads `torch._C._dispatch_tls_local_include()` and `native_functions.yaml` 
 | Script | Purpose | When to Run |
 |--------|---------|-------------|
 | `scripts/codegen/codegen_ops.py` | CUDA boxing kernels (kCUDA dispatch) | After PyTorch version bump or schema changes |
+| `scripts/codegen/codegen_boxing_flaggems_register.py` | Per-platform FlagGems register lists (`register_flaggems_<platform>.inc`) compiled by a FlagGems-primary CUDA-ABI build | After a conf route change on cuda/metax/dcu/ppu/tsingmicro, or a FlagGems op-table change |
 | `scripts/codegen/codegen_autograd.py` | Autograd backward operator wrappers | After adding autograd support for new operators |
 | `scripts/codegen/codegen_ascend.py` | Ascend ACL kernel wrappers | After updating CANN version or adding Ascend ops |
 | `scripts/codegen/codegen_gcu.py` | GCU topsaten kernel wrappers | After updating TopsRider SDK or adding GCU ops |

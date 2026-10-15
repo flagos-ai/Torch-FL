@@ -126,12 +126,16 @@ export FLAGOS_ACCELERATOR=metax
 export MACA_PATH=/opt/maca
 export MACA_HOME=/opt/maca
 
-# MetaX is a boxing-only build: no native mxcc kernels compile in, so
-# FLAGOS_BUILD_VENDOR=OFF is the one build-side statement. The export above is a
-# build input -- setup.py records it in torch_fl/_build_config.py, and the runtime
-# derives its conf from that record (torch_fl._select_backend_config), so there is
-# no mode variable to keep in agreement with the build any more.
+# MetaX builds no native mxcc kernels, so FLAGOS_BUILD_VENDOR=OFF is one
+# build-side statement. Boxing is off by default for every accelerator now
+# (cmake/flagos_platforms.json); this lane stages the vendor image's
+# libtorch_cuda.so (below) and asserts the bundled libtorch, so it opts into
+# boxing explicitly. The exports above are build inputs -- setup.py records them
+# in torch_fl/_build_config.py, and the runtime derives its conf from that record
+# (torch_fl._select_backend_config), so there is no mode variable to keep in
+# agreement with the build any more.
 export FLAGOS_BUILD_VENDOR=OFF
+export FLAGOS_BUILD_BOXING=1
 export FLAGOS_METAX_CUDART_SHIM=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 # Which op takes which backend is stated in backends_metax.conf, not here: that
@@ -285,7 +289,7 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
-  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
+  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi

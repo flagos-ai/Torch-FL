@@ -746,14 +746,21 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
 
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     compiled = [KERNEL_SET_NAME[name] for name in KERNEL_SWITCHES if kernels[name]]
+    # vendor_torch_libraries is the platform's policy; a `vendor_torch_gate` names
+    # the kernel switch the build has to compile for the wheel to actually source
+    # and ship a vendor libtorch. CUDA-ABI platforms gate on boxing: the generated
+    # boxing kernels are the only consumer of a vendor libtorch there, so a
+    # FlagGems-primary wheel (the default) ships none and must not be asked for
+    # vendor provenance at release time.
+    entry = _platform_entry(FLAGOS_ACCELERATOR)
+    gate = entry.get("vendor_torch_gate")
     manifest = preflight.make_manifest(
         platform=FLAGOS_ACCELERATOR,
         wheel_version=wheel_version,
         kernels=compiled,
         bundle_libdir=_BUNDLE_LIBDIR,
-        vendor_torch_libraries=_platform_entry(FLAGOS_ACCELERATOR)[
-            "vendor_torch_libraries"
-        ],
+        vendor_torch_libraries=entry["vendor_torch_libraries"]
+        and (gate is None or kernels[gate]),
         requirements=_install_requires(),
         torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
         sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
@@ -782,6 +789,12 @@ def _bundle_cuda_assets() -> None:
     supplies libtorch_cuda.so out-of-band).
     """
     if FLAGOS_ACCELERATOR != "cuda":
+        return
+    # A FlagGems-primary CUDA wheel is built with FLAGOS_BUILD_BOXING=OFF (the
+    # default). It compiles no boxing kernels and has no vendor torch to feed, so
+    # the bundled libtorch_cuda.so and its nvidia-*-cu12 runtime wheels are not
+    # part of it. An explicit boxing opt-in restores them.
+    if not _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]:
         return
     if os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1":
         return
@@ -1338,7 +1351,23 @@ def _install_requires():
     # runtime), so the pinned nvidia-*-cu12 wheels are both mismatched and
     # unnecessary. Skip them so `pip install` does not drag in cu12 packages.
     skip_assets = os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1"
-    if FLAGOS_ACCELERATOR == "cuda" and not skip_assets:
+    # A FlagGems-primary CUDA wheel (FLAGOS_BUILD_BOXING=OFF, the default) bundles
+    # no libtorch_cuda.so -- _bundle_cuda_assets() skips for the same reason -- so
+    # it must not pull the nvidia-*-cu12 runtime wheels either. Boxing is the
+    # opt-in that needs them.
+    #
+    # CUDA is the only accelerator asked, and it has to be asked first: these
+    # runtime wheels are a CUDA-only requirement, and _kernel_switches() raises
+    # for a platform whose pin contradicts an inherited environment value (say
+    # FLAGOS_BUILD_BOXING=1 in a lane that builds boxing, while the table is
+    # walked and reaches iluvatar). That objection is about the build's -D list,
+    # which still goes through _kernel_switches(), not about what this wheel's
+    # requirements are on a platform that never ships the runtime wheels anyway.
+    if (
+        FLAGOS_ACCELERATOR == "cuda"
+        and not skip_assets
+        and _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]
+    ):
         reqs += _CUDA_RUNTIME_DEPS
     return reqs
 

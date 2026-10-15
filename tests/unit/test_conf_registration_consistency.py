@@ -73,15 +73,21 @@ PLATFORM_REGISTRATION = {
     # generated/register.inc fallback below, which would claim every op and turn
     # its `none` entries into "backend not registered" instead of cpu_fallback.
     "iluvatar": ["backends/iluvatar/generated/iluvatar_flaggems_register.inc"],
-    # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro fall through to
-    # generated/register.inc (register.cc:610-613), which claims every generated
-    # op.
+    # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro share the
+    # register.cc ``#else`` arm. With boxing ON it includes generated/register.inc
+    # (every generated op); with boxing OFF -- the FlagGems-primary default -- it
+    # includes the matching generated/register_flaggems_<platform>.inc, which
+    # claims only the ops the conf routes to a FlagGems backend. Both are listed
+    # here because a build compiles one or the other.
+    "cuda": ["generated/register.inc", "generated/register_flaggems_cuda.inc"],
+    "dcu": ["generated/register.inc", "generated/register_flaggems_dcu.inc"],
+    "metax": ["generated/register.inc", "generated/register_flaggems_metax.inc"],
+    "ppu": ["generated/register.inc", "generated/register_flaggems_ppu.inc"],
+    "tsingmicro": [
+        "generated/register.inc",
+        "generated/register_flaggems_tsingmicro.inc",
+    ],
     "mps": [],  # MPS registers no compute ops yet (register.cc USE_MPS arm)
-    "cuda": ["generated/register.inc"],
-    "dcu": ["generated/register.inc"],
-    "metax": ["generated/register.inc"],
-    "ppu": ["generated/register.inc"],
-    "tsingmicro": ["generated/register.inc"],
 }
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in

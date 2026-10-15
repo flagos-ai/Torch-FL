@@ -483,6 +483,12 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=cuda
+# This lane deliberately exercises the CUDA boxing coverage: it stages the
+# vendor image's libtorch_cuda.so (below) and the factory/operator suites assert
+# -> cuda routing. Boxing is off by default for every accelerator now
+# (cmake/flagos_platforms.json), so the lane must ask for it explicitly or the
+# wheel would ship no CUDA kernels and the staged asset would go unused.
+export FLAGOS_BUILD_BOXING=1
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
 export FLAGOS_CUDA_ASSETS_DIR="$CUDA_ASSETS_DIR"
@@ -582,7 +588,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING CUDA_HOME CUDA_PATH FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi

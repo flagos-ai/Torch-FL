@@ -61,6 +61,12 @@ jobs:
           set -euo pipefail
           echo "=== gen_vendor_confs.py --check ==="
           python3 scripts/codegen/gen_vendor_confs.py --check
+          # Regenerates the per-platform FlagGems register lists that a
+          # FlagGems-primary CUDA-ABI build (FLAGOS_BUILD_BOXING=OFF) compiles
+          # instead of the full generated/register.inc. Reads only committed
+          # sources, so --check needs no vendor toolkit.
+          echo "=== codegen_boxing_flaggems_register.py --check ==="
+          python3 scripts/codegen/codegen_boxing_flaggems_register.py --check
           echo "=== codegen_gcu_flaggems.py --check ==="
           python3 scripts/codegen/codegen_gcu_flaggems.py --check
           echo "=== codegen_musa_flaggems.py --check ==="

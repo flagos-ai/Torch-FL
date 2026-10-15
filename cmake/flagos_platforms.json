@@ -61,15 +61,30 @@
     "(https://resource.flagos.net/repository/flagos-pypi-{vendor}/). This is the",
     "publishing target and is deliberately not derived from wheel_local: that",
     "names the build variant, and a platform publishes to one lane however many",
-    "SDK variants it builds. Empty where nothing is published (tsingmicro, bpu)."
+    "SDK variants it builds. Empty where nothing is published (tsingmicro, bpu).",
+    "",
+    "vendor_torch_libraries: whether the platform sources a vendor libtorch in",
+    "the wheel. vendor_torch_gate, when present, names the one kernel switch the",
+    "build has to compile for that to actually happen (the CUDA-ABI platforms",
+    "gate on boxing); setup.py writes the resolved value into the compatibility",
+    "manifest and CMake ignores it."
   ],
 
   "accelerators": {
     "cuda": {
+      "_comment": [
+        "NVIDIA CUDA. FlagGems-primary by default: FLAGOS_BUILD_BOXING is off,",
+        "so the wheel does not compile the generated CUDA boxing kernels and",
+        "does not need a bundled libtorch_cuda.so -- ops route to the FlagGems",
+        "Python path and everything else reaches cpu_fallback. Boxing stays",
+        "available as an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
+        "FLAGOS_BUILD_BOXING=1), which is what a boxing wheel is built with."
+      ],
       "project_languages": ["CUDA", "CXX", "C"],
       "runtime_dir": "cuda",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": true,
+      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
       "wheel_local": "cuda13.3",
       "pypi_lane": "nvidia",
       "use_macro": "",
@@ -78,7 +93,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": true,
         "FLAGOS_BUILD_TILEOPS": true
       },
@@ -86,11 +101,17 @@
     },
 
     "ppu": {
-      "_comment": "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel dir.",
+      "_comment": [
+        "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel",
+        "dir. FlagGems-primary by default now that FLAGOS_BUILD_BOXING is off:",
+        "the default wheel needs no PPU libtorch bundle and routes to FlagGems",
+        "(cpu_fallback for the rest). A boxing wheel is an explicit opt-in."
+      ],
       "project_languages": ["CUDA", "CXX", "C"],
       "runtime_dir": "cuda",
       "bundle_libdir": "lib_ppu",
       "vendor_torch_libraries": true,
+      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
       "wheel_local": "ppu2.0.0",
       "pypi_lane": "thead",
       "use_macro": "",
@@ -99,7 +120,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -113,13 +134,18 @@
         "hand-written mxcc kernels under backends/metax/ are retired. No",
         "MACA-built liboperators exists by default, so the FlagGems C++ wrappers",
         "stay off (an explicit FLAGGEMS_CPP=1 with FLAGGEMS_DIR still wins -- the",
-        "MACA case is a documented opt-in). FlagGems Python stays on so the boxing",
-        "wheel can route to the python path."
+        "MACA case is a documented opt-in). FlagGems Python stays on so the",
+        "default FlagGems-primary wheel routes to the python path.",
+        "",
+        "Boxing is now an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
+        "FLAGOS_BUILD_BOXING=1); the default wheel compiles no boxing kernels and",
+        "needs neither the MACA libtorch bundle nor a vendor torch package."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "metax",
       "bundle_libdir": "lib_maca",
       "vendor_torch_libraries": true,
+      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
       "wheel_local": "maca3.8.1.3",
       "pypi_lane": "metax",
       "use_macro": "USE_MACA",
@@ -128,7 +154,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": false,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -250,7 +276,11 @@
     "tsingmicro": {
       "_comment": [
         "TsingMicro Kuiper: no vendor backend directory exists, so FLAGOS_BUILD_VENDOR",
-        "is a no-op, and boxing plus FlagGems Python and C++ stay on by default."
+        "is a no-op. FlagGems Python and C++ stay on; boxing is now an explicit",
+        "opt-in, so the default wheel compiles no CUDA boxing kernels. Nothing",
+        "routes to them anyway -- backends_tsingmicro.conf names no `cuda` entry",
+        "and leaves unlisted ops on the conf's default flaggems route -- but the",
+        "switch no longer compiles kernels the conf never selects."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "tsingmicro",
@@ -264,7 +294,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": true,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -275,12 +305,16 @@
       "_comment": [
         "Hygon DTK: the vendor torch is a hipified build registering its HIP",
         "kernels under the CUDA key, so the generated boxing kernels dispatch into",
-        "libtorch_hip.so unchanged. No FlagGems liboperators exists for DTK."
+        "libtorch_hip.so unchanged. No FlagGems liboperators exists for DTK.",
+        "FlagGems-primary by default: FLAGOS_BUILD_BOXING is off, so the default",
+        "wheel needs no vendor torch package and routes to FlagGems (cpu_fallback",
+        "for the rest). A boxing wheel is an explicit opt-in."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "cuda",
       "bundle_libdir": "lib_dcu",
       "vendor_torch_libraries": true,
+      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
       "wheel_local": "dtk2604",
       "pypi_lane": "hygon",
       "use_macro": "USE_DCU",
@@ -289,7 +323,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -364,7 +398,10 @@
       "_comment": [
         "D-Robotics RDK BPU: no per-op kernels, only the runtime layer (UCP",
         "allocator, device/stream stubs) is native. FLAGOS_BUILD_VENDOR stays at the",
-        "ON default but compiles nothing (backends/bpu/ does not exist)."
+        "ON default but compiles nothing (backends/bpu/ does not exist).",
+        "FLAGOS_BUILD_BOXING is off: backends_bpu.conf names no `cuda` entry and the",
+        "platform registers no compute ops at all, so the boxing kernels were",
+        "compiled but never reachable. Acceleration is the torch.compile backend."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "bpu",
@@ -378,7 +415,7 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": false,
-        "FLAGOS_BUILD_BOXING": true,
+        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },

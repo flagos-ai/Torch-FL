@@ -113,6 +113,46 @@ def test_build_ext_stages_generated_build_config(
     assert compatibility["build"]["vendor_torch_version"] is None
 
 
+@pytest.mark.parametrize("boxing, expected", [(None, False), ("1", True)])
+def test_cuda_manifest_vendor_torch_policy_follows_boxing(
+    monkeypatch, tmp_path, clean_kernel_env, boxing, expected
+):
+    """A FlagGems-primary CUDA wheel declares no vendor libtorch; boxing opts in.
+
+    ``torch-fl-preflight --release`` demands FLAGOS_VENDOR_TORCH_VERSION only
+    when the manifest says the wheel ships a vendor libtorch, so the manifest
+    has to record the build's actual policy: a default (boxing-off) wheel ships
+    none, and only the explicit boxing opt-in carries the vendor libraries.
+    """
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "cuda")
+    if boxing is not None:
+        monkeypatch.setenv("FLAGOS_BUILD_BOXING", boxing)
+    namespace, _ = _load_setup(monkeypatch)
+    root = tmp_path / "src"
+    (root / "torch_fl").mkdir(parents=True)
+    globals_ = namespace["_write_compatibility_manifest"].__globals__
+    monkeypatch.setitem(globals_, "BASE_DIR", str(root))
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "cuda")
+    # The manifest writer imports torch and reads its C++ ABI flag; a stub keeps
+    # the test off the real interpreter, whose device-backend autoload is not
+    # guaranteed to import cleanly in a bare checkout.
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=False)),
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "2.10.0+cuda13.3" if name == "torch" else None,
+    )
+
+    namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3")
+
+    manifest = json.loads((root / "torch_fl" / "compatibility.json").read_text())
+    assert manifest["build"]["vendor_torch_libraries"] is expected
+
+
 def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_env):
     """The generated file is imported by torch_fl._env.build_kernels()."""
     namespace, _ = _load_setup(monkeypatch)
@@ -128,9 +168,10 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     generated = {}
     exec((root / "torch_fl" / "_build_config.py").read_text("utf-8"), generated)
     assert generated["ACCELERATOR"] == "cuda"
-    # CUDA builds every set, including the SM90-only TileOps.
+    # CUDA builds every set except the CUDA boxing kernels: boxing is off by
+    # default (a FlagGems-primary wheel), and only an explicit opt-in adds
+    # "boxing" back.
     assert generated["KERNELS"] == (
-        "boxing",
         "flaggems",
         "flaggems_cpp",
         "tileops",
@@ -141,20 +182,23 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
 @pytest.mark.parametrize(
     "accelerator, expected",
     [
-        # CUDA compiles everything; every other platform drops at least TileOps,
-        # and the non-CUDA-compatible vendors drop the CUDA boxing wrappers too.
-        ("cuda", {"vendor", "flaggems", "boxing", "flaggems_cpp", "tileops"}),
-        ("metax", {"flaggems", "boxing"}),
+        # No platform compiles the CUDA boxing kernels by default now: boxing is
+        # the explicit opt-in that these defaults leave off, so a default wheel
+        # depends on no vendor torch package. CUDA still compiles everything
+        # else; the platforms below drop TileOps and/or the FlagGems C++ wrapper
+        # as before.
+        ("cuda", {"vendor", "flaggems", "flaggems_cpp", "tileops"}),
+        ("metax", {"flaggems"}),
         ("ascend", {"vendor", "flaggems"}),
-        ("dcu", {"vendor", "flaggems", "boxing"}),
-        ("ppu", {"vendor", "flaggems", "boxing"}),
-        ("tsingmicro", {"vendor", "flaggems", "boxing", "flaggems_cpp"}),
+        ("dcu", {"vendor", "flaggems"}),
+        ("ppu", {"vendor", "flaggems"}),
+        ("tsingmicro", {"vendor", "flaggems", "flaggems_cpp"}),
         ("gcu", {"vendor", "flaggems"}),
         ("musa", {"vendor", "flaggems"}),
         # BPU keeps the FLAGOS_BUILD_VENDOR default, but csrc/aten/backends/bpu/ does
         # not exist, so "vendor" here records a switch that is on rather than a
         # kernel set that is present.
-        ("bpu", {"vendor", "boxing"}),
+        ("bpu", {"vendor"}),
         # MPS is native (no CUDA runtime to box onto) and has no FlagGems/Triton
         # line, so only FLAGOS_BUILD_VENDOR is on; as for BPU its operator tree
         # does not exist yet, so "vendor" is a switch rather than a present set.
@@ -277,6 +321,13 @@ def test_platform_table_is_internally_consistent():
         for field in required:
             assert field in row, (accelerator, field)
         assert isinstance(row["vendor_torch_libraries"], bool), accelerator
+        # vendor_torch_gate, when present, names the one kernel switch the build
+        # must compile for the wheel to source a vendor libtorch. It only makes
+        # sense where the platform declares one at all.
+        gate = row.get("vendor_torch_gate")
+        if gate is not None:
+            assert row["vendor_torch_libraries"], accelerator
+            assert gate in switches, (accelerator, gate)
         assert set(row["kernel_defaults"]) == set(switches), accelerator
         assert all(
             isinstance(value, bool) for value in row["kernel_defaults"].values()

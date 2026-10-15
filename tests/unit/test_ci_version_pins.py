@@ -285,6 +285,41 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
             assert declared == ">=3.8", (platform, declared)
 
 
+def test_setup_kwargs_survive_a_boxing_lane_walking_the_table(monkeypatch):
+    """Every CUDA-ABI lane builds boxing, so its hook exports FLAGOS_BUILD_BOXING=1.
+
+    That value is inherited by the unit tests, including the loop above, which
+    points FLAGOS_ACCELERATOR at every accelerator in the table. One of them --
+    iluvatar -- pins boxing off, so resolving the switch while computing another
+    platform's requirements raises and fails the DCU lane. `_get_setup_kwargs()`
+    describes the wheel for the platform it is asked about, so it must not reject
+    an environment value that belongs to a different platform's build.
+    """
+    globals_ = _setup_globals()
+    monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")
+    for platform in _platforms_in_the_table():
+        globals_["FLAGOS_ACCELERATOR"] = platform
+        assert globals_["_get_setup_kwargs"]()["python_requires"], platform
+
+
+def test_cuda_runtime_wheels_still_follow_boxing(monkeypatch):
+    """The tolerant table walk must not drop the CUDA runtime-wheel policy.
+
+    Scoping the switch lookup to CUDA is what keeps the walk above working; the
+    cuda case itself has to keep pulling nvidia-*-cu12 in on the boxing opt-in
+    and leaving them out for the FlagGems-primary default.
+    """
+    globals_ = _setup_globals()
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "cuda")
+    monkeypatch.delenv("FLAGOS_BUILD_BOXING", raising=False)
+    # A PPU-style environment exports this; it would hide the runtime wheels the
+    # boxing opt-in is supposed to pull in, so clear it before the two halves.
+    monkeypatch.delenv("FLAGOS_SKIP_CUDA_ASSETS", raising=False)
+    assert not [r for r in globals_["_install_requires"]() if r.startswith("nvidia-")]
+    monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")
+    assert [r for r in globals_["_install_requires"]() if r.startswith("nvidia-")]
+
+
 def test_every_platform_with_a_wheel_segment_has_an_interpreter_pin():
     """The two travel together: both describe the one published artifact."""
     pins = _pins()

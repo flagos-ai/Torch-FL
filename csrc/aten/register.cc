@@ -620,9 +620,37 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // CUDA and does not build the CUDA boxing kernels (FLAGOS_BUILD_BOXING is
     // pinned off in cmake/flagos_platforms.json).
   #else
+  // CUDA-ABI boxing platforms: cuda, metax, dcu, ppu and tsingmicro all share
+  // this arm. With FLAGOS_BUILD_BOXING=ON the wheel carries the generated CUDA
+  // boxing kernels (generated/cuda_kernels.cc), so every generated op may be
+  // claimed here and a `cuda` route lands on a real kernel.
+  //
+  // Boxing is off by default for all five now (cmake/flagos_platforms.json).
+  // Those wheels link no CUDA kernels and no vendor torch, so claiming a
+  // `cuda`-routed op would raise "backend not registered" instead of reaching
+  // the cpu_fallback arm below. Register only the ops the platform's conf routes
+  // to a FlagGems backend, from the generated per-platform list; every other op
+  // stays unregistered and falls through to cpu_fallback. Boxing remains an
+  // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
+  #if defined(FLAGOS_BOXING_BUILD)
   #define FLAGOS_GEN_IMPLS
   #include "generated/register.inc"
   #undef FLAGOS_GEN_IMPLS
+  #elif defined(FLAGOS_FLAGGEMS_PYTHON)
+  #if defined(FLAGOS_ACCEL_CUDA)
+  #include "generated/register_flaggems_cuda.inc"
+  #elif defined(FLAGOS_ACCEL_METAX)
+  #include "generated/register_flaggems_metax.inc"
+  #elif defined(FLAGOS_ACCEL_DCU)
+  #include "generated/register_flaggems_dcu.inc"
+  #elif defined(FLAGOS_ACCEL_PPU)
+  #include "generated/register_flaggems_ppu.inc"
+  #elif defined(FLAGOS_ACCEL_TSINGMICRO)
+  #include "generated/register_flaggems_tsingmicro.inc"
+  #endif
+  // FLAGOS_BUILD_FLAGGEMS=OFF leaves the block empty: no accelerated route is
+  // compiled in, so every op is meant to reach cpu_fallback.
+  #endif
   #endif
 }
 

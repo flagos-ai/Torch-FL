@@ -51,7 +51,7 @@ torch-fl 主要支持三类算子执行策略：
 
 - **厂商原生内核**：直接调用厂商运行时和算子库（ACLNN、mudnn、topsaten），由插件生成对应厂商 C/C++ API 的绑定代码。
 
-- **兼容性 boxing**：当厂商栈提供可与 PrivateUse1 共存的独立 PyTorch dispatch key 时，以零拷贝方式转换张量元数据。CUDA boxing 通过外部 `libtorch_cuda.so` 复用 NVIDIA 内核。
+- **兼容性 boxing**：当厂商栈提供可与 PrivateUse1 共存的独立 PyTorch dispatch key 时，以零拷贝方式转换张量元数据。CUDA boxing 通过外部 `libtorch_cuda.so` 复用厂商的 CUDA-ABI 内核。它是**可选**路径（`FLAGOS_BUILD_BOXING=1`）：所有 CUDA-ABI 平台默认构建 FlagGems-primary 的 wheel，不编译 boxing 内核，也不打包厂商 libtorch。
 
 - **可移植编译器内核**：使用 Triton 或兼容编译器后端生成的 FlagGems 内核，在多个加速器系列之间复用，无需逐平台重写。
 
@@ -91,11 +91,11 @@ torch-fl 在项目层面提供以下能力：
 
 | 平台 | 执行路径 | 已验证能力 | 状态 | 指南 |
 |---|---|---|---|---|
-| NVIDIA CUDA | 基于外部 `libtorch_cuda.so` 的 CUDA boxing | Eager、autograd、分布式（FlagCX/NCCL）、profiler（CUPTI）、FlagGems（Python + C++） | **稳定** | [CUDA](docs/vendors/cuda/installation.md) |
-| MetaX | 通过 cu-bridge 进行 CUDA boxing，或使用 MetaX 原生内核 | Eager、autograd | **稳定** | [MetaX](docs/vendors/metax/installation.md) |
+| NVIDIA CUDA | FlagGems-primary；基于外部 `libtorch_cuda.so` 的 CUDA boxing 为可选 | Eager、autograd、分布式（FlagCX/NCCL）、profiler（CUPTI）、FlagGems（Python + C++） | **稳定** | [CUDA](docs/vendors/cuda/installation.md) |
+| MetaX | FlagGems-primary；通过 cu-bridge 的 CUDA boxing 为可选，MetaX 原生内核已退役 | Eager、autograd | **稳定** | [MetaX](docs/vendors/metax/installation.md) |
 | Ascend | 原生 ACLNN 后端，通过 FlagTree（Triton 3.5）使用 FlagGems | Eager、autograd、RNG 套件 | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
-| PPU | 针对 PPU CUDA 13 兼容 SDK 的 CUDA boxing | Eager、autograd | **实验性** | [PPU](docs/vendors/ppu/installation.md) |
-| 海光 DCU | 基于 hipify DTK torch 的 CUDA boxing | Eager、autograd、profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
+| PPU | FlagGems-primary；针对 PPU CUDA 13 兼容 SDK 的 CUDA boxing 为可选 | Eager、autograd | **实验性** | [PPU](docs/vendors/ppu/installation.md) |
+| 海光 DCU | FlagGems-primary；基于 hipify DTK torch 的 CUDA boxing 为可选 | Eager、autograd、profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | 昆仑芯 Kunlunxin（P800） | 基于厂商 xdnn 算子库的原生 XPU 后端 | Eager、autograd | **实验性** | [Kunlunxin](docs/vendors/kunlunxin/installation.md) |
 | 燧原 GCU | 原生 topsaten 后端，未路由及 int64 算子使用 CPU 回退 | Eager | **实验性** | [GCU](docs/vendors/gcu/installation.md) |
 | 摩尔线程 MUSA | FlagGems 优先的 Triton 内核，原生 mudnn 回退，未路由算子使用 CPU 回退 | Eager、FP16/BF16 AMP | **实验性** | [MUSA](docs/vendors/musa/installation.md) |

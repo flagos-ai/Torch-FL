@@ -311,20 +311,24 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "ON, OFF on metax",
         "Compile the accelerator vendor's native kernels (a no-op where the "
         "vendor ships none: cuda, dcu, ppu, tsingmicro, bpu). MetaX defaults OFF "
-        "because its native path is retired -- the generated CUDA boxing kernels "
-        "are what accelerate that platform",
+        "because its native path is retired -- that platform's accelerated ops "
+        "are its FlagGems routes, with the rest on cpu_fallback",
     ),
     "FLAGOS_BUILD_FLAGGEMS": (
         SCOPE_BUILD,
         "ON, OFF on bpu",
         "Compile the FlagGems Python kernel wrappers (calls into Python, no C++ "
-        "linking). Set OFF for a slim pure-boxing build",
+        "linking). Set OFF for a runtime-only build with no FlagGems routes (bpu)",
     ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,
-        "ON, OFF on ascend, gcu and musa",
-        "Compile the generated CUDA boxing kernels. OFF is a default for "
-        "ascend, gcu and musa, which have no CUDA runtime to box onto",
+        "OFF",
+        "Compile the generated CUDA boxing kernels, the CUDA-ABI vendor path. "
+        "Off on every platform by default: the default wheel is FlagGems-primary "
+        "(routed ops go to FlagGems, the rest to cpu_fallback) and depends on no "
+        "vendor torch package. Set FLAGOS_BUILD_BOXING=1 (or "
+        "-DFLAGOS_BUILD_BOXING=ON) to build a boxing wheel that reuses the "
+        "vendor's CUDA-ABI kernels",
     ),
     "FLAGOS_BUILD_FLAGGEMS_CPP": (
         SCOPE_BUILD,

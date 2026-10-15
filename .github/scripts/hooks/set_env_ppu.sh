@@ -346,6 +346,11 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
+# This lane stages the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_ppu
+# and asserts the bundle, so it builds the boxing wheel. Boxing is off by default
+# for every accelerator now (cmake/flagos_platforms.json); without this the
+# default FlagGems-primary wheel would bundle no libtorch_cuda.so.
+export FLAGOS_BUILD_BOXING=1
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
@@ -459,5 +464,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

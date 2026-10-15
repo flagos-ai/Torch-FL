@@ -362,6 +362,15 @@ if(FLAGOS_BUILD_FLAGGEMS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
 endif()
 
+# Tells register.cc that the generated CUDA boxing kernels are part of this
+# wheel, so the CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro) may claim
+# every generated op on PrivateUse1. With boxing OFF -- the default for all of
+# them -- those wheels carry no CUDA kernels, so register.cc claims only the ops
+# their conf routes to a FlagGems backend and leaves the rest to cpu_fallback.
+if(FLAGOS_BUILD_BOXING)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_BOXING_BUILD=1)
+endif()
+
 # Compile the FlagGems C++ dispatch kernels (flaggems_cpp_kernels.cc, guarded by
 # this macro) only when linking against liboperators.so is requested.
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
@@ -419,6 +428,16 @@ endif()
 if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
 endif()
+
+# FLAGOS_ACCEL_<UPPER> for every accelerator. The USE_* macro above is empty for
+# cuda and ppu and names a vendor SDK (USE_MACA, USE_DCU) at that, so it cannot
+# tell register.cc which FlagGems-primary register list a boxing-OFF CUDA-ABI
+# build should compile: cuda, metax, dcu, ppu and tsingmicro all share the one
+# `#else` arm there. This define is that discriminator and nothing else.
+string(TOUPPER "${FLAGOS_ACCELERATOR}" _FLAGOS_ACCEL_UPPER)
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_ACCEL_${_FLAGOS_ACCEL_UPPER}=1
+)
 
 if(FLAGOS_ACCELERATOR STREQUAL "metax")
   # maca's torch headers are a hard fork gated on USE_MACA (e.g. C10_WARP_SIZE,

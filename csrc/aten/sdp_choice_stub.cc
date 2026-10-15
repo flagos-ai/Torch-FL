@@ -64,14 +64,18 @@
 // a graph. A Python TorchDispatchMode is what forces the second registration --
 // it is measured and explained at the registrations at the end of this file.
 //
-// Registered only on CUDA-boxing builds. Ascend (USE_ASCEND) keeps its own
-// PrivateUse1 _fused_sdp_choice stub (returns efficient_attention for its
-// aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc; MUSA, GCU,
-// TsingMicro, BPU and Kunlunxin do not run CUDA-compatible kernels and must keep
-// their own paths. Kunlunxin registers nothing here: xdnn_pytorch exposes no
-// fused attention op, so it is left to ATen's decomposition (matmul, softmax
-// and the rest all route to the native XPU kernels), which is the same answer
-// MUSA's backend gives.
+// Compiled for the CUDA-ABI platforms, in both build states. On a boxing build
+// (FLAGOS_BOXING_BUILD) the default tail boxes q/k/v and calls the composite on
+// the vendor's CUDA kernels. On a FlagGems-primary build there is nothing to box
+// onto, so the tail calls the composite on the flagos tensors and lets it
+// decompose onto the PrivateUse1 FlagGems leaf kernels. Ascend (USE_ASCEND)
+// keeps its own PrivateUse1 _fused_sdp_choice stub (returns efficient_attention
+// for its aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc;
+// MUSA, GCU, TsingMicro, BPU and Kunlunxin do not run CUDA-compatible kernels
+// and must keep their own paths. Kunlunxin registers nothing here: xdnn_pytorch
+// exposes no fused attention op, so it is left to ATen's decomposition (matmul,
+// softmax and the rest all route to the native XPU kernels), which is the same
+// answer MUSA's backend gives.
 // Without this guard the PrivateUse1 stub registration below would collide with
 // Ascend's registration of the same DispatchStub slot.
 
@@ -464,6 +468,10 @@ at::Tensor WrapperScaledDotProductAttention(
     return result;
   }
 #endif
+#ifdef FLAGOS_BOXING_BUILD
+  // Boxing build: hand the flagos tensors to the vendor's CUDA kernels for the
+  // whole attention, then unbox the result.
+  //
   // DeviceBoxingGuard records raw TensorImpl* and must only be handed named
   // lvalues that outlive the guard, so the optional mask is bound to a local
   // first. An undefined mask Tensor is left untouched by the guard (matching the
@@ -480,6 +488,16 @@ at::Tensor WrapperScaledDotProductAttention(
   // one of the boxed inputs) and must be explicitly unboxed back to flagos.
   at::native::flagos::UnboxToFlagos(output);
   return output;
+#else
+  // FlagGems-primary build: there are no CUDA kernels and no vendor torch to
+  // box onto, so DeviceBoxingGuard would only move the tensors to a device with
+  // nothing behind it. Call the composite directly on the flagos tensors
+  // instead; it decomposes into leaf ops (mm/bmm/_softmax/...) that dispatch
+  // through the PrivateUse1 FlagGems kernels, or reach cpu_fallback where the
+  // conf has no route.
+  return at::native::scaled_dot_product_attention(
+      query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+#endif
 }
 
 } // namespace

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CUDA backend reuses PyTorch's optimized CUDA kernels through compatibility-key boxing, eliminating the need for hand-written kernels. This route installs CPU-only PyTorch via pip and bundles a version-matched external `libtorch_cuda.so` that provides the full CUDA operator set. An optional FlagGems compiler path routes eligible operations to Triton kernels at runtime.
+The CUDA backend is **FlagGems-primary by default**: the operations its conf routes go to the FlagGems/Triton path and the rest reach `cpu_fallback`, with no vendor torch package required. An opt-in **boxing** build (`FLAGOS_BUILD_BOXING=1`) instead reuses PyTorch's optimized CUDA kernels through compatibility-key boxing — CPU-only PyTorch via pip plus a version-matched external `libtorch_cuda.so` that carries the full CUDA operator set.
 
 **Status:** Stable. CI validates vendor-backend and FlagGems operator suites, factory ops, profiler parity, and Qwen3-0.6B inference/training on 8-GPU A100 runners.
 
@@ -17,7 +17,7 @@ The CUDA backend reuses PyTorch's optimized CUDA kernels through compatibility-k
 
 ## Installation
 
-### From Source (Standard Build)
+### From Source (Standard Build, FlagGems-primary)
 
 Clone the repository and build with the CUDA accelerator:
 
@@ -28,15 +28,30 @@ cd PyTorch-Plugin-FL
 # Install CPU PyTorch (if not already present)
 pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
-# Build torch_fl with CUDA boxing kernels and bundled CUDA assets
+# Default build: FlagGems-primary, no boxing kernels, no vendor libtorch
 FLAGOS_ACCELERATOR=cuda \
+  pip install --no-build-isolation -vvv -e .
+```
+
+This build:
+- Compiles FlagGems Python-dispatch integration by default (routing comes from `backends_cuda.conf`)
+- Compiles the CUDA device runtime (`csrc/runtime/accelerator/cuda/`), which needs the CUDA toolkit but not a vendor torch package
+- Compiles **no** CUDA boxing kernels and does **not** bundle `libtorch_cuda.so`; operations the conf does not route to FlagGems reach `cpu_fallback`
+- Depends on no `nvidia-*-cu12` runtime wheels
+
+### From Source (Boxing Build, Opt-in)
+
+Set `FLAGOS_BUILD_BOXING=1` to build the CUDA boxing path, where each routed operation runs on the vendor's CUDA-ABI kernels:
+
+```bash
+FLAGOS_ACCELERATOR=cuda \
+  FLAGOS_BUILD_BOXING=1 \
   pip install --no-build-isolation -vvv -e .
 ```
 
 This build:
 - Generates CUDA boxing kernels from PyTorch's ATen schema (`csrc/aten/generated/cuda_kernels.cc`)
 - Bundles `libtorch_cuda.so` and related CUDA dispatcher libraries into `torch_fl/lib/`
-- Compiles FlagGems Python-dispatch integration by default (routing comes from `backends_cuda.conf`)
 - Pins matching `nvidia-*-cu12` runtime dependencies for the bundled CUDA assets
 
 ### With FlagGems C++ Dispatch (Optional)
@@ -87,7 +102,7 @@ Expected output shows `flagos devices: N` (where N matches your GPU count) and a
 
 ### Operator Validation
 
-Run the main operator test suite against the CUDA boxing backend:
+Run the main operator test suite against the platform's routed operator path:
 
 ```bash
 pytest tests/integration/ops/ \

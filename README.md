@@ -35,7 +35,7 @@ torch-fl implements three principal operator execution strategies:
 
 - **Native vendor kernels**: Direct calls into vendor runtime and operator libraries (ACLNN, mudnn, topsaten). The plugin generates bindings to each vendor's C/C++ API.
 
-- **Compatibility boxing**: Zero-copy metadata conversion into an independent PyTorch dispatch key when the vendor stack exposes one that can coexist with PrivateUse1. CUDA boxing reuses NVIDIA kernels via an external `libtorch_cuda.so`.
+- **Compatibility boxing**: Zero-copy metadata conversion into an independent PyTorch dispatch key when the vendor stack exposes one that can coexist with PrivateUse1. CUDA boxing reuses the vendor's CUDA-ABI kernels via an external `libtorch_cuda.so`. It is an **opt-in** (`FLAGOS_BUILD_BOXING=1`): the default wheel for every CUDA-ABI platform is FlagGems-primary, so it compiles no boxing kernels and bundles no vendor libtorch.
 
 - **Portable compiler kernels**: FlagGems kernels generated through Triton or a compatible compiler backend. These kernels target multiple accelerator families without per-platform rewrites.
 
@@ -75,11 +75,11 @@ Capability availability and validation status vary by platform. A feature existi
 
 | Platform | Execution path | Validated capabilities | Status | Guide |
 |---|---|---|---|---|
-| NVIDIA CUDA | CUDA boxing over external `libtorch_cuda.so` | Eager, autograd, distributed (FlagCX/NCCL), profiler (CUPTI), FlagGems (Python + C++) | **Stable** | [CUDA](docs/vendors/cuda/installation.md) |
-| MetaX | CUDA boxing via cu-bridge, or native MetaX kernels | Eager, autograd | **Stable** | [MetaX](docs/vendors/metax/installation.md) |
+| NVIDIA CUDA | FlagGems-primary; CUDA boxing over an external `libtorch_cuda.so` is opt-in | Eager, autograd, distributed (FlagCX/NCCL), profiler (CUPTI), FlagGems (Python + C++) | **Stable** | [CUDA](docs/vendors/cuda/installation.md) |
+| MetaX | FlagGems-primary; CUDA boxing via cu-bridge is opt-in, native MetaX kernels retired | Eager, autograd | **Stable** | [MetaX](docs/vendors/metax/installation.md) |
 | Ascend | Native ACLNN backend, FlagGems via FlagTree (Triton 3.5) | Eager, autograd, RNG suite | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
-| PPU | CUDA boxing against PPU's CUDA-13-compatible SDK | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
-| Hygon DCU | CUDA boxing over hipified DTK torch | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
+| PPU | FlagGems-primary; CUDA boxing against PPU's CUDA-13-compatible SDK is opt-in | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
+| Hygon DCU | FlagGems-primary; CUDA boxing over the hipified DTK torch is opt-in | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | Native XPU backend over the vendor xdnn operator library | Eager, autograd | **Experimental** | [Kunlunxin](docs/vendors/kunlunxin/installation.md) |
 | Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | FlagGems-first Triton kernels, native mudnn fallback, CPU fallback for unrouted ops | Eager, FP16/BF16 AMP | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |

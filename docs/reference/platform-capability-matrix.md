@@ -14,15 +14,15 @@ when a platform gains or loses one.
 
 | `FLAGOS_ACCELERATOR` | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
-| `cuda` | native CUDA | `cuda` | — (C++ / FlagGems / CUDA) | `cuda` | 2034 | yes |
-| `ppu` | CUDA-ABI boxing (bundled PPU libtorch) | `cuda` (+ `lib_ppu/` bundle) | — (boxing) | `ppu` | 2037 | yes |
-| `metax` | CUDA-ABI boxing (bundled MACA libtorch) | `metax` | — (native retired) | `metax` | 2037 | yes |
-| `dcu` | CUDA-ABI boxing (hipified DTK torch) | `cuda` (+ `dcu` DTK-core shim) | — (boxing) | `dcu` | 2037 | yes |
+| `cuda` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `cuda` | — (C++ / FlagGems / CUDA) | `cuda` | 2034 | yes |
+| `ppu` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `cuda` (+ `lib_ppu/` bundle) | — (FlagGems / boxing opt-in) | `ppu` | 2037 | yes |
+| `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2037 | yes |
+| `dcu` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `cuda` (+ `dcu` DTK-core shim) | — (FlagGems / boxing opt-in) | `dcu` | 2037 | yes |
 | `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
-| `tsingmicro` | CUDA-ABI boxing (Kuiper) | `tsingmicro` | — | — (no dir) | 53 | no |
+| `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 53 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary (no vendor kernels, no boxing) | `cuda` | `iluvatar` (generated FlagGems register only) | — (no dir) | 2037 | no |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | — (MPSGraph-first, none yet) | `mps` (stream/event only) | 0 | no |
@@ -31,6 +31,12 @@ Column notes:
 
 - **Kind** is the operator path the build selects (see
   `cmake/flagos_platforms.json` for the per-platform kernel-switch defaults).
+  The CUDA-ABI platforms (`cuda`, `ppu`, `metax`, `dcu`, `tsingmicro`) are
+  **FlagGems-primary by default**: `FLAGOS_BUILD_BOXING` is off, so the wheel
+  compiles no CUDA boxing kernels, bundles no vendor libtorch, and routes the
+  ops its conf names to FlagGems with everything else on `cpu_fallback`. Boxing
+  is the explicit opt-in (`FLAGOS_BUILD_BOXING=1` / `-DFLAGOS_BUILD_BOXING=ON`)
+  that restores the vendor-libtorch build.
 - **runtime dir** is the `csrc/runtime/accelerator/<dir>` whose sources the
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
 toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
@@ -57,7 +63,9 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
 sets a wheel compiles: `vendor` (the platform's native tree), `flaggems`
 (FlagGems Python path), `flaggems_cpp` (FlagGems C++ path), `boxing` (generated
 CUDA boxing kernels) and `tileops`. Which are on by default is a property of the
-platform, not a per-build choice.
+platform, not a per-build choice. `boxing` is off on every platform by default —
+a CUDA-ABI wheel is FlagGems-primary and carries no vendor libtorch unless a
+build opts into boxing.
 
 ## Known gaps
 

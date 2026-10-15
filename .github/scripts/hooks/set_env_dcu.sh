@@ -309,6 +309,11 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=dcu
+# This lane builds the DCU boxing wheel: it stages the hipified DTK libtorch into
+# the bundle and asserts libtorch_hip.so/libc10_hip.so. Boxing is off by default
+# for every accelerator now (cmake/flagos_platforms.json), so the lane opts in
+# explicitly; otherwise the wheel would compile no CUDA boxing kernels.
+export FLAGOS_BUILD_BOXING=1
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
 # exactly the CUDA-compatible path a kernel library needs here. Mirrors the
@@ -579,5 +584,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
 fi
