@@ -74,7 +74,16 @@ def _run_bmm_subprocess(
     check: bool = True,
     stub_python_op: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run a minimal bmm call in a subprocess and return the result."""
+    """Run a minimal bmm call in a subprocess and return the result.
+
+    A fresh interpreter pays the whole bring-up cost -- start, `import torch_fl`
+    and device init -- before the three-line body runs, so the 60 s budget is a
+    flake guard rather than a bound on the op. Run 38723076856 saw it exceeded
+    once on Ascend (test_ascend_out_correctness, 379 tests into the session)
+    while the identical neighbouring case passed, so a timeout gets one retry
+    and the timed-out attempt's output is attached to the failure, which keeps a
+    genuine hang diagnosable instead of turning it into a bare re-raise.
+    """
     env = os.environ.copy()
     env.update(extra_env)
     setup = "import torch_fl, torch; "
@@ -98,13 +107,23 @@ def _run_bmm_subprocess(
             "b = torch.randn(2,4,4,device='flagos:0'); "
             "torch.bmm(a, b)"
         )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    timeout = 60
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", code],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            if attempt:
+                raise AssertionError(
+                    f"bmm subprocess timed out after {timeout} s on both "
+                    f"attempts; stdout={exc.stdout!r} stderr={exc.stderr!r}"
+                ) from exc
     if check:
         assert result.returncode == 0, (
             f"Subprocess failed (exit {result.returncode}):\n{result.stderr}"
