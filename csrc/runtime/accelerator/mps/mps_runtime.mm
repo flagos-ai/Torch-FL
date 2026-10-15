@@ -175,3 +175,18 @@ extern "C" void* FlagosMPSCommandQueue(Stream_t stream) {
   torch_fl_mps::StreamState* state = torch_fl_mps::AsStream(stream);
   return state == nullptr ? nullptr : (void*)state->queue;
 }
+
+// See mps.h. The buffer is committed and released immediately: Commit() hands
+// the state its own reference, which is the one Drain() later waits on, so
+// nothing here outlives the call.
+extern "C" void FlagosMPSStreamSentinel(Stream_t stream) {
+  torch_fl_mps::StreamState* state = torch_fl_mps::AsStream(stream);
+  if (state == nullptr || state->queue == nil) {
+    return;
+  }
+  id<MTLCommandBuffer> buffer = [state->queue commandBuffer];
+  if (buffer == nil) {
+    return;
+  }
+  torch_fl_mps::Commit(state, buffer);
+}

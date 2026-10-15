@@ -54,6 +54,23 @@ FLAGOS_EXPORT void* FlagosMPSBufferForPointer(const void* ptr, size_t* byteOffse
 // Returns NULL when no Metal device is present. Borrowed like the buffer above.
 FLAGOS_EXPORT void* FlagosMPSCommandQueue(Stream_t stream);
 
+// Records a completion sentinel for a producer that schedules work on the
+// stream's queue without handing back the MTLCommandBuffer it used, which is
+// what MPSGraph's asynchronous runs do.
+//
+// The stream layer tracks "the newest committed buffer" and answers
+// StreamQuery/StreamSynchronize/DeviceSynchronize from it, on the guarantee that
+// Metal executes a queue in order. A producer that keeps its own command buffer
+// private would leave that pointer naming older work, so a query could report a
+// stream idle while the producer's kernel is still writing the buffer a tensor
+// points at -- and the caching allocator reads StreamQuery to decide whether a
+// freed block may be reused. This commits one empty command buffer to the
+// stream's queue and records it as the newest, which puts the producer's work
+// behind the sentinel without the sentinel waiting for anything itself.
+//
+// A no-op when `stream` has no queue (no Metal device), like the accessor above.
+FLAGOS_EXPORT void FlagosMPSStreamSentinel(Stream_t stream);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

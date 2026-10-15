@@ -134,6 +134,30 @@ ALPHA = {
     "sub.Scalar": (", const at::Scalar& alpha", ", alpha", "alpha"),
 }
 
+# The host values a body bakes into its graph as constants, as the trailing
+# argument list `mps::MpsGraphKey` takes. MpsRunGraph folds the operands' own
+# signature -- dtype and shape of every operand and of the result -- into the
+# cache key itself, so this only has to name what the tensors cannot say: the
+# `alpha` a scaled operand carries, the host scalar a `.Scalar` form adds, the
+# axes a reduction covers. Empty for an op whose graph is a function of its
+# operands alone.
+#
+# A host value a body reads and this list leaves out is not a slow path, it is a
+# wrong answer: the two calls produce one cache key and the first compiled graph
+# answers both. So an op with a host constant declares it here, and a reviewer
+# checks this row against the body that reads it.
+KEY_PARTS = {
+    "abs": "",
+    "add.Tensor": ", alpha",
+    "sub.Tensor": ", alpha",
+    "mul.Tensor": "",
+    "add.Scalar": ", other, alpha",
+    "sub.Scalar": ", other, alpha",
+    "mul.Scalar": ", other",
+    "sum.dim_IntList": ", axes",
+    "mean.dim": ", axes",
+}
+
 # The tail a reduce body runs once the reduction node exists, for the ops whose
 # MPSGraph selector does not cover the whole semantics. Inserted as written
 # between the reduction and the return, so braces here are C++ and not doubled.
@@ -168,16 +192,20 @@ FINISH = {
 
 # Every body below has the same shape: gate on dtype, materialise a dense operand
 # (MPSGraph reads and writes dense memory, so a strided operand is copied first),
-# hand one graph to mps::MpsRunGraph, and take the CPU round-trip when that
-# returns false -- an operand the Metal allocator does not own, or a node the
-# graph builder declined. The marshalling itself lives in MpsRunGraph, which
-# describes the aten tensors to MPSGraph against the runtime's shared MTLBuffers,
-# runs the graph on the current stream's queue and returns the output. Both sides
-# of the graph are 1-D buffer views with the aten shape reapplied inside it,
-# because MPSNDArray rounds the stride between the rows of an N-D array up to 16
-# bytes and would otherwise misread a torch-contiguous buffer whose innermost
-# dimension is not already that wide: a (4, 5) float32 tensor has 20-byte rows,
-# which MPSNDArray reads as 32. See the row-pitch note in mps_common.h.
+# hand one graph to mps::MpsRunGraph under a key naming the host constants that
+# graph bakes in, and take the CPU round-trip when that returns false -- an
+# operand the Metal allocator does not own, a node the graph builder declined, or
+# a graph that would not compile. Nothing runs here on every call: MpsRunGraph
+# keeps the compiled graph under (this body's key, the operands' dtypes and
+# shapes), so `build` runs once per distinct signature and later calls only
+# schedule the work. The marshalling itself lives in MpsRunGraph, which describes
+# the aten tensors to MPSGraph against the runtime's shared MTLBuffers and
+# schedules the graph on the current stream's queue. Both sides of the graph are
+# 1-D buffer views with the aten shape reapplied inside it, because MPSNDArray
+# rounds the stride between the rows of an N-D array up to 16 bytes and would
+# otherwise misread a torch-contiguous buffer whose innermost dimension is not
+# already that wide: a (4, 5) float32 tensor has 20-byte rows, which MPSNDArray
+# reads as 32. See the row-pitch note in mps_common.h.
 T_UNARY = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -189,6 +217,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
     return out;
   }}
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -231,6 +260,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
     return out;
   }}
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c, other_c}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -271,6 +301,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other{alpha_param}
     return out;
   }}
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -327,6 +358,7 @@ at::Tensor {kernel}(
   at::Tensor out = at::empty(
       mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -357,11 +389,13 @@ FILE_HEADER = """\
 //
 // MPSGraph kernels for the Apple Metal backend. Each kernel gates on dtype and
 // hands one graph to mps::MpsRunGraph, which describes the aten tensors to
-// MPSGraph against the runtime's shared MTLBuffers, runs the graph on the current
-// flagos stream's command queue and returns the output it allocated; a case the
-// graph cannot answer exactly takes the CPU round-trip. Dispatchers are declared
-// in generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kMps slot.
+// MPSGraph against the runtime's shared MTLBuffers, schedules the graph on the
+// current flagos stream's command queue and returns the output it allocated; a
+// case the graph cannot answer exactly takes the CPU round-trip. The graph
+// itself is compiled once per (body, operand shapes and dtypes) and reused, so
+// the per-call cost is a schedule rather than a graph construction -- see the
+// plan cache in mps_common.mm. Dispatchers are declared in generated/ops.h
+// (shared with the CUDA codegen); here we only fill the Backend::kMps slot.
 //
 // Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
 // on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph
@@ -464,6 +498,8 @@ def render():
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
                 finish=FINISH.get(op, ""),
+                key_parts=KEY_PARTS[op],
+                op=op,
             )
         )
         covered.append((op, category))

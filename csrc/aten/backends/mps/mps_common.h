@@ -60,6 +60,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace at::native::flagos::mps {
@@ -152,23 +153,76 @@ MPSGraphTensor* MpsScaledByScalar(
     const at::Scalar& factor,
     at::ScalarType dtype);
 
+// One string naming a graph *body*: the op, plus every host value the body bakes
+// in as a constant (an `alpha`, the axes a reduction covers). The operands' own
+// signature -- dtype, shape and element count of every operand and of `out` --
+// is folded into the cache key by MpsRunGraph itself, so a body key only has to
+// name what the tensors cannot say.
+//
+// The split is one-sided and worth being blunt about. Folding the operand
+// signature in MpsRunGraph makes it impossible for a body key to be too coarse
+// *about a tensor* -- but it cannot rescue a body that reads a host value it
+// never named: `add(alpha=1)` and `add(alpha=2)` over operands of the same shape
+// and dtype would then share one key and the first plan would answer both. That
+// is a wrong answer rather than a slow one, so every host value a graph builder
+// reads has to appear in this key; KEY_PARTS in scripts/codegen/codegen_mps.py
+// is where each op declares its own.
+//
+// The parts are appended in the order given, each with its own tag, so the key
+// distinguishes an int 2 from a float 2.0 exactly where the graph does.
+void MpsKeyAppend(std::string& key, const at::Scalar& value);
+void MpsKeyAppend(std::string& key, at::IntArrayRef value);
+void MpsKeyAppend(std::string& key, int64_t value);
+void MpsKeyAppend(std::string& key, bool value);
+void MpsKeyAppend(std::string& key, const char* value);
+
+template <typename... Parts>
+std::string MpsGraphKey(const char* op, const Parts&... parts) {
+  std::string key(op);
+  (MpsKeyAppend(key, parts), ...);
+  return key;
+}
+
 // Runs `build` as an MPSGraph over buffer-backed operands and writes the result
-// into `out`.
+// into `out`, reusing a graph already compiled for this `key` and this operand
+// signature when there is one.
 //
 // Every operand is described as a 1-D buffer of its own `numel()` elements and
 // reshaped to its aten shape inside the graph (see the row-pitch note above), so
 // `build` receives the operands in order, already shaped, and must return a
 // tensor with `out.numel()` elements; that result is flattened back for the
-// result dictionary. `out` must be a non-empty flagos tensor with the operands'
-// dtype. The graph runs synchronously on the current stream's queue, so `out` is
-// ready when this returns.
+// result array. `out` must be a non-empty flagos tensor with the operands'
+// dtype.
+//
+// `build` runs only when a plan has to be constructed -- the graph, its
+// placeholders and the compiled executable are then cached under the key -- and
+// must be a pure function of the operands' shapes and dtypes plus whatever host
+// values `key` names, because a later call with an equal key reuses the graph it
+// built without calling it again.
+//
+// The work is *scheduled* on the current stream's queue and this returns without
+// waiting for it: building and compiling a graph per call cost milliseconds
+// (measured ~4.5 ms for a one-node graph on an M5, of which ~3.5 ms was the
+// build), and a per-call wait for one commit cost another ~370 us, while the
+// same op scheduled and left to run costs ~20-75 us. Correctness rests on three
+// things this file can rely on instead of a wait:
+//
+//   * Metal runs one queue in order, so every later op that reads `out` through
+//     the same stream is already ordered behind the graph.
+//   * Reads that leave the device -- the CPU round-trip a declined op or
+//     `.cpu()` takes -- go through the runtime's copy path, which drains.
+//   * A sentinel command buffer is committed after the graph
+//     (FlagosMPSStreamSentinel), so StreamQuery and StreamSynchronize see this
+//     work rather than only what the runtime itself committed. That is what the
+//     caching allocator's block-reuse check reads.
 //
 // False when an operand or `out` is not backed by a buffer the runtime owns
-// (MpsBufferOf), or when `build` returns nil to decline; both are the caller's
-// signal to take the CPU round-trip. A missing command queue is not that kind of
-// condition: it means the host has no usable Metal device at all, so it is a
-// TORCH_CHECK rather than a fallback.
+// (MpsBufferOf), or when `build` returns nil to decline, or when the graph does
+// not compile; all three are the caller's signal to take the CPU round-trip. A
+// missing command queue is not that kind of condition: it means the host has no
+// usable Metal device at all, so it is a TORCH_CHECK rather than a fallback.
 bool MpsRunGraph(
+    const std::string& key,
     at::TensorList inputs,
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));

@@ -12,6 +12,12 @@
 #ifdef USE_MPS
 
 #include <algorithm>
+#include <cstdio>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <c10/util/Exception.h>
 
@@ -261,16 +267,274 @@ bool MpsBufferOf(const at::Tensor& t, id<MTLBuffer>* buffer, size_t* byteOffset)
   return true;
 }
 
-id<MTLCommandQueue> MpsCurrentQueue() {
+// The current stream, which is the queue MpsCurrentQueue() hands back. Internal:
+// flagos.h's Stream_t is a runtime type the header does not name.
+static Stream_t MpsCurrentStream() {
   int device = 0;
   if (::GetDevice(&device) != ::Success) {
+    return nullptr;
+  }
+  return ::GetCurrentStreamForDevice(device);
+}
+
+id<MTLCommandQueue> MpsCurrentQueue() {
+  Stream_t stream = MpsCurrentStream();
+  if (stream == nullptr) {
     return nil;
   }
-  Stream_t stream = ::GetCurrentStreamForDevice(device);
   return (id<MTLCommandQueue>)::FlagosMPSCommandQueue(stream);
 }
 
+// ---------------------------------------------------------------------------
+// Graph key -> compiled plan
+//
+// The measured reason this cache exists: on an M5 a one-node graph built and run
+// per call cost ~4.5 ms (128 elements: 4751 us for `abs`, 6458 us for `mul`), and
+// a bare Metal probe attributes ~3.5-4.5 ms of that to `[[MPSGraph alloc] init]`
+// plus node construction and only ~370 us to running an already-compiled graph.
+// A per-call wait is the second half of the problem: the same executable left
+// asynchronous costs ~18 us a call. So a plan is built once per key and the op
+// is scheduled, not awaited.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct MpsPlan {
+  MPSGraph* graph;                                   // +1
+  MPSGraphTensor* result;                            // +1, the flattened target
+  MPSGraphExecutable* executable;                    // +1
+  MPSGraphExecutableExecutionDescriptor* descriptor; // +1, waitUntilCompleted == NO
+  // For each slot of the executable's inputs array, the operand whose tensor
+  // data goes there. MPSGraph documents that array as "the same order as
+  // arguments of main function"; reading the permutation out of `feedTensors`
+  // instead of trusting creation order means an executable that reports its
+  // feeds differently still gets the right operand. Stored in the direction the
+  // array is filled, so a run appends operands without a placeholder.
+  std::vector<NSUInteger> input_order;
+};
+
+// Leaked deliberately, like the runtime's default stream: these own Objective-C
+// objects whose release at static-destruction time is not ours to order, and the
+// process is exiting anyway. The map is bounded, so a long run cannot grow it
+// without limit.
+std::unordered_map<std::string, MpsPlan*>& PlanCache() {
+  static auto* cache = new std::unordered_map<std::string, MpsPlan*>();
+  return *cache;
+}
+
+// Insertion order, for evicting the oldest plan once the cache is full.
+std::deque<std::string>& PlanOrder() {
+  static auto* order = new std::deque<std::string>();
+  return *order;
+}
+
+// Enough for the handful of (dtype, shape) signatures a model actually presents,
+// with room for the shapes a growing sequence length adds, and small enough that
+// the compiled graphs cannot pile up. Each plan holds one graph plus one
+// executable; a decode loop that presents a new sequence length per token is the
+// case this bounds.
+constexpr size_t kMaxPlans = 64;
+
+// MPSGraph is not documented as thread-safe, and a plan is shared mutable state,
+// so the whole of MpsRunGraph -- lookup, build, schedule -- holds this.
+std::mutex& PlansMutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+void ReleasePlan(MpsPlan* plan) {
+  MpsRelease(plan->descriptor);
+  MpsRelease(plan->executable);
+  MpsRelease(plan->result);
+  MpsRelease(plan->graph);
+  delete plan;
+}
+
+// The operands' own signature, folded into every key: dtype and shape of each
+// operand and of `out`. It is what lets a body key name only the host constants
+// a graph bakes in (see mps_common.h).
+void MpsKeyAppendTensor(std::string& key, const at::Tensor& tensor) {
+  key.push_back('|');
+  key += std::to_string(static_cast<int>(tensor.scalar_type()));
+  key.push_back('[');
+  for (const int64_t dim : tensor.sizes()) {
+    key += std::to_string(dim);
+    key.push_back(',');
+  }
+  key.push_back(']');
+}
+
+// Builds one plan: placeholders, the graph `build` returns, and the executable
+// MPSGraph compiles from it. nil (and nothing retained) when `build` declines or
+// the graph does not compile -- both are the caller's cue for the CPU
+// round-trip.
+MpsPlan* BuildPlan(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& out,
+    MPSGraphDevice* device,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
+  const int64_t out_numel = out.numel();
+  MPSDataType out_dtype;
+  if (!MpsDataTypeOf(out.scalar_type(), &out_dtype)) {
+    return nullptr;
+  }
+  MPSGraph* graph = [[MPSGraph alloc] init];
+  if (graph == nil) {
+    return nullptr;
+  }
+  MPSGraphTensor* result = nil;
+  MPSGraphExecutable* executable = nil;
+  NSArray<MPSGraphTensor*>* placeholders = nil;
+  @autoreleasepool {
+    NSMutableArray<MPSGraphTensor*>* args =
+        [NSMutableArray arrayWithCapacity:inputs.size()];
+    NSMutableArray<MPSGraphTensor*>* buffers =
+        [NSMutableArray arrayWithCapacity:inputs.size()];
+    NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
+        [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      MPSDataType dtype;
+      if (!MpsDataTypeOf(inputs[i].scalar_type(), &dtype)) {
+        break;
+      }
+      const int64_t count = inputs[i].numel();
+      // The placeholder is the 1-D buffer view and the operand's aten shape is
+      // reapplied over it, because an MPSNDArray over N-D memory reads with its
+      // own row pitch (see the row-pitch note in mps_common.h).
+      MPSGraphTensor* buffer = MpsFlatPlaceholder(graph, count, dtype);
+      const int64_t dims[1] = {count};
+      MPSGraphShapedType* type = [[MPSGraphShapedType alloc]
+          initWithShape:MpsShapeOf(at::IntArrayRef(dims, 1))
+               dataType:dtype];
+      [feeds setObject:type forKey:buffer];
+      MpsRelease(type);
+      [buffers addObject:buffer];
+      [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
+    }
+    if (static_cast<size_t>([buffers count]) == inputs.size()) {
+      MPSGraphTensor* built = build(graph, args);
+      if (built != nil) {
+        result = [MpsFlatten(graph, built, out_numel) retain];
+        executable = [[graph compileWithDevice:device
+                                        feeds:feeds
+                                targetTensors:@[result]
+                             targetOperations:nil
+                        compilationDescriptor:nil] retain];
+      }
+    }
+    placeholders = [buffers retain];
+  }
+  if (executable == nil) {
+    MpsRelease(placeholders);
+    MpsRelease(result);
+    MpsRelease(graph);
+    return nullptr;
+  }
+  auto* plan = new MpsPlan();
+  plan->graph = graph;
+  plan->result = result;
+  plan->executable = executable;
+  plan->descriptor = [[MPSGraphExecutableExecutionDescriptor alloc] init];
+  plan->descriptor.waitUntilCompleted = NO;
+  // Sentinel: a slot no operand has claimed yet.
+  plan->input_order.assign(inputs.size(), inputs.size());
+  NSArray<MPSGraphTensor*>* reported = executable.feedTensors;
+  bool resolved = (reported != nil && reported.count == inputs.size());
+  for (size_t i = 0; resolved && i < inputs.size(); ++i) {
+    const NSUInteger position = [reported indexOfObject:placeholders[i]];
+    if (position == NSNotFound || position >= inputs.size() ||
+        plan->input_order[position] != inputs.size()) {
+      resolved = false;
+      break;
+    }
+    plan->input_order[position] = i;
+  }
+  if (!resolved) {
+    // Fall back to the order MPSGraph documents ("the same order as arguments
+    // of main function") rather than failing. This is not a guess between
+    // equally likely readings: an operand whose type does not match the feed it
+    // lands on does not raise, it aborts the process, which is a far worse way
+    // to learn that `feedTensors` went away than a rebuilt-on-every-call plan
+    // would be.
+    for (size_t slot = 0; slot < inputs.size(); ++slot) {
+      plan->input_order[slot] = slot;
+    }
+  }
+  MpsRelease(placeholders);
+  if (PlanCache().size() >= kMaxPlans) {
+    auto* oldest = PlanCache()[PlanOrder().front()];
+    PlanCache().erase(PlanOrder().front());
+    PlanOrder().pop_front();
+    ReleasePlan(oldest);
+  }
+  PlanCache()[key] = plan;
+  PlanOrder().push_back(key);
+  return plan;
+}
+
+} // namespace
+
+namespace {
+
+void AppendDouble(std::string& key, double value) {
+  // 17 significant digits round-trip every double, so two scalars that would
+  // build different constants always produce different keys.
+  char text[32];
+  std::snprintf(text, sizeof(text), "%.17g", value);
+  key += text;
+}
+
+} // namespace
+
+void MpsKeyAppend(std::string& key, const at::Scalar& value) {
+  key += "|s";
+  if (value.isComplex()) {
+    const c10::complex<double> complex = value.toComplexDouble();
+    key.push_back('c');
+    AppendDouble(key, complex.real());
+    key.push_back(',');
+    AppendDouble(key, complex.imag());
+    return;
+  }
+  if (value.isSymbolic()) {
+    key += "y";
+    return;
+  }
+  if (value.isIntegral(/*includeBool=*/true)) {
+    key.push_back('i');
+    key += std::to_string(value.toLong());
+    return;
+  }
+  key.push_back('f');
+  AppendDouble(key, value.toDouble());
+}
+
+void MpsKeyAppend(std::string& key, at::IntArrayRef value) {
+  key += "|a[";
+  for (const int64_t element : value) {
+    key += std::to_string(element);
+    key.push_back(',');
+  }
+  key.push_back(']');
+}
+
+void MpsKeyAppend(std::string& key, int64_t value) {
+  key += "|n";
+  key += std::to_string(value);
+}
+
+void MpsKeyAppend(std::string& key, bool value) {
+  key += value ? "|b1" : "|b0";
+}
+
+void MpsKeyAppend(std::string& key, const char* value) {
+  key += "|t";
+  key += (value == nullptr ? "" : value);
+}
+
 bool MpsRunGraph(
+    const std::string& key,
     at::TensorList inputs,
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
@@ -286,69 +550,92 @@ bool MpsRunGraph(
   // allocator does not own costs the caller a fallback rather than half a run.
   std::vector<id<MTLBuffer>> buffers(inputs.size(), nil);
   std::vector<size_t> offsets(inputs.size(), 0);
+  std::vector<MPSDataType> dtypes(inputs.size(), MPSDataTypeFloat32);
   for (size_t i = 0; i < inputs.size(); ++i) {
     if (!MpsBufferOf(inputs[i], &buffers[i], &offsets[i])) {
       return false;
     }
+    TORCH_CHECK(
+        MpsDataTypeOf(inputs[i].scalar_type(), &dtypes[i]),
+        "mps: no MPSGraph element type for ",
+        inputs[i].scalar_type());
   }
   id<MTLBuffer> out_buffer = nil;
   size_t out_offset = 0;
   if (!MpsBufferOf(out, &out_buffer, &out_offset)) {
     return false;
   }
+  Stream_t stream = MpsCurrentStream();
   id<MTLCommandQueue> queue = MpsCurrentQueue();
   TORCH_CHECK(
       queue != nil, "mps: no Metal command queue for the flagos device");
+  // The caller's key names the body and its host constants; the operand
+  // signature is added here, which is what keeps a body key from being too coarse
+  // about a tensor. It cannot keep a body from reading a host value the caller
+  // never named -- see the key contract in mps_common.h.
+  std::string full_key = key;
+  for (const at::Tensor& input : inputs) {
+    MpsKeyAppendTensor(full_key, input);
+  }
+  MpsKeyAppendTensor(full_key, out);
+
+  std::lock_guard<std::mutex> lock(PlansMutex());
+  MpsPlan* plan = nullptr;
+  const auto found = PlanCache().find(full_key);
+  if (found != PlanCache().end()) {
+    plan = found->second;
+  } else {
+    @autoreleasepool {
+      MPSGraphDevice* device =
+          [MPSGraphDevice deviceWithMTLDevice:queue.device];
+      plan = BuildPlan(full_key, inputs, out, device, build);
+    }
+    if (plan == nullptr) {
+      return false;
+    }
+  }
   bool ran = false;
   @autoreleasepool {
-    MPSGraph* graph = [[MPSGraph alloc] init];
-    NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds =
-        [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
-    NSMutableArray<MPSGraphTensor*>* args =
-        [NSMutableArray arrayWithCapacity:inputs.size()];
-    std::vector<MPSGraphTensorData*> operands;
-    operands.reserve(inputs.size());
+    std::vector<MPSGraphTensorData*> operands(inputs.size(), nil);
     for (size_t i = 0; i < inputs.size(); ++i) {
-      MPSDataType dtype;
+      operands[i] =
+          MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtypes[i]);
       TORCH_CHECK(
-          MpsDataTypeOf(inputs[i].scalar_type(), &dtype),
-          "mps: no MPSGraph element type for ",
-          inputs[i].scalar_type());
-      MPSGraphTensorData* operand =
-          MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtype);
-      TORCH_CHECK(
-          operand != nil,
+          operands[i] != nil,
           "mps: cannot describe a zero-element tensor to MPSGraph");
-      MPSGraphTensor* buffer =
-          MpsFlatPlaceholder(graph, inputs[i].numel(), dtype);
-      [feeds setObject:operand forKey:buffer];
-      [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
-      operands.push_back(operand);
     }
     MPSGraphTensorData* result_data =
         MpsTensorData(out_buffer, out_offset, out.numel(), out_dtype);
     TORCH_CHECK(
         result_data != nil,
         "mps: cannot describe a zero-element tensor to MPSGraph");
-    MPSGraphTensor* result = build(graph, args);
-    if (result != nil) {
-      MPSGraphTensor* flattened = MpsFlatten(graph, result, out.numel());
-      // Synchronous: runWithMTLCommandQueue: commits to the queue and returns
-      // once the results are written, so `out` is ready when this returns and
-      // no explicit stream drain is needed. The command buffer lands on the
-      // same queue the runtime's copies use, so it stays ordered behind any op
-      // that produced an operand.
-      [graph runWithMTLCommandQueue:queue
-                              feeds:feeds
-                   targetOperations:nil
-                  resultsDictionary:@{flattened: result_data}];
-      ran = true;
+    // Held by the array (its own +1) and released again below, once the run has
+    // been scheduled: the executable reads them during that run, so they have to
+    // outlive the call only as long as the call.
+    NSMutableArray<MPSGraphTensorData*>* array =
+        [NSMutableArray arrayWithCapacity:inputs.size()];
+    for (const NSUInteger operand : plan->input_order) {
+      [array addObject:operands[operand]];
     }
-    MpsRelease(graph);
+    // Asynchronous on purpose: see the contract in mps_common.h. Measured on an
+    // M5, the same one-node executable costs ~18 us scheduled this way against
+    // ~370 us when awaited inline, because the wait is a round trip to the GPU
+    // per op rather than the work itself.
+    [plan->executable runAsyncWithMTLCommandQueue:queue
+                                      inputsArray:array
+                                     resultsArray:@[result_data]
+                              executionDescriptor:plan->descriptor];
+    ran = true;
     MpsRelease(result_data);
     for (MPSGraphTensorData* operand : operands) {
       MpsRelease(operand);
     }
+  }
+  if (ran) {
+    // Puts the graph's work behind a buffer the stream layer can see, without
+    // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
+    // -- what allocator block reuse and a host read ask -- now covers this op.
+    ::FlagosMPSStreamSentinel(stream);
   }
   return ran;
 }

@@ -197,6 +197,26 @@ reshape is a metadata operation (`MpsFlatPlaceholder`, `MpsReshape`,
 `tests/integration/ops/test_mps_unary.py` pins it on the shapes -- and the
 aligned controls -- that an aten-shaped descriptor would get wrong.
 
+**Graph reuse, measured on an M5 (this is what stage 3 fixes).** The
+marshalling contract above is only half of what the first implementation got
+wrong. The nine stage-1/2 kernels ran per call at a cost that did not depend on
+size: 4751 us for `abs` and 6458 us for `mul` at 128 elements, against CPU
+fallbacks of 1.7-348 us, so the arithmetic was not what was being measured. A
+bare-Metal probe separates the two halves: `[[MPSGraph alloc] init]` plus node
+construction costs ~3.5-4.5 ms per call, and awaiting a command buffer that
+already holds the compiled graph costs another ~270-370 us, while the same
+graph scheduled with `runAsyncWithMTLCommandQueue:` and never awaited costs
+~18 us. Only the `MPSGraphExecutable` plus
+`runAsync…inputsArray:resultsArray:` path reaches that: reusing one `MPSGraph`
+and its `runAsync…feeds:resultsDictionary:` measured ~159 us, and dynamic-shape
+placeholders -- which would have collapsed the cache keys -- measured ~409 us.
+`MpsRunGraph` therefore compiles a plan once per (body key, operand dtypes and
+shapes), caches it up to 64 entries, schedules without waiting, and commits one
+empty sentinel command buffer afterwards so that `StreamQuery` and
+`StreamSynchronize` still cover the work (§5.1's allocator hazard). The same
+ops then measure ~20-75 us per call, and a `.cpu()` read back immediately after
+one still returns the right values.
+
 ## 7. Staged delivery
 
 | Stage | Content | Exit criteria |
@@ -281,9 +301,13 @@ directories must land together or unit tests fail.
 - **MPSGraph from C++.** MPSGraph is an Objective-C API; the op layer must be
   Objective-C++, and every kernel boundary crosses the ObjC++/C++ seam. The
   extent of that seam is not yet measured.
-- **Graph-build cost.** MPSGraph node construction per op is heavier than a
-  direct kernel launch; small elementwise ops may need the MSL fallback to be
-  competitive. Stage 1 will measure this.
+- **Graph-build cost — resolved by the plan cache.** It measured far worse than
+  expected (~4.5 ms per call, described in §6) and was worth fixing before
+  adding ops: the fix is compiled-graph reuse keyed on the graph body and the
+  operand signature, plus an asynchronous run with a sentinel commit, which
+  takes the same ops to ~20-75 us. Whether the remaining per-op floor still
+  argues for MSL kernels is a question for stage 3+ and for ops with real
+  arithmetic, not for the elementwise family the cache now covers.
 - **Unified memory and the allocator.** Apple GPUs use unified memory; whether
   the block pool should hand out `MTLResourceStorageModePrivate` buffers (fast,
   needs blit for host access) or `Shared` buffers (simple, host-visible) is a

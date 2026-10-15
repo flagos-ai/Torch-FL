@@ -185,6 +185,81 @@ class TestAbsCorrectness:
             torch.abs(a)
 
 
+class TestScheduleAndPlanReuse:
+    """The marshalling contract every MPS kernel shares (mps_common.mm).
+
+    Two properties live below the individual kernels, so no single-op case can
+    show them and a regression in either shows up as a wrong number rather than
+    as an ordering assertion: the compiled graph is cached per operand signature
+    and reused, and the run is scheduled rather than awaited.
+    """
+
+    @pytest.mark.anyplatform
+    def test_interleaved_signatures_never_share_a_plan(self):
+        """Each signature gets its own compiled graph, asked for round-robin.
+
+        A cache key that named only the op would let the first graph built serve
+        every later case -- an f32 graph reading bf16 storage, or a reshape sized
+        for one shape reading a longer buffer. Rotating through the signatures
+        instead of grouping them is what puts a different shape or dtype on a
+        warm cache on every step.
+        """
+        cases = [
+            ((128,), torch.float32),
+            ((128,), torch.float16),
+            ((128,), torch.int32),
+            ((32, 128), torch.float32),
+            ((32, 128), torch.float16),
+            ((4, 5), torch.float32),  # 20-byte rows, against 128-byte ones
+            ((512, 512), torch.float32),
+        ]
+        hosts = []
+        for index, (shape, dtype) in enumerate(cases):
+            generator = torch.Generator().manual_seed(index)
+            if dtype.is_floating_point:
+                host = torch.randn(*shape, generator=generator) * 3.0
+            else:
+                host = torch.randint(-50, 50, shape, generator=generator)
+            hosts.append(host.to(dtype))
+        wanted = [torch.abs(host) for host in hosts]
+        on_device = [_to_device(host) for host in hosts]
+
+        for round_ in range(3):
+            for offset in range(len(cases)):
+                index = (offset + round_) % len(cases)
+                out = torch.abs(on_device[index])
+                assert out.dtype == wanted[index].dtype
+                assert out.shape == wanted[index].shape
+                torch.testing.assert_close(
+                    out.cpu(), wanted[index], rtol=1e-5, atol=1e-5
+                )
+
+    @pytest.mark.anyplatform
+    def test_results_survive_block_reuse_and_immediate_readback(self):
+        """Nothing waits for the GPU, so both ends of the call are checked here.
+
+        An operand's block goes back to the pool as soon as the caller drops it,
+        while the graph reading it has only been scheduled; and the value the
+        caller reads back is produced by work the runtime has not awaited. Both
+        rest on the sentinel command buffer the runtime commits behind the graph
+        (see mps_common.h), so a call that returned before its work was visible
+        to StreamQuery would show up here as a wrong result.
+        """
+        held = []
+        for _ in range(64):
+            src = torch.randn(1 << 13, device=DEVICE) * 3.0
+            wanted = torch.abs(src.cpu())
+            out = torch.abs(src)
+            del src  # recycled while the graph above may still be reading it
+            for _ in range(4):  # blocks the allocator is free to hand back out
+                torch.abs(torch.randn(1 << 13, device=DEVICE))
+            held.append((out.cpu(), wanted))  # read back without a synchronize
+
+        for index, (got, wanted) in enumerate(held):
+            torch.testing.assert_close(got, wanted, rtol=1e-5, atol=1e-5)
+            assert got.shape == wanted.shape, f"round {index}"
+
+
 class TestAbsDispatch:
     """``abs`` is claimed on PrivateUse1, not left to cpu_fallback."""
 

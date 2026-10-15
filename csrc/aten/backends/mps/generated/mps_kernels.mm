@@ -4,11 +4,13 @@
 //
 // MPSGraph kernels for the Apple Metal backend. Each kernel gates on dtype and
 // hands one graph to mps::MpsRunGraph, which describes the aten tensors to
-// MPSGraph against the runtime's shared MTLBuffers, runs the graph on the current
-// flagos stream's command queue and returns the output it allocated; a case the
-// graph cannot answer exactly takes the CPU round-trip. Dispatchers are declared
-// in generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kMps slot.
+// MPSGraph against the runtime's shared MTLBuffers, schedules the graph on the
+// current flagos stream's command queue and returns the output it allocated; a
+// case the graph cannot answer exactly takes the CPU round-trip. The graph
+// itself is compiled once per (body, operand shapes and dtypes) and reused, so
+// the per-call cost is a schedule rather than a graph construction -- see the
+// plan cache in mps_common.mm. Dispatchers are declared in generated/ops.h
+// (shared with the CUDA codegen); here we only fill the Backend::kMps slot.
 //
 // Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
 // on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph
@@ -53,6 +55,7 @@ at::Tensor AbsKernelMps(const at::Tensor& self) {
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("abs"),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -83,6 +86,7 @@ at::Tensor AddTensorKernelMps(const at::Tensor& self, const at::Tensor& other, c
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("add.Tensor", alpha),
       {self_c, other_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -118,6 +122,7 @@ at::Tensor SubTensorKernelMps(const at::Tensor& self, const at::Tensor& other, c
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sub.Tensor", alpha),
       {self_c, other_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -153,6 +158,7 @@ at::Tensor MulTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("mul.Tensor"),
       {self_c, other_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -181,6 +187,7 @@ at::Tensor AddScalarKernelMps(const at::Tensor& self, const at::Scalar& other, c
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("add.Scalar", other, alpha),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -214,6 +221,7 @@ at::Tensor SubScalarKernelMps(const at::Tensor& self, const at::Scalar& other, c
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sub.Scalar", other, alpha),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -247,6 +255,7 @@ at::Tensor MulScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
     return out;
   }
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("mul.Scalar", other),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -292,6 +301,7 @@ at::Tensor SumDimIntlistKernelMps(
   at::Tensor out = at::empty(
       mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sum.dim_IntList", axes),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -329,6 +339,7 @@ at::Tensor MeanDimKernelMps(
   at::Tensor out = at::empty(
       mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
   const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("mean.dim", axes),
       {self_c},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
