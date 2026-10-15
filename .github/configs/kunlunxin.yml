@@ -45,9 +45,15 @@ paths_watch:
   - .github/scripts/set_env_kunlunxin.sh
   - scripts/codegen/codegen_kunlunxin.py
 
-container_volumes: []
 
-integration_environment: {}
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH, asserted
+# by environment_check.model_dir below.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 # The image ships no `build` module, and a missing one does not fail cleanly: the
 # checkout's own CMake `build/` directory shadows it as a namespace package, so
@@ -89,3 +95,4 @@ environment_check:
   flagos_devices:
     at_least: 1
   triton_backend: xpu
+  model_dir: true

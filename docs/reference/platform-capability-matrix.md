@@ -139,6 +139,108 @@ build opts into boxing.
 - **CI covers 8 of 12**: TsingMicro, BPU, Iluvatar and MPS have no
   `.github/configs/` entry.
 
+## Integration coverage
+
+The eight platforms with a `.github/configs/<platform>.yml` run one integration
+pipeline: a single ordered list of 21 groups in
+`.github/integration-manifest.yml`, composed for each platform by
+`.github/scripts/compose_integration_manifest.py` in the loader job. There is
+no per-platform step list any more, so the eight run the same groups in the
+same order and a config cannot add, drop or reword a step.
+
+What a platform contributes to a step is a *value*, in one of two config keys:
+
+- `environment_check` — the wheel, package and device expectations that
+  `check_platform_environment.py` asserts before the pipeline starts. The
+  manifest's `environment` group hands the whole block to that script as JSON
+  through its `environment_from_config`, so the data a platform is checked
+  against is the data it states.
+- `step_environment` — a mapping of manifest step id to the environment
+  variables that step alone needs on this platform: CUDA's
+  `FLAGOS_USE_FLAGTREE=1` for `torch_compile`, Ascend's process-start
+  `LD_PRELOAD` for `profiler_contract`. Keys are step ids rather than positions,
+  so a step that moves in the manifest cannot silently carry another step's
+  environment, and the composer refuses a key no manifest entry defines.
+
+The model groups are uniform too: every config mounts the host checkpoint
+`/data/models/Qwen/Qwen3-0.6B` at `/models/Qwen3-0.6B:ro`, sets
+`MODEL_PATH=/models/Qwen3-0.6B` in `integration_environment`, and asserts the
+mount through `environment_check.model_dir`, so `inference` and `training` are
+plain manifest entries rather than a per-platform set.
+
+The skips that remain are therefore pytest-level, and they are listed in
+`tests/integration/platform_gates.py`: one entry per step whose target still
+skips itself on some platform, with the measured reason and what would remove
+it. The loader prints the entries that apply to a platform on every run, ahead
+of the hardware job, and `tests/unit/test_platform_gates.py` holds the table to
+the manifest, to the eight platforms and to the whitelist below.
+
+| platform | steps whose target still skips |
+|---|---|
+| ascend | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge |
+| dcu | rng, musa_dispatch |
+| gcu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| metax | rng, musa_dispatch, profiler_parity, native_comm_bridge |
+| musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge |
+| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+
+The recorded skips, with the measured reason each is still there:
+
+- `rng` — `tests/integration/ops/test_rng_dispatch.py`, the
+  `TestRngSeedSource`, `TestRngMultiDevice`, `TestRngDistribution` and
+  `TestRngDropout` classes, on every platform but MUSA. MUSA's vendor RNG
+  library `murand` is broken on this runner: `murandGenerateUniform/Normal`
+  fail with `LAUNCH_FAILURE` and `randperm` returns garbage (err 700), so the
+  four classes that draw through it are gated inside the file. The
+  reproducible-draw class still runs there. Removing the gate is what fixes it
+  — `docs/vendors/musa/installation.md` records the same suite passing on an
+  S5000 on 2026-08-17, so this is a driver/toolkit/image regression rather than
+  a `torch_fl` defect.
+- `vendor_ops` — `tests/integration/ops/test_flaggems_device_name.py` on
+  Kunlunxin. Its flagtree XPU stack cannot import `flag_gems` at all: the XPU
+  TLE backend raises `NotImplementedError` for `tle.device_mesh`, which
+  `pytest.importorskip` does not catch, so the file skips itself. A flagtree
+  XPU build that imports `flag_gems` removes the gate.
+- `musa_dispatch` — `tests/integration/ops/test_musa_dispatch.py` on every
+  platform but MUSA. Its cases carry `@pytest.mark.musa`, which the ops conftest
+  skips elsewhere: MUSA compiles no CUDA boxing kernels, so the per-op
+  `-> cuda` assertions cannot hold on the other platforms either. The step is
+  kept universal so the MUSA dispatch coverage is one shared entry rather than
+  a MUSA-only variant.
+- `profiler_parity` — `tests/integration/test_profiler_parity.py` on Ascend,
+  GCU, Kunlunxin, MetaX, MUSA and PPU. The comparison is against
+  `tests/data/profiler_cuda_baseline.json`, so it is only meaningful where the
+  tracer emits stock-CUDA-shaped records: MUSA's MUPTI reports no `gpu_memset`
+  category and no occupancy-derived kernel args (2026-08-29: 5 passed, 2
+  failed), and PPU's vendor kernels produce no `gpu_memset` record and no
+  `::`-qualified kernel name (3 passed, 1 xpassed, 3 failed). Ascend, GCU and
+  Kunlunxin gate it through the capability table in
+  `tests/integration/profiler_support.py`. The structural contract those
+  platforms do owe is the `profiler_contract` step.
+- `torch_compile` — `tests/integration/test_compile.py` on MUSA.
+  `torch.compile` needs a vendor Triton stack and this MUSA image ships none:
+  `set_env_musa.sh` deliberately does not link
+  `flagtree-0.5.0+mthreads3.1`, and stock PyPI `triton` is not a substitute —
+  it carries no mthreads backend and cannot compile a MUSA kernel. The file
+  gates itself on the active Triton lacking that backend rather than on the
+  platform name, so provisioning the vendor flagtree removes the gate. The
+  suite is green on an MTT S5000 with that runtime on `PYTHONPATH`
+  (2026-08-29: 25 passed, 19 skipped).
+- `soft_lowp_matrix` — `tests/integration/ops/test_soft_lowp_gate_dispatch.py`
+  on Ascend, CUDA, GCU, Kunlunxin, MUSA and PPU. The software low-precision
+  matmul path is compiled for DCU and MetaX only, and the ops conftest skips the
+  `soft_lowp` marker elsewhere, so the command is identical on every platform
+  and the selection is the capability. Removing the gate means compiling
+  `csrc/aten/backends/soft_lowp` for the other six platforms.
+- `native_comm_bridge` — `tests/integration/test_comm_native_bridge.py` on
+  every platform but DCU. The native RCCL bridge is a DCU artifact: the file
+  carries `pytestmark = pytest.mark.dcu` and skips itself everywhere else,
+  because the groups it asserts are the ones the DCU image stages. The step is
+  kept universal so a platform that grows an equivalent bridge has one shared
+  entry to extend rather than a private one.
+
 ## Directory inventory
 
 Authoritative membership of the three per-platform trees. Machine-checked

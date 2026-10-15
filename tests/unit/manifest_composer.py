@@ -73,12 +73,12 @@ def composed_steps(platform: str) -> list[dict]:
     )
 
 
-def step_ids(platform: str) -> list[str]:
-    """The manifest ids one platform's composed groups came from."""
-    return [
-        step_id
-        for step_id, platforms in composer.validate_manifest(
-            manifest(), platform_names()
-        )[2].items()
-        if platform in platforms
-    ]
+def step_ids() -> list[str]:
+    """Every manifest id, which is also what every platform runs.
+
+    The platform argument this used to take is gone: the manifest states one
+    entry per step and the composer runs all of them everywhere, so an id set
+    that varied by platform could only be the old `platforms:`-restricted
+    variants coming back.
+    """
+    return list(composer.validate_manifest(manifest())[1])

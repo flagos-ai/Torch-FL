@@ -40,9 +40,15 @@ paths_watch:
   - scripts/codegen/codegen_gcu.py
   - scripts/codegen/codegen_gcu_flaggems.py
 
-container_volumes: []
 
-integration_environment: {}
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH, asserted
+# by environment_check.model_dir below.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 # GCU builds and tests the same wheel in one hardware job, against the isolated
 # CPU-PyTorch environment set_env.sh provisions. That environment does not carry
@@ -81,3 +87,4 @@ environment_check:
     at_least: 8
   triton_backend: enflame
   flaggems_vendor: enflame
+  model_dir: true

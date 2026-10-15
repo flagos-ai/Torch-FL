@@ -18,17 +18,17 @@ The steps a platform runs used to be written in that platform's own config, so
 "which platforms run this group" was a question you answered by reading eight
 files and comparing them by hand -- and the answer drifted, because nothing
 made two platforms run the same step in the same order. The manifest is one
-ordered list that all eight read, and this module is the price of that: the
-composer is exercised through its real entry point, and every deviation that
-remains is a number in `_KNOWN_GAPS` rather than a difference nobody wrote
-down.
+ordered list that all eight read, every entry in it runs on every platform, and
+this module is the price of that: the composer is exercised through its real
+entry point, and the shapes it refuses are refused here rather than on a vendor
+runner.
 
-The gaps are recorded rather than asserted away on purpose. This is the first
-of three changes; the platforms still differ in coverage, and a test that
-demanded uniformity today would fail until the last of them lands. What it
-demands *now* is that the difference is a written decision: adding a platform
-to a step's `platforms:` list has to be paired with editing `_KNOWN_GAPS`, and
-that edit is where a reviewer sees how much is still per-platform.
+What a platform still does not exercise is *not* in this file. It is the pytest
+gate table in ``tests/integration/platform_gates.py``, whose entries name a
+manifest step and the platforms where that step's target skips itself;
+``tests/unit/test_platform_gates.py`` holds that table to the manifest and to
+the eight platforms, and every platform's run prints it. A per-platform step
+list here would be the second answer that table exists to remove.
 """
 
 import copy
@@ -61,54 +61,10 @@ _TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG_DIR = _REPO / ".github/configs"
 
-# The steps that do not run on every platform yet, as `platforms` -> the
-# platforms missing from it. This is the ratchet: it has to match the
-# composition exactly, so wiring a platform in or out is a visible edit here,
-# and the check cannot quietly become a description of a pipeline nobody runs.
-_KNOWN_GAPS = {
-    "rng": ("ppu",),
-    "soft_lowp_matrix": ("ascend", "cuda", "gcu", "kunlunxin", "musa", "ppu"),
-    "amp_contract": ("kunlunxin", "ppu"),
-    "profiler_contract": ("gcu", "kunlunxin"),
-    "profiler_parity": ("ascend", "gcu", "kunlunxin", "metax", "musa", "ppu"),
-    "torch_compile": ("ascend", "dcu", "musa", "ppu"),
-    "inference": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "musa"),
-    "training": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "musa"),
-    "native_comm_bridge": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "kunlunxin",
-        "metax",
-        "musa",
-        "ppu",
-    ),
-    "musa_dispatch": ("ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "ppu"),
-    "unit_tests_per_file": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "kunlunxin",
-        "metax",
-        "musa",
-        "ppu",
-    ),
-}
-
 
 def _entries() -> list[dict]:
     """The manifest's entries, in the order they run."""
     return manifest()["steps"]
-
-
-def _assigned() -> dict[str, set[str]]:
-    """Each step id mapped to the platforms that run it, as composed."""
-    return composer.validate_manifest(manifest(), platform_names())[2]
-
-
-def _expected_entry(platform: str, entry: dict) -> bool:
-    """Whether one manifest entry applies to a platform."""
-    return platform in (entry.get("platforms") or _PLATFORMS)
 
 
 def _environment_entry() -> dict:
@@ -158,44 +114,50 @@ def test_only_platform_configs_live_in_the_config_directory():
 
 
 def test_the_manifest_composes_at_all():
-    """A reader that found nothing would make every check below vacuous."""
-    steps, seen_order, assigned = composer.validate_manifest(
-        manifest(), platform_names()
-    )
-    assert steps and seen_order and assigned
-    assert set(seen_order) == set(assigned)
-    assert all(assigned.values()), "a step id was composed for no platform"
+    """A reader that found nothing would make every check below vacuous.
 
-
-def test_the_manifest_still_records_which_steps_are_not_universal():
-    """The deviation is a key in one file, and there is at least one of them.
-
-    If this ever went to zero the composer's `platforms:` handling would stop
-    being exercised, and the gaps check below would pass by having nothing to
-    look at.
+    The composed count is the manifest's own count on every platform, which is
+    the property this layer exists for: the same groups, in the same order,
+    with a platform contributing values rather than steps.
     """
-    steps = _entries()
-    restricted = [entry for entry in steps if entry.get("platforms")]
-    assert restricted, "no manifest entry restricts itself to a platform"
-    known = set(_PLATFORMS)
-    for entry in restricted:
-        assert set(entry["platforms"]) < known, entry
-        assert len(set(entry["platforms"])) == len(entry["platforms"]), entry
-    # Variants are separate entries for the same id, so ids outnumber groups.
-    assert len(_assigned()) < len(steps)
+    steps, ids = composer.validate_manifest(manifest())
+    assert steps and ids
+    assert len(set(ids)) == len(ids), "a step id is defined twice"
+    for platform in _PLATFORMS:
+        composed = composed_steps(platform)
+        assert len(composed) == len(steps), (
+            f"{platform} composes {len(composed)} group(s) from {len(steps)} "
+            "manifest entries"
+        )
+
+
+def test_no_manifest_entry_restricts_itself_to_a_platform():
+    """The key that made eight step lists out of one is gone.
+
+    The composer refuses a `platforms:` key as an unknown one, which is the
+    mechanical half of the rule; this is the half stated over the real
+    manifest, where a reader can see which entry broke it.
+    """
+    for entry in _entries():
+        assert "platforms" not in entry, (
+            f"{entry['id']!r} restricts itself to some platforms; a platform "
+            "that cannot exercise a step is recorded in "
+            "tests/integration/platform_gates.py instead, where it is printed "
+            "per platform and held to the test tree by a unit test"
+        )
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
 def test_each_platform_runs_the_manifest_in_manifest_order(platform):
     """Order is the manifest's for every platform, and nothing is added or lost."""
     composed = composed_steps(platform)
-    expected = [entry for entry in _entries() if _expected_entry(platform, entry)]
+    entries = _entries()
     assert [group["command"] for group in composed] == [
-        entry["command"] for entry in expected
+        entry["command"] for entry in entries
     ]
     display_name = platform_config(platform)["display_name"]
     assert [group["name"] for group in composed] == [
-        entry["name"].replace("{{display_name}}", display_name) for entry in expected
+        entry["name"].replace("{{display_name}}", display_name) for entry in entries
     ]
 
 
@@ -277,19 +239,59 @@ def test_no_platform_config_carries_a_step_list_of_its_own(platform):
     assert "integration_tests" not in platform_config(platform)
 
 
-def test_the_steps_that_do_not_run_everywhere_are_exactly_the_recorded_ones():
-    """The remaining per-platform coverage, held to the list above.
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_a_configs_step_environment_names_steps_the_manifest_has(platform):
+    """The values a platform adds to a step are keyed by an id that exists.
 
-    Read the failure as a to-do list: each entry is a step one platform runs
-    and another does not, which this layer's follow-ups close one at a time.
+    `step_environment` is how a platform states the environment one step alone
+    needs -- CUDA's FlagTree switch for the compile step, Ascend's process-start
+    `LD_PRELOAD` for the profiler step. Keyed by id rather than by position, so
+    a step that moves in the manifest does not silently carry someone else's
+    environment, and a key naming no step is refused by the composer rather
+    than dropped, because it would read as a step getting its environment while
+    no such step runs.
     """
-    assigned = _assigned()
-    gaps = {
-        step_id: tuple(p for p in _PLATFORMS if p not in platforms)
-        for step_id, platforms in assigned.items()
-        if len(platforms) != len(_PLATFORMS)
-    }
-    assert gaps == _KNOWN_GAPS
+    declared = platform_config(platform).get("step_environment") or {}
+    ids = set(composer.validate_manifest(manifest())[1])
+    assert set(declared) <= ids, (
+        f"{platform} states step_environment for {sorted(set(declared) - ids)}, "
+        "which the manifest does not define"
+    )
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_a_step_gets_the_shared_environment_plus_this_platforms_own(platform):
+    """The composition rule, asserted group by group rather than sampled.
+
+    A group's environment is the manifest entry's own value, plus whatever
+    block the entry reads out of the config as JSON, plus the platform's
+    `step_environment` for that id folded in last. Writing the whole mapping
+    out is what catches the two ways this goes wrong: a platform's exception
+    replacing the shared value instead of sitting beside it, and a variable
+    stated for one step leaking onto a neighbour it did not name.
+    """
+    config = platform_config(platform)
+    declared = config.get("step_environment") or {}
+    entries = _entries()
+    composed = composed_steps(platform)
+    assert len(composed) == len(entries), platform
+    for group, entry in zip(composed, entries):
+        expected = {
+            key: str(value) for key, value in (entry.get("environment") or {}).items()
+        }
+        for config_key, variable in (
+            entry.get("environment_from_config") or {}
+        ).items():
+            expected[variable] = json.dumps(
+                config[config_key], separators=(",", ":"), sort_keys=True
+            )
+        expected.update(
+            {
+                key: str(value)
+                for key, value in (declared.get(entry["id"]) or {}).items()
+            }
+        )
+        assert group.get("environment", {}) == expected, (platform, entry["id"])
 
 
 _REFUSED = [
@@ -310,24 +312,8 @@ _REFUSED = [
         id="unknown-key",
     ),
     pytest.param(
-        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": []}]},
-        id="empty-platforms",
-    ),
-    pytest.param(
-        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": "cuda"}]},
-        id="platforms-not-a-list",
-    ),
-    pytest.param(
-        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": ["nvidia"]}]},
-        id="unknown-platform",
-    ),
-    pytest.param(
-        {
-            "steps": [
-                {"id": "a", "name": "N", "command": "c", "platforms": ["cuda", "cuda"]}
-            ]
-        },
-        id="repeated-platform",
+        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": ["cuda"]}]},
+        id="platforms-restricted-entry",
     ),
     pytest.param(
         {"steps": [{"id": "a", "name": "N", "command": "c", "environment": "X"}]},
@@ -382,32 +368,25 @@ def test_a_manifest_that_cannot_be_composed_is_refused(document):
     mistake caught on a vendor runner costs a provisioning run and a queue.
     """
     with pytest.raises(composer.ManifestError):
-        composer.validate_manifest(document, platform_names())
+        composer.validate_manifest(document)
 
 
-def test_a_step_whose_variants_are_not_adjacent_is_refused():
-    """Variants of one step sit together, so merging them is a local edit."""
+def test_a_step_id_defined_twice_is_refused():
+    """An id used twice would run one step twice, silently.
+
+    It is also the shape a platform-restricted variant of a step used to take:
+    two entries for one id, each naming the platforms it applied to. Both
+    readings are refused here, and the message says where a restriction belongs
+    instead.
+    """
     document = {
         "steps": [
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]},
-            {"id": "b", "name": "B", "command": "y"},
-            {"id": "a", "name": "A", "command": "x", "platforms": ["dcu"]},
+            {"id": "a", "name": "A", "command": "x"},
+            {"id": "a", "name": "A", "command": "x"},
         ]
     }
-    with pytest.raises(composer.ManifestError, match="not contiguous"):
-        composer.validate_manifest(document, platform_names())
-
-
-def test_a_step_that_claims_a_platform_twice_is_refused():
-    """Two variants covering one platform would run the step twice, silently."""
-    document = {
-        "steps": [
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]},
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda", "dcu"]},
-        ]
-    }
-    with pytest.raises(composer.ManifestError, match="would run it twice"):
-        composer.validate_manifest(document, platform_names())
+    with pytest.raises(composer.ManifestError, match="repeats"):
+        composer.validate_manifest(document)
 
 
 def test_an_unknown_platform_is_refused():
@@ -446,29 +425,28 @@ def test_a_block_stated_as_a_non_mapping_is_refused():
         composer.compose(manifest(), config, "metax", platform_names())
 
 
-def test_a_config_whose_expectations_no_running_step_reads_is_refused():
-    """The other direction: data nobody consumes is data nobody checks.
-
-    Left alone, a platform can carry a whole block of expectations while the
-    step that would assert them is restricted to some other platform.
-    """
-    document = manifest()
-    for entry in document["steps"]:
-        if entry.get("environment_from_config"):
-            entry["platforms"] = ["cuda"]
-    with pytest.raises(
-        composer.ManifestError, match="no step that runs on this platform"
-    ):
-        composer.compose(document, platform_config("metax"), "metax", platform_names())
+def test_a_step_environment_that_is_not_a_mapping_is_refused():
+    """`step_environment` is a mapping of step id to environment, or nothing."""
+    config = copy.deepcopy(platform_config("cuda"))
+    config["step_environment"] = ["torch_compile"]
+    with pytest.raises(composer.ManifestError, match="step_environment"):
+        composer.compose(manifest(), config, "cuda", platform_names())
 
 
-def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
-    """An empty pipeline is a broken manifest, not a fast platform."""
-    document = {
-        "steps": [{"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]}]
-    }
-    with pytest.raises(composer.ManifestError, match="no steps apply"):
-        composer.compose(document, platform_config("dcu"), "dcu", platform_names())
+def test_a_step_environment_for_an_unknown_step_is_refused():
+    """A key naming no step would read as a step getting its environment."""
+    config = copy.deepcopy(platform_config("cuda"))
+    config["step_environment"] = {"torch_compiel": {"FLAGOS_USE_FLAGTREE": "1"}}
+    with pytest.raises(composer.ManifestError, match="not a step in the manifest"):
+        composer.compose(manifest(), config, "cuda", platform_names())
+
+
+def test_a_step_environment_value_that_is_not_scalar_is_refused():
+    """The environment reaches the runner as strings, and only as strings."""
+    config = copy.deepcopy(platform_config("cuda"))
+    config["step_environment"] = {"torch_compile": {"FLAGOS_USE_FLAGTREE": ["1"]}}
+    with pytest.raises(composer.ManifestError, match="must be a scalar"):
+        composer.compose(manifest(), config, "cuda", platform_names())
 
 
 def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
@@ -476,7 +454,10 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
 
     `load-platform-config.yml` runs this script with `yq`-produced JSON and
     takes the stdout as the pipeline's groups; a test that only called
-    `compose()` would not notice a broken CLI.
+    `compose()` would not notice a broken CLI. The stderr it also produces is
+    the coverage statement a reader of a run gets: one line saying every entry
+    runs on every platform, then the pytest-level skips that remain, which are
+    the only thing left that can differ.
     """
     manifest_json = tmp_path / "manifest.json"
     config_json = tmp_path / "cuda.json"
@@ -500,9 +481,11 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
     )
     captured = capsys.readouterr()
     assert json.loads(captured.out) == composed_steps("cuda")
-    # The loader prints how far the platforms still differ, once per platform.
+    # The loader says how far the platforms still differ, once per platform.
     assert "cuda:" in captured.err
-    assert "do not run on every platform yet" in captured.err
+    assert "every entry on every platform" in captured.err
+    for line in composer.gate_report("cuda"):
+        assert line in captured.err, line
 
 
 def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):

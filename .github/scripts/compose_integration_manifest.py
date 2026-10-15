@@ -23,9 +23,24 @@ into the step so `run_integration_tests.py` receives the same
 `integration_tests` JSON it always has.
 
 That shape is the point. Eight per-platform step lists made a step that only
-one platform ran look like a step every platform ran; here the deviation is a
-`platforms:` key in one file, and how much is still per-platform is a number
-the loader prints on every run.
+one platform ran look like a step every platform ran; here every step is one
+entry that every platform runs, and what a platform contributes to it is a
+value in its own config.
+
+Two kinds of value a platform states reach a step:
+
+  * `environment_check` (and any other block named by a step's
+    `environment_from_config`), handed over as JSON in one environment
+    variable;
+  * `step_environment`, a mapping of step id to the environment variables that
+    step alone needs on this platform -- CUDA's `FLAGOS_USE_FLAGTREE=1` for the
+    compile step, Ascend's process-start `LD_PRELOAD` for the profiler step.
+    Keys are step ids rather than step numbers so a step that moves in the
+    manifest does not silently carry someone else's environment.
+
+The second kind is what keeps a *value* from having to be a step: the alternative
+is a `platforms:`-restricted variant of the step per platform, which is how the
+eight-way divergence grew in the first place.
 
 Input is JSON, not YAML: this runs in the loader job on ubuntu-latest, where
 `yq` is already the YAML reader, and the vendor images are not required to
@@ -48,10 +63,22 @@ _ENTRY_KEYS = {
     "id",
     "name",
     "command",
-    "platforms",
     "environment",
     "environment_from_config",
 }
+
+# A platform config key: step id -> environment variables that step alone needs.
+_STEP_ENVIRONMENT_KEY = "step_environment"
+
+# The pytest-level gate table, read here only to print what each platform will
+# skip. It lives under tests/ because the hardware job runs the wheel-only test
+# workspace, which holds `tests` and nothing else; this loader job runs in the
+# checkout, so it can read the same file and say the same thing before a runner
+# is queued. Loading it is optional: a missing file prints nothing rather than
+# failing a load, and tests/unit/test_platform_gates.py holds it to existence.
+_GATES_PATH = (
+    Path(__file__).resolve().parents[2] / "tests/integration/platform_gates.py"
+)
 
 
 class ManifestError(Exception):
@@ -83,31 +110,23 @@ def _require_string(value, field):
     return value
 
 
-def _entry_platforms(entry, known):
-    platforms = entry.get("platforms")
-    if platforms is None:
-        return list(known)
-    if not isinstance(platforms, list) or not platforms:
-        raise ManifestError(
-            f"step {entry.get('id')!r}: platforms must be a non-empty list"
-        )
-    for platform in platforms:
-        if platform not in known:
-            raise ManifestError(
-                f"step {entry.get('id')!r}: platforms names {platform!r}, which is "
-                f"not a platform config; known platforms are {', '.join(known)}"
-            )
-    if len(set(platforms)) != len(platforms):
-        raise ManifestError(f"step {entry.get('id')!r}: platforms repeats a platform")
-    return list(platforms)
+def validate_manifest(manifest):
+    """Check the manifest's shape and return its entries and their ids.
 
+    The invariants that matter: every entry is complete, and every id is defined
+    exactly once. An id used twice would run one step twice, silently -- and it
+    is also the shape a platform-restricted *variant* of a step used to take, so
+    the refusal covers both readings: this manifest states steps, and the only
+    way a platform stops running one is if the step leaves this file.
 
-def validate_manifest(manifest, known):
-    """Check the manifest's shape and return its entries.
-
-    The invariants that matter: every entry is complete, a step's variants sit
-    together and never overlap (a platform that got the same step twice would
-    run it twice, silently), and every entry names a platform that exists.
+    `platforms:` is not in `_ENTRY_KEYS`, so an entry carrying one is refused as
+    an unknown key. That is deliberate: a step a platform does not run is a
+    decision about the platform, and every such decision belongs in the
+    pytest-level gate table (tests/integration/platform_gates.py), where it is
+    printed per platform, recorded in
+    docs/reference/platform-capability-matrix.md and reasoned about in one
+    place. A `platforms:` key here would let the same decision be made twice, in
+    two files, with nothing comparing them.
     """
     if not isinstance(manifest, dict):
         raise ManifestError("the manifest must be a mapping with a steps list")
@@ -115,8 +134,7 @@ def validate_manifest(manifest, known):
     if not isinstance(steps, list) or not steps:
         raise ManifestError("the manifest must define a non-empty steps list")
 
-    seen_order: list[str] = []
-    assigned: dict[str, set[str]] = {}
+    ids: list[str] = []
     for index, entry in enumerate(steps):
         if not isinstance(entry, dict):
             raise ManifestError(f"steps[{index}] must be a mapping")
@@ -128,10 +146,8 @@ def validate_manifest(manifest, known):
         step_id = _require_string(entry.get("id"), f"steps[{index}].id")
         _require_string(entry.get("name"), f"steps[{index}].name")
         _require_string(entry.get("command"), f"steps[{index}].command")
-        platforms = _entry_platforms(entry, known)
 
-        if entry.get("environment") is not None:
-            _environment(entry, f"steps[{index}].environment")
+        _scalar_environment(entry.get("environment"), f"steps[{index}].environment")
         environment_from = entry.get("environment_from_config")
         if environment_from is not None:
             if not isinstance(environment_from, dict) or not environment_from:
@@ -145,40 +161,62 @@ def validate_manifest(manifest, known):
                     variable, f"steps[{index}].environment_from_config[{key}]"
                 )
 
-        if step_id in assigned:
-            previous = seen_order[-1] if seen_order else None
-            if previous != step_id:
-                raise ManifestError(
-                    f"step {step_id!r} is not contiguous: all of a step's variants "
-                    "belong together, so collapsing them into one is a local edit"
-                )
-            overlap = assigned[step_id] & set(platforms)
-            if overlap:
-                raise ManifestError(
-                    f"step {step_id!r} lists {', '.join(sorted(overlap))} in more "
-                    "than one variant, so those platforms would run it twice"
-                )
-            assigned[step_id].update(platforms)
-        else:
-            assigned[step_id] = set(platforms)
-            seen_order.append(step_id)
+        if step_id in ids:
+            raise ManifestError(
+                f"steps[{index}].id repeats {step_id!r}: one step is one entry that "
+                "every platform runs, so a second entry for an id would either run "
+                "it twice or restrict it to one platform, and a restriction belongs "
+                "in tests/integration/platform_gates.py instead"
+            )
+        ids.append(step_id)
 
-    return steps, seen_order, assigned
+    return steps, ids
 
 
-def _environment(entry, field):
-    environment = entry.get("environment")
-    if environment is None:
+def _scalar_environment(value, field):
+    """One environment mapping, normalized to a string-to-string dict."""
+    if value is None:
         # A step that needs none is the common case, and validate_manifest
         # accepts the key's absence; composing must read it the same way.
         return {}
-    if not isinstance(environment, dict):
+    if not isinstance(value, dict):
         raise ManifestError(f"{field} must be a mapping")
-    for key, value in environment.items():
+    for key, item in value.items():
         _require_string(key, f"{field} key")
-        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        if not isinstance(item, (str, int, float)) or isinstance(item, bool):
             raise ManifestError(f"{field}[{key}] must be a scalar")
-    return {str(key): str(value) for key, value in environment.items()}
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _step_environment(config, platform, ids):
+    """The per-step environment this platform states, validated.
+
+    Keys are step ids, not step numbers, so a step that moves in the manifest
+    does not silently carry someone else's environment -- and a key naming an id
+    the manifest does not define is refused rather than dropped, because it
+    would read as a step getting its environment while no such step runs.
+    """
+    block = config.get(_STEP_ENVIRONMENT_KEY)
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise ManifestError(
+            f"the {platform} config states {_STEP_ENVIRONMENT_KEY} as "
+            f"{type(block).__name__} rather than a mapping of step id to the "
+            "environment variables that step needs on this platform"
+        )
+    resolved = {}
+    for step_id, environment in block.items():
+        if step_id not in ids:
+            raise ManifestError(
+                f"the {platform} config sets {_STEP_ENVIRONMENT_KEY} for "
+                f"{step_id!r}, which is not a step in the manifest; the steps are "
+                f"{', '.join(ids)}"
+            )
+        resolved[step_id] = _scalar_environment(
+            environment, f"{_STEP_ENVIRONMENT_KEY}.{step_id} of the {platform} config"
+        )
+    return resolved
 
 
 def compose(manifest, config, platform, known):
@@ -187,7 +225,7 @@ def compose(manifest, config, platform, known):
     Order is the manifest's, never the config's, so two platforms that run the
     same steps run them in the same sequence.
     """
-    steps, _ids, _assigned = validate_manifest(manifest, known)
+    steps, ids = validate_manifest(manifest)
     if platform not in known:
         raise ManifestError(
             f"unknown platform {platform!r}; known platforms are {', '.join(known)}"
@@ -197,16 +235,13 @@ def compose(manifest, config, platform, known):
 
     display_name = _require_string(config.get("display_name"), "display_name")
 
-    consumed_from_config: set[str] = set()
-    declared_from_config = {
-        key for entry in steps for key in (entry.get("environment_from_config") or {})
-    }
+    step_environment = _step_environment(config, platform, ids)
 
     composed = []
     for entry in steps:
-        if platform not in _entry_platforms(entry, known):
-            continue
-        environment = _environment(entry, f"step {entry['id']}.environment")
+        environment = _scalar_environment(
+            entry.get("environment"), f"step {entry['id']}.environment"
+        )
         for key, variable in (entry.get("environment_from_config") or {}).items():
             block = config.get(key)
             if not block:
@@ -223,7 +258,12 @@ def compose(manifest, config, platform, known):
             environment[variable] = json.dumps(
                 block, separators=(",", ":"), sort_keys=True
             )
-            consumed_from_config.add(key)
+        # Last, so a platform states an exception beside the shared value rather
+        # than instead of it: the step's own `environment` is the value every
+        # platform gets, and `step_environment` is what this one adds or
+        # overrides. `LD_PRELOAD` on the profiler step is the case that reads
+        # this way -- no other platform sets it, and no platform has to know.
+        environment.update(step_environment.get(entry["id"], {}))
         step = {
             "name": entry["name"].replace(DISPLAY_NAME_TOKEN, display_name),
             "command": entry["command"],
@@ -232,36 +272,47 @@ def compose(manifest, config, platform, known):
             step["environment"] = environment
         composed.append(step)
 
-    # The other direction: data a config states that no step of this platform
-    # reads is data nobody checks. Left unchecked, a platform can carry a whole
-    # expectation block and run against nothing.
-    unread = sorted(
-        key
-        for key in declared_from_config
-        if config.get(key) and key not in consumed_from_config
-    )
-    if unread:
-        raise ManifestError(
-            f"the {platform} config defines {', '.join(unread)}, which no step that "
-            "runs on this platform consumes"
-        )
-
     if not composed:
         raise ManifestError(f"no steps apply to {platform!r}")
     return composed
 
 
-def coverage_report(assigned, known):
-    """Lines describing how far the platforms still differ, worst first."""
-    lines = []
-    for step_id, platforms in assigned.items():
-        missing = [platform for platform in known if platform not in platforms]
-        if missing:
-            lines.append(
-                f"  {step_id}: {len(known) - len(missing)}/{len(known)} platforms "
-                f"(no {', '.join(missing)})"
-            )
-    return lines
+def _gates_module():
+    """The pytest-level gate table, loaded by path, or None when unavailable."""
+    import importlib.util
+
+    if not _GATES_PATH.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("platform_gates", _GATES_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def gate_report(platform):
+    """Lines describing the pytest-level skips that apply to one platform.
+
+    Every manifest entry runs on every platform, so a platform that cannot
+    exercise one reads as full coverage unless the skips it still makes are
+    printed. This is that print, from the same table the unit test holds to the
+    gates in the test tree -- so what a run says it will skip is what it skips.
+    """
+    try:
+        module = _gates_module()
+    except (ImportError, AttributeError, OSError, SyntaxError):
+        # A gate table that cannot be read must not fail a load on a vendor
+        # runner: the tests themselves carry the gates, and
+        # tests/unit/test_platform_gates.py is where the file is required to
+        # exist and be importable.
+        return []
+    if module is None:
+        return []
+    return [
+        f"  {gate.step}: {gate.target} ({gate.reason})"
+        for gate in module.gates_for(platform)
+    ]
 
 
 def main(argv=None):
@@ -280,7 +331,7 @@ def main(argv=None):
         manifest = json.loads(Path(args.manifest).read_text())
         config = json.loads(Path(args.platform_config).read_text())
         known = known_platforms(args.config_dir)
-        steps, _ids, assigned = validate_manifest(manifest, known)
+        steps, ids = validate_manifest(manifest)
         composed = compose(manifest, config, args.platform, known)
     except ManifestError as error:
         print(f"::error::{error}", file=sys.stderr)
@@ -289,18 +340,18 @@ def main(argv=None):
         print(f"::error::cannot read the manifest inputs: {error}", file=sys.stderr)
         return 1
 
-    # Printed on every load, in every platform's run: the number is the
-    # progress measure for making the platforms one pipeline instead of eight.
-    variants = len(steps) - len(assigned)
+    # Printed on every load, in every platform's run: one line saying the
+    # pipeline no longer varies by platform, and then the skips that remain,
+    # which are pytest-level and are the only thing left that can differ.
     print(
         f"{args.platform}: {len(composed)} groups from {len(steps)} manifest entries "
-        f"({variants} platform-restricted variant(s))",
+        f"({len(ids)} step id(s), every entry on every platform)",
         file=sys.stderr,
     )
-    report = coverage_report(assigned, known)
+    report = gate_report(args.platform)
     if report:
         print(
-            f"{len(report)} step(s) do not run on every platform yet:",
+            f"{len(report)} pytest-level gate(s) apply to {args.platform}:",
             file=sys.stderr,
         )
         for line in report:
