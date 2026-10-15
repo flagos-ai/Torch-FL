@@ -60,6 +60,13 @@ platform_support = _load_platform_support()
 def _clean_env(monkeypatch):
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("PPU_SDK", raising=False)
+    # See test_platform_detect.py: the host probe has to be neutralised so a
+    # stub wheel for another platform is not shadowed by this machine's
+    # /usr/local/PPU_SDK. platform_support re-exports detect_platform from its
+    # own loaded copy of torch_fl/_platform.py, so the patch goes on that copy.
+    monkeypatch.setattr(
+        platform_support._platform, "PPU_SDK_DIR", Path("/nonexistent/ppu-sdk")
+    )
 
 
 def _install_wheel(tmp_path, accelerator):
