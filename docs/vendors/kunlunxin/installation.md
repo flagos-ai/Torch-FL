@@ -134,6 +134,36 @@ native backend no longer uses, so arming it would report an empty device timelin
 instead of the XPU one. Import is unaffected, and `start()` is a no-op; device
 profiling is not available on this platform.
 
+## Peer Copies Between Cards
+
+XPU device pointers are **device-scoped**: `xpu_memcpy` resolves both operands
+against the device that is current when the copy is issued, and libxpurt exports
+no peer entry point that names the two cards explicitly — there is no XPU
+equivalent of the `topsMemcpyPeer` entry the GCU backend uses.
+
+A device-to-device `xpu_memcpy` whose two ends live on different cards therefore
+does not deliver the bytes to the destination: the transfer is served against the
+current card's address space, and the destination keeps whatever it held. The
+status comes back as success, so the caller sees neither an error nor an
+exception — only a tensor that reads back as uninitialized memory.
+
+Measured on the P800 platform pipeline through `comm.scatter` / `comm.gather`
+over a 4x4 fp32 tensor (`tests/unit/test_dataparallel_comm_install.py`, run
+38763731890): rows 2-3, the rows that travel to `flagos:1`, came back as
+uninitialized memory, while rows 0-1, which never leave `flagos:0`, were exact
+and the single-device roundtrip was byte-exact. A device-wide barrier changes
+none of that, which is what separates this from the MUSA peer-visibility hazard
+recorded in `csrc/aten/copy_ops.cc`: the copy never reaches the destination
+address at all.
+
+Cross-card copies are consequently **staged through host memory** — D2H on the
+source's card, then H2D on the destination's — by the Kunlunxin arm of
+`CrossDeviceMemcpy` in `csrc/aten/copy_ops.cc`. Both legs are same-device copies
+issued under the port's device-binding copy guard, so a peer copy costs host
+bandwidth in each direction instead of a device-to-device DMA. Copies that stay
+on one card keep the direct `xpu_memcpy` path and are unaffected. If a future XPU
+SDK exports a peer entry point, it replaces this staging route.
+
 ## Verification
 
 Run the checked-in smoke harness on the P800:
@@ -146,8 +176,9 @@ FLAGOS_ACCELERATOR=kunlunxin \
 ```
 
 The harness verifies device count, device index 1, allocation, host-to-device and
-device-to-host copies, an XPU stream, synchronization, cache release, and
-`torch.mm` against a CPU reference. It exits nonzero on the first failed check.
+device-to-host copies, a two-card copy in both directions when a second XPU is
+present, an XPU stream, synchronization, cache release, and `torch.mm` against a
+CPU reference. It exits nonzero on the first failed check.
 Every check runs through the port's own native XPU device layer; `mm` reaches the
 vendor xdnn op library behind the native `kunlunxin` route.
 

@@ -16,6 +16,7 @@
 #include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 
+#include <algorithm>
 #include <optional>
 #include "device_boxing.h"
 // ascend_copy.h and gcu_copy.h are included unconditionally: the #else
@@ -217,20 +218,58 @@ void SyncPeerCopyVisibility(const at::Tensor& src, const at::Tensor& dst) {
   // backends get the same guarantee from cudaMemcpy's own semantics, and a
   // device-wide sync there would be a real cost on every peer copy.
   ::DeviceSynchronize();
-#elif defined(USE_KUNLUNXIN)
-  // The Kunlunxin peer copy is known to lose its payload: the two-device
-  // `comm.scatter`/`comm.gather` roundtrip moves rows 2-3 of a 4x4 float tensor
-  // through flagos:1 and reads them back as uninitialized memory, while rows 0-1,
-  // which never left flagos:0, are exact and the single-device roundtrip is
-  // byte-exact (issue #544, run 38723076856). The XPU SDK exports no stream
-  // query, so the only barrier available is the device-wide one -- the same call
-  // the kunlunxin arm of BlockingCopyGuard in this file already makes. This arm
-  // is the ordering half of the fix; whether it is also the *sufficient* half is
-  // what the kunlunxin pipeline run on issue #544 decides. Skipped for a
-  // same-device copy, so only the peer path pays it.
-  ::DeviceSynchronize();
 #endif
 }
+
+#if defined(USE_KUNLUNXIN)
+// XPU device pointers are device-scoped: `xpu_memcpy` resolves both operands
+// against the device that is current when it is issued, and libxpurt exports no
+// peer entry point to name the two cards explicitly -- there is no XPU
+// equivalent of GCU's topsMemcpyPeer (see docs/vendors/kunlunxin/installation.md).
+// A cross-card device-to-device memcpy therefore reports success and leaves the
+// destination holding whatever it held before, because the destination pointer
+// is written as though it belonged to the source's card; the ordering barrier
+// this file adds for MUSA cannot help, since the copy never reaches the right
+// address in the first place.
+//
+// Measured on the P800 pipeline (run 38763731890, job 116522681663) through
+// `comm.scatter`/`comm.gather`: rows 2-3 of a 4x4 fp32 tensor, the rows that
+// travel to flagos:1, read back as uninitialized memory while rows 0-1, which
+// never leave flagos:0, are exact and the single-device roundtrip is byte-exact
+// (issue #544).
+//
+// The emulation is the one the XPU SDK leaves available: two same-device copies
+// with a host buffer between them. Each leg goes through BlockingMemcpy, which
+// binds the current device to the card owning the accelerator-side operand and
+// drains that card first (the kunlunxin arm of BlockingCopyGuard is device-wide),
+// so the read sees the producers' output and the write has landed before the
+// next leg or the caller's read-back is issued.
+void StagedPeerMemcpy(
+    void* dst_ptr,
+    const void* src_ptr,
+    size_t nbytes,
+    const at::Tensor& src,
+    const at::Tensor& dst) {
+  // Bounded by a chunk so a peer copy of a multi-gigabyte gradient buffer, which
+  // model-parallel runs do produce, does not ask for a second copy of it in host
+  // memory. One chunk of staging is allocated per call and reused across the
+  // whole transfer.
+  constexpr size_t kPeerStagingChunkBytes = 32u << 20;
+  const size_t chunk_bytes = std::min(nbytes, kPeerStagingChunkBytes);
+  at::Tensor staging = at::empty(
+      {static_cast<int64_t>(chunk_bytes)},
+      src.options().device(at::kCPU).dtype(at::kByte));
+  char* host = static_cast<char*>(staging.data_ptr());
+  char* dst_bytes = static_cast<char*>(dst_ptr);
+  const char* src_bytes = static_cast<const char*>(src_ptr);
+
+  for (size_t offset = 0; offset < nbytes; offset += chunk_bytes) {
+    const size_t chunk = std::min(chunk_bytes, nbytes - offset);
+    BlockingMemcpy(host, src_bytes + offset, chunk, MemcpyDeviceToHost, src);
+    BlockingMemcpy(dst_bytes + offset, host, chunk, MemcpyHostToDevice, dst);
+  }
+}
+#endif
 
 // The device-to-device copy whose two ends are both known, which is what makes
 // the peer-visibility sync above possible. It has to be issued inside the
@@ -244,6 +283,12 @@ void CrossDeviceMemcpy(
     size_t nbytes,
     const at::Tensor& src,
     const at::Tensor& dst) {
+#if defined(USE_KUNLUNXIN)
+  if (src.device() != dst.device()) {
+    StagedPeerMemcpy(dst_ptr, src_ptr, nbytes, src, dst);
+    return;
+  }
+#endif
   BlockingCopyGuard barrier(src);
   Memcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
   SyncPeerCopyVisibility(src, dst);
