@@ -547,14 +547,11 @@ class Stream(torch.cuda.Stream):
                 # with no stream class of its own is a property of the runtime
                 # (one queue, handle 0), not a name to keep adding to a list.
                 self._stream = _DefaultStreamHandle(_device_index(device))
-            # Set device attribute for __repr__ compatibility with torch.cuda.Stream
-            self.device = self._stream.device
         elif not hasattr(torch._C, "_cuda_getCurrentStream"):
             # CUDA runtime present, but torch.cuda.Stream is the wheel's dummy base
             # class rather than a real stream. Delegate to the same shim
             # torch.cuda.current_stream hands out.
             self._stream = _cuda_stream_shim(device)
-            self.device = self._stream.device
         # else: real torch.cuda.Stream path -- __new__ constructed it, do nothing.
 
     def __repr__(self):
@@ -592,6 +589,25 @@ class Stream(torch.cuda.Stream):
         if hasattr(self, "_stream"):
             return self._stream.handle
         return super().cuda_stream
+
+    @property
+    def device(self):
+        """The device whose queue this stream denotes.
+
+        Both vendor arms above used to write this attribute for
+        ``__repr__`` compatibility with ``torch.cuda.Stream``, which works where
+        the wheel's ``torch._C._CudaStreamBase`` is the dummy Python class it
+        synthesises over a CPU-only torch. It is the real C type on the
+        CUDA-shaped wheels (PPU), derived from ``torch.Stream``, and there
+        ``device`` is a read-only property: the assignment raised
+        ``AttributeError: attribute 'device' of 'torch.Stream' objects is not
+        writable`` out of ``__init__``. Answering it as a property keeps the
+        vendor arms from writing the attribute at all, and defers to the base
+        for the real ``torch.cuda.Stream`` that ``__new__`` constructed.
+        """
+        if hasattr(self, "_stream"):
+            return self._stream.device
+        return super().device
 
     @property
     def gcu_stream(self):

@@ -72,8 +72,13 @@ def _ascend_was_imported() -> bool:
 
 def _build_stream(device=None, priority=0):
     """Run ``Stream.__init__`` without ``Stream.__new__``'s CUDA inheritance."""
+    return _build_stream_of(flagos.Stream, device, priority)
+
+
+def _build_stream_of(cls, device=None, priority=0):
+    """Allocate ``cls`` past ``__new__``, then run ``flagos.Stream.__init__``."""
     try:
-        stream = object.__new__(flagos.Stream)
+        stream = object.__new__(cls)
     except TypeError:
         # On a CUDA-shaped build (MetaX, PPU) the most derived static base is
         # torch._C._CudaStreamBase, and its tp_new refuses object.__new__ with
@@ -81,9 +86,42 @@ def _build_stream(device=None, priority=0):
         # tp_new is optional, so calling it with the class alone allocates an
         # instance without inheriting torch.cuda.Stream's device logic, and the
         # __init__ below replaces whatever it picked with the vendor stream.
-        stream = torch._C._CudaStreamBase.__new__(flagos.Stream)
+        stream = torch._C._CudaStreamBase.__new__(cls)
     flagos.Stream.__init__(stream, device, priority)
     return stream
+
+
+class _ReadOnlyDeviceStream(flagos.Stream):
+    """A ``flagos.Stream`` whose base refuses the ``device`` attribute.
+
+    That is what the CUDA-shaped wheels (PPU) hand back: their
+    ``torch._C._CudaStreamBase`` is the C type derived from ``torch.Stream``,
+    where ``device`` is a read-only property. Subclassing is how the refusal is
+    reachable from a CPU-only checkout, which is where this suite runs.
+    """
+
+    def __setattr__(self, name, value):
+        if name == "device":
+            raise AttributeError(
+                "attribute 'device' of 'torch.Stream' objects is not writable"
+            )
+        super().__setattr__(name, value)
+
+
+def test_device_is_answered_without_writing_the_attribute(vendor):
+    """The vendor arms must not write ``device``; the property answers it.
+
+    Writing it worked only where ``torch._C._CudaStreamBase`` is torch's dummy
+    Python class. On PPU it is the C type, and the write raised out of
+    ``Stream.__init__`` -- which is how run 38757609110 failed these four cases
+    after the ``object.__new__`` refusal in front of it was fixed.
+    """
+    vendor("musa")
+
+    stream = _build_stream_of(_ReadOnlyDeviceStream)
+
+    assert stream.device == torch.device("flagos", 0)
+    assert "device" not in stream.__dict__
 
 
 def test_stream_builds_the_shared_musa_stream(vendor):
