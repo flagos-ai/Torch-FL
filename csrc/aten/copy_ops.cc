@@ -53,9 +53,23 @@
 // dispatch key, so c10::cuda is a hollow shell in that build -- including
 // <c10/cuda/CUDAStream.h> there would resolve against headers the runtime does
 // not back with symbols. It still needs *some* barrier; see the arm below.
+//
+// FLAGOS_COPY_CUDA_ABI marks the platforms that DO share the vendor's CUDA
+// streams -- cuda, ppu, metax, iluvatar -- i.e. where a barrier is required but
+// the stream cannot be named without c10::cuda. On those, the actual stream
+// query is still gated on FLAGOS_BOXING_BUILD: c10::cuda lives in
+// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
+// links the CPU-only torch wheel), so getCurrentCUDAStream is an unresolved
+// symbol there. The de-boxed arm below covers both cases.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
     !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
+#define FLAGOS_COPY_CUDA_ABI 1
+#else
+#define FLAGOS_COPY_CUDA_ABI 0
+#endif
+
+#if defined(FLAGOS_BOXING_BUILD) && FLAGOS_COPY_CUDA_ABI
 #define FLAGOS_COPY_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -164,6 +178,17 @@ class BlockingCopyGuard {
     // primitive -- and the runtime layer's DeviceSynchronize wraps that, so
     // this is a device-wide drain: a superset of the per-stream wait, and so
     // still correct, just coarser. Only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
+#elif FLAGOS_COPY_CUDA_ABI
+    // A CUDA-ABI platform with boxing OFF. The vendor runtime still shares its
+    // streams with flagos, so a barrier is required -- but this wheel carries
+    // no libtorch_cuda.so, so there is no c10::cuda::getCurrentCUDAStream to
+    // ask which stream is current (see the guard above). Every stream query in
+    // this build answers id 0 (runtime/guard.h's #else arms), so flagos work
+    // and this memcpy both land on the legacy default stream and the copy is
+    // already ordered; the device-wide sync keeps that guarantee even if a
+    // vendor library submits to a side stream of its own. Same superset the
+    // DCU/Kunlunxin arms use, and only reached on the blocking-copy paths.
     ::DeviceSynchronize();
 #endif
   }

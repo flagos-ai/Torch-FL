@@ -6,10 +6,17 @@
 
 #include <cuda_runtime.h>
 
+// The caching-allocator delegation below reaches into c10::cuda, which only
+// exists when torch was built with CUDA and that build's libtorch_cuda.so is in
+// the process. The default FlagGems-primary wheel (FLAGOS_BUILD_BOXING=OFF)
+// ships neither -- it links the CPU-only torch wheel and drives the vendor
+// runtime's cudaMalloc/cudaFree through the block pool instead -- so the
+// includes and the whole delegation block are gated on the boxing build.
+#ifdef FLAGOS_BOXING_BUILD
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAStream.h>
-
 #include <mutex>
+#endif
 
 namespace c10::flagos {
 
@@ -110,7 +117,7 @@ class CudaDeviceMemory final : public DeviceMemoryInterface {
   // memory lives in one pool -> stats/empty_cache/OOM-retry are unified, and
   // torch.randn (a compute-factory that allocates on the CUDA device) is now
   // reflected in flagos memory stats.
-
+#ifdef FLAGOS_BOXING_BUILD
   bool provides_caching() const override { return true; }
 
   void* caching_alloc(size_t nbytes, Stream_t stream) override {
@@ -188,6 +195,13 @@ class CudaDeviceMemory final : public DeviceMemoryInterface {
       c10::cuda::CUDACachingAllocator::init(n);
     });
   }
+#else
+  // No c10::cuda in the process (see the include guard above), so there is
+  // nothing to delegate to. Returning false leaves CachingDeviceAllocator on
+  // its own block pool over this backend's cudaMalloc/cudaFree, which are plain
+  // runtime calls the vendor toolkit backs.
+  bool provides_caching() const override { return false; }
+#endif
 };
 
 } // namespace c10::flagos

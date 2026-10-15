@@ -18,7 +18,7 @@
 #endif
 
 // Real c10::cuda:: stream/event plumbing. Gated the same way as
-// runtime/allocator/caching_device_allocator.cc's delegation to
+// backends/cuda_memory.h's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
 // exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see
@@ -32,9 +32,20 @@
 // cuda_runtime.h, but c10::cuda:: (the C++ stream plumbing this branch needs)
 // is a hollow shell in this build, which is exactly why the backend was
 // de-boxed.
-#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
-    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
+//
+// FLAGOS_BOXING_BUILD is required on top of that list, for the same reason
+// backends/cuda_memory.h gates its allocator delegation: c10::cuda lives in
+// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
+// links the CPU-only torch wheel), so the symbols this branch calls are absent
+// at load time even on a real NVIDIA box. Every CUDA-ABI platform that reaches
+// here -- cuda, ppu, metax, iluvatar -- builds with boxing on except the cuda
+// lane the default wheel is tested on, so this only ever flips the default
+// build. The #else arms below are the shape Ascend/Kunlunxin already use:
+// stream id 0 (the legacy default stream) and event/stream waits on nullptr.
+#if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
+    !defined(USE_TSINGMICRO) && !defined(USE_DCU) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_MPS)
 #define FLAGOS_GUARD_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #else
