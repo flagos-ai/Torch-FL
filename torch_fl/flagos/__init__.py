@@ -153,6 +153,13 @@ def synchronize(device=None):
 
 def init():
     _lazy_init()
+    # Device init can arrive while flag_gems is still importing, which is what
+    # happens on the platforms whose torch_fl import path imports it itself. That
+    # call leaves `_lazy_init` through the early exit below with the FlagGems
+    # patches still uninstalled, and latches nothing, because the patches only
+    # install against a module that has finished importing. Repeating the call
+    # here is what finishes them; see `_install_flaggems_patches`.
+    _install_flaggems_patches()
 
 
 def is_initialized():
@@ -162,6 +169,7 @@ def is_initialized():
 def _lazy_init():
     global _initialized
     if is_initialized():
+        _install_flaggems_patches()
         return
     _C._init()
     _initialized = True
@@ -218,6 +226,90 @@ def _lazy_init():
     # still materialising weights. See the function for the measurement.
     _prewarm_triton_key()
 
+    # Everything else that has to be in place before the first routed op, behind
+    # one re-entrant entry point: it declines a call that arrives while flag_gems
+    # is still importing rather than latching against the half-built module, so
+    # whichever of its callers runs first against a finished import installs the
+    # lot. See the function for why that distinction is load-bearing.
+    _install_flaggems_patches()
+
+    # Advanced indexing on this device takes the C++ dispatcher and needs no
+    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
+    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
+    # reach `IndexTensorKernelCuda` directly.
+    #
+    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
+    # CPython special method, so assigning to it also populates the type's
+    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
+    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
+    # takes the sequence-protocol branch in
+    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
+    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
+    # including for CPU tensors, in a process that merely touched a non-CPU
+    # device. Restoring the attribute afterwards does not undo it; only never
+    # assigning it does.
+
+
+_flaggems_patches_installed = False
+
+
+def _flaggems_op_names_are_bound() -> bool:
+    """Whether ``flag_gems`` has been imported far enough for the patches below.
+
+    Every one of them reaches for a top-level op name -- ``slice_backward``,
+    ``where``, ``vector_norm`` -- and installs nothing when it is missing, so
+    the two states that can produce a missing name have to be told apart: a
+    build that never had the op, and an import that has not finished yet. The
+    modules' shared ``getattr(flag_gems, name, None) is None`` guard cannot see
+    the difference, and the two call for opposite answers.
+
+    The import that has to be survived is torch_fl's own. GCU's runtime shims
+    and MUSA's Philox bridge both import flag_gems while ``torch_fl`` is still
+    executing, and triton asks for the active device on the way through, which
+    runs ``torch::utils::device_lazy_init(PrivateUse1)`` -> ``torch_flagos`` ->
+    ``_lazy_init`` from *inside* ``flag_gems/__init__.py``. The op tree is
+    imported at the top of that module and ``_FULL_CONFIG`` is built after it,
+    so by the time the module body returns every name the patches want exists.
+    CPython marks the in-progress import on the module's spec and clears it when
+    the body finishes, which is the whole question asked here.
+    """
+    module = sys.modules.get("flag_gems")
+    if module is None:
+        return False
+    return not getattr(getattr(module, "__spec__", None), "_initializing", False)
+
+
+def _install_flaggems_patches() -> bool:
+    """Install every FlagGems patch that has to precede the first routed op.
+
+    The C++ bridge resolves ``flag_gems.<name>`` once and caches the callable
+    (``csrc/aten/backends/flagos/python_op_caller.cc``), so each of these has to
+    be in place before the first routed op of the process; there is no second
+    chance once a callable has been cached.
+
+    They used to run inline from ``_lazy_init`` and nowhere else, which is not
+    where device init actually lands on the two platforms that import flag_gems
+    at ``import torch_fl`` time: the re-entrant call reaches ``_lazy_init``
+    while ``flag_gems/__init__.py`` is still executing, every patch declines
+    silently against that half-built module -- the guard cannot tell a missing
+    name from an unfinished import -- the same call then sets ``_initialized``,
+    and the early exit makes sure no later call retries. On those platforms the
+    patches were installed by nobody until this function existed.
+
+    So the install is latched only once it has run against a module that has
+    finished importing, and every caller repeats it until then -- ``_lazy_init``
+    on both of its paths, ``init()``, and ``torch_fl``'s ecosystem phase, which
+    is where the eager import above returns. A repeat costs a ``sys.modules``
+    lookup while the module is absent, and each patch keeps its own idempotency
+    marker (``_torch_fl_*`` on the wrapper it installs), so a repeat against a
+    finished module is a no-op.
+    """
+    global _flaggems_patches_installed
+    if _flaggems_patches_installed:
+        return True
+    if not _flaggems_op_names_are_bound():
+        return False
+
     # FlagGems locates itself in the device namespace by the vendor's own device
     # string ("cuda" for nvidia), while torch_fl registers this accelerator as
     # "flagos". Its ops compare the two and hand the call back to ATen when they
@@ -264,21 +356,8 @@ def _lazy_init():
     _patch_flaggems_where_out()
     _patch_flaggems_slice_backward()
 
-    # Advanced indexing on this device takes the C++ dispatcher and needs no
-    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
-    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
-    # reach `IndexTensorKernelCuda` directly.
-    #
-    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
-    # CPython special method, so assigning to it also populates the type's
-    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
-    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
-    # takes the sequence-protocol branch in
-    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
-    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
-    # including for CPU tensors, in a process that merely touched a non-CPU
-    # device. Restoring the attribute afterwards does not undo it; only never
-    # assigning it does.
+    _flaggems_patches_installed = True
+    return True
 
 
 from .random import *  # noqa: F403, E402
