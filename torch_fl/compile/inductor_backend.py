@@ -300,7 +300,7 @@ def pin_static_cuda_launcher() -> bool:
 
 
 def pin_compile_threads() -> bool:
-    """Keep vendor-driver compilation in one process on a native accelerator.
+    """Keep vendor-driver compilation in one process where a worker cannot cope.
 
     ``flagos_compile_backend`` scopes ``compile_threads = 1`` into its own
     compiles, which covers ``torch.compile(backend="flagos")`` but *not*
@@ -324,10 +324,13 @@ def pin_compile_threads() -> bool:
 
     An explicit ``TORCHINDUCTOR_COMPILE_THREADS`` stays authoritative: Inductor
     turns it into the very config value this would write, so the pin steps aside
-    either way. Only the vendor compilers that need it are pinned -- GCU, PPU,
-    and MThreads FlagTree on MUSA -- so a CUDA-like build keeps upstream's
-    parallel compile. The pin is needed for the CUDA-shaped PPU too, which is why
-    the test is the vendor backend and not ``is_native_accelerator()``.
+    either way. The vendor compilers that need it are pinned -- GCU, PPU, and
+    MThreads FlagTree on MUSA -- and so is a CPU-only torch on the cuda platform.
+    A CUDA-like build whose torch *does* carry CUDA kernels keeps upstream's
+    parallel compile: its worker links the nvidia Triton backend and finds its
+    driver without torch_fl, so there is nothing to work around. The pin is
+    needed for the CUDA-shaped PPU too, which is why the test is the vendor
+    backend and not ``is_native_accelerator()``.
 
     Returns whether the pin applied a value.
     """
@@ -335,6 +338,7 @@ def pin_compile_threads() -> bool:
         return False
 
     from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
     if ACCELERATOR == "gcu":
@@ -344,6 +348,23 @@ def pin_compile_threads() -> bool:
         vendor_pinned = backend == "ppu" or (
             ACCELERATOR == "musa" and backend == "mthreads"
         )
+
+    # The default FlagGems-primary CUDA wheel links the CPU-only pip torch, where
+    # `torch.cuda.is_available()` is torch_fl's own shim. The compile worker
+    # imports torch and triton but never torch_fl, so that probe answers False
+    # there and the nvidia Triton driver reports no active backend -- the same
+    # cold-compile failure as the vendors above, on a platform whose *torch* is
+    # the thing that is missing. Autoload's `torch.backends` entry point is the
+    # real cure, but it is disabled wherever `TORCH_DEVICE_BACKEND_AUTOLOAD=0`
+    # (the documented launch env), so pinning here is what keeps the default
+    # `backend="inductor"` entry point -- transformers' CompiledFlexAttention,
+    # for one -- working in that configuration.
+    #
+    # Scoped to the cuda platform: every non-CUDA build's torch answers False to
+    # this probe as well, so gating on the probe alone would pin the vendors that
+    # are deliberately left parallel.
+    if not vendor_pinned and ACCELERATOR == "cuda" and not _torch_has_cuda_kernels():
+        vendor_pinned = True
     if not vendor_pinned:
         return False
 

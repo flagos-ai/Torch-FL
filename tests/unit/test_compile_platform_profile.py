@@ -1229,8 +1229,36 @@ def test_pin_compile_threads_on_musa(as_musa, monkeypatch):
 
 
 @pytest.mark.anyplatform
-def test_pin_compile_threads_leaves_a_cuda_like_build_alone(as_cuda, monkeypatch):
-    """CUDA-like builds keep upstream's parallel compile."""
+def test_pin_compile_threads_on_cpu_torch_cuda_platform(as_cuda, monkeypatch):
+    """The default FlagGems-primary CUDA wheel must pin too.
+
+    That wheel links the CPU-only pip torch, so `torch.cuda.is_available()` is
+    torch_fl's own shim. The compile worker imports torch+triton but never
+    torch_fl, so the nvidia Triton driver there finds no active backend and a
+    *cold* Triton cache dies in `set_driver_to_gpu()` -- measured on A100 as
+    `test_flex_attention_with_grads`, which passes once the cache is warm. The
+    load-bearing input is the torch, not the platform, so the pin keys on
+    `_torch_has_cuda_kernels()`.
+    """
+    monkeypatch.setattr(
+        "torch_fl.compile.device_interface._torch_has_cuda_kernels", lambda: False
+    )
+    applied, threads = _run_threads_pin(monkeypatch, backend="cuda")
+    assert applied is True
+    assert threads == 1
+
+
+@pytest.mark.anyplatform
+def test_pin_compile_threads_leaves_a_cuda_kernel_build_alone(as_cuda, monkeypatch):
+    """A cuda platform whose torch has CUDA kernels keeps upstream's parallelism.
+
+    Its worker links the nvidia Triton backend and finds its driver without
+    torch_fl, so there is nothing to work around and serializing would only cost
+    compile time.
+    """
+    monkeypatch.setattr(
+        "torch_fl.compile.device_interface._torch_has_cuda_kernels", lambda: True
+    )
     applied, threads = _run_threads_pin(monkeypatch, backend="cuda")
     assert applied is False
     assert threads == 32
