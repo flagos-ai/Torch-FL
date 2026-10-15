@@ -231,11 +231,12 @@ if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
 fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
-# reason above. numpy is deliberately not listed: the CPU torch wheel does not
-# pull it in, and nothing on this path imports it -- FlagGems' GCU route and the
-# integration tests are both numpy-free. pip still warns that flag_gems declares
-# a numpy requirement it cannot satisfy; that warning is expected here and is not
-# a failure, because flag_gems is installed with --no-deps.
+# reason above. numpy is deliberately not listed here: flag_gems goes in with
+# --no-deps, this script imports none, and the one the model-test stack pulls in
+# is installed after the wheel by integration_test_dependencies in
+# .github/configs/gcu.yml, so its pin lives in a single place. pip still warns
+# that flag_gems declares a numpy requirement it cannot satisfy at this point;
+# that warning is expected and is not a failure.
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'

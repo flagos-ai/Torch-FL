@@ -50,10 +50,25 @@ integration_environment:
   MODEL_PATH: /models/Qwen3-0.6B
 
 # GCU builds and tests the same wheel in one hardware job, against the isolated
-# CPU-PyTorch environment set_env.sh provisions. That environment does not carry
-# pytest, so the pipeline installs it after the wheel.
+# CPU-PyTorch environment set_env.sh provisions. That environment carries
+# neither pytest nor the model-test stack, so the pipeline installs both after
+# the wheel.
+#
+# The model-test stack is what the `inference` and `training` manifest entries
+# need, and they are shared entries now: every platform loads Qwen3-0.6B through
+# transformers on the same mount, so a platform whose hook does not provision it
+# fails at import rather than at an operator. The mount carries no tokenizer.json
+# -- following the same reason set_env_ppu.sh records -- so AutoTokenizer
+# converts the slow sentencepiece form, which needs one of the two backends
+# (sentencepiece here) and protobuf for the spm proto.
+#
+# numpy is listed explicitly and pinned <2. It arrives as a transformers
+# dependency, GCU's hook deliberately never installs it (set_env_gcu.sh), and an
+# unconstrained pull takes 2.x, which breaks the stock +cpu torch C extensions
+# at import (.github/constraints.txt). transformers stays <5 for the Qwen3
+# slow-to-fast regression set_env_ppu.sh documents.
 integration_test_dependencies:
-  - python -m pip install pytest
+  - python -m pip install pytest "transformers>=4.51,<5" "numpy<2" sentencepiece tiktoken protobuf
 
 container_options: >-
   --privileged

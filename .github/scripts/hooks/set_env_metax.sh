@@ -211,6 +211,17 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # (documented in set_env_musa.sh:176-178).
   python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
 
+  # The model-test stack the shared `inference` and `training` manifest entries
+  # need. They load Qwen3-0.6B through transformers on every platform now, so a
+  # platform whose provisioning skips it fails at import rather than at an
+  # operator. Pinned the way set_env_ppu.sh documents: the mount has no
+  # tokenizer.json, so AutoTokenizer converts the slow sentencepiece form, which
+  # needs one backend (sentencepiece here) plus protobuf for the spm proto, and
+  # transformers stays <5 for the Qwen3 slow-to-fast regression. No numpy pin
+  # here: <2.0 is installed above and satisfies transformers' floor.
+  pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
+    'transformers>=4.51,<5' sentencepiece tiktoken protobuf
+
   # --- FlagTree: the Triton build carrying the "metax" backend ----------------
   #
   # The MetaX wheel supplies the backend used by FlagGems. Install only a

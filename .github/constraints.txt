@@ -32,6 +32,11 @@ torch==2.10.0
 # makes it hold for the transitive pull too.
 numpy<2
 
-# The floor the agnostic-checks job and the hardware venvs use: Qwen3 model_type
-# support landed in transformers 4.51.
-transformers>=4.51
+# The range the agnostic-checks job and the hardware venvs use. 4.51 is the floor
+# because that is where Qwen3 model_type support landed. 5.x is excluded because
+# its TokenizersBackend rewrite breaks the slow-to-fast tokenizer conversion the
+# mounted checkpoints need even with sentencepiece/tiktoken installed;
+# set_env_ppu.sh carries the detail and the upstream discussion. Both ends have
+# to stay pinned -- an install that leaves either open picks whichever of the two
+# failure modes is currently latest on the index.
+transformers>=4.51,<5
