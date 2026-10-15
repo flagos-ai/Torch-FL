@@ -217,6 +217,18 @@ void SyncPeerCopyVisibility(const at::Tensor& src, const at::Tensor& dst) {
   // backends get the same guarantee from cudaMemcpy's own semantics, and a
   // device-wide sync there would be a real cost on every peer copy.
   ::DeviceSynchronize();
+#elif defined(USE_KUNLUNXIN)
+  // The Kunlunxin peer copy is known to lose its payload: the two-device
+  // `comm.scatter`/`comm.gather` roundtrip moves rows 2-3 of a 4x4 float tensor
+  // through flagos:1 and reads them back as uninitialized memory, while rows 0-1,
+  // which never left flagos:0, are exact and the single-device roundtrip is
+  // byte-exact (issue #544, run 38723076856). The XPU SDK exports no stream
+  // query, so the only barrier available is the device-wide one -- the same call
+  // the kunlunxin arm of BlockingCopyGuard in this file already makes. This arm
+  // is the ordering half of the fix; whether it is also the *sufficient* half is
+  // what the kunlunxin pipeline run on issue #544 decides. Skipped for a
+  // same-device copy, so only the peer path pays it.
+  ::DeviceSynchronize();
 #endif
 }
 
