@@ -520,8 +520,24 @@ def patch_flagtree_enflame_for_flagos() -> bool:
         device=torch.device("flagos", flagos.current_device()),
     )
 
-    # 4. Pin the driver's device lookups.
+    # 4. Pin the driver's device lookups, then let COMPILE_ARCH short-circuit
+    #    the driver's own torch-facing construction path.
+    #
+    #    The redirects above are in-process, and inductor compiles in a child
+    #    process: SubprocPool spawns its worker with subprocess.Popen, which
+    #    inherits the environment but imports torch only -- never torch_fl. So
+    #    the worker has no torch.gcu, and every FlagTree construction that reads
+    #    it dies there. GCUDriver.__init__ is the first one: without
+    #    COMPILE_ARCH it takes its else branch and calls
+    #    torch.gcu.current_device() out of backend.py, raising `AttributeError:
+    #    module 'torch' has no attribute 'gcu'` before any kernel is compiled.
+    #    With COMPILE_ARCH set the branch hardcodes the device index and the
+    #    lookup is never reached.
+    #
+    #    Written to os.environ rather than patched in this process, because the
+    #    environment is the only channel that reaches the worker.
     _pin_vendor_driver_to_flagos(flagos, _backend.GCUDriver, wrapper_driver_cls)
+    _derive_compile_arch(lambda: wrapper_driver_cls().get_arch())
 
     return True
 

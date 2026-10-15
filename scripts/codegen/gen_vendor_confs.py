@@ -1722,6 +1722,28 @@ NATIVE_TRITON_GAPS = {
         "sort.stable",
         "sub.Tensor",
         "sub_.Tensor",
+        # `rsub` is the reflected `other - self` and belongs to the same family:
+        # its FlagGems kernel is the same pointwise template and fails on an
+        # integral operand for the same reason. Measured on the S60 through the
+        # HF bert cohort, which is what made it visible --
+        # `1 - unfinished_sequences` over the int64 mask transformers builds at
+        # generation/utils.py:3257 reaches `Tensor.__rsub__` ->
+        # flag_gems/ops/rsub.py:45 -> GCU300's
+        # `64-bit data type not supported on GCU300!` at
+        # triton/backends/enflame/toolkit.py:146. Four bert tests
+        # (assisted-decoding x2, assisted_decoding_sample,
+        # generate_continue_from_inputs_embeds) failed there and nowhere else.
+        #
+        # Unlike the rest of this group, `rsub` has a topsaten entry point of its
+        # own -- `topsatenRsub`, with the reflected operand order -- so gapping it
+        # routes to `gcu` rather than to `none`. That kernel is what
+        # codegen_gcu.py's T_BINARY_RSUB_SCALAR emits; the two changes are one
+        # fix and neither half works alone. Gapping without the kernel raises
+        # `rsub.Scalar: backend not registered` (measured with
+        # `FLAGOS_OP_rsub__Scalar=gcu`), and the kernel without the gap is never
+        # reached because FlagGems wins the route.
+        "rsub.Scalar",
+        "rsub.Tensor",
         # The out= spelling is gapped for ATen's out= contract and not for a
         # throughput one. FlagGems' `where_self_out` computes the broadcast
         # shape only when `out is None`; handed a destination it passes it
