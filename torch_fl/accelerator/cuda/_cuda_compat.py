@@ -214,6 +214,7 @@ _ATTR_MP_COUNT = 16
 _ATTR_L2_CACHE_SIZE = 38
 _ATTR_MAX_THREADS_PER_MP = 39
 _ATTR_WARP_SIZE = 10
+_ATTR_MAX_THREADS_PER_BLOCK = 1
 
 
 @dataclass
@@ -222,7 +223,16 @@ class _CudaDeviceProperties:
 
     Exposes the fields FlagGems reads: ``name``, ``major``, ``minor``,
     ``multi_processor_count``, ``L2_cache_size``, ``total_memory``,
-    ``warp_size``, ``max_threads_per_multi_processor``.
+    ``warp_size``, ``max_threads_per_multi_processor`` -- and
+    ``max_threads_per_block``, which Inductor reads.
+
+    The last one is not a FlagGems field. ``torch._inductor.utils.get_max_numwarps``
+    takes it off whatever ``torch.cuda.get_device_properties()`` returns, so on a
+    wheel whose ``torch.cuda`` is this shim the coordinate-descent tuner used by
+    ``mode="max-autotune"`` dies with ``AttributeError`` instead of compiling. A
+    CUDA-enabled torch answers it from ``cudaDeviceProp``; here it comes from the
+    same Driver API attribute, which reports 1024 on every device this shim
+    describes -- including the A100 CI lane.
     """
 
     name: str = ""
@@ -233,6 +243,9 @@ class _CudaDeviceProperties:
     L2_cache_size: int = 40 * 1024 * 1024
     warp_size: int = 32
     max_threads_per_multi_processor: int = 2048
+    # CUDA's documented ceiling for one block of threads. Every device this shim
+    # describes reports 1024, so the default and the queried value agree.
+    max_threads_per_block: int = 1024
     is_integrated: bool = False
     is_multi_gpu_board: bool = False
     gcnArchName: str = ""
@@ -358,6 +371,9 @@ def _query_device_properties(device_index: int) -> _CudaDeviceProperties:
     props.warp_size = attr(_ATTR_WARP_SIZE, props.warp_size)
     props.max_threads_per_multi_processor = attr(
         _ATTR_MAX_THREADS_PER_MP, props.max_threads_per_multi_processor
+    )
+    props.max_threads_per_block = attr(
+        _ATTR_MAX_THREADS_PER_BLOCK, props.max_threads_per_block
     )
 
     total = ctypes.c_size_t(0)
