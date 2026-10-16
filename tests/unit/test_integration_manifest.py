@@ -78,6 +78,21 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    # TEMPORARY. `mps_env_probe` is a diagnostic, not a group: the hosted
+    # macos-14 runner aborts the MPS operator group before pytest prints a
+    # summary, so this step re-runs the same shapes through a probe that reports
+    # each diff and always exits 0. It exists to measure that runner and comes
+    # out of both the manifest and this table once the behaviour is understood.
+    "mps_env_probe": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "kunlunxin",
+        "metax",
+        "musa",
+        "ppu",
+    ),
     # `vendor_ops` is the per-platform operator group family; every platform
     # carries its own variant, so a platform named in none of them is the gap.
     # MPS runs its operator suite under the `backend_ops` id below rather than
