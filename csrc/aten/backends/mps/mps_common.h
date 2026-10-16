@@ -104,6 +104,57 @@ bool MpsSupportsReduceDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
 
+// Whether an aten `_softmax` over a tensor of `self_dtype` computes exactly on
+// the MPSGraph path, and the dtype the result comes back in.
+//
+// `_softmax(self, dim, half_to_float)` returns the operand's own dtype, or
+// float when `half_to_float` is set: that flag is the CUDA spelling of
+// "accumulate in float and hand back float", and it is the one host argument
+// here that decides the result dtype rather than the tensor. A body that takes
+// it therefore widens the operand to the dtype it computed in, which is what
+// the reference does as well.
+//
+// The widths are the ones the graph was measured on (Apple M5, four rows of
+// 4096 values spread over [-6, 6], against a reference softmax that accumulates
+// in float and rounds once):
+//
+//   float32   within 29 ulp, 1.9e-6 relative
+//   float16   bit-identical on every element above 1e-4, and the rest differ by
+//             at most one subnormal (4.7e-41) -- MPSGraph accumulates a half
+//             reduction in float, the way the reference does, so half does not
+//             need the round-trip that would otherwise be the safe answer
+//   bfloat16  declined. A bfloat16 graph returned a denormal for every element
+//             instead of the reference's value on this SDK, so the graph's
+//             bfloat16 path is not one this backend can vouch for; the
+//             round-trip keeps it correct until it is.
+//
+// float64 has no MPSGraph element type at all, and an integral or bool operand
+// is a NotImplementedError in the reference rather than a result, so both take
+// the round-trip and get it.
+bool MpsSupportsSoftmaxDtype(
+    at::ScalarType self_dtype,
+    bool half_to_float,
+    at::ScalarType* out_dtype);
+
+// Whether `pow(self, exponent)` computes exactly on the MPSGraph path, on the
+// same measurement as the softmax gate above: `x ** 2` was exact and `x ** 2.5`
+// within 1 ulp in float32, and both matched the reference bit for bit in
+// float16 -- including the NaN a negative base to a fractional exponent
+// produces, which is where a naive `exp(log(x) * e)` composition would not be.
+//
+// An integral operand is declined rather than measured: aten raises on a
+// negative exponent there ("Integers to negative integer powers are not
+// allowed") and promotes to float on a fractional one, and MPSGraph's power has
+// no integral form to match either answer with. The exponent itself is the
+// constant MpsConstant carries, so a complex one is declined by the same rule
+// every other scalar operand is.
+bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent);
+
+// The rank `dim` names once negative positions are resolved against `self`'s
+// rank. False when `dim` is out of range for the tensor, which is the reference's
+// error to report: the wrappers decline that case without touching the input.
+bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
+
 // Whether a matrix multiplication computes exactly on the MPSGraph path. Both
 // operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
 // and a mismatched pair is a reference error rather than a result -- and that
@@ -182,6 +233,14 @@ MPSGraphTensor* MpsConstant(
     const at::Scalar& value,
     at::ScalarType dtype);
 
+// Whether `value` is one MpsConstant can express in `dtype`: integral on an
+// integral operand -- a fractional constant would promote the aten result off
+// the operand's dtype -- within the range a double names exactly, and never
+// complex. A body that has to decide *before* it has a graph -- a dtype
+// predicate in codegen -- asks this instead of building the node and finding out,
+// which is what keeps one predicate and one implementation of the rule.
+bool MpsConstantExact(const at::Scalar& value, at::ScalarType dtype);
+
 // `tensor * factor` as an MPSGraph node, with `factor` the host scalar an aten
 // `alpha` (or a scalar operand) becomes. Returns `tensor` itself for a factor of
 // 1 -- the common case -- so no node and no constant appear then. nil when the
@@ -190,6 +249,17 @@ MPSGraphTensor* MpsScaledByScalar(
     MPSGraph* graph,
     MPSGraphTensor* tensor,
     const at::Scalar& factor,
+    at::ScalarType dtype);
+
+// `tensor ** exponent` as an MPSGraph node, with `exponent` the host scalar an
+// aten `pow.Tensor_Scalar` carries. Returns `tensor` itself for an exponent of
+// 1 -- which is `x ** 1` for every x, NaN and -0.0 included -- so no node and
+// no constant appear then, the same short-circuit MpsScaledByScalar takes.
+// nil when the exponent cannot be expressed in `dtype`: see MpsConstant.
+MPSGraphTensor* MpsPowByScalar(
+    MPSGraph* graph,
+    MPSGraphTensor* tensor,
+    const at::Scalar& exponent,
     at::ScalarType dtype);
 
 // One string naming a graph *body*: the op, plus every host value the body bakes

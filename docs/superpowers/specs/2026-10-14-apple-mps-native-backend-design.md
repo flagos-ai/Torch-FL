@@ -276,8 +276,44 @@ stage-3 `gemm` increment is
 verified with `tests/integration/ops/test_mps_gemm.py` (CPU-equal across
 f32/f16/bf16, the graph-transpose and the copied slice case distinguished by
 the allocator's peak, the declined shapes and integral/float64 round-trips, and
-the dispatch log naming `mps`). `conv` and `softmax` are the rest of stage 3,
-and stage 4 is open. There is still no CI job: the lane below needs a
+the dispatch log naming `mps`).
+
+Stage 3 then added `softmax` and the two elementwise unaries a small model
+reaches for beside it, `neg` and `pow.Tensor_Scalar`, each measured on the M5
+against the CPU round-trip the previous commit's composite path paid -- a
+device-to-host copy, the CPU kernel, and a host-to-device copy back, which is
+what a device-resident model pays rather than a bare CPU kernel. A
+(1, 16, 512, 512) attention-score softmax fell from 3.04 ms to 1.03 ms, the
+(1, 512, 1024) `pow(x, 2)` of a LayerNorm variance from 1.35 ms to 0.38 ms, and
+the (1, 16, 512, 64) `neg` a `rotate_half` is built from from 0.48 ms to
+0.33 ms -- the last one the smallest win of the three because a 512x64 slice is
+where the copy is cheap relative to the schedule. The largest single item on the
+layer is still `embedding` on the fallback (44 ms of its dispatch time), which
+this stage did not touch.
+
+Two decisions narrow the surface and are worth recording. **`softmax.int` is
+not registered because it cannot be.** On this PyTorch build it is
+`CompositeImplicitAutograd`: the dispatcher decomposes it above the backend key,
+so a kernel for it is never called and there is no wrapper in
+`csrc/aten/generated/register.inc` to fill. What does reach `PrivateUse1` --
+what `torch.softmax`, `F.softmax`, SDPA and `torch.softmax(dtype=...)` all lower
+to -- is `aten._softmax(self, dim, half_to_float)`, so that one spelling is the
+whole category. `softmax.int_out` joins the other `.out` forms on the fallback,
+because serving one means writing into a tensor the caller owns. **`bfloat16`
+is declined for both `softmax` and `pow`**, on a measurement rather than a
+tolerance: a bfloat16 MPSGraph softmax returned a denormal for every element and
+a bfloat16 `pow` returned values up to 36 from the reference on the SDK in use,
+while float16 was bit-identical and float32 within 29 ulp. The gate takes
+float32 and float16; everything else keeps the round-trip, which stays correct.
+
+This increment is verified with `tests/integration/ops/test_mps_softmax.py`,
+`test_mps_pow.py`, and the extended `test_mps_unary.py`: CPU-equal over every
+axis including the negative spellings, f32/f16 accepted with bf16/f64/integral/
+bool declined into the reference's own values and errors, an empty operand, a
+rank-0 operand, a strided operand, plan reuse across axes, exponents and dtypes,
+and the dispatch log naming `mps` for the public `torch.softmax` spelling rather
+than only for `_softmax`. `conv` is the last lane of stage 3, and stage 4 is
+open. There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
 

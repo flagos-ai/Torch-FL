@@ -13,6 +13,7 @@
 // backends_mps.conf may name for this backend, so the conf cannot claim a route
 // this file does not register.
 
+  m.impl("_softmax", WrapperPrivSoftmax);
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
@@ -21,6 +22,8 @@
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("neg", WrapperNeg);
+  m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);

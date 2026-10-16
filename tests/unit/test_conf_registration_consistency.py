@@ -344,18 +344,23 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "backends_mps.conf may only route ops to 'mps' or 'none'"
     )
     # One op per MPSGraph category the codegen emits (unary, binary,
-    # binary_scalar, reduce, gemm). A category whose entry silently dropped would
-    # leave its ops on cpu_fallback and be invisible in a count-only check. Both
-    # mm and bmm are listed because the gemm category emits one kernel per op:
-    # a rank guard that reached one of them and not the other is exactly what a
-    # single representative case would miss.
+    # binary_scalar, reduce, gemm, softmax, pow_scalar). A category whose entry
+    # silently dropped would leave its ops on cpu_fallback and be invisible in a
+    # count-only check. Both mm and bmm are listed because the gemm category
+    # emits one kernel per op: a rank guard that reached one of them and not the
+    # other is exactly what a single representative case would miss. ``neg`` is
+    # the second op of the ``unary`` category -- the same template, so it is the
+    # category's registration that a representative would otherwise not cover.
     for op in (
         "abs",
+        "neg",
         "add.Tensor",
         "sub.Scalar",
         "mul.Tensor",
         "mean.dim",
         "sum.dim_IntList",
+        "_softmax",
+        "pow.Tensor_Scalar",
         "mm",
         "bmm",
     ):
@@ -457,10 +462,14 @@ def test_conf_route_counts_are_stable():
         "iluvatar": _derived_iluvatar_counts(),
         # MPS is a native vendor backend at stage 3: the codegen'd
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
-        # ``binary_scalar``, ``reduce`` and ``gemm`` categories generate (11 ops
-        # so far -- stage 3 opened with ``mm`` and ``bmm``), so the conf routes
-        # those to ``mps`` and every other op to ``none``.
-        "mps": {"mps": 11, "none": 2026},
+        # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax`` and ``pow_scalar``
+        # categories generate (14 ops so far -- stage 3 added ``mm``/``bmm`` and
+        # then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``), so the conf
+        # routes those to ``mps`` and every other op to ``none``. The
+        # ``softmax`` category is registered under ``_softmax`` alone because
+        # ``softmax.int`` is CompositeImplicitAutograd and never reaches a
+        # backend key; see scripts/codegen/codegen_mps.py.
+        "mps": {"mps": 14, "none": 2023},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

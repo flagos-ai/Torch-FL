@@ -94,6 +94,43 @@ bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype)
       self_dtype == at::kBFloat16;
 }
 
+bool MpsSupportsSoftmaxDtype(
+    at::ScalarType self_dtype,
+    bool half_to_float,
+    at::ScalarType* out_dtype) {
+  if (out_dtype == nullptr) {
+    return false;
+  }
+  // The measured widths; see the header for what bfloat16 does instead.
+  if (self_dtype != at::kFloat && self_dtype != at::kHalf) {
+    return false;
+  }
+  *out_dtype = half_to_float ? at::kFloat : self_dtype;
+  return true;
+}
+
+bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent) {
+  if (self_dtype != at::kFloat && self_dtype != at::kHalf) {
+    return false;
+  }
+  // A float constant carries any real the caller can hand aten, so the only
+  // exponent this declines is a complex one -- which MpsConstant declines too.
+  return MpsConstantExact(exponent, self_dtype);
+}
+
+bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  const int64_t rank = self.dim();
+  const int64_t resolved = dim < 0 ? dim + rank : dim;
+  if (resolved < 0 || resolved >= rank) {
+    return false;
+  }
+  *out = resolved;
+  return true;
+}
+
 MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
   if (t.dim() >= 2) {
     // Not a `contiguous()` call: this is the layout test. The tensor's own last
@@ -215,33 +252,42 @@ MPSGraphTensor* MpsFlatten(MPSGraph* graph, MPSGraphTensor* tensor, int64_t coun
   return [graph reshapeTensor:tensor withShape:FlatShape(count) name:nil];
 }
 
+bool MpsConstantExact(const at::Scalar& value, at::ScalarType dtype) {
+  MPSDataType ignored;
+  if (!MpsDataTypeOf(dtype, &ignored)) {
+    return false;
+  }
+  if (c10::isIntegralType(dtype, /*includeBool=*/false)) {
+    // An integral constant has to be integral and exactly representable: a
+    // fractional one promotes the aten result off the operand's dtype, and past
+    // 2^53 a double no longer names the integer the scalar held.
+    if (!value.isIntegral(/*includeBool=*/true)) {
+      return false;
+    }
+    const int64_t integer = value.toLong();
+    constexpr int64_t kLargestExact = int64_t{1} << 53;
+    return integer <= kLargestExact && integer >= -kLargestExact;
+  }
+  return !value.isComplex();
+}
+
 MPSGraphTensor* MpsConstant(
     MPSGraph* graph,
     const at::Scalar& value,
     at::ScalarType dtype) {
+  if (!MpsConstantExact(value, dtype) || graph == nil) {
+    return nil;
+  }
   MPSDataType mps_dtype;
-  if (graph == nil || !MpsDataTypeOf(dtype, &mps_dtype)) {
+  if (!MpsDataTypeOf(dtype, &mps_dtype)) {
     return nil;
   }
   if (c10::isIntegralType(dtype, /*includeBool=*/false)) {
-    // An integral operand takes an integral constant only. A fractional one
-    // would promote the aten result off the operand's dtype -- `int + 0.5` is a
-    // float tensor -- which an integral element type cannot express, so the
-    // constant is declined and the op takes the CPU round-trip.
-    if (!value.isIntegral(/*includeBool=*/true)) {
-      return nil;
-    }
-    const int64_t integer = value.toLong();
-    constexpr int64_t kLargestExact = int64_t{1} << 53;
-    if (integer > kLargestExact || integer < -kLargestExact) {
-      return nil;
-    }
-    return [graph constantWithScalar:static_cast<double>(integer)
+    // MpsConstantExact has already established that the value names an integer
+    // this dtype can hold exactly.
+    return [graph constantWithScalar:static_cast<double>(value.toLong())
                                shape:FlatShape(1)
                             dataType:mps_dtype];
-  }
-  if (value.isComplex()) {
-    return nil;
   }
   return [graph constantWithScalar:value.toDouble()
                              shape:FlatShape(1)
@@ -268,6 +314,31 @@ MPSGraphTensor* MpsScaledByScalar(
   return [graph multiplicationWithPrimaryTensor:tensor
                                 secondaryTensor:constant
                                            name:nil];
+}
+
+MPSGraphTensor* MpsPowByScalar(
+    MPSGraph* graph,
+    MPSGraphTensor* tensor,
+    const at::Scalar& exponent,
+    at::ScalarType dtype) {
+  if (tensor == nil) {
+    return nil;
+  }
+  if (exponent.equal(1.0)) {
+    return tensor;
+  }
+  // One MPSGraph selector, `powerWithPrimaryTensor:`, takes any real exponent
+  // as a broadcast one-element constant. It is not a composition of exp and
+  // log: those would have to agree with the reference on the sign of a
+  // negative base raised to a fractional power, which is where the measured
+  // NaN comes from.
+  MPSGraphTensor* constant = MpsConstant(graph, exponent, dtype);
+  if (constant == nil) {
+    return nil;
+  }
+  return [graph powerWithPrimaryTensor:tensor
+                       secondaryTensor:constant
+                                  name:nil];
 }
 
 bool MpsBufferOf(const at::Tensor& t, id<MTLBuffer>* buffer, size_t* byteOffset) {
