@@ -5,6 +5,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #pragma once
+#include "dcu_stream.h"
 
 #include <c10/core/DeviceType.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
@@ -17,8 +18,9 @@
 #include "runtime/accelerator/ascend/acl_stream.h"
 #endif
 
-// Real c10::cuda:: stream/event plumbing. Gated the same way as
-// backends/cuda_memory.h's delegation to
+// Real c10::cuda:: stream/event plumbing. Boxed DCU uses the separately gated
+// c10::hip provider before these fallback branches. Gated the same way as
+// runtime/allocator/caching_device_allocator.cc's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
 // exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see

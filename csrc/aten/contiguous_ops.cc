@@ -117,38 +117,49 @@ void copy_strided_via_host(
     const at::Tensor& result,
     c10::MemoryFormat memory_format) {
   size_t storage_size = self.storage().nbytes();
-  at::Tensor storage_cpu = at::empty(
-      {static_cast<int64_t>(storage_size)},
-      at::TensorOptions().dtype(at::kByte).device(at::kCPU));
+  at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
   if (storage_size > 0) {
+    at::Tensor storage_cpu = at::empty(
+        {static_cast<int64_t>(storage_size)},
+        at::TensorOptions().dtype(at::kByte).device(at::kCPU));
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::CopyBytesOnCurrentStream(
+        storage_cpu.data_ptr(), self.storage().data(), storage_size,
+        MemcpyDeviceToHost);
+#else
     BlockingMemcpy(
         storage_cpu.data_ptr(),
         self.storage().data(),
         storage_size,
         MemcpyDeviceToHost,
         self);
+#endif
+    cpu_view.set_(
+        storage_cpu.storage(),
+        self.storage_offset(),
+        self.sizes(),
+        self.strides());
   }
-
-  at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
-  cpu_view.set_(
-      storage_cpu.storage(),
-      self.storage_offset(),
-      self.sizes(),
-      self.strides());
 
   auto cpu_contig = at::empty(
       self.sizes(),
       self.options().device(at::kCPU).memory_format(memory_format));
   cpu_contig.copy_(cpu_view);
 
-  size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
-  if (nbytes > 0) {
+  size_t result_nbytes = cpu_contig.numel() * cpu_contig.element_size();
+  if (result_nbytes > 0) {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::CopyBytesOnCurrentStream(
+        result.data_ptr(), cpu_contig.data_ptr(), result_nbytes,
+        MemcpyHostToDevice);
+#else
     BlockingMemcpy(
         result.data_ptr(),
         cpu_contig.data_ptr(),
-        nbytes,
+        result_nbytes,
         MemcpyHostToDevice,
         result);
+#endif
   }
 }
 #endif
@@ -261,6 +272,11 @@ at::Tensor clone(
       auto result = at::empty_like(self);
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+        c10::flagos::dcu::CopyDeviceBytes(
+            result.data_ptr(), result.device().index(), self.data_ptr(),
+            self.device().index(), nbytes);
+#else
         // Blocking, and against `self`'s device rather than whichever device is
         // ambient: a bare Memcpy only orders against the current device, so
         // cloning a flagos:1 tensor while flagos:0 is current copies the buffer
@@ -272,6 +288,7 @@ at::Tensor clone(
             nbytes,
             MemcpyDeviceToDevice,
             self);
+#endif
       } else if (nbytes > 0) {
         result.copy_(self);
       }
