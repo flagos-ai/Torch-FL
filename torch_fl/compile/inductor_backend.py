@@ -120,7 +120,16 @@ def _patch_native_cuda_probe() -> None:
     torch.cuda.is_available = torch.flagos.is_available
     # Read back by torch_fl._real_cuda_is_available, which has to tell this
     # redirect from a real CUDA runtime; the alias's guard depends on it.
-    torch.cuda._flagos_original_is_available = original
+    #
+    # An already-stashed copy wins: torch_fl's own earlier redirect (the
+    # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
+    # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this does,
+    # and storing *that* keeps a torch_fl lambda rather than torch's answer --
+    # which is the one value the copy exists to preserve, and reading it back as
+    # "there is real CUDA" would mislabel every native accelerator.
+    torch.cuda._flagos_original_is_available = getattr(
+        torch.cuda, "_flagos_original_is_available", original
+    )
     torch.cuda._flagos_native_patched = True
 
 

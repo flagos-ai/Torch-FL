@@ -979,6 +979,28 @@ class _DeviceProperties:
     """Minimal device properties object for compiler/runtime compatibility."""
 
     def __init__(self, device_id):
+        if _platform() == "tsingmicro":
+            # The TX runtime exposes no device-properties query at all -- the
+            # only tx* calls reachable from Python are device count/get/set,
+            # synchronize, malloc/free and the stream/event set -- so these are
+            # constants, matching the ones FlagGems' own tsingmicro descriptor
+            # reports (`_tsingmicro.get_device_properties`). Falling through to
+            # the Ascend arm below would name the device "Ascend NPU {id}" and
+            # report its AICore count as multi_processor_count, which inductor
+            # uses for its reduction-split heuristics and for its cache key.
+            self.name = "TX81"
+            self.multi_processor_count = 16
+            self.total_memory = 64 * 1024**3
+            self.major = 8
+            self.minor = 1
+            self.gcnArchName = self.name
+            self.warp_size = 16
+            self.L2_cache_size = 3 * 1024 * 1024
+            self.max_threads_per_multi_processor = 2048
+            self.regs_per_multiprocessor = 65536
+            self.shared_memory_per_multiprocessor = 0
+            return
+
         get_musa_properties = getattr(_C, "_get_musa_device_properties", None)
         if get_musa_properties is not None:
             props = get_musa_properties(device_id)

@@ -66,43 +66,39 @@ def test_the_guard_asks_the_helper_not_the_probe_it_wrote():
 
 
 def test_the_helper_reports_what_torch_said_before_the_redirect(monkeypatch):
-    """After the redirect, only the saved copy still answers for torch.
+    """The helper answers from the probe captured before any redirect.
 
-    `torch.cuda.is_available` is left saying `True` throughout: the helper must
-    ignore it and report the saved original, whichever way that original went.
+    Both the live attribute and the ``_flagos_original_is_available`` stash carry
+    a torch_fl lambda once it has run -- the stash is written from the *already
+    redirected* attribute, so it is torch_fl's value too. The helper must ignore
+    both and report what torch itself said, which is what
+    ``_TORCH_CUDA_PROBE`` preserves.
     """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
     monkeypatch.setattr(
-        torch.cuda,
-        "_flagos_original_is_available",
-        lambda: False,
-        raising=False,
+        torch.cuda, "_flagos_original_is_available", lambda: True, raising=False
     )
+    monkeypatch.setattr(torch_fl, "_TORCH_CUDA_PROBE", lambda: False)
     assert torch_fl._real_cuda_is_available() is False
 
-    monkeypatch.setattr(
-        torch.cuda,
-        "_flagos_original_is_available",
-        lambda: True,
-        raising=False,
+    # ... and the other way, so this is not passing by accident of one value.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch_fl, "_TORCH_CUDA_PROBE", lambda: True)
+    assert torch_fl._real_cuda_is_available() is True
+
+
+def test_the_captured_probe_is_the_one_torch_shipped():
+    """The capture must happen before torch_fl replaces the attribute.
+
+    torch's probe is the function ``torch.cuda`` defines; torch_fl's redirect is
+    a ``lambda`` defined in ``torch_fl``. A capture that ran too late holds the
+    lambda, which this catches without needing a particular device present.
+    """
+    probe = torch_fl._TORCH_CUDA_PROBE
+    assert probe is not None, "never captured"
+    assert getattr(probe, "__module__", "") != "torch_fl", (
+        f"captured torch_fl's own redirect ({probe!r}) instead of torch's probe"
     )
-    assert torch_fl._real_cuda_is_available() is True
-
-
-def test_the_helper_falls_back_when_nothing_redirected(monkeypatch):
-    """Without the patch there is no saved copy, and torch's own answer stands."""
-    monkeypatch.delattr(torch.cuda, "_flagos_original_is_available", raising=False)
-    calls = []
-
-    def is_available():
-        calls.append(1)
-        return True
-
-    monkeypatch.setattr(torch.cuda, "is_available", is_available)
-
-    assert torch_fl._real_cuda_is_available() is True
-    assert calls == [1]
 
 
 def test_vendor_device_aliases_cover_every_native_vendor():

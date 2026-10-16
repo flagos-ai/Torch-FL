@@ -133,6 +133,25 @@ def as_iluvatar(monkeypatch):
     return pp._ILUVATAR_PROFILE
 
 
+@pytest.fixture
+def as_tsingmicro(monkeypatch):
+    """Force every profile consumer onto the TsingMicro profile.
+
+    Like kunlunxin the reported device type is not the package key, but unlike
+    kunlunxin it is not "cuda" either, so nothing collides with the stock
+    CudaInterface. ACCELERATOR is patched alongside the profile because the
+    generated-code snippets branch on it directly.
+    """
+    for module in ("platform_profile", "device_interface", "inductor_codegen"):
+        monkeypatch.setattr(
+            f"torch_fl.compile.{module}.platform_profile",
+            lambda: pp._TSINGMICRO_PROFILE,
+            raising=False,
+        )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "tsingmicro")
+    return pp._TSINGMICRO_PROFILE
+
+
 # --- profile selection ------------------------------------------------------
 
 
@@ -147,6 +166,7 @@ def as_iluvatar(monkeypatch):
         ("gcu", pp._GCU_PROFILE),
         ("kunlunxin", pp._KUNLUNXIN_PROFILE),
         ("iluvatar", pp._ILUVATAR_PROFILE),
+        ("tsingmicro", pp._TSINGMICRO_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -180,6 +200,27 @@ def test_only_ascend_is_not_cuda_like():
     assert pp._CUDA_PROFILE.is_cuda_like
     assert pp._METAX_PROFILE.is_cuda_like
     assert pp._DCU_PROFILE.is_cuda_like
+    # The vendors with no CUDA runtime at all. Asserted together so adding one
+    # to _PROFILES without a profile that says so fails here.
+    for name in ("musa", "gcu", "kunlunxin", "tsingmicro"):
+        assert not getattr(pp, f"_{name.upper()}_PROFILE").is_cuda_like, name
+
+
+@pytest.mark.anyplatform
+def test_tsingmicro_target_and_package_key_differ():
+    """FlagTree's TXDA backend names the target and the package differently.
+
+    Measured on a TX8: ``driver.active.get_current_target()`` reports
+    ``GPUTarget(backend='txda', arch=1, warp_size=16)`` and TXDABackend.
+    supports_target accepts only ``"txda"``, while the backend is registered in
+    ``triton.backends.backends`` under ``"tsingmicro"``. Collapsing the two
+    breaks either the toolchain probe or the compile.
+    """
+    profile = pp._TSINGMICRO_PROFILE
+    assert profile.triton_device_type == "txda"
+    assert profile.triton_backend_key == "tsingmicro"
+    assert profile.vendor == "tsingmicro"
+    assert profile.is_cuda_like is False
 
 
 @pytest.mark.anyplatform
@@ -300,6 +341,52 @@ def test_generated_code_imports_the_iluvatar_stream_getter(as_iluvatar):
         "from torch_fl.compile.flagtree_shim import "
         "get_iluvatar_current_raw_stream as s"
     )
+
+
+@pytest.mark.anyplatform
+def test_raw_stream_comes_from_flagos_on_tsingmicro(as_tsingmicro, monkeypatch):
+    """The launch-path stream is the TX runtime's, read through torch.flagos.
+
+    There is no CUDA binding and no vendor raw-stream binding in ``_C`` (unlike
+    MUSA), so the value can only come from the flagos stand-in -- and it must be
+    the same one the eager FlagGems kernels launch on, or compiled and eager
+    kernels would not be ordered against each other.
+    """
+    from torch_fl.compile import device_interface as di
+
+    seen = []
+
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.get_tsingmicro_current_raw_stream",
+        lambda idx=None: seen.append(idx) or 0,
+    )
+
+    assert di._raw_stream(3) == 0
+    assert seen == [3]
+
+
+@pytest.mark.anyplatform
+def test_compute_capability_is_the_driver_arch_on_tsingmicro(
+    as_tsingmicro, monkeypatch
+):
+    """`cc` reaches Triton as GPUTarget.arch, which the TX driver owns."""
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(di, "_tsingmicro_arch", lambda: 1)
+    assert di.FlagOSDeviceInterface.get_compute_capability() == 1
+
+
+@pytest.mark.anyplatform
+def test_set_stream_is_a_noop_on_tsingmicro(as_tsingmicro, monkeypatch):
+    """One default queue per device: there is nothing to switch, and nothing
+    on the stand-in to call (it has no ``set_current``)."""
+    from torch_fl.compile import device_interface as di
+
+    monkeypatch.setattr(
+        torch.cuda, "set_stream", lambda *a, **k: pytest.fail("must not touch cuda")
+    )
+    di._set_stream(object())
+    di._set_stream_by_id(stream_id=7, device_index=0, device_type=1)
 
 
 @pytest.mark.anyplatform
@@ -1090,6 +1177,95 @@ def test_musa_device_op_overrides_emit_the_musa_raw_stream(as_musa):
     snippet = overrides.import_get_raw_stream_as("get_raw_stream")
     assert "current_acl_raw_stream" not in snippet
     assert "get_musa_current_raw_stream as get_raw_stream" in snippet
+
+
+@pytest.mark.anyplatform
+def test_tsingmicro_device_op_overrides_emit_the_txda_raw_stream(as_tsingmicro):
+    """Same trap as MUSA/GCU: a non-CUDA build that is not Ascend.
+
+    Selecting the raw-stream snippet on `is_cuda_like` alone emitted either the
+    ACL getter or the CUDA binding into generated TX code; the CUDA one is the
+    failure that made `torch.compile` unusable here
+    (``ImportError: cannot import name '_cuda_getCurrentRawStream'``).
+    """
+    from torch_fl.compile import inductor_codegen as ic
+
+    overrides = ic._device_op_overrides()
+    assert isinstance(overrides, ic.FlagOSDeviceOpOverrides)
+    assert not isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
+
+    snippet = overrides.import_get_raw_stream_as("get_raw_stream")
+    assert "current_acl_raw_stream" not in snippet
+    assert "_cuda_getCurrentRawStream" not in snippet
+    assert "get_tsingmicro_current_raw_stream as get_raw_stream" in snippet
+
+
+@pytest.mark.anyplatform
+def test_triton_warp_size_patch_uses_the_driver_on_tsingmicro(
+    as_tsingmicro, monkeypatch
+):
+    """Inductor's GPUTarget must carry the vendor's warp size, not CUDA's 32.
+
+    ``triton_heuristics`` builds it as ``GPUTarget(device_type, cc,
+    cc_warp_size(cc))`` and ``cc_warp_size`` hard-codes 32 for every non-HIP
+    build. Measured on a TX8: the target handed to ``triton.compile`` was
+    ``warp_size=32`` while ``driver.active.get_current_target()`` reported 16 --
+    wrong-but-running, so it mis-shapes the kernel instead of failing.
+    """
+    import types
+
+    from torch._inductor.runtime import triton_heuristics
+    from triton.runtime import driver as triton_driver
+    from torch_fl.compile import device_interface as di
+
+    # `driver.active` is a read-only property over `_active`, so seed the slot it
+    # reads; monkeypatch restores whatever was there.
+    monkeypatch.setattr(
+        triton_driver,
+        "_active",
+        types.SimpleNamespace(
+            get_current_target=lambda: types.SimpleNamespace(
+                backend="txda", arch=1, warp_size=16
+            )
+        ),
+    )
+
+    di._patch_triton_warp_size()
+
+    assert triton_heuristics.cc_warp_size(1) == 16
+    # Idempotent: a second call must not stack another wrapper.
+    first = triton_heuristics.cc_warp_size
+    di._patch_triton_warp_size()
+    assert triton_heuristics.cc_warp_size is first
+
+
+@pytest.mark.anyplatform
+def test_triton_warp_size_patch_leaves_cuda_alone(as_cuda, monkeypatch):
+    """On a CUDA-like build the stock value is correct and must not be touched."""
+    from torch._inductor.runtime import triton_heuristics
+    from torch_fl.compile import device_interface as di
+
+    before = triton_heuristics.cc_warp_size
+    di._patch_triton_warp_size()
+    assert triton_heuristics.cc_warp_size is before
+
+
+@pytest.mark.anyplatform
+def test_tsingmicro_claims_the_txda_name(as_tsingmicro, monkeypatch):
+    """The reported device name must map to the flagos interface.
+
+    ``triton_heuristics.get_device_interface`` looks the launcher's interface up
+    by ``device_props.type``, which on this profile is ``txda``. Nothing else
+    registers that name, so without this the runtime launcher finds no interface
+    at all.
+    """
+    from torch_fl.compile import device_interface as di
+
+    registered = _capture_registrations(di, monkeypatch)
+    di.register_flagos_device_interface()
+
+    assert registered[di.DEVICE_TYPE] is di.FlagOSDeviceInterface
+    assert registered["txda"] is di.FlagOSDeviceInterface
 
 
 @pytest.mark.anyplatform

@@ -604,6 +604,28 @@ tests live alongside it:
    [64-bit Kernels on GCU](#64-bit-kernels-on-gcu-inductorerror--has-no-64-bit-support).
    Removing the refusal (a compiler that gains 64-bit support) is what closes
    this, not a change on the torch_fl side
+8. **TsingMicro is new here**: the profile, the raw stream and the warp-size
+   correction are wired up and the graphs in `tests/integration/test_compile.py`
+   are validated on a TX8, but nothing beyond them is. Two things are known and
+   deliberately left alone: the TX runtime exposes no device-properties query, so
+   `torch.flagos.get_device_properties` reports constants matching FlagGems' own
+   tsingmicro descriptor rather than values read from the hardware; and the
+   Ascend-only Triton workarounds (`triton_byte_loads.py`,
+   `triton_resource_limits.py`) are gated on `is_cuda_like=False`, so TsingMicro
+   inherits them — they are unverified there. There is no CI lane for this
+   vendor, so none of it runs automatically
+9. **TsingMicro's matmul is reduced-precision, and compiling changes which op
+   you get**: a single `1x128 . 128x1` dot on a `flagos` tensor differs from a
+   float32 CPU reference by ~1.6e-3, the signature of a TF32-shaped accumulation
+   inside FlagGems' `mm` kernel. Eager `nn.Linear` does not show it because ATen
+   sends it to `addmm`, which is exact here; inductor instead schedules
+   `extern_kernels.mm` plus a bias add, so a *compiled* Linear is measurably
+   further from the reference than the eager one (measured ~7e-4 relative on
+   |out| ~ 2). Elementwise fusion stays bit-exact. This is the device's matmul
+   precision rather than a compile defect — the same `mm` is what a hand-written
+   `torch.mm` calls — but it means compiled-vs-eager comparisons on this platform
+   need a ~1e-3 relative tolerance, which is what
+   `tests/integration/test_compile.py` uses for it
 
 ## Roadmap
 
