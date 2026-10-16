@@ -820,6 +820,16 @@ def _install_tsingmicro_flaggems_compat() -> None:
     )
     torch.txda = txda
 
+    # Qwen-Image-2.1's rope puts a complex64 operand on the device, and FlagGems'
+    # Triton kernels have no complex pointer type for the cat/mul it feeds. Patch
+    # the rotation to stay real-valued. Inert when diffusers or the 2.1
+    # transformer is absent, and skippable via FLAGOS_DISABLE_QWENIMAGE_ROPE.
+    from torch_fl.accelerator.tsingmicro._tsingmicro_compat import (
+        patch_diffusers_qwenimage21_rope,
+    )
+
+    patch_diffusers_qwenimage21_rope()
+
 
 _registered_ops = []
 

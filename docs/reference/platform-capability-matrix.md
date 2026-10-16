@@ -2,9 +2,9 @@
 
 The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
-asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers nine of the twelve — so this page is the
-authoritative answer.
+asymmetries — PPU is Python-only, TsingMicro's Python compat is a Qwen-Image-2.1
+rope shim only, `soft_lowp` is aten-only, and CI covers nine of the twelve — so
+this page is the authoritative answer.
 
 The directory inventory at the end is machine-checked by
 `tests/unit/test_platform_capability_matrix.py`; update it with the directories
@@ -22,7 +22,7 @@ when a platform gains or loses one.
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
 | `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
-| `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | — (no dir) | 67 | no |
+| `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: 37 native routes) | `mps` (stream/event only) | 2037 | yes |
@@ -121,7 +121,8 @@ build opts into boxing.
   by [PyTorch issue #161129](https://github.com/pytorch/pytorch/issues/161129):
   autograd can choose a different stream from the MPS device.
 - **TsingMicro** has a sparse hand-written conf (67 routes) and no CI job; its
-  Python compat module does not exist.
+  `torch_fl/accelerator/tsingmicro/` directory holds only the Qwen-Image-2.1
+  rotation shim, not a device compat layer.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
   `torch_fl/accelerator/musa/` directory, but it holds only `musa_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to) — not a
@@ -175,4 +176,4 @@ against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
 - `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, kunlunxin, metax, mps, musa, tsingmicro
 - `csrc/aten/backends/`: ascend, flagos, gcu, iluvatar, kunlunxin, mps, musa, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu, tsingmicro

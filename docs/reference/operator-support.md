@@ -9177,8 +9177,72 @@ separate change and is **not** made here.
 
 **Evidence gaps.** One device, one host; no CI lane. The RNG values were checked for
 determinism and device residency, not against a CPU reference — the host draw *is* the
-CPU reference for these ops, so a value comparison would be tautological. The
-`complex64` `cat` above remains open.
+CPU reference for these ops, so a value comparison would be tautological.
+
+## TsingMicro Qwen-Image-2.1 RoPE: keep complex off the device (2026-10-16)
+
+With the RNG fix in place the `infer --stage full` run executed the whole denoise
+loop and then died at the rotation, one level deeper:
+
+```
+File "diffusers/models/transformers/transformer_qwenimage21.py", line 710
+    return torch.cat([self.freqs[0][frame_index], self.freqs[1][height_index], self.freqs[2][width_index]], dim=-1)
+File ".../flag_gems/runtime/backend/_tsingmicro/ops/cat.py", line 108, in cat
+File ".../triton/_utils.py", line 105, in canonicalize_dtype
+KeyError: 'complex64'
+```
+
+`QwenImage21Rope` builds its operand as **complex64** (`torch.polar` in
+`rope_params`), moves it to the device, advanced-indexes it and concatenates the
+three axes. Those route to FlagGems, whose Triton kernels have no complex pointer
+type. **Measured on a TX8 which complex ops survive:** `polar`, `view_as_complex`,
+`view_as_real`, `angle`, `real` and a plain complex `mul` all work; `cat`, `stack`
+and the rope's own broadcast multiply (`freqs.unsqueeze(1) * x`) do not. So this was
+not a per-op gap to patch — the complex tensor had to stop reaching the device.
+
+`torch_fl/accelerator/tsingmicro/_tsingmicro_compat.py` (new) patches the rotation to
+stay real-valued, the same remedy the Qwen-Image-**2512** model already carries for
+Ascend and GCU (`torch_fl.accelerator.{ascend,gcu}._*_compat.patch_diffusers_qwenimage_rope`).
+Two coupled halves, both required:
+
+* **operand** — `QwenImage21Rope.rope_params` is wrapped to return the raw rotation
+  *angles* instead of `torch.polar(ones, angles)`. Since `polar(1, a) == cos a + i
+  sin a`, the angles *are* the values the complex tensor carried, so `self.freqs`
+  becomes real for `__init__` and for `forward`'s `.to(device)`, and no complex
+  tensor is ever moved onto the device. (The 2512 path instead `torch.angle`s an
+  already-built complex tensor; here the `polar` call is simply dropped.)
+* **consumer** — the module-level `apply_rotary_emb_qwen` is wrapped so a
+  `use_real=False` call handed real angles is served by a real multiply. The shipped
+  `use_real=True` branch cannot be reused: it broadcasts `cos[None, None]`, which is
+  flux's heads-before-sequence layout, not 2.1's `[B, S, H, D]`.
+
+The 2.1 classes are unreleased (diffusers 0.41.0 here), so every patch point is
+`hasattr`-guarded, the installer returns `False` rather than raising when one is
+missing, and it honours `FLAGOS_DISABLE_QWENIMAGE_ROPE` (the existing switch, reused
+rather than duplicated).
+
+**Measured** on a TX8:
+
+| Probe | Result |
+| --- | --- |
+| `QwenImage21Rope(...).freqs[k].is_complex()` | `False` (was `True`) |
+| the failing expression `cat([freqs[k][idx]]*3, -1)` on a flagos tensor | `float32`, no raise (was `KeyError: 'complex64'`) |
+| patched `apply_rotary_emb_qwen(x, angles, use_real=False)` vs the complex `view_as_complex(x) * polar(1, angles)` path | `max|d| = 4.8e-07` — one fp32 ulp |
+| the same call on a `flagos` tensor vs CPU | `max|d| = 8.3e-07` |
+| `infer --stage full` | clears the rope; no `complex64` in the run's log |
+
+**Still open, and outside this change:** the run continues but is very slow, because
+`repeat_interleave`, `index_select`, `nonzero` and several elementwise ops fall to
+`cpu_fallback` on flagos and are issued per denoise step. That is a performance path,
+not a root-cause blocker, and is not addressed here.
+
+**Evidence gaps.** One device, one host; no CI lane. The rotation is checked against
+the complex path it replaces at one-ulp tolerance, not bit-for-bit — the two form the
+same products in a different order, so bf16 rounding can differ by an ulp. The 2.1
+class being patched is a diffusers-internal API, so a future diffusers that renames
+`rope_params` or `self.freqs` silently turns this patch into a no-op (by design it
+returns `False` rather than corrupting a run); `tests/unit/test_tsingmicro_qwenimage21_rope.py`
+pins that no-op shape.
 
 ## `cat` route changes (2026-10-12)
 
