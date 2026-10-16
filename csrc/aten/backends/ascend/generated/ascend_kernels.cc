@@ -1601,6 +1601,71 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
 
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kAscend, AddTensorKernelAscend)
 
+at::Tensor& AddOutKernelAscend(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto result_dtype = ascend::BinaryResultType("aclnnAdd", self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+  auto other_c = other.is_privateuseone()
+      ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
+      : other.to(self.options().dtype(result_dtype));
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto result_options = self.options().dtype(result_dtype);
+  // aclnn binary ops broadcast and honor strides internally (verified), so we
+  // pass self/other_c straight through instead of expand().contiguous(). This
+  // avoids up to two device strided-copies + host view construction per op on
+  // the eager decode hot path. Only materialize a contiguous copy when the
+  // tensor is genuinely non-contiguous AND the aclnn path would otherwise need
+  // it — measured unnecessary for the common same-shape/contiguous case, which
+  // is the overwhelming majority in Qwen3.
+  const at::Tensor& self_b = self_c;
+  const at::Tensor& other_b = other_c;
+  TORCH_CHECK(
+      out.sizes().equals(out_shape),
+      "AddOutFn: expected out of size ", out_shape, ", but got ", out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == result_dtype,
+      "AddOutFn: expected out of dtype ", result_dtype, " but got ", out.scalar_type());
+
+  ascend::AclTensorWrapper acl_self(self_b);
+  ascend::AclTensorWrapper acl_other(other_b);
+  ascend::AclScalarWrapper acl_alpha(alpha, result_dtype);
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD(aclnnAdd, acl_self.get(), acl_other.get(), acl_alpha.get(), acl_out.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kAscend, AddOutKernelAscend)
+
+at::Tensor& AddScalarOutKernelAscend(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(
+      out.sizes().equals(self.sizes()),
+      "AddScalarOutFn: expected out of size ", self.sizes(), ", but got ", out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == self.scalar_type(),
+      "AddScalarOutFn: expected out of dtype ", self.scalar_type(), " but got ", out.scalar_type());
+
+  ascend::AclTensorWrapper acl_self(self);
+  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD(aclnnAdds, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddScalarOutFn, add_scalar_out_dispatcher, Backend::kAscend, AddScalarOutKernelAscend)
+
 at::Tensor MulScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
   // Issue #326: make the primary tensor's device current, so the
   // workspace, launch stream and executor cache below all agree on it.
