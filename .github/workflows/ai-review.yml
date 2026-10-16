@@ -48,9 +48,11 @@ on:
         required: true
         type: string
 
+# contents: read is all the Actions token needs: the review is submitted with
+# the machine user's token (GH_TOKEN), never github.token. Keep this minimal so
+# the workflow token cannot write even if the script misbehaved.
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: ai-review-${{ github.event.pull_request.number || inputs.pr_number }}
