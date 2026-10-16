@@ -64,6 +64,28 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
+# --- One architecture, the one this runner has -------------------------------
+# The python.org installer on a GitHub macOS runner is a universal2 build, so
+# distutils tags everything it compiles `macosx-10.13-universal2` and passes
+# `-arch arm64 -arch x86_64` to clang. CMake compiles for the host alone, so
+# the dylibs it installs are arm64-only and the second `-arch` only produces a
+# broken link: `ld: warning: ignoring file 'libtorch_bindings.dylib': found
+# architecture 'arm64', required architecture 'x86_64'`, after which `_C.so`
+# silently carries no reference to the backend it exists to load. A wheel can
+# only be as native as its unstripped half, so the wheel is built for one
+# architecture: arm64, which is what the runner this lane selects has, what
+# Metal exists for, and what PyPI's torch ships for macOS.
+#
+# ARCHFLAGS is the knob distutils/`_osx_support` reads (it overrides the
+# per-interpreter default); setuptools' bdist_wheel consults
+# `_PYTHON_HOST_PLATFORM` for the tag, so both are set -- otherwise the wheel
+# would still be *labelled* universal2 while containing only arm64, which
+# `check_platform_environment.py`'s arm64 assertion (and `pip`, on an x86_64
+# host) would then trust.
+export ARCHFLAGS="-arch arm64"
+export _PYTHON_HOST_PLATFORM="macosx-$(sw_vers -productVersion | cut -d. -f1,2)-arm64"
+export CMAKE_OSX_ARCHITECTURES=arm64
+
 # --- Isolated Python ---------------------------------------------------------
 # The runner image Python is fine to use directly: unlike the vendor images
 # there is no conflicting vendor torch to keep out, and isolating would only add
@@ -170,7 +192,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
 fi
 
 cd "$REPO_ROOT"

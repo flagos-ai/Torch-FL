@@ -105,3 +105,10 @@ environment_check:
     - lib/libtorch_cuda.so
   flagos_devices:
     at_least: 1
+  # The wheel must be the architecture the runner is. A universal2
+  # interpreter would otherwise tag and compile every setuptools extension
+  # for two architectures while CMake builds one, and the tag would be
+  # believed: the link to libtorch_bindings is dropped with a warning, the
+  # wheel installs everywhere and imports only here. See ARCHFLAGS in
+  # .github/scripts/hooks/set_env_mps.sh and assert_native_extensions_arch.
+  native_extensions_arch: arm64
