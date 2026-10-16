@@ -370,6 +370,7 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "silu",
         "embedding",
         "index_select",
+        "take",
         "div.Tensor",
         "div.Scalar",
         "reciprocal",
@@ -474,18 +475,18 @@ def test_conf_route_counts_are_stable():
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
         # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax``, ``pow_scalar``
         # ``conv``, ``silu``, ``embedding``, ``index_select``, ``div``,
-        # ``div_scalar`` and ``reciprocal`` categories generate (21 ops so far
-        # -- stage 3 added
+        # ``div_scalar``, ``reciprocal`` and ``take`` categories generate (22 ops
+        # so far -- stage 3 added
         # ``mm``/``bmm``, then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``,
         # then ``convolution_overrideable``; stage 4 added ``silu`` and
         # ``embedding``, then ``div.Tensor``/``div.Scalar``/``reciprocal``,
-        # then ``index_select``), so the conf routes those to ``mps``
+        # then ``index_select``, then ``take``), so the conf routes those to ``mps``
         # and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 21, "none": 2016},
+        "mps": {"mps": 22, "none": 2015},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

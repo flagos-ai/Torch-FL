@@ -168,6 +168,23 @@ bool MpsSupportsEmbeddingDtype(
   return table && index;
 }
 
+bool MpsSupportsTakeDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType index_dtype) {
+  // The widths MPSGraph has element types for. Wider than the embedding gate on
+  // purpose: a read does not change its operand's width, so float64/int64/bool
+  // are the only ones declined here and they are declined because the *graph*
+  // has no element type for them, not because the reference does not.
+  const bool readable = self_dtype == at::kFloat || self_dtype == at::kHalf ||
+                        self_dtype == at::kBFloat16 || self_dtype == at::kInt ||
+                        self_dtype == at::kShort || self_dtype == at::kChar ||
+                        self_dtype == at::kByte;
+  // int64 alone: measured, `aten::take` raises for int32 where
+  // `aten::index_select` accepts it. See the note in mps_common.h.
+  const bool index = index_dtype == at::kLong;
+  return readable && index;
+}
+
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   if (out == nullptr) {
     return false;

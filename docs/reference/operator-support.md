@@ -188,12 +188,12 @@ record.
 
 ## Native Backend Route Changes
 
-### Apple MPS: twenty-one routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+### Apple MPS: twenty-two routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
 
-**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **21** ATen overloads from
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **22** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
 reduction, convolution, embedding and matrix-multiply families — with the
-remaining **2016** routes at `none` (`cpu_fallback`), measured overload by
+remaining **2015** routes at `none` (`cpu_fallback`), measured overload by
 overload against a CPU reference on an Apple Silicon arm64 host.
 
 **This is not a FlagGems cohort and must not be read against the 546-overload
@@ -202,10 +202,10 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 21, none: 2016}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 22, none: 2015}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
-`embedding`, `index_select`, `mm` and `bmm`. The backend is MPSGraph-first with a
+`embedding`, `index_select`, `take`, `mm` and `bmm`. The backend is MPSGraph-first with a
 hand-written Metal Shading Language fallback, and — as the name of this section
 insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
@@ -229,6 +229,32 @@ is flattened before it is described to the graph, so a higher-rank index would
 otherwise be answered with a plausible flattening where the reference raises
 `index_select(): Index is supposed to be a vector`. Both were measured, and both
 are held in `tests/integration/ops/test_mps_index_select.py` (45 cases).
+
+**`take` shares that node with an entirely different contract, and the
+differences are all measured rather than inherited.** The same
+`gatherWithUpdatesTensor:indicesTensor:axis:0 batchDimensions:0` serves it, but
+`take` has no `dim` at all: the operand is read as a flat `numel()`-length
+sequence and the result's shape is the *index's* own shape, so a `(2, 2)` index
+is a result shape here where `index_select` raises. Two measured behaviours
+decide the body. A **negative index is in range** (`take(t, [-1])` reads the last
+element, where `index_select` raises), and MPSGraph's gather does not resolve
+one -- it reads a negative index as the *first* element, so the first version of
+this body, which range-checked against the operand and handed the original index
+through, answered `take(t, [-1, 0, 19])` over a 20-element operand with
+`[0, 0, 19]` where the reference returns `[19, 0, 19]`. The body now normalises
+as it checks: one host pass wraps a negative entry and rejects one outside
+`[-numel, numel)`, so the graph is only ever handed a non-negative index and an
+out-of-range call takes the round-trip and therefore the reference's own
+`IndexError: out of range: tried to access index 20 on a tensor of 20 elements`.
+The second measured behaviour is a graph limit with a shape cause: the index is
+reshaped to its own shape through a buffer carrying the operand's trailing 1,
+and a `(1, numel)` flatten of that buffer is rejected -- `error: 'mps.reshape'
+op the result shape is not compatible with the input shape … (tensor<3x20xf32>)
+-> tensor<3xf32>` -- because the index's runtime shape overrides the static
+placeholder shape. The index dtype gate is also narrower than `index_select`'s:
+measured, `aten::take` requires a long tensor and raises for int32, short, char,
+bool and float. Both contracts are held in
+`tests/integration/ops/test_mps_take.py` (57 cases).
 
 **Every route is gated on a measured dtype predicate, and two gates exist only
 because the obvious one was wrong.** The first `div` increment gated on the
@@ -257,7 +283,8 @@ graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
 per-op suites `test_mps_binary.py`, `test_mps_conv.py`, `test_mps_embedding.py`,
 `test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_pow.py`,
-`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py` and
+`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py`,
+`test_mps_take.py` and
 `test_mps_unary.py`, run as `pytest tests/integration/ops -m mps` on an Apple
 Silicon host; the per-op dtype gates and the `index_select` argument contracts
 are asserted against the CPU reference in the same tests. This is the only

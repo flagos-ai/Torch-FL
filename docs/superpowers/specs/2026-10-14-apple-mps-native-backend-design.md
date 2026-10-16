@@ -547,10 +547,66 @@ across dtypes, index widths and index values, the dispatch log naming `mps`, and
 a cost case over the `(151936, 1024)` shape that fails if the whole-operand
 round-trip returns.
 
-The remaining stage-4 work is the `embedding_dense_backward`, `gather` and
-`take` ops that share the `embedding` node family, `F.layer_norm` as a
-multi-op increment (`native_batch_norm` plus `addcmul`, measured at
-1.50-4.56 ms), and the `native_batch_norm` it lowers to.
+Stage 4 continued with `take`, the second reader of the same node and the one
+that proved the node's *contract* is not the node's *behaviour*. It was picked
+over `gather` on measurement: both route to `none` and both pay the same
+whole-operand round-trip, and on a `(151936, 1024)` float32 operand the fallback
+costs 45.6 ms for a single element, 46.3 ms for 512 and 42.0 ms for a
+one-element `gather` at `dim=0` -- the cost is the operand, not the question,
+which is the same profile `index_select` had. The node costs 0.29 ms.
+
+Every argument `take` has, `index_select` does not: there is no `dim`, the
+operand is read as a flat `numel()`-length sequence rather than along an axis,
+the result's shape is the index's own shape rather than the index's length
+prepended to the operand's trailing dimensions, the index may have any rank
+rather than being a vector, and a negative index is in range rather than an
+error. Each of those was measured against the CPU reference before the body was
+written, and the last one cost a real bug. The first version of the body
+range-checked the index on the host and handed the original through, which is
+what the `index_select` body does and what the `embedding` range check is for.
+Measured through that version, `take(t, [-1, 0, 19])` over a 20-element operand
+returned `[0, 0, 19]` against the reference's `[19, 0, 19]`: MPSGraph's gather
+answers a negative index with the *first* element, so the check had admitted the
+index correctly and the graph had then read it wrongly. The fix is that the
+range check and the wrap are one host pass -- a negative entry is normalised
+against `numel()` and an entry outside `[-numel, numel)` takes the round-trip --
+so the graph is only ever handed a non-negative index. That the wrong answer is
+plausible is the point: it is the same failure class as the out-of-range index
+the `embedding` check exists for, and it is why the case that holds it asks for a
+single element rather than one negative index among positive ones.
+
+The second finding is a graph limit worth recording because its cause is
+unobvious. The body reshapes the index to its own shape from a buffer that
+carries the operand's trailing 1 (the same row-pitch reshape the `embedding`
+body uses), and a `(1, numel)` index is rejected by that reshape:
+`error: 'mps.reshape' op the result shape is not compatible with the input shape
+… (tensor<3x20xf32>) -> tensor<3xf32>`. The index's *runtime* shape overrides the
+static placeholder shape the graph was compiled with, so the shapes the node
+produces are the operand's `(N, 1)` against an index of `(K)` giving `(K, 1)`,
+`(2, 2)` giving `(2, 2, 1)`, and so on -- read through `MPSGraphTensorData`'s
+`mpsndarray` and `MPSNDArray readBytes:strideBytes:`, because a standalone probe
+run with `runWithFeeds:` answers zeros and would have hidden it.
+
+This increment is verified with `tests/integration/ops/test_mps_take.py`:
+bit-exact CPU equality across the index ranks (rank-1, rank-2, rank-3, one row,
+one column) and the operand ranks (rank-0 through rank-3, all read as flat), the
+operand structure being discarded and the index shape being the result shape,
+the `(2, 2)` index that separates the two siblings' shape rules, negative
+indices including the two ends of the wrap, the int8-width operand the
+normalisation reads `numel` from, the out-of-range cases in both signs reaching
+the reference's own `IndexError`, the int64-only index contract, the empty
+index, non-contiguous operands and indices, plan reuse across index values and
+across a declined call, the dispatch log naming `mps` on both the served and the
+declined path, and a cost case over the `(151936, 1024)` shape that fails if the
+whole-operand round-trip returns.
+
+The remaining stage-4 work is `gather` (the same node again, but with a `dim`
+and a batch contract, and a reference that raises `RuntimeError: index 99 is out
+of bounds for dimension 0 with size 5` for an out-of-range index and accepts
+int32 as well as int64), `F.layer_norm` as a multi-op increment
+(`native_batch_norm` plus `addcmul`, measured at 1.50-4.56 ms), and the
+`native_batch_norm` it lowers to. `embedding_dense_backward` stays dropped for
+the reason recorded above.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.

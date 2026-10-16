@@ -194,6 +194,25 @@ OPS = {
     # named in the key: a dim=0 call and a dim=1 call over the same shapes are
     # two graphs, and a key that left `dim` out would hand the first one to both.
     "index_select": "index_select",
+    # The third spelling of the same gather, and the one with the simplest
+    # contract: `take` reads the operand as a flat buffer and indexes it with an
+    # index of *any* rank, returning the index's own shape. It is the read a
+    # `vocab[flat_ids]` over a packed table performs, and it round-trips for the
+    # same reason its two siblings did: measured on an M5 with a (151936, 1024)
+    # float32 operand, `take` of a *single* element cost 45.6 ms and 512 elements
+    # cost 46.3 ms, against the 0.29 ms of the one gather node this body builds.
+    #
+    # It is a separate body rather than a fourth entry in the index_select
+    # template because its argument contract is genuinely different, and measured
+    # to be so: `take` takes **int64 only** (`RuntimeError: take(): Expected a
+    # long tensor for index, but got Int`, where `index_select` accepts int32 and
+    # int64), it takes any index rank rather than a vector, and it accepts a
+    # negative index (-1 reads the last element) where `index_select` raises. Its
+    # range check is therefore over the *flattened* operand, not over axis 0, and
+    # it has no `dim` to key on. Folding it into the sibling's body would mean a
+    # body with two disagreement maps, which is how the wrong list gets applied
+    # to the wrong op.
+    "take": "take",
     # The last arithmetic gap on the elementwise path. `add`, `sub` and `mul`
     # have been served since stage 2; `div` was not, so every `x / y` and every
     # `x / 2.0` in a model took the CPU round-trip, and it is the op the
@@ -265,6 +284,12 @@ AT_OP = {
     # than `at::gather`, which carries a different argument contract for the
     # same node.
     "index_select": "index_select",
+    # The CPU reference the `take` body round-trips to on anything it declines:
+    # an index that is not int64, and an element the operand does not have. It is
+    # `at::take` for the same reason the other two are their own aten op -- that
+    # is where the reference's `IndexError` (`out of range: tried to access index
+    # 20 on a tensor of 20 elements`) and its own int64-only `RuntimeError` live.
+    "take": "take",
     # The CPU reference the `div` body round-trips to on anything it declines.
     # It is `at::div` rather than a reciprocal-multiply: the two readings differ
     # on the cases the gate below exists for (a zero denominator, a subnormal
@@ -297,6 +322,14 @@ SUPPORTS = {
     # out-of-range contract is the same `IndexError`, so the pair of bodies
     # declines on the same inputs and takes the same round-trip for them.
     "index_select": "MpsSupportsEmbeddingDtype",
+    # Not the sibling's predicate, because the two ops do not accept the same
+    # index: `take` is int64-only on the reference (`RuntimeError: take():
+    # Expected a long tensor for index, but got Int`) where `index_select` takes
+    # int32 as well, so a shared gate would let an int32 `take` reach the graph
+    # and answer a call the reference raises on. The operand half is wider than
+    # the sibling's for the opposite reason -- a read does not change its
+    # operand's width, and the reference passes every one of them through.
+    "take": "MpsSupportsTakeDtype",
     # Neither form takes the dtype-preserving predicate its sibling arithmetic
     # ops use: division is not dtype-preserving on the reference (`int / int` is
     # a float tensor), and a predicate that admitted the integral widths would
@@ -355,6 +388,11 @@ CALLS = {
     # takes the operand's rank into account when it decides whether the single
     # `axis:0` node it builds is the axis the caller asked for.
     "index_select": "gatherWithUpdatesTensor:",
+    # Still the same gather, and the difference is only in what the body has to
+    # describe to it: `take` reads the operand as one flat row, so the reshape is
+    # to `(1, numel)` and the index is the flat list -- there is no axis 0 to
+    # preserve and no row width to compute. See T_TAKE.
+    "take": "gatherWithUpdatesTensor:",
     # MPSGraph's division node, and the interesting thing about it is that it is
     # the *only* arithmetic selector here whose choice is not obvious: the
     # plausible alternative is `a * reciprocalWithTensor:b`, which is what a
@@ -460,6 +498,12 @@ KEY_PARTS = {
     # dim=0 and at dim=1 have the same dtype and shape and two different
     # answers. Naming it is what stops the first plan from answering both.
     "index_select": ", dim",
+    # Empty, and that is the whole difference from its two siblings: `take` has
+    # no `dim` and no other host argument, so a take graph is a function of its
+    # operands' dtypes and shapes alone -- which MpsRunGraph folds in. There is
+    # no host value left that an operand pair could disagree about, so there is
+    # nothing to name and two calls that share a shape share a plan.
+    "take": "",
     # Empty: a division graph is a function of its operands' dtypes and shapes,
     # which MpsRunGraph folds in, and of nothing else. There is no `alpha` on
     # either spelling and no host scalar the body bakes in -- `div.Scalar`'s
@@ -1404,6 +1448,150 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `take` is the third spelling of the embedding gather, and it is the one with
+# the *least* to get wrong and the most to get wrong quietly.
+#
+# What it does not have is the embedding body's problem. `embedding` reads axis 0
+# of a table and `index_select` reads an axis the caller names; `take` reads the
+# operand as one flat buffer of `numel()` elements, so the graph is a reshape to
+# `(1, numel)` and a gather over axis 0 with the index as a flat list. There is no
+# row width to compute, no axis to resolve, and no host argument at all -- which
+# is why `KEY_PARTS` for this op is empty and two calls that share a shape share a
+# plan.
+#
+# What it does have is a different contract from both siblings, measured rather
+# than assumed, and each difference is a way to answer a call the reference
+# rejects:
+#
+#   * **The index is int64 only.** `aten::take` raises `RuntimeError: take():
+#     Expected a long tensor for index, but got Int` for an int32 index, where
+#     `aten::index_select` accepts both widths -- so this op has its own
+#     predicate rather than the sibling's, and an int32 index takes the
+#     round-trip to that error.
+#   * **The index may be any rank**, and the result takes the index's own shape:
+#     a `(2, 2)` index returns a `(2, 2)` result, where `index_select` rejects a
+#     non-vector index outright. The embedding body's flattening is therefore
+#     correct *here* and wrong there, which is why the two are separate bodies
+#     rather than one with a flag.
+#   * **A negative index is in range.** Measured, `take(t, [-1])` reads the last
+#     element where `index_select(t, 0, [-1])` raises, so the range check below is
+#     written against the wrapped value and not against zero -- a check that
+#     copied the sibling's would decline `-1` and cost a round-trip on a call the
+#     graph answers exactly.
+#
+# The range check itself is over the *flattened* operand (`self.numel()` rather
+# than `self.size(0)`), and it is the same defence its siblings carry: MPSGraph's
+# gather has no range contract and returns the operand's first element for a bad
+# index instead of failing, where the reference raises
+# `IndexError: out of range: tried to access index 20 on a tensor of 20 elements`.
+T_TAKE = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& index) {{
+  if (!mps::{supports}(self.scalar_type(), index.scalar_type())) {{
+    return at::{at_op}(self.cpu(), index.cpu()).to(self.device());
+  }}
+  // One host pass over the index before a node exists, resolving a negative
+  // entry against the operand the way the reference does (measured: -1 reads the
+  // last element, it does not raise). Anything the operand cannot answer takes
+  // the round-trip so the caller sees the reference's own IndexError rather than
+  // MPSGraph's silent first element.
+  at::Tensor index_c = index.contiguous();
+  const int64_t elements = self.numel();
+  // `index_c` becomes the index the graph is handed, and that is the reason this
+  // body rewrites it rather than only reading it.
+  if (index_c.numel() > 0) {{
+    const at::Tensor host = index_c.cpu();
+    const int64_t* as_long = host.const_data_ptr<int64_t>();
+    at::Tensor resolved_host = at::empty_like(host);
+    int64_t* resolved = resolved_host.mutable_data_ptr<int64_t>();
+    bool in_range = true;
+    for (int64_t i = 0; i < host.numel(); ++i) {{
+      // The int64-only predicate above is what makes this read safe.
+      const int64_t at = as_long[i];
+      const int64_t positive = at < 0 ? at + elements : at;
+      if (positive < 0 || positive >= elements) {{
+        in_range = false;
+        break;
+      }}
+      resolved[i] = positive;
+    }}
+    // A *negative* index is in range on this op -- measured, `-1` reads the last
+    // element where `index_select` raises -- and MPSGraph's gather does not
+    // resolve it: measured through this backend, `take(t, [-1, 0, 19])` over a
+    // 20-element operand returned `[0, 0, 19]` against the reference's
+    // `[19, 0, 19]`, the graph having read a negative index as the *first*
+    // element. So the body normalises rather than describes: the range check and
+    // the wrapping are one pass, and the graph is only ever handed a
+    // non-negative index. The first version of this body checked the range and
+    // handed the original through, which answered every negative index with a
+    // plausible wrong value -- the failure mode the check was there to prevent.
+    if (!in_range) {{
+      return at::{at_op}(self.cpu(), index.cpu()).to(self.device());
+    }}
+    index_c = resolved_host.to(index_c.device(), /*non_blocking=*/true);
+  }}
+  at::Tensor self_c = self.contiguous();
+  // The result is the index's own shape -- not the operand's with an axis
+  // replaced, which is what the two sibling bodies build. A scalar (rank-0)
+  // index is not a shape `take` accepts, so there is no rank-0 case here.
+  at::Tensor out = at::empty(index.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // The operand is described to the graph as one element per row, `(numel, 1)`,
+  // and the index on the way in as a flat list, `(K)`. Measured on the SDK in
+  // use, that pair gives `(K, 1)` for a `(K)` index and, for an index of any
+  // other shape, the index's own shape carrying a trailing 1 -- `(2, 2)` gives
+  // `(2, 2, 1)`, `(2, 1, 2)` gives `(2, 1, 2, 1)`. So one reshape of the gather's
+  // result to the index's own shape lands on `out`, and `take`'s whole contract
+  // falls out of the two nodes: the operand's structure is discarded because
+  // `take` indexes a flat buffer, and the result's shape is the index's because
+  // that is what the second reshape says.
+  //
+  // The three rescribings that do *not* work, recorded because each looks like
+  // it should. `(1, numel)` with a `(K)` index gives `(K, numel)` -- the index
+  // takes a whole row, so the result is rank 2 of the wrong size, which is what
+  // the first version of this body shipped and MPSGraph rejected at compile time
+  // ("the result shape is not compatible with the input shape") because the
+  // index's runtime shape overrides the placeholder's. A flat `(numel)` operand
+  // is the opposite mistake: the gather reads a `(K)` index against it as
+  // selecting whole rows of a rank-1 tensor, which is a *different* answer from
+  // selecting elements, and it happens to produce the right shape. And
+  // reshape *after* the gather to the index's shape only works while the
+  // operand's trailing 1 is still there to drop -- which is why the second
+  // reshape needs the gathered shape above and not the index's shape alone.
+  const int64_t element_count = self_c.numel();
+  const int64_t index_count = index_c.numel();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c, index_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* column = [graph reshapeTensor:args[0]
+                                            withShape:mps::MpsShapeOf(
+                                                          {{element_count, 1}})
+                                                 name:nil];
+        MPSGraphTensor* flat_index = [graph reshapeTensor:args[1]
+                                                withShape:mps::MpsShapeOf(
+                                                              {{index_count}})
+                                                     name:nil];
+        MPSGraphTensor* gathered = [graph gatherWithUpdatesTensor:column
+                                                    indicesTensor:flat_index
+                                                             axis:0
+                                                  batchDimensions:0
+                                                             name:nil];
+        return [graph reshapeTensor:gathered
+                          withShape:mps::MpsShapeOf(index_c.sizes())
+                               name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), index.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # `div` closes the elementwise arithmetic set -- `add`, `sub` and `mul` have been
 # served since stage 2 and this is the fourth -- so the least interesting thing
 # about it is the body, which is `T_BINARY` with one selector changed. What is
@@ -1586,6 +1774,7 @@ CATEGORIES = {
     "silu": T_SILU,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
+    "take": T_TAKE,
     "div": T_DIV,
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
@@ -1640,6 +1829,7 @@ FILE_HEADER = """\
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
+#include <ATen/ops/take.h>
 #include <c10/core/ScalarType.h>
 #include <exception>
 #include <optional>

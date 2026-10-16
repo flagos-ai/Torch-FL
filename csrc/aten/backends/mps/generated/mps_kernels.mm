@@ -46,6 +46,7 @@
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
+#include <ATen/ops/take.h>
 #include <c10/core/ScalarType.h>
 #include <exception>
 #include <optional>
@@ -932,6 +933,112 @@ at::Tensor IndexSelectKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kMps, IndexSelectKernelMps)
+
+at::Tensor TakeKernelMps(const at::Tensor& self, const at::Tensor& index) {
+  if (!mps::MpsSupportsTakeDtype(self.scalar_type(), index.scalar_type())) {
+    return at::take(self.cpu(), index.cpu()).to(self.device());
+  }
+  // One host pass over the index before a node exists, resolving a negative
+  // entry against the operand the way the reference does (measured: -1 reads the
+  // last element, it does not raise). Anything the operand cannot answer takes
+  // the round-trip so the caller sees the reference's own IndexError rather than
+  // MPSGraph's silent first element.
+  at::Tensor index_c = index.contiguous();
+  const int64_t elements = self.numel();
+  // `index_c` becomes the index the graph is handed, and that is the reason this
+  // body rewrites it rather than only reading it.
+  if (index_c.numel() > 0) {
+    const at::Tensor host = index_c.cpu();
+    const int64_t* as_long = host.const_data_ptr<int64_t>();
+    at::Tensor resolved_host = at::empty_like(host);
+    int64_t* resolved = resolved_host.mutable_data_ptr<int64_t>();
+    bool in_range = true;
+    for (int64_t i = 0; i < host.numel(); ++i) {
+      // The int64-only predicate above is what makes this read safe.
+      const int64_t at = as_long[i];
+      const int64_t positive = at < 0 ? at + elements : at;
+      if (positive < 0 || positive >= elements) {
+        in_range = false;
+        break;
+      }
+      resolved[i] = positive;
+    }
+    // A *negative* index is in range on this op -- measured, `-1` reads the last
+    // element where `index_select` raises -- and MPSGraph's gather does not
+    // resolve it: measured through this backend, `take(t, [-1, 0, 19])` over a
+    // 20-element operand returned `[0, 0, 19]` against the reference's
+    // `[19, 0, 19]`, the graph having read a negative index as the *first*
+    // element. So the body normalises rather than describes: the range check and
+    // the wrapping are one pass, and the graph is only ever handed a
+    // non-negative index. The first version of this body checked the range and
+    // handed the original through, which answered every negative index with a
+    // plausible wrong value -- the failure mode the check was there to prevent.
+    if (!in_range) {
+      return at::take(self.cpu(), index.cpu()).to(self.device());
+    }
+    index_c = resolved_host.to(index_c.device(), /*non_blocking=*/true);
+  }
+  at::Tensor self_c = self.contiguous();
+  // The result is the index's own shape -- not the operand's with an axis
+  // replaced, which is what the two sibling bodies build. A scalar (rank-0)
+  // index is not a shape `take` accepts, so there is no rank-0 case here.
+  at::Tensor out = at::empty(index.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  // The operand is described to the graph as one element per row, `(numel, 1)`,
+  // and the index on the way in as a flat list, `(K)`. Measured on the SDK in
+  // use, that pair gives `(K, 1)` for a `(K)` index and, for an index of any
+  // other shape, the index's own shape carrying a trailing 1 -- `(2, 2)` gives
+  // `(2, 2, 1)`, `(2, 1, 2)` gives `(2, 1, 2, 1)`. So one reshape of the gather's
+  // result to the index's own shape lands on `out`, and `take`'s whole contract
+  // falls out of the two nodes: the operand's structure is discarded because
+  // `take` indexes a flat buffer, and the result's shape is the index's because
+  // that is what the second reshape says.
+  //
+  // The three rescribings that do *not* work, recorded because each looks like
+  // it should. `(1, numel)` with a `(K)` index gives `(K, numel)` -- the index
+  // takes a whole row, so the result is rank 2 of the wrong size, which is what
+  // the first version of this body shipped and MPSGraph rejected at compile time
+  // ("the result shape is not compatible with the input shape") because the
+  // index's runtime shape overrides the placeholder's. A flat `(numel)` operand
+  // is the opposite mistake: the gather reads a `(K)` index against it as
+  // selecting whole rows of a rank-1 tensor, which is a *different* answer from
+  // selecting elements, and it happens to produce the right shape. And
+  // reshape *after* the gather to the index's shape only works while the
+  // operand's trailing 1 is still there to drop -- which is why the second
+  // reshape needs the gathered shape above and not the index's shape alone.
+  const int64_t element_count = self_c.numel();
+  const int64_t index_count = index_c.numel();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("take"),
+      {self_c, index_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* column = [graph reshapeTensor:args[0]
+                                            withShape:mps::MpsShapeOf(
+                                                          {element_count, 1})
+                                                 name:nil];
+        MPSGraphTensor* flat_index = [graph reshapeTensor:args[1]
+                                                withShape:mps::MpsShapeOf(
+                                                              {index_count})
+                                                     name:nil];
+        MPSGraphTensor* gathered = [graph gatherWithUpdatesTensor:column
+                                                    indicesTensor:flat_index
+                                                             axis:0
+                                                  batchDimensions:0
+                                                             name:nil];
+        return [graph reshapeTensor:gathered
+                          withShape:mps::MpsShapeOf(index_c.sizes())
+                               name:nil];
+      });
+  if (!ran) {
+    return at::take(self.cpu(), index.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TakeFn, take_dispatcher, Backend::kMps, TakeKernelMps)
 
 at::Tensor DivTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
   if (!mps::MpsSupportsDivDtype(self.scalar_type(), other.scalar_type())) {

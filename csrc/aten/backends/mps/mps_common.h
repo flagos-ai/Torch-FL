@@ -234,6 +234,32 @@ bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype);
 
+// Whether `take` computes on the MPSGraph path.
+//
+// It is its own predicate rather than `MpsSupportsEmbeddingDtype` because the
+// two ops do not accept the same index, and the difference is the reference's:
+// measured, `aten::take` raises `RuntimeError: take(): Expected a long tensor for
+// index, but got Int` for an int32 index, where `aten::index_select` accepts it.
+// So the index half here is int64 alone, and an int32 index takes the round-trip
+// for a `RuntimeError` the graph path could only answer by computing.
+//
+// The operand half is deliberately *wider* than the embedding gate rather than
+// the same three float widths. `aten::take` passes its operand's dtype through
+// (measured: float64 stays float64, int64 stays int64, bool stays bool), and it
+// is a pure read with no arithmetic for a width to change under, so the widths
+// MPSGraph has element types for are all servable. bool and the 64-bit widths
+// are not among them and are declined here, which costs the round-trip and keeps
+// the reference's own values.
+//
+// The index *range* is not covered, for the same reason it is not covered by the
+// embedding gate: it is a property of the values. It is checked on the host in
+// the kernel body, against the *flattened* operand -- `take` indexes
+// `self.numel()` elements rather than a single axis -- and a negative index is
+// in range there, unlike `index_select`'s.
+bool MpsSupportsTakeDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType index_dtype);
+
 // Whether `self / other` computes on the MPSGraph path.
 //
 // The gate itself is deliberately the same test `mul` uses: two operands of one
