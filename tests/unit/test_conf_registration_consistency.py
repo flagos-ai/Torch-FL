@@ -465,7 +465,7 @@ def test_conf_route_counts_are_stable():
         # ops now reach their boxing kernel instead of the FlagGems route.
         # `_unsafe_view`, `unsqueeze`, `unsqueeze_` and `transpose.int` were
         # separately kept off the FlagGems route for view semantics and cost.
-        "cuda": {"flaggems": 412, "cuda": 1622},
+        "cuda": {"flaggems": 390, "cuda": 1644},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
