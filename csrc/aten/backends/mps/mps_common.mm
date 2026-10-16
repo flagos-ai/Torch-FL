@@ -86,6 +86,29 @@ bool MpsSupportsReduceDtype(
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
+  if (self_dtype != other_dtype) {
+    return false;
+  }
+  return self_dtype == at::kFloat || self_dtype == at::kHalf ||
+      self_dtype == at::kBFloat16;
+}
+
+MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
+  if (t.dim() >= 2) {
+    // Not a `contiguous()` call: this is the layout test. The tensor's own last
+    // two axes are swapped, so the axes in memory are the other way round and
+    // the graph can put them back with a transpose node. `data_ptr()` and
+    // `numel()` are the same for the view as for the tensor, so the buffer this
+    // describes is the caller's own memory either way. See MpsGemmOperand.
+    at::Tensor dense = t.transpose(-1, -2);
+    if (dense.is_contiguous()) {
+      return {dense, true};
+    }
+  }
+  return {t.contiguous(), false};
+}
+
 bool MpsReduceAxes(
     at::IntArrayRef sizes,
     at::OptionalIntArrayRef dims,

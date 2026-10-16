@@ -344,8 +344,11 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "backends_mps.conf may only route ops to 'mps' or 'none'"
     )
     # One op per MPSGraph category the codegen emits (unary, binary,
-    # binary_scalar, reduce). A category whose entry silently dropped would leave
-    # its ops on cpu_fallback and be invisible in a count-only check.
+    # binary_scalar, reduce, gemm). A category whose entry silently dropped would
+    # leave its ops on cpu_fallback and be invisible in a count-only check. Both
+    # mm and bmm are listed because the gemm category emits one kernel per op:
+    # a rank guard that reached one of them and not the other is exactly what a
+    # single representative case would miss.
     for op in (
         "abs",
         "add.Tensor",
@@ -353,6 +356,8 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "mul.Tensor",
         "mean.dim",
         "sum.dim_IntList",
+        "mm",
+        "bmm",
     ):
         assert routes.get(op) == "mps", f"the {op} kernel must be routed to mps"
 
@@ -445,11 +450,12 @@ def test_conf_route_counts_are_stable():
         # the native .inc, since a second m.impl in the same PrivateUse1 body is a
         # duplicate-registration error. See _derived_iluvatar_counts().
         "iluvatar": _derived_iluvatar_counts(),
-        # MPS is a native vendor backend at stage 2: the codegen'd
+        # MPS is a native vendor backend at stage 3: the codegen'd
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
-        # ``binary_scalar`` and ``reduce`` categories generate (9 ops so far), so
-        # the conf routes those to ``mps`` and every other op to ``none``.
-        "mps": {"mps": 9, "none": 2028},
+        # ``binary_scalar``, ``reduce`` and ``gemm`` categories generate (11 ops
+        # so far -- stage 3 opened with ``mm`` and ``bmm``), so the conf routes
+        # those to ``mps`` and every other op to ``none``.
+        "mps": {"mps": 11, "none": 2026},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

@@ -247,8 +247,37 @@ fractional scalars and alphas on integral operands, int64 beyond +/-2^53,
 integer/bool/float64 reductions, empty operands, repeated or out-of-range axes
 -- taking the annotated CPU round-trip). `max.dim`/`min.dim` stay on the
 fallback: MPSGraph's argmax selector has no documented tie-break and the
-reference has an answer. Stages 3-4 are open. There is still no CI job: the lane
-below needs a
+reference has an answer.
+
+Stage 3 opened with the `gemm` category -- `mm` and `bmm` -- the ops the
+category exists for and the ones the stage's promise is measured against:
+MPSGraph exposes a single selector,
+`matrixMultiplicationWithPrimaryTensor:secondaryTensor:`, which broadcasts, so
+one graph node serves both ops and the kernel is what enforces aten's shapes (a
+non-2-D `mm` operand, a non-3-D or mismatched-batch `bmm` operand, and a
+mismatched contracting dimension are declined to the CPU round-trip so the
+reference raises its own error). The layout is the part worth recording:
+`nn.Linear` hands over `weight.t()`, and a transposed last two axes over dense
+memory is the one stride pattern the kernel recognises (`MpsGemmOperand` in
+`mps_common.h`), carrying the transpose into the graph instead of copying the
+operand. Measured on an M5 with a (512, 1024) x (1024, 32768) f32 product, the
+graph transpose cost 11.9 ms against 13.1 ms for an already-dense operand and
+2.96 ms for the transpose node on its own, so reading a weight down its columns
+(70 ms) is what the copy was paying for. Because the layout is a host value the
+kernel reads, it is part of the plan key: a `(32, 32)` dense operand and the
+same buffer transposed present identical dtypes and shapes and would otherwise
+be answered by one another's compiled graph. On a single Qwen3-0.6B layer --
+eight `mm` and two `bmm` calls -- device dispatch time for the layer fell from
+163.2 ms to 43.7-47.6 ms with the ten calls going from 121.5 ms (74% of it) to
+0.42-0.51 ms (1%), and nine timed forwards went from a 239.0 ms median (212.6 ms
+minimum) to 68.4 ms (61.9 ms); those are single-host numbers on a machine shared
+with other load, so they are a same-session A/B rather than an absolute. The
+stage-3 `gemm` increment is
+verified with `tests/integration/ops/test_mps_gemm.py` (CPU-equal across
+f32/f16/bf16, the graph-transpose and the copied slice case distinguished by
+the allocator's peak, the declined shapes and integral/float64 round-trips, and
+the dispatch log naming `mps`). `conv` and `softmax` are the rest of stage 3,
+and stage 4 is open. There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
 
@@ -319,5 +348,15 @@ directories must land together or unit tests fail.
   device and torch's own MPS backend will be live in the same process on a Mac.
   They own separate command queues and allocations, so dispatch should not
   conflict, but this needs an explicit test (import both, run on both).
+- **The device copy is slower than it should be.** Materialising a strided
+  operand on the device -- `w_t.contiguous()` -- measured 84.6 ms against the
+  10.4 ms `torch.mps` needs for the same copy, so the fallback is 7-12x the
+  reference on the one path the gemm kernels no longer need. Stage 3 took the
+  copy off the hot path rather than fixing it; the copy itself is an open
+  measurement on the runtime floor, not the op layer.
+- **No CI lane.** The MPS suite is gated on an Apple Silicon host and run by
+  hand. The pipeline is container-based and does not schedule a GitHub-hosted
+  `macos-14`/`macos-15` runner, so until one is wired up a green MPS run is a
+  local result rather than a checked one.
 - **Scope.** Option B is a multi-week project; the staged plan exists so value
   lands at every stage instead of only at the end.

@@ -104,6 +104,45 @@ bool MpsSupportsReduceDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
 
+// Whether a matrix multiplication computes exactly on the MPSGraph path. Both
+// operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
+// and a mismatched pair is a reference error rather than a result -- and that
+// dtype must be one of the float widths the MPSGraph mul-add is defined for. The
+// integral overloads take the CPU round-trip: aten accumulates an integral `mm`
+// in the operand's own width and MPSGraph has no matmul for them, so a graph
+// would be a guess rather than a measurement.
+bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
+
+// A gemm operand resolved into the layout the graph should read it in: the dense
+// buffer to describe, and whether the graph has to swap that buffer's last two
+// axes to recover the operand the caller passed.
+//
+// A transpose of the last two axes of a dense buffer is the one strided layout
+// worth carrying into the graph instead of copying, and `nn.Linear` is why it is
+// not a corner case: it hands a gemm `weight.t()`. Both halves of that are
+// measured on an M5 for a (512, 1024) x (1024, 32768) f32 product: materialising
+// the (1024, 32768) weight on the device costs 13 ms, because reading a
+// 32768-column buffer down its columns touches a fresh cache line per element --
+// more than the product itself -- while the transpose node is free (11.9 ms with
+// the transpose in the graph against 13.1 ms with the operand already dense).
+//
+// `buffer` always holds the operand's `numel()` elements densely from its own
+// offset, which is what MpsRunGraph describes: for a transposed operand it is
+// the operand's own transpose view, which shares that memory, and otherwise the
+// operand is made contiguous. Every other strided layout -- a slice, a
+// broadcast -- takes that copy, because a buffer MpsRunGraph reads densely would
+// otherwise be read as the wrong bytes.
+//
+// A body that branches on `transposed` has to name it in its graph key:
+// MpsRunGraph folds in dtype and shape, and a transposed (n, n) operand and a
+// dense (n, n) one are otherwise one key and one plan.
+struct MpsGemmOperand {
+  at::Tensor buffer;
+  bool transposed;
+};
+
+MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t);
+
 // The axes `dims` covers in a tensor of `sizes`, written to *out: negative
 // positions resolved against the rank, then sorted. A nullopt or EMPTY dims
 // list means every axis, because that is what aten means by it -- `sum(x)` and
@@ -167,6 +206,10 @@ MPSGraphTensor* MpsScaledByScalar(
 // is a wrong answer rather than a slow one, so every host value a graph builder
 // reads has to appear in this key; KEY_PARTS in scripts/codegen/codegen_mps.py
 // is where each op declares its own.
+//
+// A layout a builder decides for itself from an operand's strides is the same
+// kind of host value and has to be named the same way; MpsGemmOperand is the one
+// case of it today.
 //
 // The parts are appended in the order given, each with its own tag, so the key
 // distinguishes an int 2 from a float 2.0 exactly where the graph does.

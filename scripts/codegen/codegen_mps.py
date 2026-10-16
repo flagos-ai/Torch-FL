@@ -10,10 +10,11 @@
 # every entry has a body written out once.
 #
 # This tree carries stages 1 and 2 of
-# docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md section 7:
-# the `unary` category, the elementwise `binary` and `binary_scalar` families, and
-# the `reduce` family, each matching the CPU reference within tolerance. Stage 3
-# adds the gemm/conv/softmax set Qwen3-0.6B needs.
+# docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md section 7
+# -- the `unary` category, the elementwise `binary` and `binary_scalar` families,
+# and the `reduce` family -- plus the first stage-3 increment, the `gemm`
+# category (`mm` and `bmm`), each matching the CPU reference within tolerance.
+# The rest of stage 3 (conv, softmax) is still open.
 #
 # Two consequences worth stating up front, mirroring codegen_kunlunxin.py:
 #
@@ -79,6 +80,16 @@ OPS = {
     "mul.Scalar": "binary_scalar",
     "sum.dim_IntList": "reduce",
     "mean.dim": "reduce",
+    # Stage 3 opens with the matmuls, because they are where a small model
+    # spends its time: measured on an M5 (one Qwen3-0.6B layer, hidden 1024, seq
+    # 512, fp32), the eight `mm` calls and two `bmm` calls were 71-73% of the
+    # layer's device dispatch time, and at seq 1 -- where the whole layer's
+    # arithmetic is 0.09 GFLOP -- the eight `mm` calls were still 84% of it, so
+    # the cost is the host round trip around the weights rather than the flops.
+    # `addmm`, `mv`, `linear` and the `.out` spellings follow the same rule as
+    # the categories above: unregistered until a kernel exists.
+    "mm": "gemm",
+    "bmm": "gemm",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -94,6 +105,8 @@ AT_OP = {
     "mul.Scalar": "mul",
     "sum.dim_IntList": "sum",
     "mean.dim": "mean",
+    "mm": "mm",
+    "bmm": "bmm",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -102,6 +115,7 @@ SUPPORTS = {
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
+    "gemm": "MpsSupportsGemmDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -119,6 +133,18 @@ CALLS = {
     "mul.Scalar": "multiplicationWithPrimaryTensor:",
     "sum.dim_IntList": "reductionSumWithTensor:",
     "mean.dim": "reductionSumWithTensor:",
+    # One selector for both ops: it broadcasts, so the batched rank-3 pair bmm
+    # takes is the same node as the rank-2 pair mm takes.
+    "mm": "matrixMultiplicationWithPrimaryTensor:",
+    "bmm": "matrixMultiplicationWithPrimaryTensor:",
+}
+
+# The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
+# two stacks of them, and a call whose operands are some other rank is declined
+# rather than handed to a selector that broadcasts.
+RANK = {
+    "mm": 2,
+    "bmm": 3,
 }
 
 # The host `alpha` an aten signature carries, as the three pieces a body needs:
@@ -139,8 +165,8 @@ ALPHA = {
 # signature -- dtype and shape of every operand and of the result -- into the
 # cache key itself, so this only has to name what the tensors cannot say: the
 # `alpha` a scaled operand carries, the host scalar a `.Scalar` form adds, the
-# axes a reduction covers. Empty for an op whose graph is a function of its
-# operands alone.
+# axes a reduction covers, the layout a gemm body decides for an operand from
+# its strides. Empty for an op whose graph is a function of its operands alone.
 #
 # A host value a body reads and this list leaves out is not a slow path, it is a
 # wrong answer: the two calls produce one cache key and the first compiled graph
@@ -156,6 +182,9 @@ KEY_PARTS = {
     "mul.Scalar": ", other",
     "sum.dim_IntList": ", axes",
     "mean.dim": ", axes",
+    # Which of the two operands the graph has to transpose: see T_GEMM.
+    "mm": ", self_transposed, mat2_transposed",
+    "bmm": ", self_transposed, mat2_transposed",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -375,11 +404,105 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# The matrix-multiply body. One MPSGraph selector serves both ops, because it
+# broadcasts: `mm`'s rank-2 pair and `bmm`'s rank-3 one are the same node, and
+# the op's own rank is the only thing the body holds the graph to.
+#
+# Four checks come before the graph. All four are the reference's contract rather
+# than the graph's, and all four would otherwise be a wrong answer instead of an
+# error:
+#
+#   * The rank. `mm` is defined for two matrices and `bmm` for two stacks, while
+#     the broadcast selector answers happily for another rank.
+#   * The inner dimensions, and the batch dimensions `bmm` requires to match. The
+#     selector broadcasts batch dimensions too, so a pair aten refuses to
+#     multiply would otherwise build a graph.
+#   * A zero-length inner dimension. `(M, 0) x (0, N)` is M*N zeros rather than
+#     an empty tensor, and there is no zero-element tensor to describe to
+#     MPSGraph; the reference has that arithmetic.
+#   * An empty result, which is returned as the empty tensor it is.
+#
+# Each failure takes the CPU round-trip, where the reference raises in its own
+# words: `mm` of a rank-3 operand reports the rank, and a mismatched pair reports
+# the two shapes.
+#
+# The operands are then described to the graph in the layout it should read:
+# MpsGemmOperand resolves each one, and a transpose of the last two axes is left
+# for the graph to apply as a view rather than copied on the device. `nn.Linear`
+# is why that case is the common one -- it hands this op `weight.t()`. The layout
+# is a host value the body reads, so both flags are named in the key as well:
+# MpsRunGraph folds in dtype and shape only, and a transposed (n, n) operand and
+# a dense (n, n) one would otherwise share whatever plan the first call compiled.
+T_GEMM = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
+  if (!mps::{supports}(self.scalar_type(), mat2.scalar_type())) {{
+    return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
+  }}
+  if (self.dim() != {rank} || mat2.dim() != {rank} ||
+      self.size(-1) != mat2.size(-2)) {{
+    return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
+  }}
+  // Empty for mm, which has no batch dimension, and aten's equal-batch rule for
+  // bmm.
+  for (int64_t dim = 0; dim + 2 < self.dim(); ++dim) {{
+    if (self.size(dim) != mat2.size(dim)) {{
+      return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
+    }}
+  }}
+  std::vector<int64_t> out_shape(self.sizes().vec());
+  out_shape.back() = mat2.size(-1);
+  at::Tensor out = at::empty(out_shape, self.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  if (self.numel() == 0 || mat2.numel() == 0) {{
+    return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
+  }}
+  const mps::MpsGemmOperand self_operand = mps::MpsGemmOperandOf(self);
+  const mps::MpsGemmOperand mat2_operand = mps::MpsGemmOperandOf(mat2);
+  const bool self_transposed = self_operand.transposed;
+  const bool mat2_transposed = mat2_operand.transposed;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_operand.buffer, mat2_operand.buffer}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        // The operands arrive at the shape their own buffers hold, so a
+        // transposed one is put back the way the operand presents itself before
+        // the product.
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args[1];
+        if (self_transposed) {{
+          const NSUInteger last = (NSUInteger)primary.shape.count;
+          primary = [graph transposeTensor:primary
+                                 dimension:last - 2
+                             withDimension:last - 1
+                                      name:nil];
+        }}
+        if (mat2_transposed) {{
+          const NSUInteger last = (NSUInteger)secondary.shape.count;
+          secondary = [graph transposeTensor:secondary
+                                   dimension:last - 2
+                               withDimension:last - 1
+                                        name:nil];
+        }}
+        return [graph {call}primary secondaryTensor:secondary name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), mat2.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
+    "gemm": T_GEMM,
 }
 
 FILE_HEADER = """\
@@ -392,10 +515,11 @@ FILE_HEADER = """\
 // MPSGraph against the runtime's shared MTLBuffers, schedules the graph on the
 // current flagos stream's command queue and returns the output it allocated; a
 // case the graph cannot answer exactly takes the CPU round-trip. The graph
-// itself is compiled once per (body, operand shapes and dtypes) and reused, so
-// the per-call cost is a schedule rather than a graph construction -- see the
-// plan cache in mps_common.mm. Dispatchers are declared in generated/ops.h
-// (shared with the CUDA codegen); here we only fill the Backend::kMps slot.
+// itself is compiled once per (body, operand shapes, dtypes and layouts) and
+// reused, so the per-call cost is a schedule rather than a graph construction;
+// the plan cache that does it is in mps_common.mm. Dispatchers are declared in
+// generated/ops.h (shared with the CUDA codegen); here we only fill the
+// Backend::kMps slot.
 //
 // Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
 // on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph
@@ -414,8 +538,10 @@ FILE_HEADER = """\
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
+#include <ATen/ops/bmm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/mean.h>
+#include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
@@ -494,6 +620,7 @@ def render():
                 at_op=AT_OP[op],
                 supports=SUPPORTS[category],
                 call=CALLS[op],
+                rank=RANK.get(op, 0),
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
