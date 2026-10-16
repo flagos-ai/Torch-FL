@@ -304,6 +304,60 @@ def _report_upstream_mps():
             )
 
 
+def _report_timing():
+    """The per-call times the three cost classes bound, with their numbers."""
+    import time
+
+    import torch.nn.functional as F
+
+    # `torch_fl.synchronize` does not exist (the tests guard it with `hasattr`
+    # and so measure launch time); report both with and without a real sync so a
+    # runner whose launch cost is higher than the device cost is visible.
+    def measure(fn, n):
+        for _ in range(3):
+            fn()
+        if hasattr(torch_fl, "_C") and hasattr(torch_fl._C, "_synchronize"):
+            torch_fl._C._synchronize()
+        start = time.perf_counter()
+        for _ in range(n):
+            fn()
+        if hasattr(torch_fl, "_C") and hasattr(torch_fl._C, "_synchronize"):
+            torch_fl._C._synchronize()
+        return (time.perf_counter() - start) / n * 1e3
+
+    vocab, hidden, seq = 151936, 1024, 512
+    weight = torch.randn(vocab, hidden, device=DEVICE)
+    indices = torch.randint(0, vocab, (1, seq), device=DEVICE)
+    print(
+        json.dumps(
+            {
+                "kind": "timing",
+                "case": "embedding",
+                "ms": measure(lambda: F.embedding(indices, weight), 10),
+                "bound": 10.0,
+            }
+        ),
+        flush=True,
+    )
+
+    for rows, cols, index_len in ((4096, 1024, 512), (1024, 1024, 512)):
+        operand = torch.randn(rows, cols, device=DEVICE)
+        index = torch.randint(0, rows, (index_len,), device=DEVICE)
+        print(
+            json.dumps(
+                {
+                    "kind": "timing",
+                    "case": f"index_select {rows}x{cols}",
+                    "ms": measure(
+                        lambda: torch.ops.aten.index_select(operand, 0, index), 10
+                    ),
+                    "bound": 10.0,
+                }
+            ),
+            flush=True,
+        )
+
+
 def _report_frontend():
     """The aborting case, alone in its own process.
 
@@ -333,13 +387,14 @@ SECTIONS = {
     "div": _report_div,
     "layer_norm": _report_layer_norm,
     "upstream": _report_upstream_mps,
+    "timing": _report_timing,
     "frontend": _report_frontend,
 }
 
 # The order the driver runs them in. `frontend` is last because it is the one
 # expected to abort: everything before it has already been printed and flushed
 # by the time its child dies.
-SECTION_ORDER = ["environment", "upstream", "div", "layer_norm", "frontend"]
+SECTION_ORDER = ["environment", "div", "layer_norm", "timing", "frontend"]
 
 
 def _run_section(name):
