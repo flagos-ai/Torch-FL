@@ -23,6 +23,7 @@ driver, so they need neither a DCU device nor DTK.
 
 import ctypes
 import enum
+import sys
 import types
 
 import pytest
@@ -34,6 +35,11 @@ _dcu_compat = load_module(
 )
 
 _PATCHED_ATTRS = (
+    "Stream",
+    "ExternalStream",
+    "stream",
+    "set_stream",
+    "_set_stream_by_id",
     "get_device_properties",
     "get_device_name",
     "get_device_capability",
@@ -651,3 +657,39 @@ def test_sdpa_switch_does_not_take_the_whole_shim_down(shim, monkeypatch):
 
 # install_dcu_rng_bridge() is covered by tests/unit/test_dcu_rng_bridge.py, which
 # imports the real torch_fl package (the bridge needs torch_fl.flagos).
+
+
+def test_boxed_provider_installs_one_consistent_facade(shim, monkeypatch):
+    provider = types.SimpleNamespace()
+    for name in (
+        "DcuStream",
+        "DcuEvent",
+        "DcuExternalStream",
+        "default_stream",
+        "set_stream",
+        "set_stream_by_id",
+        "stream_context",
+    ):
+        setattr(provider, name, lambda *args, **kwargs: None)
+    provider.current_stream = lambda idx=0: types.SimpleNamespace(cuda_stream=900 + idx)
+    package = types.ModuleType("torch_fl.accelerator.dcu")
+    package.dcu_stream = provider
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    shim.flagos._C = types.SimpleNamespace(_dcu_stream_info=lambda: None)
+    assert _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.cuda.Stream is provider.DcuStream
+    assert torch.cuda.Event is provider.DcuEvent
+    assert torch.cuda.ExternalStream is provider.DcuExternalStream
+    assert torch.cuda.set_stream is provider.set_stream
+    assert torch.cuda.stream is provider.stream_context
+    assert torch.cuda._set_stream_by_id is provider.set_stream_by_id
+    assert torch._C._cuda_getCurrentRawStream(2) == 902
+
+
+def test_runtime_env_cannot_enable_missing_binary_provider(shim, monkeypatch):
+    original = torch.cuda.Stream
+    monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")
+    assert not hasattr(shim.flagos, "_C")
+    assert _dcu_compat.patch_torch_cuda_for_dcu()
+    assert torch.cuda.Stream is original
+    assert torch._C._cuda_getCurrentRawStream(0) == 0
