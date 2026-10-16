@@ -43,7 +43,11 @@ paths_watch:
   - scripts/vendor/with_cuda_libtorch.sh
 
 container_volumes:
-  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+  # The checkpoint lives on the shared NFS mount on every torch-fl-nv host, not
+  # under /data: /data/models/Qwen/Qwen3-0.6B is absent from all of them, which
+  # makes the bind mount source empty and fails every Qwen3 group at setup with
+  # "Unrecognized model in /models/Qwen3-0.6B".
+  - /nfs/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 integration_environment:
   MODEL_PATH: /models/Qwen3-0.6B
