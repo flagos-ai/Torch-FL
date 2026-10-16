@@ -164,6 +164,32 @@ OPS = {
     # caller owns like every other `.out` form here, and `embedding_dense_backward`
     # is a separate op with its own scatter question.
     "embedding": "embedding",
+    # The last arithmetic gap on the elementwise path. `add`, `sub` and `mul`
+    # have been served since stage 2; `div` was not, so every `x / y` and every
+    # `x / 2.0` in a model took the CPU round-trip, and it is the op the
+    # transformers reach for at two places that matter: the `1 / sqrt(d)`
+    # attention scale and the `x / sum(exp(x))` tail of a hand-written softmax.
+    #
+    # The cost is the round-trip rather than the arithmetic. Measured on an M5
+    # over a (2, 512, 1024) operand, `div.Scalar` cost 0.68-0.95 ms against a
+    # 0.24 ms device-to-host copy of the same tensor -- three host passes over
+    # the operand where the kernel does one -- and 1.36-2.66 ms for the tensor
+    # form. `reciprocal` is served with it: it is the same body with a constant
+    # numerator, `1 / x` is `div` with a scalar self, and MPSGraph's reciprocal
+    # is the same arithmetic (and the same overflow policy) as the division
+    # node. Serve one and the other is nearly free; serve `reciprocal` alone and
+    # a caller who writes `1 / x` still takes the round-trip, because that is
+    # `div`.
+    #
+    # Only the two plain overloads. `div.out` writes into a tensor the caller
+    # owns like every other `.out` form here, and `div.Tensor_mode` / `.Scalar_mode`
+    # carry a `rounding_mode` whose three values (`floor`, `trunc`, `None`) the
+    # body would have to branch on *inside* the graph -- a divisor the truncating
+    # one needs and the other two must not have, which is a different body rather
+    # than a keyword. Both take the round-trip.
+    "div.Tensor": "div",
+    "div.Scalar": "div_scalar",
+    "reciprocal": "reciprocal",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -201,6 +227,16 @@ AT_OP = {
     # rather than `index_select` because a table read is what the caller asked
     # for and the reference is where its out-of-range contract lives.
     "embedding": "embedding",
+    # The CPU reference the `div` body round-trips to on anything it declines.
+    # It is `at::div` rather than a reciprocal-multiply: the two readings differ
+    # on the cases the gate below exists for (a zero denominator, a subnormal
+    # quotient), so the round-trip has to land on the reference's own kernel.
+    "div.Tensor": "div",
+    "div.Scalar": "div",
+    # `reciprocal` exists as its own aten kernel, so the round-trip gets the
+    # reference's own `1 / x` rather than a composite that would re-enter the
+    # dispatcher.
+    "reciprocal": "reciprocal",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -215,6 +251,20 @@ SUPPORTS = {
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
+    # Neither form takes the dtype-preserving predicate its sibling arithmetic
+    # ops use: division is not dtype-preserving on the reference (`int / int` is
+    # a float tensor), and a predicate that admitted the integral widths would
+    # return the graph's truncated int64 where the CPU returns float32 -- a wrong
+    # answer rather than an exception. So the pair and the scalar operand each
+    # have their own gate over the float widths. See the notes above the two
+    # predicates in mps_common.h.
+    "div": "MpsSupportsDivDtype",
+    "div_scalar": "MpsSupportsDivScalarDtype",
+    # `reciprocal` computes on the same node family as `div` with a constant
+    # numerator, so it takes the div wall rather than the unary one: the two
+    # must agree on the dtypes that are served, or `x / 2` and `1 / x` would
+    # answer in different widths.
+    "reciprocal": "MpsSupportsDivDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -253,6 +303,22 @@ CALLS = {
     # reference contract forces the body to check on the host before it builds
     # the node.
     "embedding": "gatherWithUpdatesTensor:",
+    # MPSGraph's division node, and the interesting thing about it is that it is
+    # the *only* arithmetic selector here whose choice is not obvious: the
+    # plausible alternative is `a * reciprocalWithTensor:b`, which is what a
+    # bare-metal port of `div` usually reaches for. Measured on an M5 against
+    # `at::div` over the cases that separate the two -- a zero denominator, a
+    # signed zero, an inf/nan pair, the smallest denormals -- the two readings
+    # are bit-identical to each other *and* to the reference on every one of
+    # them, so the cheaper one node is the one this body builds. See
+    # MpsSupportsDivDtype for the measurement and for the one case (a subnormal
+    # result) where the node and the reference do part.
+    "div.Tensor": "divisionWithPrimaryTensor:",
+    "div.Scalar": "divisionWithPrimaryTensor:",
+    # The same family with a constant numerator, so it needs no second operand
+    # and `{call}` names the one-argument selector. Sized by the same gate as
+    # the div bodies above.
+    "reciprocal": "reciprocalWithTensor:",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -335,6 +401,13 @@ KEY_PARTS = {
     # the index range check, and its outcome is a function of the indices
     # themselves, which MpsRunGraph folds in.
     "embedding": "",
+    # Empty: a division graph is a function of its operands' dtypes and shapes,
+    # which MpsRunGraph folds in, and of nothing else. There is no `alpha` on
+    # either spelling and no host scalar the body bakes in -- `div.Scalar`'s
+    # scalar *is* an operand constant and is named there.
+    "div.Tensor": "",
+    "div.Scalar": ", other",
+    "reciprocal": "",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -1125,6 +1198,176 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `div` closes the elementwise arithmetic set -- `add`, `sub` and `mul` have been
+# served since stage 2 and this is the fourth -- so the least interesting thing
+# about it is the body, which is `T_BINARY` with one selector changed. What is
+# worth recording is the three ways it is *not* the binary template.
+#
+# **The selector.** MPSGraph offers `divisionWithPrimaryTensor:secondaryTensor:`
+# and a `reciprocalWithTensor:`, and a port that reached for the reciprocal (the
+# usual trick on hardware where division is slow) would be building
+# `a * reciprocal(b)`. Measured on an M5 against `at::div` over the cases that
+# separate the two readings -- a zero denominator (both signs), a signed zero
+# numerator and denominator, an inf/nan pair, and the smallest denormals -- the
+# two graphs return bit-identical results *to each other and to the reference*
+# on every case except one, where both differ together (below). So the
+# reciprocal is not a different answer, it is a second node, and the body takes
+# the one node.
+#
+# **The subnormal the graph does not keep.** This is the one measured difference
+# from the reference, and it is not a division property. Measured on an M5
+# through this backend: a subnormal *result* comes back as zero -- `1e-38 / 2`
+# is `5.0e-39` on the reference and `0` from the graph, while `2.35e-38 / 2` is
+# the normal `1.175494e-38` from both -- and the same through every spelling
+# (`div.Tensor` with a tensor or a folded constant, `div.Scalar`, and the
+# reciprocal, which returns `inf` for `1 / 1.17e-38` where the reference reaches
+# `8.5e37`). `mul.Tensor` flushes identically and has been routed to `mps` since
+# stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39` -> `0`).
+# So the choice here is "div behaves like the mul and add the branch already
+# serves" or "div is the only arithmetic op on the device with a different
+# subnormal policy from its siblings", and the first is both the smaller surprise
+# and the one already shipped. The gate does not pretend otherwise --
+# MpsSupportsDivDtype's note records the measurement and test_mps_div.py pins it
+# as intentional beside the `mul` case it shares -- so a future reader meets it
+# as a known property rather than by bisecting a model. Nothing in a
+# transformer's attention or normalization path evaluates a division whose result
+# is subnormal -- the values there are O(1) -- so this is a boundary the branch
+# documents rather than one it meets.
+#
+# **The `mode` overloads are a different body, not a keyword.** `div.Tensor_mode`
+# and `div.Scalar_mode` carry a `rounding_mode` whose three values are `floor`,
+# `trunc` and the absent one; floor and trunc both need a `floor` node MPSGraph
+# has, but they need it *after* the division and they need the division to be
+# exact first, which is not what a single node does. That is a composition, and
+# a composition is only allowed here where it was measured -- so those two, and
+# the four `.out` spellings with them, take the round-trip.
+#
+# The dtype gate is a predicate over two operands because that is the form the
+# tensor overload needs, and the scalar overload takes one of its own shape --
+# `MpsSupportsDivScalarDtype`, not the shared `MpsSupportsScalarDtype` the other
+# scalar bodies use. The shared one is dtype-preserving by construction, which is
+# right for `mul`/`add`/`sub` and wrong here: `div(int, 2)` is a *float* tensor on
+# the reference, so an integral operand takes the round-trip rather than the
+# graph's truncated int64. On a float operand the divisor is then free, and a
+# fractional one is served like any other.
+T_DIV = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
+  if (!mps::{supports}(self.scalar_type(), other.scalar_type())) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c, other_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] secondaryTensor:args[1] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The elementwise body over a tensor and a host scalar, for `div.Scalar`: the
+# divisor becomes a one-element constant in the operand's own element type and
+# the graph broadcasts it. Same shape as T_SCALAR, and the same reason for the
+# narrower gate -- `x / 2` on a float tensor is a float tensor, but `x / 2` on
+# an int tensor is a float tensor on the reference, which a constant of the
+# operand's dtype cannot express, so an integral operand takes the round-trip
+# unless the divisor is integral too.
+#
+# The selector is the two-operand division node rather than the reciprocal,
+# exactly as in T_DIV, so a `div_scalar` body and a `div` body over the same
+# values build the same node.
+T_DIV_SCALAR = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
+  if (!mps::{supports}(self.scalar_type(), other)) {{
+    return at::{at_op}(self.cpu(), other).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {{
+          return nil;
+        }}
+        return [graph {call}args[0] secondaryTensor:other_t name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), other).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `reciprocal` is `1 / x`, and this body is the unary template with the division
+# node in it. The two things worth recording:
+#
+#   * **It is the same family, not a separate question.** MPSGraph has
+#     `reciprocalWithTensor:`, which is a node of its own, but it is the same
+#     arithmetic and the same subnormal policy as `divisionWithPrimaryTensor:`
+#     (both measured on an M5 against the reference over the zero, signed-zero,
+#     inf, nan and denormal cases). Serving `div` and not this would leave
+#     `1 / x` -- which is what `torch.reciprocal` is, and what a caller who wants
+#     the reciprocal *writes* -- on the CPU round-trip for no reason, so the two
+#     land together.
+#   * **The dtype gate is the div one, not the unary one.** It would be easy to
+#     give this op the unary predicate, which is wider (it serves the int widths
+#     as well). It must not: `x / 2` and `1 / x` are the same arithmetic, and two
+#     ops built on one node family that disagree about which dtypes they serve is
+#     a divergence someone would later have to prove correct rather than one a
+#     reader can see. So the gate is named for the family.
+T_RECIPROCAL = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type(), self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -1136,6 +1379,9 @@ CATEGORIES = {
     "conv": T_CONV,
     "silu": T_SILU,
     "embedding": T_EMBEDDING,
+    "div": T_DIV,
+    "div_scalar": T_DIV_SCALAR,
+    "reciprocal": T_RECIPROCAL,
 }
 
 FILE_HEADER = """\
@@ -1174,6 +1420,7 @@ FILE_HEADER = """\
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
+#include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/mean.h>
@@ -1181,6 +1428,7 @@ FILE_HEADER = """\
 #include <ATen/ops/mul.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
+#include <ATen/ops/reciprocal.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>

@@ -86,6 +86,38 @@ bool MpsSupportsReduceDtype(
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsDivDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
+  // The float widths only, *not* the mul predicate, even though the two would
+  // look interchangeable: `mul` is dtype-preserving on the reference and
+  // division is not. Measured, because the difference is a wrong answer rather
+  // than an exception -- `at::div(tensor([-7]), tensor([2]))` is the float
+  // `-3.5` on the reference while the graph's integral division truncates in
+  // place and returns the int64 `-3`. A gate that admitted the integral widths
+  // would hand the caller the truncated tensor and a dtype that disagrees with
+  // the CPU, so the pair takes the round-trip instead. See the note in
+  // mps_common.h. `reciprocal` names this same predicate with both arguments
+  // equal to the operand's dtype, so `x / 2` and `1 / x` are served on exactly
+  // one width set.
+  if (self_dtype != other_dtype) {
+    return false;
+  }
+  return self_dtype == at::kFloat || self_dtype == at::kHalf ||
+      self_dtype == at::kBFloat16;
+}
+
+bool MpsSupportsDivScalarDtype(
+    at::ScalarType self_dtype,
+    const at::Scalar& other) {
+  // The float widths only, and the divisor is then unconstrained within them:
+  // see the note in mps_common.h. A complex divisor has no MPSGraph element
+  // type, so it is declined along with the complex operand widths.
+  if (other.isComplex()) {
+    return false;
+  }
+  return self_dtype == at::kFloat || self_dtype == at::kHalf ||
+      self_dtype == at::kBFloat16;
+}
+
 bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
   if (self_dtype != other_dtype) {
     return false;

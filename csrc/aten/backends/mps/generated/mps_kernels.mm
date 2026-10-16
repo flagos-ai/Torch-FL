@@ -33,6 +33,7 @@
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
+#include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/mean.h>
@@ -40,6 +41,7 @@
 #include <ATen/ops/mul.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
+#include <ATen/ops/reciprocal.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
@@ -827,5 +829,89 @@ at::Tensor EmbeddingKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMps, EmbeddingKernelMps)
+
+at::Tensor DivTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsDivDtype(self.scalar_type(), other.scalar_type())) {
+    return at::div(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::div(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("div.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph divisionWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::div(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kMps, DivTensorKernelMps)
+
+at::Tensor DivScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsDivScalarDtype(self.scalar_type(), other)) {
+    return at::div(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("div.Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {
+          return nil;
+        }
+        return [graph divisionWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+      });
+  if (!ran) {
+    return at::div(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kMps, DivScalarKernelMps)
+
+at::Tensor ReciprocalKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsDivDtype(self.scalar_type(), self.scalar_type())) {
+    return at::reciprocal(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("reciprocal"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reciprocalWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::reciprocal(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, ReciprocalKernelMps)
 
 } // namespace at::native::flagos

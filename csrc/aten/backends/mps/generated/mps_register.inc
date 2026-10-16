@@ -19,6 +19,8 @@
   m.impl("add.Tensor", WrapperAddTensor);
   m.impl("bmm", WrapperBmm);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
+  m.impl("div.Scalar", WrapperDivScalar);
+  m.impl("div.Tensor", WrapperDivTensor);
   m.impl("embedding", WrapperEmbedding);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mm", WrapperMm);
@@ -26,6 +28,7 @@
   m.impl("mul.Tensor", WrapperMulTensor);
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
+  m.impl("reciprocal", WrapperReciprocal);
   m.impl("silu", WrapperSilu);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);

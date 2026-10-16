@@ -369,6 +369,9 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "convolution_overrideable",
         "silu",
         "embedding",
+        "div.Tensor",
+        "div.Scalar",
+        "reciprocal",
     ):
         assert routes.get(op) == "mps", f"the {op} kernel must be routed to mps"
 
@@ -466,19 +469,21 @@ def test_conf_route_counts_are_stable():
         # the native .inc, since a second m.impl in the same PrivateUse1 body is a
         # duplicate-registration error. See _derived_iluvatar_counts().
         "iluvatar": _derived_iluvatar_counts(),
-        # MPS is a native vendor backend at stage 3: the codegen'd
+        # MPS is a native vendor backend at stage 4: the codegen'd
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
         # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax``, ``pow_scalar``
-        # ``conv``, ``silu`` and ``embedding`` categories generate (17 ops so far
-        # -- stage 3 added ``mm``/``bmm``, then ``_softmax``, ``neg`` and
-        # ``pow.Tensor_Scalar``, then ``convolution_overrideable``, and stage 4
-        # added ``silu`` and ``embedding``), so the conf routes those to ``mps``
+        # ``conv``, ``silu``, ``embedding``, ``div``, ``div_scalar`` and
+        # ``reciprocal`` categories generate (20 ops so far -- stage 3 added
+        # ``mm``/``bmm``, then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``,
+        # then ``convolution_overrideable``; stage 4 added ``silu`` and
+        # ``embedding``, then ``div.Tensor``/``div.Scalar``/``reciprocal``), so
+        # the conf routes those to ``mps``
         # and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 17, "none": 2020},
+        "mps": {"mps": 20, "none": 2017},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

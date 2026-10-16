@@ -221,6 +221,66 @@ bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype);
 
+// Whether `self / other` computes on the MPSGraph path.
+//
+// The gate itself is deliberately the same test `mul` uses: two operands of one
+// float width. What is worth recording is the one measured difference from the
+// reference, because it is a boundary this branch accepts knowingly rather than
+// a case that was missed.
+//
+// **MPSGraph flushes a subnormal *result* to zero.** Measured on an M5 through
+// this backend, not on a standalone graph. The boundary is the result, at the
+// smallest normal float: `1e-38 / 2` returns `5.0e-39` on the reference (a
+// subnormal) and `0` from the graph, while `2.35e-38 / 2` returns the normal
+// `1.175494e-38` from both. It holds for an operand array and for a folded
+// constant alike -- `aten::div.Tensor(x, tensor(2.0))`,
+// `aten::div.Tensor(x, 2.0)` and `aten::div.Scalar(x, 2.0)` all return `0` here
+// -- so it is the graph's arithmetic rather than a property of one overload. A
+// reciprocal overflows from the same boundary: `1 / 1.17e-38` is `8.5e37` on the
+// reference and `inf` from the graph.
+//
+// This is not a division property, and the measurement says so plainly:
+// `mul.Tensor` flushes the identical way and has been routed to this backend
+// since stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39`
+// -> `0`). So the choice here is "div behaves like the mul and add this branch
+// already serves" or "div is the only arithmetic op on the device with a
+// different subnormal policy from its three siblings", and the first is both the
+// smaller surprise and the one already shipped. Nothing in an attention or
+// normalization path evaluates a division whose result is subnormal -- those are
+// O(1) by construction -- so this is a boundary the branch documents rather than
+// one it meets. test_mps_div.py pins it as intentional beside the ``mul`` case
+// it shares.
+//
+// The other case that separates the plausible readings -- `a / b` against
+// `a * reciprocal(b)` -- does **not** show up here: measured against `at::div`
+// over the zero and signed-zero denominators, the inf/nan pairs and the
+// denormals, both readings are bit-identical to each other *and* to the
+// reference. So the selector is a cost decision (one node against two) rather
+// than a correctness one, and the two bodies that share it -- `div` and
+// `reciprocal` -- are gated together rather than per op.
+//
+// Integral operands take the round-trip. `div(int, int)` is a float tensor on the
+// reference rather than a truncating one, and a *fractional* scalar divisor
+// promotes the same way, which one constant of the operand's own element type
+// cannot express; float64 and the complex pair have no MPSGraph element type at
+// all.
+bool MpsSupportsDivDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
+
+// The scalar-operand spelling of the same question: whether `self / scalar`
+// computes on the MPSGraph path.
+//
+// This is *not* MpsSupportsScalarDtype, for the reason MpsSupportsDivDtype is not
+// MpsSupportsBinaryDtype. That predicate is dtype-preserving by construction --
+// it admits an integral operand with an integral divisor so the result stays in
+// the operand's element type, which is what `mul`/`add`/`sub` need. Division is
+// not dtype-preserving: measured on an M5 through this backend,
+// `at::div.Scalar(tensor([-7]), 2)` is the float `-3.5` on the reference while
+// the graph's integral division truncates and returns the int64 `-3`. So the
+// operand has to be a float width, and the divisor is then free (an integral or
+// fractional host scalar both land in the float result). The round-trip is what
+// keeps the reference's dtype, which is the part a wrong gate gets wrong.
+bool MpsSupportsDivScalarDtype(at::ScalarType self_dtype, const at::Scalar& other);
+
 // Whether a matrix multiplication computes exactly on the MPSGraph path. Both
 // operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
 // and a mismatched pair is a reference error rather than a result -- and that

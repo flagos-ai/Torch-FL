@@ -104,8 +104,9 @@ scalar (with aten's `alpha`); and `sum.dim_IntList`/`mean.dim`. Stage 3 has
 added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`)
 two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
 (`convolution_overrideable`), which closes the stage-3 lanes. Stage 4 has added
-the `silu` and `embedding` categories, for seventeen in all.
-Those seventeen are claimed on the `PrivateUse1` `mps` slot by
+the `silu` and `embedding` categories and then the `div`/`div_scalar`/
+`reciprocal` ones, for twenty in all.
+Those twenty are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
@@ -114,11 +115,11 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated seventeen are compared against
+Results are correct on every op: the accelerated twenty are compared against
 the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
 `test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py`,
-`test_mps_silu.py` and `test_mps_embedding.py`, and a case their
+`test_mps_silu.py`, `test_mps_embedding.py` and `test_mps_div.py`, and a case their
 kernels decline takes the CPU round-trip rather than a wrong answer. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
 than copying it: a transposed last two axes over dense memory is recognised and
@@ -144,8 +145,20 @@ graph's silent first-row answer, and `padding_idx` must *not* be read, because
 the forward op's output does not depend on it -- treating it as though it did
 cost the whole-table round-trip on every `F.embedding` call, since the Python
 front end passes `None` as `-1` (design doc section 7).
+The `div` increment closes the elementwise arithmetic set -- `add`/`sub`/`mul`
+have been served since stage 2 -- and carries `div.Tensor`, `div.Scalar` and
+`reciprocal` together, because `1 / x` is division with a constant numerator and
+the two come from one MPSGraph node family. Its gate is the one place on this
+backend where the dtype predicate is *not* the dtype-preserving one its
+siblings use: `div(int, int)` is a float tensor on the reference
+(`-7 / 2` is `-3.5`), while the graph's integral division truncates in place and
+returns int64 `-3`, so an integral operand takes the round-trip. The one
+measured difference from the reference is recorded in the kernel and pinned in
+the test: the graph flushes a subnormal *result* to zero (`1e-38 / 2` is `0`
+where the CPU says `5e-39`), which is the same boundary `mul` and `add` have had
+since stage 2 (design doc section 7).
 A platform whose GPU
-never runs a kernel is a "Runtime only" row, not operator support; seventeen ops
+never runs a kernel is a "Runtime only" row, not operator support; twenty ops
 is operator support for the unary, elementwise, reduction, matrix-product,
 softmax, convolution, activation and table-read families and nothing more. Note that `softmax.int` is
 not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch

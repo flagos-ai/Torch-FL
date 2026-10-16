@@ -422,8 +422,71 @@ log naming `mps` for both the `F.embedding` and `aten.embedding` spellings, a
 declined float64 table that never reaches the graph, and a cost case that fails
 if the whole-table round-trip comes back.
 
-The remaining stage-4 work is the `docs/reference/operator-support.md` matrix
-rows and a CI lane for the operator suite.
+Stage 4 continued with `div`, `div.Scalar` and `reciprocal`, which close the
+elementwise arithmetic set that `add`, `sub` and `mul` opened in stage 2. The
+increment was chosen from a measurement rather than from the op list: on an M5
+over a `(2, 512, 1024)` float32 tensor, `div.Scalar` cost 0.68-0.95 ms and
+`div.Tensor` 1.36-2.66 ms against 0.24 ms for a device-to-host copy of the same
+tensor, so the routed path was making three host passes where the kernel makes
+one. All three ops are served by a single graph node,
+`divisionWithPrimaryTensor:secondaryTensor:`, and the body is one node for
+`reciprocal` too -- `reciprocalWithTensor:` was measured and rejected on cost,
+since `a * reciprocal(b)` and `a / b` are bit-identical to each other and to
+the reference over zero and signed-zero denominators, inf, nan and denormals,
+which makes the reciprocal a two-node cost decision rather than a correctness
+one. `div.out`, the `mode` spellings (`div.Tensor_mode`, `div.Scalar_mode`,
+`div.out_mode`, `div.Scalar_out`, `div.Scalar_mode_out`), the in-place
+`div_.Tensor` / `div_.Scalar`, `reciprocal.out` and `reciprocal_` are not
+served: the `mode` forms need a floor or trunc composition after an exact
+division, which is a different body.
+
+The honest finding of this increment is a bug the first version shipped. The
+gate reused `MpsSupportsBinaryDtype`, the predicate written for `mul`, and that
+predicate admits integral widths -- which is correct for a multiplication and
+wrong for a division, because `aten::div` promotes integers to float. Measured
+through the backend, `aten::div.Tensor(tensor([-7]), tensor([2]))` returned the
+truncated int64 `-3` where the reference returns the float32 `-3.5`: a silently
+wrong value *and* a silently wrong dtype. The fix is a dedicated
+`MpsSupportsDivDtype` that requires the two dtypes to match and both to be
+float32, float16 or bfloat16, plus a second new predicate,
+`MpsSupportsDivScalarDtype`, because `div.Scalar` reaches the same promotion
+through `MpsSupportsScalarDtype` and had the same defect. `reciprocal` is gated
+by the division predicate rather than by the wider unary one, since `x / 2` and
+`1 / x` are one node family and have to agree on the widths they claim.
+
+One behavioural difference from the reference is measured, recorded and shared:
+MPSGraph flushes a subnormal *result* to zero. The boundary is the result, at
+the smallest normal float -- `1e-38 / 2` returns `0` where the reference returns
+`5.0e-39`, while `2.35e-38 / 2` returns the normal `1.175494e-38` untouched --
+and it holds through both bodies, `aten::div.Tensor(x, tensor(2.0))` and
+`aten::div.Scalar(x, 2.0)` alike; `reciprocal` overflows the same way, with
+`1 / 1.17e-38` returning `inf` where the reference returns `8.5e37`. It is not a
+division property: `mul.Tensor`, routed since stage 2, flushes identically
+(`1e-38 * tensor(0.5)` returns `0`), as does `add.Tensor` (`1e-39 + 1e-39`
+returns `0`). The subtlety worth recording is that the Python operators do *not*
+reproduce it: `x / 2.0` and `x * 0.5` are resolved by PyTorch's own composite
+wrapper before PrivateUse1 dispatch, so no graph node is built for the constant
+and the result keeps its subnormal -- even though the dispatch log names
+`div.Tensor` for that spelling, because that is the schema name and not the
+kernel that ran. Only the opaque `aten::div.Scalar(t, 2.0)` and
+`aten::div.Tensor(t, tensor([2.0]))` reach the graph. A future reader who
+measures only the Python form would wrongly conclude the graph preserves
+subnormals, so both spellings are pinned in the suite.
+
+This increment is verified with `tests/integration/ops/test_mps_div.py`:
+bit-exact CPU equality on all three float widths including the zero and
+signed-zero sign bits, the inf and nan quadrants, exact quotients, the dtype
+promotions the reference applies to integers and booleans, the subnormal
+boundary through both bodies and in both the Python and the opaque spellings,
+the declined integral, complex and mismatched-dtype pairs that never reach the
+graph, plan reuse across shapes and dtypes, and the dispatch log naming `mps`
+for the `a / b`, `a / 2.0`, `2.0 / a` and `torch.reciprocal` spellings.
+
+The remaining stage-4 work is the `embedding_dense_backward`, `gather` and
+`index_select` ops that share the `embedding` node family, `F.layer_norm` as a
+multi-op increment (`native_batch_norm` plus `addcmul`, measured at
+1.50-4.56 ms), the `docs/reference/operator-support.md` matrix rows, and a CI
+lane for the operator suite.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
