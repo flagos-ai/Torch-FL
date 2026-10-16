@@ -188,12 +188,12 @@ record.
 
 ## Native Backend Route Changes
 
-### Apple MPS: twenty-three routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+### Apple MPS: twenty-four routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
 
-**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **23** ATen overloads from
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **24** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
-reduction, convolution, embedding and matrix-multiply families — with the
-remaining **2014** routes at `none` (`cpu_fallback`), measured overload by
+reduction, convolution, embedding, matrix-multiply and normalisation families —
+with the remaining **2013** routes at `none` (`cpu_fallback`), measured overload by
 overload against a CPU reference on an Apple Silicon arm64 host.
 
 **This is not a FlagGems cohort and must not be read against the 546-overload
@@ -202,10 +202,11 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 23, none: 2014}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 24, none: 2013}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
-`embedding`, `index_select`, `take`, `gather`, `mm` and `bmm`. The backend is MPSGraph-first with a
+`embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and
+`native_layer_norm`. The backend is MPSGraph-first with a
 hand-written Metal Shading Language fallback, and — as the name of this section
 insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
@@ -281,6 +282,55 @@ gather over a `(151936, 1024)` operand costs 0.26 ms with a full-width index and
 52 ms with an `(8, 16)` index, ~48 ms of which is the strided copy alone, while
 the same gather over an already-trimmed operand is 0.22 ms.
 
+**`native_layer_norm` is the first route that answers with three tensors, and
+the design's own prediction about how it would be built was wrong.** The plan
+recorded in
+[`docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`](../superpowers/specs/2026-10-14-apple-mps-native-backend-design.md)
+was a composition — `native_batch_norm` plus `addcmul`, the way the CPU fallback
+decomposes it, measured at 1.50-4.56 ms per instance. That was a reading of the
+*fallback*, which is what the op was taking at the time, and it does not
+describe the graph. Measured on an M5, `F.layer_norm` reaches
+`native_layer_norm`, and the graph answers the whole thing with **one node**:
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:epsilon:name:`,
+which is `(x - mean) / sqrt(var + eps) * gamma + beta` exactly. The mean and the
+variance come from `meanOfTensor:axes:` and `varianceOfTensor:meanTensor:axes:`;
+the graph's named reductions already return keepdim, which is the shape the
+reference's `mean`/`rstd` carry, so no reshape is needed. On `(2, 512, 1024)`
+the served call costs **0.411 ms against 0.958 ms** through the fallback.
+
+**Two measurements decide the body, and both were taken rather than assumed.**
+The variance the node wants is the **population** variance (`unbiased=False`),
+not the sample one: checked on an `N=3` case whose two answers differ
+(`1/sqrt(14/3) = 0.4629` against `1/sqrt(7) = 0.3780`), `varianceOfTensor:` at
+`axes:` matches the reference's population answer and the reference's
+`layer_norm` uses `unbiased=False`. And the trailing-run precondition is a
+*host* check, because MPSGraph will happily reduce axes the reference does not
+name: `normalized_shape` must be the input's trailing run, and a call whose
+shape is not — or that is longer than the input, or rank-0 — declines and
+reaches the reference's own `Given normalized_shape=[...], expected input with
+shape [*, ...]`. The dtype gate is the reduction family's, so float64 and the
+integral widths take the round trip: measured, an integer input raises
+`LayerNormKernelImpl is not implemented for 'Int'` on the CPU too, so the
+round-trip is what produces the reference's error rather than a graph computing
+at the operand's width.
+
+**A `weight`/`bias` left on the host is moved, and the failure mode when it is
+not is not an exception.** `F.layer_norm(x, shape, w, b)` with `w`/`b` built on
+the host is the common spelling, and a body that handed the host tensor straight
+to the graph resolves no Metal buffer for it; the measured result was not a
+raise but the *host* tensors coming back, values right and device wrong, because
+the refusal was routed into the same round trip the declines take. The affine
+pair is moved to the input's device first, and every decline returns all three
+results through `.to(input.device())` — the one place in this backend where the
+round trip yields many tensors rather than one.
+
+**One reported crash was a red herring and is recorded so it is not chased
+again.** An early probe blamed a segfault on `native_batch_norm` with null
+statistics; the same call aborts in plain PyTorch on *CPU* tensors, so it is
+neither this backend's nor this op's. `native_batch_norm` is the next item on
+the stage-4 list and is unrelated. Held in
+`tests/integration/ops/test_mps_layer_norm.py` (61 cases).
+
 **Every route is gated on a measured dtype predicate, and two gates exist only
 because the obvious one was wrong.** The first `div` increment gated on the
 predicate `mul` already used, which admits integral widths; measured, the graph
@@ -307,9 +357,9 @@ graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
 per-op suites `test_mps_binary.py`, `test_mps_conv.py`, `test_mps_embedding.py`,
-`test_mps_gather.py`, `test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_pow.py`,
-`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py`,
-`test_mps_take.py` and
+`test_mps_gather.py`, `test_mps_gemm.py`, `test_mps_index_select.py`,
+`test_mps_layer_norm.py`, `test_mps_pow.py`, `test_mps_reduce.py`,
+`test_mps_silu.py`, `test_mps_softmax.py`, `test_mps_take.py` and
 `test_mps_unary.py`, run as `pytest tests/integration/ops -m mps` on an Apple
 Silicon host; the per-op dtype gates and the `index_select` argument contracts
 are asserted against the CPU reference in the same tests. This is the only

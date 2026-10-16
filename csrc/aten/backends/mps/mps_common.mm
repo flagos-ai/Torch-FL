@@ -660,7 +660,13 @@ namespace {
 
 struct MpsPlan {
   MPSGraph* graph;                                   // +1
-  MPSGraphTensor* result;                            // +1, the flattened target
+  // +1 each, the flattened targets, in the order the caller returns them. One
+  // entry for every single-result body (the MpsRunGraph path) and one per
+  // result for the multi-result ones (MpsRunGraphMulti). A vector rather than a
+  // lone pointer so both paths share one plan cache and one executable: the
+  // caching allocator reads `outs` on the host either way, and MPSGraph's
+  // resultsArray is already an array.
+  std::vector<MPSGraphTensor*> results;
   MPSGraphExecutable* executable;                    // +1
   MPSGraphExecutableExecutionDescriptor* descriptor; // +1, waitUntilCompleted == NO
   // For each slot of the executable's inputs array, the operand whose tensor
@@ -704,7 +710,9 @@ std::mutex& PlansMutex() {
 void ReleasePlan(MpsPlan* plan) {
   MpsRelease(plan->descriptor);
   MpsRelease(plan->executable);
-  MpsRelease(plan->result);
+  for (MPSGraphTensor* result : plan->results) {
+    MpsRelease(result);
+  }
   MpsRelease(plan->graph);
   delete plan;
 }
@@ -727,22 +735,33 @@ void MpsKeyAppendTensor(std::string& key, const at::Tensor& tensor) {
 // MPSGraph compiles from it. nil (and nothing retained) when `build` declines or
 // the graph does not compile -- both are the caller's cue for the CPU
 // round-trip.
+//
+// `build` returns one tensor per entry of `outs`, in that order. A nil tensor in
+// the vector, a vector of the wrong length, and a nil `build` are all the same
+// decline.
 MpsPlan* BuildPlan(
     const std::string& key,
     at::TensorList inputs,
-    const at::Tensor& out,
+    at::TensorList outs,
     MPSGraphDevice* device,
-    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
-  const int64_t out_numel = out.numel();
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  if (outs.empty()) {
+    return nullptr;
+  }
+  // Every result is flattened back to a 1-D buffer of its own numel. Only the
+  // first result's dtype is consulted: all results share the operands' dtype,
+  // which MpsRunGraphMulti's caller has already established.
   MPSDataType out_dtype;
-  if (!MpsDataTypeOf(out.scalar_type(), &out_dtype)) {
+  if (!MpsDataTypeOf(outs[0].scalar_type(), &out_dtype)) {
     return nullptr;
   }
   MPSGraph* graph = [[MPSGraph alloc] init];
   if (graph == nil) {
     return nullptr;
   }
-  MPSGraphTensor* result = nil;
+  std::vector<MPSGraphTensor*> results;
   MPSGraphExecutable* executable = nil;
   NSArray<MPSGraphTensor*>* placeholders = nil;
   @autoreleasepool {
@@ -772,12 +791,28 @@ MpsPlan* BuildPlan(
       [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
     }
     if (static_cast<size_t>([buffers count]) == inputs.size()) {
-      MPSGraphTensor* built = build(graph, args);
-      if (built != nil) {
-        result = [MpsFlatten(graph, built, out_numel) retain];
+      std::vector<MPSGraphTensor*> built = build == nil
+          ? std::vector<MPSGraphTensor*>()
+          : build(graph, args);
+      bool complete = built.size() == outs.size();
+      for (size_t i = 0; complete && i < built.size(); ++i) {
+        complete = built[i] != nil;
+      }
+      if (complete) {
+        // One flatten per result, and each is a compile target in its own right:
+        // MPSGraph returns them positionally, in the order they are listed here,
+        // which is the order `outs` is written back in.
+        NSMutableArray<MPSGraphTensor*>* targets =
+            [NSMutableArray arrayWithCapacity:outs.size()];
+        for (size_t i = 0; i < built.size(); ++i) {
+          MPSGraphTensor* flattened =
+              [MpsFlatten(graph, built[i], outs[i].numel()) retain];
+          results.push_back(flattened);
+          [targets addObject:flattened];
+        }
         executable = [[graph compileWithDevice:device
                                         feeds:feeds
-                                targetTensors:@[result]
+                                targetTensors:targets
                              targetOperations:nil
                         compilationDescriptor:nil] retain];
       }
@@ -786,13 +821,15 @@ MpsPlan* BuildPlan(
   }
   if (executable == nil) {
     MpsRelease(placeholders);
-    MpsRelease(result);
+    for (MPSGraphTensor* result : results) {
+      MpsRelease(result);
+    }
     MpsRelease(graph);
     return nullptr;
   }
   auto* plan = new MpsPlan();
   plan->graph = graph;
-  plan->result = result;
+  plan->results = std::move(results);
   plan->executable = executable;
   plan->descriptor = [[MPSGraphExecutableExecutionDescriptor alloc] init];
   plan->descriptor.waitUntilCompleted = NO;
@@ -883,6 +920,11 @@ void MpsKeyAppend(std::string& key, int64_t value) {
   key += std::to_string(value);
 }
 
+void MpsKeyAppend(std::string& key, double value) {
+  key += "|d";
+  AppendDouble(key, value);
+}
+
 void MpsKeyAppend(std::string& key, bool value) {
   key += value ? "|b1" : "|b0";
 }
@@ -892,19 +934,36 @@ void MpsKeyAppend(std::string& key, const char* value) {
   key += (value == nullptr ? "" : value);
 }
 
-bool MpsRunGraph(
+namespace {
+
+// The shared body of MpsRunGraph and MpsRunGraphMulti. `outs` is that function's
+// result list -- one entry for the single-result entry point. Everything the two
+// have in common lives here: buffer resolution, the key, the plan cache and the
+// asynchronous schedule.
+bool RunGraphImpl(
     const std::string& key,
     at::TensorList inputs,
-    const at::Tensor& out,
-    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
-  if (build == nil || !out.defined() || out.numel() <= 0) {
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil || outs.empty()) {
     return false;
   }
-  MPSDataType out_dtype;
-  TORCH_CHECK(
-      MpsDataTypeOf(out.scalar_type(), &out_dtype),
-      "mps: no MPSGraph element type for ",
-      out.scalar_type());
+  // `defined` and a non-empty numel are the two things a body's `out` has always
+  // had to satisfy, now checked per result. An empty result is a decline rather
+  // than an error, exactly as before: MPSGraph has no empty tensor and the
+  // caller's body has already computed the right answer for that case.
+  std::vector<MPSDataType> out_dtypes(outs.size(), MPSDataTypeFloat32);
+  for (size_t i = 0; i < outs.size(); ++i) {
+    if (!outs[i].defined() || outs[i].numel() <= 0) {
+      return false;
+    }
+    TORCH_CHECK(
+        MpsDataTypeOf(outs[i].scalar_type(), &out_dtypes[i]),
+        "mps: no MPSGraph element type for ",
+        outs[i].scalar_type());
+  }
   // Resolve every buffer before the graph is built, so a pointer the Metal
   // allocator does not own costs the caller a fallback rather than half a run.
   std::vector<id<MTLBuffer>> buffers(inputs.size(), nil);
@@ -919,10 +978,12 @@ bool MpsRunGraph(
         "mps: no MPSGraph element type for ",
         inputs[i].scalar_type());
   }
-  id<MTLBuffer> out_buffer = nil;
-  size_t out_offset = 0;
-  if (!MpsBufferOf(out, &out_buffer, &out_offset)) {
-    return false;
+  std::vector<id<MTLBuffer>> out_buffers(outs.size(), nil);
+  std::vector<size_t> out_offsets(outs.size(), 0);
+  for (size_t i = 0; i < outs.size(); ++i) {
+    if (!MpsBufferOf(outs[i], &out_buffers[i], &out_offsets[i])) {
+      return false;
+    }
   }
   Stream_t stream = MpsCurrentStream();
   id<MTLCommandQueue> queue = MpsCurrentQueue();
@@ -936,7 +997,16 @@ bool MpsRunGraph(
   for (const at::Tensor& input : inputs) {
     MpsKeyAppendTensor(full_key, input);
   }
-  MpsKeyAppendTensor(full_key, out);
+  // Every result's signature is folded in, not just the first: a multi-result
+  // body can be called with the same operand shapes and a different (out, mean,
+  // rstd) split -- `native_layer_norm` with a different `normalized_shape` has
+  // the same input and a different mean. The result count is named too, so a
+  // single-result and a multi-result body cannot collide on the same key.
+  full_key += "|results";
+  full_key += std::to_string(outs.size());
+  for (const at::Tensor& out : outs) {
+    MpsKeyAppendTensor(full_key, out);
+  }
 
   std::lock_guard<std::mutex> lock(PlansMutex());
   MpsPlan* plan = nullptr;
@@ -947,7 +1017,7 @@ bool MpsRunGraph(
     @autoreleasepool {
       MPSGraphDevice* device =
           [MPSGraphDevice deviceWithMTLDevice:queue.device];
-      plan = BuildPlan(full_key, inputs, out, device, build);
+      plan = BuildPlan(full_key, inputs, outs, device, build);
     }
     if (plan == nullptr) {
       return false;
@@ -971,13 +1041,22 @@ bool MpsRunGraph(
         return false;
       }
     }
-    MPSGraphTensorData* result_data =
-        MpsTensorData(out_buffer, out_offset, out.numel(), out_dtype);
-    if (result_data == nil) {
-      for (MPSGraphTensorData* operand : operands) {
-        MpsRelease(operand);
+    // One MPSGraphTensorData per result, in the same positional order the
+    // executable's target tensors were listed in, which is the order `outs` is
+    // written back in. A nil here is the same decline as a nil operand.
+    NSMutableArray<MPSGraphTensorData*>* result_data =
+        [NSMutableArray arrayWithCapacity:outs.size()];
+    for (size_t i = 0; i < outs.size(); ++i) {
+      MPSGraphTensorData* data =
+          MpsTensorData(out_buffers[i], out_offsets[i], outs[i].numel(),
+                        out_dtypes[i]);
+      if (data == nil) {
+        for (MPSGraphTensorData* operand : operands) {
+          MpsRelease(operand);
+        }
+        return false;
       }
-      return false;
+      [result_data addObject:data];
     }
     // Held by the array (its own +1) and released again below, once the run has
     // been scheduled: the executable reads them during that run, so they have to
@@ -993,10 +1072,12 @@ bool MpsRunGraph(
     // per op rather than the work itself.
     [plan->executable runAsyncWithMTLCommandQueue:queue
                                       inputsArray:array
-                                     resultsArray:@[result_data]
+                                     resultsArray:result_data
                               executionDescriptor:plan->descriptor];
     ran = true;
-    MpsRelease(result_data);
+    for (MPSGraphTensorData* data : result_data) {
+      MpsRelease(data);
+    }
     for (MPSGraphTensorData* operand : operands) {
       MpsRelease(operand);
     }
@@ -1008,6 +1089,42 @@ bool MpsRunGraph(
     ::FlagosMPSStreamSentinel(stream);
   }
   return ran;
+}
+
+} // namespace
+
+bool MpsRunGraph(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& out,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil) {
+    return false;
+  }
+  // The single-result block lifted into the vector form RunGraphImpl expects.
+  // `out` is captured by value (it is a Tensor, a cheap refcount bump) so the
+  // wrapper's lifetime is independent of the caller's reference.
+  auto multi = ^std::vector<MPSGraphTensor*>(
+      MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+    std::vector<MPSGraphTensor*> one;
+    MPSGraphTensor* built = build(graph, args);
+    if (built != nil) {
+      one.push_back(built);
+    }
+    return one;
+  };
+  return RunGraphImpl(
+      key, inputs, at::TensorList(&out, 1), multi);
+}
+
+bool MpsRunGraphMulti(
+    const std::string& key,
+    at::TensorList inputs,
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  return RunGraphImpl(key, inputs, outs, build);
 }
 
 void MpsRelease(id object) {

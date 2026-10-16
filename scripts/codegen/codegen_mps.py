@@ -270,6 +270,11 @@ OPS = {
     "div.Tensor": "div",
     "div.Scalar": "div_scalar",
     "reciprocal": "reciprocal",
+    # Stage 4 opens with the normalisation every transformer block calls once,
+    # and it is the first op here that answers with more than one tensor. It is
+    # one MPSGraph node rather than the `native_batch_norm` + `addcmul`
+    # decomposition the CPU fallback performs -- see T_LAYER_NORM.
+    "native_layer_norm": "layer_norm",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -340,6 +345,10 @@ AT_OP = {
     # reference's own `1 / x` rather than a composite that would re-enter the
     # dispatcher.
     "reciprocal": "reciprocal",
+    # The reference op, so the round-trip lands on the kernel that computes
+    # `(x - mean) / sqrt(var + eps) * gamma + beta` and answers the same
+    # (out, mean, rstd) triple this body does.
+    "native_layer_norm": "native_layer_norm",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -393,6 +402,11 @@ SUPPORTS = {
     # must agree on the dtypes that are served, or `x / 2` and `1 / x` would
     # answer in different widths.
     "reciprocal": "MpsSupportsDivDtype",
+    # The reduction family's wall, not a gate of its own: `layer_norm` reduces
+    # over the trailing axes exactly as `mean` and `sum` do, so it serves the
+    # float widths and declines an integer input the reference computes in
+    # float -- one rule, named once.
+    "layer_norm": "MpsSupportsReduceDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -470,6 +484,10 @@ CALLS = {
     # and `{call}` names the one-argument selector. Sized by the same gate as
     # the div bodies above.
     "reciprocal": "reciprocalWithTensor:",
+    # Unused: the layer_norm body builds its own node (`normalizationWithTensor:`)
+    # and its two reductions, so it names none here. The entry exists because
+    # `render` reads `CALLS[op]` for every op in OPS.
+    "native_layer_norm": "",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -584,6 +602,15 @@ KEY_PARTS = {
     "div.Tensor": "",
     "div.Scalar": ", other",
     "reciprocal": "",
+    # Every host value the body bakes into the graph, and the row a reviewer has
+    # to check against it: `normalized_shape` names the trailing run the
+    # reductions cover (and so the mean/rstd result shapes, whose own signatures
+    # are folded in below -- but the *axes* are not in any tensor), `eps` is the
+    # constant added to the variance, and `has_weight` / `has_bias` say whether
+    # the node is given a gamma and a beta at all. A body that read any of these
+    # and left it out of the key would hand the first compiled plan to a call
+    # that needed a different one.
+    "native_layer_norm": ", normalized_shape, has_weight, has_bias, eps",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -2096,6 +2123,207 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `F.layer_norm` -- the normalisation a transformer calls once per block, right
+# after the residual add -- and the first body here that answers with more than
+# one tensor: `native_layer_norm(input, normalized_shape, weight, bias, eps)`
+# returns `(out, mean, rstd)`.
+#
+# **It is one node, not the `native_batch_norm` + `addcmul` decomposition the
+# design doc predicted.** That prediction came from reading the CPU fallback,
+# and the fallback is what this op was taking: `F.layer_norm` on a device tensor
+# round-tripped through the CPU, so the two ops the CPU build decomposes it into
+# (`native_batch_norm` in inference mode, then `addcmul`) were what the fallback
+# log showed. MPSGraph has the whole operation behind one selector,
+# `normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:
+# epsilon:name:`, whose documented semantics are exactly aten's:
+# `(x - mean) / sqrt(var + eps) * gamma + beta` over the trailing axes. The mean
+# comes from `meanOfTensor:axes:` and the variance from
+# `varianceOfTensor:axes:`, the two reduction selectors the header documents as
+# the ones that feed the normalisation node.
+#
+# Three things decide whether the graph can answer a call, and each is the
+# reference's contract rather than the graph's:
+#
+#   * **`normalized_shape` must be a trailing run of the input's axes.** aten
+#     requires it (`normalized_shape` of `(8,)` on a `(2, 3, 8)` input is over
+#     the last axis; `(3, 8)` over the last two; `(2, 3, 8)` over all three), and
+#     a shape that is not the input's own trailing dimensions is a `RuntimeError`
+#     naming the two. The body checks the suffix and declines otherwise, so the
+#     reference raises in its own words.
+#   * **The reduced axes are `[-len(normalized_shape), 0)`.** That is what the
+#     "trailing run" sentence means, and it is the same axis list the reference
+#     reduces over.
+#   * **`mean` and `rstd` are the *keepdim* shape over those axes** -- `(2, 3,
+#     1)` for the `(8,)` case -- not the reduced shape. Measured against the
+#     reference: `native_layer_norm((2, 3, 8), [8], ...)` answers `mean` and
+#     `rstd` both `(2, 3, 1)`. So the body allocates those two results with the
+#     reduced axes already set to 1, which is also the shape MPSGraph's own
+#     `meanOfTensor:axes:` returns (the named reduction keeps the rank and leaves
+#     each reduced axis at size 1), so no reshape is needed to match it.
+#
+# `weight` and `bias` are the gamma and beta and are optional. When absent the
+# node is handed `nil` for both, which is what its `_Nullable` annotations
+# document, so a weight-less call is the same node with two feeds missing rather
+# than a second graph shape -- hence the two `has_weight`/`has_bias` entries in
+# the key (a bias-less call hands the graph one operand fewer, which the operand
+# signature alone cannot say).
+#
+# The variance the node wants is the **population** variance (divided by N), not
+# the sample one: measured on an M5, `varianceOfTensor:axes:` matches the
+# reference's `unbiased=False` answer to the last digit and the reference's
+# `layer_norm` uses `unbiased=False`. This is checked rather than assumed, in the
+# integration suite, on a case whose sample and population variances differ.
+#
+# The dtype gate is the float-only one the reduction family uses: the reference
+# accepts an integer input and computes in float, which a graph at the operand's
+# own width cannot express, so an integral input takes the round-trip.
+T_LAYER_NORM = """\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& input,
+    at::IntArrayRef normalized_shape,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    double eps) {{
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  // The CPU round-trip every decline below takes, in one place. Every other
+  // body in this file ends its round trip with `.to(self.device())`; here all
+  // three results have to be moved, and a body that returned the host tuple
+  // would hand the caller values that are right on a device that is not -- the
+  // `mean`/`rstd` shapes and the flagos device both belong to the contract.
+  const auto round_trip = [&]() {{
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    auto host = at::{at_op}(
+        input.cpu(), normalized_shape, host_weight, host_bias, eps);
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  }};
+  if (!mps::{supports}(input.scalar_type(), std::nullopt)) {{
+    return round_trip();
+  }}
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): a weight or bias the caller left on the host --
+  // `F.layer_norm(x, shape, w, b)` with `w`/`b` built on the host is the common
+  // spelling -- is moved to the input's device rather than handed to the graph,
+  // which would resolve no Metal buffer for it and silently produce a CPU
+  // result. `input` is already on the device, so it is only the affine pair.
+  const at::Tensor weight_d =
+      has_weight && weight->device() != input.device()
+      ? weight->to(input.device())
+      : (has_weight ? *weight : at::Tensor());
+  const at::Tensor bias_d =
+      has_bias && bias->device() != input.device()
+      ? bias->to(input.device())
+      : (has_bias ? *bias : at::Tensor());
+  const int64_t rank = input.dim();
+  const int64_t normalized = static_cast<int64_t>(normalized_shape.size());
+  // The suffix check, in the reference's own terms: the normalised shape has to
+  // be the input's trailing axes, and a rank-0 input or a normalised shape
+  // longer than the input is declined rather than described to the graph.
+  if (normalized <= 0 || normalized > rank) {{
+    return round_trip();
+  }}
+  for (int64_t i = 0; i < normalized; ++i) {{
+    if (normalized_shape[normalized - 1 - i] != input.size(rank - 1 - i)) {{
+      return round_trip();
+    }}
+  }}
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {{
+    return round_trip();
+  }}
+  // The keepdim shape over the trailing run, which is what the reference
+  // answers for mean and rstd and what the named reductions produce.
+  std::vector<int64_t> stat_shape(input_c.sizes().vec());
+  std::vector<int64_t> axes;
+  for (int64_t axis = rank - normalized; axis < rank; ++axis) {{
+    axes.push_back(axis);
+    stat_shape[axis] = 1;
+  }}
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  at::Tensor mean = at::empty(stat_shape, input_c.options());
+  at::Tensor rstd = at::empty(stat_shape, input_c.options());
+  if (out.numel() == 0) {{
+    return {{out, mean, rstd}};
+  }}
+  at::Tensor weight_c;
+  at::Tensor bias_c;
+  std::vector<at::Tensor> operands{{input_c}};
+  if (has_weight) {{
+    weight_c = weight_d.contiguous();
+    operands.push_back(weight_c);
+  }}
+  if (has_bias) {{
+    bias_c = bias_d.contiguous();
+    operands.push_back(bias_c);
+  }}
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> outs{{out, mean, rstd}};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* avg =
+            [graph meanOfTensor:x axes:mps::MpsAxesArray(axes) name:nil];
+        if (avg == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // The two-argument variance, which takes the mean the node above
+        // produced and is the spelling MPSGraph's own documentation pairs with
+        // the normalisation node's `variance` parameter.
+        MPSGraphTensor* var = [graph varianceOfTensor:x
+                                           meanTensor:avg
+                                                 axes:mps::MpsAxesArray(axes)
+                                                 name:nil];
+        if (var == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // rstd is 1 / sqrt(var + eps). MPSGraph's reciprocal square root is a
+        // node of its own, so this is two nodes rather than the one the
+        // composition would otherwise need -- and it is the same arithmetic the
+        // reference performs for the second result it returns.
+        MPSGraphTensor* shifted =
+            [graph additionWithPrimaryTensor:var
+                             secondaryTensor:[graph constantWithScalar:epsilon
+                                                              dataType:var.dataType]
+                                        name:nil];
+        if (shifted == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        MPSGraphTensor* rstd_t =
+            [graph reciprocalSquareRootWithTensor:shifted name:nil];
+        if (rstd_t == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        MPSGraphTensor* gamma = {gamma};
+        MPSGraphTensor* beta = {beta};
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:avg
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        return std::vector<MPSGraphTensor*>{{y, avg, rstd_t}};
+      }});
+  if (!ran) {{
+    return round_trip();
+  }}
+  return {{out, mean, rstd}};
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -2113,6 +2341,7 @@ CATEGORIES = {
     "div": T_DIV,
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
+    "layer_norm": T_LAYER_NORM,
 }
 
 FILE_HEADER = """\
@@ -2159,6 +2388,7 @@ FILE_HEADER = """\
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
@@ -2256,6 +2486,13 @@ def render():
                 # The conv body's own reading of the optional bias, as a C++
                 # literal. Every other template ignores it.
                 has_bias="has_bias",
+                # The layer_norm body's two optional operands, read positionally
+                # out of the operands it built: input is args[0], weight is
+                # args[1] when it is present, and bias follows it. The absent
+                # case is the `nil` the node's own `_Nullable` gamma and beta
+                # document, so both spellings are one graph shape.
+                gamma="has_weight ? args[1] : nil",
+                beta="has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil)",
             )
         )
         covered.append((op, category))

@@ -41,6 +41,7 @@
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
@@ -1276,5 +1277,150 @@ at::Tensor ReciprocalKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, ReciprocalKernelMps)
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelMps(
+    const at::Tensor& input,
+    at::IntArrayRef normalized_shape,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    double eps) {
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  // The CPU round-trip every decline below takes, in one place. Every other
+  // body in this file ends its round trip with `.to(self.device())`; here all
+  // three results have to be moved, and a body that returned the host tuple
+  // would hand the caller values that are right on a device that is not -- the
+  // `mean`/`rstd` shapes and the flagos device both belong to the contract.
+  const auto round_trip = [&]() {
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    auto host = at::native_layer_norm(
+        input.cpu(), normalized_shape, host_weight, host_bias, eps);
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  };
+  if (!mps::MpsSupportsReduceDtype(input.scalar_type(), std::nullopt)) {
+    return round_trip();
+  }
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): a weight or bias the caller left on the host --
+  // `F.layer_norm(x, shape, w, b)` with `w`/`b` built on the host is the common
+  // spelling -- is moved to the input's device rather than handed to the graph,
+  // which would resolve no Metal buffer for it and silently produce a CPU
+  // result. `input` is already on the device, so it is only the affine pair.
+  const at::Tensor weight_d =
+      has_weight && weight->device() != input.device()
+      ? weight->to(input.device())
+      : (has_weight ? *weight : at::Tensor());
+  const at::Tensor bias_d =
+      has_bias && bias->device() != input.device()
+      ? bias->to(input.device())
+      : (has_bias ? *bias : at::Tensor());
+  const int64_t rank = input.dim();
+  const int64_t normalized = static_cast<int64_t>(normalized_shape.size());
+  // The suffix check, in the reference's own terms: the normalised shape has to
+  // be the input's trailing axes, and a rank-0 input or a normalised shape
+  // longer than the input is declined rather than described to the graph.
+  if (normalized <= 0 || normalized > rank) {
+    return round_trip();
+  }
+  for (int64_t i = 0; i < normalized; ++i) {
+    if (normalized_shape[normalized - 1 - i] != input.size(rank - 1 - i)) {
+      return round_trip();
+    }
+  }
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {
+    return round_trip();
+  }
+  // The keepdim shape over the trailing run, which is what the reference
+  // answers for mean and rstd and what the named reductions produce.
+  std::vector<int64_t> stat_shape(input_c.sizes().vec());
+  std::vector<int64_t> axes;
+  for (int64_t axis = rank - normalized; axis < rank; ++axis) {
+    axes.push_back(axis);
+    stat_shape[axis] = 1;
+  }
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  at::Tensor mean = at::empty(stat_shape, input_c.options());
+  at::Tensor rstd = at::empty(stat_shape, input_c.options());
+  if (out.numel() == 0) {
+    return {out, mean, rstd};
+  }
+  at::Tensor weight_c;
+  at::Tensor bias_c;
+  std::vector<at::Tensor> operands{input_c};
+  if (has_weight) {
+    weight_c = weight_d.contiguous();
+    operands.push_back(weight_c);
+  }
+  if (has_bias) {
+    bias_c = bias_d.contiguous();
+    operands.push_back(bias_c);
+  }
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> outs{out, mean, rstd};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("native_layer_norm", normalized_shape, has_weight, has_bias, eps),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* avg =
+            [graph meanOfTensor:x axes:mps::MpsAxesArray(axes) name:nil];
+        if (avg == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // The two-argument variance, which takes the mean the node above
+        // produced and is the spelling MPSGraph's own documentation pairs with
+        // the normalisation node's `variance` parameter.
+        MPSGraphTensor* var = [graph varianceOfTensor:x
+                                           meanTensor:avg
+                                                 axes:mps::MpsAxesArray(axes)
+                                                 name:nil];
+        if (var == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // rstd is 1 / sqrt(var + eps). MPSGraph's reciprocal square root is a
+        // node of its own, so this is two nodes rather than the one the
+        // composition would otherwise need -- and it is the same arithmetic the
+        // reference performs for the second result it returns.
+        MPSGraphTensor* shifted =
+            [graph additionWithPrimaryTensor:var
+                             secondaryTensor:[graph constantWithScalar:epsilon
+                                                              dataType:var.dataType]
+                                        name:nil];
+        if (shifted == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* rstd_t =
+            [graph reciprocalSquareRootWithTensor:shifted name:nil];
+        if (rstd_t == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* gamma = has_weight ? args[1] : nil;
+        MPSGraphTensor* beta = has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil);
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:avg
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        return std::vector<MPSGraphTensor*>{y, avg, rstd_t};
+      });
+  if (!ran) {
+    return round_trip();
+  }
+  return {out, mean, rstd};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kMps, NativeLayerNormKernelMps)
 
 } // namespace at::native::flagos

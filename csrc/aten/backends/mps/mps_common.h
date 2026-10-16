@@ -541,6 +541,11 @@ MPSGraphTensor* MpsPowByScalar(
 void MpsKeyAppend(std::string& key, const at::Scalar& value);
 void MpsKeyAppend(std::string& key, at::IntArrayRef value);
 void MpsKeyAppend(std::string& key, int64_t value);
+// A bare host float, for the ops whose schema carries one directly rather than
+// through a Scalar -- `native_layer_norm`'s `eps`. Its own overload rather than a
+// Scalar: `MpsKeyAppend(key, eps)` with a `double` is ambiguous between the
+// int64_t and Scalar overloads, and a `double` is what the schema hands over.
+void MpsKeyAppend(std::string& key, double value);
 void MpsKeyAppend(std::string& key, bool value);
 void MpsKeyAppend(std::string& key, const char* value);
 
@@ -594,6 +599,37 @@ bool MpsRunGraph(
     at::TensorList inputs,
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
+
+// The multi-result form of MpsRunGraph, for the ops that answer with more than
+// one tensor -- `native_layer_norm` returns (out, mean, rstd) and
+// `native_batch_norm` (out, save_mean, save_var). `outs` is every result in the
+// order the aten schema returns them, and `build` returns that many tensors in
+// the same order; each is flattened to its own `outs[i]` buffer.
+//
+// This is a second entry point rather than a widening of MpsRunGraph because the
+// single-result contract is what almost every body here rests on: `build` has to
+// answer one tensor and the caching allocator's block-reuse reasoning reads one
+// `out`. Keeping that signature untouched means the 23 single-result kernels
+// cannot be handed a plan that writes somewhere they did not describe.
+//
+// The result order is positional, and it is the caller's to get right: MPSGraph
+// does not name the results, so the `i`th tensor `build` returns is flattened to
+// the `i`th entry of `outs` and nothing reconciles the two. Every result must be
+// a non-empty flagos tensor with the operands' dtype, and every result's numel is
+// folded into the key.
+//
+// False on the same conditions as MpsRunGraph -- a nil `build`, a result the
+// runtime does not own, a `build` that declines (nil or a short vector), or a
+// graph that does not compile -- and the caller takes the CPU round-trip. An
+// empty `outs` is false rather than a no-op, because there would be nothing to
+// schedule and no way to tell that from a decline.
+bool MpsRunGraphMulti(
+    const std::string& key,
+    at::TensorList inputs,
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args));
 
 // `sizes` as an MPSShape. Autoreleased; consume it inside the caller's
 // autorelease pool.

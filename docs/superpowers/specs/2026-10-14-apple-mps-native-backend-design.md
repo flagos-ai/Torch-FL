@@ -674,10 +674,60 @@ range pass does not move the operand, one asserting the trim costs what the
 platform charges. The `[0, 10, 15]` value assertion that caught the view bug is
 kept.
 
-The remaining stage-4 work is `F.layer_norm` as a multi-op increment
-(`native_batch_norm` plus `addcmul`, measured at 1.50-4.56 ms), and the
-`native_batch_norm` it lowers to. `embedding_dense_backward` stays dropped for
-the reason recorded above.
+Stage 4 continued with `native_layer_norm`, the first op here that answers with
+more than one tensor -- and the increment that corrected this document. Section
+7 recorded `F.layer_norm` as a multi-op increment built from `native_batch_norm`
+plus `addcmul`, measured at 1.50-4.56 ms. That reading was taken from the *CPU
+fallback*, which is what the op was routed to at the time, and it does not
+describe the graph at all: MPSGraph has a single node for the whole thing,
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:epsilon:name:`,
+which is exactly `(x - mean) / sqrt(var + eps) * gamma + beta`. The mean and
+variance are `meanOfTensor:axes:` and `varianceOfTensor:meanTensor:axes:`, both
+of which already return keepdim -- the shape the reference's `mean`/`rstd`
+carry -- so the body builds four nodes (`mean`, `variance`, the `+ eps` and the
+`rsqrt` behind `rstd`, then the normalisation) and hands back three results.
+Measured on `(2, 512, 1024)`: 0.958 ms through the fallback against 0.411 ms
+served.
+
+The **population** variance is what the node computes, checked on an `N=3` case
+whose sample and population answers differ rather than assumed from the
+selector's name, and it is what the reference's `layer_norm` uses. The
+**trailing-run precondition** is a host check rather than the graph's: MPSGraph
+reduces whatever axes it is given, so `normalized_shape` is compared against the
+input's suffix and a call that is not the trailing run, is longer than the
+input, or is rank-0 declines into the reference's own `Given normalized_shape=
+[...], expected input with shape [*, ...]`. The dtype gate is the reduction
+family's; an integral input declines, and measured, `native_layer_norm` on an
+integer tensor raises `LayerNormKernelImpl is not implemented for 'Int'` on the
+CPU as well, so the round-trip is what reaches the reference's error rather than
+a graph computing at the operand's width.
+
+Two body-level findings came out of this increment. A **`weight`/`bias` left on
+the host** -- the ordinary `F.layer_norm(x, shape, w, b)` spelling -- is moved to
+the input's device, because a host tensor resolved no Metal buffer and the
+measured failure was silent rather than loud: the operand was refused, the
+refusal took the round trip, and the caller received the *host* tensors with the
+right values and the wrong device. And this is the one body here whose **round
+trip yields several tensors**, so every decline ends in `.to(input.device())`
+over all three results; the sibling entry point `MpsRunGraphMulti` exists for the
+same reason, with the single-result `MpsRunGraph` contract left untouched so the
+other kernels cannot be handed a plan that writes somewhere they did not
+describe.
+
+One reported crash is recorded so it is not chased again: an early probe blamed
+a segfault on `native_batch_norm` with null statistics, and the same call aborts
+in plain PyTorch on CPU tensors, so it belongs to neither this backend nor this
+op. This increment is verified with
+`tests/integration/ops/test_mps_layer_norm.py` (61 cases): CPU equality for the
+trailing shapes across f32/f16/bf16, the affine pair in every combination
+including on the host, the keepdim statistic shapes, the population-vs-sample
+check, the trailing-run and rank declines reaching the reference's own error,
+the dtype gate, plan reuse across `normalized_shape`, `eps` and the affine
+flags, the dispatch log naming `mps`, and the cost case.
+
+The remaining stage-4 work is `native_batch_norm`, which is now the next op
+rather than the layer-norm substrate this document previously predicted.
+`embedding_dense_backward` stays dropped for the reason recorded above.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
