@@ -12,9 +12,10 @@
 # This tree carries stages 1 and 2 of
 # docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md section 7
 # -- the `unary` category, the elementwise `binary` and `binary_scalar` families,
-# and the `reduce` family -- plus the first stage-3 increment, the `gemm`
-# category (`mm` and `bmm`), each matching the CPU reference within tolerance.
-# The rest of stage 3 (conv, softmax) is still open.
+# and the `reduce` family -- plus four stage-3 increments: the `gemm` category
+# (`mm` and `bmm`), the `softmax` category (`_softmax`), the elementwise `neg`
+# and `pow.Tensor_Scalar`, and the `conv` category (`convolution_overrideable`),
+# each matching the CPU reference within tolerance.
 #
 # Two consequences worth stating up front, mirroring codegen_kunlunxin.py:
 #
@@ -59,10 +60,12 @@ REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
 # composes the result with.
 #
 # Only the functional forms are listed. The `.out` and inplace spellings
-# (`abs.out`, `abs_`, `add.out`, `add_`, `sum.IntList_out`, ...) are left
-# unregistered on PrivateUse1, exactly as on GCU/MUSA/Ascend: the dispatcher then
-# sends those spellings to the generic fallback rather than to an empty kernel
-# slot. A later stage adds them once their kernels exist.
+# (`abs.out`, `abs_`, `add.out`, `add_`, `sum.IntList_out`, `softmax.int_out`,
+# `pow.Tensor_Scalar_out`, ...) are left unregistered on PrivateUse1, exactly as
+# on GCU/MUSA/Ascend: the dispatcher then sends those spellings to the generic
+# fallback rather than to an empty kernel slot. A later stage adds them once
+# their kernels exist -- serving one means writing into a tensor the caller
+# owns, which this layer does not do.
 #
 # `max.dim` and `min.dim` are absent on purpose. aten defines both as a
 # (values, indices) pair, and the index half has no MPSGraph selector that comes
@@ -80,6 +83,33 @@ OPS = {
     "mul.Scalar": "binary_scalar",
     "sum.dim_IntList": "reduce",
     "mean.dim": "reduce",
+    # `softmax` is the third stage-3 lane and the op a small model calls between
+    # the matmuls: one per attention block, over the (batch, heads, seq, seq)
+    # scores. MPSGraph has the whole operation behind one selector,
+    # `softMaxWithTensor:axis:`, which is what the body hands it once the shape
+    # and dtype contract is checked.
+    #
+    # Only `_softmax` is registered, and it is the only spelling that needs to
+    # be. On this PyTorch build `softmax.int` is CompositeImplicitAutograd: the
+    # dispatcher decomposes it above the backend key, so a kernel registered for
+    # it is never called and a probe confirms no `softmax.int` wrapper exists in
+    # csrc/aten/generated/register.inc to register. What actually reaches the
+    # PrivateUse1 key -- what `torch.softmax`, `F.softmax`, SDPA and
+    # `torch.softmax(dtype=...)` all lower to -- is `aten._softmax(self, dim,
+    # half_to_float)`. `softmax.int_out` is the `out=` spelling and is left
+    # unregistered like every other `.out` form here: serving it means writing
+    # into a tensor the caller owns, which this layer does not do.
+    "_softmax": "softmax",
+    # The elementwise unary a model reaches for next: `neg` is what a masked or
+    # signed activation is built from, and it is the one unary whose MPSGraph
+    # selector is exact on the integral widths as well (`-(-128)` wraps to
+    # -128 there, exactly as aten does), so the body is the plain unary template.
+    "neg": "unary",
+    # A scalar exponent. MPSGraph's power is a real selector rather than an
+    # exp/log composition, which is what keeps the NaN of a negative base to a
+    # fractional exponent -- the case the reference produces and a composition
+    # would not.
+    "pow.Tensor_Scalar": "pow_scalar",
     # Stage 3 opens with the matmuls, because they are where a small model
     # spends its time: measured on an M5 (one Qwen3-0.6B layer, hidden 1024, seq
     # 512, fp32), the eight `mm` calls and two `bmm` calls were 71-73% of the
@@ -90,6 +120,20 @@ OPS = {
     # the categories above: unregistered until a kernel exists.
     "mm": "gemm",
     "bmm": "gemm",
+    # Convolution, the last lane of stage 3 and the op the two matmuls above are
+    # not enough for: a vision model (and a Qwen3.5-class mixer's depthwise
+    # conv1d) reaches `conv2d`/`conv1d` through `nn.Conv2d` and
+    # `F.conv2d`. On this PyTorch build `aten.convolution` is
+    # CompositeImplicitAutograd and decomposes above the backend key into
+    # `aten.convolution_overrideable` -- the PrivateUse1 spelling every vendor
+    # backend fills -- so that is the op to register, and it is the op a probe
+    # sees `F.conv2d` land on. `convolution_overrideable.out` and
+    # `aten.convolution.out` join the other `.out` forms on the fallback which is
+    # the spelling that writes into a tensor the caller owns. The three other
+    # lowering spellings (`_convolution`, `slow_conv2d_forward`, `_mps_convolution`)
+    # are the CUDA/MPS-specific paths aten picks off the CUDA/MPS key and are not
+    # the ones a PrivateUse1 tensor reaches, so they stay unregistered too.
+    "convolution_overrideable": "conv",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -105,8 +149,17 @@ AT_OP = {
     "mul.Scalar": "mul",
     "sum.dim_IntList": "sum",
     "mean.dim": "mean",
+    "_softmax": "_softmax",
+    "neg": "neg",
+    "pow.Tensor_Scalar": "pow",
     "mm": "mm",
     "bmm": "bmm",
+    # The CPU reference the `conv` category round-trips to. `convolution` is the
+    # composite that lowers to `convolution_overrideable`, and the reference
+    # implementation behind it is the slow 2d/3d path, so this is what the
+    # round-trip is written against -- it carries the same shape, stride, padding,
+    # dilation, transposed, output_padding and groups arguments the kernel holds.
+    "convolution_overrideable": "convolution",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -116,6 +169,9 @@ SUPPORTS = {
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
     "gemm": "MpsSupportsGemmDtype",
+    "softmax": "MpsSupportsSoftmaxDtype",
+    "pow_scalar": "MpsSupportsPowDtype",
+    "conv": "MpsSupportsConvDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -137,6 +193,13 @@ CALLS = {
     # takes is the same node as the rank-2 pair mm takes.
     "mm": "matrixMultiplicationWithPrimaryTensor:",
     "bmm": "matrixMultiplicationWithPrimaryTensor:",
+    "neg": "negativeWithTensor:",
+    "_softmax": "softMaxWithTensor:",
+    "pow.Tensor_Scalar": "powerWithPrimaryTensor:",
+    # The conv body picks between the 2-D and 3-D selectors on the operand's
+    # rank, so `{call}` names the shape-independent prefix both share and the
+    # template fills the rank in.
+    "convolution_overrideable": "convolution{dim}DWithSourceTensor:",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -174,6 +237,7 @@ ALPHA = {
 # checks this row against the body that reads it.
 KEY_PARTS = {
     "abs": "",
+    "neg": "",
     "add.Tensor": ", alpha",
     "sub.Tensor": ", alpha",
     "mul.Tensor": "",
@@ -185,6 +249,27 @@ KEY_PARTS = {
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
     "bmm": ", self_transposed, mat2_transposed",
+    # The axis the body resolved against the operand's rank. The result dtype
+    # `half_to_float` decides does not need naming here: the body widens the
+    # operand to it first, and MpsRunGraph folds the operand's own dtype into the
+    # cache key, so the widened (batch, heads, seq, seq) float tensor of a
+    # half_to_float call and a plain half one already sit under different keys.
+    "_softmax": ", axis",
+    # The exponent, which is the constant the graph bakes in and the operands say
+    # nothing about.
+    "pow.Tensor_Scalar": ", other",
+    # Every geometric argument the conv body reads, and the bias flag with them:
+    # the graph node is a function of the operands' shapes (which MpsRunGraph
+    # folds in) *and* of stride, padding, dilation, groups, transposed and
+    # output_padding, which the shapes cannot say. `transposed` and
+    # `output_padding` are declined before the graph is built, but the kernel
+    # still names them because MpsConvDescriptor takes them and a body that read
+    # a host value the key did not name would hand the first plan to the second
+    # call. `has_bias` is the last piece of the graph's shape that the tensor
+    # list does not carry: a bias-less call hands the graph one operand fewer.
+    "convolution_overrideable": (
+        ", stride, padding, dilation, groups, transposed, output_padding, has_bias"
+    ),
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -497,12 +582,299 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# The softmax body. MPSGraph has the whole operation behind one selector, so the
+# work here is the contract around it rather than the arithmetic.
+#
+# `softMaxWithTensor:axis:` reduces along one axis of one tensor, which is exactly
+# what `_softmax(self, dim, half_to_float)` asks for, so there is one node and no
+# composition. What has to be settled before it runs:
+#
+#   * The axis. aten resolves a negative `dim` against the rank and rejects one
+#     out of range, and MPSGraph takes the axis as it is given -- an out-of-range
+#     axis would be a graph that either wraps or traps, not the reference's error.
+#     MpsSoftmaxDim resolves the position, so a negative dim is answered and a
+#     rank-0 tensor or an out-of-range one takes the round-trip and gets the
+#     reference's own error or its 1.0 for the scalar it does answer.
+#   * The dtype the operation computes in, which is a function of the host
+#     `half_to_float` flag rather than of the tensor: it returns the operand's own
+#     dtype, or float when the flag says "accumulate in float and hand back
+#     float". MpsSupportsSoftmaxDtype settles it and hands back the dtype, which
+#     the operand is widened to before the graph sees it and the output is
+#     allocated in -- the same conversion aten's generic path makes with
+#     `_to_copy`, so a declined width stays one copy away from correct. The gate
+#     also fixes the widths: float32 measured within 29 ulp and float16
+#     bit-identical on an M5, while bfloat16 came back as denormals, so half is
+#     served and bfloat16 is not (mps_common.h carries the measurements).
+#
+# The empty input is declined rather than handed to the graph: MPSGraph has no
+# empty tensor, and the reference's answer (an empty result) is free to produce
+# on the host.
+T_SOFTMAX_BODY = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float) {{
+  at::ScalarType out_dtype = at::kFloat;
+  int64_t axis = 0;
+  if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
+      !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {{
+    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+  }}
+  at::Tensor self_c = self.to(out_dtype).contiguous();
+  if (self_c.numel() == 0) {{
+    return at::empty(self_c.sizes(), self_c.options());
+  }}
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] axis:axis name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The tensor-raised-to-a-scalar body. The exponent is a host value, so it becomes
+# a one-element constant in the operand's own element type and the graph
+# broadcasts it -- the shape the `.Scalar` bodies give an addend, with the
+# selector deciding the arithmetic.
+#
+# The dtype gate is narrower than the scalar bodies' because aten is the narrow
+# one here: a float operand takes any real exponent, but an integral operand
+# raises on a negative one ("Integers to negative integer powers are not
+# allowed") and promotes to float on a fractional one, so no integral operand is
+# served and the round-trip produces both the reference's dtype and the
+# reference's error. bfloat16 is declined for the reason the softmax gate
+# declines it -- on the measured SDK its graph returns values the reference does
+# not -- and float64 has no MPSGraph element type at all.
+#
+# An exponent of 1 short-circuits inside MpsPowByScalar, so `x ** 1` builds no
+# node and no constant, the way an `alpha` of 1 builds no node either.
+T_POW = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
+  if (!mps::{supports}(self.scalar_type(), other)) {{
+    return at::{at_op}(self.cpu(), other).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return mps::MpsPowByScalar(
+            graph, args[0], other, self_c.scalar_type());
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), other).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The convolution body, over the one spelling a PrivateUse1 tensor reaches:
+# `aten.convolution` is CompositeImplicitAutograd on this build and decomposes
+# into `aten.convolution_overrideable` (see the OPS comment).
+#
+# MPSGraph has one convolution pair of selectors -- `convolution2D...` and
+# `convolution3D...` -- and no 1-D one, so the body resolves the spatial rank
+# first and every other rank takes the CPU round-trip. What the descriptor
+# carries is the whole geometry: NCHW data and OIHW weights, per-axis stride and
+# dilation, `groups`, and an explicit padding style whose per-axis
+# `paddingFront`/`paddingBack` are aten's own padding list -- aten's `padding` is
+# [front_0, front_1, ..., back_0, back_1, ...], which is the order
+# `MpsConvDescriptor` fills, and a list that is not two entries per axis is
+# declined so the reference reports its own error.
+#
+# The checks before the graph are the reference's contract rather than the
+# graph's, and each would otherwise be a wrong answer instead of an error:
+#
+#   * The rank pair (a 3-D input with a 4-D weight, say) and the channel rules
+#     (`in_channels / groups == weight.size(1)`, `weight.size(0)` a multiple of
+#     `groups`). The graph would happily misread or broadcast either.
+#   * `transposed`, which on this selector means a *transposed convolution*: a
+#     different selector (`convolutionTranspose2D...`), with the channel roles
+#     swapped and its own argument rules. The body declines it rather than
+#     folding it into the forward node.
+#   * `output_padding`, which only a transposed convolution reads, so a non-zero
+#     one here is the reference's error.
+#   * A zero-length operand, which MPSGraph has no tensor for. A zero-length
+#     batch or spatial axis produces an empty result and is returned as one, and
+#     every other empty operand takes the round-trip -- where the shape error
+#     the reference raises is the reference's to write.
+#
+# The bias is the one part of the graph with a measured shape. MPSGraph's
+# convolution descriptor runs the convolution alone, so the bias is an
+# `additionWithPrimaryTensor:` against the conv result -- and that add's operand
+# has to broadcast against an (N, OC, OH, OW) result. The bias arrives as
+# (OC,), and the shape that broadcasts is (1, OC, 1, 1), which measured within
+# 1.19e-07 of the reference on an M5. The two readings that look equally
+# reasonable are both wrong: (1, 1, 1, OC) crashes the MPSGraph compiler
+# ("mps.add operands don't have broadcast-compatible shapes", then "original
+# module failed verification") and `broadcastTensor:toShape:` compares as
+# 6.6e-01, because it expands the bias along the wrong axes. So the bias is
+# reshaped, once, rather than broadcast.
+#
+# The dtype gate is the conv category's own (MpsSupportsConvDtype), and it is
+# wider than the softmax gate above on purpose: a bfloat16 convolution came back
+# *bit-identical* to a bfloat16 reference convolution on an M5 (6.52e-03 against
+# an exact float64 reference for both -- bfloat16's own precision, not the
+# graph's error), so bfloat16 is served here where bfloat16 softmax was
+# declined. That is what a per-category predicate is for. float64 has no
+# MPSGraph element type and the integral and bool widths are the reference's own
+# NotImplementedError, so those take the round-trip and get it.
+T_CONV = """\
+at::Tensor {kernel}(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups) {{
+  const bool has_bias = bias.has_value() && bias->defined();
+  const at::ScalarType bias_dtype =
+      has_bias ? bias->scalar_type() : input.scalar_type();
+  if (!mps::{supports}(input.scalar_type(), weight.scalar_type(), bias_dtype)) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  // The spatial rank: 1-D has no MPSGraph selector, and a rank above 3 has no
+  // graph either, so both take the round-trip and the reference reports what it
+  // reports.
+  const int64_t dim = input.dim() - 2;
+  const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
+  if (dim < 2 || dim > 3 || weight.dim() != input.dim() ||
+      stride.size() != ndim || padding.size() != 2 * ndim ||
+      dilation.size() != ndim || groups < 1) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  if (input.size(1) / groups != weight.size(1) ||
+      weight.size(0) % groups != 0) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  if (transposed || output_padding.size() != ndim) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  for (const int64_t entry : output_padding) {{
+    if (entry != 0) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
+  }}
+  mps::MpsConvParams params;
+  std::vector<int64_t> out_shape;
+  if (!mps::MpsConvResolve(
+          input, weight, stride, padding, dilation, groups, &params, &out_shape)) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  at::Tensor out = at::empty(out_shape, input.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  at::Tensor input_c = input.contiguous();
+  at::Tensor weight_c = weight.contiguous();
+  if (input_c.numel() == 0 || weight_c.numel() == 0) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  at::Tensor bias_c;
+  if (has_bias) {{
+    bias_c = bias->contiguous();
+    if (bias_c.numel() != weight_c.size(0)) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
+  }}
+  std::vector<at::Tensor> operands{{input_c, weight_c}};
+  if (has_bias) {{
+    operands.push_back(bias_c);
+  }}
+  const int64_t spatial = out.dim() - 2;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphObject* descriptor =
+            mps::MpsConvDescriptor(input_c.scalar_type(), spatial, params);
+        if (descriptor == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* y =
+            (spatial == 2)
+                ? [graph {call2d}args[0]
+                              weightsTensor:args[1]
+                                descriptor:(MPSGraphConvolution2DOpDescriptor*)descriptor
+                                 name:nil]
+                : [graph {call3d}args[0]
+                              weightsTensor:args[1]
+                                descriptor:(MPSGraphConvolution3DOpDescriptor*)descriptor
+                                 name:nil];
+
+        if (y == nil) {{
+          mps::MpsRelease(descriptor);
+          return nil;
+        }}
+        // The bias, in the one shape that broadcasts against the (N, OC, ...)
+        // result -- see the note above for why it is not (1, 1, 1, OC).
+        if ({has_bias}) {{
+          MPSGraphTensor* bias_t = [graph reshapeTensor:args[2]
+                                              withShape:mps::MpsShapeOf(params.bias_shape)
+                                                   name:nil];
+          y = [graph additionWithPrimaryTensor:y
+                               secondaryTensor:bias_t
+                                          name:nil];
+        }}
+        mps::MpsRelease(descriptor);
+        return y;
+      }});
+  if (!ran) {{
+    return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
     "gemm": T_GEMM,
+    "softmax": T_SOFTMAX_BODY,
+    "pow_scalar": T_POW,
+    "conv": T_CONV,
 }
 
 FILE_HEADER = """\
@@ -536,13 +908,17 @@ FILE_HEADER = """\
 #include "../../../generated/ops.h"
 #include <ATen/ExpandUtils.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/ops/_softmax.h>
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
+#include <ATen/ops/convolution.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/neg.h>
+#include <ATen/ops/pow.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <c10/core/ScalarType.h>
@@ -627,6 +1003,14 @@ def render():
                 finish=FINISH.get(op, ""),
                 key_parts=KEY_PARTS[op],
                 op=op,
+                # The rank digit the conv body puts in the selector name. `dim`
+                # is only read by the conv template, so a body that has no rank
+                # to pick gets the 2-D name and never uses it.
+                call2d=CALLS[op].replace("{dim}", "2"),
+                call3d=CALLS[op].replace("{dim}", "3"),
+                # The conv body's own reading of the optional bias, as a C++
+                # literal. Every other template ignores it.
+                has_bias="has_bias",
             )
         )
         covered.append((op, category))

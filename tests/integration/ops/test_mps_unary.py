@@ -292,3 +292,131 @@ class TestAbsDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "[flagos dispatch] abs -> mps" in result.stderr
+
+
+class TestNegCorrectness:
+    """``neg`` on the flagos device equals ``neg`` on the CPU reference.
+
+    ``neg`` is the second op in the ``unary`` category, and the one that shows
+    the category is not only about ``abs``: MPSGraph's ``negativeWithTensor:`` is
+    the two's-complement identity on the integral widths, so the signed minima
+    wrap exactly as the reference wraps them rather than saturating.
+    """
+
+    @pytest.mark.parametrize("shape", [(1,), (128, 256), (4, 8, 16)])
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.float32, torch.float16, torch.bfloat16, torch.int32],
+    )
+    @pytest.mark.anyplatform
+    def test_matches_cpu_for_signed_dtypes(self, shape, dtype):
+        if dtype.is_floating_point:
+            host = torch.randn(*shape) * 3.0
+        else:
+            host = torch.randint(-50, 50, shape)
+        host = host.to(dtype)
+        out = torch.neg(_to_device(host))
+        assert out.dtype == dtype
+        torch.testing.assert_close(out.cpu(), torch.neg(host))
+
+    @pytest.mark.parametrize(
+        "shape",
+        [(4, 5), (4, 6), (3, 7), (8, 3), (2, 3, 5)],
+    )
+    @pytest.mark.anyplatform
+    def test_rows_narrower_than_a_16_byte_multiple(self, shape):
+        """The shapes MPSNDArray's row pitch would silently corrupt (see abs)."""
+        host = torch.randn(*shape) * 3.0
+        out = torch.neg(_to_device(host))
+        torch.testing.assert_close(out.cpu(), torch.neg(host))
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.int8, torch.uint8, torch.int16, torch.int32, torch.int64],
+    )
+    @pytest.mark.anyplatform
+    def test_matches_cpu_for_every_integral_width(self, dtype):
+        host = torch.tensor([-7, -1, 0, 3, 11]).to(dtype)
+        out = torch.neg(_to_device(host))
+        torch.testing.assert_close(out.cpu(), torch.neg(host))
+
+    @pytest.mark.anyplatform
+    def test_signed_min_wraps_like_cpu(self):
+        """``neg`` of the most-negative integer has no positive counterpart.
+
+        Two's complement leaves it where it was: ``neg(-128) == -128`` for int8,
+        which is what the CPU computes too. Pinning it keeps the kernel from
+        being "fixed" into a saturating negate that would silently disagree with
+        the reference.
+        """
+        host = torch.tensor([-128, -127, 0, 127], dtype=torch.int8)
+        out = torch.neg(_to_device(host))
+        assert torch.equal(out.cpu(), torch.neg(host))
+        assert out.cpu()[0].item() == -128
+
+    @pytest.mark.anyplatform
+    def test_unsigned_negates_modulo_the_width(self):
+        """``neg`` of a uint8 operand is aten's wrapping negation, not a decline."""
+        host = torch.tensor([0, 1, 128, 255], dtype=torch.uint8)
+        out = torch.neg(_to_device(host))
+        assert torch.equal(out.cpu(), torch.neg(host))
+
+    @pytest.mark.anyplatform
+    def test_float_signed_zero_is_preserved(self):
+        """``0.0`` negates to ``-0.0``; a graph that dropped the sign would not.
+
+        The comparison is on the sign bit rather than on the value, because
+        ``-0.0 == 0.0`` -- a kernel that returned ``+0.0`` for both would pass a
+        value test and differ here.
+        """
+        host = torch.tensor([0.0, -0.0, 1.0, -1.0])
+        out = torch.neg(_to_device(host))
+        assert torch.equal(torch.signbit(out.cpu()), torch.signbit(torch.neg(host)))
+        assert torch.signbit(out.cpu())[0].item() is True
+
+    @pytest.mark.anyplatform
+    def test_bool_raises_exactly_like_cpu(self):
+        a = _to_device(torch.tensor([True, False, True]))
+        with pytest.raises(RuntimeError):
+            torch.neg(a)
+
+    @pytest.mark.anyplatform
+    def test_strided_operand_is_materialised(self):
+        host = torch.randn(8, 10)
+        a = _to_device(host)[:, ::2]
+        assert not a.is_contiguous()
+        out = torch.neg(a)
+        torch.testing.assert_close(out.cpu(), torch.neg(host[:, ::2]))
+
+    @pytest.mark.anyplatform
+    def test_empty_tensor(self):
+        a = _to_device(torch.empty(0, 4))
+        out = torch.neg(a)
+        assert out.shape == (0, 4)
+        assert out.device.type == "flagos"
+
+
+class TestNegDispatch:
+    """``neg`` is claimed on PrivateUse1, not left to cpu_fallback."""
+
+    @pytest.mark.main_ops
+    def test_conf_routes_neg_to_mps(self):
+        assert routed_backend_or_none("neg") == "mps"
+
+    @pytest.mark.main_ops
+    def test_dispatch_log_names_mps(self):
+        env = os.environ.copy()
+        env["FLAGOS_LOG"] = "dispatch"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch, torch_fl; "
+                "a = torch.randn(4, 4, device='flagos:0'); torch.neg(a)",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "[flagos dispatch] neg -> mps" in result.stderr

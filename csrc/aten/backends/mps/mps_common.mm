@@ -94,6 +94,43 @@ bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype)
       self_dtype == at::kBFloat16;
 }
 
+bool MpsSupportsSoftmaxDtype(
+    at::ScalarType self_dtype,
+    bool half_to_float,
+    at::ScalarType* out_dtype) {
+  if (out_dtype == nullptr) {
+    return false;
+  }
+  // The measured widths; see the header for what bfloat16 does instead.
+  if (self_dtype != at::kFloat && self_dtype != at::kHalf) {
+    return false;
+  }
+  *out_dtype = half_to_float ? at::kFloat : self_dtype;
+  return true;
+}
+
+bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent) {
+  if (self_dtype != at::kFloat && self_dtype != at::kHalf) {
+    return false;
+  }
+  // A float constant carries any real the caller can hand aten, so the only
+  // exponent this declines is a complex one -- which MpsConstant declines too.
+  return MpsConstantExact(exponent, self_dtype);
+}
+
+bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  const int64_t rank = self.dim();
+  const int64_t resolved = dim < 0 ? dim + rank : dim;
+  if (resolved < 0 || resolved >= rank) {
+    return false;
+  }
+  *out = resolved;
+  return true;
+}
+
 MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
   if (t.dim() >= 2) {
     // Not a `contiguous()` call: this is the layout test. The tensor's own last
@@ -107,6 +144,176 @@ MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
     }
   }
   return {t.contiguous(), false};
+}
+
+bool MpsSupportsConvDtype(
+    at::ScalarType input_dtype,
+    at::ScalarType weight_dtype,
+    at::ScalarType bias_dtype) {
+  if (input_dtype != weight_dtype || weight_dtype != bias_dtype) {
+    // The graph runs one element type for the whole node, while aten promotes
+    // (a float tensor with a double weight is a float convolution, and a
+    // mixed pair is otherwise a reference error), so a mixed call takes the
+    // round-trip rather than a graph built at one width.
+    return false;
+  }
+  return input_dtype == at::kFloat || input_dtype == at::kHalf ||
+      input_dtype == at::kBFloat16;
+}
+
+bool MpsConvResolve(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    int64_t groups,
+    MpsConvParams* params,
+    std::vector<int64_t>* out_shape) {
+  if (params == nullptr || out_shape == nullptr) {
+    return false;
+  }
+  const int64_t dim = input.dim() - 2;
+  if (dim < 2 || dim > 3 || weight.dim() != input.dim()) {
+    return false;
+  }
+  const int64_t spatial = dim;
+  if (stride.size() != spatial || dilation.size() != spatial ||
+      padding.size() != 2 * spatial || groups < 1) {
+    return false;
+  }
+  const int64_t in_channels = input.size(1);
+  const int64_t out_channels = weight.size(0);
+  if (in_channels / groups != weight.size(1) || out_channels % groups != 0) {
+    return false;
+  }
+
+  params->stride.assign(stride.begin(), stride.end());
+  params->dilation.assign(dilation.begin(), dilation.end());
+  params->padding_front.clear();
+  params->padding_back.clear();
+  // aten's flat `padding` is [front_0, front_1, ..., back_0, back_1, ...], and
+  // MPSGraph takes the two halves as two arrays -- the same split, so the first
+  // `spatial` entries are the fronts and the rest are the backs.
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    params->padding_front.push_back(padding[axis]);
+    params->padding_back.push_back(padding[axis + spatial]);
+  }
+  params->groups = groups;
+
+  // The dilation-aware forward formula, the same arithmetic the reference uses:
+  // floor((in + front + back - dilation * (kernel - 1) - 1) / stride + 1).
+  std::vector<int64_t> shape;
+  shape.push_back(input.size(0));
+  shape.push_back(out_channels);
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    const int64_t padded = input.size(axis + 2) + params->padding_front[axis] +
+        params->padding_back[axis];
+    const int64_t window =
+        params->dilation[axis] * (weight.size(axis + 2) - 1) + 1;
+    const int64_t extent = (padded - window) / params->stride[axis] + 1;
+    if (extent <= 0) {
+      // What the reference reports as "Kernel size can't be greater than actual
+      // input size": there is no output extent to give the graph.
+      return false;
+    }
+    shape.push_back(extent);
+  }
+  // A non-positive step is a zero-stride graph, and the reference rejects it in
+  // its own words; the formula above already divided by it, so this can only
+  // catch it before the descriptor does.
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    if (params->stride[axis] <= 0 || params->dilation[axis] <= 0) {
+      return false;
+    }
+  }
+  *out_shape = std::move(shape);
+
+  // The bias broadcasts over the spatial axes and along the channel axis, so it
+  // becomes (1, OC, 1, ...) -- see T_CONV for the two shapes that do not work.
+  params->bias_shape.assign(static_cast<size_t>(dim), 1);
+  params->bias_shape[1] = out_channels;
+  return true;
+}
+
+MPSGraphObject* MpsConvDescriptor(
+    at::ScalarType dtype,
+    int64_t spatial,
+    const MpsConvParams& params) {
+  MPSDataType mps_dtype;
+  if (!MpsDataTypeOf(dtype, &mps_dtype)) {
+    // The descriptor carries no dtype -- the selector reads it off the source
+    // and weights tensors -- but a dtype with no MPSGraph element type never
+    // reaches a graph, so a descriptor for it is a decline.
+    return nil;
+  }
+  const size_t rank = static_cast<size_t>(spatial);
+  if (params.stride.size() != rank || params.dilation.size() != rank ||
+      params.padding_front.size() != rank ||
+      params.padding_back.size() != rank) {
+    return nil;
+  }
+  // The per-axis argument order and the descriptor's X/Y/Z properties run in
+  // opposite directions: aten's axis order is the fastest-moving one last, and
+  // so is the descriptor's, which is what `p = rank - 1 - axis` maps between.
+  // Reading it the other way round is a wrong number rather than a shape error
+  // for any non-square kernel, which is why it is spelled out. Measured on the
+  // 3-D probe, which transposes exactly the two spatial axes this doc string
+  // compares against: only the (2, 3, 4) diag kernel agrees, the (2, 3, 4) and
+  // the (3, 2) cases do not.
+  const NSUInteger sx = static_cast<NSUInteger>(params.stride[rank - 1]);
+  const NSUInteger sy = static_cast<NSUInteger>(params.stride[rank - 2]);
+  const NSUInteger dx = static_cast<NSUInteger>(params.dilation[rank - 1]);
+  const NSUInteger dy = static_cast<NSUInteger>(params.dilation[rank - 2]);
+  const NSUInteger left =
+      static_cast<NSUInteger>(params.padding_front[rank - 1]);
+  const NSUInteger right =
+      static_cast<NSUInteger>(params.padding_back[rank - 1]);
+  const NSUInteger top =
+      static_cast<NSUInteger>(params.padding_front[rank - 2]);
+  const NSUInteger bottom =
+      static_cast<NSUInteger>(params.padding_back[rank - 2]);
+  const NSUInteger groups = static_cast<NSUInteger>(params.groups);
+  if (spatial == 3) {
+    const NSUInteger sz = static_cast<NSUInteger>(params.stride[0]);
+    const NSUInteger dz = static_cast<NSUInteger>(params.dilation[0]);
+    const NSUInteger front =
+        static_cast<NSUInteger>(params.padding_front[0]);
+    const NSUInteger back = static_cast<NSUInteger>(params.padding_back[0]);
+    return [[MPSGraphConvolution3DOpDescriptor alloc]
+        initWithStrideInX:sx
+                strideInY:sy
+                strideInZ:sz
+          dilationRateInX:dx
+          dilationRateInY:dy
+          dilationRateInZ:dz
+                   groups:groups
+             paddingLeft:left
+            paddingRight:right
+              paddingTop:top
+           paddingBottom:bottom
+             paddingFront:front
+              paddingBack:back
+             paddingStyle:MPSGraphPaddingStyleExplicit
+               dataLayout:MPSGraphTensorNamedDataLayoutNCDHW
+            weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
+  }
+  if (spatial == 2) {
+    return [[MPSGraphConvolution2DOpDescriptor alloc]
+        initWithStrideInX:sx
+                strideInY:sy
+          dilationRateInX:dx
+          dilationRateInY:dy
+                   groups:groups
+             paddingLeft:left
+            paddingRight:right
+              paddingTop:top
+           paddingBottom:bottom
+             paddingStyle:MPSGraphPaddingStyleExplicit
+               dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+            weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+  }
+  return nil;
 }
 
 bool MpsReduceAxes(
@@ -215,33 +422,42 @@ MPSGraphTensor* MpsFlatten(MPSGraph* graph, MPSGraphTensor* tensor, int64_t coun
   return [graph reshapeTensor:tensor withShape:FlatShape(count) name:nil];
 }
 
+bool MpsConstantExact(const at::Scalar& value, at::ScalarType dtype) {
+  MPSDataType ignored;
+  if (!MpsDataTypeOf(dtype, &ignored)) {
+    return false;
+  }
+  if (c10::isIntegralType(dtype, /*includeBool=*/false)) {
+    // An integral constant has to be integral and exactly representable: a
+    // fractional one promotes the aten result off the operand's dtype, and past
+    // 2^53 a double no longer names the integer the scalar held.
+    if (!value.isIntegral(/*includeBool=*/true)) {
+      return false;
+    }
+    const int64_t integer = value.toLong();
+    constexpr int64_t kLargestExact = int64_t{1} << 53;
+    return integer <= kLargestExact && integer >= -kLargestExact;
+  }
+  return !value.isComplex();
+}
+
 MPSGraphTensor* MpsConstant(
     MPSGraph* graph,
     const at::Scalar& value,
     at::ScalarType dtype) {
+  if (!MpsConstantExact(value, dtype) || graph == nil) {
+    return nil;
+  }
   MPSDataType mps_dtype;
-  if (graph == nil || !MpsDataTypeOf(dtype, &mps_dtype)) {
+  if (!MpsDataTypeOf(dtype, &mps_dtype)) {
     return nil;
   }
   if (c10::isIntegralType(dtype, /*includeBool=*/false)) {
-    // An integral operand takes an integral constant only. A fractional one
-    // would promote the aten result off the operand's dtype -- `int + 0.5` is a
-    // float tensor -- which an integral element type cannot express, so the
-    // constant is declined and the op takes the CPU round-trip.
-    if (!value.isIntegral(/*includeBool=*/true)) {
-      return nil;
-    }
-    const int64_t integer = value.toLong();
-    constexpr int64_t kLargestExact = int64_t{1} << 53;
-    if (integer > kLargestExact || integer < -kLargestExact) {
-      return nil;
-    }
-    return [graph constantWithScalar:static_cast<double>(integer)
+    // MpsConstantExact has already established that the value names an integer
+    // this dtype can hold exactly.
+    return [graph constantWithScalar:static_cast<double>(value.toLong())
                                shape:FlatShape(1)
                             dataType:mps_dtype];
-  }
-  if (value.isComplex()) {
-    return nil;
   }
   return [graph constantWithScalar:value.toDouble()
                              shape:FlatShape(1)
@@ -268,6 +484,31 @@ MPSGraphTensor* MpsScaledByScalar(
   return [graph multiplicationWithPrimaryTensor:tensor
                                 secondaryTensor:constant
                                            name:nil];
+}
+
+MPSGraphTensor* MpsPowByScalar(
+    MPSGraph* graph,
+    MPSGraphTensor* tensor,
+    const at::Scalar& exponent,
+    at::ScalarType dtype) {
+  if (tensor == nil) {
+    return nil;
+  }
+  if (exponent.equal(1.0)) {
+    return tensor;
+  }
+  // One MPSGraph selector, `powerWithPrimaryTensor:`, takes any real exponent
+  // as a broadcast one-element constant. It is not a composition of exp and
+  // log: those would have to agree with the reference on the sign of a
+  // negative base raised to a fractional power, which is where the measured
+  // NaN comes from.
+  MPSGraphTensor* constant = MpsConstant(graph, exponent, dtype);
+  if (constant == nil) {
+    return nil;
+  }
+  return [graph powerWithPrimaryTensor:tensor
+                       secondaryTensor:constant
+                                  name:nil];
 }
 
 bool MpsBufferOf(const at::Tensor& t, id<MTLBuffer>* buffer, size_t* byteOffset) {

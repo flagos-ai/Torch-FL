@@ -28,13 +28,17 @@
 #include "../../../generated/ops.h"
 #include <ATen/ExpandUtils.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/ops/_softmax.h>
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
+#include <ATen/ops/convolution.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/neg.h>
+#include <ATen/ops/pow.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <c10/core/ScalarType.h>
@@ -374,6 +378,85 @@ at::Tensor MeanDimKernelMps(
 
 REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kMps, MeanDimKernelMps)
 
+at::Tensor PrivSoftmaxKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float) {
+  at::ScalarType out_dtype = at::kFloat;
+  int64_t axis = 0;
+  if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
+      !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {
+    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+  }
+  at::Tensor self_c = self.to(out_dtype).contiguous();
+  if (self_c.numel() == 0) {
+    return at::empty(self_c.sizes(), self_c.options());
+  }
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("_softmax", axis),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph softMaxWithTensor:args[0] axis:axis name:nil];
+      });
+  if (!ran) {
+    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kMps, PrivSoftmaxKernelMps)
+
+at::Tensor NegKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsUnaryDtype(self.scalar_type())) {
+    return at::neg(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("neg"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph negativeWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::neg(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kMps, NegKernelMps)
+
+at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsPowDtype(self.scalar_type(), other)) {
+    return at::pow(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("pow.Tensor_Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return mps::MpsPowByScalar(
+            graph, args[0], other, self_c.scalar_type());
+      });
+  if (!ran) {
+    return at::pow(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kMps, PowTensorScalarKernelMps)
+
 at::Tensor MmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
   if (!mps::MpsSupportsGemmDtype(self.scalar_type(), mat2.scalar_type())) {
     return at::mm(self.cpu(), mat2.cpu()).to(self.device());
@@ -497,5 +580,134 @@ at::Tensor BmmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kMps, BmmKernelMps)
+
+at::Tensor ConvolutionOverrideableKernelMps(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups) {
+  const bool has_bias = bias.has_value() && bias->defined();
+  const at::ScalarType bias_dtype =
+      has_bias ? bias->scalar_type() : input.scalar_type();
+  if (!mps::MpsSupportsConvDtype(input.scalar_type(), weight.scalar_type(), bias_dtype)) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  // The spatial rank: 1-D has no MPSGraph selector, and a rank above 3 has no
+  // graph either, so both take the round-trip and the reference reports what it
+  // reports.
+  const int64_t dim = input.dim() - 2;
+  const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
+  if (dim < 2 || dim > 3 || weight.dim() != input.dim() ||
+      stride.size() != ndim || padding.size() != 2 * ndim ||
+      dilation.size() != ndim || groups < 1) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  if (input.size(1) / groups != weight.size(1) ||
+      weight.size(0) % groups != 0) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  if (transposed || output_padding.size() != ndim) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  for (const int64_t entry : output_padding) {
+    if (entry != 0) {
+      return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }
+  }
+  mps::MpsConvParams params;
+  std::vector<int64_t> out_shape;
+  if (!mps::MpsConvResolve(
+          input, weight, stride, padding, dilation, groups, &params, &out_shape)) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  at::Tensor out = at::empty(out_shape, input.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  at::Tensor input_c = input.contiguous();
+  at::Tensor weight_c = weight.contiguous();
+  if (input_c.numel() == 0 || weight_c.numel() == 0) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  at::Tensor bias_c;
+  if (has_bias) {
+    bias_c = bias->contiguous();
+    if (bias_c.numel() != weight_c.size(0)) {
+      return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }
+  }
+  std::vector<at::Tensor> operands{input_c, weight_c};
+  if (has_bias) {
+    operands.push_back(bias_c);
+  }
+  const int64_t spatial = out.dim() - 2;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("convolution_overrideable", stride, padding, dilation, groups, transposed, output_padding, has_bias),
+      operands,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphObject* descriptor =
+            mps::MpsConvDescriptor(input_c.scalar_type(), spatial, params);
+        if (descriptor == nil) {
+          return nil;
+        }
+        MPSGraphTensor* y =
+            (spatial == 2)
+                ? [graph convolution2DWithSourceTensor:args[0]
+                              weightsTensor:args[1]
+                                descriptor:(MPSGraphConvolution2DOpDescriptor*)descriptor
+                                 name:nil]
+                : [graph convolution3DWithSourceTensor:args[0]
+                              weightsTensor:args[1]
+                                descriptor:(MPSGraphConvolution3DOpDescriptor*)descriptor
+                                 name:nil];
+
+        if (y == nil) {
+          mps::MpsRelease(descriptor);
+          return nil;
+        }
+        // The bias, in the one shape that broadcasts against the (N, OC, ...)
+        // result -- see the note above for why it is not (1, 1, 1, OC).
+        if (has_bias) {
+          MPSGraphTensor* bias_t = [graph reshapeTensor:args[2]
+                                              withShape:mps::MpsShapeOf(params.bias_shape)
+                                                   name:nil];
+          y = [graph additionWithPrimaryTensor:y
+                               secondaryTensor:bias_t
+                                          name:nil];
+        }
+        mps::MpsRelease(descriptor);
+        return y;
+      });
+  if (!ran) {
+    return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
+                       transposed, output_padding, groups)
+        .to(input.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kMps, ConvolutionOverrideableKernelMps)
 
 } // namespace at::native::flagos

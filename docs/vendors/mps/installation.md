@@ -101,26 +101,41 @@ landed: the 28-function C ABI plus the allocator, and the `unary`, `binary`,
 `binary_scalar` and `reduce` categories of the MPSGraph operator layer -- nine
 aten ops: `abs`; `add`/`sub`/`mul` over two tensors and over a tensor and a host
 scalar (with aten's `alpha`); and `sum.dim_IntList`/`mean.dim`. Stage 3 has
-opened with the `gemm` category, adding `mm` and `bmm` for eleven in all. Those
-eleven are claimed on the `PrivateUse1` `mps` slot by `csrc/aten/register.cc`,
-and `torch_fl/configs/backends_mps.conf` routes exactly them to `mps` and every
-other op to `none`, which is what sends the rest to `cpu_fallback`. The routes
+added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`)
+two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
+(`convolution_overrideable`), which closes the stage-3 lanes, for fifteen in all.
+Those fifteen are claimed on the `PrivateUse1` `mps` slot by
+`csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
+them to `mps` and every other op to `none`, which is what sends the rest to
+`cpu_fallback`. The routes
 are generated from `csrc/aten/backends/mps/generated/mps_register.inc`, so the
 conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated eleven are compared against the
+Results are correct on every op: the accelerated fifteen are compared against the
 CPU reference in `tests/integration/ops/test_mps_unary.py`,
-`test_mps_binary.py`, `test_mps_reduce.py` and `test_mps_gemm.py`, and a case
-their kernels decline takes the CPU round-trip rather than a wrong answer. The
+`test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
+`test_mps_softmax.py`, `test_mps_pow.py` and `test_mps_conv.py`, and a case their
+kernels decline takes the CPU round-trip rather than a wrong answer. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
 than copying it: a transposed last two axes over dense memory is recognised and
 handed to MPSGraph's transpose node, which measured free next to the copy it
-replaces. `conv` and `softmax` are the rest of stage 3. A platform whose GPU
-never runs a kernel is a "Runtime only" row, not operator support; eleven ops is
-operator support for the unary, elementwise, reduction and matrix-product
-families and nothing more.
+replaces. The `conv` kernel serves `nn.Conv2d`/`nn.Conv3d` -- including the
+pointwise, grouped and depthwise shapes a vision or mixer model reaches for -- by
+carrying the stride, dilation, groups and per-axis padding into the MPSGraph
+descriptor; `conv1d` and transposed convolutions have no selector there and take
+the round-trip. A platform whose GPU
+never runs a kernel is a "Runtime only" row, not operator support; fifteen ops
+is operator support for the unary, elementwise, reduction, matrix-product,
+softmax and convolution families and nothing more. Note that `softmax.int` is
+not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch
+build, so the
+dispatcher decomposes it before any backend key is consulted. `_softmax` -- what
+`torch.softmax` and SDPA lower to -- is the spelling that runs.
+`convolution_overrideable` is the conv analogue: `aten.convolution` also
+decomposes above the backend key, so the spelling every `F.conv2d` and
+`nn.Conv2d` reaches is the one registered.
 
 ## MPSGraph answers measured on an M5
 

@@ -104,6 +104,57 @@ bool MpsSupportsReduceDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
 
+// Whether an aten `_softmax` over a tensor of `self_dtype` computes exactly on
+// the MPSGraph path, and the dtype the result comes back in.
+//
+// `_softmax(self, dim, half_to_float)` returns the operand's own dtype, or
+// float when `half_to_float` is set: that flag is the CUDA spelling of
+// "accumulate in float and hand back float", and it is the one host argument
+// here that decides the result dtype rather than the tensor. A body that takes
+// it therefore widens the operand to the dtype it computed in, which is what
+// the reference does as well.
+//
+// The widths are the ones the graph was measured on (Apple M5, four rows of
+// 4096 values spread over [-6, 6], against a reference softmax that accumulates
+// in float and rounds once):
+//
+//   float32   within 29 ulp, 1.9e-6 relative
+//   float16   bit-identical on every element above 1e-4, and the rest differ by
+//             at most one subnormal (4.7e-41) -- MPSGraph accumulates a half
+//             reduction in float, the way the reference does, so half does not
+//             need the round-trip that would otherwise be the safe answer
+//   bfloat16  declined. A bfloat16 graph returned a denormal for every element
+//             instead of the reference's value on this SDK, so the graph's
+//             bfloat16 path is not one this backend can vouch for; the
+//             round-trip keeps it correct until it is.
+//
+// float64 has no MPSGraph element type at all, and an integral or bool operand
+// is a NotImplementedError in the reference rather than a result, so both take
+// the round-trip and get it.
+bool MpsSupportsSoftmaxDtype(
+    at::ScalarType self_dtype,
+    bool half_to_float,
+    at::ScalarType* out_dtype);
+
+// Whether `pow(self, exponent)` computes exactly on the MPSGraph path, on the
+// same measurement as the softmax gate above: `x ** 2` was exact and `x ** 2.5`
+// within 1 ulp in float32, and both matched the reference bit for bit in
+// float16 -- including the NaN a negative base to a fractional exponent
+// produces, which is where a naive `exp(log(x) * e)` composition would not be.
+//
+// An integral operand is declined rather than measured: aten raises on a
+// negative exponent there ("Integers to negative integer powers are not
+// allowed") and promotes to float on a fractional one, and MPSGraph's power has
+// no integral form to match either answer with. The exponent itself is the
+// constant MpsConstant carries, so a complex one is declined by the same rule
+// every other scalar operand is.
+bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent);
+
+// The rank `dim` names once negative positions are resolved against `self`'s
+// rank. False when `dim` is out of range for the tensor, which is the reference's
+// error to report: the wrappers decline that case without touching the input.
+bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
+
 // Whether a matrix multiplication computes exactly on the MPSGraph path. Both
 // operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
 // and a mismatched pair is a reference error rather than a result -- and that
@@ -142,6 +193,96 @@ struct MpsGemmOperand {
 };
 
 MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t);
+
+// Whether a convolution computes exactly on the MPSGraph path: one float width
+// shared by every operand, including the optional bias.
+//
+// This gate is deliberately wider than the softmax and pow one above, and the
+// difference is measured rather than assumed. bfloat16 is *served* here: on an
+// M5, a (2, 8, 17, 17) bfloat16 convolution against a 3x3 kernel compared as
+// 6.52e-03 against an exact float64 reference -- and a bfloat16 *reference*
+// convolution compared as 6.52e-03 against that same exact reference, the same
+// number, because bfloat16 holds about three decimal digits and the two
+// roundings land on the same value. float32 measured 3.31e-07 against the exact
+// reference where the reference itself measured 6.86e-07, so the graph is if
+// anything the more accurate of the two.
+//
+// That is the opposite of what a bfloat16 *softmax* did on the same SDK (a
+// denormal for every element), which is why the two categories carry separate
+// predicates instead of one dtype list: the measurement is per op, not per
+// dtype.
+//
+// float64 has no MPSGraph element type at all, and an integral or bool
+// convolution is a NotImplementedError in the reference rather than a result, so
+// all three take the CPU round-trip and get exactly that.
+bool MpsSupportsConvDtype(
+    at::ScalarType input_dtype,
+    at::ScalarType weight_dtype,
+    at::ScalarType bias_dtype);
+
+// A convolution's geometry, resolved on the host into what an MPSGraph
+// convolution descriptor takes: the per-axis stride, dilation and the
+// front/back padding pair each axis carries, the group count, and the (1, OC,
+// 1, ...) shape the bias has to be reshaped to before it can be added to the
+// result.
+//
+// aten hands `convolution_overrideable` one flat `padding` list and one flat
+// `stride`/`dilation` list per spatial axis, and MPSGraph wants the same
+// information split three ways. Both readings of the padding list exist in the
+// wild -- symmetric pairs, and a front/back pair per axis -- and aten's is the
+// second for an N-D call and the first for a 1-D one; `MpsConvResolve` takes the
+// reading that matches the list it is given and reports an unreadable list as a
+// decline rather than guessing.
+struct MpsConvParams {
+  // Per-axis stride and dilation, already known to have `spatial` entries.
+  std::vector<int64_t> stride;
+  std::vector<int64_t> dilation;
+  // Per-axis (front, back), flattened the way the descriptor's
+  // `paddingFronts`/`paddingBacks` arrays are filled.
+  std::vector<int64_t> padding_front;
+  std::vector<int64_t> padding_back;
+  // The (1, OC, 1, ...) shape the bias is reshaped to. See T_CONV in
+  // scripts/codegen/codegen_mps.py for why this shape rather than (1, ..., OC).
+  std::vector<int64_t> bias_shape;
+  int64_t groups = 1;
+};
+
+// Validates a forward convolution's arguments against the reference's contract
+// and fills *params and *out_shape. False is the caller's cue to take the CPU
+// round-trip: a shape or argument list the graph cannot be built from at all,
+// including the rank, the argument lengths, the channel rules and the padding
+// list -- every case where the reference's own error message is the right answer
+// and a graph would be the wrong one.
+//
+// The output shape is the dilation-aware forward formula; a kernel larger than
+// the padded input falls out of it as a non-positive extent, which is a decline
+// here and the reference's own "Kernel size can't be greater than actual input
+// size" there.
+bool MpsConvResolve(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    int64_t groups,
+    MpsConvParams* params,
+    std::vector<int64_t>* out_shape);
+
+// The MPSGraph convolution descriptor for a resolved convolution: the class
+// `spatial == 3 ? MPSGraphConvolution3DOpDescriptor
+//              : MPSGraphConvolution2DOpDescriptor`, with NCHW/NCDHW data and
+// OIHW/OIDHW weights, explicit (asymmetric) padding, and the per-axis stride,
+// dilation and padding from `params`.
+//
+// The two classes are distinct types with distinct selectors, which is why this
+// hands back a `MPSGraphObject*` the caller casts at the one place that knows
+// which selector it is calling.
+// +1, so the caller releases it; nil for a spatial rank this has no descriptor
+// for, or a dtype MPSGraph has no element type for.
+MPSGraphObject* MpsConvDescriptor(
+    at::ScalarType dtype,
+    int64_t spatial,
+    const MpsConvParams& params);
 
 // The axes `dims` covers in a tensor of `sizes`, written to *out: negative
 // positions resolved against the rank, then sorted. A nullopt or EMPTY dims
@@ -182,6 +323,14 @@ MPSGraphTensor* MpsConstant(
     const at::Scalar& value,
     at::ScalarType dtype);
 
+// Whether `value` is one MpsConstant can express in `dtype`: integral on an
+// integral operand -- a fractional constant would promote the aten result off
+// the operand's dtype -- within the range a double names exactly, and never
+// complex. A body that has to decide *before* it has a graph -- a dtype
+// predicate in codegen -- asks this instead of building the node and finding out,
+// which is what keeps one predicate and one implementation of the rule.
+bool MpsConstantExact(const at::Scalar& value, at::ScalarType dtype);
+
 // `tensor * factor` as an MPSGraph node, with `factor` the host scalar an aten
 // `alpha` (or a scalar operand) becomes. Returns `tensor` itself for a factor of
 // 1 -- the common case -- so no node and no constant appear then. nil when the
@@ -190,6 +339,17 @@ MPSGraphTensor* MpsScaledByScalar(
     MPSGraph* graph,
     MPSGraphTensor* tensor,
     const at::Scalar& factor,
+    at::ScalarType dtype);
+
+// `tensor ** exponent` as an MPSGraph node, with `exponent` the host scalar an
+// aten `pow.Tensor_Scalar` carries. Returns `tensor` itself for an exponent of
+// 1 -- which is `x ** 1` for every x, NaN and -0.0 included -- so no node and
+// no constant appear then, the same short-circuit MpsScaledByScalar takes.
+// nil when the exponent cannot be expressed in `dtype`: see MpsConstant.
+MPSGraphTensor* MpsPowByScalar(
+    MPSGraph* graph,
+    MPSGraphTensor* tensor,
+    const at::Scalar& exponent,
     at::ScalarType dtype);
 
 // One string naming a graph *body*: the op, plus every host value the body bakes
