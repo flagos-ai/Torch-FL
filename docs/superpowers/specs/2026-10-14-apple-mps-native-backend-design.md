@@ -600,10 +600,81 @@ across a declined call, the dispatch log naming `mps` on both the served and the
 declined path, and a cost case over the `(151936, 1024)` shape that fails if the
 whole-operand round-trip returns.
 
-The remaining stage-4 work is `gather` (the same node again, but with a `dim`
-and a batch contract, and a reference that raises `RuntimeError: index 99 is out
-of bounds for dimension 0 with size 5` for an out-of-range index and accepts
-int32 as well as int64), `F.layer_norm` as a multi-op increment
+Stage 4 continued with `gather`, the third reader of this node and the first
+one whose node is a *different* node. `gatherWithUpdatesTensor:indicesTensor:`
+has no axis, and the axis spelling `gatherAlongAxis:withUpdatesTensor:-
+indicesTensor:name:` carries a shape precondition that `gather` does not ask
+for: MPSGraph requires the updates tensor and the indices tensor to have the
+same shape apart from `axis`, and it enforces that in the compiler rather than
+at run time -- measured, a `(4, 5)` operand against a `(4, 2)` index does not
+raise a deferrable error, it aborts the process with `failed assertion
+'original module failed verification'`. So the body trims the operand to the
+index's shape on the non-axis dimensions before it builds the node. The node is
+permissive in the other direction -- it compiles a `(4, 5)` operand against a
+`(4, 7)` index and answers `4x7` -- which is why the non-axis rule is checked on
+the host: a non-axis dimension of the index may be smaller than the operand's
+but never larger, and the reference is what says so (`Size does not match at
+dimension 0 expected index [5, 5] to be no larger than self [4, 5] apart from
+dimension 1`). The *axis* dimension is free to exceed the operand's in both
+directions, which is the shape rule the body has to keep straight.
+
+The honest finding of this increment is a shape rule with a view behind it, and
+it was a real bug before it was a paragraph. `narrow` returns a *view*, and
+`MpsRunGraph` describes every operand as a flat 1-D array of `numel` elements
+read densely from that operand's buffer offset. The first version of the body
+narrowed the operand and fed the view straight to the graph, so a
+`gather((4, 5), 0, (3, 1))` over `arange(20)` -- whose reference answer is
+`[0, 10, 15]` -- came back as `[0, 1, 2]`, which is `t.reshape(-1)[:3]`: the
+operand's first three elements, not the narrowed block. The fix is a
+`contiguous()` when the narrow changed the shape, and the measurement is
+recorded above the body. The same class of finding, one layer down, is that the
+trim must be a *host* `narrow` rather than the graph's `sliceTensor:`: a
+`sliceTensor:` built from the same indices answers `[0, 10, 0]` where the
+reference answers `[0, 10, 15]`.
+
+Three more measured behaviours decide the body, and each is a decline rather
+than a degradation, because a declined call takes the round-trip and therefore
+the reference's own error. The **index rank must equal the operand's** in both
+directions -- a `(5,)` index into a `(4, 5)` operand raises `Index tensor must
+have the same number of dimensions as input tensor`, and so does a higher rank
+-- so the rank is checked rather than left to the node, which accepted some
+mismatched-rank inputs in the probes. The **index dtype** is int32 or int64,
+where `take` is int64-only. An **out-of-range index** raises `index 99 is out
+of bounds for dimension 0 with size 5` -- the bound is the operand's
+`size(axis)`, not its `numel` -- and a **negative index raises**, the opposite
+of `take`, so there is no wrap here and the check is a rejection. MPSGraph's
+gather answers an out-of-range index with an inserted zero rather than failing,
+which is the same plausible-answer failure class the `embedding` and `take`
+range checks exist for.
+
+The last measured finding belongs to the platform rather than to `gather`, and
+it is recorded here so it is not re-derived as a `gather` regression. The trim
+above costs what MPS charges for any strided copy whose parent is large:
+measured on a `(151936, 1024)` float32 operand, a `dim=0` gather with a
+full-width index costs 0.26 ms, the same gather with an `(8, 16)` index -- which
+needs a `(151936, 16)` trim -- costs 52 ms, and the trim alone costs ~48 ms,
+while the gather over an already-trimmed operand is back to 0.22 ms. A dense
+`op[:8, :16].contiguous()`, a bare `view * 2` and `view.abs()` over the same
+huge-parent view all cost ~42-47 ms, with the same 128-element view over an
+8-row parent at 0.007 ms, so the cost is the parent allocation's size and not
+the view's. A leading (`dim=0`) narrow stays a dense prefix and is cheap for
+that reason, which is why the cost case in the suite is written on a `dim=1`
+call whose non-axis narrow is the leading one.
+
+This increment is verified with `tests/integration/ops/test_mps_gather.py` (65
+cases): bit-exact CPU equality across the three float widths plus f16, bf16,
+int32, int64, uint8 and bool, the index rank equalling the operand's, the
+one-sided non-axis rule in both directions and on rank-2 and rank-3 operands,
+the axis being free to exceed the operand's, the out-of-range and negative
+indices reaching the reference's own `RuntimeError`, the int64-only sibling
+contract that this op does *not* share, `dim` normalisation and an out-of-range
+`dim`, non-contiguous operands and indices, the empty index, plan reuse, the
+dispatch log naming `mps`, and the two cost cases above -- one asserting the
+range pass does not move the operand, one asserting the trim costs what the
+platform charges. The `[0, 10, 15]` value assertion that caught the view bug is
+kept.
+
+The remaining stage-4 work is `F.layer_norm` as a multi-op increment
 (`native_batch_norm` plus `addcmul`, measured at 1.50-4.56 ms), and the
 `native_batch_norm` it lowers to. `embedding_dense_backward` stays dropped for
 the reason recorded above.

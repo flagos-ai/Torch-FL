@@ -213,6 +213,37 @@ OPS = {
     # body with two disagreement maps, which is how the wrong list gets applied
     # to the wrong op.
     "take": "take",
+    # The fourth spelling of the read family, and the first one whose argument
+    # contract is *not* a narrowing of `index_select`'s. `gather` and
+    # `index_select` read an axis the caller names, but everything else about
+    # them differs, and each difference is measured:
+    #
+    #   * the index has the operand's **rank**, not rank 1, and its shape is the
+    #     result's shape (`take`'s rule over an axis rather than over a flat
+    #     buffer);
+    #   * the shape must match the operand's everywhere except `dim` --
+    #     `RuntimeError: Index tensor must have the same number of dimensions as
+    #     input tensor` for a rank mismatch;
+    #   * an out-of-range index is a `RuntimeError` naming the dimension
+    #     (`index 99 is out of bounds for dimension 0 with size 5`) rather than
+    #     `index_select`'s `IndexError`;
+    #   * a **negative** index is out of range and raises, where `take` reads it
+    #     and `index_select` raises its own way;
+    #   * the index dtype list is int32 **and** int64, the wider of the two
+    #     siblings and the one `index_select` has.
+    #
+    # That combination is what points at a different node rather than the
+    # `gatherWithUpdatesTensor:` the other three bodies build. MPSGraph's
+    # `gatherAlongAxis:withUpdatesTensor:indicesTensor:` is defined as exactly
+    # `res[i_{0}..i_{axis-1}, i, i_{axis+1}..] = updates[..., indices[i], ...]`
+    # with `indices.shape == updates.shape` except at `axis` and `res.shape ==
+    # indices.shape` -- which is `aten::gather`'s contract stated in the SDK's
+    # own words, and the three clauses the sibling node cannot express. Its cost
+    # is the same: measured on an M5 over a `(151936, 1024)` float32 operand, a
+    # one-row `gather` at dim=0 cost 42.0 ms through the fallback against 0.29 ms
+    # for the node, and the fallback's cost is the operand rather than the
+    # question -- the same whole-table `aten::_to_copy` the other three pay.
+    "gather": "gather",
     # The last arithmetic gap on the elementwise path. `add`, `sub` and `mul`
     # have been served since stage 2; `div` was not, so every `x / y` and every
     # `x / 2.0` in a model took the CPU round-trip, and it is the op the
@@ -290,6 +321,15 @@ AT_OP = {
     # is where the reference's `IndexError` (`out of range: tried to access index
     # 20 on a tensor of 20 elements`) and its own int64-only `RuntimeError` live.
     "take": "take",
+    # The CPU reference the `gather` body round-trips to on anything it declines.
+    # It is `at::gather` and not `at::index_select` even though the two read the
+    # same kind of axis: the reference's *errors* differ -- `gather` raises
+    # `RuntimeError: index 99 is out of bounds for dimension 0 with size 5` where
+    # `index_select` raises an `IndexError`, and it accepts a rank-matched index
+    # that `index_select` rejects as not-a-vector -- so the round-trip has to land
+    # on the same op the caller named or a declined call would answer a different
+    # failure than the reference does.
+    "gather": "gather",
     # The CPU reference the `div` body round-trips to on anything it declines.
     # It is `at::div` rather than a reciprocal-multiply: the two readings differ
     # on the cases the gate below exists for (a zero denominator, a subnormal
@@ -330,6 +370,15 @@ SUPPORTS = {
     # the sibling's for the opposite reason -- a read does not change its
     # operand's width, and the reference passes every one of them through.
     "take": "MpsSupportsTakeDtype",
+    # `index_select`'s pair, and shared for the same reason: the two ops accept
+    # the same tensor signature here -- a table indexed by an int32/int64 tensor
+    # -- and the difference between them is in the *shape* and *range* contracts,
+    # which the body checks on the host rather than in a dtype predicate. The
+    # subject half is `MpsSupportsEmbeddingDtype`'s subject half rather than
+    # `take`'s wider one, because `gather` reads along an axis of an N-D operand
+    # and the body hands that operand to MPSGraph as an N-D placeholder, where
+    # `take` flattens its operand to one column and needs no N-D element type.
+    "gather": "MpsSupportsEmbeddingDtype",
     # Neither form takes the dtype-preserving predicate its sibling arithmetic
     # ops use: division is not dtype-preserving on the reference (`int / int` is
     # a float tensor), and a predicate that admitted the integral widths would
@@ -393,6 +442,18 @@ CALLS = {
     # to `(1, numel)` and the index is the flat list -- there is no axis 0 to
     # preserve and no row width to compute. See T_TAKE.
     "take": "gatherWithUpdatesTensor:",
+    # The one body here whose selector is not the sibling's, and the reason is
+    # the contract rather than the operand. `gatherAlongAxis:` takes the operand
+    # whole -- no row-pitch reshape, because it reads an axis of an N-D tensor
+    # rather than rows of a 2-D one -- and it carries `indices.shape ==
+    # updates.shape` except at `axis` plus `res.shape == indices.shape` as its own
+    # shape rule, which is `aten::gather`'s. See the op-list note above.
+    #
+    # The axis binds to the *first* argument of this selector, which is the
+    # opposite of the sibling's, so `{call}` is not a prefix of the expression
+    # here: T_GATHER writes the selector out in full and this entry exists for
+    # the table's completeness.
+    "gather": "gatherAlongAxis:",
     # MPSGraph's division node, and the interesting thing about it is that it is
     # the *only* arithmetic selector here whose choice is not obvious: the
     # plausible alternative is `a * reciprocalWithTensor:b`, which is what a
@@ -504,6 +565,18 @@ KEY_PARTS = {
     # no host value left that an operand pair could disagree about, so there is
     # nothing to name and two calls that share a shape share a plan.
     "take": "",
+    # The resolved axis, and the row above that a reviewer has to check against
+    # the body for the same reason `index_select`'s is: a (5, 4) operand read at
+    # dim=0 and at dim=1 has one dtype and one pair of shapes and two different
+    # answers, and `gatherAlongAxis:` bakes the axis into the compiled graph. A
+    # body that resolved the axis and left it out of the key would hand the first
+    # plan to the second call.
+    #
+    # `sparse_grad` is deliberately absent. It selects the *backward* pass's
+    # gradient layout and does not change the forward result -- the same reading
+    # the `embedding` row above takes of that op's backward arguments -- so the
+    # body does not read it and two calls that differ only there share a plan.
+    "gather": ", axis",
     # Empty: a division graph is a function of its operands' dtypes and shapes,
     # which MpsRunGraph folds in, and of nothing else. There is no `alpha` on
     # either spelling and no host scalar the body bakes in -- `div.Scalar`'s
@@ -1592,6 +1665,267 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& index) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `gather` is the fourth and last of the read family, and the one whose contract
+# is neither a sibling's nor a superset of one. Where `take` reads a flat buffer
+# with an index of any shape and `index_select` reads axis 0 with a vector index,
+# `gather` reads the axis the caller names with an index of the operand's *rank*,
+# and it is the shape rule that decides the body:
+#
+#   indices.shape == self.shape except at `dim`, and res.shape == indices.shape
+#
+# which is the same sentence the SDK writes for `gatherAlongAxis:` (measured
+# against the reference and read out of the header):
+#
+#   res[p_0..p_{axis-1}, i, p_{axis+1}..p_{U-1}] =
+#       updates[p_0..p_{axis-1}, indices[p_0..p_{axis-1}, i, p_{axis+1}..], ...]
+#   P = Q, indices.shape[0:axis] == updates.shape[0:axis],
+#   res.shape[0:axis] == updates.shape[0:axis], and so on around `axis`
+#
+# so the operand goes to the graph as itself -- no row-pitch reshape, because
+# nothing here reads rows of a 2-D flattening -- and the result goes into an
+# `out` allocated at the index's shape. That is the whole body; the rest of it is
+# the three declines the *reference* forces, and each of them is a case where the
+# node would answer plausibly rather than wrongly:
+#
+#   * **The index rank must *equal* the operand's, in both directions.** This is
+#     the first contract that had to be measured rather than assumed, because the
+#     obvious reading -- "a lower-rank index is broadcast up, the way the gathered
+#     axis moves in other frameworks" -- is what the first draft of this body
+#     implemented, and it was wrong. Measured: `gather((4, 5), 1, (5,))` raises
+#     "Index tensor must have the same number of dimensions as input tensor", and
+#     so does `gather((4, 5), 1, (4, 5, 1))`; the reference broadcasts nothing.
+#     The `(1, 5)` shape that *is* accepted is not an expanded `(5,)` -- it is an
+#     index that already has the operand's rank and happens to be one wide at a
+#     non-axis dimension. So the body declines on `index.dim() != rank` and never
+#     expands, and the two directions are one comparison rather than two.
+#   * **A non-axis dimension may be smaller than the operand's, but not larger.**
+#     This is the finding that decides the body. Measured: `gather((4, 5), 1,
+#     (4, 3))` is `(4, 3)` and `gather((4, 5), 0, (2, 3))` is `(2, 3)`, but
+#     `gather((4, 5), 1, (4, 7))` raises "Size does not match at dimension 0
+#     expected index [4, 7] to be no larger than self [4, 5] apart from dimension
+#     1" -- the reference checks the non-axis dimensions *one-sidedly*, and it
+#     does not check them the way `gatherAlongAxis:` does at all: the node
+#     requires "updates shape and indices shape must match except at axis", and
+#     the first version of this body handed the operand as-is, which made the
+#     MPSGraph compiler abort the process with `error: 'mps.gather_along_axis' op
+#     invalid input tensor shapes, updates shape and indices shape must match
+#     except at axis` -- a hard abort, not a decline the body could catch.
+#
+# The shape the node wants is reachable from the shape the reference accepts by
+# **narrowing the operand's non-axis dimensions to the index's extents before the
+# gather**: `gather((4, 5), 0, (3, 1))` reads `self[:, :1]` and gathers at axis 0,
+# and a rank-3 `(2, 3, 4)` operand read at axis 1 with a `(1, 2, 4)` index reads
+# `self[:1, :, :4]` and gathers at axis 1. The narrowing is exactly the sub-block
+# the reference's own element mapping touches -- it writes `res[i, j] =
+# self[index[i, j], j]`, so dimension 0 varies over `index.size(0)` and dimension 1
+# over `index.size(1)` and no other element is read -- which is why this trims the
+# operand rather than broadcasting it: enlarging a dimension would invent operand
+# rows the reference never reads, and the answer would be wrong rather than merely
+# slower.
+#
+# The trim is one-sided, and the asymmetry is the reference's rather than the
+# node's: a dimension the index makes *larger* than the operand's is a
+# `RuntimeError` from the reference, so the body declines it before the trim
+# rather than resizing anything. That is exactly the shape the node *would*
+# answer -- measured, `gatherAlongAxis:` compiles an `updates(4, 5)` against an
+# `indices(4, 7)` and returns a `4x7` -- which is why the check has to be here and
+# not left to the graph: the node's answer would be a plausible tensor where the
+# caller is owed an error, and the error is the whole contract for that shape.
+#
+# The narrowing is done on the **host** with `at::` (a `narrow` per non-axis
+# dimension, materialised by the `contiguous()` the body already takes) rather
+# than with MPSGraph's `sliceTensor:`. That was measured, not assumed: the graph
+# slice produces a tensor of the right *shape* -- `slice((4, 5), (4, 1))` is
+# `4x1` and the gather over it is `3x1` -- but the backend read the wrong element
+# for it, `gather((4, 5), 0, (3, 1))` returning `[0, 10, 0]` against the
+# reference's `[0, 10, 15]`. The sliced tensor and the view the runtime feeds it
+# do not agree on the row pitch, which is the same MPSNDArray layout constraint
+# the row-pitch note in mps_common.h records for the sibling bodies; the host
+# narrowing sidesteps it by handing the graph a buffer that already is the block
+# (and costs one copy of the block, which is the operand's *sub-block* rather than
+# the operand).
+#
+# The two other readings were measured and rejected. Moving the gathered axis to
+# the front and transposing back is the natural first idea and it works where the
+# *axis* dimension is the one that differs, but it is the identity permutation
+# when `axis == 0`, which is the most common call, so it fixes nothing there.
+# Flattening the operand to `(size(axis), -1)` and gathering flat rows gets the
+# shape rule and loses the element rule as soon as a dimension before `axis`
+# differs, because the flat row index no longer decomposes the way the
+# reference's does.
+#   * **An out-of-range index must raise, and the node inserts a zero.** The
+#     header says so outright ("If an index is out of bounds of the updatesTensor
+#     along axis a 0 is inserted"), and the reference raises `RuntimeError: index
+#     99 is out of bounds for dimension 0 with size 5`. So the range check runs on
+#     the host before a node exists, against `self.size(axis)` -- the *axis's*
+#     extent, not `numel`, which is the mistake this op makes easy to make in
+#     both directions: an index of `numel - 1` is in range for `take` over the
+#     same tensor and out of range here.
+#   * **A negative index is out of range.** Measured: the reference raises `index
+#     -1 is out of bounds for dimension 0 with size 5` where `take` reads the last
+#     element, so a body that reused `take`'s normalisation would wrap an index
+#     here and answer a call the reference raises -- the same failure class, in
+#     the opposite direction.
+#
+# `sparse_grad` is a backward-pass argument whose value the forward result does
+# not depend on, so the body does not read it and `KEY_PARTS` does not name it --
+# the same reading T_EMBEDDING takes of that op's three backward arguments, and
+# the reason a `sparse_grad=True` and a `sparse_grad=False` call over the same
+# operands share one plan.
+T_GATHER = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    const at::Tensor& index,
+    bool sparse_grad) {{
+  if (!mps::{supports}(self.scalar_type(), index.scalar_type())) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  // `sparse_grad` is not read: it selects the backward pass's gradient layout
+  // and the forward result does not depend on it (see the note above T_GATHER).
+  const int64_t rank = self.dim();
+  if (rank == 0) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  // The index must carry the operand's rank *exactly*, in both directions, and
+  // this is the one contract a first reading gets wrong. A lower-rank index is
+  // not broadcast up (`gather((4, 5), 1, (5,))` raises), and `(1, 5)` is not an
+  // expanded `(5,)` -- it is an index that already has the operand's rank. So
+  // the test is equality and both directions take the same round-trip; there is
+  // no expansion here and nothing to reconcile, because `gatherAlongAxis:`
+  // *would* have accepted and broadcast a mismatched index where the reference
+  // raises `Index tensor must have the same number of dimensions as input
+  // tensor`.
+  if (index.dim() != rank) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  // Resolve the axis against the operand's rank the way aten does (measured:
+  // dim=-1 over a rank-2 operand is dim=1), and leave a dim outside the rank to
+  // the reference rather than reporting it here.
+  int64_t axis = dim;
+  if (axis < 0) {{
+    axis += rank;
+  }}
+  if (axis < 0 || axis >= rank) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  // The index is materialised once, in its own width, and then read twice: the
+  // host range pass below and the graph. A non-contiguous index is made dense
+  // here, so both passes see the same buffer in the same order.
+  const at::Tensor index_c = index.contiguous();
+  // A non-axis dimension the index makes *larger* than the operand's is the
+  // reference's one-sided error -- `gather((4, 5), 1, (4, 7))` raises "expected
+  // index [4, 7] to be no larger than self [4, 5] apart from dimension 1" -- and
+  // the node would answer it rather than raising (measured: `gatherAlongAxis:`
+  // compiles that pair and returns a `4x7`). So the check runs here, and only in
+  // this direction: a *smaller* non-axis dimension is legal and is what the
+  // narrowing below is for.
+  for (int64_t d = 0; d < rank; ++d) {{
+    if (d != axis && index_c.size(d) > self.size(d)) {{
+      return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+          .to(self.device());
+    }}
+  }}
+  // One host pass over the index, in its own width, before a node exists. Any
+  // index the axis cannot answer takes the round-trip so the caller sees the
+  // reference's own RuntimeError rather than the node's inserted zero.
+  const int64_t axis_extent = self.size(axis);
+  bool in_range = true;
+  if (index_c.numel() > 0) {{
+    const at::Tensor host = index_c.cpu();
+    const int64_t* as_long = nullptr;
+    std::vector<int64_t> widened;
+    if (host.scalar_type() == at::kLong) {{
+      as_long = host.const_data_ptr<int64_t>();
+    }} else {{
+      const int32_t* as_int = host.const_data_ptr<int32_t>();
+      widened.assign(as_int, as_int + host.numel());
+      as_long = widened.data();
+    }}
+    // Two-sided and *unwrapped*: a negative index is out of range here where
+    // `take` wraps it, because the reference raises for it (measured: `index -1
+    // is out of bounds for dimension 0 with size 5`).
+    for (int64_t i = 0; i < host.numel(); ++i) {{
+      if (as_long[i] < 0 || as_long[i] >= axis_extent) {{
+        in_range = false;
+        break;
+      }}
+    }}
+  }}
+  if (!in_range) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  // The operand is read non-const because its shape is described to the graph
+  // below; a transposed or otherwise non-dense operand is declined by
+  // MpsRunGraph's own buffer resolution rather than by the node.
+  at::Tensor self_c = self.contiguous();
+  // `gatherAlongAxis:` wants the operand and the index to agree on every
+  // dimension except `axis`, where the reference lets the index be *smaller*
+  // (the larger direction was declined above); and it binds the axis before the
+  // operands, unlike the `gatherWithUpdatesTensor:` the three sibling bodies
+  // use, so the template writes the selector out in full rather than going
+  // through the `{call}` prefix. Trimming the operand's non-axis dimensions to
+  // the index's extents is what reconciles the two shape rules -- see the note
+  // above T_GATHER for why the other readings (broadcasting the operand, or
+  // flattening it to rows) are wrong rather than merely slower. The trim is
+  // `axis`-preserving, so it is one `narrow` per dimension that is not `axis`,
+  // and it is done here on the host rather than with MPSGraph's `sliceTensor:`
+  // because the graph slice produced the right *shape* and the wrong *element*
+  // (the note above records the `[0, 10, 0]` against `[0, 10, 15]`
+  // measurement): the sliced tensor and the view the runtime feeds it do not
+  // agree on the row pitch. A `narrow` on the already-contiguous operand hands
+  // the graph a buffer that already is the block, and costs a copy of the
+  // operand's sub-block rather than of the operand.
+  at::Tensor narrowed = self_c;
+  for (int64_t d = 0; d < rank; ++d) {{
+    if (d != axis && index_c.size(d) != self_c.size(d)) {{
+      narrowed = narrowed.narrow(d, 0, index_c.size(d));
+    }}
+  }}
+  // The narrow above is a *view*, and the graph reads its operands densely (see
+  // the row-pitch note in mps_common.h), so the view has to be copied down
+  // before it is described. Skipping this copy is not a slow answer but a wrong
+  // one, and the wrong answer is specific: MpsRunGraph feeds the operand's own
+  // buffer from its own offset with `numel` elements read densely, so the graph
+  // sees the operand's *first* `numel` elements in row-major order rather than
+  // the block the narrow selected. Measured here, `gather((4, 5), 0, (3, 1))`
+  // over `arange(20)` read `[0, 1, 2]` where the reference reads `[0, 10, 15]`
+  // -- the index values themselves, which is what makes it look like the
+  // operands were swapped rather than truncated.
+  if (narrowed.sizes() != self_c.sizes()) {{
+    narrowed = narrowed.contiguous();
+  }}
+  // The result is the index's own shape, which is what the node returns and what
+  // the reference returns.
+  at::Tensor out = at::empty(index.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{narrowed, index_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph gatherAlongAxis:(NSInteger)axis
+                     withUpdatesTensor:args[0]
+                         indicesTensor:args[1]
+                                  name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu(), sparse_grad)
+        .to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # `div` closes the elementwise arithmetic set -- `add`, `sub` and `mul` have been
 # served since stage 2 and this is the fourth -- so the least interesting thing
 # about it is the body, which is `T_BINARY` with one selector changed. What is
@@ -1775,6 +2109,7 @@ CATEGORIES = {
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,
+    "gather": T_GATHER,
     "div": T_DIV,
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
@@ -1819,6 +2154,7 @@ FILE_HEADER = """\
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
+#include <ATen/ops/gather.h>
 #include <ATen/ops/index_select.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>

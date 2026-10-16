@@ -188,12 +188,12 @@ record.
 
 ## Native Backend Route Changes
 
-### Apple MPS: twenty-two routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+### Apple MPS: twenty-three routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
 
-**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **22** ATen overloads from
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **23** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
 reduction, convolution, embedding and matrix-multiply families — with the
-remaining **2015** routes at `none` (`cpu_fallback`), measured overload by
+remaining **2014** routes at `none` (`cpu_fallback`), measured overload by
 overload against a CPU reference on an Apple Silicon arm64 host.
 
 **This is not a FlagGems cohort and must not be read against the 546-overload
@@ -202,10 +202,10 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 22, none: 2015}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 23, none: 2014}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
-`embedding`, `index_select`, `take`, `mm` and `bmm`. The backend is MPSGraph-first with a
+`embedding`, `index_select`, `take`, `gather`, `mm` and `bmm`. The backend is MPSGraph-first with a
 hand-written Metal Shading Language fallback, and — as the name of this section
 insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
@@ -256,6 +256,31 @@ measured, `aten::take` requires a long tensor and raises for int32, short, char,
 bool and float. Both contracts are held in
 `tests/integration/ops/test_mps_take.py` (57 cases).
 
+**`gather` is the third reader of that node and the first whose node is a
+different one.** The axis spelling,
+`gatherAlongAxis:withUpdatesTensor:indicesTensor:name:`, will not compile unless
+the operand and the index agree in every dimension except the axis — measured, a
+`(4, 5)` operand against a `(4, 2)` index does not raise a deferrable error but
+aborts the process with `failed assertion 'original module failed verification'`
+— so the body trims the operand to the index's shape on the non-axis dimensions
+first. That trim is a **host `narrow`** rather than the graph's `sliceTensor:`,
+because the same indices built as a `sliceTensor:` answer `[0, 10, 0]` where the
+reference answers `[0, 10, 15]`. The node is permissive where the reference is
+not: a non-axis dimension of the index may be *smaller* than the operand's but
+never larger (the reference raises `Size does not match at dimension 0 …`), the
+axis dimension is free in both directions, and MPSGraph answers an out-of-range
+index with an inserted zero rather than failing — so the range check is what
+keeps the answer the reference's. The `narrow` returns a *view*, and the first
+version of the body fed the view straight to the graph, which reads every
+operand as a flat `numel()`-length dense buffer: `gather((4, 5), 0, (3, 1))`
+over `arange(20)` came back `[0, 1, 2]` instead of `[0, 10, 15]`, which is the
+operand's first three elements and not the narrowed block. Held in
+`tests/integration/ops/test_mps_gather.py` (65 cases). The trim's cost on a
+large parent is a property of the platform rather than of this op — a `dim=0`
+gather over a `(151936, 1024)` operand costs 0.26 ms with a full-width index and
+52 ms with an `(8, 16)` index, ~48 ms of which is the strided copy alone, while
+the same gather over an already-trimmed operand is 0.22 ms.
+
 **Every route is gated on a measured dtype predicate, and two gates exist only
 because the obvious one was wrong.** The first `div` increment gated on the
 predicate `mul` already used, which admits integral widths; measured, the graph
@@ -282,7 +307,7 @@ graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
 per-op suites `test_mps_binary.py`, `test_mps_conv.py`, `test_mps_embedding.py`,
-`test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_pow.py`,
+`test_mps_gather.py`, `test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_pow.py`,
 `test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py`,
 `test_mps_take.py` and
 `test_mps_unary.py`, run as `pytest tests/integration/ops -m mps` on an Apple
