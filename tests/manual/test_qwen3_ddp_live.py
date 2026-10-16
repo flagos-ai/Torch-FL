@@ -143,7 +143,7 @@ def worker(rank: int, world_size: int, model_path: str, steps: int, seq_len: int
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--world-size", type=int, default=2)
-    ap.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    ap.add_argument("--model", default="/root/.cache/modelscope/models/Qwen--Qwen3-0.6B/")
     ap.add_argument("--steps", type=int, default=5)
     ap.add_argument("--seq-len", type=int, default=128)
     args = ap.parse_args()
