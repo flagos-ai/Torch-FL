@@ -1639,6 +1639,63 @@ at::Tensor DivScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
 
 REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kAscend, DivScalarKernelAscend)
 
+at::Tensor BitwiseAndScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      self.sizes(), self.options());
+
+  ascend::AclTensorWrapper acl_self(self);
+  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD(aclnnBitwiseAndScalar, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseAndScalarFn, bitwise_and_scalar_dispatcher, Backend::kAscend, BitwiseAndScalarKernelAscend)
+
+at::Tensor BitwiseOrScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      self.sizes(), self.options());
+
+  ascend::AclTensorWrapper acl_self(self);
+  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD(aclnnBitwiseOrScalar, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseOrScalarFn, bitwise_or_scalar_dispatcher, Backend::kAscend, BitwiseOrScalarKernelAscend)
+
+at::Tensor BitwiseXorScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      self.sizes(), self.options());
+
+  ascend::AclTensorWrapper acl_self(self);
+  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD(aclnnBitwiseXorScalar, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseXorScalarFn, bitwise_xor_scalar_dispatcher, Backend::kAscend, BitwiseXorScalarKernelAscend)
+
 at::Tensor EqTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
   // Issue #326: make the primary tensor's device current, so the
   // workspace, launch stream and executor cache below all agree on it.

@@ -408,7 +408,7 @@ def test_conf_route_counts_are_stable():
     expected = {
         # mm and mm.out moved from the aclnn route to flaggems; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
-        "ascend": {"flaggems": 220, "none": 1662, "ascend": 155},
+        "ascend": {"flaggems": 223, "none": 1659, "ascend": 155},
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 454, "cuda": 1583},

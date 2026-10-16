@@ -945,6 +945,212 @@ unchanged. The host conf was then restored to its original SHA-256
   whose `ones`/`max` rows are neither revalidated nor affected: the two defects
   live in the FlagGems `_ascend` backend override, which only this platform
   loads.
+### Ascend: `bitwise_{and,or,xor}.Scalar` gain a PrivateUse1 claim (2026-10-16, Ascend 910C)
+
+**One sentence.** The three scalar bitwise overloads had no `m.impl` on
+PrivateUse1 on Ascend, so ATen's `CompositeExplicitAutograd` implementation
+served them, decomposed to the `bitwise_and.Tensor` overload that *is* registered
+and routed to FlagGems, and handed FlagGems' tensor kernel a Python scalar it
+rejects -- which failed nine of the BERT cohort's generation tests on Ascend that
+pass on MetaX with byte-identical FlagGems; claiming the overloads on PrivateUse1
+stops the decomposition, so the scalar reaches `flag_gems.bitwise_and_scalar`
+(a correct scalar kernel) instead of `flag_gems.bitwise_and_tensor` (which
+rejects it).
+
+**Which kernel actually runs, and why.** On the default Ascend build the conf
+value is the route: `backends_ascend.conf` carries
+`bitwise_and.Scalar = flaggems  # ascend`, so the dispatcher resolves
+`GetFn(kFlagGems)` -> `flag_gems.bitwise_and_scalar`
+(`csrc/aten/generated/flaggems_python_kernels.cc:4337`,
+`REGISTER_IMPL_TO_DISPATCHER(BitwiseAndScalarFn, ..., Backend::kFlagGems, ...)`),
+**not** the aclnn kernel this change also generates. The `# ascend` annotation is
+inert unless `FLAGOS_FORCE_BACKEND=vendor` is set -- `csrc/aten/common.cc`
+documents the parser as "Runtime routing ignores the annotation" -- and the
+runtime dtype escape does not cover it either, because Ascend's
+`FlagGemsRejectsDtype` is bool-tolerant and the op/dtype pair is not in
+`FlagGemsRejectsOpDtype`. The aclnn `m.impl` in `ascend_register.inc` fills the
+`kAscend` slot as the vendor candidate; the *payload of the fix* is the
+PrivateUse1 claim itself, which is what moves the call off `.Tensor`. Measured
+below.
+
+**The failure, on the route being left.** The minimal repro on this host's
+`torch-fl-ascend-py311` interpreter, with the FlagGems route in force. This is the
+verbatim pre-change traceback, captured on the base build (see **Measured
+dispatch** below for the build identity):
+
+```text
+>>> t = torch.tensor([True, False], dtype=torch.bool, device="flagos")
+>>> t & False
+Traceback (most recent call last):
+  File "...", line 28, in <module>
+    print("t & False =", (t & False))
+  File ".../torch-fl-src/torch_fl/__init__.py", line 1411, in __torch_function__
+    return func(*args, **kwargs)
+  File ".../flag_gems/ops/bitwise_and.py", line 32, in bitwise_and_tensor
+    return bitwise_and_func(A, B)
+  File ".../flag_gems/utils/pointwise_dynamic.py", line 1607, in prepare_args
+    if not check_tensor_attributes(args, (schema._is_tensor)):
+  File ".../flag_gems/utils/shape_utils.py", line 326, in check_tensor_attributes
+    raise ValueError(
+ValueError: Element at index 1 is incorrect. Expected True, but got False.
+```
+
+The same expression on MetaX returns the correct result. The dispatch frames are
+what separate the two, and they show the platforms take *different ops* to the
+FlagGems route rather than the same op behaving differently -- measured on each
+build:
+
+```text
+pre-change  Ascend : PrivateUse1 bitwise_and.Scalar = False, bitwise_and.Tensor = True
+                     __torch_function__ -> torch_fl/__init__.py:1411
+                     -> flag_gems/ops/bitwise_and.py:32 -> pointwise_dynamic.py:1607
+post-change Ascend : PrivateUse1 bitwise_and.Scalar = True , bitwise_and.Tensor = True
+                     bitwise_and.Scalar -> flagos_python, returns on flagos:0
+MetaX               : PrivateUse1 bitwise_and.Scalar = True , bitwise_and.Tensor = True
+                     returns on flagos:0
+```
+
+The mechanism in full: `aten::bitwise_and.Scalar` is `CompositeExplicitAutograd:
+bitwise_and` (`aten/src/ATen/native/native_functions.yaml`). With no
+`bitwise_and.Scalar` entry in the Ascend arm, the PrivateUse1 key holds nothing
+for it, ATen's composite runs, decomposes it to `bitwise_and.Tensor` -- which
+`ascend_register.inc` *does* claim and route to FlagGems -- and passes the Python
+bool through. FlagGems' un-schema'd `bitwise_and_func` derives `is_tensor =
+[True, True]` and rejects a non-tensor second argument. MetaX claims the Scalar
+overload, so it runs the scalar kernel (`is_tensor = [True, False]`) and never
+reaches the tensor one. Two controls confirm the diagnosis is not a FlagGems
+divergence: calling `flag_gems.bitwise_and_tensor(x, False)` directly raises the
+identical ValueError on MetaX as well, so FlagGems is byte-identical and the
+tensor path's scalar tolerance is simply latent; and on the *pre-change* build
+re-routing the Ascend conf's `bitwise_and.Scalar` to `flaggems` changed nothing,
+because with no PrivateUse1 claim ATen's composite ran regardless of the conf
+value. That second control is a statement about the **pre-change** build only:
+once the claim exists the conf value becomes the route (`csrc/aten/common.cc`:
+the value is the route, the `# ascend` annotation is read only under
+`FLAGOS_FORCE_BACKEND=vendor`), which is why this change leaves the value at
+`flaggems` and still moves the call off `.Tensor`.
+
+**Why this is the torch_fl-side defect.** The asymmetry is a *registration* gap,
+not a FlagGems one: `csrc/aten/register.cc`'s Ascend arm includes only
+`backends/ascend/generated/ascend_register.inc`, whose coverage set is exactly
+what `scripts/codegen/codegen_ascend.py` generates, and that generator had no
+registry entry for the three scalar overloads -- so their `m.impl` lines, which
+the shared `generated/register.inc` carries for every vendor, never reached the
+Ascend build. The enumeration, comparing the shared file's `FLAGOS_GEN_IMPLS`
+region against `ascend_register.inc`, finds the bitwise scalar overloads among
+the missing; most other missing `.Scalar` entries are `.out` variants, internal
+`_foreach_*` lists, or ops with no aclnn scalar kernel, and are deliberately left
+alone. The three bitwise ones are the reachable set.
+
+**The fix.** Three registry entries in `codegen_ascend.py`, each mapping to the
+existing `binary_scalar` category. Their *effect on the default build* is the
+`m.impl` line they add to `ascend_register.inc`: claiming the op on PrivateUse1
+is what stops ATen serving it compositely and decomposing to `.Tensor`. The
+`binary_scalar` body they also generate -- `aclnn<Name>(self, scalar, out)`
+through `AclScalarWrapper`, the same shape `mul.Scalar`/`div.Scalar` use -- is
+the vendor candidate behind the `# ascend` annotation, reachable under
+`FLAGOS_FORCE_BACKEND=vendor`, not the default route. The generator validates each
+derived symbol against `libopapi.so` before emitting (`if acl not in syms:
+skip`), so a name that did not exist would drop the op rather than emit a broken
+kernel; `aclnnBitwiseAndScalar` exists, and its header states BOOL support
+explicitly (both-BOOL lowers to `LogicalAnd`, the dtype the failing path uses).
+
+**Route delta.** Ascend `flaggems` 220 -> **223**, `ascend` 155 unchanged, `none`
+1662 -> **1659**; 2037 entries, 378 accelerated (18.6%), up from 375. Conf
+SHA-256 `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138` (at
+`d2f0675`, the sibling `ones`/`max` routing change) ->
+`d02e4b54f801092299e091f49795ea83b3f70aae525cbad8a06d092c31122231`.
+The three rows move from `none` to `flaggems  # ascend`: the `# ascend`
+annotation is the generator recording that an aclnn kernel now backs the FlagGems
+route, and it is what `FLAGOS_FORCE_BACKEND=vendor` reaches. Both the .inc and the
+conf are generated output, byte-identical across two runs of their generators,
+with `gen_vendor_confs.py --check` reporting `all vendor confs up to date` (exit
+0). The snapshot update
+`tests/unit/test_conf_registration_consistency.py::test_conf_route_counts_are_stable`
+asks for is `{"flaggems": 223, "none": 1659, "ascend": 155}`, and
+`tests/integration/flaggems/flaggems_caps.py::EXPECTED_FLAGGEMS_ROUTES["ascend"]`
+220 -> 223 in the same change.
+
+**Regression gate.** `tests/unit/test_conf_registration_consistency.py` (52
+passed) is the conf/generator gate, and it fails if the conf is edited without
+its generator or the snapshot is not updated deliberately. The behavioural half
+is the repro above plus the paired dispatch arms below: red on the pre-change
+build (no `m.impl`, decomposes to `.Tensor`, raises), and green on the post-change
+build (`x & False` is claimed on PrivateUse1 and is served by
+`flag_gems.bitwise_and_scalar`).
+
+**Measured dispatch (post-change build, default conf value).** Both arms below
+were run on the same host (`bm-jn-zs-zone1-910C-64G-10-108`, container
+`lvyufeng-torch-fl`, interpreter `torch-fl-ascend-py311`) with
+`TORCH_DEVICE_BACKEND_AUTOLOAD=0` and `FLAGOS_LOG=dispatch`.
+
+Post-change build -- the branch's own generated artifacts, rebuilt in-container
+(`libtorch_fl.so` md5 `e678ca8b617429f34e3f20dda4c39112`, 5,273,128 B, mtime
+2026-10-16 01:47:41, loaded from the build tree root per `/proc/self/maps`):
+
+```text
+[flagos dispatch] bitwise_and.Scalar -> flagos_python
+[flagos dispatch] bitwise_or.Scalar -> flagos_python
+[flagos dispatch] bitwise_xor.Scalar -> flagos_python
+aten::bitwise_and.Scalar True
+aten::bitwise_or.Scalar True
+aten::bitwise_xor.Scalar True
+t & False = tensor([False, False], device='flagos:0')
+t | False = tensor([ True, False], device='flagos:0')
+t ^ True  = tensor([False,  True], device='flagos:0')
+```
+
+Pre-change build at the same base (`6573910`,
+`libtorch_fl.so` md5 `340a58b136805a36c8a4c51a2592003d`, 5,267,088 B, mtime
+2026-10-15 15:16:04), which is the control that makes the dispatch line
+meaningful:
+
+```text
+[flagos dispatch] bitwise_and.Tensor -> flagos_python     <-- decomposed to .Tensor
+aten::bitwise_and.Scalar False
+aten::bitwise_or.Scalar False
+aten::bitwise_xor.Scalar False
+t & False -> ValueError: Element at index 1 is incorrect. Expected True, but got False.
+             torch_fl/__init__.py:1411 -> flag_gems/ops/bitwise_and.py:32
+             -> flag_gems/utils/pointwise_dynamic.py:1607
+```
+
+`-> flagos_python` is the expected and correct outcome, and the pre-change arm is
+what proves the claim is doing the work: the only dispatch difference between the
+two builds is `.Scalar` (present, `True`) instead of `.Tensor`. The conf value
+routes the op to FlagGems; the PrivateUse1 claim stops the `.Tensor` decomposition;
+`flag_gems.bitwise_and_scalar` is a genuine scalar kernel and returns the CPU
+reference values above. The aclnn kernel is off the default route by design, per
+**Which kernel actually runs** above.
+
+**Evidence gaps.** Recorded rather than papered over:
+
+- The three aclnn kernel bodies are **not exercised on the default build** -- the
+  dispatch arm above shows the FlagGems route wins for all three. Their symbols
+  (`aclnnBitwise{And,Or,Xor}Scalar`) and BOOL lowering were verified against
+  `libopapi.so` and the CANN headers, and the bodies are generated by the same
+  `binary_scalar` template `mul.Scalar`/`div.Scalar` use, but no run selects them,
+  so the `# ascend` annotation path (`FLAGOS_FORCE_BACKEND=vendor`) is
+  **not revalidated on hardware**.
+- Only `bitwise_and.Scalar` is exercised by the BERT cohort. `bitwise_or.Scalar`
+  and `bitwise_xor.Scalar` are the same mechanism and the same code path; they are
+  measured above only through the direct three-op probe
+  (`t | False`, `t ^ True`), not through a failing cohort test, and their aclnn
+  symbols and BOOL lowering are confirmed present but never run.
+- **The BERT cohort has not been re-run on this build.** The nine tests this
+  entry names as the defect's symptom were identified by the FAILURES-section
+  discriminator of a *pre-fix* Ascend run (nine `ValueError: Element at index 1`
+  one-liners) and cross-checked against MetaX/Moore `report.jsonl` per-test
+  outcomes, where they pass -- but the post-change count is not measured here, so
+  the group's disappearance is **inferred from the mechanism, not observed**. What
+  is observed is the mechanism end to end: pre-change dispatch to `.Tensor` with
+  the ValueError, post-change dispatch to `.Scalar` returning the CPU reference.
+- The `flaggems` route count moving 220 -> 223 does not revalidate the other 223
+  Ascend `flaggems` routes.
+- The `flagos` device is the only accelerator this entry measures. It claims
+  nothing about `dcu`, `musa`, `gcu`, `kunlunxin`, `metax`, `ppu` or `tsingmicro`;
+  MetaX is named only as the passing comparison that located the asymmetry, and
+  its conf is neither revalidated nor affected.
 
 ### MUSA: float64 `mm` served by repairing the FlagGems tune space the device refuses (2026-09-27, MTT S5000)
 
@@ -10042,6 +10248,7 @@ the recorded result is unchanged.
 |---|---|---|---|---|
 | 2026-10-16 | Hygon DCU bw1000 (1 device), torch `2.10.0+das.opt1.dtk2604.2606151054.g98b1a8` (`torch.version.hip` 6.3.26113), Python 3.10.20. **Other platforms not revalidated** | The DCU complex factory surface (`zeros`, `ones`, `randn`, `fill_`, `abs`) — a runtime dtype escape, no conf route moved | **Names complex in the FlagGems dtype converter and adds a DCU arm to the runtime dtype escape, so a complex factory keeps its dtype and reaches a kernel that can serve it.** Two defects met on one call. `OptionalDtypeToPython` (`csrc/aten/backends/flagos/python_op_caller.cc`) had no complex case and returned Python `None`, which a factory reads as `torch.get_default_dtype()`, so `torch.zeros(4, dtype=torch.complex64, device="flagos:0")` returned `float32` — a silent wrong answer, wider than the issue's title (`ones` and `randn` the same way). The converter now names `ComplexFloat`/`ComplexDouble` and its `default` raises `TORCH_CHECK` instead of returning `None`, so the next unnamed dtype fails loudly. That alone is not enough: FlagGems' HCU Triton backend has no complex pointer type, so the preserved dtype turns the silent `float32` into `KeyError: 'complex64'`. `FlagGemsRejectsDtype` (`csrc/aten/common.cc`) therefore gains a `FLAGOS_ACCEL_DCU` arm, the shape MetaX already carries (PR #539), and `ResolveFn` reroutes the complex call to the DCU CUDA boxing kernels. DCU ships `FLAGOS_BUILD_BOXING=1` (`.github/scripts/hooks/set_env_dcu.sh:316`), so the vendor slot is populated and the diversion has somewhere to land; `ones`/`fill_` divert because their vendor kernels are compositional (`at::empty(...).fill_(1)` / `.zero_()`) and the inner in-place call is itself diverted. The escape is dtype-scoped: `ones(float32)` still logs `flagos_python`. No conf, registration `.inc` or generated kernel changes. | Measured on a `libtorch_fl.so` built from this branch (copied into the env, original set aside) on one BW1000 with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`: `zeros`/`ones`/`randn` at `complex64` and `complex128` all return the requested dtype (was silent `float32`); `abs(complex64)` returns `[5.0, 1.4142, 2.0]`, equal to the CPU reference, and `abs(complex128)` returns `float64` (was `KeyError: 'complex64'`); `fill_(1+2j)` correct; controls unmoved — `zeros(float32)`/`zeros(float64)`/`ones(int64)`/`arange(int32)`/`ones(no dtype)` keep their dtypes and `complex64` `add` is correct. `FLAGOS_LOG=dispatch` on the patched build: `zeros -> cuda`, `ones -> cuda`, `fill_.Scalar -> cuda`, `zero_ -> cuda`, `abs -> cuda` for complex, and `ones -> flagos_python` for float32. New `tests/integration/ops/test_dcu_complex.py` (SHA-256 of the committed file verified on the host before the run) **9 passed in 57.23s** on hardware; `test_factory_ops.py` + `test_dtype_coverage.py` **221 passed, 1 xfailed**. The shipped DCU wheel predates both halves and reproduces the two defects, which is the before column. **Evidence gaps:** the `_flagos_nccl` comm extension fails to build on this branch (`/opt/dtk/include/rccl/rccl.h` uses `hipStream_t` without including `hip/hip_runtime.h`), so only the core `libtorch_fl.so` was rebuilt and swapped in — a full wheel rebuild needs that build-env issue resolved and is **not** done here. The broad `tests/integration/ops` sweep (`-k "not mps and not gcu and not kunlunxin and not ascend and not musa"`, whole directory) was still running against this build when this row was written and its result is **not** part of the evidence here; the regression result claimed is the new file and the two targeted files above. Every other platform is **not revalidated**: they share the converter (a complex factory there moves from silent `float32` to a loud FlagGems failure) and take the `#else` arm of the escape, and that is reasoned from the code, not measured. |
 | 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `ones`, `ones_like`, `max`, `max.dim` leave the FlagGems route for the aclnn kernels already registered behind them | **Routes four ops off two broken FlagGems `_ascend` backend overrides onto the vendor kernels that already serve them.** `flag_gems/runtime/backend/_ascend/ops/ones.py:56` sizes its grid as `cdiv(N, next_power_of_2(ceil(sqrt(volume))))`, which is `cdiv(0, 0)` for any zero-element shape, so `torch.ones((2, 0), device="flagos")` and `torch.ones(0, device="flagos")` raise `ZeroDivisionError` where the generic `ops/ones.py` (hardcoded 1024) does not; `_ascend/ops/max.py:100` builds its block mask with Python `and` on non-scalar tensors, the deprecated form that does not produce the intended elementwise mask, yielding a 43.4% mismatch in the BERT cohort's `test_forward_with_logits_to_keep`. Both defects are FlagGems'; the torch_fl lever is the route — the four ops enter `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends them to `ascend`, where `codegen_ascend.py` already emits and registers `WrapperOnes`/`WrapperOnesLike`/`WrapperMax`/`WrapperMaxDim`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **220**, `ascend` 151 -> **155**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. Both defects reproduce standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (verbatim tracebacks in the platform narrative above); `ones_like` on `(2, 0)` fails in the same kernel while `zeros`/`full` succeed. `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 220, "none": 1662, "ascend": 155}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 220. **The post-change conf is measured on hardware, per-op**: installing this PR's conf (`eeee6b6e…`) over the base build's own copy logs `ones -> ascend` (×2), `ones_like -> ascend`, `max -> ascend`, `max.dim -> ascend`, and the five probes that failed on the FlagGems route -- `ones((2,0))`, `ones(0)`, `ones_like(empty(2,0))`, `max(a)`, `max(a,dim=1)` -- all return correct values (full block in the platform narrative; the host conf was restored to `3e6979f6…` afterwards). The **BERT cohort has not been re-run** against it, so the end-to-end green is inferred rather than observed. The other 220 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the two defects living only in the `_ascend` override. |
+| 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `bitwise_{and,or,xor}.Scalar` gain a native aclnn claim (generated `ascend_register.inc` + `ascend_kernels.cc`) | **Claims the three scalar bitwise overloads on PrivateUse1, replacing a composite decomposition that handed FlagGems' tensor kernel a Python scalar it rejects.** `aten::bitwise_and.Scalar` is `CompositeExplicitAutograd`, and `csrc/aten/register.cc`'s Ascend arm includes only `backends/ascend/generated/ascend_register.inc`, so with no entry there the PrivateUse1 key held nothing: ATen's composite ran, decomposed to the registered `bitwise_and.Tensor` overload (routed `flaggems`), and `flag_gems.bitwise_and_tensor` -- whose un-schema'd `prepare_args` derives `is_tensor = [True, True]` -- raised `ValueError: Element at index 1 is incorrect. Expected True, but got False.`, failing nine BERT generation tests. MetaX claims the Scalar overload and passes the same tree. Three `binary_scalar` registry entries in `scripts/codegen/codegen_ascend.py` emit the PrivateUse1 claim (the fix's payload) plus an `aclnnBitwise{And,Or,Xor}Scalar` body through the existing `AclScalarWrapper` shape (`mul.Scalar`/`div.Scalar` precedent); the generator validates each symbol against `libopapi.so` and its header states BOOL support (both-BOOL lowers to `LogicalAnd`, the dtype the failing path uses). **On the default build the conf value stays `flaggems`**, so the winning backend is `flag_gems.bitwise_and_scalar` (correct for bool) and the aclnn kernel is the vendor candidate behind the `# ascend` annotation under `FLAGOS_FORCE_BACKEND=vendor`; the measured post-change dispatch line is `[flagos dispatch] bitwise_and.Scalar -> flagos_python`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `none` 1662 -> **1659**, `flaggems` 220 -> **223**, `ascend` 155 unchanged; 378 accelerated (18.6%). Every other platform's conf and every other platform's generated artifacts are byte-identical. | Conf SHA-256 `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138` -> `d02e4b54f801092299e091f49795ea83b3f70aae525cbad8a06d092c31122231`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The generated artifacts move by exactly the change: `ascend_register.inc` +3 `m.impl` (373 -> 376 registered ops), `ascend_kernels.cc` +57 lines (the three kernel bodies). Both pre-flight checks are recorded rather than assumed: `aclnnBitwiseAndScalar` exists (`nm -D libopapi.so` shows it plus `Or`/`Xor`, each with `GetSymbolSize`) and the enumerated missing reachable set is exactly the three overloads, obtained from the `FLAGOS_GEN_IMPLS` region of the shared `generated/register.inc` diffed against `ascend_register.inc` -- not guessed. The pre-fix failure is the verbatim traceback in the platform narrative above; two controls rule out a FlagGems divergence: `flag_gems.bitwise_and_tensor(x, False)` raises the identical ValueError on MetaX, and on the *pre-change* build re-routing the Ascend conf's `bitwise_and.Scalar` to `flaggems` changed nothing, because with no PrivateUse1 claim ATen's composite ran regardless of the conf value -- a statement about the **pre-change** build only; once the claim exists the conf value is the route (`csrc/aten/common.cc`: the value is the route, the `# ascend` annotation is read only under `FLAGOS_FORCE_BACKEND=vendor`), which is why this change leaves the value at `flaggems` and still moves the call off `.Tensor`. `tests/unit/test_conf_registration_consistency.py` and `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` move together to 223. **The three claimed overloads are measured on hardware, both arms**: same host, same interpreter, `TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_LOG=dispatch`; pre-change build at base `6573910` (`libtorch_fl.so` md5 `340a58b136805a36c8a4c51a2592003d`) logs `bitwise_and.Tensor -> flagos_python` with `PrivateUse1 bitwise_and.Scalar = False` and raises the ValueError, post-change build (`libtorch_fl.so` md5 `e678ca8b617429f34e3f20dda4c39112`, 5,273,128 B) logs `bitwise_{and,or,xor}.Scalar -> flagos_python` with all three `= True` and returns the CPU-reference values -- so the claim is what moves the call off `.Tensor`, and `flag_gems.bitwise_and_scalar` (not the aclnn kernel) is the winning backend, as designed. The aclnn bodies themselves are **not exercised** by any run, which is the recorded evidence gap. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected. |
 | 2026-10-14 | None (CPU-only host) | CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro) | **Makes CUDA boxing opt-in on every CUDA-compatible accelerator, so the default wheel links no vendor torch and routes FlagGems-primary.** `FLAGOS_BUILD_BOXING` is off again for all five platforms (`cmake/flagos_platforms.json`): the default wheel compiles no CUDA boxing kernels and bundles no vendor libtorch. `csrc/aten/register.cc`'s shared `#else` arm now compiles the new `csrc/aten/generated/register_flaggems_<platform>.inc` when `FLAGOS_FLAGGEMS_PYTHON` is set and boxing is off, claiming only the ops the platform's conf routes to a FlagGems backend; every other op stays unregistered and reaches `cpu_fallback`. `-DFLAGOS_BUILD_BOXING=ON` / `FLAGOS_BUILD_BOXING=1` restores the previous behavior -- the generated `generated/register.inc` claims every op and the wheel bundles the vendor libtorch. `setup.py` returns early from `_bundle_cuda_assets()` and drops the pinned `nvidia-*-cu12` runtime deps when boxing is off. The compatibility manifest's `vendor_torch_libraries` now follows the build: a new per-platform `vendor_torch_gate` (`FLAGOS_BUILD_BOXING` for cuda/ppu/metax/dcu) keeps the declaration true only on a boxing build, so a default wheel declares no vendor libtorch and `--release` no longer demands `FLAGOS_VENDOR_TORCH_VERSION` for one it does not ship. `csrc/aten/sdp_choice_stub.cc`'s composite tail boxes onto the vendor CUDA kernels only on a boxing build and otherwise calls `at::native::scaled_dot_product_attention` on the flagos tensors. `csrc/CMakeLists.txt` adds `FLAGOS_BOXING_BUILD` and a `FLAGOS_ACCEL_<UPPER>` discriminator for the shared arm. **No conf route moved:** `flaggems`/`cuda` counts stay cuda 416/1618, dcu 454/1583, ppu 592/1445, metax 594 + 10 `flaggems_cpp`/1433, tsingmicro 51 + 2 `flagos_python` (totals 2034/2037/2037/2037/53 unchanged). The CI hooks (`set_env_cuda/metax/ppu/dcu`) opt their boxes into boxing so the existing CUDA-kernel and bundled-libtorch assertions stay valid. | New `scripts/codegen/codegen_boxing_flaggems_register.py --check` -> `[check] 5 register_flaggems_*.inc files are up to date` (cuda 417, dcu 454, metax 604, ppu 593, tsingmicro 52 `m.impl` lines); `scripts/codegen/gen_vendor_confs.py --check` -> `all vendor confs up to date`; targeted unit suite (`test_setup_build`, `test_env_registry`, `test_conf_registration_consistency`, `test_platform_capability_matrix`, `test_gen_vendor_confs`, `test_vendor_conf_single_writer`, `test_wheel_preflight`) -> 174 passed; `ruff check` -> "All checks passed!". Every hardware row is **not revalidated** -- no route changed and no build was produced on a target here. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin unified RNG cohort: 47 overloads rerouted from `none` to the native `kunlunxin` backend | **Rewires the RNG surface onto the flagos PrivateUse1 generator, so `torch.flagos.manual_seed` / `get_rng_state` / `set_rng_state` / `manual_seed_all` own the stream the draws consume.** The lane's operator step failed two `tests/integration/ops/test_rng_dispatch.py` cases (`TestRngSeedSource::test_rng_state_round_trip`, `TestRngMultiDevice::test_manual_seed_all_replays_each_device_independently`) because every RNG op was left at `none` and took `cpu_fallback`: `torch.manual_seed` reaches ATen's CPU fallback generator (so whole-tensor reproducibility checks passed), but the flagos PrivateUse1 generator is a different state object, so `torch.flagos.*` moved nothing the fallback read. `csrc/aten/backends/kunlunxin/rng.cc` is added — the "declined to the host" arm of the GCU file (`csrc/aten/backends/gcu/rng.cc`): the XPU op library exposes no RNG entry point, so each draw is taken on an `at::CPUGeneratorImpl` and copied back, while the seed is reserved through `c10::flagos::ReserveSeed`. It defines 47 `*KernelKunlunxin` kernels and 47 `REGISTER_IMPL_TO_DISPATCHER(..., Backend::kKunlunxin, ...)` lines. Route delta `kunlunxin` 10 -> **57**, `none` 2027 -> **1980**, `flaggems` 0 unchanged (no FlagGems route), zero `cuda` routes; total 2037. **This uses the GCU `HANDWRITTEN_OPS` precedent under the CLAUDE.md codegen rule:** the generator owns the `m.impl` registration (so route and registration move together and the consistency invariants hold) while the bodies live in the hand-written file, because the RNG surface's contract is seed provenance plus a host-side draw — a shape the one-per-op xdnn-wrapper `{kernels}` template cannot emit. No test case was modified except the platform registration of kunlunxin in `_supports_flagos_generator()` (identical test-case code across platforms is a fleet requirement). | Regeneration proofs: `codegen_kunlunxin.py --check` → `[check] 57 kernel(s) up to date` (10 generated + 47 handwritten, empty diff on a second run); `kunlunxin_kernels.cc` byte-unchanged; `gen_vendor_confs.py` twice → empty diff and `--check` exits 0. `tests/unit/test_conf_registration_consistency.py`'s census/route-count snapshot updated to `{"kunlunxin": 57, "none": 1980}`, and its `test_vendor_routes_are_registered` / `test_accelerated_routes_are_registered` / `test_registered_ops_are_never_left_at_none` invariants cover all 57 routes (parametrized over `["musa","gcu","ascend","kunlunxin"]`). The pre-fix failure is the lane's own integration-job log: `2 failed, 660 passed, 29 skipped, 834 deselected, 3 xpassed` with both failures in `test_rng_dispatch.py`. The 47 RNG routes and the ten conformance routes are **not measured on hardware** in this change — a `pytest tests/integration/ops/test_rng_dispatch.py -m main_ops` run on a P800 is the follow-up that closes the hardware-measurement gap. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin native backend dtype gates (the ten runtime-conformance ops: `add.Tensor`, `mul.Tensor`, `mm`, `bmm`, `neg`, `sum.dim_IntList`) | **Splits the native backend's single flat dtype gate into per-op gates measured against the vendor wrapper, so a dtype the vendor rejects takes the CPU round-trip instead of erroring inside the wrapper.** The lane's first run to reach the portable integration step failed ten `tests/integration/test_dtype_coverage.py` cases, every one of them a dtype the previous build sent straight to the vendor: the generated kernels gated on the flat `KunlunxinSupportsDtype`, whose dtype map admits float64 and int8 for every op, but `xdnn_pytorch_wrapper` validates the scalar types of each entry point at run time and rejects a per-op subset (`add.cpp:151`, `mul.cpp:189`, `neg.cpp:55`, `sum.cpp:81`, `matmul.cpp:106` raise "scalar type of ret : k<dtype> is unsupported", surfaced to the caller as `RuntimeError: <op> failed on the Kunlunxin XPU backend: Interrupted system call (4)`). Five new predicates in `csrc/aten/backends/kunlunxin/kunlunxin_common.h` now name each op's accepted set, each measured against the wrapper rather than inferred from the base map: `KunlunxinSupportsAddDtype` (base − float64 − int8), `KunlunxinSupportsMulDtype` (add − int16), `KunlunxinSupportsMatmulDtype` (exactly float16/float32), `KunlunxinSupportsUnaryDtype` (base − float64) and `KunlunxinSupportsReductionDtype` (float16/bfloat16/float32). The generator drives them through one `{supports}` placeholder and a `SUPPORTS` category→predicate map in `scripts/codegen/codegen_kunlunxin.py`, and `cat`, `_softmax`, `embedding` and `where.self` resolve to the base predicate through the same map (no change to their behaviour). `neg` on bool and the compact int/uint cases are unchanged. No test case was touched — the fleet requires identical test-case code across platforms; the gate is a per-op capability of the vendor wrapper, not a host accommodation. No operator reroutes: `backends_kunlunxin.conf` is byte-identical. | Regeneration is idempotent (`python scripts/codegen/codegen_kunlunxin.py --check` → `[check] 10 kernel(s) up to date`); the regenerated `kunlunxin_kernels.cc` changes exactly the six gate lines and `kunlunxin_register.inc` is byte-identical (the `m.impl` set did not move). The pre-fix failure is the lane's own integration-job log (`test_dtype_coverage.py` → `10 failed, 226 passed, 1 xfailed`). The runtime-conformance cohort this row names builds every operand via `_randn(...)` and is therefore **float32 only** (`tests/integration/runtime/runtime_probe.py`), so per-op gating cannot move it; a `pytest tests/integration/runtime` run on the P800 is the follow-up that closes the hardware-measurement gap — the new gates are **not revalidated** on hardware until the lane re-runs. |

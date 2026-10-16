@@ -93,13 +93,16 @@
   m.impl("binary_cross_entropy_backward", WrapperBinaryCrossEntropyBackward);
   m.impl("binary_cross_entropy_with_logits", WrapperBinaryCrossEntropyWithLogits);
   m.impl("binomial", WrapperBinomial);
+  m.impl("bitwise_and.Scalar", WrapperBitwiseAndScalar);
   m.impl("bitwise_and.Tensor", WrapperBitwiseAndTensor);
   m.impl("bitwise_and_.Scalar", WrapperBitwiseAndInplaceScalar);
   m.impl("bitwise_and_.Tensor", WrapperBitwiseAndInplaceTensor);
   m.impl("bitwise_not", WrapperBitwiseNot);
+  m.impl("bitwise_or.Scalar", WrapperBitwiseOrScalar);
   m.impl("bitwise_or.Tensor", WrapperBitwiseOrTensor);
   m.impl("bitwise_or_.Scalar", WrapperBitwiseOrInplaceScalar);
   m.impl("bitwise_or_.Tensor", WrapperBitwiseOrInplaceTensor);
+  m.impl("bitwise_xor.Scalar", WrapperBitwiseXorScalar);
   m.impl("bitwise_xor.Tensor", WrapperBitwiseXorTensor);
   m.impl("bitwise_xor_.Scalar", WrapperBitwiseXorInplaceScalar);
   m.impl("bitwise_xor_.Tensor", WrapperBitwiseXorInplaceTensor);

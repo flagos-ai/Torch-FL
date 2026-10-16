@@ -159,6 +159,20 @@ OPS = {
     # ---- binary_scalar: aclnn<Name>(self, scalar, out), no alpha (migrated seeds) ----
     "mul.Scalar": ("binary_scalar", "Muls"),
     "div.Scalar": ("binary_scalar", "Divs"),
+    # The three bitwise scalar overloads. aclnnBitwise{And,Or,Xor}Scalar
+    # (aclnn_bitwise_{and,or,xor}_scalar.h, symbols in libopapi.so) take
+    # (self, aclScalar*, out) exactly like Muls/Divs, and their BOOL support is
+    # explicit in the header: when self and other are both BOOL the op lowers to
+    # LogicalAnd, which is the dtype the failing BERT path uses
+    # (`x & False` on a bool tensor). Without these entries the three overloads
+    # have no m.impl on PrivateUse1 at all, so ATen's CompositeExplicitAutograd
+    # implementation serves them; it decomposes to the .Tensor overload, which
+    # IS registered and routed to FlagGems, and FlagGems' un-schema'd
+    # bitwise_and_func then rejects the Python scalar it is handed
+    # ("Element at index 1 is incorrect. Expected True, but got False.").
+    "bitwise_and.Scalar": ("binary_scalar", "BitwiseAndScalar"),
+    "bitwise_or.Scalar": ("binary_scalar", "BitwiseOrScalar"),
+    "bitwise_xor.Scalar": ("binary_scalar", "BitwiseXorScalar"),
     # ---- binary_cmp: bool out ----
     "eq.Tensor": ("binary_cmp", "EqTensor"),
     "ne.Tensor": ("binary_cmp", "NeTensor"),
