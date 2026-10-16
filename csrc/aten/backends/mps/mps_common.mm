@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -25,6 +26,9 @@
 // plus the two Metal side-door helpers the operator layer needs, the same way
 // every other vendor backend includes runtime/accelerator/<vendor>/.
 #include "runtime/accelerator/mps/mps.h"
+// and the C++ runtime surface: DrainAll, the host-read barrier the staging
+// copies live behind.
+#include "runtime/accelerator/mps/mps_runtime.h"
 
 namespace at::native::flagos::mps {
 
@@ -488,6 +492,221 @@ MPSShape* FlatShape(int64_t count) {
 
 } // namespace
 
+namespace {
+
+// Whether this build/host can describe a buffer at a byte offset to MPSGraph.
+//
+// Two independent gates have to agree, and the second is the one that fires on
+// the hosted macos-14 runner. The *SDK* gate is compile-time: the initializer is
+// only declared from macOS 15, so an Xcode 15.4 SDK (14.5, what the runner
+// ships) cannot name it at all. The *runtime* gate is separate: a process
+// running on macOS 14 may or may not have loaded a framework that implements a
+// macOS 15 selector. `__builtin_available` answers the runtime half, and the
+// preprocessor answer below is constant per build, so this whole function folds
+// away to a constant on either kind of toolchain.
+bool OffsetTensorDataAvailable() {
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  return __builtin_available(macOS 15.0, *);
+#else
+  return false;
+#endif
+}
+
+// A dedicated MTLBuffer holding one operand's bytes densely from offset 0, for
+// the toolchains above that cannot describe an interior pointer.
+//
+// This is the difference between "declined" and "native" on macOS 14, and it is
+// worth being explicit about why a copy is the right answer here rather than
+// leaving the op on cpu_fallback. The fallback is not one copy: it is a
+// device-to-host copy of the whole operand, a host kernel in torch's own
+// threading, and a host-to-device copy of the result back -- and for the table
+// reads this backend exists for (a 151936x1024 float32 embedding table is
+// 622 MB) that is what turned a 0.7 ms node into the 69-149 ms the cost classes
+// measured on the runner. One device-side copy into a staging buffer is a
+// memcpy, and on a unified-memory Apple GPU it is a plain `memcpy` between two
+// shared allocations rather than a PCIe round trip.
+//
+// The allocation is cached by size and reused across calls. These operands come
+// in a handful of sizes (an attention weight, a token embedding table, a batch
+// of activations) and a fresh MTLBuffer per call would put an allocation on the
+// hot path of every op the runner otherwise serves natively. Bounded like the
+// plan cache is, and for the same reason: a long run must not grow it without
+// limit.
+constexpr size_t kMaxStagingBuffers = 16;
+
+struct StagingBuffer {
+  id<MTLBuffer> buffer;  // +1
+  size_t capacity;
+};
+
+std::unordered_map<size_t, StagingBuffer>& StagingPool() {
+  // Leaked deliberately, like the plan cache: these own MTLBuffers whose
+  // release at static-destruction time is not ours to order.
+  static auto* pool = new std::unordered_map<size_t, StagingBuffer>();
+  return *pool;
+}
+
+// The exact byte count the staging buffer has to hold, rounded up so an
+// odd-sized operand does not land in a class of its own.
+size_t StagingCapacity(size_t bytes) {
+  constexpr size_t kGranularity = 1u << 20;  // 1 MiB
+  return ((bytes + kGranularity - 1) / kGranularity) * kGranularity;
+}
+
+// The staging buffers one RunGraphImpl call has taken, released on the way out.
+//
+// A buffer the pool holds is left alone: it belongs to the pool and outlives the
+// call. One the pool did not take was allocated because every pooled buffer of
+// its class was already spoken for, so nothing else will ever hand it out and
+// this is its one owner -- and since RunGraphImpl has half a dozen exits between
+// taking a buffer and running the graph (a nil operand description, a body that
+// declines, a queue that is not there), the release belongs in a destructor
+// rather than at the end. Ownership is recorded when the buffer is taken rather
+// than looked up at release time, which keeps the release from having to search
+// the pool and lets the two live in either order.
+//
+// A private buffer is only ever created after a DrainAll, and the copy-back
+// drain covers the results, so nothing read by a queued graph outlives the
+// scope by more than the queue's own ordering allows.
+struct ClaimedStaging {
+  struct Entry {
+    id<MTLBuffer> buffer;
+    bool from_pool;
+  };
+  std::vector<Entry> buffers;
+
+  id<MTLBuffer> Take(id<MTLBuffer> buffer, bool from_pool) {
+    buffers.push_back(Entry{buffer, from_pool});
+    return buffer;
+  }
+
+  bool Contains(id<MTLBuffer> buffer) const {
+    for (const Entry& entry : buffers) {
+      if (entry.buffer == buffer) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool AnyPrivate() const {
+    for (const Entry& entry : buffers) {
+      if (!entry.from_pool) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  ~ClaimedStaging() {
+    for (const Entry& entry : buffers) {
+      if (!entry.from_pool) {
+        [entry.buffer release];
+      }
+    }
+  }
+};
+
+// A buffer of at least `bytes`, owned by the pool and *claimed for the current
+// call*. Borrowed, like MpsBufferOf's: it lives until the pool is torn down
+// (never, in practice) and the caller must not release it. Returns nil when
+// Metal cannot satisfy the request, which the caller turns into the same
+// decline a nil operand always was.
+//
+// `claimed` is what keeps two operands of one call from landing on the same
+// buffer, and it is load-bearing rather than tidy. The pools are keyed by
+// rounded capacity, and a call's operands and results routinely round to the
+// same class -- measured, `gather((4, 5), 0, (3, 1))` stages a 4-element input
+// and a 3-element result, 16 and 24 bytes, both of which round to 1 MiB. Handing
+// both the same buffer does not fail loudly: the result's write is ordered after
+// the input's copy-in on the same queue, so the graph reads a zeroed operand and
+// the op returns the right shape holding the wrong values (measured: `gather`
+// answered `[0, 0, 0]` against `[0, 10, 15]`). A buffer already claimed by this
+// call is therefore skipped, and a fresh one allocated outside the pool.
+id<MTLBuffer> StagingBufferFor(size_t bytes, ClaimedStaging* claimed) {
+  if (bytes == 0) {
+    return nil;
+  }
+  const size_t capacity = StagingCapacity(bytes);
+  auto& pool = StagingPool();
+  const auto found = pool.find(capacity);
+  if (found != pool.end()) {
+    if (!claimed->Contains(found->second.buffer)) {
+      return claimed->Take(found->second.buffer, /*from_pool=*/true);
+    }
+  }
+  id<MTLDevice> device = torch_fl_mps::MetalDevice();
+  id<MTLBuffer> buffer =
+      [device newBufferWithLength:capacity
+                          options:MTLResourceStorageModeShared];
+  if (buffer == nil) {
+    return nil;
+  }
+  // Only a buffer the pool has never seen is worth keeping: the pool holds one
+  // buffer per capacity class, so a second buffer of a class already present is
+  // this call's own escape hatch, not a candidate for every later call.
+  const bool pooled = found == pool.end() && pool.size() < kMaxStagingBuffers;
+  if (pooled) {
+    pool.emplace(capacity, StagingBuffer{buffer, capacity});
+  }
+  return claimed->Take(buffer, pooled);
+}
+
+// The buffer to describe `t` with, and the byte offset to describe it from.
+//
+// Offset 0 with the tensor's own MTLBuffer is the case the whole design is
+// built around and the one this returns whenever the toolchain can express an
+// offset. When it cannot -- an SDK older than macOS 15, or a host older than
+// macOS 15 -- an interior operand cannot be described at all, and it is staged
+// into a dedicated buffer instead of declined.
+//
+// The staging copy mirrors MpsGemmOperandOf's rule in one respect worth naming:
+// what the graph reads is `t.numel()` elements densely from the offset, and
+// this copies exactly those bytes, so a caller with a strided tensor has already
+// materialised it (every body either calls `contiguous()` or has shown the
+// layout is dense before it gets here).
+//
+// Returns false when the pointer is not inside a Metal allocation this runtime
+// owns (a host tensor, a foreign or stale pointer) -- the same decline as
+// before. That case is not a toolchain limitation and staging would not fix it.
+bool ResolveOperand(
+    const at::Tensor& t,
+    id<MTLBuffer>* buffer,
+    size_t* byteOffset,
+    ClaimedStaging* claimed) {
+  if (!MpsBufferOf(t, buffer, byteOffset)) {
+    return false;
+  }
+  if (*byteOffset == 0 || OffsetTensorDataAvailable()) {
+    return true;
+  }
+  // The copy is ordered behind any producer still writing `t`: Metal executes a
+  // queue in order, but `t` may have been written by a kernel on a *different*
+  // queue, so the host read is drained first. This is the same reasoning
+  // MemoryManager::memcpy_ uses for its own copies.
+  ::torch_fl_mps::DrainAll();
+  const size_t bytes =
+      static_cast<size_t>(t.numel()) *
+      static_cast<size_t>(t.element_size());
+  id<MTLBuffer> staging = StagingBufferFor(bytes, claimed);
+  if (staging == nil) {
+    return false;
+  }
+  // `t.data_ptr()` is the buffer's contents plus `byteOffset` -- that is what
+  // MpsBufferOf established -- so the copy source is spelled the same way, and
+  // the destination is the staging buffer's own base because it is described
+  // from offset 0.
+  std::memcpy(
+      staging.contents,
+      static_cast<const char*>((*buffer).contents) + *byteOffset,
+      bytes);
+  *buffer = staging;
+  *byteOffset = 0;
+  return true;
+}
+
+} // namespace
+
 MPSGraphTensorData* MpsTensorData(
     id<MTLBuffer> buffer,
     size_t byteOffset,
@@ -524,11 +743,30 @@ MPSGraphTensorData* MpsTensorData(
   }
 #endif
   if (array == nil) {
-    // Older SDK: every MPSNDArray spans its buffer from the start, so an
-    // interior pointer cannot be described and the operand is refused rather
-    // than silently read from offset 0. MpsRunGraph turns a nil here into a
-    // decline, which routes the op to cpu_fallback: correct, just not native.
-    return nil;
+    // No MPSNDArray initializer here, so the offset-carrying description is
+    // unavailable. That does not make the buffer undescribable: the *only* other
+    // way MPSGraphTensorData accepts a buffer is
+    // `initWithMTLBuffer:shape:dataType:`, which spans it from byte 0 -- the
+    // same limitation, seen from the other side. It is also exactly the shape a
+    // staged operand has, because ResolveOperand copies the operand to byte 0 of
+    // a dedicated buffer and hands back offset 0.
+    //
+    // The offset is refused rather than ignored: a nonzero offset through this
+    // initializer would silently read the wrong bytes (row 0 of the buffer
+    // instead of the operand), which is the one failure mode worth more than the
+    // fallback. An offset-0 operand reads correctly, and an interior one never
+    // reaches here -- RunGraphImpl stages it first.
+    if (byteOffset != 0) {
+      return nil;
+    }
+    MPSGraphTensorData* direct =
+        [[MPSGraphTensorData alloc] initWithMTLBuffer:buffer
+                                                shape:FlatShape(count)
+                                             dataType:dtype];
+    if (direct == nil) {
+      return nil;
+    }
+    return direct;
   }
   MPSGraphTensorData* data =
       [[MPSGraphTensorData alloc] initWithMPSNDArray:array];
@@ -1000,8 +1238,16 @@ bool RunGraphImpl(
   std::vector<id<MTLBuffer>> buffers(inputs.size(), nil);
   std::vector<size_t> offsets(inputs.size(), 0);
   std::vector<MPSDataType> dtypes(inputs.size(), MPSDataTypeFloat32);
+  // The operands that had to be staged, and the buffer each one came from, so
+  // the operand's own bytes are what the graph's inputs were copied *from* and
+  // nothing has to be copied back for an input.
+  //
+  // `claimed` is the set of staging buffers this call has taken, threaded
+  // through both loops below so the result of one operand cannot be handed the
+  // buffer a sibling operand's input was staged into.
+  ClaimedStaging claimed;
   for (size_t i = 0; i < inputs.size(); ++i) {
-    if (!MpsBufferOf(inputs[i], &buffers[i], &offsets[i])) {
+    if (!ResolveOperand(inputs[i], &buffers[i], &offsets[i], &claimed)) {
       return false;
     }
     TORCH_CHECK(
@@ -1011,10 +1257,29 @@ bool RunGraphImpl(
   }
   std::vector<id<MTLBuffer>> out_buffers(outs.size(), nil);
   std::vector<size_t> out_offsets(outs.size(), 0);
+  // A result is the other direction: the graph writes the staging buffer, and
+  // the bytes have to reach the caller's tensor afterwards. `nullptr` means the
+  // result was described in place.
+  std::vector<id<MTLBuffer>> out_originals(outs.size(), nil);
+  std::vector<size_t> out_original_offsets(outs.size(), 0);
   for (size_t i = 0; i < outs.size(); ++i) {
-    if (!MpsBufferOf(outs[i], &out_buffers[i], &out_offsets[i])) {
+    if (!MpsBufferOf(outs[i], &out_originals[i], &out_original_offsets[i])) {
       return false;
     }
+    if (out_original_offsets[i] == 0 || OffsetTensorDataAvailable()) {
+      out_buffers[i] = out_originals[i];
+      out_offsets[i] = out_original_offsets[i];
+      out_originals[i] = nil;
+      continue;
+    }
+    const size_t bytes = static_cast<size_t>(outs[i].numel()) *
+        static_cast<size_t>(outs[i].element_size());
+    id<MTLBuffer> staging = StagingBufferFor(bytes, &claimed);
+    if (staging == nil) {
+      return false;
+    }
+    out_buffers[i] = staging;
+    out_offsets[i] = 0;
   }
   Stream_t stream = MpsCurrentStream();
   id<MTLCommandQueue> queue = MpsCurrentQueue();
@@ -1118,6 +1383,42 @@ bool RunGraphImpl(
     // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
     // -- what allocator block reuse and a host read ask -- now covers this op.
     ::FlagosMPSStreamSentinel(stream);
+  }
+  // The run is asynchronous, so anything the host has to do with a staging
+  // buffer -- a result's copy-back, or a private buffer's release -- has to be
+  // ordered behind it. That is one drain, covering both.
+  //
+  // A staged result is the one output the run does not finish by itself: the
+  // graph wrote the staging buffer, and the caller is still holding a tensor
+  // whose bytes are the old ones. A staged *input* needs no copy back, but its
+  // buffer must not be released while the queued graph is still reading it,
+  // which is what the drain below also buys for ClaimedStaging's destructor.
+  //
+  // This drain is also what makes the staging *pool* safe to reuse. A staging
+  // buffer is handed to a later call, and the only way that later call can reach
+  // a buffer a queued graph is still reading is by writing into it without
+  // draining first: every writer here either drains (this block) or drains
+  // before its copy *in* (ResolveOperand), and that drain covers every live
+  // queue. So no copy into a staging buffer can overtake a queued reader of the
+  // same buffer.
+  bool any_staged = false;
+  for (id<MTLBuffer> original : out_originals) {
+    any_staged = any_staged || original != nil;
+  }
+  if (ran && (any_staged || claimed.AnyPrivate())) {
+    ::torch_fl_mps::DrainAll();
+  }
+  if (ran && any_staged) {
+    for (size_t i = 0; i < outs.size(); ++i) {
+      if (out_originals[i] == nil) {
+        continue;
+      }
+      std::memcpy(
+          static_cast<char*>(out_originals[i].contents) + out_original_offsets[i],
+          out_buffers[i].contents,
+          static_cast<size_t>(outs[i].numel()) *
+              static_cast<size_t>(outs[i].element_size()));
+    }
   }
   return ran;
 }

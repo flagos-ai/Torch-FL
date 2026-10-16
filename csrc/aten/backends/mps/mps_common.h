@@ -32,11 +32,22 @@
 //     rejected the argument ("cannot initialize a parameter of type
 //     'MPSMatrixDescriptor *' with an lvalue of type 'MPSNDArrayDescriptor *'").
 //     MpsTensorData compiles the offset path only when the SDK in force can
-//     express it and the runtime reports macOS 15; under an older SDK it returns
-//     nil, and that nil is a *decline*, so an op whose operand is an interior
-//     pointer takes the CPU round-trip instead of reading from offset 0. The
-//     consequence is a correct but not-native op on an older toolchain, and it is
-//     why the initializer is not simply called unconditionally.
+//     express it and the runtime reports macOS 15.
+//
+//     Under an older toolchain an interior pointer cannot be *described*, but it
+//     is still served natively: RunGraphImpl stages the operand into a dedicated
+//     buffer at offset 0 and copies results back out, so an op whose operands the
+//     caching allocator split off a larger MTLBuffer keeps the whole computation
+//     on the GPU. It has to, because the alternative is not neutral. Declining
+//     sends the op to cpu_fallback, which copies the operand to the host, runs a
+//     torch kernel in torch's own threading, and copies the result back -- and
+//     for the table reads this backend exists for (a 151936x1024 float32
+//     embedding table is 622 MB) that is what turned a 0.7 ms node into the
+//     69-149 ms the MPS cost classes measured on the hosted runner. One memcpy
+//     between two shared allocations is the smaller cost by two orders of
+//     magnitude, and on unified memory it is the same device's copy. The staging
+//     buffers are pooled by size rather than allocated per call; see the
+//     StagingPool comment in mps_common.mm for the reuse argument.
 //
 //   * An MPSNDArray is not a dense view of a buffer once it has more than one
 //     dimension: it rounds the stride between rows up to a 16-byte boundary. A
