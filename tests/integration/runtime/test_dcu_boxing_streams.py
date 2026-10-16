@@ -200,3 +200,25 @@ def test_device_index_does_not_wrap_to_another_card(device):
         torch.flagos.current_stream(device)
     with pytest.raises(RuntimeError, match="Invalid DCU stream device index"):
         torch.flagos.ExternalStream(0, device=device)
+
+
+def test_compiled_mutation_cannot_escape_to_default_stream():
+    fn = torch.compile(lambda x: x.add_(1), backend="flagos", fullgraph=True)
+    stream = torch.flagos.Stream()
+    # Compile and warm the exact specialization before holding the queue.
+    with torch.flagos.stream(stream):
+        warm = torch.zeros(256, device="flagos")
+        fn(warm)
+    stream.synchronize()
+    x = torch.zeros(256, device="flagos")
+    torch.flagos.synchronize()
+    with pending(stream):
+        with torch.flagos.stream(stream):
+            fn(x)
+        # A raw-getter equality check alone cannot prove launch placement. An
+        # escaped launch on stream 0 would finish here and change these bytes;
+        # a correctly queued launch must remain behind the held selected stream.
+        with torch.flagos.stream(torch.flagos.default_stream()):
+            torch.flagos.default_stream().synchronize()
+            torch.testing.assert_close(x.cpu(), torch.zeros(256))
+    torch.testing.assert_close(x.cpu(), torch.ones(256))
