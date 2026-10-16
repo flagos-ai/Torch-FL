@@ -164,6 +164,36 @@ OPS = {
     # caller owns like every other `.out` form here, and `embedding_dense_backward`
     # is a separate op with its own scatter question.
     "embedding": "embedding",
+    # The same table read the body above serves, reached through the op the
+    # caller names rather than through the embedding front end. `embedding`
+    # gathers because a table read is what `F.embedding` asks for; `index_select`
+    # *is* that read, and every other op that wants rows of a big tensor --
+    # `nn.Embedding`'s backward, an attention KV cache, a beam search's
+    # reordering -- reaches this one instead.
+    #
+    # It is served on the same evidence `embedding` was, and the cost is larger
+    # because the operand is: measured on an M5 with a (151936, 1024) float32
+    # table, `index_select` of a *single* row cost 40.4 ms and the same call
+    # through `gather` cost 40.8 ms, both against 0.29 ms for the one gather node
+    # this body builds. The work is the same one node at any row count: 512 rows
+    # cost 0.29 ms and 4096 rows 0.78 ms, so the graph does not care how much of
+    # the table is read while the fallback cares only how *big* it is. The
+    # fallback's cost is the whole operand, copied device-to-host and back
+    # (profiled: `aten::_to_copy` at 178 ms over three passes of the 622 MB
+    # table), which is why V=10000 costs 2.4 ms and V=151936 costs 41.7 ms for
+    # the same one row.
+    #
+    # Only `index_select` is registered. `index_select.out` writes into a tensor
+    # the caller owns like every other `.out` form here, and the other spellings
+    # of the same read -- `take`, `gather`, `index` -- are separate ops with their
+    # own argument contracts and stay on the fallback; they were measured with
+    # this one (40.6-40.8 ms) and are the same node under a different contract,
+    # so they are the next increment rather than this one.
+    #
+    # `dim` is a host value the body reads and the operands cannot say, so it is
+    # named in the key: a dim=0 call and a dim=1 call over the same shapes are
+    # two graphs, and a key that left `dim` out would hand the first one to both.
+    "index_select": "index_select",
     # The last arithmetic gap on the elementwise path. `add`, `sub` and `mul`
     # have been served since stage 2; `div` was not, so every `x / y` and every
     # `x / 2.0` in a model took the CPU round-trip, and it is the op the
@@ -227,6 +257,14 @@ AT_OP = {
     # rather than `index_select` because a table read is what the caller asked
     # for and the reference is where its out-of-range contract lives.
     "embedding": "embedding",
+    # The CPU reference the `index_select` body round-trips to on anything it
+    # declines: a dim this body has no node for, and the index dtype and range
+    # the body checks on the host. It is `at::index_select` for the same reason
+    # `embedding` is `at::embedding` -- that is where the reference's own
+    # `IndexError` and its own dtype list live -- and it is the reference rather
+    # than `at::gather`, which carries a different argument contract for the
+    # same node.
+    "index_select": "index_select",
     # The CPU reference the `div` body round-trips to on anything it declines.
     # It is `at::div` rather than a reciprocal-multiply: the two readings differ
     # on the cases the gate below exists for (a zero denominator, a subnormal
@@ -251,6 +289,14 @@ SUPPORTS = {
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
+    # The same predicate over the same pair, and shared rather than copied
+    # because the two ops accept the same thing: one float operand (the table
+    # here, the weight there) indexed by one integer tensor, with the reference's
+    # own two integer widths. `index_select`'s index list is the same one -- a
+    # float or bool index is a `RuntimeError` naming int32/int64 -- and its
+    # out-of-range contract is the same `IndexError`, so the pair of bodies
+    # declines on the same inputs and takes the same round-trip for them.
+    "index_select": "MpsSupportsEmbeddingDtype",
     # Neither form takes the dtype-preserving predicate its sibling arithmetic
     # ops use: division is not dtype-preserving on the reference (`int / int` is
     # a float tensor), and a predicate that admitted the integral widths would
@@ -303,6 +349,12 @@ CALLS = {
     # reference contract forces the body to check on the host before it builds
     # the node.
     "embedding": "gatherWithUpdatesTensor:",
+    # The same gather, and the same selector, because `index_select` is that
+    # read named directly. T_INDEX_SELECT carries the one difference: `dim` can
+    # be any axis rather than the 0 the embedding body hard-codes, so the body
+    # takes the operand's rank into account when it decides whether the single
+    # `axis:0` node it builds is the axis the caller asked for.
+    "index_select": "gatherWithUpdatesTensor:",
     # MPSGraph's division node, and the interesting thing about it is that it is
     # the *only* arithmetic selector here whose choice is not obvious: the
     # plausible alternative is `a * reciprocalWithTensor:b`, which is what a
@@ -401,6 +453,13 @@ KEY_PARTS = {
     # the index range check, and its outcome is a function of the indices
     # themselves, which MpsRunGraph folds in.
     "embedding": "",
+    # `dim` is the interesting row here, and the one a reviewer has to check
+    # against the body: the graph is a gather over axis 0 (or over the axis
+    # `dim` names, which the body resolves to a graph it can build), and the
+    # operands cannot say which axis was asked for -- a (4, 6) operand read at
+    # dim=0 and at dim=1 have the same dtype and shape and two different
+    # answers. Naming it is what stops the first plan from answering both.
+    "index_select": ", dim",
     # Empty: a division graph is a function of its operands' dtypes and shapes,
     # which MpsRunGraph folds in, and of nothing else. There is no `alpha` on
     # either spelling and no host scalar the body bakes in -- `div.Scalar`'s
@@ -1198,6 +1257,153 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `index_select` is the read the `embedding` body above performs, named
+# directly, so the node it builds and the two host checks it makes are the same
+# ones -- `gatherWithUpdatesTensor:indicesTensor:axis:0 batchDimensions:0`, the
+# index dtype list, and the range check that keeps MPSGraph's silent first-row
+# answer away from an out-of-range index (see T_EMBEDDING for the measurements
+# behind the second and third).
+#
+# The one thing that is not the same is `dim`, and the way it is handled is the
+# whole of this body's design:
+#
+#   * **dim = 0 is the embedding gather**, row by row, and it is the case worth
+#     having: measured on an M5 with a (151936, 1024) float32 table, the fallback
+#     costs 40.4 ms for *one* row and the graph costs 0.29 ms -- and the graph
+#     costs the same 0.29 ms for 512 rows and 0.78 ms for 4096, because the node
+#     reads the rows it was asked for rather than the operand. The fallback's
+#     cost is the operand, not the result (V=10000 -> 2.4 ms, V=151936 ->
+#     41.7 ms, same one row), so this is the axis where serving the op removes a
+#     whole-table round-trip.
+#   * **dim = -1 is dim = rank - 1**, resolved on the host the way every other
+#     negative axis on this backend is, and it is declined: a gather along the
+#     last axis of a contiguous table is a different node (the row width would
+#     have to change) and one this increment does not measure.
+#   * **any other dim is declined**, including the negative ones that resolve to
+#     something other than 0. The body has no node for them and does not pretend
+#     to.
+#
+# Declining is not a failure mode here: the round-trip is the reference's own
+# implementation and its own `IndexError`, so a declined dim answers correctly
+# and simply costs what it costs today. The alternative -- building a node for
+# the axis the body happens to know how to reach and returning its answer for a
+# different axis -- is the kind of plausible-looking wrong answer T_EMBEDDING
+# exists to avoid.
+#
+# The second thing that is not the embedding body's is the *shape* of the index,
+# and it is a check rather than a case: `index_select` takes a vector and says so
+# (`IndexError: index_select(): Index is supposed to be a vector`), where
+# `embedding` reads any index shape as a batch dim. That is not a formality --
+# measured on an M5, a (2, 2) index over a (6, 4) operand reached the graph and
+# came back as a (4, 4) tensor with a silent flatten, because the body sets
+# `out_shape[0] = index.numel()` and flattens the index buffer before it
+# describes it. The reference raises for the same call, so without this check the
+# backend answers a question the reference refuses -- and answers it plausibly,
+# which is the failure mode the whole decline machinery here exists to avoid.
+T_INDEX_SELECT = """\
+at::Tensor {kernel}(
+    const at::Tensor& self, int64_t dim, const at::Tensor& index) {{
+  if (!mps::{supports}(self.scalar_type(), index.scalar_type())) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  // A vector index is the reference's own contract (`Index is supposed to be a
+  // vector`), and the one below it flattens the index buffer before it
+  // describes it to MPSGraph, so a higher-rank index would otherwise be read as
+  // its own flattening. Declined rather than reported here: the round-trip is
+  // the reference's implementation and its own message.
+  if (index.dim() != 1) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  // Resolve the axis against the operand's rank, then decide whether this body
+  // has a node for it. `dim` may be negative and aten normalises it (measured:
+  // dim=-1 over a rank-2 operand is dim=1), so the body does the same before it
+  // compares, and a dim below -rank is left to the reference rather than
+  // reported here.
+  const int64_t rank = self.dim();
+  if (rank == 0) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  int64_t axis = dim;
+  if (axis < 0) {{
+    axis += rank;
+  }}
+  if (axis != 0) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  // One host pass over the index, in its own width, before a node exists. Any
+  // index the operand cannot answer takes the round-trip so the caller sees the
+  // reference's own IndexError rather than MPSGraph's silent first row.
+  const at::Tensor index_c = index.contiguous();
+  const int64_t rows = self.size(0);
+  bool in_range = true;
+  if (index_c.numel() > 0) {{
+    const at::Tensor host = index_c.cpu();
+    const int64_t* as_long = nullptr;
+    std::vector<int64_t> widened;
+    if (host.scalar_type() == at::kLong) {{
+      as_long = host.const_data_ptr<int64_t>();
+    }} else {{
+      const int32_t* as_int = host.const_data_ptr<int32_t>();
+      widened.assign(as_int, as_int + host.numel());
+      as_long = widened.data();
+    }}
+    for (int64_t i = 0; i < host.numel(); ++i) {{
+      if (as_long[i] < 0 || as_long[i] >= rows) {{
+        in_range = false;
+        break;
+      }}
+    }}
+  }}
+  if (!in_range) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  // The result is the operand's shape with axis 0 replaced by the index count.
+  // For a rank-1 operand that is just (num_indices); for a rank-n one it is
+  // (num_indices, ...) and the graph's gather returns exactly that.
+  std::vector<int64_t> out_shape(
+      self_c.sizes().begin(), self_c.sizes().end());
+  out_shape[0] = index_c.numel();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // The graph reads a flattened index buffer and reshapes the table, because an
+  // MPSNDArray over N-D memory reads with its own row pitch (see the row-pitch
+  // note in mps_common.h). The gather's own contract is the same one the
+  // embedding body relies on: `axis:0 batchDimensions:0` indexes the outermost
+  // dimension and returns the slices named, in the index's order.
+  const int64_t index_count = index_c.numel();
+  const int64_t rows_in_table = self_c.size(0);
+  const int64_t row_width = self_c.numel() / (rows_in_table > 0 ? rows_in_table : 1);
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c, index_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* table = [graph reshapeTensor:args[0]
+                                           withShape:mps::MpsShapeOf(
+                                                         {{rows_in_table, row_width}})
+                                                name:nil];
+        MPSGraphTensor* flat = [graph reshapeTensor:args[1]
+                                          withShape:mps::MpsShapeOf(
+                                                        {{index_count}})
+                                               name:nil];
+        return [graph gatherWithUpdatesTensor:table
+                                indicesTensor:flat
+                                         axis:0
+                              batchDimensions:0
+                                         name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, index.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # `div` closes the elementwise arithmetic set -- `add`, `sub` and `mul` have been
 # served since stage 2 and this is the fourth -- so the least interesting thing
 # about it is the body, which is `T_BINARY` with one selector changed. What is
@@ -1379,6 +1585,7 @@ CATEGORIES = {
     "conv": T_CONV,
     "silu": T_SILU,
     "embedding": T_EMBEDDING,
+    "index_select": T_INDEX_SELECT,
     "div": T_DIV,
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
@@ -1423,6 +1630,7 @@ FILE_HEADER = """\
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
+#include <ATen/ops/index_select.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>

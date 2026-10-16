@@ -482,11 +482,75 @@ the declined integral, complex and mismatched-dtype pairs that never reach the
 graph, plan reuse across shapes and dtypes, and the dispatch log naming `mps`
 for the `a / b`, `a / 2.0`, `2.0 / a` and `torch.reciprocal` spellings.
 
+Stage 4 continued with `index_select`, which was *not* the op this section had
+recorded as next. The plan was `embedding_dense_backward`, and it was measured
+and dropped: the only correct graph for it is `oneHot(N, V)ᵀ @ grad(N, H)`,
+verified bit-exact, and its work is `O(V·N)` -- 18.8 ms at `N=1` (a win against
+the fallback's 43 ms), 68.3 ms at `N=512` and 243 ms at `N=2048` (losses), with
+chunking over `V` measured at 162 ms and 670 ms and no better. The
+`scatterAlongAxis:withDataTensor:` node that would have made it linear is
+unusable: the SDK enforces `indices.shape == updates.shape`, and with equal
+shapes it writes updates as a rolling window rather than by row index (a
+`(N, 1, 1)` sparse index is rejected outright, and MPSGraph exposes no
+`broadcastTensor:withShape:` to build the equal-shape form). Every row *write*
+primitive round-trips as well -- `index_copy_` 117 ms, `index_add_` 115 ms,
+`out[idx] = grad` 66 ms -- all of them `aten::_to_copy` over the whole `(V, H)`
+table, so the dense output has to be materialised either way. The measurement
+pointed instead at the read family those ops all share, and that is this
+increment.
+
+`index_select` is the gather the `embedding` body above already builds, reached
+through the op the caller names rather than through the embedding front end, and
+it is served on the same evidence: measured on an M5 over a `(151936, 1024)`
+float32 operand, the fallback cost 40.4 ms for a *single* row and the graph
+costs 0.29 ms, with 0.29 ms at 512 rows and 0.78 ms at 4096 -- the fallback's
+cost is the dimension of the operand (V=10000 → 2.4 ms, V=151936 → 41.7 ms, same
+one row, profiled as `aten::_to_copy` over 622 MB) while the graph's cost is the
+number of rows asked for. The body is one node,
+`gatherWithUpdatesTensor:indicesTensor:axis:0 batchDimensions:0`, over the same
+`(rows, row_width)` reshape the embedding body uses for the row-pitch reason
+recorded above.
+
+What is new here, and the whole of the increment's design, is that
+`index_select` carries arguments where `embedding` carried only operands. The
+body resolves `dim` against the operand's rank and **declines** unless it
+resolves to axis 0 -- the only axis the one node reaches -- alongside an
+out-of-range `dim`, an index whose dtype is not int32/int64, and an index that
+falls outside the operand. Declining is not a degradation of the contract: the
+round-trip *is* the reference's implementation and its own
+`IndexError`/`RuntimeError`, so a declined call answers correctly and simply
+costs what it costs today. The alternative -- building the axis-0 node and
+returning its answer for a different axis -- is a plausible-looking wrong
+answer, which is the failure class the `embedding` range check exists for.
+
+The honest finding of this increment is a second member of that class, found by
+the suite rather than by review. `index_select` takes a *vector* index and says
+so (`IndexError: index_select(): Index is supposed to be a vector`), where
+`embedding` reads any index shape as a batch dimension -- but the first version
+of this body set `out_shape[0] = index.numel()` and flattened the index buffer
+for the graph, so a `(2, 2)` index over a `(6, 4)` operand came back as a
+`(4, 4)` tensor with a silent flatten where the reference raises. The fix is an
+explicit `index.dim() != 1` decline, and it is held by a case that fails without
+it.
+
+This increment is verified with `tests/integration/ops/test_mps_index_select.py`:
+bit-exact CPU equality across the three float widths and both index widths,
+the index length becoming the leading dimension, rank-1 and rank-3 operands,
+repeated and reordered indices, an empty index, non-contiguous operands and
+non-contiguous indices, the `dim` cases (axis 1 and 2 declined, `dim=-3` over a
+rank-3 operand served, an out-of-range `dim` reaching aten's error, and a square
+operand read at `dim=0` and `dim=1` giving two different answers, which is what
+`dim` being in the plan key is for), the range contract (out-of-range, negative,
+and one bad index among good ones all raising the reference's `IndexError`, in
+both index widths), the declined dtypes and the higher-rank index, plan reuse
+across dtypes, index widths and index values, the dispatch log naming `mps`, and
+a cost case over the `(151936, 1024)` shape that fails if the whole-operand
+round-trip returns.
+
 The remaining stage-4 work is the `embedding_dense_backward`, `gather` and
-`index_select` ops that share the `embedding` node family, `F.layer_norm` as a
+`take` ops that share the `embedding` node family, `F.layer_norm` as a
 multi-op increment (`native_batch_norm` plus `addcmul`, measured at
-1.50-4.56 ms), the `docs/reference/operator-support.md` matrix rows, and a CI
-lane for the operator suite.
+1.50-4.56 ms), and the `native_batch_norm` it lowers to.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.

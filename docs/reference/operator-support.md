@@ -188,12 +188,12 @@ record.
 
 ## Native Backend Route Changes
 
-### Apple MPS: twenty routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+### Apple MPS: twenty-one routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
 
-**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **20** ATen overloads from
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **21** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
 reduction, convolution, embedding and matrix-multiply families — with the
-remaining **2017** routes at `none` (`cpu_fallback`), measured overload by
+remaining **2016** routes at `none` (`cpu_fallback`), measured overload by
 overload against a CPU reference on an Apple Silicon arm64 host.
 
 **This is not a FlagGems cohort and must not be read against the 546-overload
@@ -202,14 +202,33 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 20, none: 2017}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 21, none: 2016}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
-`embedding`, `mm` and `bmm`. The backend is MPSGraph-first with a hand-written
-Metal Shading Language fallback, and — as the name of this section insists — it
-re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
+`embedding`, `index_select`, `mm` and `bmm`. The backend is MPSGraph-first with a
+hand-written Metal Shading Language fallback, and — as the name of this section
+insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
 libtorch bundle to land a re-dispatch on.
+
+**`index_select` is the `embedding` gather reached by name, and it is the first
+route here whose op has an argument contract rather than a dtype one.** The node
+is the same one `embedding` builds (`gatherWithUpdatesTensor:indicesTensor:axis:0
+batchDimensions:0`), and the cost it removes is the same whole-operand
+round-trip: measured on an M5 over a `(151936, 1024)` float32 operand, the
+fallback cost 40.4 ms for a *single* row — profiled as `aten::_to_copy` over the
+622 MB tensor — against 0.29 ms for the node, and the node costs 0.29 ms at 512
+rows and 0.78 ms at 4096 because it reads the rows it is asked for rather than
+the operand. What is new is that `index_select` carries a `dim`, so only where
+`dim` resolves to axis 0 does the graph have a node; every other axis, an
+out-of-range `dim`, a non-vector index and an out-of-range or non-integer index
+all take the round-trip, which is the reference's own implementation and its own
+`IndexError`/`RuntimeError`. That matters twice over: MPSGraph's gather answers an
+out-of-range index with the first row rather than failing, and the index buffer
+is flattened before it is described to the graph, so a higher-rank index would
+otherwise be answered with a plausible flattening where the reference raises
+`index_select(): Index is supposed to be a vector`. Both were measured, and both
+are held in `tests/integration/ops/test_mps_index_select.py` (45 cases).
 
 **Every route is gated on a measured dtype predicate, and two gates exist only
 because the obvious one was wrong.** The first `div` increment gated on the
@@ -237,13 +256,14 @@ graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
 per-op suites `test_mps_binary.py`, `test_mps_conv.py`, `test_mps_embedding.py`,
-`test_mps_gemm.py`, `test_mps_pow.py`, `test_mps_reduce.py`, `test_mps_silu.py`,
-`test_mps_softmax.py` and `test_mps_unary.py`, run as `pytest tests/integration/ops
--m mps` on an Apple Silicon host; the per-op dtype gates are asserted against the
-CPU reference in the same tests. This is the only platform whose hardware job runs
-on a GitHub-hosted macOS runner rather than a vendor image — see
-[`.github/configs/mps.yml`](../../.github/configs/mps.yml) — and the lane runs
-that suite in CI.
+`test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_pow.py`,
+`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py` and
+`test_mps_unary.py`, run as `pytest tests/integration/ops -m mps` on an Apple
+Silicon host; the per-op dtype gates and the `index_select` argument contracts
+are asserted against the CPU reference in the same tests. This is the only
+platform whose hardware job runs on a GitHub-hosted macOS runner rather than a
+vendor image — see [`.github/configs/mps.yml`](../../.github/configs/mps.yml) —
+and the lane runs that suite in CI.
 
 ### Enflame GCU S60: `rsub` gains a native kernel, and COMPILE_ARCH stops splitting the launch stream (2026-10-16)
 

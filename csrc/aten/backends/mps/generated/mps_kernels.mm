@@ -36,6 +36,7 @@
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
+#include <ATen/ops/index_select.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
@@ -829,6 +830,108 @@ at::Tensor EmbeddingKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMps, EmbeddingKernelMps)
+
+at::Tensor IndexSelectKernelMps(
+    const at::Tensor& self, int64_t dim, const at::Tensor& index) {
+  if (!mps::MpsSupportsEmbeddingDtype(self.scalar_type(), index.scalar_type())) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  // A vector index is the reference's own contract (`Index is supposed to be a
+  // vector`), and the one below it flattens the index buffer before it
+  // describes it to MPSGraph, so a higher-rank index would otherwise be read as
+  // its own flattening. Declined rather than reported here: the round-trip is
+  // the reference's implementation and its own message.
+  if (index.dim() != 1) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  // Resolve the axis against the operand's rank, then decide whether this body
+  // has a node for it. `dim` may be negative and aten normalises it (measured:
+  // dim=-1 over a rank-2 operand is dim=1), so the body does the same before it
+  // compares, and a dim below -rank is left to the reference rather than
+  // reported here.
+  const int64_t rank = self.dim();
+  if (rank == 0) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  int64_t axis = dim;
+  if (axis < 0) {
+    axis += rank;
+  }
+  if (axis != 0) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  // One host pass over the index, in its own width, before a node exists. Any
+  // index the operand cannot answer takes the round-trip so the caller sees the
+  // reference's own IndexError rather than MPSGraph's silent first row.
+  const at::Tensor index_c = index.contiguous();
+  const int64_t rows = self.size(0);
+  bool in_range = true;
+  if (index_c.numel() > 0) {
+    const at::Tensor host = index_c.cpu();
+    const int64_t* as_long = nullptr;
+    std::vector<int64_t> widened;
+    if (host.scalar_type() == at::kLong) {
+      as_long = host.const_data_ptr<int64_t>();
+    } else {
+      const int32_t* as_int = host.const_data_ptr<int32_t>();
+      widened.assign(as_int, as_int + host.numel());
+      as_long = widened.data();
+    }
+    for (int64_t i = 0; i < host.numel(); ++i) {
+      if (as_long[i] < 0 || as_long[i] >= rows) {
+        in_range = false;
+        break;
+      }
+    }
+  }
+  if (!in_range) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  // The result is the operand's shape with axis 0 replaced by the index count.
+  // For a rank-1 operand that is just (num_indices); for a rank-n one it is
+  // (num_indices, ...) and the graph's gather returns exactly that.
+  std::vector<int64_t> out_shape(
+      self_c.sizes().begin(), self_c.sizes().end());
+  out_shape[0] = index_c.numel();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  // The graph reads a flattened index buffer and reshapes the table, because an
+  // MPSNDArray over N-D memory reads with its own row pitch (see the row-pitch
+  // note in mps_common.h). The gather's own contract is the same one the
+  // embedding body relies on: `axis:0 batchDimensions:0` indexes the outermost
+  // dimension and returns the slices named, in the index's order.
+  const int64_t index_count = index_c.numel();
+  const int64_t rows_in_table = self_c.size(0);
+  const int64_t row_width = self_c.numel() / (rows_in_table > 0 ? rows_in_table : 1);
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("index_select", dim),
+      {self_c, index_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* table = [graph reshapeTensor:args[0]
+                                           withShape:mps::MpsShapeOf(
+                                                         {rows_in_table, row_width})
+                                                name:nil];
+        MPSGraphTensor* flat = [graph reshapeTensor:args[1]
+                                          withShape:mps::MpsShapeOf(
+                                                        {index_count})
+                                               name:nil];
+        return [graph gatherWithUpdatesTensor:table
+                                indicesTensor:flat
+                                         axis:0
+                              batchDimensions:0
+                                         name:nil];
+      });
+  if (!ran) {
+    return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kMps, IndexSelectKernelMps)
 
 at::Tensor DivTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
   if (!mps::MpsSupportsDivDtype(self.scalar_type(), other.scalar_type())) {
