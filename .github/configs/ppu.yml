@@ -43,7 +43,7 @@ container_volumes:
   # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
   # installs the FlagGems stack into the job venv from published FlagOS wheels,
   # so the environment is reproducible from the image plus those indexes alone.
-  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+  - /mnt/cpfs/models/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 integration_environment:
   MODEL_PATH: /models/Qwen3-0.6B
