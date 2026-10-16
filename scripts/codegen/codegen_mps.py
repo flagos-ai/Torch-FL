@@ -146,6 +146,24 @@ OPS = {
     # `silu_backward` is a separate op with a separate selector question that
     # this increment does not answer.
     "silu": "silu",
+    # The largest single item left on a small model's fallback profile, and the
+    # first op here whose cost is a *read* of its operand rather than a
+    # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
+    # seq 512), `embedding` was ~47% of the layer's device dispatch time.
+    #
+    # The reason is not the arithmetic -- a table read is nearly free -- but what
+    # the fallback does instead of it. `embedding` is routed to `none` in the
+    # MPS conf, so a call lands on `cpu_fallback`, and that path copies the whole
+    # (151936, 1024) weight to the host and the result back: measured on the same
+    # M5, one `F.embedding` call with a (1, 512) index tensor cost 55.3 ms, of
+    # which 55.8 ms was the host copy of the weight alone, against 0.697 ms for
+    # the same read performed entirely on the CPU. The op is therefore worth
+    # serving even though the graph node it builds is a single gather.
+    #
+    # Only `embedding` is registered. `embedding.out` writes into a tensor the
+    # caller owns like every other `.out` form here, and `embedding_dense_backward`
+    # is a separate op with its own scatter question.
+    "embedding": "embedding",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -177,6 +195,12 @@ AT_OP = {
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    # The CPU reference the `embedding` body round-trips to on anything it
+    # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
+    # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
+    # rather than `index_select` because a table read is what the caller asked
+    # for and the reference is where its out-of-range contract lives.
+    "embedding": "embedding",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -190,6 +214,7 @@ SUPPORTS = {
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    "embedding": "MpsSupportsEmbeddingDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -222,6 +247,12 @@ CALLS = {
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # A table read is a gather with `axis = 0` and no batch dimensions, and this
+    # is that selector. See T_EMBEDDING for why the *other* gather spelling
+    # (`gatherAlongAxis:`) is not usable here, and for the two things the
+    # reference contract forces the body to check on the host before it builds
+    # the node.
+    "embedding": "gatherWithUpdatesTensor:",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -297,6 +328,13 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # Empty: the body reads no host value that the operands cannot say. The three
+    # non-tensor arguments are backward-pass arguments whose value the forward
+    # output does not depend on -- measured, see the note above T_EMBEDDING -- so
+    # they are not read and not named. The one host value the body *does* read is
+    # the index range check, and its outcome is a function of the indices
+    # themselves, which MpsRunGraph folds in.
+    "embedding": "",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -956,6 +994,137 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `embedding` is the first body here that has to decide whether the *graph* can
+# answer the call at all, rather than only whether it can be built. A table read
+# is one gather node -- `gatherWithUpdatesTensor:indicesTensor:axis:0
+# batchDimensions:0` -- but MPSGraph's gather has no out-of-range contract of its
+# own, and the reference's contract is an error:
+#
+#   * measured on an M5 with a 6-row table and the index list (5, 6, 2, 0), the
+#     node returns the *first row* for the out-of-range index 6; with -1 it
+#     returns the first row, and with 100 the first row again. That is a
+#     plausible-looking wrong answer rather than a failure, which is the one
+#     outcome worse than a round-trip.
+#   * the reference raises `IndexError: index out of range in self` for 6, -1 and
+#     100 alike.
+#
+# So the body validates the index range on the host before it builds the node, and
+# declines -- handing the call to the reference, which raises its own error -- for
+# any index outside [0, num_embeddings). The check is one host pass over the index
+# tensor, which is (batch, seq) against a (vocab, hidden) table: 512 elements
+# against 151936 rows, so it does not move the measurement above.
+#
+# The *other* gather spelling, `gatherAlongAxis:withUpdatesTensor:indicesTensor:`,
+# was measured first and rejected: it requires the indices to carry the operand's
+# rank (`rank of destination array (1) must equal number of outer dimensions in
+# index array (2) + rank of slice to update (1)`), and its own documented
+# out-of-range behaviour is to insert a 0 -- a zero vector for a genuinely bad
+# index, which is a wrong answer that would look like a padding row.
+#
+# `padding_idx` is deliberately *not* consulted. The forward op does not read it:
+# measured on the CPU reference with a (4, 3) table and the index list
+# (0, 1, 2, 3), the result is bit-identical for `padding_idx` -1, -3, -4 and 2 --
+# every one of them returns `weight` row for row, and an out-of-range
+# `padding_idx` (7, -9) is accepted rather than rejected. The zeroing that
+# `padding_idx` asks for is a property of the *gradient* (`embedding_dense_backward`
+# zeroes that row of the grad table), not of this op's output, so a body that
+# branched on it would decline calls whose answer does not depend on it. The first
+# version of this body did exactly that and took the whole-table round-trip for
+# every `F.embedding` call -- which passes `padding_idx = None`, arriving here as
+# -1. It is not in the key either: two calls that differ only in `padding_idx`
+# produce the same bytes, so they are one graph.
+#
+# Only the int and long index widths are accepted, which is what the reference
+# accepts: a float index is a `RuntimeError` naming the two integer types, and a
+# bool index is not one either, so both take the round-trip and get that error.
+T_EMBEDDING = """\
+at::Tensor {kernel}(
+    const at::Tensor& weight,
+    const at::Tensor& indices,
+    int64_t padding_idx,
+    bool scale_grad_by_freq,
+    bool sparse) {{
+  if (!mps::{supports}(weight.scalar_type(), indices.scalar_type())) {{
+    return at::{at_op}(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }}
+  const int64_t rows = weight.size(0);
+  // `padding_idx`, `scale_grad_by_freq` and `sparse` are all backward-pass
+  // arguments: the reference's forward output does not depend on any of them (see
+  // the note above T_EMBEDDING), so this body does not read them either and the
+  // kernel is one gather for every value they take.
+  // One host pass over the indices, in their own width, before a node exists.
+  // Any index the table cannot answer takes the round-trip so the caller sees
+  // the reference's own IndexError rather than MPSGraph's silent first row.
+  const at::Tensor indices_c = indices.contiguous();
+  bool in_range = true;
+  if (indices_c.numel() > 0) {{
+    const at::Tensor host = indices_c.cpu();
+    const int64_t* as_long = nullptr;
+    std::vector<int64_t> widened;
+    if (host.scalar_type() == at::kLong) {{
+      as_long = host.const_data_ptr<int64_t>();
+    }} else {{
+      const int32_t* as_int = host.const_data_ptr<int32_t>();
+      widened.assign(as_int, as_int + host.numel());
+      as_long = widened.data();
+    }}
+    for (int64_t i = 0; i < host.numel(); ++i) {{
+      if (as_long[i] < 0 || as_long[i] >= rows) {{
+        in_range = false;
+        break;
+      }}
+    }}
+  }}
+  if (!in_range) {{
+    return at::{at_op}(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }}
+  at::Tensor weight_c = weight.contiguous();
+  std::vector<int64_t> out_shape(
+      indices_c.sizes().begin(), indices_c.sizes().end());
+  out_shape.push_back(weight_c.size(1));
+  at::Tensor out = at::empty(out_shape, weight_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // The graph reads a flattened index buffer and reshapes the table, because an
+  // MPSNDArray over N-D memory reads with its own row pitch (see the row-pitch
+  // note in mps_common.h) and the gather's result is (num_indices, num_cols).
+  const int64_t index_count = indices_c.numel();
+  const int64_t row_width = weight_c.size(1);
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{weight_c, indices_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* table = [graph reshapeTensor:args[0]
+                                           withShape:mps::MpsShapeOf(
+                                                         {{rows, row_width}})
+                                                name:nil];
+        MPSGraphTensor* flat = [graph reshapeTensor:args[1]
+                                          withShape:mps::MpsShapeOf(
+                                                        {{index_count}})
+                                               name:nil];
+        return [graph gatherWithUpdatesTensor:table
+                                indicesTensor:flat
+                                         axis:0
+                              batchDimensions:0
+                                         name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -966,6 +1135,7 @@ CATEGORIES = {
     "pow_scalar": T_POW,
     "conv": T_CONV,
     "silu": T_SILU,
+    "embedding": T_EMBEDDING,
 }
 
 FILE_HEADER = """\
@@ -1005,6 +1175,7 @@ FILE_HEADER = """\
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/embedding.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>

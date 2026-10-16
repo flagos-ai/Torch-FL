@@ -19,6 +19,7 @@
   m.impl("add.Tensor", WrapperAddTensor);
   m.impl("bmm", WrapperBmm);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
+  m.impl("embedding", WrapperEmbedding);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);

@@ -190,6 +190,37 @@ bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
 // and get exactly that.
 bool MpsSupportsSiluDtype(at::ScalarType dtype);
 
+// Whether a table read computes exactly on the MPSGraph path: one float width
+// for the table, and an int or long index tensor.
+//
+// The table half mirrors the other gates -- float32, float16 and bfloat16 are
+// served, float64 has no MPSGraph element type, and an integral or bool table is
+// the reference's own error rather than a result.
+//
+// The index half is the narrower one, and it is the reference's list rather than
+// this file's: `at::embedding` accepts Long and Int indices and rejects anything
+// else with a `RuntimeError` naming exactly those two types, so a float index
+// takes the round-trip and gets that message. The width matters to the graph too
+// -- MPSGraph's gather takes an int32 or int64 index tensor and has no other
+// integer input -- but the reason this gate is written from the reference is that
+// the reference has an answer for a float index and a graph built from one would
+// not.
+//
+// What this predicate does *not* cover is the index *range*, which is a property
+// of the values rather than the types and is checked in the kernel body: see the
+// out-of-range note in scripts/codegen/codegen_mps.py, where a measured
+// first-row-returned silent wrong answer is why the range is validated on the
+// host before any node is built.
+//
+// Nor does it cover `padding_idx`, because the forward op does not read it
+// either: measured against the CPU reference, `aten::embedding` returns the same
+// bytes for every `padding_idx` a caller can pass, including the -1 that the
+// Python front end uses for "none" and values outside the table. The zeroing
+// that name asks for belongs to `embedding_dense_backward`.
+bool MpsSupportsEmbeddingDtype(
+    at::ScalarType weight_dtype,
+    at::ScalarType index_dtype);
+
 // Whether a matrix multiplication computes exactly on the MPSGraph path. Both
 // operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
 // and a mismatched pair is a reference error rather than a result -- and that

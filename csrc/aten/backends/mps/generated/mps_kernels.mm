@@ -34,6 +34,7 @@
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/embedding.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
@@ -740,5 +741,91 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
+
+at::Tensor EmbeddingKernelMps(
+    const at::Tensor& weight,
+    const at::Tensor& indices,
+    int64_t padding_idx,
+    bool scale_grad_by_freq,
+    bool sparse) {
+  if (!mps::MpsSupportsEmbeddingDtype(weight.scalar_type(), indices.scalar_type())) {
+    return at::embedding(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }
+  const int64_t rows = weight.size(0);
+  // `padding_idx`, `scale_grad_by_freq` and `sparse` are all backward-pass
+  // arguments: the reference's forward output does not depend on any of them (see
+  // the note above T_EMBEDDING), so this body does not read them either and the
+  // kernel is one gather for every value they take.
+  // One host pass over the indices, in their own width, before a node exists.
+  // Any index the table cannot answer takes the round-trip so the caller sees
+  // the reference's own IndexError rather than MPSGraph's silent first row.
+  const at::Tensor indices_c = indices.contiguous();
+  bool in_range = true;
+  if (indices_c.numel() > 0) {
+    const at::Tensor host = indices_c.cpu();
+    const int64_t* as_long = nullptr;
+    std::vector<int64_t> widened;
+    if (host.scalar_type() == at::kLong) {
+      as_long = host.const_data_ptr<int64_t>();
+    } else {
+      const int32_t* as_int = host.const_data_ptr<int32_t>();
+      widened.assign(as_int, as_int + host.numel());
+      as_long = widened.data();
+    }
+    for (int64_t i = 0; i < host.numel(); ++i) {
+      if (as_long[i] < 0 || as_long[i] >= rows) {
+        in_range = false;
+        break;
+      }
+    }
+  }
+  if (!in_range) {
+    return at::embedding(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }
+  at::Tensor weight_c = weight.contiguous();
+  std::vector<int64_t> out_shape(
+      indices_c.sizes().begin(), indices_c.sizes().end());
+  out_shape.push_back(weight_c.size(1));
+  at::Tensor out = at::empty(out_shape, weight_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  // The graph reads a flattened index buffer and reshapes the table, because an
+  // MPSNDArray over N-D memory reads with its own row pitch (see the row-pitch
+  // note in mps_common.h) and the gather's result is (num_indices, num_cols).
+  const int64_t index_count = indices_c.numel();
+  const int64_t row_width = weight_c.size(1);
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("embedding"),
+      {weight_c, indices_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* table = [graph reshapeTensor:args[0]
+                                           withShape:mps::MpsShapeOf(
+                                                         {rows, row_width})
+                                                name:nil];
+        MPSGraphTensor* flat = [graph reshapeTensor:args[1]
+                                          withShape:mps::MpsShapeOf(
+                                                        {index_count})
+                                               name:nil];
+        return [graph gatherWithUpdatesTensor:table
+                                indicesTensor:flat
+                                         axis:0
+                              batchDimensions:0
+                                         name:nil];
+      });
+  if (!ran) {
+    return at::embedding(
+        weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
+        .to(weight.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMps, EmbeddingKernelMps)
 
 } // namespace at::native::flagos

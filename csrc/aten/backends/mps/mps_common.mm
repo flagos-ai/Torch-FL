@@ -125,6 +125,17 @@ bool MpsSupportsSiluDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsEmbeddingDtype(
+    at::ScalarType weight_dtype,
+    at::ScalarType index_dtype) {
+  // The table widths, the same three the silu and conv gates serve.
+  const bool table = weight_dtype == at::kFloat || weight_dtype == at::kHalf ||
+                     weight_dtype == at::kBFloat16;
+  // The reference's own list, not this file's: see the note in mps_common.h.
+  const bool index = index_dtype == at::kLong || index_dtype == at::kInt;
+  return table && index;
+}
+
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   if (out == nullptr) {
     return false;

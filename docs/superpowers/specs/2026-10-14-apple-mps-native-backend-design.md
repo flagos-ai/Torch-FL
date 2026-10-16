@@ -375,10 +375,55 @@ plan reuse across interleaved dtypes and shapes, and the dispatch log naming
 guards the *reference* rather than the kernel: it fails if a future PyTorch makes
 `silu` the composition, because then the note this gate rests on would be stale.
 
-The remaining stage-4 work is the `embedding`/`gather` design (section 7 records
-it as ~47% of a Qwen3-0.6B layer's device dispatch time, the largest single
-item), the `docs/reference/operator-support.md` matrix rows, and a CI lane for
-the operator suite.
+Stage 4 continued with the `embedding` category, which section 7 recorded as
+~47% of a Qwen3-0.6B layer's device dispatch time -- the largest single item
+left. It is the first op here whose cost is a *read* of its operand rather than
+a computation over it, and the reason it mattered was not the arithmetic: the op
+was routed to `none`, so every call took `cpu_fallback`, which copies the whole
+`(151936, 1024)` weight to the host. Measured on an M5, one `F.embedding` call
+with a `(1, 512)` index tensor cost 55.3 ms, of which 55.8 ms was the host copy
+of the table, against 0.697 ms for the same read performed entirely on the CPU.
+The graph side is one node -- `gatherWithUpdatesTensor:indicesTensor:axis:0
+batchDimensions:0` -- and it reproduces `at::embedding` bit for bit.
+
+Two things about this kernel are worth recording, because each is a case where
+the obvious reading of the reference is wrong. The first is the index range:
+MPSGraph's gather has no range contract, and measured on an M5 with a 6-row
+table and the index list `(5, 6, 2, 0)` it returns the table's *first row* for
+the out-of-range 6 -- likewise for `-1` and for `100` -- where the reference
+raises `IndexError: index out of range in self`. A plausible wrong answer is the
+one outcome worse than a round-trip, so the body validates the range on the host
+before any node exists and declines, handing the call to the reference for its
+own error. The other gather spelling, `gatherAlongAxis:`, was measured first and
+rejected: it requires the indices to carry the operand's rank, and its own
+out-of-range behaviour is to insert a 0, which would look like a padding row.
+
+The second is `padding_idx`, which the forward op **does not read**. Measured
+against the CPU reference with a `(4, 3)` table and the index list
+`(0, 1, 2, 3)`, the result is bit-identical for `padding_idx` `-1`, `-3`, `-4`
+and `2`, and an out-of-range `padding_idx` (`7`, `-9`) is accepted rather than
+rejected; the zeroing that name asks for is a property of
+`embedding_dense_backward`, not of this op's output. That matters because the
+first version of this body assumed otherwise and declined whenever
+`padding_idx >= 0` -- and `F.embedding` passes `padding_idx=None`, which arrives
+at the op as `-1` and was read as "count back from the end", so *every* ordinary
+`F.embedding` call took the whole-table round-trip the increment existed to
+remove. The kernel measured 77-99 ms with that bug and 0.25-0.29 ms without it.
+`padding_idx` is not in the graph key either: two calls that differ only in it
+produce the same bytes and are one plan.
+
+This increment is verified with `tests/integration/ops/test_mps_embedding.py`:
+bit-exact CPU equality on all three float widths and both integer index widths,
+the index rank preserved from `(1,)` to `(2, 3, 4, 5)`, empty and non-contiguous
+operands, every `padding_idx` spelling including the `None`-as-`-1` the front end
+passes, the three out-of-range `IndexError` cases and the float-index
+`RuntimeError`, plan reuse across dtypes and across `padding_idx`, the dispatch
+log naming `mps` for both the `F.embedding` and `aten.embedding` spellings, a
+declined float64 table that never reaches the graph, and a cost case that fails
+if the whole-table round-trip comes back.
+
+The remaining stage-4 work is the `docs/reference/operator-support.md` matrix
+rows and a CI lane for the operator suite.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
