@@ -1282,6 +1282,136 @@ reference values above. The aclnn kernel is off the default route by design, per
   nothing about `dcu`, `musa`, `gcu`, `kunlunxin`, `metax`, `ppu` or `tsingmicro`;
   MetaX is named only as the passing comparison that located the asymmetry, and
   its conf is neither revalidated nor affected.
+### Ascend: `cumsum` leaves the FlagGems route for its aclnn kernel (2026-10-16, Ascend 910C)
+
+**One sentence.** The `_ascend` backend override of the FlagGems `cumsum` kernel
+sizes its reduction with `K = inp.numel() // M // N` at
+`flag_gems/runtime/backend/_ascend/ops/cumsum.py:225`, where `N = shape[dim]`, so
+an **empty reduction dim** (e.g. a `bool` tensor of shape `(1, 0)`) is
+`0 // 1 // 0` and a `ZeroDivisionError` -- where the generic
+`flag_gems/ops/cumsum.py` does not divide by `N` -- so `cumsum` moves off the
+FlagGems route to the aclnn kernel that already serves it and is already
+registered.
+
+**The failure, on the route being left.** The input is not degenerate: it is
+exactly what transformers' `_assisted_decoding` builds at
+`transformers/generation/utils.py:4107`
+(`((~(candidate_new_tokens == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()`),
+and ATen's own `cumsum` returns an empty tensor for it. The defect reproduces
+standalone on this host's `torch-fl-ascend-py311` interpreter with the FlagGems
+route in force, which is what makes this an entry about the kernel rather than
+about the model:
+
+```text
+>>> t = torch.tensor([], dtype=torch.bool, device='flagos:0').reshape(1, 0)
+>>> torch.cumsum(t, dim=-1)
+ZeroDivisionError: integer division or modulo by zero
+  File ".../flag_gems/runtime/backend/_ascend/ops/cumsum.py", line 225, in cumsum
+    K = inp.numel() // M // N
+```
+
+This is the **third instance of the same `_ascend` override defect class** on
+this backend: the override does shape arithmetic that divides by a dimension
+size, and an empty dim makes it raise. The sibling change routes `ones`/`ones_like`
+out for the same reason (`_ascend/ops/ones.py:56`, `cdiv(0, next_power_of_2(...))`).
+
+**The failure, end-to-end.** On the BERT cohort the flip moves two ids from FAIL
+to PASS, and the failure on the FlagGems route is that traceback, not a value
+mismatch:
+
+```text
+E       ZeroDivisionError: integer division or modulo by zero
+.../flag_gems/runtime/backend/_ascend/ops/cumsum.py:225: ZeroDivisionError
+=============== 2 failed, 294 deselected, 40 warnings in 23.54s ==============
+```
+
+after the flip, with the `cumsum` conf row the only variable:
+
+```text
+=============== 2 passed, 294 deselected, 40 warnings in 28.51s ==============
+```
+
+**Why the route is the torch_fl lever and not the bug.** The defect is in the
+FlagGems `_ascend` backend override, upstream of torch_fl, and is reported here
+as such. What torch_fl owns is the route: `backends_ascend.conf` sent `cumsum` to
+`flaggems`, and the line carried the `# ascend` annotation, which is the
+generator's statement that an aclnn kernel exists behind the winning route.
+`ascend_register.inc:137` registers `m.impl("cumsum", WrapperCumsum)` and
+`ascend_kernels.cc:2223` binds it via
+`REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kAscend,
+CumsumKernelAscend)` to `aclnnCumsum`. The kernel was reachable through
+`FLAGOS_FORCE_BACKEND=ascend` all along; the conf simply preferred FlagGems. No
+new kernel is added, so nothing here needs the codegen-limitation approval path.
+
+**Route delta.** Ascend `flaggems` 224 -> **223**, `ascend` 151 -> **152**, `none`
+1662 unchanged; 2037 entries, still 375 accelerated (18.4%). Conf SHA-256
+`346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` (at `a040ea7`)
+-> `61a4dc07353e51fd2a16423ecdec91b69451e40b4af68bbc06e54850b9607c5f`. The diff is
+three lines: the two header counts and the route line, `cumsum = flaggems  #
+ascend` becoming `cumsum = ascend`. The conf stays generated output -- `cumsum`
+enters `NATIVE_TRITON_GAPS["ascend"]` in `scripts/codegen/gen_vendor_confs.py` --
+and is byte-identical across two runs of that script, whose `--check` reports
+`all vendor confs up to date` (exit 0) with every other platform's conf
+byte-identical. The move is the deliberate update
+`tests/unit/test_conf_registration_consistency.py::test_conf_route_counts_are_stable`
+asks for, its `ascend` snapshot going `{"flaggems": 224, "none": 1662,
+"ascend": 151}` -> `{"flaggems": 223, "none": 1662, "ascend": 152}`, and
+`tests/integration/flaggems/flaggems_caps.py:EXPECTED_FLAGGEMS_ROUTES["ascend"]`
+224 -> 223 in the same change.
+
+**Regression gate.** `tests/unit/test_conf_registration_consistency.py` is the
+gate for the conf/generator pair -- 52 passed, and it fails if the conf is edited
+without its generator or the snapshot is not updated deliberately. The
+behavioural half is the standalone repro above (red on the FlagGems route, green
+on the aclnn route) plus the two BERT assisted-decoding ids.
+
+**Measured dispatch (post-change conf, on hardware).** Because the change is
+conf-only, this PR's `cumsum = ascend` row was installed over the base build's
+own conf on `bm-jn-zs-zone1-910C-64G-10-108` (container `lvyufeng-torch-fl`,
+interpreter `torch-fl-ascend-py311`, `TORCH_DEVICE_BACKEND_AUTOLOAD=0
+FLAGOS_LOG=dispatch`) and the probe re-run. No rebuild is needed: the aclnn
+`cumsum` kernel is already in the base `libtorch_fl.so` and the swap is what the
+change ships. The only diff between the two arms is one line:
+
+```text
+< cumsum = flaggems  # ascend
+---
+> cumsum = ascend  # ascend
+```
+
+with the flip in force the dispatch and values are:
+
+```text
+[flagos dispatch] cumsum -> ascend
+[flagos dispatch] cumsum -> ascend
+[flagos dispatch] cumsum -> ascend
+[flagos dispatch] cumsum -> ascend
+
+empty-bool cumsum OK -> (1, 0) torch.int64
+cumsum(arange(5)) -> [0, 1, 3, 6, 10]
+cumsum(ones(3)) -> [1.0, 2.0, 3.0]
+empty-f32 cumsum OK -> (1, 0)
+```
+
+`lift_fresh -> ascend`, `arange -> flagos_python`, `ones -> ascend` and
+`fill_.Scalar -> flagos_python` in the same log are construction ops the probe
+itself issues; their routes are unchanged. The base conf was never edited (its
+SHA-256 `d02e4b54f801092299e091f49795ea83b3f70aae525cbad8a06d092c31122231` is
+unchanged after the run), so this is a zero-mutation A/B.
+
+**Evidence gaps.** Recorded rather than papered over:
+
+- The flip is confirmed at the dispatch, value and end-to-end (two ids) level on
+  hardware. A **full BERT cohort re-run** against a build carrying this change
+  has **not** been made; the end-to-end green is the two targeted ids, not the
+  suite.
+- The other 223 Ascend `flaggems` routes are **not revalidated** by this change.
+  It moves one op and measures it; no sweep of the remainder was run, and the
+  other `NATIVE_TRITON_GAPS["ascend"]` entries are untouched.
+- The `flagos` device is the only accelerator this entry measures. It claims
+  nothing about `dcu`, `musa`, `gcu`, `kunlunxin`, `metax`, `ppu` or `tsingmicro`,
+  whose `cumsum` rows are neither revalidated nor affected: the defect lives in
+  the FlagGems `_ascend` backend override, which only this platform loads.
 
 ### MUSA: float64 `mm` served by repairing the FlagGems tune space the device refuses (2026-09-27, MTT S5000)
 
@@ -10433,6 +10563,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `cumsum` leaves the FlagGems route for the aclnn kernel already registered behind it | **Routes one op off a broken FlagGems `_ascend` backend override onto the vendor kernel that already serves it.** `flag_gems/runtime/backend/_ascend/ops/cumsum.py:225` sizes its reduction as `K = inp.numel() // M // N` with `N = shape[dim]`, so an empty reduction dim — the `bool (1, 0)` tensor `_assisted_decoding` builds at `transformers/generation/utils.py:4107`, which ATen's own `cumsum` answers with an empty tensor — is `0 // 1 // 0` and `ZeroDivisionError`, where the generic `ops/cumsum.py` does not divide by `N`. This is the third instance of the same `_ascend` override class (cf. the sibling `ones`/`ones_like` change). The defect is FlagGems'; the torch_fl lever is the route — `cumsum` enters `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends it to `ascend`, where `ascend_register.inc:137` registers `WrapperCumsum` and `ascend_kernels.cc:2223` binds `CumsumKernelAscend` to `aclnnCumsum`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **223**, `ascend` 151 -> **152**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `61a4dc07353e51fd2a16423ecdec91b69451e40b4af68bbc06e54850b9607c5f`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The defect reproduces standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (`torch.cumsum(bool(1,0), dim=-1)` -> `ZeroDivisionError` at `cumsum.py:225`). `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 223, "none": 1662, "ascend": 152}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 223. **The flip is measured on hardware, zero-mutation:** the `cumsum = ascend` row is the *only* difference between the two arms, and under it `FLAGOS_LOG=dispatch` logs `cumsum -> ascend` (x4) with `cumsum(bool(1,0)) -> (1, 0) int64`, `cumsum(arange(5)) -> [0, 1, 3, 6, 10]`, `cumsum(ones(3)) -> [1.0, 2.0, 3.0]` and `cumsum(f32(1,0)) -> (1, 0)`, while the FlagGems arm raises; the base conf was restored untouched (SHA-256 `d02e4b54…`). End-to-end on the two BERT assisted-decoding ids: **`2 failed` on the FlagGems route -> `2 passed` on `ascend`**, same single variable. A **full BERT cohort re-run** against this change has not been made — the end-to-end green is those two ids, not the suite. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the defect living only in the `_ascend` override. |
 | 2026-10-16 | Hygon DCU bw1000 (1 device), torch `2.10.0+das.opt1.dtk2604.2606151054.g98b1a8` (`torch.version.hip` 6.3.26113), Python 3.10.20. **Other platforms not revalidated** | The DCU complex factory surface (`zeros`, `ones`, `randn`, `fill_`, `abs`) — a runtime dtype escape, no conf route moved | **Names complex in the FlagGems dtype converter and adds a DCU arm to the runtime dtype escape, so a complex factory keeps its dtype and reaches a kernel that can serve it.** Two defects met on one call. `OptionalDtypeToPython` (`csrc/aten/backends/flagos/python_op_caller.cc`) had no complex case and returned Python `None`, which a factory reads as `torch.get_default_dtype()`, so `torch.zeros(4, dtype=torch.complex64, device="flagos:0")` returned `float32` — a silent wrong answer, wider than the issue's title (`ones` and `randn` the same way). The converter now names `ComplexFloat`/`ComplexDouble` and its `default` raises `TORCH_CHECK` instead of returning `None`, so the next unnamed dtype fails loudly. That alone is not enough: FlagGems' HCU Triton backend has no complex pointer type, so the preserved dtype turns the silent `float32` into `KeyError: 'complex64'`. `FlagGemsRejectsDtype` (`csrc/aten/common.cc`) therefore gains a `FLAGOS_ACCEL_DCU` arm, the shape MetaX already carries (PR #539), and `ResolveFn` reroutes the complex call to the DCU CUDA boxing kernels. DCU ships `FLAGOS_BUILD_BOXING=1` (`.github/scripts/hooks/set_env_dcu.sh:316`), so the vendor slot is populated and the diversion has somewhere to land; `ones`/`fill_` divert because their vendor kernels are compositional (`at::empty(...).fill_(1)` / `.zero_()`) and the inner in-place call is itself diverted. The escape is dtype-scoped: `ones(float32)` still logs `flagos_python`. No conf, registration `.inc` or generated kernel changes. | Measured on a `libtorch_fl.so` built from this branch (copied into the env, original set aside) on one BW1000 with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`: `zeros`/`ones`/`randn` at `complex64` and `complex128` all return the requested dtype (was silent `float32`); `abs(complex64)` returns `[5.0, 1.4142, 2.0]`, equal to the CPU reference, and `abs(complex128)` returns `float64` (was `KeyError: 'complex64'`); `fill_(1+2j)` correct; controls unmoved — `zeros(float32)`/`zeros(float64)`/`ones(int64)`/`arange(int32)`/`ones(no dtype)` keep their dtypes and `complex64` `add` is correct. `FLAGOS_LOG=dispatch` on the patched build: `zeros -> cuda`, `ones -> cuda`, `fill_.Scalar -> cuda`, `zero_ -> cuda`, `abs -> cuda` for complex, and `ones -> flagos_python` for float32. New `tests/integration/ops/test_dcu_complex.py` (SHA-256 of the committed file verified on the host before the run) **9 passed in 57.23s** on hardware; `test_factory_ops.py` + `test_dtype_coverage.py` **221 passed, 1 xfailed**. The shipped DCU wheel predates both halves and reproduces the two defects, which is the before column. **Evidence gaps:** the `_flagos_nccl` comm extension fails to build on this branch (`/opt/dtk/include/rccl/rccl.h` uses `hipStream_t` without including `hip/hip_runtime.h`), so only the core `libtorch_fl.so` was rebuilt and swapped in — a full wheel rebuild needs that build-env issue resolved and is **not** done here. The broad `tests/integration/ops` sweep (`-k "not mps and not gcu and not kunlunxin and not ascend and not musa"`, whole directory) was still running against this build when this row was written and its result is **not** part of the evidence here; the regression result claimed is the new file and the two targeted files above. Every other platform is **not revalidated**: they share the converter (a complex factory there moves from silent `float32` to a loud FlagGems failure) and take the `#else` arm of the escape, and that is reasoned from the code, not measured. |
 | 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `ones`, `ones_like`, `max`, `max.dim` leave the FlagGems route for the aclnn kernels already registered behind them | **Routes four ops off two broken FlagGems `_ascend` backend overrides onto the vendor kernels that already serve them.** `flag_gems/runtime/backend/_ascend/ops/ones.py:56` sizes its grid as `cdiv(N, next_power_of_2(ceil(sqrt(volume))))`, which is `cdiv(0, 0)` for any zero-element shape, so `torch.ones((2, 0), device="flagos")` and `torch.ones(0, device="flagos")` raise `ZeroDivisionError` where the generic `ops/ones.py` (hardcoded 1024) does not; `_ascend/ops/max.py:100` builds its block mask with Python `and` on non-scalar tensors, the deprecated form that does not produce the intended elementwise mask, yielding a 43.4% mismatch in the BERT cohort's `test_forward_with_logits_to_keep`. Both defects are FlagGems'; the torch_fl lever is the route — the four ops enter `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends them to `ascend`, where `codegen_ascend.py` already emits and registers `WrapperOnes`/`WrapperOnesLike`/`WrapperMax`/`WrapperMaxDim`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **220**, `ascend` 151 -> **155**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. Both defects reproduce standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (verbatim tracebacks in the platform narrative above); `ones_like` on `(2, 0)` fails in the same kernel while `zeros`/`full` succeed. `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 220, "none": 1662, "ascend": 155}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 220. **The post-change conf is measured on hardware, per-op**: installing this PR's conf (`eeee6b6e…`) over the base build's own copy logs `ones -> ascend` (×2), `ones_like -> ascend`, `max -> ascend`, `max.dim -> ascend`, and the five probes that failed on the FlagGems route -- `ones((2,0))`, `ones(0)`, `ones_like(empty(2,0))`, `max(a)`, `max(a,dim=1)` -- all return correct values (full block in the platform narrative; the host conf was restored to `3e6979f6…` afterwards). The **BERT cohort has not been re-run** against it, so the end-to-end green is inferred rather than observed. The other 220 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the two defects living only in the `_ascend` override. |
 | 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `bitwise_{and,or,xor}.Scalar` gain a native aclnn claim (generated `ascend_register.inc` + `ascend_kernels.cc`) | **Claims the three scalar bitwise overloads on PrivateUse1, replacing a composite decomposition that handed FlagGems' tensor kernel a Python scalar it rejects.** `aten::bitwise_and.Scalar` is `CompositeExplicitAutograd`, and `csrc/aten/register.cc`'s Ascend arm includes only `backends/ascend/generated/ascend_register.inc`, so with no entry there the PrivateUse1 key held nothing: ATen's composite ran, decomposed to the registered `bitwise_and.Tensor` overload (routed `flaggems`), and `flag_gems.bitwise_and_tensor` -- whose un-schema'd `prepare_args` derives `is_tensor = [True, True]` -- raised `ValueError: Element at index 1 is incorrect. Expected True, but got False.`, failing nine BERT generation tests. MetaX claims the Scalar overload and passes the same tree. Three `binary_scalar` registry entries in `scripts/codegen/codegen_ascend.py` emit the PrivateUse1 claim (the fix's payload) plus an `aclnnBitwise{And,Or,Xor}Scalar` body through the existing `AclScalarWrapper` shape (`mul.Scalar`/`div.Scalar` precedent); the generator validates each symbol against `libopapi.so` and its header states BOOL support (both-BOOL lowers to `LogicalAnd`, the dtype the failing path uses). **On the default build the conf value stays `flaggems`**, so the winning backend is `flag_gems.bitwise_and_scalar` (correct for bool) and the aclnn kernel is the vendor candidate behind the `# ascend` annotation under `FLAGOS_FORCE_BACKEND=vendor`; the measured post-change dispatch line is `[flagos dispatch] bitwise_and.Scalar -> flagos_python`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `none` 1662 -> **1659**, `flaggems` 220 -> **223**, `ascend` 155 unchanged; 378 accelerated (18.6%). Every other platform's conf and every other platform's generated artifacts are byte-identical. | Conf SHA-256 `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138` -> `d02e4b54f801092299e091f49795ea83b3f70aae525cbad8a06d092c31122231`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The generated artifacts move by exactly the change: `ascend_register.inc` +3 `m.impl` (373 -> 376 registered ops), `ascend_kernels.cc` +57 lines (the three kernel bodies). Both pre-flight checks are recorded rather than assumed: `aclnnBitwiseAndScalar` exists (`nm -D libopapi.so` shows it plus `Or`/`Xor`, each with `GetSymbolSize`) and the enumerated missing reachable set is exactly the three overloads, obtained from the `FLAGOS_GEN_IMPLS` region of the shared `generated/register.inc` diffed against `ascend_register.inc` -- not guessed. The pre-fix failure is the verbatim traceback in the platform narrative above; two controls rule out a FlagGems divergence: `flag_gems.bitwise_and_tensor(x, False)` raises the identical ValueError on MetaX, and on the *pre-change* build re-routing the Ascend conf's `bitwise_and.Scalar` to `flaggems` changed nothing, because with no PrivateUse1 claim ATen's composite ran regardless of the conf value -- a statement about the **pre-change** build only; once the claim exists the conf value is the route (`csrc/aten/common.cc`: the value is the route, the `# ascend` annotation is read only under `FLAGOS_FORCE_BACKEND=vendor`), which is why this change leaves the value at `flaggems` and still moves the call off `.Tensor`. `tests/unit/test_conf_registration_consistency.py` and `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` move together to 223. **The three claimed overloads are measured on hardware, both arms**: same host, same interpreter, `TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_LOG=dispatch`; pre-change build at base `6573910` (`libtorch_fl.so` md5 `340a58b136805a36c8a4c51a2592003d`) logs `bitwise_and.Tensor -> flagos_python` with `PrivateUse1 bitwise_and.Scalar = False` and raises the ValueError, post-change build (`libtorch_fl.so` md5 `e678ca8b617429f34e3f20dda4c39112`, 5,273,128 B) logs `bitwise_{and,or,xor}.Scalar -> flagos_python` with all three `= True` and returns the CPU-reference values -- so the claim is what moves the call off `.Tensor`, and `flag_gems.bitwise_and_scalar` (not the aclnn kernel) is the winning backend, as designed. The aclnn bodies themselves are **not exercised** by any run, which is the recorded evidence gap. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected. |

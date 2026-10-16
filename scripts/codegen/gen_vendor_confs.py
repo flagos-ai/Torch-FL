@@ -1195,6 +1195,29 @@ FLAGGEMS_PYTHON_PLATFORMS = {"ascend", "metax", "dcu", "gcu", "musa", "ppu", "il
 # (5.4.0.dev0) + flagtree 0.6.1+enflame3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
+        # `cumsum` is an Ascend-backend kernel defect in the installed
+        # FlagGems, not a triton-lowering gap: its aclnn kernel is registered
+        # below (ascend_register.inc: WrapperCumsum; ascend_kernels.cc:
+        # CumsumKernelAscend -> aclnnCumsum), and the conf therefore annotates
+        # the FlagGems route `# ascend` -- the kernel is reachable, it just
+        # must not be the one a run reaches first.
+        #
+        #   cumsum -- flag_gems/runtime/backend/_ascend/ops/cumsum.py:225
+        #     sizes its reduction with `K = inp.numel() // M // N`, where
+        #     `N = shape[dim]`. For an empty reduction dim (e.g. a bool
+        #     tensor of shape (1, 0), the input `_assisted_decoding` builds at
+        #     transformers/generation/utils.py:4107) that is `0 // 1 // 0` ->
+        #     ZeroDivisionError. An empty dim is a legitimate input -- ATen's
+        #     own cumsum returns an empty tensor -- and the generic
+        #     flag_gems/ops/cumsum.py does not divide by `N`.
+        #
+        # This is the third instance of the same `_ascend` override defect
+        # class on this backend (cf. `ones`/`ones_like` in the sibling change
+        # and the annotated entries below): the override does shape arithmetic
+        # that divides by a dimension size, and an empty dim makes it raise.
+        # The torch_fl lever is the route, and the aclnn kernel that serves it
+        # already exists.
+        "cumsum",
         "eq.Scalar",
         "eq.Tensor",
         "exponential_",
