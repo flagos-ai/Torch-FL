@@ -20,9 +20,19 @@ Ascend has no CUDA runtime at all, so what differs per vendor is factored into a
 boundary, the key that backend is registered under in `triton.backends.backends`,
 and whether the runtime is CUDA-like. `is_cuda_like=False` routes hardware
 queries, raw streams and generated device snippets through `torch.flagos` and the
-ACL runtime instead. Ascend compile support is **experimental**; see
+vendor runtime instead. Ascend compile support is **experimental**; see
 [`docs/architecture/torch-compile-integration.md`](../../docs/architecture/torch-compile-integration.md)
 for the toolchain defects it works around.
+
+TsingMicro is the same shape as Ascend in that respect — its wheel pairs with a
+CPU-only torch — but it reaches Triton through FlagTree's TXDA backend, which
+names the target `txda` and registers the package under `tsingmicro`. Its raw
+stream is the TX runtime's single default queue, read through `torch.flagos`.
+One vendor quirk is handled outside the profile: `triton_heuristics` builds the
+`GPUTarget` it hands to `triton.compile` from `cc_warp_size(cc)`, which hard-codes
+CUDA's 32, while the TX driver reports 16 — `device_interface._patch_triton_warp_size`
+points that at the driver. A wrong warp size is wrong-but-running, not a failed
+compile.
 
 ## Usage
 

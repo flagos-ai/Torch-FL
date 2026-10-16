@@ -143,6 +143,18 @@ _KUNLUNXIN_PROFILE = PlatformProfile(
     vendor="kunlunxin",
 )
 
+# TsingMicro (Kuiper): FlagTree's TXDA backend names the target "txda" and is
+# registered under the package key "tsingmicro". Unlike kunlunxin it does *not*
+# report "cuda", so nothing collides with the stock CudaInterface. No CUDA
+# runtime at all -- the wheel pairs with a CPU-only torch -- so device and
+# stream queries go through torch.flagos like they do on the three above.
+_TSINGMICRO_PROFILE = PlatformProfile(
+    triton_device_type="txda",
+    triton_backend_key="tsingmicro",
+    is_cuda_like=False,
+    vendor="tsingmicro",
+)
+
 _PROFILES = {
     "dcu": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
@@ -150,6 +162,7 @@ _PROFILES = {
     "musa": _MUSA_PROFILE,
     "gcu": _GCU_PROFILE,
     "kunlunxin": _KUNLUNXIN_PROFILE,
+    "tsingmicro": _TSINGMICRO_PROFILE,
 }
 
 

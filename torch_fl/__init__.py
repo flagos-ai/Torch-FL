@@ -1390,17 +1390,23 @@ _VENDOR_DEVICE_ALIASES = {
     "tsingmicro": ("cuda", "txda"),
 }
 
+# Torch's own CUDA probe, captured in `_phase_claim` the moment `torch` is bound
+# and before any torch_fl code can replace it. `_real_cuda_is_available` answers
+# from this; see the note at the assignment for why the live attribute and the
+# `_flagos_original_is_available` stash both answer the wrong question.
+_TORCH_CUDA_PROBE = None
+
 
 def _real_cuda_is_available() -> bool:
     """Whether *torch* reports a CUDA device, not whether torch_fl redirected it.
 
-    ``torch.cuda.is_available`` stops being torch's own answer once
-    ``torch_fl.compile`` is imported: ``_patch_native_cuda_probe`` repoints it at
-    the flagos device count so that Inductor's CUDA-shaped FakeTensor probe finds
-    the accelerator on a build that has no CUDA runtime, and saves the function
-    it replaced as ``torch.cuda._flagos_original_is_available``. That import
-    lands before ``_phase_ecosystem`` reaches ``_alias_cuda_to_flagos``, so the
-    saved function is the only remaining answer to "is there real CUDA here".
+    ``torch.cuda.is_available`` stops being torch's own answer as soon as
+    torch_fl installs its own accelerator probe, which happens in this phase --
+    so the answer comes from ``_TORCH_CUDA_PROBE``, captured at import time
+    before anything could replace it. Consulting the live attribute (or the
+    ``_flagos_original_is_available`` copy, which ``_patch_native_cuda_probe``
+    writes from the *already-redirected* attribute) reports torch_fl's lambda
+    back and answers "real CUDA" on every build that has a flagos device.
 
     Reading the redirected probe instead answers yes on exactly the builds the
     alias exists for. Measured on MUSA with the redirect in place and this guard
@@ -1411,10 +1417,7 @@ def _real_cuda_is_available() -> bool:
     raised ``AssertionError: Torch not compiled with CUDA enabled``, so
     ``torch.compile(model, fullgraph=True)`` could not compile at all.
     """
-    probe = getattr(torch.cuda, "_flagos_original_is_available", None)
-    if probe is None:
-        probe = torch.cuda.is_available
-    return bool(probe())
+    return bool(_TORCH_CUDA_PROBE())
 
 
 def _alias_cuda_to_flagos():
@@ -2133,7 +2136,21 @@ def _phase_claim() -> None:
     load-bearing, so the constraints are documented at the runner.
     """
     global torch, flagos
+    global _TORCH_CUDA_PROBE
     import torch  # noqa: E402
+
+    # Torch's own CUDA probe, captured here -- the first moment `torch` is bound
+    # and before any torch_fl code can replace it. Both of torch_fl's redirects
+    # write ``torch.cuda.is_available``: `_alias_cuda_to_flagos`'s
+    # ``lambda: flagos.device_count() > 0``, and `_patch_native_cuda_probe`'s
+    # ``torch.flagos.is_available``. The latter stashes a copy under
+    # ``_flagos_original_is_available`` for `_real_cuda_is_available` to read --
+    # but it runs *after* the former, so what it captures is torch_fl's lambda,
+    # not torch's function. `_real_cuda_is_available` then answers "real CUDA" on
+    # every build with a flagos device, and the ``cuda`` alias never installs on
+    # exactly the builds it exists for. See `_TORCH_CUDA_PROBE`'s module-level
+    # note for the full chain.
+    _TORCH_CUDA_PROBE = torch.cuda.is_available
 
     # Immediately after `import torch`, and before anything relies on CUDA dispatch:
     # confirm the DTK device libraries actually bound to the official core.
