@@ -783,6 +783,49 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     assert patches["compile_threads"] == 4
 
 
+def test_dcu_defaults_to_serial_compile(monkeypatch):
+    """DCU must not resolve its device from a fresh compile worker.
+
+    The DTK torch is a HIP build, so `triton_helpers.set_driver_to_gpu()` looks
+    for the active device through `torch.cuda`, which only answers once
+    `torch_fl`'s shim is installed. Inductor's compile worker imports `torch` and
+    `triton` but never `torch_fl`, so a cold compile died there with "Could not
+    find an active GPU backend" while the parent process was fine -- which is why
+    the failure only appears on a cache miss and only once the group runs on DCU.
+    """
+    from torch_fl.compile import inductor_backend
+
+    monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "hcu"
+    )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "dcu")
+
+    patches = {}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+
+    assert patches["compile_threads"] == 1
+
+
+def test_dcu_preserves_explicit_compile_threads(monkeypatch):
+    """An explicit per-compile or environment setting remains authoritative."""
+    from torch_fl.compile import inductor_backend
+
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "hcu"
+    )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "dcu")
+
+    patches = {"compile_threads": 4}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert patches["compile_threads"] == 4
+
+    monkeypatch.setenv("TORCHINDUCTOR_COMPILE_THREADS", "8")
+    patches = {}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert "compile_threads" not in patches
+
+
 def test_flagtree_compiler_is_reached_through_triton():
     """Guard the packaging trap: the compiler is imported as `triton`.
 

@@ -395,13 +395,25 @@ def _resolve_config_patches(
 def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
     """Avoid unsafe vendor-driver initialization in compile workers.
 
-    PPU and MThreads FlagTree drivers, and Enflame's triton_gcu, query a vendor
-    runtime while creating compiler hints. Keeping the first implementation
-    conservative matters for all of them: the vendor runtime owns the current
-    device and stream, while Inductor workers may be forked after the parent has
-    initialized it. On GCU that is sharper than elsewhere, because a tops pointer
-    only resolves against the current device. Explicit per-compile and
-    environment settings remain authoritative.
+    PPU, HCU and MThreads FlagTree drivers, and Enflame's triton_gcu, query a
+    vendor runtime while creating compiler hints. Keeping the first
+    implementation conservative matters for all of them: the vendor runtime owns
+    the current device and stream, while Inductor workers may be forked after the
+    parent has initialized it. On GCU that is sharper than elsewhere, because a
+    tops pointer only resolves against the current device. Explicit per-compile
+    and environment settings remain authoritative.
+
+    HCU (DCU) is the case that reached this the hard way: its driver resolves the
+    active device through the `torch.cuda` shim that `torch_fl` installs on
+    import, and an Inductor compile worker imports only `torch` and `triton`. The
+    `torch.backends` entry point cannot close that gap here, because DCU's CPU
+    torch is a HIP build whose own `torch.cuda.is_available()` answer is already
+    the one the driver reads -- the entry point is what makes the two agree on
+    the other platforms, not what makes a DCU worker see a device. So every cold
+    Triton compile died in the worker with "Could not find an active GPU backend"
+    (run 38929353220, job 117069976592: 6 failed, 17 passed, 28 skipped in the
+    torch.compile group). Compiling in the parent keeps the shim in the process
+    that resolves it.
     """
     if "compile_threads" in config_patches:
         return
@@ -411,7 +423,7 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
     from torch_fl._build_config import ACCELERATOR
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if ACCELERATOR == "gcu":
+    if ACCELERATOR in ("gcu", "dcu"):
         config_patches["compile_threads"] = 1
         return
 
