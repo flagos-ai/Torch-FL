@@ -510,19 +510,21 @@ steps:
   # when detect_platform() is not "mps", so a lane that provisioned the wrong
   # accelerator would report skips rather than a false pass, which is why the
   # environment check asserts the device count.
-  - id: backend_ops
-    name: Run {{display_name}} backend operator tests
-    platforms: [mps]
-    command: python -m pytest tests/integration/ops -m mps -v --tb=short
-
   # TEMPORARY DIAGNOSTIC -- not a test. The backend operator group below is the
   # only place the native MPS kernels run, and on the hosted macos-14 runner its
   # process aborts before pytest prints a summary, so the numbers behind the
   # failures are lost. This entry runs the same shapes through a probe that
   # reports each diff explicitly and always exits 0, so the log carries the
-  # measurements without the pipeline turning red. Remove it once the runner
+  # measurements without the pipeline turning red. It is *above* `backend_ops`
+  # on purpose: the runner returns on the first failing group, so a probe placed
+  # after the group that aborts never runs at all. Remove it once the runner
   # behaviour is understood.
   - id: mps_env_probe
     name: MPS environment probe (diagnostic)
     platforms: [mps]
     command: python tests/integration/ops/_mps_env_probe.py
+
+  - id: backend_ops
+    name: Run {{display_name}} backend operator tests
+    platforms: [mps]
+    command: python -m pytest tests/integration/ops -m mps -v --tb=short

@@ -21,12 +21,21 @@ shapes as ``test_mps_layer_norm.py`` through explicit reporting and always exits
 0, so the measurements arrive without turning the pipeline red. It is scaffolding
 rather than a test: it carries no assertions and comes out with the manifest
 entry that invokes it once the runner behaviour is understood.
+
+The probe is delivered as ``python _mps_env_probe.py`` with no argument; that
+entry point is the *driver*, and it re-invokes this same file once per section
+with the section name as the argument. The split is the point: the unit under
+test aborts the whole process (``Fatal Python error: Aborted`` with no traceback
+of its own), so a single process that ran every section in sequence would lose
+the report of every section after the first abort. Run one per child, and the
+driver prints the child's signal next to the sections that did survive.
 """
 
 import json
 import os
 import platform
 import subprocess
+import sys
 
 import torch
 import torch_fl  # noqa: F401
@@ -43,7 +52,12 @@ def _shell(command):
 
 
 def _diff_report(label, got, expected, rtol=1e-5, atol=1e-5):
-    for index, name in enumerate(("out", "mean", "rstd")):
+    # ``native_layer_norm`` answers with a triple and ``F.layer_norm`` with the
+    # single ``out``, so the names walk whichever length the caller handed over
+    # rather than a fixed three.
+    names = ("out", "mean", "rstd")
+    for index in range(min(len(got), len(expected))):
+        name = names[index] if index < len(names) else f"result{index}"
         got_t = got[index]
         exp_t = expected[index]
         line = {
@@ -214,34 +228,93 @@ def _report_div():
         "div.Scalar subnormal": torch.ops.aten.div.Scalar(tiny.clone().to(DEVICE), 2.0),
         "mul.Scalar subnormal": torch.ops.aten.mul.Scalar(tiny.clone().to(DEVICE), 0.5),
         "mul.Tensor subnormal": tiny.clone().to(DEVICE) * divisor.clone().to(DEVICE),
+        "python div operator": tiny.clone().to(DEVICE) / 2.0,
     }
     expected = {
         "div.Tensor subnormal": (tiny / divisor).item(),
         "div.Scalar subnormal": (tiny / 2.0).item(),
         "mul.Scalar subnormal": (tiny * 0.5).item(),
         "mul.Tensor subnormal": (tiny * divisor).item(),
+        "python div operator": (tiny / 2.0).item(),
     }
     for name, tensor in cases.items():
+        got = tensor.detach().cpu().item()
+        # The two suites disagree about this value and both are "pinned", so the
+        # probe reports the direction explicitly rather than a bare number: the
+        # dev host flushes a graph subnormal to zero, and a runner that *keeps*
+        # it fails `TestSubnormalBoundaryIsDocumented` on the same assertion
+        # that passes here.
         print(
             json.dumps(
                 {
                     "kind": "subnormal",
                     "case": name,
-                    "got": tensor.detach().cpu().item(),
+                    "got": got,
                     "expected": expected[name],
-                    "flushed": tensor.detach().cpu().item() == 0.0,
+                    "flushed": got == 0.0,
+                    "direction": "FLUSHED" if got == 0.0 else "KEPT-THE-SUBNORMAL",
                 }
             ),
             flush=True,
         )
 
 
-def main():
-    _report_environment()
-    _report_div()
-    _report_layer_norm()
-    # The aborting case, last and alone, so its neighbours' reports survive it.
-    print(json.dumps({"kind": "abort-case", "stage": "entering"}), flush=True)
+def _report_upstream_mps():
+    """What upstream PyTorch's own MPS layer_norm makes of the same shapes.
+
+    The torch-fl body feeds MPSGraph the same nodes upstream's MPS
+    ``native_layer_norm`` does, so if the *hosted runner* also disagrees with
+    the CPU reference through ``torch.mps`` directly, the divergence is the
+    runner's Metal rather than this backend's graph. If upstream agrees and
+    torch-fl does not, the graph here is the difference. Either way the answer
+    separates the two possibilities the failure list cannot: the probe reports
+    both sides on one machine.
+    """
+    if not torch.backends.mps.is_available():
+        print(json.dumps({"kind": "upstream", "available": False}), flush=True)
+        return
+    print(json.dumps({"kind": "upstream", "available": True}), flush=True)
+    torch.manual_seed(0)
+    for shape, normalized_shape in TRAILING_CASES:
+        host = torch.randn(*shape)
+        moved = host.clone().to("mps")
+        got = torch.ops.aten.native_layer_norm(
+            moved, list(normalized_shape), None, None, 1e-5
+        )
+        reference = torch.ops.aten.native_layer_norm(
+            host, list(normalized_shape), None, None, 1e-5
+        )
+        for index, name in enumerate(("out", "mean", "rstd")):
+            got_c = got[index].detach().cpu().float()
+            exp_c = reference[index].detach().cpu().float()
+            same_shape = tuple(got_c.shape) == tuple(exp_c.shape)
+            print(
+                json.dumps(
+                    {
+                        "kind": "upstream",
+                        "case": f"trailing {shape} ns={normalized_shape}",
+                        "tensor": name,
+                        "shape": list(got_c.shape),
+                        "maxdiff": (got_c - exp_c).abs().max().item()
+                        if same_shape
+                        else None,
+                    }
+                ),
+                flush=True,
+            )
+
+
+def _report_frontend():
+    """The aborting case, alone in its own process.
+
+    ``F.layer_norm`` with a host affine pair is the call the runner dies inside
+    (``test_the_layer_norm_front_end_reaches_the_same_kernel``), and the death
+    is a ``Fatal Python error: Aborted`` with no assertion in front of it. It
+    shares its section with nothing on purpose: the driver runs this section
+    last and reads its exit signal, so a crash is *the measurement* here rather
+    than the loss of the other sections' numbers.
+    """
+    print(json.dumps({"kind": "frontend", "stage": "entering"}), flush=True)
     host = torch.randn(2, 8, 512)
     weight = torch.randn(512)
     bias = torch.randn(512)
@@ -252,7 +325,58 @@ def main():
         host, (512,), weight=weight, bias=bias, eps=1e-5
     )
     _diff_report("F.layer_norm", (out,), (expected,))
-    print(json.dumps({"kind": "abort-case", "stage": "survived"}), flush=True)
+    print(json.dumps({"kind": "frontend", "stage": "survived"}), flush=True)
+
+
+SECTIONS = {
+    "environment": _report_environment,
+    "div": _report_div,
+    "layer_norm": _report_layer_norm,
+    "upstream": _report_upstream_mps,
+    "frontend": _report_frontend,
+}
+
+# The order the driver runs them in. `frontend` is last because it is the one
+# expected to abort: everything before it has already been printed and flushed
+# by the time its child dies.
+SECTION_ORDER = ["environment", "upstream", "div", "layer_norm", "frontend"]
+
+
+def _run_section(name):
+    print(json.dumps({"kind": "section-begin", "section": name}), flush=True)
+    SECTIONS[name]()
+    print(json.dumps({"kind": "section-end", "section": name}), flush=True)
+
+
+def _drive():
+    """Run each section in its own child, then summarize the exit signals."""
+    interpreter = sys.executable
+    for name in SECTION_ORDER:
+        # A child that aborts must not take the driver with it; the driver
+        # reports the child's returncode so a SIGABRT is visible as the value it
+        # is, and the sections after it still run.
+        done = subprocess.run(
+            [interpreter, os.path.abspath(__file__), name],
+            text=True,
+        )
+        print(
+            json.dumps(
+                {
+                    "kind": "section-result",
+                    "section": name,
+                    "returncode": done.returncode,
+                    "signal": -done.returncode if done.returncode < 0 else None,
+                }
+            ),
+            flush=True,
+        )
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in SECTIONS:
+        _run_section(sys.argv[1])
+    else:
+        _drive()
 
 
 if __name__ == "__main__":
