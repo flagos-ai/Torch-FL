@@ -114,6 +114,14 @@ steps:
       tests/integration/test_dtype_coverage.py tests/integration/test_ops.py
       -v -s --tb=short
 
+  # Issue #200: the cross-platform device backend contract -- one small suite
+  # asserting the public `flagos` tensor surface (registration, allocation, the
+  # mixed-device rejection) on every platform, selected without a marker so a
+  # wheel-only job that collects nothing still fails rather than passing empty.
+  - id: device_backend_contract
+    name: Device backend contract
+    command: python -m pytest tests/integration/test_device_backend_contract.py -v -s --tb=short
+
   # The vendor-backend group: seven selections for eight platforms today.
   #
   # The marker expression is the platform's because the marker a test carries is

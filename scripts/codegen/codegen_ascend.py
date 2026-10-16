@@ -156,6 +156,12 @@ OPS = {
     # ---- binary_alpha: aclnn<Name>(self, other, alpha, out) ----
     "sub.Tensor": ("binary_alpha", "Sub"),
     "add.Tensor": ("binary_alpha", "Add"),  # migrated seed
+    # ---- binary_out / binary_alpha_out: caller-provided out ----
+    # See T_BINARY_OUT. Only `add` claims its overloads today; the templates are
+    # generic, so widening the set is one line per op once a mixed-device route
+    # needs it.
+    "add.out": ("binary_alpha_out", "Add"),
+    "add.Scalar_out": ("binary_scalar_out", "Adds"),
     # ---- binary_scalar: aclnn<Name>(self, scalar, out), no alpha (migrated seeds) ----
     "mul.Scalar": ("binary_scalar", "Muls"),
     "div.Scalar": ("binary_scalar", "Divs"),
@@ -795,6 +801,95 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
 )
+
+# The `.out` overloads of the elementwise binary ops. Every template above
+# allocates its own `out` with apply_tensor_without_format, so none of them can
+# serve a caller-provided destination -- and the Ascend registration claims only
+# what this table emits. Without these entries `torch.add(a, b, out=...)`,
+# `add_(...)`'s composite decomposition and `torch.add(t, 1.0, out=...)` have no
+# m.impl on PrivateUse1 at all, so ATen's CompositeExplicitAutograd/cpu_fallback
+# path serves them: the arguments are moved to CPU and redispatched, which both
+# defeats the device check the wrapper would have run and silently succeeds for
+# operands on different flagos devices. See
+# tests/integration/test_device_backend_contract.py::
+# test_mixed_device_arithmetic_rejects_mismatch_in_subprocess for the contract
+# these must satisfy. The shape/dtype TORCH_CHECKs mirror what
+# apply_tensor_without_format would otherwise have enforced for us by allocating
+# the out itself.
+T_BINARY_OUT = (
+    """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {{
+"""
+    + _BINARY_PROLOGUE
+    + """\
+  TORCH_CHECK(
+      out.sizes().equals(out_shape),
+      "{fn}: expected out of size ", out_shape, ", but got ", out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == result_dtype,
+      "{fn}: expected out of dtype ", result_dtype, " but got ", out.scalar_type());
+
+  ascend::AclTensorWrapper acl_self(self_b);
+  ascend::AclTensorWrapper acl_other(other_b);
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+)
+
+# binary + trailing Scalar alpha, caller-provided out (add.out).
+T_BINARY_ALPHA_OUT = (
+    """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {{
+"""
+    + _BINARY_PROLOGUE
+    + """\
+  TORCH_CHECK(
+      out.sizes().equals(out_shape),
+      "{fn}: expected out of size ", out_shape, ", but got ", out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == result_dtype,
+      "{fn}: expected out of dtype ", result_dtype, " but got ", out.scalar_type());
+
+  ascend::AclTensorWrapper acl_self(self_b);
+  ascend::AclTensorWrapper acl_other(other_b);
+  ascend::AclScalarWrapper acl_alpha(alpha, result_dtype);
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_alpha.get(), acl_out.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+)
+
+# Tensor + Scalar, caller-provided out (add.Scalar_out). No alpha, and the
+# dtype is self's -- the same contract T_BINARY_SCALAR_ALPHA allocates from.
+T_BINARY_SCALAR_OUT = """\
+at::Tensor& {kernel}(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) {{
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(
+      out.sizes().equals(self.sizes()),
+      "{fn}: expected out of size ", self.sizes(), ", but got ", out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == self.scalar_type(),
+      "{fn}: expected out of dtype ", self.scalar_type(), " but got ", out.scalar_type());
+
+  ascend::AclTensorWrapper acl_self(self);
+  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  ascend::AclTensorWrapper acl_out(out);
+
+  EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_out.get());
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
 
 T_BINARY_SCALAR_ALPHA = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {{
@@ -4494,7 +4589,10 @@ SCALAR_VARIANT = {
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
+    "binary_out": T_BINARY_OUT,
     "binary_alpha": T_BINARY_ALPHA,
+    "binary_alpha_out": T_BINARY_ALPHA_OUT,
+    "binary_scalar_out": T_BINARY_SCALAR_OUT,
     "binary_cmp": T_BINARY_CMP,
     "binary_scalar_alpha": T_BINARY_SCALAR_ALPHA,
     "binary_scalar_cmp": T_BINARY_SCALAR_CMP,
@@ -4868,12 +4966,42 @@ def _handwritten_dispatchers() -> set:
         r"REGISTER_IMPL_TO_DISPATCHER\(\s*\w+\s*,\s*(\w+)_dispatcher\s*,"
         r"\s*Backend::kAscend\b"
     )
+    # The metadata-view ops are registered through a macro whose device is a
+    # parameter -- `FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kAscend)` expands
+    # to a dozen REGISTER_IMPL_TO_DISPATCHER calls written `..., device, ...`.
+    # The literal pattern above cannot see through that, so those dispatchers
+    # fell out of the coverage set and the checked-in ascend_register.inc kept
+    # them only because it was never regenerated after the macro was introduced.
+    # Regenerating without this arm drops all fourteen, which routes alias,
+    # permute, squeeze, transpose and friends off their Ascend kernels and into
+    # cpu_fallback -- and the dispatch test that names them goes red.
+    macro_pat = re.compile(
+        r"REGISTER_IMPL_TO_DISPATCHER\(\s*\w+\s*,\s*(\w+)_dispatcher\s*,"
+        r"\s*device\s*,"
+    )
+    macro_invocation = re.compile(
+        r"^#?\s*(\w+)\(\s*Backend::kAscend\s*\)", re.MULTILINE
+    )
     found = set()
     for d in HANDWRITTEN_DIRS:
         if not d.is_dir():
             continue
         for path in sorted(d.glob("*.cc")):
-            found |= set(pat.findall(path.read_text()))
+            text = path.read_text()
+            found |= set(pat.findall(text))
+            # A macro that takes the device as its last argument and is invoked
+            # with Backend::kAscend claims every dispatcher it registers. The
+            # registrations are wrapped across lines with a trailing backslash,
+            # so splice continuations before matching.
+            text = re.sub(r"\\\n\s*", " ", text)
+            for name in macro_invocation.findall(text):
+                body = re.search(
+                    rf"#define\s+{re.escape(name)}\([^)]*\)(.*?)(?=#define |#undef |\Z)",
+                    text,
+                    re.MULTILINE | re.DOTALL,
+                )
+                if body:
+                    found |= set(macro_pat.findall(body.group(1)))
     return found
 
 
