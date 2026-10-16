@@ -84,10 +84,12 @@ jobs:
     needs: configuration
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
-    container:
-      image: ${{ needs.configuration.outputs.ci_image }}
-      volumes: ${{ fromJson(needs.configuration.outputs.container_volumes) }}
-      options: ${{ needs.configuration.outputs.container_options }}
+    # `container:` cannot be conditional, so it is omitted for a platform whose
+    # config leaves `ci_image` empty. MPS is that platform: its accelerator is
+    # the runner's own Metal GPU and a macOS runner cannot start a container at
+    # all. A workflow-level `container: ''` is a schema error, not an absent
+    # key, which is why the two platforms need two spellings of the job.
+    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":"{0}","volumes":{1},"options":"{2}"}}', needs.configuration.outputs.ci_image, needs.configuration.outputs.container_volumes, needs.configuration.outputs.container_options)) || null }}
     defaults:
       run:
         shell: bash

@@ -104,19 +104,27 @@ def test_no_script_redefines_a_shared_phase():
 
 
 def test_every_script_calls_the_common_phases():
-    """The four phases every platform runs, called by name.
+    """The phases every platform runs, called by name.
 
     install_flagcx is defined for the platforms whose hook installs a published
     FlagCX wheel, which is not every one of them, so it is not asserted here.
+    install_flagtree is the other one: it exists for platforms whose operators
+    come from a FlagTree/FlagGems cohort, and Apple Silicon has none -- PyPI
+    publishes no `triton` wheel for macOS and there is no Metal FlagTree line --
+    so MPS is the one hook that installs no Triton build. The absence is
+    asserted directly rather than left implicit, so a hook that silently
+    dropped its FlagTree install would not pass by being here.
     """
     for script in _scripts():
         text = script.read_text(encoding="utf-8")
-        for phase in (
-            "install_cpu_torch",
-            "install_flagtree",
-            "build_flagos_inplace",
-            "export_ci_env",
-        ):
+        phases = ["install_cpu_torch", "build_flagos_inplace", "export_ci_env"]
+        if script.name == "set_env_mps.sh":
+            assert not re.search(r"^[ \t]*install_flagtree\b", text, re.M), (
+                f"{script.name}: install_flagtree is not available on macOS"
+            )
+        else:
+            phases.append("install_flagtree")
+        for phase in phases:
             assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
                 f"{script.name}: {phase}"
             )

@@ -77,10 +77,12 @@ jobs:
     name: Build wheel (${{ inputs.display_name }})
     runs-on: ${{ fromJson(inputs.runs_on) }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
-    container:
-      image: ${{ inputs.image }}
-      volumes: ${{ fromJson(inputs.container_volumes) }}
-      options: ${{ inputs.container_options }}
+    # `container:` cannot be conditional, so it is omitted for a platform whose
+    # config leaves `ci_image` empty. MPS is that platform: it builds for the
+    # runner's own Metal GPU, and a macOS runner cannot start a container at
+    # all. A workflow-level `container: ''` is a schema error rather than an
+    # absent key, which is why the two platforms need two spellings of the job.
+    container: ${{ inputs.image && fromJson(format('{{"image":"{0}","volumes":{1},"options":"{2}"}}', inputs.image, inputs.container_volumes, inputs.container_options)) || null }}
     defaults:
       run:
         shell: bash

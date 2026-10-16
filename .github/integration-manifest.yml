@@ -495,3 +495,22 @@ steps:
   - id: flaggems_conformance
     name: FlagGems conformance (hardware-agnostic)
     command: python -m pytest tests/integration/flaggems -v -s --tb=short
+
+  # MPS is the one platform whose runner is a GitHub-hosted macOS machine rather
+  # than a vendor image, and the one platform with no operator cohort to route
+  # (see NO_OPERATOR_COHORT in tests/unit/test_ci_version_pins.py). It picks up
+  # every group above that names no platform -- environment, the shared
+  # contracts and the flaggems pair included -- and adds exactly one of its own.
+  #
+  # The addition is the backend operator suite, the only place the native
+  # PrivateUse1 MPS kernels are executed at all. It is a new id rather than a
+  # `vendor_ops` variant because the vendor groups are file lists composed from
+  # a platform's operator cohort and MPS has none; the whole directory is
+  # selected by marker instead. `-m mps` is that marker; the tests self-skip
+  # when detect_platform() is not "mps", so a lane that provisioned the wrong
+  # accelerator would report skips rather than a false pass, which is why the
+  # environment check asserts the device count.
+  - id: backend_ops
+    name: Run {{display_name}} backend operator tests
+    platforms: [mps]
+    command: python -m pytest tests/integration/ops -m mps -v --tb=short
