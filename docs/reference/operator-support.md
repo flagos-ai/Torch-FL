@@ -808,6 +808,144 @@ snapshot assertion above catches a conf edited without its generator.
   whose `mm` rows are neither revalidated nor affected: `FlagGemsRejectsOpDtype`'s
   new rows live in the `USE_ASCEND` branch alone.
 
+### Ascend: `ones`/`ones_like`/`max`/`max.dim` leave the FlagGems route for their aclnn kernels (2026-10-16, Ascend 910C)
+
+**One sentence.** The `_ascend` backend overrides of two FlagGems kernels are
+wrong on Ascend -- `flag_gems/runtime/backend/_ascend/ops/ones.py:56` sizes its
+grid with `triton.cdiv(N, next_power_of_2(ceil(sqrt(volume))))`, which is
+`cdiv(0, 0)` and a `ZeroDivisionError` for any zero-element shape, where the
+generic `flag_gems/ops/ones.py` hardcodes 1024 and does not have the bug, and
+`flag_gems/runtime/backend/_ascend/ops/max.py:100` builds its block mask with
+Python `and` on non-scalar tensors, the deprecated form that does not produce the
+intended elementwise mask -- so `ones`, `ones_like`, `max` and `max.dim` move off
+the FlagGems route to the aclnn kernels that already serve them and are already
+registered.
+
+**The failure, on the route being left.** Both defects reproduce standalone on
+this host's `torch-fl-ascend-py311` interpreter with the FlagGems route in
+force, which is what makes this an entry about the kernel rather than about the
+model:
+
+```text
+>>> torch.ones((2, 0), device="flagos")
+ZeroDivisionError: integer division or modulo by zero
+  File ".../flag_gems/runtime/backend/_ascend/ops/ones.py", line 56, in ones
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+>>> torch.ones(0, device="flagos")
+ZeroDivisionError: integer division or modulo by zero
+```
+
+`torch.ones((4,), device="flagos")`, `torch.zeros((2, 0), device="flagos")` and
+`torch.full((2, 0), 1.0, device="flagos")` all succeed, so the division is the
+whole of the `ones` failure and `zeros`/`full` are unaffected. The Ascend override
+is what runs -- `flag_gems.ones` resolves to `_ascend/ops/ones.py:46`, not to the
+generic `ops/ones.py:44`. `ones_like` on a `(2, 0)` tensor fails in the same
+kernel.
+
+The `max` defect shows as a value rather than a raise: the BERT cohort's
+`test_forward_with_logits_to_keep` compares `all_logits[:, -1:, :]` against
+`last_token_logits` at `rtol=atol=1e-5` and reports
+
+```text
+AssertionError: Tensor-likes are not close!
+Mismatched elements: 558 / 1287 (43.4%)
+Greatest absolute difference: 6.57886266708374e-05 at index (10, 0, 66) (up to 1e-05 allowed)
+Greatest relative difference: 0.047847408801317215 at index (3, 0, 95) (up to 1e-05 allowed)
+```
+
+and the same run's captured warnings name the source:
+
+```text
+.../flag_gems/runtime/backend/_ascend/ops/max.py:100: UserWarning: Logical operators 'and' and 'or' are deprecated for non-scalar tensors; please use '&' or '|' instead
+    mask = m_offset[:, None] < M and n_offset[None, :] < N
+```
+
+The Ascend `max` kernel is genuinely reached: replacing `flag_gems.max` with a
+raising stub makes `torch.max(t)` raise that stub's exception.
+
+**Why the route is the torch_fl lever and not the bug.** Both defects are in the
+FlagGems `_ascend` backend override, upstream of torch_fl, and are reported here
+as such. What torch_fl owns is the route: `backends_ascend.conf` sent all four
+ops to `flaggems`, and each line carried the `# ascend` annotation, which is the
+generator's statement that an aclnn kernel exists behind the winning route.
+`codegen_ascend.py` emits them -- `ones`/`ones_like` from `T_ONES`
+(`at::empty(size, options)` then `fill_(1)`, "Same shape as T_ZEROS") and
+`max`/`max.dim` from `reduce_minmax_all` -- and `ascend_register.inc` registers
+`WrapperOnes`, `WrapperOnesLike`, `WrapperMax` and `WrapperMaxDim`. The kernels
+were reachable through `FLAGOS_FORCE_BACKEND=ascend` all along; the conf simply
+preferred FlagGems. No new kernel is added, so nothing here needs the
+codegen-limitation approval path.
+
+**Route delta.** Ascend `flaggems` 224 -> **220**, `ascend` 151 -> **155**, `none`
+1662 unchanged; 2037 entries, still 375 accelerated (18.4%). Conf SHA-256
+`346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` (at `2f94db1`)
+-> `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`. The diff is
+six lines: the two header counts and four route lines, `max = flaggems  # ascend`,
+`max.dim = flaggems  # ascend`, `ones = flaggems  # ascend` and
+`ones_like = flaggems  # ascend` becoming `max = ascend`, `max.dim = ascend`,
+`ones = ascend` and `ones_like = ascend`. The conf stays generated output -- the
+four ops enter `NATIVE_TRITON_GAPS["ascend"]` in
+`scripts/codegen/gen_vendor_confs.py` -- and is byte-identical across two runs of
+that script, whose `--check` reports `all vendor confs up to date` (exit 0) with
+every other platform's conf byte-identical. The move is the deliberate update
+`tests/unit/test_conf_registration_consistency.py::test_conf_route_counts_are_stable`
+asks for, its `ascend` snapshot going `{"flaggems": 224, "none": 1662,
+"ascend": 151}` -> `{"flaggems": 220, "none": 1662, "ascend": 155}`, and
+`tests/integration/flaggems/flaggems_caps.py:EXPECTED_FLAGGEMS_ROUTES["ascend"]`
+224 -> 220 in the same change.
+
+**Regression gate.** `tests/unit/test_conf_registration_consistency.py` is the
+gate for the conf/generator pair -- 52 passed, and it fails if the conf is edited
+without its generator or the snapshot is not updated deliberately. The behavioural
+half is the standalone repro above (red on the FlagGems route, green on the aclnn
+route) plus the BERT cohort's `test_forward_with_logits_to_keep`, whose 43.4%
+mismatch is the `max` route's.
+
+**Measured dispatch (post-change conf, on hardware).** Because the change is
+conf-only, this PR's `backends_ascend.conf` was installed over the base build's
+own copy on `bm-jn-zs-zone1-910C-64G-10-108` (container `lvyufeng-torch-fl`,
+interpreter `torch-fl-ascend-py311`, `TORCH_DEVICE_BACKEND_AUTOLOAD=0
+FLAGOS_LOG=dispatch`) and the probe re-run. No rebuild is needed: the four aclnn
+kernels are already in the base `libtorch_fl.so`
+(md5 `340a58b136805a36c8a4c51a2592003d`, 5,267,088 B) and the swap is what the
+change ships. Conf SHA-256
+`eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`:
+
+```text
+[flagos dispatch] ones -> ascend
+[flagos dispatch] ones -> ascend
+[flagos dispatch] ones_like -> ascend
+[flagos dispatch] max -> ascend
+[flagos dispatch] max.dim -> ascend
+
+ones((2,0))            -> (2, 0)
+ones(0)                -> (0,)
+ones_like(empty(2,0))  -> (2, 0)
+max(a)                 -> 5.0
+max(a, dim=1).values   -> [2.0, 5.0]
+```
+
+All four leave the FlagGems route, and all five probes that failed there return
+correct values. `fill_.Scalar -> flagos_python` and `arange -> flagos_python` in
+the same log are construction ops the probe itself issues; their routes are
+unchanged. The host conf was then restored to its original SHA-256
+`3e6979f6cc9756d3b2cc6c002cb9925056967ee06f62aab17098bb41a3862f0d`.
+
+**Evidence gaps.** Recorded rather than papered over:
+
+- The two `ZeroDivisionError` sites and the `max` mismatch were reproduced with
+  the FlagGems route forced, and the fix is confirmed per-op at the dispatch and
+  value level above. The **BERT cohort has not been re-run** against this conf,
+  so the end-to-end green is inferred, not observed.
+- The other 220 Ascend `flaggems` routes are **not revalidated** by this change.
+  It moves four ops and measures those four; no sweep of the remainder was run,
+  and the other `NATIVE_TRITON_GAPS["ascend"]` entries are untouched.
+- The `flagos` device is the only accelerator this entry measures. It claims
+  nothing about `dcu`, `musa`, `gcu`, `kunlunxin`, `metax`, `ppu` or `tsingmicro`,
+  whose `ones`/`max` rows are neither revalidated nor affected: the two defects
+  live in the FlagGems `_ascend` backend override, which only this platform
+  loads.
+
 ### MUSA: float64 `mm` served by repairing the FlagGems tune space the device refuses (2026-09-27, MTT S5000)
 
 **One sentence.** The mthreads `mm` tune space declares two 64x64x64 tiles at
@@ -9903,6 +10041,7 @@ the recorded result is unchanged.
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
 | 2026-10-16 | Hygon DCU bw1000 (1 device), torch `2.10.0+das.opt1.dtk2604.2606151054.g98b1a8` (`torch.version.hip` 6.3.26113), Python 3.10.20. **Other platforms not revalidated** | The DCU complex factory surface (`zeros`, `ones`, `randn`, `fill_`, `abs`) — a runtime dtype escape, no conf route moved | **Names complex in the FlagGems dtype converter and adds a DCU arm to the runtime dtype escape, so a complex factory keeps its dtype and reaches a kernel that can serve it.** Two defects met on one call. `OptionalDtypeToPython` (`csrc/aten/backends/flagos/python_op_caller.cc`) had no complex case and returned Python `None`, which a factory reads as `torch.get_default_dtype()`, so `torch.zeros(4, dtype=torch.complex64, device="flagos:0")` returned `float32` — a silent wrong answer, wider than the issue's title (`ones` and `randn` the same way). The converter now names `ComplexFloat`/`ComplexDouble` and its `default` raises `TORCH_CHECK` instead of returning `None`, so the next unnamed dtype fails loudly. That alone is not enough: FlagGems' HCU Triton backend has no complex pointer type, so the preserved dtype turns the silent `float32` into `KeyError: 'complex64'`. `FlagGemsRejectsDtype` (`csrc/aten/common.cc`) therefore gains a `FLAGOS_ACCEL_DCU` arm, the shape MetaX already carries (PR #539), and `ResolveFn` reroutes the complex call to the DCU CUDA boxing kernels. DCU ships `FLAGOS_BUILD_BOXING=1` (`.github/scripts/hooks/set_env_dcu.sh:316`), so the vendor slot is populated and the diversion has somewhere to land; `ones`/`fill_` divert because their vendor kernels are compositional (`at::empty(...).fill_(1)` / `.zero_()`) and the inner in-place call is itself diverted. The escape is dtype-scoped: `ones(float32)` still logs `flagos_python`. No conf, registration `.inc` or generated kernel changes. | Measured on a `libtorch_fl.so` built from this branch (copied into the env, original set aside) on one BW1000 with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`: `zeros`/`ones`/`randn` at `complex64` and `complex128` all return the requested dtype (was silent `float32`); `abs(complex64)` returns `[5.0, 1.4142, 2.0]`, equal to the CPU reference, and `abs(complex128)` returns `float64` (was `KeyError: 'complex64'`); `fill_(1+2j)` correct; controls unmoved — `zeros(float32)`/`zeros(float64)`/`ones(int64)`/`arange(int32)`/`ones(no dtype)` keep their dtypes and `complex64` `add` is correct. `FLAGOS_LOG=dispatch` on the patched build: `zeros -> cuda`, `ones -> cuda`, `fill_.Scalar -> cuda`, `zero_ -> cuda`, `abs -> cuda` for complex, and `ones -> flagos_python` for float32. New `tests/integration/ops/test_dcu_complex.py` (SHA-256 of the committed file verified on the host before the run) **9 passed in 57.23s** on hardware; `test_factory_ops.py` + `test_dtype_coverage.py` **221 passed, 1 xfailed**. The shipped DCU wheel predates both halves and reproduces the two defects, which is the before column. **Evidence gaps:** the `_flagos_nccl` comm extension fails to build on this branch (`/opt/dtk/include/rccl/rccl.h` uses `hipStream_t` without including `hip/hip_runtime.h`), so only the core `libtorch_fl.so` was rebuilt and swapped in — a full wheel rebuild needs that build-env issue resolved and is **not** done here. The broad `tests/integration/ops` sweep (`-k "not mps and not gcu and not kunlunxin and not ascend and not musa"`, whole directory) was still running against this build when this row was written and its result is **not** part of the evidence here; the regression result claimed is the new file and the two targeted files above. Every other platform is **not revalidated**: they share the converter (a complex factory there moves from silent `float32` to a loud FlagGems failure) and take the `#else` arm of the escape, and that is reasoned from the code, not measured. |
+| 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `ones`, `ones_like`, `max`, `max.dim` leave the FlagGems route for the aclnn kernels already registered behind them | **Routes four ops off two broken FlagGems `_ascend` backend overrides onto the vendor kernels that already serve them.** `flag_gems/runtime/backend/_ascend/ops/ones.py:56` sizes its grid as `cdiv(N, next_power_of_2(ceil(sqrt(volume))))`, which is `cdiv(0, 0)` for any zero-element shape, so `torch.ones((2, 0), device="flagos")` and `torch.ones(0, device="flagos")` raise `ZeroDivisionError` where the generic `ops/ones.py` (hardcoded 1024) does not; `_ascend/ops/max.py:100` builds its block mask with Python `and` on non-scalar tensors, the deprecated form that does not produce the intended elementwise mask, yielding a 43.4% mismatch in the BERT cohort's `test_forward_with_logits_to_keep`. Both defects are FlagGems'; the torch_fl lever is the route — the four ops enter `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends them to `ascend`, where `codegen_ascend.py` already emits and registers `WrapperOnes`/`WrapperOnesLike`/`WrapperMax`/`WrapperMaxDim`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **220**, `ascend` 151 -> **155**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. Both defects reproduce standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (verbatim tracebacks in the platform narrative above); `ones_like` on `(2, 0)` fails in the same kernel while `zeros`/`full` succeed. `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 220, "none": 1662, "ascend": 155}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 220. **The post-change conf is measured on hardware, per-op**: installing this PR's conf (`eeee6b6e…`) over the base build's own copy logs `ones -> ascend` (×2), `ones_like -> ascend`, `max -> ascend`, `max.dim -> ascend`, and the five probes that failed on the FlagGems route -- `ones((2,0))`, `ones(0)`, `ones_like(empty(2,0))`, `max(a)`, `max(a,dim=1)` -- all return correct values (full block in the platform narrative; the host conf was restored to `3e6979f6…` afterwards). The **BERT cohort has not been re-run** against it, so the end-to-end green is inferred rather than observed. The other 220 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the two defects living only in the `_ascend` override. |
 | 2026-10-14 | None (CPU-only host) | CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro) | **Makes CUDA boxing opt-in on every CUDA-compatible accelerator, so the default wheel links no vendor torch and routes FlagGems-primary.** `FLAGOS_BUILD_BOXING` is off again for all five platforms (`cmake/flagos_platforms.json`): the default wheel compiles no CUDA boxing kernels and bundles no vendor libtorch. `csrc/aten/register.cc`'s shared `#else` arm now compiles the new `csrc/aten/generated/register_flaggems_<platform>.inc` when `FLAGOS_FLAGGEMS_PYTHON` is set and boxing is off, claiming only the ops the platform's conf routes to a FlagGems backend; every other op stays unregistered and reaches `cpu_fallback`. `-DFLAGOS_BUILD_BOXING=ON` / `FLAGOS_BUILD_BOXING=1` restores the previous behavior -- the generated `generated/register.inc` claims every op and the wheel bundles the vendor libtorch. `setup.py` returns early from `_bundle_cuda_assets()` and drops the pinned `nvidia-*-cu12` runtime deps when boxing is off. The compatibility manifest's `vendor_torch_libraries` now follows the build: a new per-platform `vendor_torch_gate` (`FLAGOS_BUILD_BOXING` for cuda/ppu/metax/dcu) keeps the declaration true only on a boxing build, so a default wheel declares no vendor libtorch and `--release` no longer demands `FLAGOS_VENDOR_TORCH_VERSION` for one it does not ship. `csrc/aten/sdp_choice_stub.cc`'s composite tail boxes onto the vendor CUDA kernels only on a boxing build and otherwise calls `at::native::scaled_dot_product_attention` on the flagos tensors. `csrc/CMakeLists.txt` adds `FLAGOS_BOXING_BUILD` and a `FLAGOS_ACCEL_<UPPER>` discriminator for the shared arm. **No conf route moved:** `flaggems`/`cuda` counts stay cuda 416/1618, dcu 454/1583, ppu 592/1445, metax 594 + 10 `flaggems_cpp`/1433, tsingmicro 51 + 2 `flagos_python` (totals 2034/2037/2037/2037/53 unchanged). The CI hooks (`set_env_cuda/metax/ppu/dcu`) opt their boxes into boxing so the existing CUDA-kernel and bundled-libtorch assertions stay valid. | New `scripts/codegen/codegen_boxing_flaggems_register.py --check` -> `[check] 5 register_flaggems_*.inc files are up to date` (cuda 417, dcu 454, metax 604, ppu 593, tsingmicro 52 `m.impl` lines); `scripts/codegen/gen_vendor_confs.py --check` -> `all vendor confs up to date`; targeted unit suite (`test_setup_build`, `test_env_registry`, `test_conf_registration_consistency`, `test_platform_capability_matrix`, `test_gen_vendor_confs`, `test_vendor_conf_single_writer`, `test_wheel_preflight`) -> 174 passed; `ruff check` -> "All checks passed!". Every hardware row is **not revalidated** -- no route changed and no build was produced on a target here. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin unified RNG cohort: 47 overloads rerouted from `none` to the native `kunlunxin` backend | **Rewires the RNG surface onto the flagos PrivateUse1 generator, so `torch.flagos.manual_seed` / `get_rng_state` / `set_rng_state` / `manual_seed_all` own the stream the draws consume.** The lane's operator step failed two `tests/integration/ops/test_rng_dispatch.py` cases (`TestRngSeedSource::test_rng_state_round_trip`, `TestRngMultiDevice::test_manual_seed_all_replays_each_device_independently`) because every RNG op was left at `none` and took `cpu_fallback`: `torch.manual_seed` reaches ATen's CPU fallback generator (so whole-tensor reproducibility checks passed), but the flagos PrivateUse1 generator is a different state object, so `torch.flagos.*` moved nothing the fallback read. `csrc/aten/backends/kunlunxin/rng.cc` is added — the "declined to the host" arm of the GCU file (`csrc/aten/backends/gcu/rng.cc`): the XPU op library exposes no RNG entry point, so each draw is taken on an `at::CPUGeneratorImpl` and copied back, while the seed is reserved through `c10::flagos::ReserveSeed`. It defines 47 `*KernelKunlunxin` kernels and 47 `REGISTER_IMPL_TO_DISPATCHER(..., Backend::kKunlunxin, ...)` lines. Route delta `kunlunxin` 10 -> **57**, `none` 2027 -> **1980**, `flaggems` 0 unchanged (no FlagGems route), zero `cuda` routes; total 2037. **This uses the GCU `HANDWRITTEN_OPS` precedent under the CLAUDE.md codegen rule:** the generator owns the `m.impl` registration (so route and registration move together and the consistency invariants hold) while the bodies live in the hand-written file, because the RNG surface's contract is seed provenance plus a host-side draw — a shape the one-per-op xdnn-wrapper `{kernels}` template cannot emit. No test case was modified except the platform registration of kunlunxin in `_supports_flagos_generator()` (identical test-case code across platforms is a fleet requirement). | Regeneration proofs: `codegen_kunlunxin.py --check` → `[check] 57 kernel(s) up to date` (10 generated + 47 handwritten, empty diff on a second run); `kunlunxin_kernels.cc` byte-unchanged; `gen_vendor_confs.py` twice → empty diff and `--check` exits 0. `tests/unit/test_conf_registration_consistency.py`'s census/route-count snapshot updated to `{"kunlunxin": 57, "none": 1980}`, and its `test_vendor_routes_are_registered` / `test_accelerated_routes_are_registered` / `test_registered_ops_are_never_left_at_none` invariants cover all 57 routes (parametrized over `["musa","gcu","ascend","kunlunxin"]`). The pre-fix failure is the lane's own integration-job log: `2 failed, 660 passed, 29 skipped, 834 deselected, 3 xpassed` with both failures in `test_rng_dispatch.py`. The 47 RNG routes and the ten conformance routes are **not measured on hardware** in this change — a `pytest tests/integration/ops/test_rng_dispatch.py -m main_ops` run on a P800 is the follow-up that closes the hardware-measurement gap. |
 | 2026-10-13 | Kunlunxin P800 (native backend) | Kunlunxin native backend dtype gates (the ten runtime-conformance ops: `add.Tensor`, `mul.Tensor`, `mm`, `bmm`, `neg`, `sum.dim_IntList`) | **Splits the native backend's single flat dtype gate into per-op gates measured against the vendor wrapper, so a dtype the vendor rejects takes the CPU round-trip instead of erroring inside the wrapper.** The lane's first run to reach the portable integration step failed ten `tests/integration/test_dtype_coverage.py` cases, every one of them a dtype the previous build sent straight to the vendor: the generated kernels gated on the flat `KunlunxinSupportsDtype`, whose dtype map admits float64 and int8 for every op, but `xdnn_pytorch_wrapper` validates the scalar types of each entry point at run time and rejects a per-op subset (`add.cpp:151`, `mul.cpp:189`, `neg.cpp:55`, `sum.cpp:81`, `matmul.cpp:106` raise "scalar type of ret : k<dtype> is unsupported", surfaced to the caller as `RuntimeError: <op> failed on the Kunlunxin XPU backend: Interrupted system call (4)`). Five new predicates in `csrc/aten/backends/kunlunxin/kunlunxin_common.h` now name each op's accepted set, each measured against the wrapper rather than inferred from the base map: `KunlunxinSupportsAddDtype` (base − float64 − int8), `KunlunxinSupportsMulDtype` (add − int16), `KunlunxinSupportsMatmulDtype` (exactly float16/float32), `KunlunxinSupportsUnaryDtype` (base − float64) and `KunlunxinSupportsReductionDtype` (float16/bfloat16/float32). The generator drives them through one `{supports}` placeholder and a `SUPPORTS` category→predicate map in `scripts/codegen/codegen_kunlunxin.py`, and `cat`, `_softmax`, `embedding` and `where.self` resolve to the base predicate through the same map (no change to their behaviour). `neg` on bool and the compact int/uint cases are unchanged. No test case was touched — the fleet requires identical test-case code across platforms; the gate is a per-op capability of the vendor wrapper, not a host accommodation. No operator reroutes: `backends_kunlunxin.conf` is byte-identical. | Regeneration is idempotent (`python scripts/codegen/codegen_kunlunxin.py --check` → `[check] 10 kernel(s) up to date`); the regenerated `kunlunxin_kernels.cc` changes exactly the six gate lines and `kunlunxin_register.inc` is byte-identical (the `m.impl` set did not move). The pre-fix failure is the lane's own integration-job log (`test_dtype_coverage.py` → `10 failed, 226 passed, 1 xfailed`). The runtime-conformance cohort this row names builds every operand via `_randn(...)` and is therefore **float32 only** (`tests/integration/runtime/runtime_probe.py`), so per-op gating cannot move it; a `pytest tests/integration/runtime` run on the P800 is the follow-up that closes the hardware-measurement gap — the new gates are **not revalidated** on hardware until the lane re-runs. |

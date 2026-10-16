@@ -1208,11 +1208,38 @@ NATIVE_TRITON_GAPS = {
         "le.Tensor",
         "lt.Scalar",
         "lt.Tensor",
+        # `max`/`max.dim` and the `ones` family are Ascend-backend kernel
+        # defects in the installed FlagGems, not triton-lowering gaps: their
+        # aclnn kernels are registered below (ascend_register.inc:
+        # WrapperMax/WrapperMaxDim/WrapperOnes/WrapperOnesLike), and the conf
+        # therefore annotates the FlagGems route `# ascend` -- the kernel is
+        # reachable, it just must not be the one a run reaches first.
+        #
+        #   max/max.dim — flag_gems/runtime/backend/_ascend/ops/max.py:100
+        #     builds its block mask with Python `and` on non-scalar tensors
+        #     (`mask = m_offset[:, None] < M and n_offset[None, :] < N`), the
+        #     deprecated form that does not produce the intended elementwise
+        #     mask. `torch.max(t)` measured 43.4% mismatched elements
+        #     (558/1287) on bert.
+        #   ones/ones_like — flag_gems/runtime/backend/_ascend/ops/ones.py:56
+        #     sizes its grid with triton.cdiv(N, BLOCK_SIZE) where
+        #     BLOCK_SIZE = next_power_of_2(ceil(sqrt(volume))). For a
+        #     zero-element shape (e.g. (2, 0)) that is cdiv(0, 0) →
+        #     ZeroDivisionError; the generic flag_gems/ops/ones.py hardcodes
+        #     1024 and does not have the bug.
+        #
+        # Both are upstream FlagGems bugs on the `_ascend` backend override,
+        # reproducible with the lines above; the torch_fl lever is the route,
+        # and the aclnn kernels that serve it already exist.
+        "max",
+        "max.dim",
         "mul_.Tensor",
         "native_dropout",
         "native_dropout_backward",
         "ne.Scalar",
         "ne.Tensor",
+        "ones",
+        "ones_like",
         "rand",
         "rand_like",
         "randperm",
