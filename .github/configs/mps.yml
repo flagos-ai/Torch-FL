@@ -62,6 +62,18 @@ integration_environment: {}
 # workflow's `container.options` field, which is empty on this platform.
 container_options: ""
 
+# The `build` frontend has to be installed in the hook's own venv before the
+# wheel step, for the same reason Kunlunxin needs it and one more. The masked
+# failure is shared: the checkout's own CMake `build/` directory shadows a
+# missing `build` module as a namespace package, so `python -m build` resolves
+# to the checkout instead of the frontend and reports `No module named
+# build.__main__; 'build' is a package and cannot be directly executed`. The
+# extra reason is that this lane's venv is created from scratch by the hook, so
+# there is no prebuilt image that might already have carried it. Measured on the
+# third run of this lane, which is where the message above comes from.
+integration_build_tools:
+  - python -m pip install --upgrade build
+
 timeout_minutes: 60
 wheel_artifact_name: wheel-mps
 
