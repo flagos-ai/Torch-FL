@@ -1386,10 +1386,27 @@ REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, 
         if (var == nil) {
           return std::vector<MPSGraphTensor*>();
         }
-        // rstd is 1 / sqrt(var + eps). MPSGraph's reciprocal square root is a
-        // node of its own, so this is two nodes rather than the one the
-        // composition would otherwise need -- and it is the same arithmetic the
-        // reference performs for the second result it returns.
+        // rstd is 1 / sqrt(var + eps), built from `squareRootWithTensor:` and
+        // `reciprocalWithTensor:` rather than the single fused
+        // `reciprocalSquareRootWithTensor:` the composition suggests.
+        //
+        // The fused selector is `MPS_AVAILABLE_STARTING(macos(15.0))`, and the
+        // hosted `macos-14` runner is the one lane that is *not* on 15 or
+        // later. There the selector is absent from the runtime even though it
+        // is absent from the SDK header too, so it compiles with only an
+        // `-Wobjc-method-access` warning ("instance method not found, return
+        // type defaults to 'id'") and then dies at the call rather than at the
+        // build: the first case to reach the node terminates the process with
+        // `NSInvalidArgumentException: -[MPSGraph reciprocalSquareRootWithTensor:
+        // name:]: unrecognized selector`, which is the SIGABRT the MPS lane
+        // reported as an operator-suite failure with no assertion in front of
+        // it. The two nodes below are the macOS 11 spelling with no availability
+        // gate, and `reciprocalWithTensor:` is the one the `reciprocal` kernel
+        // in this same file already runs on.
+        //
+        // This is a portability constraint rather than a numerics choice: both
+        // spellings compute 1/sqrt(x), and the composed form is what the older
+        // MPSGraph the runner carries can actually execute.
         MPSGraphTensor* shifted =
             [graph additionWithPrimaryTensor:var
                              secondaryTensor:[graph constantWithScalar:epsilon
@@ -1398,8 +1415,11 @@ REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, 
         if (shifted == nil) {
           return std::vector<MPSGraphTensor*>();
         }
-        MPSGraphTensor* rstd_t =
-            [graph reciprocalSquareRootWithTensor:shifted name:nil];
+        MPSGraphTensor* rooted = [graph squareRootWithTensor:shifted name:nil];
+        if (rooted == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* rstd_t = [graph reciprocalWithTensor:rooted name:nil];
         if (rstd_t == nil) {
           return std::vector<MPSGraphTensor*>();
         }
