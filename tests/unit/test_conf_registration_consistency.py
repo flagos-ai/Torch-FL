@@ -413,7 +413,11 @@ def test_conf_route_counts_are_stable():
     expected = {
         # mm and mm.out moved from the aclnn route to flaggems; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
-        "ascend": {"flaggems": 222, "none": 1659, "ascend": 156},
+        #
+        # flip moved from the flaggems route to ascend for the same reason;
+        # the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower the rank-2
+        # copy_func kernel the FlagGems `_ascend` flip override builds.
+        "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
         "bpu": {},
         "cuda": {"flaggems": 416, "cuda": 1618},
         "dcu": {"flaggems": 454, "cuda": 1583},
