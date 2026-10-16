@@ -4,6 +4,7 @@
 // Below is the original copyright:
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include "stream_copy.h"
 #include "contiguous_ops.h"
 
 #include <ATen/native/Resize.h>
@@ -124,7 +125,8 @@ at::Tensor contiguous(
         at::Tensor storage_cpu = at::empty(
             {static_cast<int64_t>(storage_size)},
             at::TensorOptions().dtype(at::kByte).device(at::kCPU));
-        Memcpy(storage_cpu.data_ptr(), self.storage().data(), storage_size, MemcpyDeviceToHost);
+        BlockingRuntimeMemcpy(
+            storage_cpu.data_ptr(), self.storage().data(), storage_size, MemcpyDeviceToHost);
 
         at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
         cpu_view.set_(
@@ -137,7 +139,8 @@ at::Tensor contiguous(
         cpu_contig.copy_(cpu_view);
 
         size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
-        Memcpy(result.data_ptr(), cpu_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+        BlockingRuntimeMemcpy(
+            result.data_ptr(), cpu_contig.data_ptr(), nbytes, MemcpyHostToDevice);
       }
 #endif
     }
@@ -162,7 +165,14 @@ at::Tensor clone(
       auto result = at::empty_like(self);
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
-        Memcpy(result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice);
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+        c10::flagos::dcu::CopyDeviceBytes(
+            result.data_ptr(), result.device().index(), self.data_ptr(),
+            self.device().index(), nbytes);
+#else
+        BlockingRuntimeMemcpy(
+            result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice);
+#endif
       } else if (nbytes > 0) {
         result.copy_(self);
       }

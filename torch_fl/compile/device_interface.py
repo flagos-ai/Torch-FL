@@ -583,6 +583,41 @@ def _repair_stock_cuda_interface() -> None:
     import torch._dynamo.device_interface as di
 
     getter = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if (
+        platform_profile().vendor == "dcu"
+        and hasattr(torch.flagos._C, "_dcu_stream_info")
+        and callable(getter)
+    ):
+        # CudaInterface may have cached the CPU wheel's dummy classes before
+        # the DCU shim was installed. Its runtime autotuner must agree with
+        # FlagOSDeviceInterface and with the generated raw-stream getter.
+        # Respect the actual installed provider: the CPU-wheel facade uses
+        # DcuStream/DcuEvent, whereas native DTK retains its torch.cuda types.
+        # Vendor name alone is not evidence that the facade was installed.
+        di.CudaInterface.Stream = torch.cuda.Stream
+        di.CudaInterface.Event = torch.cuda.Event
+        # These staticmethods are also captured when device_interface is first
+        # imported. Updating torch.cuda alone leaves references to the CPU
+        # wheel's original CUDA entry points in the runtime autotuner.
+        for name in (
+            "current_device",
+            "set_device",
+            "device_count",
+            "stream",
+            "current_stream",
+            "set_stream",
+            "_set_stream_by_id",
+            "synchronize",
+            "memory_allocated",
+        ):
+            setattr(di.CudaInterface, name, staticmethod(getattr(torch.cuda, name)))
+        di.CudaInterface.exchange_device = staticmethod(torch.cuda._exchange_device)
+        di.CudaInterface.maybe_exchange_device = staticmethod(
+            torch.cuda._maybe_exchange_device
+        )
+        di.get_cuda_stream = getter
+        di.CudaInterface.get_raw_stream = staticmethod(getter)
+        return
     if getter is not None and di.CudaInterface.get_raw_stream is None:
         di.get_cuda_stream = getter
         di.CudaInterface.get_raw_stream = staticmethod(getter)  # type: ignore[assignment]

@@ -24,6 +24,10 @@
 #include <flagos.h>
 
 #include "generator.h"
+#include "dcu_stream.h"
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+#include <c10/core/DeviceGuard.h>
+#endif
 #include "host_allocator.h"
 
 namespace c10::flagos {
@@ -120,6 +124,11 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
       return;
     }
 
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    // Allocation and its current stream belong to Storage, not the ambient
+    // device. Preserve DataPtr/context/deleter while publishing the new block.
+    const c10::DeviceGuard guard(storage_impl->device());
+#endif
     // Allocate new memory
     at::DataPtr new_data = allocator->allocate(newsize);
     TORCH_CHECK(new_data.get() != nullptr || newsize == 0,
@@ -128,8 +137,14 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
     // Copy existing data if any
     if (old_nbytes > 0 && storage_impl->data()) {
       size_t copy_size = std::min(old_nbytes, newsize);
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+      c10::flagos::dcu::CopyDeviceBytes(
+          new_data.get(), storage_impl->device().index(),
+          storage_impl->data(), storage_impl->device().index(), copy_size);
+#else
       ::Memcpy(new_data.get(), storage_impl->data(),
                copy_size, MemcpyDeviceToDevice);
+#endif
     }
 
     // Replace storage data

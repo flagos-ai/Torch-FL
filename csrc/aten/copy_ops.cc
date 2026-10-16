@@ -4,6 +4,7 @@
 // Below is the original copyright:
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+#include "stream_copy.h"
 #include "copy_ops.h"
 #include "contiguous_ops.h"
 #include "copy_dispatcher.h"
@@ -126,6 +127,8 @@ class BlockingCopyGuard {
     if (stream.stream() != nullptr) {
       stream.synchronize();
     }
+#elif defined(FLAGOS_DCU_VENDOR_STREAMS)
+    c10::flagos::dcu::Synchronize(c10::flagos::dcu::Current());
 #elif defined(USE_DCU)
     // DCU shares the vendor's streams, so it needs this barrier just as much as
     // the other CUDA-family backends -- but it cannot ask which stream is
@@ -184,7 +187,7 @@ void BlockingMemcpy(
     MemcpyKind kind,
     const at::Tensor& on_device) {
   BlockingCopyGuard barrier(on_device);
-  Memcpy(dst, src, nbytes, kind);
+  BlockingRuntimeMemcpy(dst, src, nbytes, kind);
 }
 
 // A blocking `Memcpy` is blocking only against the device that is current when
@@ -232,8 +235,14 @@ void CrossDeviceMemcpy(
     size_t nbytes,
     const at::Tensor& src,
     const at::Tensor& dst) {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+  c10::flagos::dcu::CopyDeviceBytes(
+      dst_ptr, dst.device().index(), src_ptr, src.device().index(), nbytes);
+  return;
+#endif
+
   BlockingCopyGuard barrier(src);
-  Memcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
+  BlockingRuntimeMemcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
   SyncPeerCopyVisibility(src, dst);
 }
 
@@ -353,6 +362,14 @@ at::Tensor _copy_from(
     bool non_blocking) {
   TORCH_CHECK(self.defined(), "Source tensor (self) is not defined.");
   TORCH_CHECK(dst.defined(), "Destination tensor (dst) is not defined.");
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+  // FlagGems in-place wrappers may copy their exact result back to self.
+  // Do not turn that no-op into a blocking device transfer. Storage aliases
+  // with different TensorImpls still require the normal copy semantics.
+  if (self.is_same(dst)) {
+    return dst;
+  }
+#endif
 
   // Raw memcpy copies storage bytes and therefore bypasses lazy Conjugate and
   // Negative math bits. Materialize those bits once before entering any of the
@@ -509,10 +526,12 @@ at::Tensor _copy_from(
 
   if (self.is_cpu() && dst.is_privateuseone()) {
     if (dst.is_contiguous()) {
-      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+      BlockingRuntimeMemcpy(
+          dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
     } else {
       auto tmp = at::empty(self_contig.sizes(), dst.options());
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+      BlockingRuntimeMemcpy(
+          tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS)
@@ -531,29 +550,36 @@ at::Tensor _copy_from(
       // buffer as well.
       auto tmp =
           at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      BlockingRuntimeMemcpy(
+          tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
     } else if (dst.is_contiguous()) {
-      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      BlockingRuntimeMemcpy(
+          dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
     } else {
       auto tmp = at::empty(self_contig.sizes(), dst.options());
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      BlockingRuntimeMemcpy(
+          tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
     }
   } else if (self.is_privateuseone() && dst.is_cuda()) {
     if (dst.is_contiguous()) {
-      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      BlockingRuntimeMemcpy(
+          dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
     } else {
       auto tmp = at::empty(self_contig.sizes(), dst.options());
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      BlockingRuntimeMemcpy(
+          tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
     }
   } else if (self.is_cuda() && dst.is_privateuseone()) {
     if (dst.is_contiguous()) {
-      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      BlockingRuntimeMemcpy(
+          dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
     } else {
       auto tmp = at::empty(self_contig.sizes(), dst.options());
-      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      BlockingRuntimeMemcpy(
+          tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS)
@@ -833,9 +859,11 @@ at::Tensor _to_copy(
     if (nbytes > 0) {
       BlockingCopyGuard barrier(result);
       if (self.is_cpu()) {
-        Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+        BlockingRuntimeMemcpy(
+            result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyHostToDevice);
       } else if (self.is_cuda()) {
-        Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+        BlockingRuntimeMemcpy(
+            result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
       } else {
         TORCH_CHECK(false, "_to_copy: unsupported source device ", self.device());
       }

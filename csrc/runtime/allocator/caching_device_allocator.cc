@@ -1,6 +1,7 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
 
 #include "caching_device_allocator.h"
+#include "runtime/dcu_stream.h"
 
 #if defined(USE_ASCEND)
 #include "backends/ascend_memory.h"
@@ -139,6 +140,12 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
   // Route the allocation through it so flagos `empty` and boxed-kernel outputs
   // share one pool. We skip the built-in block pool entirely.
   if (backend_->provides_caching()) {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    auto dcu_ptr = c10::flagos::dcu::Allocate(nbytes);
+    dcu_ptr.unsafe_set_device(c10::Device(c10::DeviceType::PrivateUse1, device));
+    return dcu_ptr;
+#endif
+
     void* ptr = backend_->caching_alloc(nbytes, /*stream=*/nullptr);
     TORCH_CHECK(
         ptr != nullptr,
@@ -172,6 +179,9 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
 }
 
 at::DeleterFnPtr CachingDeviceAllocator::raw_deleter() const {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+  return c10::flagos::dcu::RawDeleter();
+#endif
   return &block_deleter;
 }
 
@@ -179,6 +189,11 @@ void CachingDeviceAllocator::copy_data(
     void* dest,
     const void* src,
     std::size_t count) const {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+  c10::flagos::dcu::CopyData(dest, src, count);
+  return;
+#endif
+
   backend_->memcpy(dest, src, count, MemcpyDeviceToDevice);
 }
 

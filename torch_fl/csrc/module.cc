@@ -22,6 +22,9 @@
 #include <torch/csrc/autograd/generated/variable_factories.h>
 
 #include <memory>
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+#include <pybind11/pybind11.h>
+#endif
 
 #ifdef USE_MUSA
 #include <musa_runtime.h>
@@ -37,6 +40,7 @@
 #include <torch/csrc/Generator.h>
 
 #include <runtime/functions.h>
+#include <runtime/dcu_stream.h>
 #include <runtime/generator.h>
 #include <macros.h>
 #include <runtime/allocator/caching_device_allocator.h>
@@ -354,7 +358,14 @@ PyObject* _getDeviceCount(PyObject* self, PyObject* noargs) {
 
 PyObject* _synchronize(PyObject* self, PyObject* noargs) {
   HANDLE_TH_ERRORS
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+  {
+    pybind11::gil_scoped_release no_gil;
+    DeviceSynchronize();
+  }
+#else
   DeviceSynchronize();
+#endif
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS
 }
@@ -510,7 +521,103 @@ PyObject* _set_scatter_scope(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+// Validate before narrowing Python's integer to c10::DeviceIndex.
+static void checkDcuDeviceIndex(int device, bool allow_current = false) {
+  TORCH_CHECK(
+      device >= (allow_current ? -1 : 0) &&
+          device < c10::flagos::DeviceCount(),
+      "Invalid DCU stream device index: ", device);
+}
+
+static c10::Stream dcuStreamFromId(long long id, int device) {
+  checkDcuDeviceIndex(device);
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::DeviceType::PrivateUse1, device), id);
+}
+
+static PyObject* _dcuStreamInfo(PyObject*, PyObject* args) {
+  HANDLE_TH_ERRORS
+  int device = -1, use_default = 0;
+  if (!PyArg_ParseTuple(args, "i|p", &device, &use_default)) return nullptr;
+  checkDcuDeviceIndex(device, true);
+  auto stream = use_default ? c10::flagos::dcu::Default(device)
+                            : c10::flagos::dcu::Current(device);
+  // This ID is not a raw HIP handle. Keep its public PrivateUse1 tag.
+  return Py_BuildValue(
+      "Lii", static_cast<long long>(stream.id()),
+      static_cast<int>(stream.device_index()),
+      static_cast<int>(stream.device_type()));
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* _dcuRawStream(PyObject*, PyObject* args) {
+  HANDLE_TH_ERRORS
+  long long id;
+  int device;
+  if (!PyArg_ParseTuple(args, "Li", &id, &device)) return nullptr;
+  return PyLong_FromVoidPtr(c10::flagos::dcu::Raw(dcuStreamFromId(id, device)));
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* _dcuSetStream(PyObject*, PyObject* args) {
+  HANDLE_TH_ERRORS
+  long long id;
+  int device;
+  if (!PyArg_ParseTuple(args, "Li", &id, &device)) return nullptr;
+  c10::flagos::dcu::Exchange(dcuStreamFromId(id, device));
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* _dcuExternalStream(PyObject*, PyObject* args) {
+  HANDLE_TH_ERRORS
+  unsigned long long raw;
+  int device;
+  if (!PyArg_ParseTuple(args, "Ki", &raw, &device)) return nullptr;
+  checkDcuDeviceIndex(device);
+  auto stream = c10::flagos::dcu::External(
+      reinterpret_cast<Stream_t>(raw), device);
+  return Py_BuildValue(
+      "Li", static_cast<long long>(stream.id()),
+      static_cast<int>(stream.device_index()));
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* _dcuStreamPriority(PyObject*, PyObject* args) {
+  HANDLE_TH_ERRORS
+  long long id;
+  int device, priority;
+  if (!PyArg_ParseTuple(args, "Li", &id, &device)) return nullptr;
+  TORCH_CHECK(
+      ::StreamGetPriority(
+          c10::flagos::dcu::Raw(dcuStreamFromId(id, device)), &priority) == Success,
+      "DCU StreamGetPriority failed");
+  return PyLong_FromLong(priority);
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* _dcuPriorityRange(PyObject*, PyObject*) {
+  HANDLE_TH_ERRORS
+  int least, greatest;
+  TORCH_CHECK(
+      ::DeviceGetStreamPriorityRange(&least, &greatest) == Success,
+      "DCU DeviceGetStreamPriorityRange failed");
+  return Py_BuildValue("ii", least, greatest);
+  END_HANDLE_TH_ERRORS
+}
+
+#endif
 static PyMethodDef methods[] = {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    {"_dcu_stream_priority", _dcuStreamPriority, METH_VARARGS, nullptr},
+    {"_dcu_priority_range", _dcuPriorityRange, METH_NOARGS, nullptr},
+    {"_dcu_stream_info", _dcuStreamInfo, METH_VARARGS, nullptr},
+    {"_dcu_raw_stream", _dcuRawStream, METH_VARARGS, nullptr},
+    {"_dcu_set_stream", _dcuSetStream, METH_VARARGS, nullptr},
+    {"_dcu_external_stream", _dcuExternalStream, METH_VARARGS, nullptr},
+#endif
     {"_init", _initExtension, METH_NOARGS, nullptr},
     {"_get_default_generator", _getDefaultGenerator, METH_O, nullptr},
     {"_reserve_rng_seed", _reserveRngSeed, METH_VARARGS, nullptr},
