@@ -275,6 +275,19 @@ OPS = {
     # one MPSGraph node rather than the `native_batch_norm` + `addcmul`
     # decomposition the CPU fallback performs -- see T_LAYER_NORM.
     "native_layer_norm": "layer_norm",
+    # Two ops the runtime-conformance suite lists as `RUNTIME_OPS`, which is the
+    # contract that every one of them reaches an accelerator backend on every
+    # platform -- MPS was the one platform handing these two to cpu_fallback.
+    #
+    # `where.self` is the ternary select and MPSGraph has the node
+    # (`selectWithPredicateTensor:`), so it is a native body rather than a
+    # round-trip: see T_WHERE for the three reference checks the node does not
+    # make.
+    "where.self": "where",
+    # `cat` is the variadic concatenation, and the node is
+    # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
+    # node would otherwise answer with a broadcasted wrong answer.
+    "cat": "cat",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -349,6 +362,15 @@ AT_OP = {
     # `(x - mean) / sqrt(var + eps) * gamma + beta` and answers the same
     # (out, mean, rstd) triple this body does.
     "native_layer_norm": "native_layer_norm",
+    # `where.self` is a real aten kernel rather than a decomposition, so the
+    # round-trip lands on the reference's own `select` and reports its own
+    # `where expected condition to be a boolean tensor` message for a condition
+    # width this body declines.
+    "where.self": "where",
+    # `cat` is likewise its own kernel, and the round-trip is where the
+    # reference's shape message (`Sizes of tensors must match except in dimension
+    # {dim}`) and its empty-list error live.
+    "cat": "cat",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -407,6 +429,18 @@ SUPPORTS = {
     # float widths and declines an integer input the reference computes in
     # float -- one rule, named once.
     "layer_norm": "MpsSupportsReduceDtype",
+    # `where`'s select takes both branches in one datatype and promotes nothing,
+    # while the reference promotes `self`/`other` to a common dtype -- so the gate
+    # is over the two branch widths, and the condition width is checked with
+    # them: bool is the reference's modern condition, uint8 the deprecated one
+    # the body widens by comparing to zero, and any other width is the
+    # reference's own error. See T_WHERE.
+    "where": "MpsSupportsWhereDtype",
+    # `cat`'s node requires one datatype across the whole list, where the
+    # reference promotes a mixed list. The body checks the list is uniform and
+    # this gate checks the one width is carryable, so a promoted or uncarryable
+    # list takes the round-trip. See T_CAT.
+    "cat": "MpsSupportsCatDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -488,6 +522,12 @@ CALLS = {
     # and its two reductions, so it names none here. The entry exists because
     # `render` reads `CALLS[op]` for every op in OPS.
     "native_layer_norm": "",
+    # Both bodies write the selector out in full -- `where` builds the predicate
+    # comparison as well as the select, and `cat` passes the whole operand array
+    # to a variadic selector -- so neither names a prefix here. The entries exist
+    # because `render` reads `CALLS[op]` for every op in OPS.
+    "where.self": "",
+    "cat": "",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -611,6 +651,17 @@ KEY_PARTS = {
     # and left it out of the key would hand the first compiled plan to a call
     # that needed a different one.
     "native_layer_norm": ", normalized_shape, has_weight, has_bias, eps",
+    # Empty: the graph is a select over three operands, and everything the body
+    # decides is already in their signatures. The condition's width decides the
+    # bool comparison, and MpsRunGraph folds every operand's dtype into the key,
+    # so a bool and a uint8 condition already sit under different keys.
+    "where.self": "",
+    # The normalised axis, and the row a reviewer has to check against the body:
+    # a (2, 3) list read at dim=0 and at dim=1 has one dtype and one set of
+    # operand shapes and two different answers, and `concatTensors:dimension:`
+    # bakes the axis into the compiled graph. A body that normalised the axis and
+    # left it out of the key would hand the first plan to the second call.
+    "cat": ", axis",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -2324,6 +2375,265 @@ T_LAYER_NORM = """\
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `where.self(condition, self, other)` is MPSGraph's own ternary select node,
+# `selectWithPredicateTensor:truePredicateTensor:falsePredicateTensor:name:`, and
+# the node broadcasts, which is the contract the reference has as well.
+#
+# Three things about the reference decide what this body has to check before the
+# node is built, and each of them was measured against `at::where.self`:
+#
+#   * The condition is bool-only in the modern reference. `where` accepts a
+#     uint8 condition still -- emitting a deprecation warning -- and rejects
+#     everything else itself (`where expected condition to be a boolean tensor,
+#     but got a tensor with dtype Int`) for int8/int32/int64/float. The graph's
+#     predicate is a bool tensor, so a uint8 condition is compared against zero
+#     and the rest is declined so the reference raises its own message.
+#
+#   * `self` and `other` are *promoted* to a common dtype, which is the one thing
+#     the graph cannot do: MPSGraph's select takes both branches in one type and
+#     promotes nothing (int32 against int64 is int64 in aten, and half against
+#     float is float). `MpsSupportsWhereDtype` admits the same pair
+#     `MpsSupportsBinaryDtype` does and for the same reason -- equal dtypes only
+#     -- and a promoted pair takes the round-trip, which keeps the reference's
+#     result dtype.
+#
+#   * The three operands broadcast to the result shape the reference computes
+#     with `at::infer_size`. That shape is not the condition's alone: `where` of
+#     a (4, 1) condition against (4, 5) branches answers (4, 5). The body infers
+#     it over all three and lets the node broadcast, and a triple that cannot
+#     broadcast takes the round-trip so the reference raises.
+T_WHERE = """\
+at::Tensor {kernel}(
+    const at::Tensor& condition,
+    const at::Tensor& self,
+    const at::Tensor& other) {{
+  if (!mps::{supports}(self.scalar_type(), other.scalar_type(), condition.scalar_type())) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor condition_c = condition.contiguous();
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(
+        at::infer_size(condition_c.sizes(), self_c.sizes()), other_c.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // The graph's predicate is bool, so a uint8 condition -- the one other width
+  // the reference still accepts, with a deprecation warning -- is compared to
+  // zero. `condition.dataType` is read inside the block because the node is
+  // built once per plan and the comparison is a function of the dtype, which is
+  // already in the cache key through the operand.
+  const bool wide_condition = condition_c.scalar_type() == at::kByte;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{condition_c, self_c, other_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* predicate = args[0];
+        if (wide_condition) {{
+          predicate = [graph notEqualWithPrimaryTensor:predicate
+                                       secondaryTensor:[graph constantWithScalar:0.0
+                                                                        dataType:predicate.dataType]
+                                                  name:nil];
+        }}
+        if (predicate == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:predicate
+                            truePredicateTensor:args[1]
+                           falsePredicateTensor:args[2]
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `cat(tensors, dim)` is MPSGraph's variadic `concatTensors:dimension:name:`, and
+# the interesting part of this body is everything the node does *not* check.
+#
+# The node concatenates along `dim` and requires the inputs broadcast-compatible
+# along every other dimension, which is close to the reference's contract but not
+# the same one, and the differences are what the body resolves on the host:
+#
+#   * `dim` is normalised against the operands' rank. aten accepts a negative
+#     `dim` and normalises it (measured: `dim=-1` over a rank-2 pair is `dim=1`);
+#     the node's `dimensionIndex` is `-rank <= dim < rank` in the same terms, so
+#     the body normalises to a non-negative axis and a `dim` outside the rank is
+#     left to the reference.
+#
+#   * Every operand must carry the same dtype. The reference promotes a mixed
+#     list to a common dtype; the node requires one datatype and does not promote,
+#     so a mixed list takes the round-trip and keeps the reference's result dtype.
+#
+#   * The non-`dim` dimensions must match exactly. The reference requires it
+#     (`Sizes of tensors must match except in dimension {dim}`) where the node
+#     would *broadcast* a (4, 1) against a (4, 5) along the mismatched axis,
+#     which is a plausible-looking wrong answer rather than an error. The body
+#     checks every other axis on the host and declines the mismatch.
+#
+# A single-operand `cat` is the operand itself, and `torch.cat([])` is a reference
+# error; the body declines an empty list rather than building a node with nothing
+# to concatenate, so both reach the reference.
+#
+# The result shape is the reference's own: every operand's shape with `dim`
+# replaced by the sum of the operands' extents along it.
+T_CAT = """\
+at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
+  // Materialise the list once: the reference and every check below read it more
+  // than once, and `ITensorListRef` is a view whose lifetime is the caller's.
+  const std::vector<at::Tensor> ops(tensors.begin(), tensors.end());
+  // The reference is called on host copies, exactly as every other body here
+  // does, because the operands are flagos tensors and `at::cat(ops, dim)` would
+  // re-enter this same kernel. That is not a theoretical hazard: the fallback
+  // spelling was written with the original list first and a bool `cat` -- which
+  // this body declines, because bool has no MPSGraph element type -- recursed
+  // until the stack ran out and the process died with SIGSEGV. Built once,
+  // before any early return, so no decline path can be written against the live
+  // list by mistake.
+  std::vector<at::Tensor> host_ops;
+  host_ops.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    host_ops.push_back(t.cpu());
+  }}
+  // An empty list is the reference's own error, and it is raised here rather
+  // than returned as an empty tensor. `ops[0]` below would also be out of
+  // range, so the check has to come first for the shape of the body as much as
+  // for the message.
+  if (ops.empty()) {{
+    return at::{at_op}(host_ops, dim);
+  }}
+  // One dtype for the whole list, and one the graph can carry. A mixed list is
+  // declined so the reference promotes it.
+  const at::ScalarType dtype = ops[0].scalar_type();
+  for (const at::Tensor& t : ops) {{
+    if (t.scalar_type() != dtype ||
+        !mps::{supports}(dtype, dtype)) {{
+      return at::{at_op}(host_ops, dim).to(ops[0].device());
+    }}
+  }}
+  const int64_t rank = ops[0].dim();
+  if (rank == 0) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  int64_t axis = dim;
+  if (axis < 0) {{
+    axis += rank;
+  }}
+  if (axis < 0 || axis >= rank) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  // The result shape: every operand's shape with `axis` summed. A rank or a
+  // non-`axis` extent that disagrees is the reference's error, not the node's
+  // broadcast, so the body checks rather than describes it.
+  std::vector<int64_t> out_shape(ops[0].sizes().vec());
+  out_shape[axis] = 0;
+  for (const at::Tensor& t : ops) {{
+    if (t.dim() != rank) {{
+      return at::{at_op}(host_ops, dim).to(ops[0].device());
+    }}
+    for (int64_t d = 0; d < rank; ++d) {{
+      if (d == axis) {{
+        continue;
+      }}
+      if (t.size(d) != out_shape[d]) {{
+        return at::{at_op}(host_ops, dim).to(ops[0].device());
+      }}
+    }}
+    out_shape[axis] += t.size(axis);
+  }}
+  std::vector<at::Tensor> operands;
+  operands.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    operands.push_back(t.contiguous());
+  }}
+  at::Tensor out = at::empty(out_shape, ops[0].options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // Each operand reaches the node as a two-dimensional `(outer, inner)` view,
+  // with the concatenation over the *inner* axis rather than over `axis`
+  // directly.
+  //
+  // Concatenating along `axis` is exactly concatenating the inner axis of the
+  // `(prod(shape[:axis]), prod(shape[axis:]))` view: there are `outer` blocks,
+  // each block is `inner` elements wide, and the operands join end to end inside
+  // every block. The result is `(outer, sum(inner))`, which reshapes back to the
+  // aten shape.
+  //
+  // This indirection is not cosmetic, and the direct spelling is what found it.
+  // Measured through this backend, `cat([tensor([0., 1.]), tensor([2., 3.])],
+  // dim=0)` -- two rank-1 operands handed to `concatTensors:` as their ranked
+  // selves -- returned all zeros, and an int32 form returned
+  // `[0, 0, 1, 0, 2, 0]`: the eight-byte row pitch of a four-byte element, the
+  // same symptom the row-pitch note in mps_common.h records. A (2, 3) pair on
+  // dim=0 was correct, which is what makes the rank-1 case the interesting one:
+  // MPSGraph reads a rank-1 input to `concatTensors:` as one row and pays the
+  // pitch, and the two-dimensional view above sidesteps that by never handing
+  // the node a rank below two. `inner` is at least 1 because `axis < rank`.
+  //
+  // `outer` is the same on every operand -- the shape check above rejected any
+  // list where a non-`axis` extent disagreed -- but `inner` is not: it is each
+  // operand's own extent along `axis` times the extents after it, and the whole
+  // point of the concatenation is that those differ. Read per operand, from the
+  // same `(prod(shape[:axis]), prod(shape[axis:]))` split, so a (2,) operand
+  // beside a (1,) one reshapes to (1, 2) and (1, 1) rather than both to the
+  // first operand's width. Sharing one `inner` across the list is not a
+  // cosmetic error: a three-operand rank-1 `cat` of (2,), (2,) and (1,) built
+  // `mps.reshape` to a shape the third operand's element count cannot fill and
+  // MPSGraph aborted the process ("the result shape is not compatible with the
+  // input shape", then "original module failed verification") rather than
+  // declining.
+  int64_t outer = 1;
+  for (int64_t d = 0; d < axis; ++d) {{
+    outer *= ops[0].size(d);
+  }}
+  std::vector<int64_t> inner;
+  inner.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    inner.push_back(t.numel() / (outer > 0 ? outer : 1));
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        NSMutableArray<MPSGraphTensor*>* rows =
+            [NSMutableArray arrayWithCapacity:[args count]];
+        for (NSUInteger i = 0; i < [args count]; ++i) {{
+          [rows addObject:mps::MpsReshape(graph, args[i],
+                                          at::IntArrayRef({{outer, inner[i]}}))];
+        }}
+        MPSGraphTensor* joined = [graph concatTensors:rows
+                                            dimension:1
+                                                 name:nil];
+        if (joined == nil) {{
+          return nil;
+        }}
+        // `outer` is the operand side; the concatenation's own outer extent is
+        // the sum the result shape already carries along `axis`, which is what
+        // the reshape back to the aten shape reads.
+        return mps::MpsReshape(graph, joined, out_shape);
+      }});
+  if (!ran) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -2342,6 +2652,8 @@ CATEGORIES = {
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
     "layer_norm": T_LAYER_NORM,
+    "where": T_WHERE,
+    "cat": T_CAT,
 }
 
 FILE_HEADER = """\
@@ -2379,6 +2691,7 @@ FILE_HEADER = """\
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
+#include <ATen/ops/cat.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
@@ -2396,6 +2709,7 @@ FILE_HEADER = """\
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/take.h>
+#include <ATen/ops/where.h>
 #include <c10/core/ScalarType.h>
 #include <exception>
 #include <optional>

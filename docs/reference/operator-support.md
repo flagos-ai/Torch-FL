@@ -188,13 +188,14 @@ record.
 
 ## Native Backend Route Changes
 
-### Apple MPS: twenty-four routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+### Apple MPS: twenty-six routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
 
-**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **24** ATen overloads from
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **26** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
-reduction, convolution, embedding, matrix-multiply and normalisation families —
-with the remaining **2013** routes at `none` (`cpu_fallback`), measured overload by
-overload against a CPU reference on an Apple Silicon arm64 host.
+reduction, convolution, embedding, matrix-multiply, normalisation and select
+families — with the remaining **2011** routes at `none` (`cpu_fallback`),
+measured overload by overload against a CPU reference on an Apple Silicon arm64
+host.
 
 **This is not a FlagGems cohort and must not be read against the 546-overload
 tables.** Apple Silicon has no FlagTree/FlagGems line and no macOS `triton`
@@ -202,11 +203,11 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 24, none: 2013}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 26, none: 2011}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
 `embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and
-`native_layer_norm`. The backend is MPSGraph-first with a
+`native_layer_norm`, `cat` and `where.self`. The backend is MPSGraph-first with a
 hand-written Metal Shading Language fallback, and — as the name of this section
 insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
@@ -331,6 +332,61 @@ neither this backend's nor this op's. `native_batch_norm` is the next item on
 the stage-4 list and is unrelated. Held in
 `tests/integration/ops/test_mps_layer_norm.py` (61 cases).
 
+**`cat` is one variadic node with almost none of the reference's contract, and
+the two bugs its body hit are the two halves of the shape work.** The node is
+`concatTensors:dimension:name:`, and it checks neither the non-`dim` extents
+nor the operand dtypes: handed a `(2, 3)` and a `(2, 1)` on `dim=0` it
+*broadcasts* the mismatched axis into a plausible `(2, 3)` where the reference
+raises `Sizes of tensors must match except in dimension 0`, and a mixed list
+whose promotion the reference performs is refused by the node's single
+datatype. Both are resolved on the host — the extents compared axis by axis,
+the mixed list round-tripped — and `dim` is normalised against the operands'
+rank before it reaches `dimension:`. The first shape bug is the **row-pitch
+trap** the backend's `mps_common.h` note records: `cat([tensor([0., 1.]),
+  tensor([2., 3.])], dim=0)` handed to the node as two *ranked* operands returned
+all zeros, and an int32 form returned `[0, 0, 1, 0, 2, 0]` — the eight-byte row
+pitch of a four-byte element, because MPSGraph reads a rank-1 input to
+`concatTensors:` as one row. Every operand therefore reaches the graph as a
+two-dimensional `(outer, inner)` view with the concatenation over the *inner*
+axis, which rewrites concatenating along `axis` as concatenating the
+`prod(shape[:axis])` blocks' `prod(shape[axis:])`-wide tails.
+
+**The second shape bug aborted the process, and it is why `inner` is read per
+operand.** The first version of that two-dimensional view computed `outer` and
+`inner` once from `ops[0]`. For a rank-1 three-operand list of `(2,)`, `(2,)` and
+`(1,)` that reshaped the third operand to `(1, 2)`, a shape its one element
+cannot fill, and MPSGraph failed the compiled module — `mps.reshape op the result
+shape is not compatible with the input shape`, then `original module failed
+verification` — and took the *process* with it rather than declining. `outer` is
+legitimately shared (the extent check already rejected a list whose non-`axis`
+extents disagree), but `inner` is each operand's own `numel() / outer`. The
+third bug was in the decline path itself: written `at::cat(tensors, dim)`
+against the caller's list, it re-entered this same kernel — a bool `cat`, which
+has no MPSGraph element type and is correctly declined, recursed until the stack
+ran out and the process died with SIGSEGV, measured at 23810 dispatch lines. The
+reference is called on host copies built once before any early return. Held in
+`tests/integration/ops/test_mps_cat.py` (46 cases).
+
+**`where.self` is a one-node select wrapped in the reference's three surrounding
+rules.** The node is `selectWithPredicateTensor:truePredicateTensor:
+falsePredicateTensor:name:`, and the reference does three things around it: it
+narrows the condition to bool (bool or, with a deprecation warning, uint8, and
+raises `where expected condition to be a boolean tensor, but got a tensor with
+dtype Int` for every other width), it promotes the two branches to a common
+dtype the way the binary ops do, and it broadcasts the result's shape from all
+three operands rather than from any one. The body widens a uint8 condition with a
+comparison against zero before handing it to the bool predicate, declines a
+condition width outside the two so the reference raises its own message,
+round-trips a promoted branch pair (measured: `int32` against `int64` is `int64`,
+half against float is float, and the result *dtype* is asserted, since a select
+served at the first branch's width returns the right values at the wrong width),
+and infers the result shape with a twice-nested `infer_size` over the three
+operands. A ``(4, 1)`` condition against ``(4, 5)`` branches is the case the
+shape inference exists for: the result is neither operand's shape. The condition
+is a valid *branch* width and an invalid *condition* width, and the two roles are
+held apart (a bool branch pair is served; an int condition declines). Held in
+`tests/integration/ops/test_mps_where.py` (37 cases).
+
 **Every route is gated on a measured dtype predicate, and two gates exist only
 because the obvious one was wrong.** The first `div` increment gated on the
 predicate `mul` already used, which admits integral widths; measured, the graph
@@ -356,11 +412,12 @@ built — even though the dispatch log still names `div.Tensor`. Only
 graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
-per-op suites `test_mps_binary.py`, `test_mps_conv.py`, `test_mps_embedding.py`,
-`test_mps_gather.py`, `test_mps_gemm.py`, `test_mps_index_select.py`,
-`test_mps_layer_norm.py`, `test_mps_pow.py`, `test_mps_reduce.py`,
-`test_mps_silu.py`, `test_mps_softmax.py`, `test_mps_take.py` and
-`test_mps_unary.py`, run as `pytest tests/integration/ops -m mps` on an Apple
+per-op suites `test_mps_binary.py`, `test_mps_cat.py`, `test_mps_conv.py`,
+`test_mps_embedding.py`, `test_mps_gather.py`, `test_mps_gemm.py`,
+`test_mps_index_select.py`, `test_mps_layer_norm.py`, `test_mps_pow.py`,
+`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py`,
+`test_mps_take.py`, `test_mps_unary.py` and `test_mps_where.py`, run as
+`pytest tests/integration/ops -m mps` on an Apple
 Silicon host; the per-op dtype gates and the `index_select` argument contracts
 are asserted against the CPU reference in the same tests. This is the only
 platform whose hardware job runs on a GitHub-hosted macOS runner rather than a

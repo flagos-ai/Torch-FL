@@ -126,6 +126,37 @@ bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype)
       self_dtype == at::kBFloat16;
 }
 
+bool MpsSupportsWhereDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType other_dtype,
+    at::ScalarType condition_dtype) {
+  // The two branches take the binary pair's rule: the select builds one node in
+  // one element type and promotes nothing, where the reference promotes
+  // `self`/`other` to a common dtype (`int32` against `int64` is `int64`, half
+  // against float is float), so a promoted pair takes the round-trip. See
+  // T_WHERE.
+  if (!MpsSupportsBinaryDtype(self_dtype, other_dtype)) {
+    return false;
+  }
+  // The condition is the reference's own narrowing, not the graph's: `where`
+  // accepts a bool condition and, with a deprecation warning, a uint8 one, and
+  // raises for every other width (`where expected condition to be a boolean
+  // tensor, but got a tensor with dtype Int`). Bool is the node's predicate
+  // type; uint8 is widened by a comparison against zero in the body. A width
+  // outside the pair is declined so the reference raises its own message rather
+  // than the body answering a call the reference rejects.
+  return condition_dtype == at::kBool || condition_dtype == at::kByte;
+}
+
+bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype) {
+  // Both arguments are the list's one datatype: the body checks the list is
+  // uniform and this checks that width is carryable. `cat` promotes a mixed
+  // list on the reference, which is the body's decline, so nothing here does the
+  // promotion. The second parameter exists so this predicate reads like the
+  // other two-operand gates; the body passes the same dtype twice.
+  return dtype == other_dtype && MpsSupportsUnaryDtype(dtype);
+}
+
 bool MpsSupportsSoftmaxDtype(
     at::ScalarType self_dtype,
     bool half_to_float,

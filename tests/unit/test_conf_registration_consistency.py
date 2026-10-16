@@ -376,6 +376,8 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "div.Scalar",
         "reciprocal",
         "native_layer_norm",
+        "cat",
+        "where.self",
     ):
         assert routes.get(op) == "mps", f"the {op} kernel must be routed to mps"
 
@@ -477,20 +479,22 @@ def test_conf_route_counts_are_stable():
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
         # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax``, ``pow_scalar``
         # ``conv``, ``silu``, ``embedding``, ``index_select``, ``gather``,
-        # ``div``, ``div_scalar``, ``reciprocal``, ``take`` and ``layer_norm``
-        # categories generate (24 ops
+        # ``div``, ``div_scalar``, ``reciprocal``, ``take``, ``layer_norm``,
+        # ``where`` and ``cat``
+        # categories generate (26 ops
         # so far -- stage 3 added
         # ``mm``/``bmm``, then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``,
         # then ``convolution_overrideable``; stage 4 added ``silu`` and
         # ``embedding``, then ``div.Tensor``/``div.Scalar``/``reciprocal``,
         # then ``index_select``, then ``take``, then ``gather``, then
-        # ``native_layer_norm``), so the conf routes those to ``mps``
+        # ``native_layer_norm``, then ``where.self`` and ``cat``), so the conf
+        # routes those to ``mps``
         # and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 24, "none": 2013},
+        "mps": {"mps": 26, "none": 2011},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

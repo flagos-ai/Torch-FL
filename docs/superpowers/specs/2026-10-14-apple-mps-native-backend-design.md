@@ -732,6 +732,51 @@ There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
 
+Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
+runtime-conformance traversal named both: `tests/integration/runtime/
+runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real
+backend, and `require_routed()` raises rather than skips when one of them lands
+on `none` -- deliberately, because a `none` route there is a generation gap
+rather than a platform that does not implement the op. Every other platform's
+conf already routed both; only `backends_mps.conf` had them on `none`, so the
+fix is the two kernels and not a skip. `cat` is MPSGraph's variadic
+`concatTensors:dimension:name:`, and the increment's two bugs are the two halves
+of the shape work. The first is the **row-pitch trap** section 6 records:
+`cat([tensor([0., 1.]), tensor([2., 3.])], dim=0)` handed to the node as two
+*ranked* operands returned all zeros, and an int32 form returned
+`[0, 0, 1, 0, 2, 0]` -- the eight-byte row pitch of a four-byte element, because
+MPSGraph reads a rank-1 input to `concatTensors:` as one row. Every operand now
+reaches the graph as a two-dimensional `(outer, inner)` view with the
+concatenation over the *inner* axis. The second is that this view's `inner` must
+be read per operand: the first version computed it once from `ops[0]`, and a
+rank-1 three-operand list of `(2,)`, `(2,)` and `(1,)` reshaped the third
+operand to a shape its one element cannot fill, which made MPSGraph fail the
+compiled module (`mps.reshape op the result shape is not compatible with the
+input shape`, then `original module failed verification`) and take the
+**process** with it rather than declining. A third bug was in the decline path:
+written `at::cat(tensors, dim)` against the caller's list, it re-entered this
+same kernel -- a bool `cat`, which has no MPSGraph element type and is correctly
+declined, recursed until the stack ran out and the process died with SIGSEGV,
+measured at 23810 dispatch lines. The reference is now called on host copies
+built once before any early return, and both bugs are held as cases rather than
+as notes. `where.self` is
+`selectWithPredicateTensor:truePredicateTensor:falsePredicateTensor:name:` and
+the increment is the reference's three surrounding rules rather than the node:
+the condition is narrowed to bool (bool or uint8, the rest declining to the
+reference's own `where expected condition to be a boolean tensor`), the two
+branches are promoted where the node does not promote, and the result's shape
+is broadcast from all three operands rather than from any one of them. Both
+increments keep the no-boxing property: they are new cases in the same
+`codegen_mps.py` template tables and no conf route moves off the native
+PrivateUse1 key. This increment is verified with
+`tests/integration/ops/test_mps_cat.py` (46 cases) and
+`tests/integration/ops/test_mps_where.py` (37 cases): the row-pitch rank-1
+cases, the per-operand-`inner` ragged lists, the bool decline held in a
+subprocess so a recursive re-entry shows as a signal, the `(4, 1)`-condition
+broadcast, the branch promotion asserted by dtype, the condition-width declines
+reaching the reference's message, the axis and dtype key parts, the dispatch log
+naming `mps`, and the cost cases.
+
 ## 8. Conformance surface (files added or changed)
 
 | File | Change |

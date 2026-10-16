@@ -100,6 +100,25 @@ bool MpsSupportsUnaryDtype(at::ScalarType dtype);
 // mixed pair takes the CPU round-trip and keeps the reference's result dtype.
 bool MpsSupportsBinaryDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
 
+// Whether a `where.self` computes exactly on the MPSGraph path. The two branch
+// widths take MpsSupportsBinaryDtype's rule for that predicate's reason -- the
+// select builds one node in one element type and promotes nothing, while the
+// reference promotes the branches to a common dtype -- and the condition width
+// is checked against the reference's own narrowing rather than the graph's:
+// bool and the deprecated uint8 are accepted, anything else is a decline so the
+// reference raises its own message.
+bool MpsSupportsWhereDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType other_dtype,
+    at::ScalarType condition_dtype);
+
+// Whether a `cat` over a list of `dtype` computes exactly on the MPSGraph path.
+// Both parameters are that one datatype: the concat node requires a single
+// datatype across the list where the reference promotes a mixed list, which the
+// body checks separately, so this only decides whether the uniform width is one
+// the graph can carry.
+bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype);
+
 // Whether an elementwise op over a tensor and a host scalar computes exactly on
 // the MPSGraph path. The scalar becomes an MPSGraph constant of the tensor's
 // dtype, so an integer tensor accepts an integer scalar only -- a float scalar
