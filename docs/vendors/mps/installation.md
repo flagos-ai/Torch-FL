@@ -103,8 +103,9 @@ aten ops: `abs`; `add`/`sub`/`mul` over two tensors and over a tensor and a host
 scalar (with aten's `alpha`); and `sum.dim_IntList`/`mean.dim`. Stage 3 has
 added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`)
 two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
-(`convolution_overrideable`), which closes the stage-3 lanes, for fifteen in all.
-Those fifteen are claimed on the `PrivateUse1` `mps` slot by
+(`convolution_overrideable`), which closes the stage-3 lanes. Stage 4 has added
+the `silu` category, for sixteen in all.
+Those sixteen are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
@@ -113,10 +114,11 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated fifteen are compared against the
+Results are correct on every op: the accelerated sixteen are compared against the
 CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
-`test_mps_softmax.py`, `test_mps_pow.py` and `test_mps_conv.py`, and a case their
+`test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py` and
+`test_mps_silu.py`, and a case their
 kernels decline takes the CPU round-trip rather than a wrong answer. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
 than copying it: a transposed last two axes over dense memory is recognised and
@@ -125,10 +127,15 @@ replaces. The `conv` kernel serves `nn.Conv2d`/`nn.Conv3d` -- including the
 pointwise, grouped and depthwise shapes a vision or mixer model reaches for -- by
 carrying the stride, dilation, groups and per-axis padding into the MPSGraph
 descriptor; `conv1d` and transposed convolutions have no selector there and take
-the round-trip. A platform whose GPU
-never runs a kernel is a "Runtime only" row, not operator support; fifteen ops
+the round-trip. The `silu` kernel -- what a SwiGLU MLP multiplies its gate
+projection by -- is the first op here MPSGraph has no selector for, so it is a
+composition of `sigmoid` and a multiply rather than one node; the gate for it is
+a measurement against `at::silu` rather than the identity, because aten's own
+`silu` is not `x * sigmoid(x)` on the narrow widths (design doc section 7).
+A platform whose GPU
+never runs a kernel is a "Runtime only" row, not operator support; sixteen ops
 is operator support for the unary, elementwise, reduction, matrix-product,
-softmax and convolution families and nothing more. Note that `softmax.int` is
+softmax, convolution and activation families and nothing more. Note that `softmax.int` is
 not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch
 build, so the
 dispatcher decomposes it before any backend key is consulted. `_softmax` -- what

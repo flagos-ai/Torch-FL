@@ -134,6 +134,18 @@ OPS = {
     # are the CUDA/MPS-specific paths aten picks off the CUDA/MPS key and are not
     # the ones a PrivateUse1 tensor reaches, so they stay unregistered too.
     "convolution_overrideable": "conv",
+    # The first activation a transformer reaches: `silu` is what a SwiGLU MLP
+    # multiplies its gate projection by, so it runs once per layer on the
+    # (batch, seq, intermediate) tensor -- a bigger operand than the softmax
+    # above ever sees. MPSGraph has no `siluWithTensor:`, but it does have
+    # `sigmoidWithTensor:`, and `x * sigmoid(x)` is the definition, so this is
+    # the first body here whose graph is two nodes rather than one.
+    #
+    # Only `silu` is registered. `silu.out` and `silu_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `silu_backward` is a separate op with a separate selector question that
+    # this increment does not answer.
+    "silu": "silu",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -160,6 +172,11 @@ AT_OP = {
     # round-trip is written against -- it carries the same shape, stride, padding,
     # dilation, transposed, output_padding and groups arguments the kernel holds.
     "convolution_overrideable": "convolution",
+    # The CPU reference the `silu` body round-trips to on a dtype it declines.
+    # `silu` exists as its own aten kernel rather than a decomposition, so the
+    # round-trip lands on the reference's own implementation rather than on a
+    # composite that would re-enter the dispatcher.
+    "silu": "silu",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -172,6 +189,7 @@ SUPPORTS = {
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
+    "silu": "MpsSupportsSiluDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -200,6 +218,10 @@ CALLS = {
     # rank, so `{call}` names the shape-independent prefix both share and the
     # template fills the rank in.
     "convolution_overrideable": "convolution{dim}DWithSourceTensor:",
+    # The body builds two nodes and the unary call table names one selector, so
+    # this is the first node -- the sigmoid every silu is built from. See T_SILU
+    # for why the multiply is written into the template rather than named here.
+    "silu": "sigmoidWithTensor:",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -270,6 +292,11 @@ KEY_PARTS = {
     "convolution_overrideable": (
         ", stride, padding, dilation, groups, transposed, output_padding, has_bias"
     ),
+    # Empty on purpose, and it is the interesting row in this table. `silu` has
+    # no host argument at all -- the graph is a function of the operand's dtype
+    # and shape, which MpsRunGraph folds into the key itself. A body with no
+    # constants has no way to be handed a plan it did not build.
+    "silu": "",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -866,6 +893,69 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# The SiLU activation, `x * sigmoid(x)`, which is what a SwiGLU MLP multiplies
+# its gate projection by. It is the first body here whose graph is a composition
+# rather than one selector, so it is worth stating what makes that safe.
+#
+# MPSGraph has no `siluWithTensor:` -- the selector set jumps from
+# `sigmoidWithTensor:` to `sineWithTensor:` -- so the activation is built from
+# the two nodes that define it. Composing is only legitimate if the reference
+# computes the same expression rather than something merely close, and aten's
+# CPU `silu` does *not* compute `x * sigmoid(x)`: it is its own kernel, and
+# evaluated on the host the two readings differ by 7.8e-03 on float16 and
+# 3.1e-02 on bfloat16, which would be a wrong answer rather than a rounding
+# difference. So the composition is measured against the reference rather than
+# assumed, and the measurement is what the `silu` entry in MpsSupportsSiluDtype
+# records (mps_common.h): on an M5 the graph was bit-identical to at::silu on
+# float16 and bfloat16, and within 2.7e-07 relative on float32 -- where it and
+# the reference sit 1.2353e-06 from an exact float64 evaluation to the last
+# digit, so the two round differently rather than one being wrong.
+#
+# That is the opposite of what the conv increment found about *bfloat16*, which
+# is served there and served here too -- but for a different reason, and the two
+# gates are separate predicates because of it. bfloat16 is served by the conv
+# gate because the graph rounds the same way the reference does on a
+# convolution; it is served here because the graph matched the reference on an
+# activation. Neither measurement implies the other.
+#
+# `sigmoid` is one operand and one node, but the operand is used twice -- once
+# as the sigmoid's input and once as the multiply's -- and the graph is a DAG,
+# so a plan built for one operand shape is handed back for every later call with
+# that shape. Nothing here reads a host value, which is why the key has no
+# parts: `MpsRunGraph` folds the operand's dtype and shape in itself, and a body
+# with no constants cannot be handed a plan it did not build.
+T_SILU = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* gate = [graph {call}args[0] name:nil];
+        if (gate == nil) {{
+          return nil;
+        }}
+        return [graph multiplicationWithPrimaryTensor:args[0]
+                                      secondaryTensor:gate
+                                                 name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -875,6 +965,7 @@ CATEGORIES = {
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,
     "conv": T_CONV,
+    "silu": T_SILU,
 }
 
 FILE_HEADER = """\
@@ -919,6 +1010,7 @@ FILE_HEADER = """\
 #include <ATen/ops/mul.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
+#include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <c10/core/ScalarType.h>

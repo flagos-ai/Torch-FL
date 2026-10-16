@@ -39,6 +39,7 @@
 #include <ATen/ops/mul.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
+#include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <c10/core/ScalarType.h>
@@ -709,5 +710,35 @@ at::Tensor ConvolutionOverrideableKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kMps, ConvolutionOverrideableKernelMps)
+
+at::Tensor SiluKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsSiluDtype(self.scalar_type())) {
+    return at::silu(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("silu"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* gate = [graph sigmoidWithTensor:args[0] name:nil];
+        if (gate == nil) {
+          return nil;
+        }
+        return [graph multiplicationWithPrimaryTensor:args[0]
+                                      secondaryTensor:gate
+                                                 name:nil];
+      });
+  if (!ran) {
+    return at::silu(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
 
 } // namespace at::native::flagos

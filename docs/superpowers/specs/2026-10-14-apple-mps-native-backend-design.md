@@ -346,6 +346,39 @@ own value or error, `conv1d` and `nn.ConvTranspose2d` round-tripping, plan reuse
 across stride, padding, dilation, groups and the bias flag, and the dispatch log
 naming `mps` for the public `F.conv2d`/`F.conv3d` spellings. That completes the
 stage-3 lanes the design names (`gemm`, `conv`, `softmax`); stage 4 is open.
+
+Stage 4 opened with the `silu` category, which is the first op here MPSGraph has
+no selector for. The definition is `x * sigmoid(x)` and MPSGraph has
+`sigmoidWithTensor:`, so the body is a two-node composition -- the first in this
+layer -- and the interesting question is whether composing at all is legitimate.
+It is not, automatically: **aten's CPU `silu` is its own kernel rather than the
+definition**, and evaluated on the host the two readings differ by 7.8e-03 on
+float16 and 3.1e-02 on bfloat16, which would be a wrong answer rather than a
+rounding difference. So the gate is a measurement of the graph against
+`at::silu` rather than a statement of the identity, taken on an M5 over operands
+spanning [-40, 40] with the saturated tails, denormals and a rank-0 shape
+included: bit-identical on float16 and bfloat16, and 2.7e-07 relative on
+float32, where the graph and the reference sit 1.2353e-06 from an exact float64
+evaluation to the last digit -- the same distance, so they round differently
+rather than one being wrong. All three widths are therefore served, which is
+wider than the `softmax` gate that declines bfloat16 and narrower than nothing:
+**the widths a category serves are per op here, not a per-dtype list this
+backend keeps.** The key has no host parts, since `silu` takes no argument
+beyond its operand.
+
+This increment is verified with `tests/integration/ops/test_mps_silu.py`:
+CPU-equal on all three float widths, the SwiGLU `(batch, seq, 3072)` shape, the
+saturated tail where a weaker `sigmoid` would show as a number, the sign of the
+negative tail, the `inf`/`nan` pair, rank-0 and empty operands, strided operands,
+plan reuse across interleaved dtypes and shapes, and the dispatch log naming
+`mps` for both the `F.silu` and `aten.silu` spellings. There is a case there that
+guards the *reference* rather than the kernel: it fails if a future PyTorch makes
+`silu` the composition, because then the note this gate rests on would be stale.
+
+The remaining stage-4 work is the `embedding`/`gather` design (section 7 records
+it as ~47% of a Qwen3-0.6B layer's device dispatch time, the largest single
+item), the `docs/reference/operator-support.md` matrix rows, and a CI lane for
+the operator suite.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.

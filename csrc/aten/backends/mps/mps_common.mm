@@ -118,6 +118,13 @@ bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent) 
   return MpsConstantExact(exponent, self_dtype);
 }
 
+bool MpsSupportsSiluDtype(at::ScalarType dtype) {
+  // The three widths the composition was measured bit-identical to at::silu on.
+  // See the note in mps_common.h: aten's `silu` is not `x * sigmoid(x)`, so this
+  // list is a measurement rather than the identity it looks like.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   if (out == nullptr) {
     return false;

@@ -25,6 +25,7 @@
   m.impl("mul.Tensor", WrapperMulTensor);
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
+  m.impl("silu", WrapperSilu);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);

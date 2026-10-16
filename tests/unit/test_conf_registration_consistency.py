@@ -367,6 +367,7 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "mm",
         "bmm",
         "convolution_overrideable",
+        "silu",
     ):
         assert routes.get(op) == "mps", f"the {op} kernel must be routed to mps"
 
@@ -467,15 +468,16 @@ def test_conf_route_counts_are_stable():
         # MPS is a native vendor backend at stage 3: the codegen'd
         # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
         # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax``, ``pow_scalar``
-        # and ``conv`` categories generate (15 ops so far -- stage 3 added
+        # ``conv`` and ``silu`` categories generate (16 ops so far -- stage 3 added
         # ``mm``/``bmm``, then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``,
-        # then ``convolution_overrideable``), so the conf routes those to ``mps``
+        # then ``convolution_overrideable``, and stage 4 added ``silu``), so the
+        # conf routes those to ``mps``
         # and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 15, "none": 2022},
+        "mps": {"mps": 16, "none": 2021},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

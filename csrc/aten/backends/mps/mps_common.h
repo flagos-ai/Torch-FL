@@ -155,6 +155,41 @@ bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent);
 // error to report: the wrappers decline that case without touching the input.
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
 
+// Whether `silu` computes exactly on the MPSGraph path, composed as
+// `x * sigmoid(x)`.
+//
+// This is the first op in the layer MPSGraph has no selector for, so the body
+// composes it -- and a composition is only allowed in where it reproduces the
+// reference rather than approximating it. aten's CPU `silu` is its own kernel
+// and does *not* evaluate `x * sigmoid(x)`: evaluated on the host the two
+// readings differ by 7.8e-03 on float16 and 3.1e-02 on bfloat16, which would be
+// a wrong answer and not a rounding difference. So this gate is set from a
+// measurement rather than from the identity. Measured on an M5 against at::silu
+// in the operand's own dtype, over operands spanning [-40, 40] (plus the
+// saturated tails, denormals, and a rank-0 and rank-3 shape):
+//
+//   float32   9.5e-07 max abs, 2.7e-07 relative. Not bit-identical, and the
+//             right reading of that is "both are correct": against an exact
+//             float64 evaluation the graph and the CPU reference sit
+//             1.2353e-06 away from it to the last digit -- the same number --
+//             so the two round differently rather than one being wrong. The
+//             difference is what a `silu` near -40 looks like, where the value
+//             is ~1.7e-16 and every ulp of sigmoid moves it.
+//   float16   bit-identical, including the inf, the -0.0 the tail produces and
+//             the NaN an `inf * 0` gives.
+//   bfloat16  bit-identical, same cases.
+//
+// All three are served, which is worth spelling out because it is the same
+// answer the conv gate reached for a different reason: a bfloat16 softmax came
+// back as denormals on this SDK and a bfloat16 pow was declined with it, so the
+// widths a category serves are per-op here rather than a list this file keeps.
+//
+// float64 has no MPSGraph element type at all, and an integral or bool operand
+// is the reference's own error -- aten's `silu` has no integral kernel, so
+// `silu(int)` raises rather than promoting -- and both take the CPU round-trip
+// and get exactly that.
+bool MpsSupportsSiluDtype(at::ScalarType dtype);
+
 // Whether a matrix multiplication computes exactly on the MPSGraph path. Both
 // operands must carry the same dtype -- aten's `mm` and `bmm` promote nothing,
 // and a mismatched pair is a reference error rather than a result -- and that
