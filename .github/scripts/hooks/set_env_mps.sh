@@ -125,6 +125,19 @@ CPU_TORCH_INDEX_URL="https://pypi.org/simple"
 CPU_TORCH_MIRROR_INDEX_URL_DEFAULT=""
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 pip_retry --upgrade pip
+# The wheel step runs `python -m build --wheel --no-isolation`, which reads the
+# build requirements from pyproject.toml instead of provisioning them in an
+# isolated env -- so `cmake>=3.18` and `wheel` have to be present in this venv or
+# that step fails with `ERROR Unmet dependencies ... found: not installed`. The
+# vendor images happen to ship cmake; a stock macOS runner image does not, and
+# the runner's own cmake is a Homebrew binary outside this venv where
+# `--no-isolation` will not look for it. Installed from PyPI rather than
+# Homebrew so the version the build backend resolves is the one it verified.
+#
+# `setuptools` is upgraded alongside because a macOS runner image can carry an
+# older one than the pyproject build requirements ask for, and `--upgrade` there
+# is what keeps this list matching what `python -m build` will demand.
+pip_retry --upgrade setuptools "cmake>=3.18" wheel
 install_cpu_torch
 CPU_TORCH_INDEX_URL="${CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${CPU_TORCH_VERSION_DEFAULT}"
