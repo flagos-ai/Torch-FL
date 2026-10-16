@@ -79,9 +79,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # GH_TOKEN is deliberately the machine user's token with no fallback to
+      # github.token. An approval made with the Actions token does not count
+      # towards required approvals, so falling back would let the job post a
+      # review that looks like an approval and silently fails to satisfy branch
+      # protection. Empty is better: the script warns and skips.
       - name: Run the AI reviewer
         env:
-          GH_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
           AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
           AI_REVIEW_API_BASE: ${{ vars.AI_REVIEW_API_BASE }}
