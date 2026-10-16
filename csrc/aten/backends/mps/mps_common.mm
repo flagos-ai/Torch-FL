@@ -448,12 +448,40 @@ MPSGraphTensorData* MpsTensorData(
   if (buffer == nil || count <= 0) {
     return nil;
   }
-  MPSNDArrayDescriptor* descriptor =
-      [MPSNDArrayDescriptor descriptorWithDataType:dtype
-                                             shape:FlatShape(count)];
-  MPSNDArray* array = [[MPSNDArray alloc] initWithBuffer:buffer
-                                                  offset:static_cast<NSUInteger>(byteOffset)
-                                              descriptor:descriptor];
+  MPSNDArray* array = nil;
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  // The offset-carrying initializer is the reason the whole design works: the
+  // caching allocator subdivides one MTLBuffer into many blocks, so an operand
+  // is the common case and a buffer-relative pointer. It is declared by the
+  // *newer* MetalPerformanceShaders framework and only from macOS 15, so this
+  // branch is guarded twice -- on the SDK that parses the file (this build is
+  // compiled against the SDK, not the host) and on the runtime the process
+  // actually loaded.
+  //
+  // Measured against Xcode 15.4 (the SDK the hosted macos-14 image ships):
+  // MPSNDArray.h there declares neither `initWithBuffer:offset:descriptor:` nor
+  // `initWithBuffer:descriptor:`. With that SDK in force a later `if
+  // (@available(macos 15.0))` does not help, because the selector does not
+  // exist at *compile* time -- the compiler resolves the sent to the
+  // MPSMatrix initializer of the same name and rejects the argument. Two
+  // spellings fail and only one does not, so both the guard and the comment are
+  // load-bearing.
+  if (__builtin_available(macOS 15.0, *)) {
+    MPSNDArrayDescriptor* descriptor =
+        [MPSNDArrayDescriptor descriptorWithDataType:dtype
+                                               shape:FlatShape(count)];
+    array = [[MPSNDArray alloc] initWithBuffer:buffer
+                                        offset:static_cast<NSUInteger>(byteOffset)
+                                    descriptor:descriptor];
+  }
+#endif
+  if (array == nil) {
+    // Older SDK: every MPSNDArray spans its buffer from the start, so an
+    // interior pointer cannot be described and the operand is refused rather
+    // than silently read from offset 0. MpsRunGraph turns a nil here into a
+    // decline, which routes the op to cpu_fallback: correct, just not native.
+    return nil;
+  }
   MPSGraphTensorData* data =
       [[MPSGraphTensorData alloc] initWithMPSNDArray:array];
   [array release];
@@ -914,15 +942,26 @@ bool MpsRunGraph(
     for (size_t i = 0; i < inputs.size(); ++i) {
       operands[i] =
           MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtypes[i]);
-      TORCH_CHECK(
-          operands[i] != nil,
-          "mps: cannot describe a zero-element tensor to MPSGraph");
+      // nil is either a zero-element tensor -- which the caller already
+      // short-circuits for `out` and which a graph could not express anyway --
+      // or an operand whose byte offset the SDK in force cannot describe. Both
+      // are declines, not errors: the header contract is that a nil MPSGraph
+      // description sends the op to the CPU round-trip, which is correct.
+      if (operands[i] == nil) {
+        for (MPSGraphTensorData* operand : operands) {
+          MpsRelease(operand);
+        }
+        return false;
+      }
     }
     MPSGraphTensorData* result_data =
         MpsTensorData(out_buffer, out_offset, out.numel(), out_dtype);
-    TORCH_CHECK(
-        result_data != nil,
-        "mps: cannot describe a zero-element tensor to MPSGraph");
+    if (result_data == nil) {
+      for (MPSGraphTensorData* operand : operands) {
+        MpsRelease(operand);
+      }
+      return false;
+    }
     // Held by the array (its own +1) and released again below, once the run has
     // been scheduled: the executable reads them during that run, so they have to
     // outlive the call only as long as the call.

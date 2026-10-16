@@ -25,6 +25,19 @@
 //     bytes. The NSData route (initWithDevice:data:shape:dataType:) has no
 //     offset either, so it is not used.
 //
+//     That initializer is macOS 15 API, and it is *not* declared by the
+//     MetalPerformanceShaders framework in the Xcode 15.4 SDK that the hosted
+//     macos-14 image pins -- measured on the first CI run of the MPS lane, where
+//     the compiler resolved the same selector to the MPSMatrix initializer and
+//     rejected the argument ("cannot initialize a parameter of type
+//     'MPSMatrixDescriptor *' with an lvalue of type 'MPSNDArrayDescriptor *'").
+//     MpsTensorData compiles the offset path only when the SDK in force can
+//     express it and the runtime reports macOS 15; under an older SDK it returns
+//     nil, and that nil is a *decline*, so an op whose operand is an interior
+//     pointer takes the CPU round-trip instead of reading from offset 0. The
+//     consequence is a correct but not-native op on an older toolchain, and it is
+//     why the initializer is not simply called unconditionally.
+//
 //   * An MPSNDArray is not a dense view of a buffer once it has more than one
 //     dimension: it rounds the stride between rows up to a 16-byte boundary. A
 //     (4, 5) float32 array is therefore laid out as 4 rows of 32 bytes, not of
