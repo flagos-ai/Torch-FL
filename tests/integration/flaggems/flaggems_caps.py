@@ -162,8 +162,11 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
 #: narrow ones while every operator still reaches some backend -- the failure
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
+    # 222 is main's regenerated Ascend count; this branch moves cuda routes only.
     "ascend": 222,
-    "cuda": 416,
+    # 416 -> 412: four metadata ops moved off the FlagGems route. See the
+    # snapshot note in tests/unit/test_conf_registration_consistency.py.
+    "cuda": 412,
     "dcu": 454,
     "gcu": 251,
     "kunlunxin": 0,
