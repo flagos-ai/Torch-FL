@@ -15,10 +15,10 @@
 """Review a pull request with an LLM and cast the AI approval vote.
 
 The repository requires two approving reviews before a pull request can merge.
-This script is the second of them: it reads the PR diff, asks a language model
-for a structured verdict, and -- only when the verdict is clean and the change
-does not touch "human-eyes-only" paths -- submits an APPROVE review through a
-dedicated machine user.
+This script supplies the automated one: it reads the PR diff, asks a language
+model for a structured verdict, and -- only when the verdict is clean and the
+change does not touch "human-eyes-only" paths -- submits an APPROVE review
+through a dedicated machine user.
 
 Why a machine user and not the workflow's own token: GitHub deliberately refuses
 to count an approval made with the Actions ``GITHUB_TOKEN`` towards required
