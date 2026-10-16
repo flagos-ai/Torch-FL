@@ -34,7 +34,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -488,9 +488,15 @@ class TestCatDispatchLog:
         on that platform's vendor kernel -- ``cuda`` on CUDA/DCU/PPU, ``musa`` on
         MUSA. Reading the conf keeps the assertion true on all of them and still
         checks the real property: the runtime honours the table it was given.
+
+        MPS writes no vendor cat kernel at all and routes it to ``none``, so
+        there is no dispatch line to assert and the case skips rather than
+        fails -- the same shape ``mean.dim`` takes on kunlunxin.
         """
+        expected = routed_backend_or_none("cat")
+        if expected is None:
+            pytest.skip("cat is routed to 'none' on this platform")
         result = _run_cat_subprocess({"FLAGOS_LOG": "dispatch"})
-        expected = routed_backend("cat")
         assert f"[flagos dispatch] cat -> {expected}" in result.stderr, (
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
