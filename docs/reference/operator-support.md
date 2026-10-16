@@ -9117,6 +9117,69 @@ what an earlier revision of this work did (689 ops, `mean` included).
 so the per-overload verdicts above are **not revalidated** and no row of theirs is
 revised. There is no TsingMicro CI lane.
 
+## TsingMicro RNG: host draw, device copy (2026-10-16)
+
+The Qwen-Image-2.1 `infer` run on a TX8 reached its first latent and died:
+
+```
+File "diffusers/utils/torch_utils.py", line 110, in randn_tensor
+    latents = torch.randn(shape, generator=generator, device=rand_device, ...)
+RuntimeError: Expected a 'cpu' device type for generator but found 'flagos'
+```
+
+The platform had no RNG registration at all — `backends_tsingmicro.conf` names no
+`randn`, and the conf-derived list it compiles therefore has no line for one — so the
+op fell to the generic `PrivateUse1` `cpu_fallback`, which redispatchs
+`randn.generator` on the CPU. There `at::native::randn` asserts the generator is a
+CPU one, and torch_fl's flagos generator subclasses `CPUGeneratorImpl` but carries
+`device_ = PrivateUse1`, so the assertion tripped.
+
+The device has **no random-number unit**, so the correct behaviour is to draw on the
+host and copy back — the arm GCU, Kunlunxin, Ascend and MUSA already carry
+(`randn_cpu` in each of their `rng.cc`). `csrc/aten/backends/tsingmicro/rng.cc` +
+`rng.h` now do the same: 47 RNG ops (the `randn`/`rand`/`rand_like`/`randint`/
+`randperm`/`normal`/`uniform_`/`random_`/`bernoulli`/`binomial`/`exponential`/
+`multinomial`/`poisson`/`native_dropout`/`_standard_gamma`/`_sample_dirichlet`
+families), every one drawing on the host from a seed reserved via
+`c10::flagos::ReserveSeed` and copying the result to the device. No vendor call is
+involved, so the file needs no SDK to build.
+
+**Registration is direct, not through the conf**, and that is the one place this
+differs from its sibling vendors. The codegen that produces
+`register_flaggems_tsingmicro.inc` (`codegen_boxing_flaggems_register.py`) emits only
+ops its conf routes to a *FlagGems* backend; a `tsingmicro` route is not one, so a
+conf entry for these would be dropped into its "unserved" comment list and the op
+would keep reaching the fallback. The claims are therefore `m.impl(...)` lines in
+`csrc/aten/register.cc`, next to the TsingMicro convolution wrappers and guarded by
+`USE_TSINGMICRO && !FLAGOS_BOXING_BUILD`. The `REGISTER_IMPL_TO_DISPATCHER` slot
+fills in `rng.cc` are kept for symmetry with the other vendors and for a future conf
+route, but they are not what makes the ops work today.
+
+**Measured** on a TX8 (torch 2.10.0+cpu, FlagGems 5.4.0):
+
+| Probe | Result |
+| --- | --- |
+| `torch.randn(..., generator=Generator("flagos:0").manual_seed(s), device="flagos:0")` | returns a `flagos` tensor |
+| same seed twice | bit-identical |
+| two different seeds | differ (proves the seed flows through `ReserveSeed`, not a fixed default) |
+| `torch.randn` / `randn_like` / `normal_` / `uniform_` / `randperm` / `randint` / `bernoulli` / `exponential_` | all return `flagos` tensors, no `cpu_fallback` |
+| `torch.flagos.manual_seed(0)` then two draws | replay identically |
+| `torch.flagos.get_rng_state()` / `set_rng_state()` | round-trip |
+
+**End to end:** the `infer --stage full` run now clears `make_latents` and executes
+the whole denoise loop — 2101 operator calls, 23 distinct ops, all on
+`flagos_python`. It then fails on a **separate, pre-existing** defect: `cat` on
+`complex64` tensors raises `KeyError: 'complex64'` from Triton's dtype
+canonicalisation, which is the documented FlagGems/Triton limitation the MetaX and
+DCU arms of `FlagGemsRejectsDtype` (`csrc/aten/common.cc`) work around. That escape
+routes to CUDA boxing kernels, which this platform does not build, so its remedy is a
+separate change and is **not** made here.
+
+**Evidence gaps.** One device, one host; no CI lane. The RNG values were checked for
+determinism and device residency, not against a CPU reference — the host draw *is* the
+CPU reference for these ops, so a value comparison would be tautological. The
+`complex64` `cat` above remains open.
+
 ## `cat` route changes (2026-10-12)
 
 `cat` was the last route of the runtime-conformance set that TsingMicro could not

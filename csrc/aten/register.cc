@@ -31,6 +31,11 @@
 #include "index_bounds.h"
 #include "backends/soft_lowp/format.h"
 #include "backends/soft_lowp/ops.h"
+// TsingMicro's RNG kernels are claimed directly below rather than through a
+// generated list, so their declarations have to be visible here.
+#if defined(USE_TSINGMICRO)
+#include "backends/tsingmicro/rng.h"
+#endif
 #include "runtime/allocator/caching_device_allocator.h"
 #include "dispatcher.h"
 
@@ -736,6 +741,70 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
+  #endif
+  // RNG: the same exception as the convolution wrappers above. TsingMicro has
+  // no random-number unit and its conf names no RNG op, so these reached the
+  // generic cpu_fallback -- which redispatchs randn.generator on the CPU and
+  // trips at::native's CPU-generator assertion against a flagos generator
+  // ("Expected a 'cpu' device type for generator but found 'flagos'"). The
+  // kernels live in backends/tsingmicro/rng.cc (host draw, device copy) and
+  // consume c10::flagos::ReserveSeed, so torch.flagos.manual_seed and the
+  // get/set_rng_state entry points own the stream these draw from.
+  //
+  // Claimed directly rather than through the conf, because the codegen that
+  // builds register_flaggems_tsingmicro.inc only emits ops its conf routes to a
+  // FlagGems backend, and a `tsingmicro` route is not one -- it would drop these
+  // silently. The REGISTER_IMPL_TO_DISPATCHER slots in rng.cc are filled for
+  // symmetry with the sibling vendors and for a future conf route; the claims
+  // below are what actually keep these ops off the fallback.
+  #if defined(USE_TSINGMICRO) && !defined(FLAGOS_BOXING_BUILD)
+    m.impl("rand", at::native::flagos::RandKernelTsingMicro);
+    m.impl("rand.generator", at::native::flagos::RandGeneratorKernelTsingMicro);
+    m.impl("rand.out", at::native::flagos::RandOutKernelTsingMicro);
+    m.impl("rand.names_out", at::native::flagos::RandNamesOutKernelTsingMicro);
+    m.impl("rand_like", at::native::flagos::RandLikeKernelTsingMicro);
+    m.impl("rand_like.generator", at::native::flagos::RandLikeGeneratorKernelTsingMicro);
+    m.impl("rand_like.out", at::native::flagos::RandLikeOutKernelTsingMicro);
+    m.impl("uniform_", at::native::flagos::UniformInplaceKernelTsingMicro);
+    m.impl("normal_", at::native::flagos::NormalInplaceKernelTsingMicro);
+    m.impl("normal.float_float", at::native::flagos::NormalFloatFloatKernelTsingMicro);
+    m.impl("normal.Tensor_float", at::native::flagos::NormalTensorFloatKernelTsingMicro);
+    m.impl("normal.Tensor_Tensor", at::native::flagos::NormalTensorTensorKernelTsingMicro);
+    m.impl("randint", at::native::flagos::RandintKernelTsingMicro);
+    m.impl("randint.low", at::native::flagos::RandintLowKernelTsingMicro);
+    m.impl("randint.out", at::native::flagos::RandintOutKernelTsingMicro);
+    m.impl("randint.low_out", at::native::flagos::RandintLowOutKernelTsingMicro);
+    m.impl("randint_like", at::native::flagos::RandintLikeKernelTsingMicro);
+    m.impl("randint_like.low_dtype", at::native::flagos::RandintLikeLowDtypeKernelTsingMicro);
+    m.impl("randint_like.out", at::native::flagos::RandintLikeOutKernelTsingMicro);
+    m.impl("randint_like.low_dtype_out", at::native::flagos::RandintLikeLowDtypeOutKernelTsingMicro);
+    m.impl("randperm", at::native::flagos::RandpermKernelTsingMicro);
+    m.impl("randperm.out", at::native::flagos::RandpermOutKernelTsingMicro);
+    m.impl("randn_like", at::native::flagos::RandnLikeKernelTsingMicro);
+    m.impl("randn_like.out", at::native::flagos::RandnLikeOutKernelTsingMicro);
+    m.impl("randn.names_out", at::native::flagos::RandnNamesOutKernelTsingMicro);
+    m.impl("random_.from", at::native::flagos::RandomInplaceFromKernelTsingMicro);
+    m.impl("native_dropout", at::native::flagos::NativeDropoutKernelTsingMicro);
+    m.impl("native_dropout_backward", at::native::flagos::NativeDropoutBackwardKernelTsingMicro);
+    m.impl("bernoulli_.Tensor", at::native::flagos::BernoulliInplaceTensorKernelTsingMicro);
+    m.impl("binomial", at::native::flagos::BinomialKernelTsingMicro);
+    m.impl("_standard_gamma", at::native::flagos::PrivStandardGammaKernelTsingMicro);
+    m.impl("_sample_dirichlet", at::native::flagos::PrivSampleDirichletKernelTsingMicro);
+    m.impl("randn", at::native::flagos::RandnKernelTsingMicro);
+    m.impl("randn.generator", at::native::flagos::RandnGeneratorKernelTsingMicro);
+    m.impl("randn_like.generator", at::native::flagos::RandnLikeGeneratorKernelTsingMicro);
+    m.impl("randn_like.generator_out", at::native::flagos::RandnLikeGeneratorOutKernelTsingMicro);
+    m.impl("randint.generator", at::native::flagos::RandintGeneratorKernelTsingMicro);
+    m.impl("randint.low_generator", at::native::flagos::RandintLowGeneratorKernelTsingMicro);
+    m.impl("randperm.generator", at::native::flagos::RandpermGeneratorKernelTsingMicro);
+    m.impl("random_", at::native::flagos::RandomInplaceKernelTsingMicro);
+    m.impl("random_.to", at::native::flagos::RandomInplaceToKernelTsingMicro);
+    m.impl("bernoulli", at::native::flagos::BernoulliKernelTsingMicro);
+    m.impl("bernoulli_.float", at::native::flagos::BernoulliInplaceFloatKernelTsingMicro);
+    m.impl("exponential", at::native::flagos::ExponentialKernelTsingMicro);
+    m.impl("exponential_", at::native::flagos::ExponentialInplaceKernelTsingMicro);
+    m.impl("multinomial", at::native::flagos::MultinomialKernelTsingMicro);
+    m.impl("poisson", at::native::flagos::PoissonKernelTsingMicro);
   #endif
   // FLAGOS_BUILD_FLAGGEMS=OFF leaves the block empty: no accelerated route is
   // compiled in, so every op is meant to reach cpu_fallback.
