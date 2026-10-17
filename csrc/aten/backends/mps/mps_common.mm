@@ -29,6 +29,9 @@
 // and the C++ runtime surface: DrainAll, the host-read barrier the staging
 // copies live behind.
 #include "runtime/accelerator/mps/mps_runtime.h"
+// and the allocator, whose record_stream is what keeps a block a queued graph
+// is still reading out of the free pool until that work completes.
+#include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {
 
@@ -1383,6 +1386,40 @@ bool RunGraphImpl(
     // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
     // -- what allocator block reuse and a host read ask -- now covers this op.
     ::FlagosMPSStreamSentinel(stream);
+
+    // The sentinel above makes the *stream* report the work, but that is not
+    // enough on its own, because the caching allocator's block-reuse check
+    // (find_free_block) compares stream pointers and never queries the stream.
+    // A block returns to its pool the moment the tensor over it is dropped
+    // (free_block, event_count == 0), and the next allocation of the same size
+    // on the same stream picks it straight back up -- while this queued graph is
+    // still reading the operand or writing the result that lived there. That is
+    // a use-after-free with a benign-looking trigger: it does not need a free()
+    // at all, just a dropped temporary, which is exactly what `torch.mm(a, b)`
+    // with an out that is not held, or a reshaped operand, produces.
+    //
+    // record_stream closes that gap the way the CUDA path does: it attaches an
+    // event on this stream to each block and bumps the block's event_count, so
+    // `free_block` defers the return to the pool until the event completes
+    // (process_events), and a block with a pending event cannot be merged away
+    // (try_merge_blocks) or released (release_cached_blocks) either. The event is
+    // the same stream the graph runs on, so it is ordered behind the run without
+    // any extra synchronization of its own.
+    //
+    // Operands and results are both in flight: the graph reads every input and
+    // writes every output, so both sets of blocks need the record. A tensor the
+    // runtime does not own is a no-op in record_stream (the deleter check), which
+    // is the right answer -- nothing in the block pool can alias it.
+    if (c10::flagos::CachingDeviceAllocator::is_enabled()) {
+      if (auto* alloc = c10::flagos::GetCachingAllocator()) {
+        for (const at::Tensor& input : inputs) {
+          alloc->record_stream(input.storage().data_ptr(), stream);
+        }
+        for (const at::Tensor& out : outs) {
+          alloc->record_stream(out.storage().data_ptr(), stream);
+        }
+      }
+    }
   }
   // The run is asynchronous, so anything the host has to do with a staging
   // buffer -- a result's copy-back, or a private buffer's release -- has to be
