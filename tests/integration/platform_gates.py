@@ -119,6 +119,32 @@ _GATES: tuple[Gate, ...] = (
         platforms=_EVERY_PLATFORM_BUT_MUSA,
     ),
     Gate(
+        step="musa_runtime",
+        target="test_musa_runtime.py",
+        reason=(
+            "the file carries `pytestmark = pytest.mark.musa` and asserts the "
+            "MThreads stack by name -- flagtree's triton backend is "
+            '"mthreads", flag_gems.vendor_name is "mthreads", and FlagTree '
+            "binds to a musa compile target -- so it can only pass on MUSA. The "
+            "step is kept universal so the MUSA runtime preflight is one shared "
+            "entry rather than a MUSA-only manifest variant"
+        ),
+        platforms=_EVERY_PLATFORM_BUT_MUSA,
+    ),
+    Gate(
+        step="musa_flaggems_hybrid",
+        target="ops/test_musa_flaggems.py",
+        reason=(
+            "the file carries `pytestmark = pytest.mark.musa`, which the ops "
+            "conftest skips on every other platform, and it asserts the MUSA "
+            "FlagGems dispatch by name (the mthreads vendor entry points, the "
+            "native/FlagGems RNG reservations and the float64 mm tune-space "
+            "boundary). The step is kept universal so the MUSA hybrid coverage "
+            "is one shared entry rather than a MUSA-only variant"
+        ),
+        platforms=_EVERY_PLATFORM_BUT_MUSA,
+    ),
+    Gate(
         step="profiler_parity",
         target="test_profiler_parity.py",
         reason=(

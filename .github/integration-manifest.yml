@@ -129,7 +129,6 @@ steps:
   # green run of this group is evidence the suites below measured something.
   - id: musa_runtime
     name: Check MUSA FlagTree and FlagGems runtime
-    platforms: [musa]
     command: >-
       python -m pytest tests/integration/test_musa_runtime.py
       -v -s --tb=short
@@ -224,7 +223,6 @@ steps:
   # wheel carries no FlagGems kernels or the runtime has no mthreads backend.
   - id: musa_flaggems_hybrid
     name: Run MUSA FlagGems hybrid tests
-    platforms: [musa]
     command: >-
       python -m pytest tests/integration/ops/test_musa_flaggems.py
       -m musa -v -s --tb=short

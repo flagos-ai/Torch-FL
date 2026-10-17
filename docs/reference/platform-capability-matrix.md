@@ -177,14 +177,14 @@ the manifest, to the eight platforms and to the whitelist below.
 
 | platform | steps whose target still skips |
 |---|---|
-| ascend | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
-| cuda | rng, musa_dispatch, soft_lowp_matrix, native_comm_bridge |
-| dcu | rng, musa_dispatch |
-| gcu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
-| kunlunxin | rng, vendor_ops, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
-| metax | rng, musa_dispatch, profiler_parity, native_comm_bridge |
+| ascend | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| cuda | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid, soft_lowp_matrix, native_comm_bridge |
+| dcu | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid |
+| gcu | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| kunlunxin | rng, vendor_ops, musa_dispatch, musa_runtime, musa_flaggems_hybrid, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| metax | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid, profiler_parity, native_comm_bridge |
 | musa | profiler_parity, torch_compile, soft_lowp_matrix, native_comm_bridge |
-| ppu | rng, musa_dispatch, profiler_parity, soft_lowp_matrix, native_comm_bridge |
+| ppu | rng, musa_dispatch, musa_runtime, musa_flaggems_hybrid, profiler_parity, soft_lowp_matrix, native_comm_bridge |
 
 The recorded skips, with the measured reason each is still there:
 
@@ -209,6 +209,18 @@ The recorded skips, with the measured reason each is still there:
   `-> cuda` assertions cannot hold on the other platforms either. The step is
   kept universal so the MUSA dispatch coverage is one shared entry rather than
   a MUSA-only variant.
+- `musa_runtime` — `tests/integration/test_musa_runtime.py` on every platform
+  but MUSA. The file carries `pytestmark = pytest.mark.musa` and asserts the
+  MThreads stack by name: flagtree's triton backend is `mthreads`,
+  `flag_gems.vendor_name` is `mthreads`, and FlagTree binds to a `musa` compile
+  target. The step is kept universal so the MUSA runtime preflight is one
+  shared entry rather than a MUSA-only variant.
+- `musa_flaggems_hybrid` — `tests/integration/ops/test_musa_flaggems.py` on
+  every platform but MUSA. Its cases carry `pytest.mark.musa`, which the ops
+  conftest skips elsewhere, and the file asserts the MUSA FlagGems dispatch by
+  name (the mthreads vendor entry points, the native/FlagGems RNG reservations
+  and the float64 `mm` tune-space boundary). The step is kept universal so the
+  MUSA hybrid coverage is one shared entry rather than a MUSA-only variant.
 - `profiler_parity` — `tests/integration/test_profiler_parity.py` on Ascend,
   GCU, Kunlunxin, MetaX, MUSA and PPU. The comparison is against
   `tests/data/profiler_cuda_baseline.json`, so it is only meaningful where the
