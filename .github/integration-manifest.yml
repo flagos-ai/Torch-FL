@@ -102,6 +102,26 @@ steps:
     command: >-
       python -m pytest tests/integration/ -m "multi_device" -v -s --tb=short
 
+  # The MUSA runtime preflight. It is deliberately a required check rather than
+  # a capability skip, and it runs before the suites it gates so a broken
+  # MThreads stack is reported as one missing runtime instead of as every hybrid
+  # and compile case failing for its own reason.
+  #
+  # It asserts what the other MUSA groups otherwise assume and turn into an
+  # optional-dependency skip: that this wheel was built with the FlagGems
+  # kernels, that the installed triton is the FlagTree build carrying the
+  # "mthreads" backend (matched against the flagtree distribution's own triton
+  # directory, so a stock triton shadowing it fails here), that flag_gems'
+  # vendor is mthreads, and that FlagTree binds to torch_fl at a musa compile
+  # target. Missing dependencies raise rather than skip, which is the point: a
+  # green run of this group is evidence the suites below measured something.
+  - id: musa_runtime
+    name: Check MUSA FlagTree and FlagGems runtime
+    platforms: [musa]
+    command: >-
+      python -m pytest tests/integration/test_musa_runtime.py
+      -v -s --tb=short
+
   # Issue #409: the remaining top-level files no manifest selected. They are
   # single-device suites, so the multi_device sweep above does not reach them,
   # and they are named here rather than selected by marker for the reason
@@ -254,6 +274,25 @@ steps:
     command: >-
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
       -v -s --tb=short
+
+  # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
+  # deselects `-m flaggems`, and ops/test_musa_flaggems.py is the MUSA hardware
+  # behaviour of that route rather than one more generically-selected case. It
+  # asserts the Python entry points the generated dispatch actually calls
+  # (patching the package-level `flag_gems.<fn>` name the codegen freezes), the
+  # native/FlagGems RNG reservations, and the float64 mm tune-space boundary.
+  #
+  # It deliberately does not call flag_gems.enable(): torch_fl already routes
+  # each overload through its generated C++ kernels, and global FlagGems
+  # registration both bypasses that dispatcher and registers lift_fresh, whose
+  # vendor-device check rejects flagos tensors. The file skips itself when the
+  # wheel carries no FlagGems kernels or the runtime has no mthreads backend.
+  - id: musa_flaggems_hybrid
+    name: Run MUSA FlagGems hybrid tests
+    platforms: [musa]
+    command: >-
+      python -m pytest tests/integration/ops/test_musa_flaggems.py
+      -m musa -v -s --tb=short
 
   # The whole RNG dispatch file, not a shrinking allowlist. Ascend is the
   # platform whose history this encodes: upstream #70 implemented the remaining

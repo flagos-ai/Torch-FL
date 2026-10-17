@@ -84,6 +84,16 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "musa_dispatch": ("ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "ppu"),
+    "musa_runtime": ("ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "ppu"),
+    "musa_flaggems_hybrid": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "kunlunxin",
+        "metax",
+        "ppu",
+    ),
     "unit_tests_per_file": (
         "ascend",
         "cuda",
