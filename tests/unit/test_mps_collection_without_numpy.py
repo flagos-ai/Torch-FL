@@ -12,20 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep shared operator collection independent of the MPS-only tests' imports.
+"""Keep the shared MPS sweep importable when its environment has no NumPy.
 
 The GCU and Kunlunxin lanes intentionally install no NumPy, but they select
 ``tests/integration/ops/`` and therefore import every MPS-only module there.
 An MPS module with a module-level ``import numpy`` turned those sweeps into
-collection errors before any operator ran. This test models that environment
-in a subprocess, so the failure is caught in a lightweight unit run as well as
-in the MPS lane itself.
+collection errors before any operator ran. The platform-agnostic lane does not
+install torch either, so this test checks the module sources rather than
+importing the full integration package, which requires a built device runtime.
 """
 
-import os
-import re
-import subprocess
-import sys
+import ast
 from pathlib import Path
 
 
@@ -34,35 +31,55 @@ _OPS_DIR = _REPO_ROOT / "tests/integration/ops"
 _SHARED_MPS_MODULES = ("test_mps_erf.py", "test_mps_sqrt.py", "test_mps_tanh.py")
 
 
-def test_shared_mps_modules_collect_without_numpy(tmp_path):
-    """The no-NumPy shared sweep must reach collection, not report import errors."""
-    package = tmp_path / "numpy"
-    package.mkdir()
-    (package / "__init__.py").write_text(
-        "raise ModuleNotFoundError(\"No module named 'numpy'\")\n",
-        encoding="utf-8",
-    )
-    env = dict(os.environ, PYTHONPATH=str(tmp_path))
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            *_SHARED_MPS_MODULES,
-            "--collect-only",
-            "-q",
-        ],
-        cwd=_OPS_DIR,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    output = result.stdout + result.stderr
-    unittest_import_error = re.search(
-        r"_FailedTest.*?ModuleNotFoundError: No module named 'numpy'",
-        output,
-        re.DOTALL,
-    )
-    assert result.returncode in (0, 5), output
-    assert not unittest_import_error, output
+def test_shared_mps_modules_do_not_import_numpy_without_guards():
+    """All NumPy uses in these modules must be scoped to guarded test bodies."""
+    failures = []
+    for name in _SHARED_MPS_MODULES:
+        path = _OPS_DIR / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if _is_numpy_import(node):
+                failures.append(f"{name}:{node.lineno}: module-level NumPy import")
+                continue
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            numpy_imports = [
+                inner
+                for inner in _walk_without_nested_callables(node)
+                if _is_numpy_import(inner)
+            ]
+            for inner in numpy_imports:
+                function_name = node.name
+                if function_name.startswith("test_"):
+                    continue
+                skips = [
+                    caller
+                    for caller in ast.walk(node)
+                    if isinstance(caller, ast.Name)
+                    and caller.id in {"skip", "skipif", "importorskip"}
+                ]
+                if not skips:
+                    failures.append(
+                        f"{name}:{inner.lineno}: unguarded NumPy import in {function_name}"
+                    )
+    assert not failures, "\n".join(failures)
+
+
+def _is_numpy_import(node):
+    """Whether an AST node imports NumPy rather than a similarly named module."""
+    if isinstance(node, ast.Import):
+        return any(alias.name == "numpy" for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return node.level == 0 and node.module == "numpy"
+    return False
+
+
+def _walk_without_nested_callables(function):
+    """Yield nodes from one function body, excluding definitions inside it."""
+    pending = list(function.body)
+    while pending:
+        node = pending.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
