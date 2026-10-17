@@ -1436,14 +1436,33 @@ bool RunGraphImpl(
       }
       [result_data addObject:data];
     }
+    if (StageTraceWanted()) {
+      std::fprintf(stderr,
+                   "[mps-stage] result.done count=%zu order=%zu\n",
+                   static_cast<size_t>(result_data.count),
+                   plan->input_order.size());
+      std::fflush(stderr);
+    }
     // Held by the array (its own +1) and released again below, once the run has
     // been scheduled: the executable reads them during that run, so they have to
     // outlive the call only as long as the call.
     NSMutableArray<MPSGraphTensorData*>* array =
         [NSMutableArray arrayWithCapacity:inputs.size()];
     for (const NSUInteger operand : plan->input_order) {
+      if (StageTraceWanted()) {
+        std::fprintf(stderr,
+                     "[mps-stage] order[%zu]=%zu operand_count=%zu slot=%p\n",
+                     static_cast<size_t>(array.count),
+                     static_cast<size_t>(operand),
+                     operands.size(),
+                     operand < operands.size()
+                         ? static_cast<void*>(operands[operand])
+                         : nullptr);
+        std::fflush(stderr);
+      }
       [array addObject:operands[operand]];
     }
+    StageTrace("array.built", inputs);
     // Asynchronous on purpose: see the contract in mps_common.h. Measured on an
     // M5, the same one-node executable costs ~18 us scheduled this way against
     // ~370 us when awaited inline, because the wait is a round trip to the GPU
