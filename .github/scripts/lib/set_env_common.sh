@@ -217,9 +217,19 @@ pip_error_is_permanent() {
 pip_retry() {
   local python_exe="${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}"
   local timeout="${PIP_RETRY_TIMEOUT:-300}"
+  # Empty on purpose when the cache is disabled, and that is the state most
+  # callers run in. The array is kept non-empty on the *expansion* side rather
+  # than by seeding it with a placeholder: macOS ships bash 3.2, where
+  # `"${extra[@]}"` on an empty array trips `set -u` as an unbound variable
+  # ("extra[@]: unbound variable") on the runner. Linux's bash 4.4+ treats that
+  # expansion as safe, so a placeholder would have hidden the divergence here
+  # and only been visible as a failed macOS job. Both branches below therefore
+  # expand the array only when it is known to hold a value; see the measured
+  # note on `pip_retry` above.
   local -a extra=()
+  local cache_flag=""
   if [[ "${PIP_RETRY_NO_CACHE:-1}" == "1" ]]; then
-    extra+=(--no-cache-dir)
+    cache_flag="--no-cache-dir"
   fi
   local index_host="" log_file="" attempt=1 route_status=0
   index_host="$(pip_index_host "$@")"
@@ -246,7 +256,15 @@ pip_retry() {
     # networks: the FlagTree wheel is hundreds of MB, and pip's default timeout
     # (15s) and retries (5) are not enough when the mirror link drops
     # mid-download.
-    if "$python_exe" -m pip install --retries 10 --timeout "$timeout" "${extra[@]}" "$@" 2>&1 | tee "$log_file"; then
+    # `cache_flag` is a scalar rather than an element of `extra` so the empty
+    # case needs no array expansion at all; a quoted empty string is a pip
+    # error, so it is dropped explicitly.
+    if [[ -n "$cache_flag" ]]; then
+      "$python_exe" -m pip install --retries 10 --timeout "$timeout" "$cache_flag" "$@" 2>&1 | tee "$log_file"
+    else
+      "$python_exe" -m pip install --retries 10 --timeout "$timeout" "$@" 2>&1 | tee "$log_file"
+    fi
+    if [[ "${PIPESTATUS[0]}" -eq 0 ]]; then
       break
     fi
     if pip_error_is_permanent "$log_file"; then

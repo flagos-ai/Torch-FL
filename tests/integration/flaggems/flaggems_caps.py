@@ -168,6 +168,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "gcu": 251,
     "kunlunxin": 0,
     "metax": 594,
+    "mps": 0,
     "musa": 466,
     "ppu": 592,
 }
@@ -187,6 +188,7 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "gcu": "none",
     "kunlunxin": "none",
     "metax": "flaggems",
+    "mps": "none",
     "musa": "none",
     "ppu": "cuda",
 }

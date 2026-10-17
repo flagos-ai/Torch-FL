@@ -45,6 +45,44 @@ StreamState* gDefaultStream = nullptr;
 std::mutex gRegistryMutex;
 std::set<StreamState*> gLiveStreams;
 
+// The shutdown drain, registered the first time a queue is created.
+//
+// Ops commit their MTLCommandBuffer and return; nothing on the ordinary path
+// ever waits for one to finish, because a Metal queue runs in order and the
+// next host read is what forces the wait. That is fine while the process keeps
+// running and wrong at the very end: an MTLCommandBuffer still in flight when
+// libmetal / MTLCompilerService tear themselves down faults inside the encode
+// machinery, which is a crash the operator sees as an inexplicable segfault in
+// a program whose last GPU op finished correctly.
+//
+// atexit runs while the C++ runtime and the still-loaded Metal frameworks are
+// intact, which is early enough to drain and late enough that no later user
+// code can commit more work. Draining twice is harmless -- waitUntilCompleted
+// on a finished buffer returns immediately, and DrainAll is already the
+// implementation of DeviceSynchronize.
+//
+// The flag is deliberate: if the drain itself faults (a queue already torn
+// down by a framework that unloads early), the second invocation must not run
+// it again and turn one fault into a crash loop inside exit().
+bool gShutdownDrainRegistered = false;
+bool gShutdownDrainRunning = false;
+
+void ShutdownDrain() {
+  if (gShutdownDrainRunning) {
+    return;
+  }
+  gShutdownDrainRunning = true;
+  DrainAll();
+}
+
+void MaybeRegisterShutdownDrain() {
+  if (gShutdownDrainRegistered) {
+    return;
+  }
+  gShutdownDrainRegistered = true;
+  ::atexit(&ShutdownDrain);
+}
+
 } // namespace
 
 id<MTLDevice> MetalDevice() {
@@ -66,6 +104,25 @@ bool MetalAvailable() {
   return device != nil && device.hasUnifiedMemory;
 }
 
+bool MetalGraphUsable() {
+  id<MTLDevice> device = MetalDevice();
+  // The paravirtualized family is the one MPSGraph encode is known to fault on,
+  // and the device class is the only thing that distinguishes those hosts from a
+  // physical GPU: the same OS build, the same MPSGraph, the same unified memory.
+  // `MTLDevice.name` is the family string ("Apple Paravirtual device"), and the
+  // loaded IOKit personality is AppleParavirtGPUMetalIOGPUFamily. The name is
+  // checked rather than the loaded bundle because it is the documented property
+  // and does not depend on an internal framework's filename.
+  NSString* name = device != nil ? device.name : nil;
+  const bool paravirtual =
+      name != nil &&
+      [name rangeOfString:@"paravirtual"
+                  options:NSCaseInsensitiveSearch].location != NSNotFound;
+  const bool usable =
+      device != nil && device.hasUnifiedMemory && !paravirtual;
+  return usable;
+}
+
 StreamState* DefaultStream() {
   std::lock_guard<std::mutex> lock(gDefaultStreamMutex);
   if (gDefaultStream == nullptr) {
@@ -81,6 +138,8 @@ StreamState* DefaultStream() {
     state->queue = queue; // +1, owned by the state for the process lifetime
     gDefaultStream = state;
     RegisterStream(state);
+    // A queue exists from here on, so committed work can outlive main.
+    MaybeRegisterShutdownDrain();
   }
   return gDefaultStream;
 }

@@ -242,8 +242,15 @@ jobs:
             echo "::error::setup_stage in $CONFIG_FILE must be 'build' or 'integration', found: $SETUP_STAGE"
             exit 1
           fi
-          if [[ -z "$CI_IMAGE" || "$CI_IMAGE" == "null" ]]; then
-            echo "::error::ci_image is required in $CONFIG_FILE"
+          # Required to be *stated*, but allowed to be the empty string. Every
+          # vendor platform names an image; the empty value is a real one, used
+          # by a platform whose jobs run directly on the runner instead of in a
+          # container (MPS needs a macOS host, which cannot run one). No `if:`
+          # can skip the `container:` key conditionally, so the consuming
+          # workflows omit that key when this value is empty -- which is why the
+          # type is asserted here rather than a placeholder being invented.
+          if [[ "$CI_IMAGE" == "null" || "$(yq -r '.ci_image | type' "$CONFIG_FILE")" != '!!str' ]]; then
+            echo "::error::ci_image must be a string in $CONFIG_FILE (empty means no container)"
             exit 1
           fi
           if [[ ! "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]]; then

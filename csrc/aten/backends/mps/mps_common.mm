@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -21,10 +23,21 @@
 
 #include <c10/util/Exception.h>
 
+// The host-round-trip spelling the softmax declines ask for. Included here
+// rather than left to the generated kernel file so the helper and its only
+// callers agree on `at::_softmax` resolving to the composite-free operator.
+#include <ATen/ops/_softmax.h>
+
 // Pulls in the flagos C ABI (Stream_t, GetDevice, GetCurrentStreamForDevice)
 // plus the two Metal side-door helpers the operator layer needs, the same way
 // every other vendor backend includes runtime/accelerator/<vendor>/.
 #include "runtime/accelerator/mps/mps.h"
+// and the C++ runtime surface: DrainAll, the host-read barrier the staging
+// copies live behind.
+#include "runtime/accelerator/mps/mps_runtime.h"
+// and the allocator, whose record_stream is what keeps a block a queued graph
+// is still reading out of the free pool until that work completes.
+#include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {
 
@@ -86,6 +99,38 @@ bool MpsSupportsReduceDtype(
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsDivDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
+  // The float widths only, *not* the mul predicate, even though the two would
+  // look interchangeable: `mul` is dtype-preserving on the reference and
+  // division is not. Measured, because the difference is a wrong answer rather
+  // than an exception -- `at::div(tensor([-7]), tensor([2]))` is the float
+  // `-3.5` on the reference while the graph's integral division truncates in
+  // place and returns the int64 `-3`. A gate that admitted the integral widths
+  // would hand the caller the truncated tensor and a dtype that disagrees with
+  // the CPU, so the pair takes the round-trip instead. See the note in
+  // mps_common.h. `reciprocal` names this same predicate with both arguments
+  // equal to the operand's dtype, so `x / 2` and `1 / x` are served on exactly
+  // one width set.
+  if (self_dtype != other_dtype) {
+    return false;
+  }
+  return self_dtype == at::kFloat || self_dtype == at::kHalf ||
+      self_dtype == at::kBFloat16;
+}
+
+bool MpsSupportsDivScalarDtype(
+    at::ScalarType self_dtype,
+    const at::Scalar& other) {
+  // The float widths only, and the divisor is then unconstrained within them:
+  // see the note in mps_common.h. A complex divisor has no MPSGraph element
+  // type, so it is declined along with the complex operand widths.
+  if (other.isComplex()) {
+    return false;
+  }
+  return self_dtype == at::kFloat || self_dtype == at::kHalf ||
+      self_dtype == at::kBFloat16;
+}
+
 bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
   if (self_dtype != other_dtype) {
     return false;
@@ -94,6 +139,36 @@ bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype)
       self_dtype == at::kBFloat16;
 }
 
+bool MpsSupportsWhereDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType other_dtype,
+    at::ScalarType condition_dtype) {
+  // The two branches take the binary pair's rule: the select builds one node in
+  // one element type and promotes nothing, where the reference promotes
+  // `self`/`other` to a common dtype (`int32` against `int64` is `int64`, half
+  // against float is float), so a promoted pair takes the round-trip. See
+  // T_WHERE.
+  if (!MpsSupportsBinaryDtype(self_dtype, other_dtype)) {
+    return false;
+  }
+  // The condition is the reference's own narrowing, not the graph's: `where`
+  // accepts a bool condition and, with a deprecation warning, a uint8 one, and
+  // raises for every other width (`where expected condition to be a boolean
+  // tensor, but got a tensor with dtype Int`). Bool is the node's predicate
+  // type; uint8 is widened by a comparison against zero in the body. A width
+  // outside the pair is declined so the reference raises its own message rather
+  // than the body answering a call the reference rejects.
+  return condition_dtype == at::kBool || condition_dtype == at::kByte;
+}
+
+bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype) {
+  // Both arguments are the list's one datatype: the body checks the list is
+  // uniform and this checks that width is carryable. `cat` promotes a mixed
+  // list on the reference, which is the body's decline, so nothing here does the
+  // promotion. The second parameter exists so this predicate reads like the
+  // other two-operand gates; the body passes the same dtype twice.
+  return dtype == other_dtype && MpsSupportsUnaryDtype(dtype);
+}
 bool MpsSupportsSoftmaxDtype(
     at::ScalarType self_dtype,
     bool half_to_float,
@@ -118,6 +193,352 @@ bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent) 
   return MpsConstantExact(exponent, self_dtype);
 }
 
+bool MpsSupportsSiluDtype(at::ScalarType dtype) {
+  // The three widths the composition was measured bit-identical to at::silu on.
+  // See the note in mps_common.h: aten's `silu` is not `x * sigmoid(x)`, so this
+  // list is a measurement rather than the identity it looks like.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsSigmoidDtype(at::ScalarType dtype) {
+  // float32 alone, and the narrowness is the increment: see the note in
+  // mps_common.h. float16 is declined because this SDK flushes a subnormal
+  // float16 *result* to zero and the left tail of a sigmoid is subnormal at that
+  // width, so the graph and the reference part by 3.1e-02; bfloat16 is declined
+  // because the graph rounds differently from at::sigmoid at a width that holds
+  // about three decimal digits. Both keep the round-trip, which stays correct.
+  return dtype == at::kFloat;
+}
+
+bool MpsSupportsExpDtype(at::ScalarType dtype) {
+  // The three widths measured bit-identical to at::exp in the operand's own
+  // dtype, where a "difference" would mean a wrong answer: float16 over its whole
+  // representable curve including every subnormal, and bfloat16 over the normal
+  // range. float32 is served on the same reading `silu`'s float32 is -- see the
+  // note in mps_common.h -- and float64 and the integral/bool widths keep the
+  // round-trip, float64 because MPSGraph has no element type for it and the
+  // others because the promotion rule lives in the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsLogDtype(at::ScalarType dtype) {
+  // The three widths measured to agree with at::log in the operand's own dtype:
+  // float16 and bfloat16 bit-for-bit or to a last-ulp rounding, and float32 to one
+  // ulp. See the note in mps_common.h. float64 has no MPSGraph element type and
+  // the integral/bool widths are promoted by the reference, so both keep the
+  // round-trip.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsRsqrtDtype(at::ScalarType dtype) {
+  // The three float widths, measured against at::rsqrt in the operand's own
+  // dtype. See the note in mps_common.h for why this is a predicate of its own
+  // rather than a reuse of the sibling unaries': the body is the two-node
+  // `reciprocal(sqrt(x))` composition, so both halves' subnormal policy applies.
+  //
+  //   float32   bit-identical to the reference over 400001 samples spanning
+  //             1e-5..100 plus the domain's edges, and over a 100001-sample
+  //             sweep of the top of the range. Zero mismatches.
+  //   float16   115782 of 400001 samples differ, max relative 9.756e-04 and max
+  //             absolute 1.563e-02 -- one float16 ulp. Every one of them is a
+  //             last-ulp rounding in which the *graph* is closer to the exact
+  //             answer than the CPU reference is: summed over the sweep, the
+  //             graph is worse than the reference on 0 samples, better on
+  //             115782, and equal on the remaining 284219. The maximum relative
+  //             distance from the exact (float64) answer is 4.877e-04 for the
+  //             graph against 7.322e-04 for the reference.
+  //   bfloat16  122658 of 400001 samples differ under the same reading, and the
+  //             same shape: worse on 0, better on 122658, equal on 277343, with
+  //             a max relative distance of 3.868e-03 against the reference's
+  //             5.842e-03.
+  //
+  // The domain's edges are reproduced exactly at all three widths, which is the
+  // first thing the composition had to get right: rsqrt(0) = inf,
+  // rsqrt(-0.0) = -inf, rsqrt(1) = 1, rsqrt(4) = 0.5, rsqrt(-1) = nan,
+  // rsqrt(inf) = 0 and rsqrt(nan) = nan, all bit-for-bit. The signed zero is the
+  // one worth naming: the sqrt of -0.0 is -0.0 and the reciprocal of -0.0 is
+  // -inf, so the composition reaches the reference's answer through two nodes
+  // rather than a fused one, and does.
+  //
+  // What the *input* half costs is the same divergence `log` measured, and it is
+  // accepted on the same policy: the platform flushes a subnormal float32 input
+  // to zero before the sqrt, and rsqrt of zero is inf, so an input below the
+  // smallest normal comes back inf where the reference answers a finite (and
+  // large) number. Measured, the boundary sits exactly at that normal:
+  // 1.1754944e-38 agrees with the reference while 1.1754942e-38 (the largest
+  // subnormal) flushes to inf. This never reaches a normal input -- measured,
+  // every input at or above the smallest normal reproduces the reference at
+  // float32 -- and a model's rsqrt operates inside a normalisation on a variance
+  // that has had an epsilon added, where that band is not reached.
+  //
+  // float16 is the width that keeps this from being a blanket rule about inputs
+  // as well: measured, it does *not* flush subnormal inputs --
+  // rsqrt(3.051758e-05) = 181.0 and rsqrt(1.525879e-05) = 256.0, both exact --
+  // so the float32 flush is a float32 property, exactly as `log` found.
+  //
+  // The *result* half turned out to cost nothing, which is worth recording
+  // because it was the half a composition was expected to risk: a reciprocal
+  // whose output is subnormal is the band `sigmoid` declined float16 for, and
+  // the band is simply not reachable here -- rsqrt is subnormal at float32 or
+  // bfloat16 only for an input beyond the largest representable value (measured:
+  // the boundary is above 3.4e38), and at float16 the curve saturates at
+  // rsqrt(inf) = 0 before it goes subnormal (measured: a 200001-sample sweep of
+  // the top half of the float16 range contains no subnormal result). So no width
+  // is declined for the result half.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::rsqrt(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`'s and `log`'s do: the promotion rule
+  // is the reference's, and the round-trip is where it lives. Both declined
+  // paths were measured to reproduce the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsSqrtDtype(at::ScalarType dtype) {
+  // The three float widths, measured against at::sqrt in the operand's own
+  // dtype. See the note in mps_common.h for why this is a predicate of its own
+  // rather than a reuse of the sibling `rsqrt`'s.
+  //
+  //   float32     bit-identical to the reference over 400001 samples spanning
+  //               1e-6..1e6, over a 200001-sample sweep of the whole positive
+  //               range up to the largest normal, and over every domain edge.
+  //               Zero mismatches at or above the smallest normal.
+  //   float16     bit-identical over the same sweeps *including every subnormal
+  //               input*: a sample of all 1023 positive float16 subnormals
+  //               reproduced the reference bit for bit, and so did the sign
+  //               patterns that matter (sqrt(-0.0) = -0.0, sqrt(-subnormal) =
+  //               nan). Zero mismatches.
+  //   bfloat16    bit-identical over the normal range under the same reading:
+  //               400001 samples, zero mismatches.
+  //
+  // The domain's edges are reproduced exactly at all three widths, which is the
+  // first thing a square root has to get right: sqrt(0) = 0,
+  // sqrt(-0.0) = -0.0 (the signed zero -- a body that folded it to +0.0 would
+  // answer the wrong signed zero, and the sibling `rsqrt` turns the signed zero
+  // into -inf), sqrt(1) = 1, sqrt(4) = 2, sqrt(-1) = nan, sqrt(inf) = inf and
+  // sqrt(nan) = nan, all bit-for-bit.
+  //
+  // What *does* diverge at float32 and bfloat16 is the same subnormal *input*
+  // flush `log` and the `rsqrt` composition's input half measured: the platform
+  // flushes a subnormal operand to zero before the node evaluates, and sqrt(0)
+  // is 0, so a positive subnormal input comes back 0 where the reference
+  // answers a small *normal* number -- measured, the boundary sits exactly at
+  // the smallest normal (1.1754944e-38 agrees with the reference while
+  // 1.1754942e-38, the largest subnormal, flushes to 0), and every input at or
+  // above that normal reproduces the reference. This is the one place `sqrt`'s
+  // gate reads differently from `rsqrt`'s even though the two share the node:
+  // the sibling's flush turned a small input into `inf`, an *out-of-range*
+  // answer, where this body's turns it into 0, a value inside the normal range.
+  // Both are accepted on the same policy -- the divergence is confined to the
+  // band where the reference's *input* is subnormal, and a model's `sqrt`
+  // operates on a variance, a norm or an already-non-negative quantity that has
+  // had an epsilon added, where that band is not reached -- and both are why the
+  // gate is stated per width rather than shared.
+  //
+  // float16 is the contrast that keeps the flush from being a blanket rule: it
+  // does *not* flush subnormal inputs, exactly as `log` and `rsqrt` found, so
+  // the boundary above is a float32/bfloat16 property rather than one that
+  // generalises across widths.
+  //
+  // The one edge whose *kind* differs rather than its magnitude is the negative
+  // subnormal: measured, a subnormal float32 or bfloat16 input below zero comes
+  // back -0.0 where the reference answers nan, because the flush turns the
+  // operand into -0.0 and sqrt(-0.0) = -0.0. That is a different failure from
+  // the positive band's wrong magnitude, and it is the *same* platform flush
+  // read at the sign boundary rather than a second divergence; it is confined to
+  // the identical band (a negative input of normal magnitude answers nan
+  // correctly -- measured, -1.1754944e-38 is nan on both), and a model's `sqrt`
+  // on a masked or clamped operand does not reach it.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::sqrt(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`, `log` and `rsqrt`'s do: the
+  // promotion rule is the reference's, and the round-trip is where it lives.
+  // Both declined paths were measured to reproduce the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsTanhDtype(at::ScalarType dtype) {
+  // The two narrow widths, measured against at::tanh in the operand's own dtype.
+  // This is the first gate on this backend that *declines the widest float*,
+  // and the reason is a node-fidelity finding rather than the flush or the
+  // domain the sibling gates measured. See the note in mps_common.h.
+  //
+  // float16 and bfloat16 are served, and the reading is the one `rsqrt`'s
+  // composed widths recorded: the node reproduces the reference's own function.
+  // Measured over a 400001-sample sweep of [-12, 12], the graph and the
+  // reference have the *same* max error against the exact (float64) tanh, to
+  // the digit -- 4.3226e-04 at float16 and 3.3111e-03 at bfloat16 -- over the
+  // part of the curve that is not saturated, and the two tensors differ on 5
+  // samples at float16 and 1 at bfloat16, every one of them a step or three of
+  // the width's own representation rather than a coarser answer. The sharper
+  // test is symmetry: max |g(x) + g(-x)| is *exactly* 0.0 at both widths, the
+  // reference's own value, where the float32 node breaks the same measurement by
+  // 1.788e-07.
+  //
+  // Two edges at these widths are the *host's* rather than this body's, and both
+  // were measured both ways -- on an M5 with a current SDK and on the macos-14
+  // runner CI uses:
+  //
+  //   * the sign of a zero. On the M5, tanh(-0.0) comes back +0.0 at both widths
+  //     where the reference answers -0.0; the CI runner answers the reference's
+  //     -0.0. The value is identical either way.
+  //   * the bfloat16 subnormal band. On the M5 all 127 subnormal operands (bits
+  //     0x0001 to 0x007f) come back 0 where the reference answers a subnormal
+  //     bfloat16; the CI runner reproduces the reference exactly. This is the
+  //     flush `sigmoid` recorded at the *result* side, read at the operand, and
+  //     float16 does not flush at all on either host: all 1023 of its positive
+  //     subnormals reproduce the reference.
+  //
+  // Neither is stable enough to be an invariant, so the served widths are held
+  // to the part that is -- the band's far edge is the reference bit for bit on
+  // both hosts, and the sign is preserved everywhere the operand is not a zero
+  // -- and the two readings above are recorded here rather than pinned.
+  //
+  // float32 is declined, and this is the increment's finding. The node is not a
+  // differently-rounded exact tanh at this width, it is a coarser approximation
+  // of one, and the measurements that say so are three:
+  //
+  //   * a break in odd symmetry. Measured, max |g(x) + g(-x)| is 1.788e-07 over
+  //     [0.01, 3.0] where the reference is *exactly* 0.0 -- measured as
+  //     `(torch.tanh(x) + torch.tanh(-x)).abs().max()` on the host. A tanh that
+  //     is not odd is not a rounding of the reference's tanh.
+  //   * a uniform accuracy gap rather than an edge effect. Measured against the
+  //     exact (float64) answer over [0.001, 3.0], the graph's error is ~100x the
+  //     reference's at every scale and not only at the ends: 4.321e-08 against
+  //     4.328e-10 over [0.001, 0.01), 5.002e-08 against 3.696e-09 over
+  //     [0.01, 0.1), 7.365e-08 against 1.505e-08 over [0.1, 0.5), and
+  //     1.069e-07 against 2.981e-08 over [0.5, 1). The reference is a float32
+  //     tanh at roughly a float32 ulp; the graph is an order of magnitude off it.
+  //   * a share of the curve that differs at all. Measured over a 400001-sample
+  //     sweep of [-10, 10], 165340 samples (41%) come back a different float32
+  //     value, and the distance is not a neighbouring ulp: `tanh` near +-1 has
+  //     its ulps packed close together and the node lands up to the int32
+  //     distance 1597438 away, i.e. on a *visibly* different number inside the
+  //     saturation band. On a model-like `torch.randn(1000000)` operand, 545055
+  //     of 1000000 samples differ and the graph is the less accurate of the two
+  //     on 544303 of them.
+  //
+  // On a transformer block's operand that is the wrong trade to make silently.
+  // `tanh` is the activation such a block reaches for most, and this body would
+  // replace the reference's answer with a coarser one on a majority of the
+  // values it is handed -- a different result from the reference on the op a
+  // reader is least likely to re-measure. The float32 caller keeps the
+  // `cpu_fallback` round-trip, which is correct, and the two *narrow* widths --
+  // where the node is the reference's own function -- take the graph. The
+  // round-trip's cost at that width is the note in mps_common.h: measured on an
+  // M5 with `(3, 512, 3072)` float32, 5.394 ms on the CPU plus a 1.253 ms
+  // device-to-host copy, against 3.168 ms for the node -- so this is a real
+  // 2x left on the table at float32, taken because the number it would buy is
+  // not the reference's.
+  //
+  // The NaN guard in the body is separate from this gate and is not what
+  // declines float32: the node saturates a NaN operand to +-1 at *every* width
+  // -- measured, `tanh(nan)` is 1.0 where the reference answers nan -- so
+  // `isNaNWithTensor:` selects a NaN back over the node's answer on all three,
+  // and the guard is what makes the two served widths answer the reference's
+  // nan rather than the node's 1.0.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::tanh(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`, `log`, `rsqrt` and `sqrt` do: the
+  // promotion rule is the reference's, and the round-trip is where it lives.
+  // Both declined paths were measured to reproduce the reference.
+  return dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsErfDtype(at::ScalarType dtype) {
+  // All three float widths, measured against at::erf in the operand's own
+  // dtype. The increment is that this list is the *opposite* of the sibling
+  // `tanh`'s even though the two are the same kind of node, and the reason is
+  // the finding itself:
+  //
+  // The tanh node was a *coarser approximation* of the reference's tanh at
+  // float32. The erf node has a comparable error bound: measured against the
+  // exact float64 curve on a 498299-point probe grid, the node's float32 error
+  // reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the node
+  // is closer on 63.3% of the points where their roundings differ. The node's
+  // error can exceed the reference's on some points; where the reference error
+  // is above half a step, the excess is at most 0.98 of a step. So the width is
+  // served on a measured error bound; a tanh that is ~100x off the exact answer
+  // at every scale of the curve is the different failure.
+  //
+  // The bit-level reading gives the bound. The node agrees with the reference
+  // bit for bit on 249310 of 498299 probe points, and its largest gap is 4.19
+  // steps at 1.0. Over the dense sweep alone it agrees on 186130 of 400001
+  // points with the same 4.19-step largest gap. The latter is deliberately not
+  // compared with `erff` in float32 or with one ulp of the reference's answer:
+  // those comparisons hide the difference in float32's own rounding, and a
+  // step near zero is 1.4e-45 next to an agreed error of about 5e-07. Both the
+  // node and the reference answer exactly 1.0 from |x| >= 4.
+  //
+  // The two narrow widths are served on the same reading and on the sibling
+  // tanh's: on the probe grid the node agrees bit for bit on 498160 of 498299
+  // points at float16 and 498290 at bfloat16, with a largest gap of half a step
+  // at 1.0 and 0.0039 of one. Over the dense sweep, float16 agrees on 399878 of
+  // 400001 and bfloat16 on 399994.
+  //
+  // The domain edges are exact at all three widths and need no guard, which is
+  // the second difference from the sibling: measured, the bare node propagates
+  // a NaN (where `tanhWithTensor:` saturated it to +-1), answers +-1 at +-inf
+  // (the bound a `1 - 2/(exp(2x)+1)`-style composition gets wrong), and keeps
+  // the sign of a zero -- `erf(-0.0)` is `-0.0` on this host *and* on the
+  // `macos-14` CI runner at every width, so unlike the tanh's signed zero this
+  // one is an invariant and the test suite asserts it.
+  //
+  // The one band recorded rather than asserted is the *subnormal operand* at
+  // the narrow widths, the same band the siblings found: measured, all 127
+  // subnormal bfloat16 operands come back a zero -- which is also what the
+  // reference rounds them to, so the two agree -- while float16 differs from the
+  // reference on 877 of its 1023 positive subnormals in the last step or two,
+  // and the reference itself rounds 3 of them to zero. The host split is on
+  // the *result* side as well: the macos-14 CI runner flushed `erf(tiny)` and
+  // `erf(2 * tiny)` from bfloat16 to zero, while this M5 kept both subnormal.
+  // Everything involved is below the width's smallest normal. A model's `erf`
+  // operand is a pre-activation, so the band is recorded rather than pinned;
+  // the suite checks that nothing in the normal range is flushed.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip, and an
+  // integral or bool operand is promoted by the reference to float32 -- measured,
+  // `at::erf(torch.arange(1, 4))` returns a float32 tensor -- so the gate
+  // declines both for the reason `exp`, `log`, `rsqrt`, `sqrt` and `tanh` do:
+  // the promotion rule is the reference's, and the round-trip is where it lives.
+  // Both declined paths were measured to reproduce the reference.
+  return dtype == at::kFloat || dtype == at::kHalf ||
+      dtype == at::kBFloat16;
+}
+
+
+bool MpsSupportsEmbeddingDtype(
+    at::ScalarType weight_dtype,
+    at::ScalarType index_dtype) {
+  // The table widths, the same three the silu and conv gates serve.
+  const bool table = weight_dtype == at::kFloat || weight_dtype == at::kHalf ||
+                     weight_dtype == at::kBFloat16;
+  // The reference's own list, not this file's: see the note in mps_common.h.
+  const bool index = index_dtype == at::kLong || index_dtype == at::kInt;
+  return table && index;
+}
+
+bool MpsSupportsTakeDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType index_dtype) {
+  // The widths MPSGraph has element types for. Wider than the embedding gate on
+  // purpose: a read does not change its operand's width, so float64/int64/bool
+  // are the only ones declined here and they are declined because the *graph*
+  // has no element type for them, not because the reference does not.
+  const bool readable = self_dtype == at::kFloat || self_dtype == at::kHalf ||
+                        self_dtype == at::kBFloat16 || self_dtype == at::kInt ||
+                        self_dtype == at::kShort || self_dtype == at::kChar ||
+                        self_dtype == at::kByte;
+  // int64 alone: measured, `aten::take` raises for int32 where
+  // `aten::index_select` accepts it. See the note in mps_common.h.
+  const bool index = index_dtype == at::kLong;
+  return readable && index;
+}
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   if (out == nullptr) {
     return false;
@@ -129,6 +550,27 @@ bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   }
   *out = resolved;
   return true;
+}
+
+at::Tensor MpsSoftmaxOnHost(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float) {
+  if (!half_to_float) {
+    return at::_softmax(self.cpu(), dim, false).to(self.device());
+  }
+  // The flag means "compute in float, hand back float", and that is exactly
+  // what the host can be asked for without the flag: widen first, then run the
+  // flag-clear kernel. Forwarding `half_to_float=true` to the CPU instead asks
+  // for a kernel that does not exist ("softmax with half to float conversion is
+  // not supported on CPU"), which would turn every declined width into a raise.
+  //
+  // An integral or bool operand still raises here, which is the reference's
+  // answer, and `at::_softmax` is the spelling that raises it: resolving to
+  // `at::softmax` would reach the composite and never report the flag's
+  // mismatch. A rank-0 operand has no `dim` in range, so its raise comes from
+  // the dim check rather than from the width.
+  return at::_softmax(self.cpu().to(at::kFloat), dim, false).to(self.device());
 }
 
 MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
@@ -144,6 +586,176 @@ MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {
     }
   }
   return {t.contiguous(), false};
+}
+
+bool MpsSupportsConvDtype(
+    at::ScalarType input_dtype,
+    at::ScalarType weight_dtype,
+    at::ScalarType bias_dtype) {
+  if (input_dtype != weight_dtype || weight_dtype != bias_dtype) {
+    // The graph runs one element type for the whole node, while aten promotes
+    // (a float tensor with a double weight is a float convolution, and a
+    // mixed pair is otherwise a reference error), so a mixed call takes the
+    // round-trip rather than a graph built at one width.
+    return false;
+  }
+  return input_dtype == at::kFloat || input_dtype == at::kHalf ||
+      input_dtype == at::kBFloat16;
+}
+
+bool MpsConvResolve(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    int64_t groups,
+    MpsConvParams* params,
+    std::vector<int64_t>* out_shape) {
+  if (params == nullptr || out_shape == nullptr) {
+    return false;
+  }
+  const int64_t dim = input.dim() - 2;
+  if (dim < 2 || dim > 3 || weight.dim() != input.dim()) {
+    return false;
+  }
+  const int64_t spatial = dim;
+  if (stride.size() != spatial || dilation.size() != spatial ||
+      padding.size() != 2 * spatial || groups < 1) {
+    return false;
+  }
+  const int64_t in_channels = input.size(1);
+  const int64_t out_channels = weight.size(0);
+  if (in_channels / groups != weight.size(1) || out_channels % groups != 0) {
+    return false;
+  }
+
+  params->stride.assign(stride.begin(), stride.end());
+  params->dilation.assign(dilation.begin(), dilation.end());
+  params->padding_front.clear();
+  params->padding_back.clear();
+  // aten's flat `padding` is [front_0, front_1, ..., back_0, back_1, ...], and
+  // MPSGraph takes the two halves as two arrays -- the same split, so the first
+  // `spatial` entries are the fronts and the rest are the backs.
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    params->padding_front.push_back(padding[axis]);
+    params->padding_back.push_back(padding[axis + spatial]);
+  }
+  params->groups = groups;
+
+  // The dilation-aware forward formula, the same arithmetic the reference uses:
+  // floor((in + front + back - dilation * (kernel - 1) - 1) / stride + 1).
+  std::vector<int64_t> shape;
+  shape.push_back(input.size(0));
+  shape.push_back(out_channels);
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    const int64_t padded = input.size(axis + 2) + params->padding_front[axis] +
+        params->padding_back[axis];
+    const int64_t window =
+        params->dilation[axis] * (weight.size(axis + 2) - 1) + 1;
+    const int64_t extent = (padded - window) / params->stride[axis] + 1;
+    if (extent <= 0) {
+      // What the reference reports as "Kernel size can't be greater than actual
+      // input size": there is no output extent to give the graph.
+      return false;
+    }
+    shape.push_back(extent);
+  }
+  // A non-positive step is a zero-stride graph, and the reference rejects it in
+  // its own words; the formula above already divided by it, so this can only
+  // catch it before the descriptor does.
+  for (int64_t axis = 0; axis < spatial; ++axis) {
+    if (params->stride[axis] <= 0 || params->dilation[axis] <= 0) {
+      return false;
+    }
+  }
+  *out_shape = std::move(shape);
+
+  // The bias broadcasts over the spatial axes and along the channel axis, so it
+  // becomes (1, OC, 1, ...) -- see T_CONV for the two shapes that do not work.
+  params->bias_shape.assign(static_cast<size_t>(dim), 1);
+  params->bias_shape[1] = out_channels;
+  return true;
+}
+
+MPSGraphObject* MpsConvDescriptor(
+    at::ScalarType dtype,
+    int64_t spatial,
+    const MpsConvParams& params) {
+  MPSDataType mps_dtype;
+  if (!MpsDataTypeOf(dtype, &mps_dtype)) {
+    // The descriptor carries no dtype -- the selector reads it off the source
+    // and weights tensors -- but a dtype with no MPSGraph element type never
+    // reaches a graph, so a descriptor for it is a decline.
+    return nil;
+  }
+  const size_t rank = static_cast<size_t>(spatial);
+  if (params.stride.size() != rank || params.dilation.size() != rank ||
+      params.padding_front.size() != rank ||
+      params.padding_back.size() != rank) {
+    return nil;
+  }
+  // The per-axis argument order and the descriptor's X/Y/Z properties run in
+  // opposite directions: aten's axis order is the fastest-moving one last, and
+  // so is the descriptor's, which is what `p = rank - 1 - axis` maps between.
+  // Reading it the other way round is a wrong number rather than a shape error
+  // for any non-square kernel, which is why it is spelled out. Measured on the
+  // 3-D probe, which transposes exactly the two spatial axes this doc string
+  // compares against: only the (2, 3, 4) diag kernel agrees, the (2, 3, 4) and
+  // the (3, 2) cases do not.
+  const NSUInteger sx = static_cast<NSUInteger>(params.stride[rank - 1]);
+  const NSUInteger sy = static_cast<NSUInteger>(params.stride[rank - 2]);
+  const NSUInteger dx = static_cast<NSUInteger>(params.dilation[rank - 1]);
+  const NSUInteger dy = static_cast<NSUInteger>(params.dilation[rank - 2]);
+  const NSUInteger left =
+      static_cast<NSUInteger>(params.padding_front[rank - 1]);
+  const NSUInteger right =
+      static_cast<NSUInteger>(params.padding_back[rank - 1]);
+  const NSUInteger top =
+      static_cast<NSUInteger>(params.padding_front[rank - 2]);
+  const NSUInteger bottom =
+      static_cast<NSUInteger>(params.padding_back[rank - 2]);
+  const NSUInteger groups = static_cast<NSUInteger>(params.groups);
+  if (spatial == 3) {
+    const NSUInteger sz = static_cast<NSUInteger>(params.stride[0]);
+    const NSUInteger dz = static_cast<NSUInteger>(params.dilation[0]);
+    const NSUInteger front =
+        static_cast<NSUInteger>(params.padding_front[0]);
+    const NSUInteger back = static_cast<NSUInteger>(params.padding_back[0]);
+    return [[MPSGraphConvolution3DOpDescriptor alloc]
+        initWithStrideInX:sx
+                strideInY:sy
+                strideInZ:sz
+          dilationRateInX:dx
+          dilationRateInY:dy
+          dilationRateInZ:dz
+                   groups:groups
+             paddingLeft:left
+            paddingRight:right
+              paddingTop:top
+           paddingBottom:bottom
+             paddingFront:front
+              paddingBack:back
+             paddingStyle:MPSGraphPaddingStyleExplicit
+               dataLayout:MPSGraphTensorNamedDataLayoutNCDHW
+            weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
+  }
+  if (spatial == 2) {
+    return [[MPSGraphConvolution2DOpDescriptor alloc]
+        initWithStrideInX:sx
+                strideInY:sy
+          dilationRateInX:dx
+          dilationRateInY:dy
+                   groups:groups
+             paddingLeft:left
+            paddingRight:right
+              paddingTop:top
+           paddingBottom:bottom
+             paddingStyle:MPSGraphPaddingStyleExplicit
+               dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+            weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+  }
+  return nil;
 }
 
 bool MpsReduceAxes(
@@ -220,6 +832,221 @@ MPSShape* FlatShape(int64_t count) {
 
 } // namespace
 
+namespace {
+
+// Whether this build/host can describe a buffer at a byte offset to MPSGraph.
+//
+// Two independent gates have to agree, and the second is the one that fires on
+// the hosted macos-14 runner. The *SDK* gate is compile-time: the initializer is
+// only declared from macOS 15, so an Xcode 15.4 SDK (14.5, what the runner
+// ships) cannot name it at all. The *runtime* gate is separate: a process
+// running on macOS 14 may or may not have loaded a framework that implements a
+// macOS 15 selector. `__builtin_available` answers the runtime half, and the
+// preprocessor answer below is constant per build, so this whole function folds
+// away to a constant on either kind of toolchain.
+bool OffsetTensorDataAvailable() {
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  return __builtin_available(macOS 15.0, *);
+#else
+  return false;
+#endif
+}
+
+// A dedicated MTLBuffer holding one operand's bytes densely from offset 0, for
+// the toolchains above that cannot describe an interior pointer.
+//
+// This is the difference between "declined" and "native" on macOS 14, and it is
+// worth being explicit about why a copy is the right answer here rather than
+// leaving the op on cpu_fallback. The fallback is not one copy: it is a
+// device-to-host copy of the whole operand, a host kernel in torch's own
+// threading, and a host-to-device copy of the result back -- and for the table
+// reads this backend exists for (a 151936x1024 float32 embedding table is
+// 622 MB) that is what turned a 0.7 ms node into the 69-149 ms the cost classes
+// measured on the runner. One device-side copy into a staging buffer is a
+// memcpy, and on a unified-memory Apple GPU it is a plain `memcpy` between two
+// shared allocations rather than a PCIe round trip.
+//
+// The allocation is cached by size and reused across calls. These operands come
+// in a handful of sizes (an attention weight, a token embedding table, a batch
+// of activations) and a fresh MTLBuffer per call would put an allocation on the
+// hot path of every op the runner otherwise serves natively. Bounded like the
+// plan cache is, and for the same reason: a long run must not grow it without
+// limit.
+constexpr size_t kMaxStagingBuffers = 16;
+
+struct StagingBuffer {
+  id<MTLBuffer> buffer;  // +1
+  size_t capacity;
+};
+
+std::unordered_map<size_t, StagingBuffer>& StagingPool() {
+  // Leaked deliberately, like the plan cache: these own MTLBuffers whose
+  // release at static-destruction time is not ours to order.
+  static auto* pool = new std::unordered_map<size_t, StagingBuffer>();
+  return *pool;
+}
+
+// The exact byte count the staging buffer has to hold, rounded up so an
+// odd-sized operand does not land in a class of its own.
+size_t StagingCapacity(size_t bytes) {
+  constexpr size_t kGranularity = 1u << 20;  // 1 MiB
+  return ((bytes + kGranularity - 1) / kGranularity) * kGranularity;
+}
+
+// The staging buffers one RunGraphImpl call has taken, released on the way out.
+//
+// A buffer the pool holds is left alone: it belongs to the pool and outlives the
+// call. One the pool did not take was allocated because every pooled buffer of
+// its class was already spoken for, so nothing else will ever hand it out and
+// this is its one owner -- and since RunGraphImpl has half a dozen exits between
+// taking a buffer and running the graph (a nil operand description, a body that
+// declines, a queue that is not there), the release belongs in a destructor
+// rather than at the end. Ownership is recorded when the buffer is taken rather
+// than looked up at release time, which keeps the release from having to search
+// the pool and lets the two live in either order.
+//
+// A private buffer is only ever created after a DrainAll, and the copy-back
+// drain covers the results, so nothing read by a queued graph outlives the
+// scope by more than the queue's own ordering allows.
+struct ClaimedStaging {
+  struct Entry {
+    id<MTLBuffer> buffer;
+    bool from_pool;
+  };
+  std::vector<Entry> buffers;
+
+  id<MTLBuffer> Take(id<MTLBuffer> buffer, bool from_pool) {
+    buffers.push_back(Entry{buffer, from_pool});
+    return buffer;
+  }
+
+  bool Contains(id<MTLBuffer> buffer) const {
+    for (const Entry& entry : buffers) {
+      if (entry.buffer == buffer) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool AnyPrivate() const {
+    for (const Entry& entry : buffers) {
+      if (!entry.from_pool) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  ~ClaimedStaging() {
+    for (const Entry& entry : buffers) {
+      if (!entry.from_pool) {
+        [entry.buffer release];
+      }
+    }
+  }
+};
+
+// A buffer of at least `bytes`, owned by the pool and *claimed for the current
+// call*. Borrowed, like MpsBufferOf's: it lives until the pool is torn down
+// (never, in practice) and the caller must not release it. Returns nil when
+// Metal cannot satisfy the request, which the caller turns into the same
+// decline a nil operand always was.
+//
+// `claimed` is what keeps two operands of one call from landing on the same
+// buffer, and it is load-bearing rather than tidy. The pools are keyed by
+// rounded capacity, and a call's operands and results routinely round to the
+// same class -- measured, `gather((4, 5), 0, (3, 1))` stages a 4-element input
+// and a 3-element result, 16 and 24 bytes, both of which round to 1 MiB. Handing
+// both the same buffer does not fail loudly: the result's write is ordered after
+// the input's copy-in on the same queue, so the graph reads a zeroed operand and
+// the op returns the right shape holding the wrong values (measured: `gather`
+// answered `[0, 0, 0]` against `[0, 10, 15]`). A buffer already claimed by this
+// call is therefore skipped, and a fresh one allocated outside the pool.
+id<MTLBuffer> StagingBufferFor(size_t bytes, ClaimedStaging* claimed) {
+  if (bytes == 0) {
+    return nil;
+  }
+  const size_t capacity = StagingCapacity(bytes);
+  auto& pool = StagingPool();
+  const auto found = pool.find(capacity);
+  if (found != pool.end()) {
+    if (!claimed->Contains(found->second.buffer)) {
+      return claimed->Take(found->second.buffer, /*from_pool=*/true);
+    }
+  }
+  id<MTLDevice> device = torch_fl_mps::MetalDevice();
+  id<MTLBuffer> buffer =
+      [device newBufferWithLength:capacity
+                          options:MTLResourceStorageModeShared];
+  if (buffer == nil) {
+    return nil;
+  }
+  // Only a buffer the pool has never seen is worth keeping: the pool holds one
+  // buffer per capacity class, so a second buffer of a class already present is
+  // this call's own escape hatch, not a candidate for every later call.
+  const bool pooled = found == pool.end() && pool.size() < kMaxStagingBuffers;
+  if (pooled) {
+    pool.emplace(capacity, StagingBuffer{buffer, capacity});
+  }
+  return claimed->Take(buffer, pooled);
+}
+
+// The buffer to describe `t` with, and the byte offset to describe it from.
+//
+// Offset 0 with the tensor's own MTLBuffer is the case the whole design is
+// built around and the one this returns whenever the toolchain can express an
+// offset. When it cannot -- an SDK older than macOS 15, or a host older than
+// macOS 15 -- an interior operand cannot be described at all, and it is staged
+// into a dedicated buffer instead of declined.
+//
+// The staging copy mirrors MpsGemmOperandOf's rule in one respect worth naming:
+// what the graph reads is `t.numel()` elements densely from the offset, and
+// this copies exactly those bytes, so a caller with a strided tensor has already
+// materialised it (every body either calls `contiguous()` or has shown the
+// layout is dense before it gets here).
+//
+// Returns false when the pointer is not inside a Metal allocation this runtime
+// owns (a host tensor, a foreign or stale pointer) -- the same decline as
+// before. That case is not a toolchain limitation and staging would not fix it.
+bool ResolveOperand(
+    const at::Tensor& t,
+    id<MTLBuffer>* buffer,
+    size_t* byteOffset,
+    ClaimedStaging* claimed) {
+  if (!MpsBufferOf(t, buffer, byteOffset)) {
+    return false;
+  }
+  if (*byteOffset == 0 || OffsetTensorDataAvailable()) {
+    return true;
+  }
+  // The copy is ordered behind any producer still writing `t`: Metal executes a
+  // queue in order, but `t` may have been written by a kernel on a *different*
+  // queue, so the host read is drained first. This is the same reasoning
+  // MemoryManager::memcpy_ uses for its own copies.
+  ::torch_fl_mps::DrainAll();
+  const size_t bytes =
+      static_cast<size_t>(t.numel()) *
+      static_cast<size_t>(t.element_size());
+  id<MTLBuffer> staging = StagingBufferFor(bytes, claimed);
+  if (staging == nil) {
+    return false;
+  }
+  // `t.data_ptr()` is the buffer's contents plus `byteOffset` -- that is what
+  // MpsBufferOf established -- so the copy source is spelled the same way, and
+  // the destination is the staging buffer's own base because it is described
+  // from offset 0.
+  std::memcpy(
+      staging.contents,
+      static_cast<const char*>((*buffer).contents) + *byteOffset,
+      bytes);
+  *buffer = staging;
+  *byteOffset = 0;
+  return true;
+}
+
+} // namespace
+
 MPSGraphTensorData* MpsTensorData(
     id<MTLBuffer> buffer,
     size_t byteOffset,
@@ -228,12 +1055,59 @@ MPSGraphTensorData* MpsTensorData(
   if (buffer == nil || count <= 0) {
     return nil;
   }
-  MPSNDArrayDescriptor* descriptor =
-      [MPSNDArrayDescriptor descriptorWithDataType:dtype
-                                             shape:FlatShape(count)];
-  MPSNDArray* array = [[MPSNDArray alloc] initWithBuffer:buffer
-                                                  offset:static_cast<NSUInteger>(byteOffset)
-                                              descriptor:descriptor];
+  MPSNDArray* array = nil;
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  // The offset-carrying initializer is the reason the whole design works: the
+  // caching allocator subdivides one MTLBuffer into many blocks, so an operand
+  // is the common case and a buffer-relative pointer. It is declared by the
+  // *newer* MetalPerformanceShaders framework and only from macOS 15, so this
+  // branch is guarded twice -- on the SDK that parses the file (this build is
+  // compiled against the SDK, not the host) and on the runtime the process
+  // actually loaded.
+  //
+  // Measured against Xcode 15.4 (the SDK the hosted macos-14 image ships):
+  // MPSNDArray.h there declares neither `initWithBuffer:offset:descriptor:` nor
+  // `initWithBuffer:descriptor:`. With that SDK in force a later `if
+  // (@available(macos 15.0))` does not help, because the selector does not
+  // exist at *compile* time -- the compiler resolves the sent to the
+  // MPSMatrix initializer of the same name and rejects the argument. Two
+  // spellings fail and only one does not, so both the guard and the comment are
+  // load-bearing.
+  if (__builtin_available(macOS 15.0, *)) {
+    MPSNDArrayDescriptor* descriptor =
+        [MPSNDArrayDescriptor descriptorWithDataType:dtype
+                                               shape:FlatShape(count)];
+    array = [[MPSNDArray alloc] initWithBuffer:buffer
+                                        offset:static_cast<NSUInteger>(byteOffset)
+                                    descriptor:descriptor];
+  }
+#endif
+  if (array == nil) {
+    // No MPSNDArray initializer here, so the offset-carrying description is
+    // unavailable. That does not make the buffer undescribable: the *only* other
+    // way MPSGraphTensorData accepts a buffer is
+    // `initWithMTLBuffer:shape:dataType:`, which spans it from byte 0 -- the
+    // same limitation, seen from the other side. It is also exactly the shape a
+    // staged operand has, because ResolveOperand copies the operand to byte 0 of
+    // a dedicated buffer and hands back offset 0.
+    //
+    // The offset is refused rather than ignored: a nonzero offset through this
+    // initializer would silently read the wrong bytes (row 0 of the buffer
+    // instead of the operand), which is the one failure mode worth more than the
+    // fallback. An offset-0 operand reads correctly, and an interior one never
+    // reaches here -- RunGraphImpl stages it first.
+    if (byteOffset != 0) {
+      return nil;
+    }
+    MPSGraphTensorData* direct =
+        [[MPSGraphTensorData alloc] initWithMTLBuffer:buffer
+                                                shape:FlatShape(count)
+                                             dataType:dtype];
+    if (direct == nil) {
+      return nil;
+    }
+    return direct;
+  }
   MPSGraphTensorData* data =
       [[MPSGraphTensorData alloc] initWithMPSNDArray:array];
   [array release];
@@ -395,7 +1269,13 @@ namespace {
 
 struct MpsPlan {
   MPSGraph* graph;                                   // +1
-  MPSGraphTensor* result;                            // +1, the flattened target
+  // +1 each, the flattened targets, in the order the caller returns them. One
+  // entry for every single-result body (the MpsRunGraph path) and one per
+  // result for the multi-result ones (MpsRunGraphMulti). A vector rather than a
+  // lone pointer so both paths share one plan cache and one executable: the
+  // caching allocator reads `outs` on the host either way, and MPSGraph's
+  // resultsArray is already an array.
+  std::vector<MPSGraphTensor*> results;
   MPSGraphExecutable* executable;                    // +1
   MPSGraphExecutableExecutionDescriptor* descriptor; // +1, waitUntilCompleted == NO
   // For each slot of the executable's inputs array, the operand whose tensor
@@ -439,7 +1319,9 @@ std::mutex& PlansMutex() {
 void ReleasePlan(MpsPlan* plan) {
   MpsRelease(plan->descriptor);
   MpsRelease(plan->executable);
-  MpsRelease(plan->result);
+  for (MPSGraphTensor* result : plan->results) {
+    MpsRelease(result);
+  }
   MpsRelease(plan->graph);
   delete plan;
 }
@@ -462,22 +1344,33 @@ void MpsKeyAppendTensor(std::string& key, const at::Tensor& tensor) {
 // MPSGraph compiles from it. nil (and nothing retained) when `build` declines or
 // the graph does not compile -- both are the caller's cue for the CPU
 // round-trip.
+//
+// `build` returns one tensor per entry of `outs`, in that order. A nil tensor in
+// the vector, a vector of the wrong length, and a nil `build` are all the same
+// decline.
 MpsPlan* BuildPlan(
     const std::string& key,
     at::TensorList inputs,
-    const at::Tensor& out,
+    at::TensorList outs,
     MPSGraphDevice* device,
-    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
-  const int64_t out_numel = out.numel();
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  if (outs.empty()) {
+    return nullptr;
+  }
+  // Every result is flattened back to a 1-D buffer of its own numel. Only the
+  // first result's dtype is consulted: all results share the operands' dtype,
+  // which MpsRunGraphMulti's caller has already established.
   MPSDataType out_dtype;
-  if (!MpsDataTypeOf(out.scalar_type(), &out_dtype)) {
+  if (!MpsDataTypeOf(outs[0].scalar_type(), &out_dtype)) {
     return nullptr;
   }
   MPSGraph* graph = [[MPSGraph alloc] init];
   if (graph == nil) {
     return nullptr;
   }
-  MPSGraphTensor* result = nil;
+  std::vector<MPSGraphTensor*> results;
   MPSGraphExecutable* executable = nil;
   NSArray<MPSGraphTensor*>* placeholders = nil;
   @autoreleasepool {
@@ -487,6 +1380,12 @@ MpsPlan* BuildPlan(
         [NSMutableArray arrayWithCapacity:inputs.size()];
     NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
         [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
+    // The input types the graph is specialized for, in the order `buffers`
+    // collects them. Specialization is what turns the compiled graph into the
+    // GPU program `runAsyncWithMTLCommandQueue:` executes, and it is the reason
+    // this list is kept: it is handed to `specializeWithDevice:` below.
+    NSMutableArray<MPSGraphShapedType*>* input_types =
+        [NSMutableArray arrayWithCapacity:inputs.size()];
     for (size_t i = 0; i < inputs.size(); ++i) {
       MPSDataType dtype;
       if (!MpsDataTypeOf(inputs[i].scalar_type(), &dtype)) {
@@ -497,37 +1396,72 @@ MpsPlan* BuildPlan(
       // reapplied over it, because an MPSNDArray over N-D memory reads with its
       // own row pitch (see the row-pitch note in mps_common.h).
       MPSGraphTensor* buffer = MpsFlatPlaceholder(graph, count, dtype);
-      const int64_t dims[1] = {count};
       MPSGraphShapedType* type = [[MPSGraphShapedType alloc]
-          initWithShape:MpsShapeOf(at::IntArrayRef(dims, 1))
+          initWithShape:FlatShape(count)
                dataType:dtype];
       [feeds setObject:type forKey:buffer];
+      [input_types addObject:type];
       MpsRelease(type);
       [buffers addObject:buffer];
       [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
     }
     if (static_cast<size_t>([buffers count]) == inputs.size()) {
-      MPSGraphTensor* built = build(graph, args);
-      if (built != nil) {
-        result = [MpsFlatten(graph, built, out_numel) retain];
+      std::vector<MPSGraphTensor*> built = build == nil
+          ? std::vector<MPSGraphTensor*>()
+          : build(graph, args);
+      bool complete = built.size() == outs.size();
+      for (size_t i = 0; complete && i < built.size(); ++i) {
+        complete = built[i] != nil;
+      }
+      if (complete) {
+        // One flatten per result, and each is a compile target in its own right:
+        // MPSGraph returns them positionally, in the order they are listed here,
+        // which is the order `outs` is written back in.
+        NSMutableArray<MPSGraphTensor*>* targets =
+            [NSMutableArray arrayWithCapacity:outs.size()];
+        for (size_t i = 0; i < built.size(); ++i) {
+          MPSGraphTensor* flattened =
+              [MpsFlatten(graph, built[i], outs[i].numel()) retain];
+          results.push_back(flattened);
+          [targets addObject:flattened];
+        }
         executable = [[graph compileWithDevice:device
                                         feeds:feeds
-                                targetTensors:@[result]
+                                targetTensors:targets
                              targetOperations:nil
                         compilationDescriptor:nil] retain];
+        // Specialize here rather than leaving it to the first run. The SDK
+        // documents that without this call specialization "occurs at encode
+        // time automatically", and on macOS 14 that encode-time path is what
+        // dies: a SIGSEGV inside MPSGraph's own
+        // convertMPSGraphShapesToMLIRTypes for a graph whose placeholders are
+        // flat buffers, with every operand resolved and a compiled executable
+        // already in hand -- i.e. past every point torch_fl can decline at.
+        //
+        // Calling it explicitly moves the same work to where a failure is
+        // observable: `specializeWithDevice:` returns void, so the only signal
+        // is whether the executable is usable afterwards. A graph that cannot
+        // be specialized there is one this build cannot run, and the honest
+        // answer is the CPU round-trip the caller already has, not a crash on
+        // the encode that would have followed.
+        [executable specializeWithDevice:device
+                              inputTypes:input_types
+                   compilationDescriptor:nil];
       }
     }
     placeholders = [buffers retain];
   }
   if (executable == nil) {
     MpsRelease(placeholders);
-    MpsRelease(result);
+    for (MPSGraphTensor* result : results) {
+      MpsRelease(result);
+    }
     MpsRelease(graph);
     return nullptr;
   }
   auto* plan = new MpsPlan();
   plan->graph = graph;
-  plan->result = result;
+  plan->results = std::move(results);
   plan->executable = executable;
   plan->descriptor = [[MPSGraphExecutableExecutionDescriptor alloc] init];
   plan->descriptor.waitUntilCompleted = NO;
@@ -618,6 +1552,11 @@ void MpsKeyAppend(std::string& key, int64_t value) {
   key += std::to_string(value);
 }
 
+void MpsKeyAppend(std::string& key, double value) {
+  key += "|d";
+  AppendDouble(key, value);
+}
+
 void MpsKeyAppend(std::string& key, bool value) {
   key += value ? "|b1" : "|b0";
 }
@@ -627,26 +1566,64 @@ void MpsKeyAppend(std::string& key, const char* value) {
   key += (value == nullptr ? "" : value);
 }
 
-bool MpsRunGraph(
+namespace {
+
+// The shared body of MpsRunGraph and MpsRunGraphMulti. `outs` is that function's
+// result list -- one entry for the single-result entry point. Everything the two
+// have in common lives here: buffer resolution, the key, the plan cache and the
+// asynchronous schedule.
+bool RunGraphImpl(
     const std::string& key,
     at::TensorList inputs,
-    const at::Tensor& out,
-    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
-  if (build == nil || !out.defined() || out.numel() <= 0) {
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil || outs.empty()) {
     return false;
   }
-  MPSDataType out_dtype;
-  TORCH_CHECK(
-      MpsDataTypeOf(out.scalar_type(), &out_dtype),
-      "mps: no MPSGraph element type for ",
-      out.scalar_type());
+  // The graph path is only open on a device MPSGraph can encode for. This is
+  // checked before anything is allocated or built, because the failure it
+  // guards against is a SIGSEGV inside MPSGraph's own encode -- a fatal signal,
+  // so a check placed after the executable exists would be a check placed after
+  // the process is already committed to the crash. See MetalGraphUsable.
+  //
+  // Declining is safe by the same contract every other decline uses: false
+  // sends the op to the CPU round-trip its body already implements, which is
+  // the reference result -- slow on a device with no working graph compiler,
+  // and correct.
+  if (!torch_fl_mps::MetalGraphUsable()) {
+    return false;
+  }
+  // `defined` and a non-empty numel are the two things a body's `out` has always
+  // had to satisfy, now checked per result. An empty result is a decline rather
+  // than an error, exactly as before: MPSGraph has no empty tensor and the
+  // caller's body has already computed the right answer for that case.
+  std::vector<MPSDataType> out_dtypes(outs.size(), MPSDataTypeFloat32);
+  for (size_t i = 0; i < outs.size(); ++i) {
+    if (!outs[i].defined() || outs[i].numel() <= 0) {
+      return false;
+    }
+    TORCH_CHECK(
+        MpsDataTypeOf(outs[i].scalar_type(), &out_dtypes[i]),
+        "mps: no MPSGraph element type for ",
+        outs[i].scalar_type());
+  }
   // Resolve every buffer before the graph is built, so a pointer the Metal
   // allocator does not own costs the caller a fallback rather than half a run.
   std::vector<id<MTLBuffer>> buffers(inputs.size(), nil);
   std::vector<size_t> offsets(inputs.size(), 0);
   std::vector<MPSDataType> dtypes(inputs.size(), MPSDataTypeFloat32);
+  // The operands that had to be staged, and the buffer each one came from, so
+  // the operand's own bytes are what the graph's inputs were copied *from* and
+  // nothing has to be copied back for an input.
+  //
+  // `claimed` is the set of staging buffers this call has taken, threaded
+  // through both loops below so the result of one operand cannot be handed the
+  // buffer a sibling operand's input was staged into.
+  ClaimedStaging claimed;
   for (size_t i = 0; i < inputs.size(); ++i) {
-    if (!MpsBufferOf(inputs[i], &buffers[i], &offsets[i])) {
+    if (!ResolveOperand(inputs[i], &buffers[i], &offsets[i], &claimed)) {
       return false;
     }
     TORCH_CHECK(
@@ -654,10 +1631,31 @@ bool MpsRunGraph(
         "mps: no MPSGraph element type for ",
         inputs[i].scalar_type());
   }
-  id<MTLBuffer> out_buffer = nil;
-  size_t out_offset = 0;
-  if (!MpsBufferOf(out, &out_buffer, &out_offset)) {
-    return false;
+  std::vector<id<MTLBuffer>> out_buffers(outs.size(), nil);
+  std::vector<size_t> out_offsets(outs.size(), 0);
+  // A result is the other direction: the graph writes the staging buffer, and
+  // the bytes have to reach the caller's tensor afterwards. `nullptr` means the
+  // result was described in place.
+  std::vector<id<MTLBuffer>> out_originals(outs.size(), nil);
+  std::vector<size_t> out_original_offsets(outs.size(), 0);
+  for (size_t i = 0; i < outs.size(); ++i) {
+    if (!MpsBufferOf(outs[i], &out_originals[i], &out_original_offsets[i])) {
+      return false;
+    }
+    if (out_original_offsets[i] == 0 || OffsetTensorDataAvailable()) {
+      out_buffers[i] = out_originals[i];
+      out_offsets[i] = out_original_offsets[i];
+      out_originals[i] = nil;
+      continue;
+    }
+    const size_t bytes = static_cast<size_t>(outs[i].numel()) *
+        static_cast<size_t>(outs[i].element_size());
+    id<MTLBuffer> staging = StagingBufferFor(bytes, &claimed);
+    if (staging == nil) {
+      return false;
+    }
+    out_buffers[i] = staging;
+    out_offsets[i] = 0;
   }
   Stream_t stream = MpsCurrentStream();
   id<MTLCommandQueue> queue = MpsCurrentQueue();
@@ -671,7 +1669,16 @@ bool MpsRunGraph(
   for (const at::Tensor& input : inputs) {
     MpsKeyAppendTensor(full_key, input);
   }
-  MpsKeyAppendTensor(full_key, out);
+  // Every result's signature is folded in, not just the first: a multi-result
+  // body can be called with the same operand shapes and a different (out, mean,
+  // rstd) split -- `native_layer_norm` with a different `normalized_shape` has
+  // the same input and a different mean. The result count is named too, so a
+  // single-result and a multi-result body cannot collide on the same key.
+  full_key += "|results";
+  full_key += std::to_string(outs.size());
+  for (const at::Tensor& out : outs) {
+    MpsKeyAppendTensor(full_key, out);
+  }
 
   std::lock_guard<std::mutex> lock(PlansMutex());
   MpsPlan* plan = nullptr;
@@ -682,7 +1689,7 @@ bool MpsRunGraph(
     @autoreleasepool {
       MPSGraphDevice* device =
           [MPSGraphDevice deviceWithMTLDevice:queue.device];
-      plan = BuildPlan(full_key, inputs, out, device, build);
+      plan = BuildPlan(full_key, inputs, outs, device, build);
     }
     if (plan == nullptr) {
       return false;
@@ -694,15 +1701,35 @@ bool MpsRunGraph(
     for (size_t i = 0; i < inputs.size(); ++i) {
       operands[i] =
           MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtypes[i]);
-      TORCH_CHECK(
-          operands[i] != nil,
-          "mps: cannot describe a zero-element tensor to MPSGraph");
+      // nil is either a zero-element tensor -- which the caller already
+      // short-circuits for `out` and which a graph could not express anyway --
+      // or an operand whose byte offset the SDK in force cannot describe. Both
+      // are declines, not errors: the header contract is that a nil MPSGraph
+      // description sends the op to the CPU round-trip, which is correct.
+      if (operands[i] == nil) {
+        for (MPSGraphTensorData* operand : operands) {
+          MpsRelease(operand);
+        }
+        return false;
+      }
     }
-    MPSGraphTensorData* result_data =
-        MpsTensorData(out_buffer, out_offset, out.numel(), out_dtype);
-    TORCH_CHECK(
-        result_data != nil,
-        "mps: cannot describe a zero-element tensor to MPSGraph");
+    // One MPSGraphTensorData per result, in the same positional order the
+    // executable's target tensors were listed in, which is the order `outs` is
+    // written back in. A nil here is the same decline as a nil operand.
+    NSMutableArray<MPSGraphTensorData*>* result_data =
+        [NSMutableArray arrayWithCapacity:outs.size()];
+    for (size_t i = 0; i < outs.size(); ++i) {
+      MPSGraphTensorData* data =
+          MpsTensorData(out_buffers[i], out_offsets[i], outs[i].numel(),
+                        out_dtypes[i]);
+      if (data == nil) {
+        for (MPSGraphTensorData* operand : operands) {
+          MpsRelease(operand);
+        }
+        return false;
+      }
+      [result_data addObject:data];
+    }
     // Held by the array (its own +1) and released again below, once the run has
     // been scheduled: the executable reads them during that run, so they have to
     // outlive the call only as long as the call.
@@ -717,10 +1744,12 @@ bool MpsRunGraph(
     // per op rather than the work itself.
     [plan->executable runAsyncWithMTLCommandQueue:queue
                                       inputsArray:array
-                                     resultsArray:@[result_data]
+                                     resultsArray:result_data
                               executionDescriptor:plan->descriptor];
     ran = true;
-    MpsRelease(result_data);
+    for (MPSGraphTensorData* data : result_data) {
+      MpsRelease(data);
+    }
     for (MPSGraphTensorData* operand : operands) {
       MpsRelease(operand);
     }
@@ -730,8 +1759,114 @@ bool MpsRunGraph(
     // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
     // -- what allocator block reuse and a host read ask -- now covers this op.
     ::FlagosMPSStreamSentinel(stream);
+
+    // The sentinel above makes the *stream* report the work, but that is not
+    // enough on its own, because the caching allocator's block-reuse check
+    // (find_free_block) compares stream pointers and never queries the stream.
+    // A block returns to its pool the moment the tensor over it is dropped
+    // (free_block, event_count == 0), and the next allocation of the same size
+    // on the same stream picks it straight back up -- while this queued graph is
+    // still reading the operand or writing the result that lived there. That is
+    // a use-after-free with a benign-looking trigger: it does not need a free()
+    // at all, just a dropped temporary, which is exactly what `torch.mm(a, b)`
+    // with an out that is not held, or a reshaped operand, produces.
+    //
+    // record_stream closes that gap the way the CUDA path does: it attaches an
+    // event on this stream to each block and bumps the block's event_count, so
+    // `free_block` defers the return to the pool until the event completes
+    // (process_events), and a block with a pending event cannot be merged away
+    // (try_merge_blocks) or released (release_cached_blocks) either. The event is
+    // the same stream the graph runs on, so it is ordered behind the run without
+    // any extra synchronization of its own.
+    //
+    // Operands and results are both in flight: the graph reads every input and
+    // writes every output, so both sets of blocks need the record. A tensor the
+    // runtime does not own is a no-op in record_stream (the deleter check), which
+    // is the right answer -- nothing in the block pool can alias it.
+    if (c10::flagos::CachingDeviceAllocator::is_enabled()) {
+      if (auto* alloc = c10::flagos::GetCachingAllocator()) {
+        for (const at::Tensor& input : inputs) {
+          alloc->record_stream(input.storage().data_ptr(), stream);
+        }
+        for (const at::Tensor& out : outs) {
+          alloc->record_stream(out.storage().data_ptr(), stream);
+        }
+      }
+    }
+  }
+  // The run is asynchronous, so anything the host has to do with a staging
+  // buffer -- a result's copy-back, or a private buffer's release -- has to be
+  // ordered behind it. That is one drain, covering both.
+  //
+  // A staged result is the one output the run does not finish by itself: the
+  // graph wrote the staging buffer, and the caller is still holding a tensor
+  // whose bytes are the old ones. A staged *input* needs no copy back, but its
+  // buffer must not be released while the queued graph is still reading it,
+  // which is what the drain below also buys for ClaimedStaging's destructor.
+  //
+  // This drain is also what makes the staging *pool* safe to reuse. A staging
+  // buffer is handed to a later call, and the only way that later call can reach
+  // a buffer a queued graph is still reading is by writing into it without
+  // draining first: every writer here either drains (this block) or drains
+  // before its copy *in* (ResolveOperand), and that drain covers every live
+  // queue. So no copy into a staging buffer can overtake a queued reader of the
+  // same buffer.
+  bool any_staged = false;
+  for (id<MTLBuffer> original : out_originals) {
+    any_staged = any_staged || original != nil;
+  }
+  if (ran && (any_staged || claimed.AnyPrivate())) {
+    ::torch_fl_mps::DrainAll();
+  }
+  if (ran && any_staged) {
+    for (size_t i = 0; i < outs.size(); ++i) {
+      if (out_originals[i] == nil) {
+        continue;
+      }
+      std::memcpy(
+          static_cast<char*>(out_originals[i].contents) + out_original_offsets[i],
+          out_buffers[i].contents,
+          static_cast<size_t>(outs[i].numel()) *
+              static_cast<size_t>(outs[i].element_size()));
+    }
   }
   return ran;
+}
+
+} // namespace
+
+bool MpsRunGraph(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& out,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil) {
+    return false;
+  }
+  // The single-result block lifted into the vector form RunGraphImpl expects.
+  // `out` is captured by value (it is a Tensor, a cheap refcount bump) so the
+  // wrapper's lifetime is independent of the caller's reference.
+  auto multi = ^std::vector<MPSGraphTensor*>(
+      MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+    std::vector<MPSGraphTensor*> one;
+    MPSGraphTensor* built = build(graph, args);
+    if (built != nil) {
+      one.push_back(built);
+    }
+    return one;
+  };
+  return RunGraphImpl(
+      key, inputs, at::TensorList(&out, 1), multi);
+}
+
+bool MpsRunGraphMulti(
+    const std::string& key,
+    at::TensorList inputs,
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args)) {
+  return RunGraphImpl(key, inputs, outs, build);
 }
 
 void MpsRelease(id object) {

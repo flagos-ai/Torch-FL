@@ -188,6 +188,310 @@ record.
 
 ## Native Backend Route Changes
 
+### Apple MPS: thirty-four routes onto the native PrivateUse1 MPSGraph backend (2026-10-17, Apple Silicon arm64)
+
+**One sentence.** `FLAGOS_ACCELERATOR=mps` serves **34** ATen overloads from
+`csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
+reduction, convolution, embedding, matrix-multiply, normalisation and select
+families — with the remaining **2003** routes at `none` (`cpu_fallback`),
+measured overload by overload against a CPU reference on an Apple Silicon arm64
+host.
+
+**This is not a FlagGems cohort and must not be read against the 546-overload
+tables.** Apple Silicon has no FlagTree/FlagGems line and no macOS `triton`
+wheel, so there is no Python/Triton routing surface to survey; the cohort here is
+a hand-grown native kernel set, and its denominator is the conf file, not the
+FlagGems ceiling. The routes, countable from
+[`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
+`{mps: 34, none: 2003}`: `abs`, `neg`, `silu`, `sigmoid`, `exp`, `log`,
+`rsqrt`, `sqrt`, `tanh`, `erf`,
+`reciprocal`, the elementwise
+`add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
+`sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
+`embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and
+`native_layer_norm`, `native_batch_norm`, `cat` and `where.self`. The backend is
+MPSGraph-first with a
+hand-written Metal Shading Language fallback, and — as the name of this section
+insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
+`cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
+libtorch bundle to land a re-dispatch on.
+
+**`index_select` is the `embedding` gather reached by name, and it is the first
+route here whose op has an argument contract rather than a dtype one.** The node
+is the same one `embedding` builds (`gatherWithUpdatesTensor:indicesTensor:axis:0
+batchDimensions:0`), and the cost it removes is the same whole-operand
+round-trip: measured on an M5 over a `(151936, 1024)` float32 operand, the
+fallback cost 40.4 ms for a *single* row — profiled as `aten::_to_copy` over the
+622 MB tensor — against 0.29 ms for the node, and the node costs 0.29 ms at 512
+rows and 0.78 ms at 4096 because it reads the rows it is asked for rather than
+the operand. What is new is that `index_select` carries a `dim`, so only where
+`dim` resolves to axis 0 does the graph have a node; every other axis, an
+out-of-range `dim`, a non-vector index and an out-of-range or non-integer index
+all take the round-trip, which is the reference's own implementation and its own
+`IndexError`/`RuntimeError`. That matters twice over: MPSGraph's gather answers an
+out-of-range index with the first row rather than failing, and the index buffer
+is flattened before it is described to the graph, so a higher-rank index would
+otherwise be answered with a plausible flattening where the reference raises
+`index_select(): Index is supposed to be a vector`. Both were measured, and both
+are held in `tests/integration/ops/test_mps_index_select.py` (45 cases).
+
+**`take` shares that node with an entirely different contract, and the
+differences are all measured rather than inherited.** The same
+`gatherWithUpdatesTensor:indicesTensor:axis:0 batchDimensions:0` serves it, but
+`take` has no `dim` at all: the operand is read as a flat `numel()`-length
+sequence and the result's shape is the *index's* own shape, so a `(2, 2)` index
+is a result shape here where `index_select` raises. Two measured behaviours
+decide the body. A **negative index is in range** (`take(t, [-1])` reads the last
+element, where `index_select` raises), and MPSGraph's gather does not resolve
+one -- it reads a negative index as the *first* element, so the first version of
+this body, which range-checked against the operand and handed the original index
+through, answered `take(t, [-1, 0, 19])` over a 20-element operand with
+`[0, 0, 19]` where the reference returns `[19, 0, 19]`. The body now normalises
+as it checks: one host pass wraps a negative entry and rejects one outside
+`[-numel, numel)`, so the graph is only ever handed a non-negative index and an
+out-of-range call takes the round-trip and therefore the reference's own
+`IndexError: out of range: tried to access index 20 on a tensor of 20 elements`.
+The second measured behaviour is a graph limit with a shape cause: the index is
+reshaped to its own shape through a buffer carrying the operand's trailing 1,
+and a `(1, numel)` flatten of that buffer is rejected -- `error: 'mps.reshape'
+op the result shape is not compatible with the input shape … (tensor<3x20xf32>)
+-> tensor<3xf32>` -- because the index's runtime shape overrides the static
+placeholder shape. The index dtype gate is also narrower than `index_select`'s:
+measured, `aten::take` requires a long tensor and raises for int32, short, char,
+bool and float. Both contracts are held in
+`tests/integration/ops/test_mps_take.py` (57 cases).
+
+**`gather` is the third reader of that node and the first whose node is a
+different one.** The axis spelling,
+`gatherAlongAxis:withUpdatesTensor:indicesTensor:name:`, will not compile unless
+the operand and the index agree in every dimension except the axis — measured, a
+`(4, 5)` operand against a `(4, 2)` index does not raise a deferrable error but
+aborts the process with `failed assertion 'original module failed verification'`
+— so the body trims the operand to the index's shape on the non-axis dimensions
+first. That trim is a **host `narrow`** rather than the graph's `sliceTensor:`,
+because the same indices built as a `sliceTensor:` answer `[0, 10, 0]` where the
+reference answers `[0, 10, 15]`. The node is permissive where the reference is
+not: a non-axis dimension of the index may be *smaller* than the operand's but
+never larger (the reference raises `Size does not match at dimension 0 …`), the
+axis dimension is free in both directions, and MPSGraph answers an out-of-range
+index with an inserted zero rather than failing — so the range check is what
+keeps the answer the reference's. The `narrow` returns a *view*, and the first
+version of the body fed the view straight to the graph, which reads every
+operand as a flat `numel()`-length dense buffer: `gather((4, 5), 0, (3, 1))`
+over `arange(20)` came back `[0, 1, 2]` instead of `[0, 10, 15]`, which is the
+operand's first three elements and not the narrowed block. Held in
+`tests/integration/ops/test_mps_gather.py` (65 cases). The trim's cost on a
+large parent is a property of the platform rather than of this op — a `dim=0`
+gather over a `(151936, 1024)` operand costs 0.26 ms with a full-width index and
+52 ms with an `(8, 16)` index, ~48 ms of which is the strided copy alone, while
+the same gather over an already-trimmed operand is 0.22 ms.
+
+**`native_layer_norm` is the first route that answers with three tensors, and
+the design's own prediction about how it would be built was wrong.** The plan
+recorded in
+[`docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`](../superpowers/specs/2026-10-14-apple-mps-native-backend-design.md)
+was a composition — `native_batch_norm` plus `addcmul`, the way the CPU fallback
+decomposes it, measured at 1.50-4.56 ms per instance. That was a reading of the
+*fallback*, which is what the op was taking at the time, and it does not
+describe the graph. Measured on an M5, `F.layer_norm` reaches
+`native_layer_norm`, and the graph answers the whole thing with **one node**:
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:epsilon:name:`,
+which is `(x - mean) / sqrt(var + eps) * gamma + beta` exactly. The mean and the
+variance come from `meanOfTensor:axes:` and `varianceOfTensor:meanTensor:axes:`;
+the graph's named reductions already return keepdim, which is the shape the
+reference's `mean`/`rstd` carry, so no reshape is needed. On `(2, 512, 1024)`
+the served call costs **0.411 ms against 0.958 ms** through the fallback.
+
+**Two measurements decide the body, and both were taken rather than assumed.**
+The variance the node wants is the **population** variance (`unbiased=False`),
+not the sample one: checked on an `N=3` case whose two answers differ
+(`1/sqrt(14/3) = 0.4629` against `1/sqrt(7) = 0.3780`), `varianceOfTensor:` at
+`axes:` matches the reference's population answer and the reference's
+`layer_norm` uses `unbiased=False`. And the trailing-run precondition is a
+*host* check, because MPSGraph will happily reduce axes the reference does not
+name: `normalized_shape` must be the input's trailing run, and a call whose
+shape is not — or that is longer than the input, or rank-0 — declines and
+reaches the reference's own `Given normalized_shape=[...], expected input with
+shape [*, ...]`. The dtype gate is the reduction family's, so float64 and the
+integral widths take the round trip: measured, an integer input raises
+`LayerNormKernelImpl is not implemented for 'Int'` on the CPU too, so the
+round-trip is what produces the reference's error rather than a graph computing
+at the operand's width.
+
+**A `weight`/`bias` left on the host is moved, and the failure mode when it is
+not is not an exception.** `F.layer_norm(x, shape, w, b)` with `w`/`b` built on
+the host is the common spelling, and a body that handed the host tensor straight
+to the graph resolves no Metal buffer for it; the measured result was not a
+raise but the *host* tensors coming back, values right and device wrong, because
+the refusal was routed into the same round trip the declines take. The affine
+pair is moved to the input's device first, and every decline returns all three
+results through `.to(input.device())` — the one place in this backend where the
+round trip yields many tensors rather than one.
+
+**One reported crash was a red herring and is recorded so it is not chased
+again.** An early probe blamed a segfault on `native_batch_norm` with null
+statistics; the same call aborts in plain PyTorch on *CPU* tensors, so it is
+neither this backend's nor this op's. Held in
+`tests/integration/ops/test_mps_layer_norm.py` (61 cases).
+
+**`native_batch_norm` is the second three-tensor route, and it is two different
+computations behind one schema — the body branches on `training`, not on a
+tensor.** `native_batch_norm(input, weight?, bias?, running_mean?, running_var?,
+training, momentum, eps)` returns `(out, save_mean, save_invstd)`. The graph
+covers the *inference* path only, where the statistics are the running buffers
+the caller passes and the whole operation is one
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:
+epsilon:name:` node — the same node `native_layer_norm` uses, with the caller's
+running statistics in place of the graph's own reductions. Training is declined
+and takes the CPU round-trip, for a reason a forward-output comparison cannot
+see: it updates `running_mean`/`running_var` **in place** with an exponential
+moving average of the *unbiased* batch variance, and no graph node writes a
+caller's buffer. A body that served training while dropping the update would
+leave a model's running statistics frozen and still return a matching forward
+output.
+
+**Three contract details were measured against the reference rather than read
+off the header.** First, **`save_mean` and `save_invstd` in inference are
+*empty*** — shape `(0,)` on the input's device and dtype — and not the running
+statistics: measured, an inference call answers `(out, tensor([]), tensor([]))`
+while the same call with `training=True` answers two `[C]` tensors. The
+intuitive reading — the running statistics, which are right there in the
+arguments — produces a correctly-valued `out` and `[C]` statistics where the
+reference has `(0,)` ones. The empties are also *not* listed among the graph's
+results: an MPSGraph result is described against an N-element buffer and the
+auto-applied flatten over zero elements is a reshape the graph rejects, so a
+result list carrying them fails to build rather than returning them.
+
+Second, **the channel axis is 1 for every rank the reference accepts in
+inference** (rank-2, NCHW and NCDHW alike), so `weight`/`bias` are `[C]`. The
+node's type inference requires its four statistics operands to be broadcast
+*compatible* with the input and a trailing `[C]` operand is not — measured, the
+node rejects a `(2, 3, 4, 5)` input against `[3]` statistics with `output type
+'tensor<2x3x4x5xf32>' and mean type 'tensor<3xf32>' are not broadcast
+compatible`, and that is a **process exit rather than a declined build** — so all
+four are reshaped to `[1, C, 1, …]` inside the graph, which is a metadata
+operation over the same buffer. Third, **`momentum` is not an operand in
+inference**: it only weights the running update, so the graph is a function of
+`eps` alone among the host scalars and `momentum` is what the round-trip
+carries. A missing affine operand is filled with an all-ones `[C]` gamma or an
+all-zeros `[C]` beta rather than dropped, which keeps the operand *list* fixed
+across a weight-less and a weighted call — the node has no `nil` gamma spelling
+here the way `layer_norm` has one.
+
+An integral input is declined like every other reduction here, and in this case
+the reference itself has no answer: measured, `batch_norm` is not implemented
+for `Long` on the CPU either, so the round-trip is what raises the reference's
+own `NotImplementedError`. The **null-statistics call is left declined and is
+not an increment candidate**: measured, `native_batch_norm` with no running pair
+aborts in plain PyTorch on CPU tensors (rc=139, `torch_fl` not involved). The
+graph *does* have the whole thing — measured, `meanOfTensor:axes:` and
+`varianceOfTensor:meanTensor:axes:` build the batch statistics and
+`normalizationWithTensor:` accepts them — so serving that shape is a graph the
+body has not grown, not a missing node, and the test that covers it is written
+to pass on the reference's abort and to fail once the shape is served. Held in
+`tests/integration/ops/test_mps_batch_norm.py` (38 cases): CPU equality for the
+inference shapes across f32/f16/bf16, the empty-statistics contract, the affine
+pair in every combination including on the host, the training path's in-place
+running update including the unbiased weighting, the dtype gate reaching the
+reference's own error, plan reuse across dtypes/`eps`/channel counts and the
+affine substitutes, the dispatch log naming `mps`, and the cost case.
+
+**`cat` is one variadic node with almost none of the reference's contract, and
+the two bugs its body hit are the two halves of the shape work.** The node is
+`concatTensors:dimension:name:`, and it checks neither the non-`dim` extents
+nor the operand dtypes: handed a `(2, 3)` and a `(2, 1)` on `dim=0` it
+*broadcasts* the mismatched axis into a plausible `(2, 3)` where the reference
+raises `Sizes of tensors must match except in dimension 0`, and a mixed list
+whose promotion the reference performs is refused by the node's single
+datatype. Both are resolved on the host — the extents compared axis by axis,
+the mixed list round-tripped — and `dim` is normalised against the operands'
+rank before it reaches `dimension:`. The first shape bug is the **row-pitch
+trap** the backend's `mps_common.h` note records: `cat([tensor([0., 1.]),
+  tensor([2., 3.])], dim=0)` handed to the node as two *ranked* operands returned
+all zeros, and an int32 form returned `[0, 0, 1, 0, 2, 0]` — the eight-byte row
+pitch of a four-byte element, because MPSGraph reads a rank-1 input to
+`concatTensors:` as one row. Every operand therefore reaches the graph as a
+two-dimensional `(outer, inner)` view with the concatenation over the *inner*
+axis, which rewrites concatenating along `axis` as concatenating the
+`prod(shape[:axis])` blocks' `prod(shape[axis:])`-wide tails.
+
+**The second shape bug aborted the process, and it is why `inner` is read per
+operand.** The first version of that two-dimensional view computed `outer` and
+`inner` once from `ops[0]`. For a rank-1 three-operand list of `(2,)`, `(2,)` and
+`(1,)` that reshaped the third operand to `(1, 2)`, a shape its one element
+cannot fill, and MPSGraph failed the compiled module — `mps.reshape op the result
+shape is not compatible with the input shape`, then `original module failed
+verification` — and took the *process* with it rather than declining. `outer` is
+legitimately shared (the extent check already rejected a list whose non-`axis`
+extents disagree), but `inner` is each operand's own `numel() / outer`. The
+third bug was in the decline path itself: written `at::cat(tensors, dim)`
+against the caller's list, it re-entered this same kernel — a bool `cat`, which
+has no MPSGraph element type and is correctly declined, recursed until the stack
+ran out and the process died with SIGSEGV, measured at 23810 dispatch lines. The
+reference is called on host copies built once before any early return. Held in
+`tests/integration/ops/test_mps_cat.py` (46 cases).
+
+**`where.self` is a one-node select wrapped in the reference's three surrounding
+rules.** The node is `selectWithPredicateTensor:truePredicateTensor:
+falsePredicateTensor:name:`, and the reference does three things around it: it
+narrows the condition to bool (bool or, with a deprecation warning, uint8, and
+raises `where expected condition to be a boolean tensor, but got a tensor with
+dtype Int` for every other width), it promotes the two branches to a common
+dtype the way the binary ops do, and it broadcasts the result's shape from all
+three operands rather than from any one. The body widens a uint8 condition with a
+comparison against zero before handing it to the bool predicate, declines a
+condition width outside the two so the reference raises its own message,
+round-trips a promoted branch pair (measured: `int32` against `int64` is `int64`,
+half against float is float, and the result *dtype* is asserted, since a select
+served at the first branch's width returns the right values at the wrong width),
+and infers the result shape with a twice-nested `infer_size` over the three
+operands. A ``(4, 1)`` condition against ``(4, 5)`` branches is the case the
+shape inference exists for: the result is neither operand's shape. The condition
+is a valid *branch* width and an invalid *condition* width, and the two roles are
+held apart (a bool branch pair is served; an int condition declines). Held in
+`tests/integration/ops/test_mps_where.py` (37 cases).
+
+**Every route is gated on a measured dtype predicate, and two gates exist only
+because the obvious one was wrong.** The first `div` increment gated on the
+predicate `mul` already used, which admits integral widths; measured, the graph
+then returned a truncated int64 for `aten::div.Tensor(tensor([-7]), tensor([2]))`
+— `-3` where the CPU reference returns float32 `-3.5`. The dedicated
+`MpsSupportsDivDtype` now requires the two operands to share a dtype and that
+dtype to be a float width, and `MpsSupportsDivScalarDtype` carries the same floor
+for `div.Scalar`. `reciprocal` reuses the tensor gate rather than the wider unary
+one for the same reason. The dtype gate is what keeps PyTorch's type promotion:
+`div.Tensor` on two integer tensors must produce float, and a kernel that
+accepts the integer inputs would silently answer the wrong question.
+
+**One measured behaviour is a property of the graph, not of division, and it is
+recorded here so it is not re-derived.** MPSGraph flushes a subnormal *result* to
+zero at the smallest normal float: `1e-38 / 2` reaches the graph and returns
+`0`, while the CPU reference returns `5.0e-39`. The same flush shows on
+`mul.Tensor` (`1e-38 * tensor(0.5)` → `0`) and on `add.Tensor`, so it is the
+graph's arithmetic mode rather than anything the `div` kernel does. The Python
+operators `x / 2.0` and `x * 0.5` do **not** flush, because PyTorch's composite
+wrapper resolves the constant before PrivateUse1 dispatch and no graph node is
+built — even though the dispatch log still names `div.Tensor`. Only
+`aten.div.Scalar(t, 2.0)` and `aten.div.Tensor(t, tensor([2.0]))` reach the
+graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
+
+**Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
+per-op suites `test_mps_batch_norm.py`, `test_mps_binary.py`, `test_mps_cat.py`,
+`test_mps_conv.py`, `test_mps_embedding.py`, `test_mps_gather.py`,
+`test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_layer_norm.py`,
+`test_mps_pow.py`, `test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_exp.py`,
+`test_mps_log.py`, `test_mps_rsqrt.py`, `test_mps_sqrt.py`, `test_mps_tanh.py`,
+`test_mps_erf.py`,
+`test_mps_softmax.py`,
+`test_mps_take.py`, `test_mps_unary.py` and
+`test_mps_where.py`, run as
+`pytest tests/integration/ops -m mps` on an Apple
+Silicon host; the per-op dtype gates and the `index_select` argument contracts
+are asserted against the CPU reference in the same tests. This is the only
+platform whose hardware job runs on a GitHub-hosted macOS runner rather than a
+vendor image — see [`.github/configs/mps.yml`](../../.github/configs/mps.yml) —
+and the lane runs that suite in CI.
+
 ### Enflame GCU S60: `rsub` gains a native kernel, and COMPILE_ARCH stops splitting the launch stream (2026-10-16)
 
 **Four failures, one route and one stream.** The BERT cohort on GCU ran **147 passed / 4 failed**
@@ -10910,8 +11214,8 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
-| 2026-10-16 | Ascend 910C (CANN 9.0.0, FlagTree `0.7.0+ascend3.5`, flag_gems 5.4.0, torch 2.10.0) | Ascend: `flip` leaves the FlagGems route for the aclnn kernel already registered behind it | **Routes one op off a FlagGems `_ascend` backend override whose generated kernel the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower.** `flag_gems/runtime/backend/_ascend/ops/flip.py:71` realizes the reversal as a strided `copy_func` pointwise kernel (`overload = copy_func.instantiate(A.ndim)` then `overload(flipped_A, out0=out)`), and the rank-2 instantiation FlagTree generates from it fails to lower: `/root/.flaggems/code_cache/pointwise_dynamic_..._copy_func_kernel_rank_2__t2048.py:59:0: error: Failures have been detected while processing an MLIR pass pipeline` / `[ConvertTritonIRToLinalgIR] encounters error:` / `PassManager::run failed`, with the LLVM backend aborting on `indexed_accessor_range_base<...>::back()` (`Assertion ``!empty() && "expected non-empty range"`` failed`). The lowering failure is FlagTree's; the torch_fl lever is the route - `flip` enters `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends it to `ascend`, where `ascend_register.inc:170` already registers `WrapperFlip` and `ascend_kernels.cc:2531` binds `FlipKernelAscend` to `aclnnFlip`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 222 -> **221**, `ascend` 156 -> **157**, `none` 1659 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `20c2a49a0985cabd7fb294918f947b57f06c86e159f622bfd45f2e76d2d6a902` -> `69d6a7dae5d74ff3d43512b5a6c57fc2cb7fa2db566b003e53bb50291d2b300b`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. `tests/unit/test_conf_registration_consistency.py` + `tests/unit/test_gen_vendor_confs.py` (95 passed) gate the conf/generator pair, the census snapshot moving to `{"flaggems": 221, "none": 1659, "ascend": 157}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 222 -> 221. **The change is measured on hardware, zero-mutation:** a copy of the build's own conf differs in the `flip` row alone, and under it `FLAGOS_LOG=dispatch` logs `[flagos dispatch] flip -> ascend` and `x.flip(1)` returns the CPU-reference values, while the unmodified conf logs `[flagos dispatch] flip -> flagos_python` and the same call raises `MLIRCompilationError` - a plain `torch.arange(24).reshape(4, 6).to("flagos").flip(1)` reproduces the whole defect. End-to-end on the transformers-5.19.0 BERT suite (`TRANSFORMERS_TEST_DEVICE_SPEC=hf_device_spec.py`, `-p hf_flagos_shims`, flagos `c2ded4b`): **12 failed / 140 passed -> 8 failed / 143 passed**, the three ids the `flip` call accounts for (`test_eager_padding_matches_padding_free_with_position_ids`, `test_sdpa_padding_matches_padding_free_with_position_ids`, `test_generate_with_and_without_position_ids`, all reaching `attention_mask.flip(1)` at `tests/generation/test_utils.py:2341`) going FAIL -> PASS, and the grad-checkpoint SUBFAIL clearing with them. The remaining 8 ids are unrelated (5 `CachingDeviceAllocator: invalid device index`, 1 flex `triton_poi_fused_flex_attention_1` in the FlagTree Ascend code generator, 1 tolerance `AssertionError` in `test_forward_with_logits_to_keep`, 1 flaky beam-search id). The other 221 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected. |
-| 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `cumsum` leaves the FlagGems route for the aclnn kernel already registered behind it | **Routes one op off a broken FlagGems `_ascend` backend override onto the vendor kernel that already serves it.** `flag_gems/runtime/backend/_ascend/ops/cumsum.py:225` sizes its reduction as `K = inp.numel() // M // N` with `N = shape[dim]`, so an empty reduction dim — the `bool (1, 0)` tensor `_assisted_decoding` builds at `transformers/generation/utils.py:4107`, which ATen's own `cumsum` answers with an empty tensor — is `0 // 1 // 0` and `ZeroDivisionError`, where the generic `ops/cumsum.py` does not divide by `N`. This is the third instance of the same `_ascend` override class (cf. the sibling `ones`/`ones_like` change). The defect is FlagGems'; the torch_fl lever is the route — `cumsum` enters `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends it to `ascend`, where `ascend_register.inc:137` registers `WrapperCumsum` and `ascend_kernels.cc:2223` binds `CumsumKernelAscend` to `aclnnCumsum`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **223**, `ascend` 151 -> **152**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `61a4dc07353e51fd2a16423ecdec91b69451e40b4af68bbc06e54850b9607c5f`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The defect reproduces standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (`torch.cumsum(bool(1,0), dim=-1)` -> `ZeroDivisionError` at `cumsum.py:225`). `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 223, "none": 1662, "ascend": 152}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 223. **The flip is measured on hardware, zero-mutation:** the `cumsum = ascend` row is the *only* difference between the two arms, and under it `FLAGOS_LOG=dispatch` logs `cumsum -> ascend` (x4) with `cumsum(bool(1,0)) -> (1, 0) int64`, `cumsum(arange(5)) -> [0, 1, 3, 6, 10]`, `cumsum(ones(3)) -> [1.0, 2.0, 3.0]` and `cumsum(f32(1,0)) -> (1, 0)`, while the FlagGems arm raises; the base conf was restored untouched (SHA-256 `d02e4b54…`). End-to-end on the two BERT assisted-decoding ids: **`2 failed` on the FlagGems route -> `2 passed` on `ascend`**, same single variable. A **full BERT cohort re-run** against this change has not been made — the end-to-end green is those two ids, not the suite. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the defect living only in the `_ascend` override. |
+| 2026-10-17 | None (CPU-only host) | `tests/integration/flaggems` on the MPS lane -- a routing-table gap, no conf route moved | **Records MPS in the two FlagGems routing tables, which its new CI lane had started to reach without a row.** The FlagGems suite is hardware-agnostic and runs unchanged on every lane, so the `macos-14` MPS lane picks it up, but `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES` and `EXPECTED_SDPA_ROUTE` had a row per accelerator and none for `mps`: `test_flaggems_route_count_matches_the_measured_one` and `test_sdpa_route_matches_the_recorded_one` both failed on the size of two dictionaries rather than on any kernel. The values are read from `backends_mps.conf` (`123c27a4…`, unmoved by this change) -- **0** `flaggems` routes (MPS names no operator cohort and has no Triton/FlagGems line) and `scaled_dot_product_attention = none`. No kernel, conf route or `FLAGGEMS_PINNED_OFF` hold moved. | `pytest tests/integration/flaggems -q` on the `torch-fl-mps` interpreter goes from **2 failed, 2 passed, 41 skipped** to **4 passed, 41 skipped `FLAGGEMS-CONFORMANCE accel=mps kernels=vendor ops_total=24 ops_routed=0 ops_none=24`**; the before-state is the MPS lane log of run `38962209291`, step `[9/10] FlagGems conformance (hardware-agnostic)`, where both failures are the missing keys verbatim. `test_flaggems_exclusions.py::test_every_pinned_platform_has_a_recorded_row` passes unchanged -- the new row carries no pinned set, which that test permits. **Evidence gap:** the `0` and the `none` are conf text, the same file the dispatcher reads, so no FlagGems execution is measured on Metal; there is none to measure, the MPS wheel shipping no FlagGems kernel set. |
+| 2026-10-17 | Apple Silicon arm64 (Metal / MPSGraph), macOS; other platforms **not revalidated** | MPS native backend CI lane + the operator-support matrix rows (20-route native cohort) | **Adds the CI lane for the one platform whose accelerator is the runner itself, and records MPS in the support matrix it was absent from.** `.github/configs/mps.yml` is a normal platform config with two differences: `ci_image` is the **empty string** and `runner_labels` is `[macos-14]`. The empty image is a real value, not a placeholder — a macOS runner cannot start a container and MPS's accelerator is the runner's own Metal GPU — so the two consuming workflows (`integration-tests.yml`, `build-wheel-common.yml`) now spell `container:` as one expression that yields `null` for a falsy image. `load-platform-config.yml` still requires the key to be *stated* and to be a string, replacing the `-z` check that would have refused MPS, because a `container:` key cannot be skipped by an `if:` and a workflow-level `container: ''` is a schema error rather than an absent key. `set_env_mps.sh` (wrapper) and `hooks/set_env_mps.sh` assert the runner's own toolchain instead of an image — Darwin, arm64, Xcode CLT, the macOS SDK — install the un-suffixed PyPI `2.10.0` (there is no `2.10.0+cpu` macosx wheel) around a call to the shared `install_cpu_torch`, and assert `flagos.device_count() >= 1`. The hook installs **no FlagTree/FlagGems** and the config names no operator cohort (`mps` is `NO_OPERATOR_COHORT` in `tests/unit/test_ci_version_pins.py`): PyPI publishes no macOS `triton` wheel and there is no Metal FlagTree line, so the absence is the platform's design. The manifest gains exactly one step id, `backend_ops` (`platforms: [mps]`, `pytest tests/integration/ops -m mps`), because the vendor operator groups are file lists composed from a cohort MPS does not have; the platform picks up every shared group in the manifest, the runtime-conformance traversal included. MPS's `paths_watch` now globs `tests/integration/ops/test_mps_*.py`, so a new increment's tests stay inside the lane rather than routing through "unknown code runs every platform". `docs/reference/platform-capability-matrix.md` moves MPS from `CI: no` to `yes`, corrects its conf-route note (2037 entries, 20 on the native key, 2017 on `none`), and replaces the "no CI job" paragraph with the runner and lane description. No conf route moves: `backends_mps.conf` is byte-identical at `{mps: 20, none: 2017}`. | Conf SHA-256 `e86364149e15ee049552a0695e227b66e8226badad35f486cc8ed1ee8241966e`; `gen_vendor_confs.py --check` -> `all vendor confs up to date` and `codegen_mps.py --check` -> the 20 kernels up to date. Routing measured with the real generator: `generate_matrix.py` with `--changed-files csrc/aten/backends/mps/mps_common.mm` -> `platforms=["mps"]`, with `tests/integration/ops/test_mps_div.py` -> `platforms=["mps"]`, with a shared path -> all nine, and with `docs/vendors/mps/installation.md` -> `[]` (no hardware lane). `compose_integration_manifest.py` for `mps` emits ten steps, `backend_ops` last. Two new unit checks in `tests/unit/test_ci_platform_routing.py` fail against the pre-change `container:` shape (verified by loading `origin/main`'s workflows) and pin `mps` as the only platform stating an empty `ci_image`. Lane-shape suites: `test_ci_matrix.py`, `test_ci_commands.py`, `test_ci_version_pins.py`, `test_ci_pip_cache.py`, `test_ci_platform_routing.py`, `test_ci_resolution.py`, `test_integration_manifest.py`, `test_set_env_common.py`, `test_set_env_runner.py`, `test_release_publishing.py`, `test_wheel_preflight.py`, `test_integration_workdir.py`, `test_run_integration_tests.py`, `test_platform_capability_matrix.py` -> **485 passed**; `ruff check` -> "All checks passed!", `ruff format --check` -> 402 files already formatted. Both edited workflows and the new config parse under PyYAML. **Evidence gaps:** the lane has not run on a real `macos-14` runner — `gh` shows the eight vendor hardware jobs QUEUED (no self-hosted runner) and the MPS job cannot be dispatched from this fork — so the hook's `xcode-select`/`xcrun` probes, the venv bootstrap and the 584-case operator suite are **not measured in CI**; they are measured only on the local Apple Silicon host the operator increments were developed on. The composed step list and the routing decision are measured locally (above). The 20 operator routes themselves are revalidated by their per-op suites, not by this lane. || 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `cumsum` leaves the FlagGems route for the aclnn kernel already registered behind it | **Routes one op off a broken FlagGems `_ascend` backend override onto the vendor kernel that already serves it.** `flag_gems/runtime/backend/_ascend/ops/cumsum.py:225` sizes its reduction as `K = inp.numel() // M // N` with `N = shape[dim]`, so an empty reduction dim — the `bool (1, 0)` tensor `_assisted_decoding` builds at `transformers/generation/utils.py:4107`, which ATen's own `cumsum` answers with an empty tensor — is `0 // 1 // 0` and `ZeroDivisionError`, where the generic `ops/cumsum.py` does not divide by `N`. This is the third instance of the same `_ascend` override class (cf. the sibling `ones`/`ones_like` change). The defect is FlagGems'; the torch_fl lever is the route — `cumsum` enters `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends it to `ascend`, where `ascend_register.inc:137` registers `WrapperCumsum` and `ascend_kernels.cc:2223` binds `CumsumKernelAscend` to `aclnnCumsum`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **223**, `ascend` 151 -> **152**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `61a4dc07353e51fd2a16423ecdec91b69451e40b4af68bbc06e54850b9607c5f`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The defect reproduces standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (`torch.cumsum(bool(1,0), dim=-1)` -> `ZeroDivisionError` at `cumsum.py:225`). `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 223, "none": 1662, "ascend": 152}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 223. **The flip is measured on hardware, zero-mutation:** the `cumsum = ascend` row is the *only* difference between the two arms, and under it `FLAGOS_LOG=dispatch` logs `cumsum -> ascend` (x4) with `cumsum(bool(1,0)) -> (1, 0) int64`, `cumsum(arange(5)) -> [0, 1, 3, 6, 10]`, `cumsum(ones(3)) -> [1.0, 2.0, 3.0]` and `cumsum(f32(1,0)) -> (1, 0)`, while the FlagGems arm raises; the base conf was restored untouched (SHA-256 `d02e4b54…`). End-to-end on the two BERT assisted-decoding ids: **`2 failed` on the FlagGems route -> `2 passed` on `ascend`**, same single variable. A **full BERT cohort re-run** against this change has not been made — the end-to-end green is those two ids, not the suite. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the defect living only in the `_ascend` override. |
 | 2026-10-16 | Hygon DCU bw1000 (1 device), torch `2.10.0+das.opt1.dtk2604.2606151054.g98b1a8` (`torch.version.hip` 6.3.26113), Python 3.10.20. **Other platforms not revalidated** | The DCU complex factory surface (`zeros`, `ones`, `randn`, `fill_`, `abs`) — a runtime dtype escape, no conf route moved | **Names complex in the FlagGems dtype converter and adds a DCU arm to the runtime dtype escape, so a complex factory keeps its dtype and reaches a kernel that can serve it.** Two defects met on one call. `OptionalDtypeToPython` (`csrc/aten/backends/flagos/python_op_caller.cc`) had no complex case and returned Python `None`, which a factory reads as `torch.get_default_dtype()`, so `torch.zeros(4, dtype=torch.complex64, device="flagos:0")` returned `float32` — a silent wrong answer, wider than the issue's title (`ones` and `randn` the same way). The converter now names `ComplexFloat`/`ComplexDouble` and its `default` raises `TORCH_CHECK` instead of returning `None`, so the next unnamed dtype fails loudly. That alone is not enough: FlagGems' HCU Triton backend has no complex pointer type, so the preserved dtype turns the silent `float32` into `KeyError: 'complex64'`. `FlagGemsRejectsDtype` (`csrc/aten/common.cc`) therefore gains a `FLAGOS_ACCEL_DCU` arm, the shape MetaX already carries (PR #539), and `ResolveFn` reroutes the complex call to the DCU CUDA boxing kernels. DCU ships `FLAGOS_BUILD_BOXING=1` (`.github/scripts/hooks/set_env_dcu.sh:316`), so the vendor slot is populated and the diversion has somewhere to land; `ones`/`fill_` divert because their vendor kernels are compositional (`at::empty(...).fill_(1)` / `.zero_()`) and the inner in-place call is itself diverted. The escape is dtype-scoped: `ones(float32)` still logs `flagos_python`. No conf, registration `.inc` or generated kernel changes. | Measured on a `libtorch_fl.so` built from this branch (copied into the env, original set aside) on one BW1000 with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`: `zeros`/`ones`/`randn` at `complex64` and `complex128` all return the requested dtype (was silent `float32`); `abs(complex64)` returns `[5.0, 1.4142, 2.0]`, equal to the CPU reference, and `abs(complex128)` returns `float64` (was `KeyError: 'complex64'`); `fill_(1+2j)` correct; controls unmoved — `zeros(float32)`/`zeros(float64)`/`ones(int64)`/`arange(int32)`/`ones(no dtype)` keep their dtypes and `complex64` `add` is correct. `FLAGOS_LOG=dispatch` on the patched build: `zeros -> cuda`, `ones -> cuda`, `fill_.Scalar -> cuda`, `zero_ -> cuda`, `abs -> cuda` for complex, and `ones -> flagos_python` for float32. New `tests/integration/ops/test_dcu_complex.py` (SHA-256 of the committed file verified on the host before the run) **9 passed in 57.23s** on hardware; `test_factory_ops.py` + `test_dtype_coverage.py` **221 passed, 1 xfailed**. The shipped DCU wheel predates both halves and reproduces the two defects, which is the before column. **Evidence gaps:** the `_flagos_nccl` comm extension fails to build on this branch (`/opt/dtk/include/rccl/rccl.h` uses `hipStream_t` without including `hip/hip_runtime.h`), so only the core `libtorch_fl.so` was rebuilt and swapped in — a full wheel rebuild needs that build-env issue resolved and is **not** done here. The broad `tests/integration/ops` sweep (`-k "not mps and not gcu and not kunlunxin and not ascend and not musa"`, whole directory) was still running against this build when this row was written and its result is **not** part of the evidence here; the regression result claimed is the new file and the two targeted files above. Every other platform is **not revalidated**: they share the converter (a complex factory there moves from silent `float32` to a loud FlagGems failure) and take the `#else` arm of the escape, and that is reasoned from the code, not measured. |
 | 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `ones`, `ones_like`, `max`, `max.dim` leave the FlagGems route for the aclnn kernels already registered behind them | **Routes four ops off two broken FlagGems `_ascend` backend overrides onto the vendor kernels that already serve them.** `flag_gems/runtime/backend/_ascend/ops/ones.py:56` sizes its grid as `cdiv(N, next_power_of_2(ceil(sqrt(volume))))`, which is `cdiv(0, 0)` for any zero-element shape, so `torch.ones((2, 0), device="flagos")` and `torch.ones(0, device="flagos")` raise `ZeroDivisionError` where the generic `ops/ones.py` (hardcoded 1024) does not; `_ascend/ops/max.py:100` builds its block mask with Python `and` on non-scalar tensors, the deprecated form that does not produce the intended elementwise mask, yielding a 43.4% mismatch in the BERT cohort's `test_forward_with_logits_to_keep`. Both defects are FlagGems'; the torch_fl lever is the route — the four ops enter `NATIVE_TRITON_GAPS["ascend"]` so `backends_ascend.conf` sends them to `ascend`, where `codegen_ascend.py` already emits and registers `WrapperOnes`/`WrapperOnesLike`/`WrapperMax`/`WrapperMaxDim`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `flaggems` 224 -> **220**, `ascend` 151 -> **155**, `none` 1662 unchanged; every other platform's conf is byte-identical. | Conf SHA-256 `346a42d765744ea7e52554b29ad165761dc80fb215d239e4ae6ed075754f34e0` -> `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. Both defects reproduce standalone on the host's `torch-fl-ascend-py311` interpreter with the FlagGems route in force (verbatim tracebacks in the platform narrative above); `ones_like` on `(2, 0)` fails in the same kernel while `zeros`/`full` succeed. `tests/unit/test_conf_registration_consistency.py` (52 passed) gates the conf/generator pair, its census snapshot moving to `{"flaggems": 220, "none": 1662, "ascend": 155}` alongside `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` 224 -> 220. **The post-change conf is measured on hardware, per-op**: installing this PR's conf (`eeee6b6e…`) over the base build's own copy logs `ones -> ascend` (×2), `ones_like -> ascend`, `max -> ascend`, `max.dim -> ascend`, and the five probes that failed on the FlagGems route -- `ones((2,0))`, `ones(0)`, `ones_like(empty(2,0))`, `max(a)`, `max(a,dim=1)` -- all return correct values (full block in the platform narrative; the host conf was restored to `3e6979f6…` afterwards). The **BERT cohort has not been re-run** against it, so the end-to-end green is inferred rather than observed. The other 220 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected, the two defects living only in the `_ascend` override. |
 | 2026-10-16 | Ascend 910C (CANN 9.0.0) | Ascend: `bitwise_{and,or,xor}.Scalar` gain a native aclnn claim (generated `ascend_register.inc` + `ascend_kernels.cc`) | **Claims the three scalar bitwise overloads on PrivateUse1, replacing a composite decomposition that handed FlagGems' tensor kernel a Python scalar it rejects.** `aten::bitwise_and.Scalar` is `CompositeExplicitAutograd`, and `csrc/aten/register.cc`'s Ascend arm includes only `backends/ascend/generated/ascend_register.inc`, so with no entry there the PrivateUse1 key held nothing: ATen's composite ran, decomposed to the registered `bitwise_and.Tensor` overload (routed `flaggems`), and `flag_gems.bitwise_and_tensor` -- whose un-schema'd `prepare_args` derives `is_tensor = [True, True]` -- raised `ValueError: Element at index 1 is incorrect. Expected True, but got False.`, failing nine BERT generation tests. MetaX claims the Scalar overload and passes the same tree. Three `binary_scalar` registry entries in `scripts/codegen/codegen_ascend.py` emit the PrivateUse1 claim (the fix's payload) plus an `aclnnBitwise{And,Or,Xor}Scalar` body through the existing `AclScalarWrapper` shape (`mul.Scalar`/`div.Scalar` precedent); the generator validates each symbol against `libopapi.so` and its header states BOOL support (both-BOOL lowers to `LogicalAnd`, the dtype the failing path uses). **On the default build the conf value stays `flaggems`**, so the winning backend is `flag_gems.bitwise_and_scalar` (correct for bool) and the aclnn kernel is the vendor candidate behind the `# ascend` annotation under `FLAGOS_FORCE_BACKEND=vendor`; the measured post-change dispatch line is `[flagos dispatch] bitwise_and.Scalar -> flagos_python`. No new kernel, so the codegen-limitation approval path is not triggered. Route delta `none` 1662 -> **1659**, `flaggems` 220 -> **223**, `ascend` 155 unchanged; 378 accelerated (18.6%). Every other platform's conf and every other platform's generated artifacts are byte-identical. | Conf SHA-256 `eeee6b6eb15a48a918dd2429a448b6e6eb9e71bfdb2d348a7c68350526245138` -> `d02e4b54f801092299e091f49795ea83b3f70aae525cbad8a06d092c31122231`; `gen_vendor_confs.py` run twice leaves it byte-identical and `--check` reports `all vendor confs up to date`. The generated artifacts move by exactly the change: `ascend_register.inc` +3 `m.impl` (373 -> 376 registered ops), `ascend_kernels.cc` +57 lines (the three kernel bodies). Both pre-flight checks are recorded rather than assumed: `aclnnBitwiseAndScalar` exists (`nm -D libopapi.so` shows it plus `Or`/`Xor`, each with `GetSymbolSize`) and the enumerated missing reachable set is exactly the three overloads, obtained from the `FLAGOS_GEN_IMPLS` region of the shared `generated/register.inc` diffed against `ascend_register.inc` -- not guessed. The pre-fix failure is the verbatim traceback in the platform narrative above; two controls rule out a FlagGems divergence: `flag_gems.bitwise_and_tensor(x, False)` raises the identical ValueError on MetaX, and on the *pre-change* build re-routing the Ascend conf's `bitwise_and.Scalar` to `flaggems` changed nothing, because with no PrivateUse1 claim ATen's composite ran regardless of the conf value -- a statement about the **pre-change** build only; once the claim exists the conf value is the route (`csrc/aten/common.cc`: the value is the route, the `# ascend` annotation is read only under `FLAGOS_FORCE_BACKEND=vendor`), which is why this change leaves the value at `flaggems` and still moves the call off `.Tensor`. `tests/unit/test_conf_registration_consistency.py` and `flaggems_caps.EXPECTED_FLAGGEMS_ROUTES["ascend"]` move together to 223. **The three claimed overloads are measured on hardware, both arms**: same host, same interpreter, `TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_LOG=dispatch`; pre-change build at base `6573910` (`libtorch_fl.so` md5 `340a58b136805a36c8a4c51a2592003d`) logs `bitwise_and.Tensor -> flagos_python` with `PrivateUse1 bitwise_and.Scalar = False` and raises the ValueError, post-change build (`libtorch_fl.so` md5 `e678ca8b617429f34e3f20dda4c39112`, 5,273,128 B) logs `bitwise_{and,or,xor}.Scalar -> flagos_python` with all three `= True` and returns the CPU-reference values -- so the claim is what moves the call off `.Tensor`, and `flag_gems.bitwise_and_scalar` (not the aclnn kernel) is the winning backend, as designed. The aclnn bodies themselves are **not exercised** by any run, which is the recorded evidence gap. The other 223 Ascend `flaggems` routes are **not revalidated**, and no non-Ascend platform is revalidated or affected. |

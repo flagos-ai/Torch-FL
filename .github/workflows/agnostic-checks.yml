@@ -101,6 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            tests/unit/test_ai_reviewer.py \
             tests/unit/test_backend_autoload_contract.py \
             tests/unit/test_ci_pip_cache.py \
             tests/unit/test_ci_platform_routing.py \

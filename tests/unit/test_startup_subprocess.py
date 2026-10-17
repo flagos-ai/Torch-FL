@@ -163,3 +163,44 @@ else:
         "minimal",
         autoload="0",
     )
+
+
+def _require_mps():
+    _require_torch()
+    spec = importlib.util.find_spec("torch_fl")
+    assert spec is not None and spec.origin, "torch_fl package is not installed"
+    detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
+    if detector["build_accelerator"]() != "mps":
+        pytest.skip("This check needs an MPS build")
+
+
+def test_mps_minimal_add_runs_clean():
+    """The smallest native MPS op there is: one add, no compiled matmul.
+
+    A fresh process has to reach the device, build a queue and encode one graph
+    without dying. That is the ground the whole backend stands on, and it is
+    the one part of this file that is a contract rather than a probe: it runs
+    on every MPS lane so a bring-up regression fails here, next to the device
+    and queue code, instead of inside an operator suite.
+    """
+    _require_mps()
+    env = os.environ.copy()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch, torch_fl\n"
+            "torch_fl.flagos.init()\n"
+            "dev = torch.device('flagos', 0)\n"
+            "a = torch.randn(4, device=dev)\n"
+            "b = torch.randn(4, device=dev)\n"
+            "assert (a + b).shape == (4,)\n"
+            "torch_fl._C._synchronize()\n",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -34,7 +34,17 @@ RUNNER = SCRIPTS / "set_env.sh"
 HOOKS = SCRIPTS / "hooks"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
-PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu"]
+PLATFORMS = [
+    "cuda",
+    "ascend",
+    "dcu",
+    "gcu",
+    "kunlunxin",
+    "metax",
+    "mps",
+    "musa",
+    "ppu",
+]
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -143,3 +153,65 @@ def test_runner_applies_the_pip_constraints():
     )
     for pin in ("torch==", "numpy<2", "transformers>="):
         assert pin in constraints, pin
+
+
+def test_mps_hook_installs_the_wheel_build_dependencies():
+    """The MPS hook provisions what `python -m build --no-isolation` reads.
+
+    The job builds the wheel with `--no-isolation`, which resolves the
+    `[build-system]` requirements against the venv instead of provisioning them
+    in a throwaway env. `pyproject.toml` asks for `setuptools`, `wheel` and
+    `cmake>=3.18`; a stock macOS runner image has none of them in the venv, so
+    the step failed with `ERROR Unmet dependencies ... found: not installed` and
+    the lane never reached a single test.
+
+    `cmake` needs the explicit guard rather than a plain `import cmake`: the repo
+    ships its own top-level `cmake/` directory, which Python resolves as a
+    namespace package from the repo root, so an import check passes in a venv
+    where the real distribution is absent and the build then dies later at
+    `running build_ext` with `error: [Errno 2] No such file or directory:
+    'cmake'`. That is the same trap the Ascend hook's comment records.
+    """
+    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    # The comments above the install name `cmake` and `wheel` too, so this reads
+    # the commands rather than the file: the requirement has to appear on a line
+    # that installs it, which a comment cannot satisfy.
+    installs = [
+        line.strip()
+        for line in hook.splitlines()
+        if line.strip().startswith("pip_retry ")
+    ]
+    assert installs, "the mps hook installs nothing"
+
+    # `torch` is exempt: the hook installs it through `install_cpu_torch`, which
+    # names the version from a variable, so the literal never appears on a line.
+    # The three wheel-build deps are what the runner image is missing.
+    for requirement in ("setuptools", "cmake", "wheel"):
+        assert requirement in _pyproject_build_requirements(), (
+            f"{requirement} is no longer a [build-system] requirement; this "
+            "test pins the hook to the file's list and needs updating"
+        )
+        assert any(requirement in line for line in installs), (
+            f"{requirement} is a [build-system] requirement but the mps hook "
+            f"never installs it; installs found: {installs}"
+        )
+
+
+def _pyproject_build_requirements() -> list[str]:
+    """The requirement names in `[build-system].requires`, normalised.
+
+    `tomllib` is stdlib on the 3.11+ interpreters every lane here uses, so the
+    test reads the real file rather than restating the list and drifting from it.
+    """
+    import tomllib
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        requires = tomllib.load(handle)["build-system"]["requires"]
+
+    names = []
+    for requirement in requires:
+        name = requirement
+        for separator in ("[", ">", "<", "=", "!", "~", " "):
+            name = name.split(separator, 1)[0]
+        names.append(name)
+    return names
