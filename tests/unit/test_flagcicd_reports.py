@@ -247,32 +247,53 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
         ],
     )
     assert process.returncode == 0
-    output = tmp_path / "pytest-cuda.json"
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/integration-tests.yml").read_text()
+    )
+    steps = {
+        step.get("id", step.get("name")): step
+        for step in workflow["jobs"]["integration-tests"]["steps"]
+    }
+    container_workspace = tmp_path / "container-workspace"
+    container_workspace.mkdir()
+    host_workspace = tmp_path / "host-workspace"
     result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "merge_pytest_reports.py"),
-            "--report-dir",
-            str(reports),
-            "--output",
-            str(output),
-            "--platform",
-            "cuda",
-            "--outcome",
-            "success",
-            "--source-repository",
-            "flagos-ai/Torch-FL",
-            "--source-ref",
-            "a" * 40,
-        ],
+        ["bash", "-e", "-c", steps["merge-report"]["run"]],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(container_workspace),
+            "FLAGCICD_REPORT_DIR": str(reports),
+            "REPORT_PLATFORM": "cuda",
+            "TEST_OUTCOME": "success",
+            "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
+            "SOURCE_REF": "a" * 40,
+        },
         text=True,
         capture_output=True,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
+
+    def container_path(value):
+        # github.workspace can name a host-only path in a job container.
+        value = value.replace("${{ github.workspace }}", str(host_workspace))
+        value = value.replace("${{ inputs.platform }}", "cuda")
+        return container_workspace / value
+
+    output = container_path(
+        steps["Upload pytest report to FlagCICD"]["with"]["report_path"]
+    )
     report = json.loads(output.read_text())
     assert report["exitcode"] == 0
     assert report["flagcicd"]["source_ref"] == "a" * 40
+    artifact_paths = steps["Retain pytest reports"]["with"]["path"].splitlines()
+    assert any(
+        container_path(path) == output
+        for path in artifact_paths
+        if "${{ env.FLAGCICD_REPORT_DIR }}" not in path
+    )
 
 
 def test_pre_pytest_failure_does_not_invent_an_empty_success_report(tmp_path):
@@ -318,10 +339,6 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         == "https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/"
     )
     assert upload["with"]["file_type"] == "pytest"
-    assert (
-        upload["with"]["report_path"]
-        == "${{ github.workspace }}/pytest-${{ inputs.platform }}.json"
-    )
     assert upload["timeout-minutes"] == 2
 
 

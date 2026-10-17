@@ -380,9 +380,12 @@ in the same job.
 Each selected hardware job collects native `pytest-json-report` JSON from its
 pytest processes and merges it into `pytest-<platform>.json` in the checkout.
 The upload action's `report_path` names this generated file; `file_type` is
-`pytest`. This reports test executions and outcomes, not Python line/branch
-coverage or a percentage of supported operators. Repeated cases in different
-groups remain separate executions, annotated with group/session metadata.
+`pytest`. Both the service upload and artifact retention use a checkout-relative
+report path so job containers resolve the generated file inside their mounted
+workspace rather than using the runner host's checkout path from
+`${{ github.workspace }}`. This reports test executions and outcomes, not Python
+line/branch coverage or a percentage of supported operators. Repeated cases in
+different groups remain separate executions, annotated with group/session metadata.
 
 Collection is scoped to the hardware test step through `PYTEST_PLUGINS` and an
 absolute report directory. Every pytest invocation gets a unique file, including
