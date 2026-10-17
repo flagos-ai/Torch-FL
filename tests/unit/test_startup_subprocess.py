@@ -387,3 +387,32 @@ def test_mps_host_and_device_report(capsys):
     print(f"[host] stderr={result.stderr}")
     captured = capsys.readouterr()
     print(captured.out)
+
+
+def test_mps_reshape_boundary_without_a_matmul():
+    """Where the graph dies, with the matmul taken out of the picture.
+
+    The sweep pinned the boundary to the first operand: `(8,8) x (8,8)` and
+    `(16,16) x (16,16)` both run clean on 64 and 256 elements, while
+    `(32,4) x (4,16)` dies on 128 -- fewer elements than a case that works. So
+    the count is not the trigger. What the dying graph has that the working ones
+    do not is a 2-D reshape over a 128-element buffer, which is the shape the
+    first operand presents.
+
+    This runs the same graph shape with the matmul removed: one `mm`-free op --
+    a flat `count`-element operand that the graph reshapes to `(m, k)` and back
+    -- at counts that straddle the boundary from both sides. Sizes are chosen so
+    the same count is exercised both flat and 2-D; if the 2-D reading dies where
+    the flat one does not, the reshape is the trigger and the matmul node is
+    innocent.
+    """
+    _require_mps()
+    for m, k in [(8, 8), (16, 8), (32, 4), (16, 16)]:
+        _probe(
+            f"""
+a = torch.randn({m}, {k}, device=dev)
+b = torch.randn({m}, {k}, device=dev)
+assert (a + b).shape == ({m}, {k})
+print('ok', flush=True)
+"""
+        )
