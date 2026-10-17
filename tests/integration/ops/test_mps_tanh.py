@@ -45,28 +45,34 @@ are the increment's findings:
   round-trip. See ``MpsSupportsTanhDtype`` for the numbers and for the ~2x the
   decline leaves on the table.
 
-Two deviations survive at the *served* widths, both measured and both pinned
-below rather than hidden by a tolerance:
+Two edges are host-dependent rather than this body's, and both were measured
+*both* ways -- on an M5 with a current SDK and on the ``macos-14`` runner CI uses:
 
-* the result of a **signed zero loses its sign** -- ``tanh(-0.0)`` comes back
-  ``+0.0`` where the reference answers ``-0.0`` -- at float16 and bfloat16, while
-  the float32 round-trip keeps it. The value is identical and the curve is odd
-  everywhere else, so this is the one band where the graph is not the
-  reference's function, and it is a *sign* rather than a magnitude.
-* bfloat16 **flushes subnormal results**: the 127 float32 subnormals this width
-  can represent all come back ``0`` (measured: every one of ``bits 0x0001`` to
-  ``0x007f``), where the reference answers subnormal bfloat16. That is the same
-  platform flush the sibling ``sigmoid`` recorded, read at the operand rather
-  than at the result, and float16 does not flush at all (all 1023 of its
-  positive subnormals reproduce the reference bit for bit).
+* the sign of a **signed zero**. On the M5, ``tanh(-0.0)`` comes back ``+0.0``
+  where the reference answers ``-0.0`` at float16 and bfloat16; the CI runner
+  answers the reference's ``-0.0``. The value is identical either way and the
+  curve is odd everywhere else.
+* the **bfloat16 subnormal band**. On the M5 all 127 subnormal bfloat16 operands
+  (``bits 0x0001`` to ``0x007f``) come back ``0``; the CI runner reproduces the
+  reference's subnormal answers exactly. This is the flush the sibling
+  ``sigmoid`` recorded at the result side, read at the operand, and float16 does
+  not flush at all on either host (all 1023 of its positive subnormals reproduce
+  the reference bit for bit).
+
+Because neither reading is stable across hosts, the cases below assert what *is*:
+a zero for the signed-zero operand with the sign preserved everywhere the operand
+is not a zero, a subnormal operand answering the reference or a flushed zero, and
+the band's far edge -- the smallest normal and up -- reproduced bit for bit. The
+deviations themselves are recorded in ``MpsSupportsTanhDtype`` and here, not
+pinned as an assertion that one of the two machines would fail.
 
 The tests below hold what the numbers alone cannot: that the two narrow widths
 are served and agree with ``at::tanh``, that nan propagates at every width through
 the guard, that the curve is odd at the served widths -- the property that
 separates a tanh from the saturating node float32 was declined for -- that the
-edges (``+-inf`` -> ``+-1``) are the ones the reference answers, that the two
-surviving deviations stay inside the band they were measured in, and that
-float32, float64 and the integral/bool operands take the round-trip.
+edges (``+-inf`` -> ``+-1``) are the ones the reference answers, that neither
+host-dependent edge leaves its band, and that float32, float64 and the
+integral/bool operands take the round-trip.
 
 Every case self-skips off an MPS build, like the stage-1 to stage-4 suites.
 """
@@ -304,31 +310,33 @@ class TestTanhCorrectness:
 
     @pytest.mark.parametrize("dtype", SERVED_DTYPES)
     @pytest.mark.anyplatform
-    def test_the_signed_zero_loses_its_sign_at_the_served_widths(self, dtype):
-        """The one edge where the graph is not the reference's function.
+    def test_the_signed_zero_is_a_zero_at_the_served_widths(self, dtype):
+        """The one edge where the graph may differ from the reference, held to
+        the part of it that is stable.
 
-        Measured at float16 and bfloat16, ``tanh(-0.0)`` comes back ``+0.0``
-        where the reference answers ``-0.0``. The value is identical and the
-        curve is odd at every other sample, so this is a *sign* rather than a
-        magnitude, and it is recorded rather than tolerated silently: the case
-        fails if a *nonzero* operand starts losing its sign (the reading that
-        would mean the rule had widened) as loudly as it would if the graph
-        started answering the reference's ``-0.0``.
+        The sign of ``tanh(-0.0)`` is a property of the *host* and not of this
+        body, and it was measured both ways: on an M5 with a current SDK the
+        served widths answer ``+0.0`` where the reference answers ``-0.0``,
+        while the ``macos-14`` CI runner answers the reference's ``-0.0``. So the
+        case asserts the reading that is the same on both -- the answer is a
+        *zero*, and the sign is preserved everywhere the operand is not one --
+        and the deviation itself is recorded in ``MpsSupportsTanhDtype`` and in
+        this module's docstring rather than pinned here, because a case that
+        pinned it would fail on one of the two machines.
 
-        The float32 round-trip keeps the sign, which is the contrast that makes
-        this a property of the served widths rather than of the op.
+        The float32 round-trip keeps the sign on both, which is the contrast
+        that makes this a property of the served widths rather than of the op.
         """
         host = torch.tensor([-0.0, 0.0, -1e-3, -1.0, -7.0], dtype=dtype)
         out = torch.tanh(_to_device(host)).cpu()
         expected = _reference(host)
         assert np.signbit(expected[0].item()), "the reference keeps -0.0"
-        assert out[0].item() == 0.0, out
-        assert not np.signbit(out[0].item()), (
-            "measured: the served widths answer +0.0 here; if this now holds "
-            "the sign, the deviation has been fixed and this case should say so"
-        )
-        # The sign is preserved everywhere it is not a zero, so what would be a
-        # regression is the rule widening past the zero.
+        # The value is the reference's -- a zero either way -- and the bits may
+        # differ only in that sign, which is what the magnitude check says.
+        assert out[0].item() == 0.0 and expected[0].item() == 0.0
+        assert abs(out[0].item()) == abs(expected[0].item())
+        # The sign is preserved everywhere the operand is not a zero, so what
+        # would be a regression is the ambiguity widening past the zero.
         assert np.signbit(out[2].item()) and np.signbit(out[3].item()), out
         assert np.signbit(out[4].item()), out
         assert torch.equal(out[1:], expected[1:]), out
@@ -354,30 +362,38 @@ class TestTanhCorrectness:
             assert 0.0 < out[5].item() < out[8].item() < 1.0
 
     @pytest.mark.anyplatform
-    def test_the_bfloat16_subnormal_band_flushes_to_zero(self):
-        """The band a sibling lost this width to, present here and pinned.
+    def test_the_bfloat16_subnormal_band_stays_inside_the_band(self):
+        """The band a sibling lost this width to, read at the *operand* here.
 
-        ``sigmoid`` recorded that MPSGraph flushes a subnormal *result* at
-        bfloat16, and the same flush is visible here at the *operand*: measured,
-        every one of the 127 subnormal bfloat16 operands -- ``bits 0x0001``
-        through ``0x007f`` -- comes back ``0`` where the reference answers a
-        subnormal bfloat16. The case holds both ends, because the invariant that
-        matters is the band's *extent*: the flush stops at the smallest normal,
-        which is reproduced bit for bit.
+        ``sigmoid`` recorded that MPSGraph flushes a subnormal result at
+        bfloat16, and the same flush is visible here on the operand side -- but
+        like the signed zero above, whether it happens is a property of the host
+        and it was measured both ways: on an M5 with a current SDK all 127
+        subnormal bfloat16 operands (``bits 0x0001`` through ``0x007f``) come
+        back ``0``, while the ``macos-14`` CI runner reproduces the reference's
+        subnormal answers exactly.
+
+        So the case asserts what holds on both: a subnormal operand answers the
+        reference's answer *or* a zero, never a third value, and the band's far
+        edge -- the smallest normal and up -- is the reference bit for bit on
+        both machines. That second half is the half that would break if the
+        flush widened, which is the reading worth having a case for.
         """
         subnormal_bits = torch.arange(1, 0x0080, dtype=torch.int32) << 16
         host = subnormal_bits.view(torch.float32).to(torch.bfloat16)
         tiny = torch.finfo(torch.bfloat16).tiny
         assert (host > 0).all() and (host < tiny).all(), "the band is covered"
-        out = torch.tanh(_to_device(host)).cpu()
-        expected = _reference(host)
+        out = torch.tanh(_to_device(host)).cpu().float()
+        expected = _reference(host).float()
         assert (expected > 0).all(), "the reference answers a subnormal here"
-        assert (out == 0).all(), (
-            "measured: the whole subnormal band flushes; if this now answers "
-            "the reference, the flush has been fixed and this case should say so"
-        )
+        for x, got, want in zip(host.tolist(), out.tolist(), expected.tolist()):
+            assert got in (want, 0.0), (
+                f"tanh({x!r}) = {got!r}, expected the reference's {want!r} or a "
+                "flushed zero"
+            )
         # The band's far edge, which is the half that would break if the flush
-        # widened: the smallest normal and up are the reference exactly.
+        # widened: the smallest normal and up are the reference exactly, on any
+        # host.
         normals = torch.tensor([tiny, tiny * 2.0, 1e-20, 1e-3, 1.0])
         out_n = torch.tanh(_to_device(normals)).cpu()
         assert torch.equal(out_n, _reference(normals)), out_n

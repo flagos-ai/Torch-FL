@@ -531,10 +531,10 @@ bool MpsSupportsSqrtDtype(at::ScalarType dtype);
 //     at these widths rather than an approximation of it -- measured, both have
 //     the *reference's* max error against the exact tanh to the digit, and both
 //     are *exactly* odd (max |g(x) + g(-x)| is 0.0 where the float32 node breaks
-//     the same measurement by 1.788e-07). Two deviations survive and are
-//     recorded rather than hidden: bfloat16 flushes a subnormal operand (all 127
-//     accessible, none of float16's 1023), and both widths answer +0.0 for
-//     tanh(-0.0). See the note in mps_common.mm.
+//     the same measurement by 1.788e-07). Two edges at these widths are the
+//     host's rather than the body's -- the sign of a zero, and the bfloat16
+//     subnormal band -- and both were measured both ways rather than pinned as
+//     an invariant. See the note in mps_common.mm.
 //   * float32 is *declined*. The node is a coarser approximation of a tanh at
 //     this width, not a differently-rounded exact one, and the measurement says
 //     so three ways: it breaks odd symmetry by 1.788e-07 where the reference is

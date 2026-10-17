@@ -1047,16 +1047,27 @@ The sharper reading is symmetry: `max |g(x) + g(-x)|` is exactly `0.0` at both
 widths, the reference's own value, where the float32 node breaks the same
 measurement by `1.788e-07`. A coarser node does not stay odd.
 
-Two deviations survive at the served widths and are recorded rather than hidden
-behind a tolerance. bfloat16 flushes a subnormal operand: all 127 of the float32
-subnormals that width represents come back `0` where the reference answers a
-subnormal bfloat16, and the band stops exactly at the smallest normal, which is
-reproduced bit for bit -- the same platform flush `sigmoid` recorded at the
-result side, read at the operand. float16 does not flush at all: all 1023 of its
-positive subnormals reproduce the reference. Both widths also answer `+0.0` for
-`tanh(-0.0)` where the reference answers `-0.0`; the value is identical and the
-curve is odd at every other sample, so this is a sign rather than a magnitude,
-and it is the one edge the served widths miss. The float32 round-trip keeps it.
+Two edges at the served widths turned out to be the *host's* rather than the
+body's, and both were measured both ways rather than pinned as an invariant --
+the lesson `rsqrt` and `sqrt` already taught, read again here.
+
+On an M5 with a current SDK, bfloat16 flushes a subnormal operand: all 127 of the
+float32 subnormals that width represents come back `0` where the reference
+answers a subnormal bfloat16. The `macos-14` runner CI uses reproduces the
+reference's subnormal answers exactly. The same split holds for the sign of a
+zero: the M5 answers `+0.0` for `tanh(-0.0)` at both served widths where the
+reference answers `-0.0`, and the CI runner answers the reference's `-0.0`. The
+first of these is the platform flush `sigmoid` recorded at the result side, read
+at the operand; float16 does not flush at all on either host, with all 1023 of
+its positive subnormals reproducing the reference.
+
+So the tests assert the reading that survives both machines -- a subnormal
+operand answers the reference *or* a flushed zero and never a third value, the
+band's far edge (the smallest normal and up) is the reference bit for bit, and
+the sign is preserved everywhere the operand is not a zero -- and the two
+host-dependent readings are recorded in `MpsSupportsTanhDtype` and in the suite's
+docstring instead. Pinning either as an assertion would have failed on one of the
+two hosts, which is exactly what this increment's first CI run did.
 
 The decline costs something and the number is on the record: measured on an M5
 with a `(3, 512, 3072)` float32 operand, the node is `3.168 ms` against
@@ -1072,10 +1083,11 @@ the odd-symmetry invariant asserted exactly at both served widths and at float32
 through the round-trip, the nan guard asserted at every served width (the case
 that fails if the `isNaNWithTensor:` select is dropped), the saturation edges
 `tanh(+-inf) = +-1` and a near-bound `-7.0` asserted exactly, the bfloat16
-subnormal band pinned at both ends so a widening flush fails while float16's 1023
-subnormals are asserted bit-identical, the signed-zero miss asserted as a miss on
-the served widths and as the reference's sign on the float32 and float64
-round-trips, float32 asserted bit-exact over the whole `[-10, 10]` curve (the
+subnormal band held to the reference's answer or a flushed zero with the cone at
+the smallest normal asserted bit-exact, float16's 1023 subnormals asserted
+bit-identical so the band is not generalised, the signed zero asserted as a zero
+with the sign preserved at every nonzero operand, and the reference's sign
+asserted on the float32 and float64 round-trips, float32 asserted bit-exact over the whole `[-10, 10]` curve (the
 case that would fail if the gate were widened), the declined widths asserting the
 round-trip's own dtype, the integral and bool promotions asserted at float32,
 plan reuse across interleaved signatures, and the dispatch log naming `mps` on

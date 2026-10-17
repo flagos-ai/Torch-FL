@@ -378,21 +378,24 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype) {
   // reference's own value, where the float32 node breaks the same measurement by
   // 1.788e-07.
   //
-  // Two deviations do survive at these widths, both measured and both narrow
-  // enough to accept on the same policy the siblings used:
+  // Two edges at these widths are the *host's* rather than this body's, and both
+  // were measured both ways -- on an M5 with a current SDK and on the macos-14
+  // runner CI uses:
   //
-  //   * bfloat16 flushes a subnormal *operand*. All 127 of the float32
-  //     subnormals this width can represent -- bits 0x0001 to 0x007f -- come
-  //     back 0 where the reference answers a subnormal bfloat16, and the band
-  //     stops exactly at the smallest normal, which is reproduced bit for bit.
-  //     This is the flush `sigmoid` recorded at the *result* side, read at the
-  //     operand, and float16 does not flush at all: all 1023 of its positive
+  //   * the sign of a zero. On the M5, tanh(-0.0) comes back +0.0 at both widths
+  //     where the reference answers -0.0; the CI runner answers the reference's
+  //     -0.0. The value is identical either way.
+  //   * the bfloat16 subnormal band. On the M5 all 127 subnormal operands (bits
+  //     0x0001 to 0x007f) come back 0 where the reference answers a subnormal
+  //     bfloat16; the CI runner reproduces the reference exactly. This is the
+  //     flush `sigmoid` recorded at the *result* side, read at the operand, and
+  //     float16 does not flush at all on either host: all 1023 of its positive
   //     subnormals reproduce the reference.
-  //   * the sign of a zero is lost. tanh(-0.0) comes back +0.0 at both widths
-  //     where the reference answers -0.0. The value is identical and the curve
-  //     is odd at every other sample, so this is a sign rather than a magnitude,
-  //     and it is the one edge the served widths miss. The float32 round-trip
-  //     below keeps it.
+  //
+  // Neither is stable enough to be an invariant, so the served widths are held
+  // to the part that is -- the band's far edge is the reference bit for bit on
+  // both hosts, and the sign is preserved everywhere the operand is not a zero
+  // -- and the two readings above are recorded here rather than pinned.
   //
   // float32 is declined, and this is the increment's finding. The node is not a
   // differently-rounded exact tanh at this width, it is a coarser approximation
