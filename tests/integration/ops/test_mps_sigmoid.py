@@ -173,21 +173,43 @@ class TestSigmoidCorrectness:
         the input band where the reference's own answer is subnormal but nonzero:
         measured, ``sigmoid(-87.0)`` agrees at 1.6458e-38, ``sigmoid(-88.0)`` is
         6.0546e-39 on the reference and exactly 0 on the graph, and by -89.0 the
-        reference is subnormal-and-zero as well. The case holds both sides of the
-        band rather than the band alone, because what would be a regression is
-        the flush moving into the normal range.
+        reference is zero as well.
+
+        Where the band starts is the *hardware's* decision, not this body's, so
+        the case asserts the shape of the policy rather than a boundary: every
+        input whose reference answer is normal agrees exactly, and the flush
+        never reaches one. Measured, the first flushed input differs by
+        generation -- ``-88.0`` on an M5, ``-87.5`` on CI's paravirtualized
+        part -- and any point boundary here would be a test that fails on the
+        other machine. What would be a regression is the flush moving into the
+        normal range, and that is what is held.
         """
-        host = torch.tensor([-87.0, -88.0, -89.0, -100.0])
+        host = torch.tensor([-86.0, -87.0, -87.5, -88.0, -88.5, -89.0, -100.0])
         out = torch.sigmoid(_to_device(host)).cpu()
         expected = _reference(host)
-        # Inside the normal range the two agree exactly.
-        assert out[0].item() == expected[0].item() > 0.0
-        # The band: the reference is subnormal-and-nonzero, the graph flushes it.
-        assert 0.0 < expected[1].item() < torch.finfo(torch.float32).tiny
-        assert out[1].item() == 0.0
-        # Below the band the reference is zero too, so the two agree again.
-        assert expected[2].item() == 0.0 and out[2].item() == 0.0
-        assert expected[3].item() == 0.0 and out[3].item() == 0.0
+        tiny = torch.finfo(torch.float32).tiny
+        for x, got, want in zip(host.tolist(), out.tolist(), expected.tolist()):
+            if want == 0.0:
+                # Below the band the reference is zero too, so the flush is
+                # indistinguishable from the answer.
+                assert got == 0.0, (
+                    f"sigmoid({x}) = {got!r}, expected the reference's own 0"
+                )
+            elif want < tiny:
+                # Inside the band the reference is subnormal-and-nonzero. The
+                # graph may answer it or flush it, and both are this policy;
+                # what it may not do is answer something else.
+                assert got == 0.0 or got == want or abs(got - want) <= tiny, (
+                    f"sigmoid({x}) = {got!r} against the reference's {want!r}"
+                )
+            else:
+                # Inside the normal range the two agree.
+                assert got == want, f"sigmoid({x}) = {got!r}, expected {want!r}"
+                assert got > 0.0
+        # The flush is confined to the subnormal band: the smallest normal
+        # input the reference answers exactly, which is the invariant that
+        # would break if the flush widened.
+        assert expected[1].item() >= tiny and out[1].item() > 0.0
 
     @pytest.mark.anyplatform
     def test_zero_and_signed_zero(self):
