@@ -85,10 +85,10 @@ build opts into boxing.
   the `torch.compile(backend="bpu")` path.
 - **MPS** (Apple Silicon) has the device runtime floor — allocate, copy,
   synchronize and real Metal streams/events work — plus the MPSGraph operator
-  layer as it stands: 27 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
+  layer as it stands: 28 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
   the elementwise `add`/`sub`/`mul`/`div` tensor and scalar forms (with aten's
   `alpha` and the float-only dtype gate `div.Tensor` needs to keep PyTorch's
-  promotion), `reciprocal`, `silu`, the `pow.Tensor_Scalar` form, the
+  promotion), `reciprocal`, `silu`, `sigmoid`, the `pow.Tensor_Scalar` form, the
   `sum`/`mean`/`_softmax` reductions, `native_layer_norm`, `native_batch_norm`,
   `convolution_overrideable`, `embedding`, `index_select`, `gather`, `take`,
   `cat`, `where.self`, `mm` and `bmm` — and everything else reaches

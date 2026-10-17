@@ -247,6 +247,79 @@ at::Tensor MpsSoftmaxOnHost(
 // and get exactly that.
 bool MpsSupportsSiluDtype(at::ScalarType dtype);
 
+// Whether `sigmoid` computes exactly on the MPSGraph path, and the increment
+// that declined a width the sibling above serves -- which is the point of it.
+//
+// `sigmoid` is the activation `silu` is composed from, and it is the op a model
+// reaches for on its own as well: a hand-written attention mask, a gating
+// projection, a `torch.sigmoid` in a loss. MPSGraph has a real selector for it
+// (`sigmoidWithTensor:`), so the body is one node -- but the selector is the
+// same one the `silu` composition already builds, and measuring *it* through
+// `silu` shows that the exactness `silu` measured is a property of the
+// composition's tail rather than of the node.
+//
+// Measured on an M5 with the graph's sigmoid read out of the routed `silu`
+// (silu(x)/x, which is the node the composition builds) against `at::sigmoid`
+// evaluated in the operand's own dtype over [-40, 40] with the saturated tails,
+// the denormals and the exact 0 included:
+//
+//   float32   1.788e-07 max abs, 3.091e-07 relative at x = 1.33 over the
+//             sampled range. Serving it is therefore a rounding decision and not
+//             an exactness claim, and it carries one more measured caveat: the
+//             same subnormal flush that costs float16 its place also reaches
+//             float32, but only where the *result* falls below the smallest
+//             normal float. Measured, `sigmoid(-87.0)` is 1.6458e-38 on both
+//             sides and `sigmoid(-88.0)` is 6.0546e-39 on the reference and
+//             exactly 0 on the graph; below about -88.5 the reference is
+//             subnormal too and the two agree on 0 again. So the divergence is
+//             confined to the single-input band where the reference's answer is
+//             subnormal-but-nonzero, and it is the same platform policy the
+//             `div` body already records for a subnormal *result*. It is
+//             recorded here rather than gated away because a sigmoid is never
+//             evaluated there by a model and the round-trip at these extremes
+//             would be a per-call host decision on a value the graph cannot
+//             express; the float16 decline below is what the same policy costs
+//             when the band is a wide one rather than a point.
+//   float16   3.088e-02 max abs against the float16 reference, which is 6.2e-02
+//             relative -- a wrong answer rather than a rounding difference, and
+//             it is the *platform's* subnormal policy rather than the node's
+//             arithmetic. 151465 of 400001 samples come back below float16's
+//             smallest normal while the reference keeps them: this SDK flushes
+//             a subnormal float16 *result* to zero, exactly as the `div` body
+//             recorded, and the left tail of a sigmoid is almost entirely
+//             subnormal at that width. So float16 is **declined** here, where
+//             `silu` serves it -- because a silu's tail is multiplied by its
+//             own x, which is likewise subnormal and flushes to the same zero
+//             the reference produces, while a bare sigmoid's tail has no such
+//             partner and the flush is visible.
+//   bfloat16  1.061e-02 relative, largest at x = 4.58. bfloat16's exponent
+//            range is float32's, so nothing here is subnormal and the
+//            difference is rounding at a width that holds about three decimal
+//            digits -- 8.289e-03 absolute against a reference whose own values
+//            are of order 1e-2 to 1. The graph's sigmoid is not bit-identical
+//            to aten's at this width, so it is declined by the same rule that
+//            keeps `softmax` off bfloat16: a measured difference that is a
+//            rounding rather than a bug is still a difference this backend
+//            declines to claim.
+//
+// float64 has no MPSGraph element type, so it takes the round-trip.
+//
+// An integral or bool operand is *promoted* rather than rejected, and that was
+// measured rather than assumed -- the first version of this note claimed aten's
+// `sigmoid` has no integral kernel, and `at::sigmoid(torch.arange(-2, 3))`
+// returns the float32 `[0.1192, 0.2689, 0.5, 0.7311, 0.8808]` on the CPU. The
+// graph path produces the same promoted float32 result, because MpsRunGraph's
+// `out` is allocated from the operand's options and the ceiling the flush above
+// is about does not arise for a small integral input; the gate declines them
+// anyway, since the round-trip is where the *promotion rule* lives and a gate
+// that is right for the wrong reason is the failure this file keeps recording.
+//
+// The gate is deliberately the narrowest one in this file, and the contrast
+// with `MpsSupportsSiluDtype` is the increment's finding: two ops that build the
+// *same node* do not share a width list, because what the node's error means
+// depends on what the surrounding graph does with it.
+bool MpsSupportsSigmoidDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

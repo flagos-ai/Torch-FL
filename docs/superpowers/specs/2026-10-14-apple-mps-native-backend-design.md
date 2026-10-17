@@ -742,6 +742,71 @@ stays dropped for the reason recorded above.
 There is still no CI job: the lane below needs a GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
 
+Stage 4 continued with `sigmoid`, and the increment is small on purpose -- it is
+the smallest body in the layer, one node, and it is the *same* node the `silu`
+composition above already builds. What it contributes is a correction to how
+this document had been reading the stage-4 dtype gates. Until now the rule it
+applied was "the widths a category serves are per op rather than a list this
+backend keeps", written when `silu` served all three float widths and `softmax`
+declined bfloat16. `sigmoid` shows the rule holds even when the *graph is
+identical*: `silu`'s body is `x * sigmoid(x)` and its first node is
+`sigmoidWithTensor:`, so the two ops compile the same selector and could not
+plausibly disagree about what it computes -- and they disagree about which
+widths to serve anyway, because the thing being gated is not the node's
+arithmetic but the meaning of its error in the surrounding graph.
+
+The measurement is taken on the node, not on `silu`, by reading the graph's
+sigmoid out of the routed `silu` as `silu(x)/x`, and comparing it with
+`at::sigmoid` evaluated in the operand's own dtype over `[-40, 40]` with the
+saturated tails, the denormals and an exact zero included. **float32 is served**:
+1.788e-07 max absolute and 3.091e-07 relative, largest at `x = 1.33` -- a
+rounding difference of the same size the `silu` increment measured and accepted,
+so the two agree here. **float16 is declined**, at 3.088e-02 absolute and 6.2e-02
+relative, and the cause is the platform rather than the arithmetic: this SDK
+flushes a subnormal *result* to zero, which is the behaviour the `div` increment
+already recorded for a subnormal quotient, and the left tail of a float16
+sigmoid is almost entirely subnormal -- 151465 of 400001 samples came back below
+float16's smallest normal while the reference kept them. `silu` serves float16
+off that same tail because a silu's tail is multiplied by its own `x`, which is
+likewise subnormal and flushes to the `x * 0 = 0` the reference produces too; a
+bare sigmoid's tail has no such partner, so the flush is visible and the width is
+declined. **bfloat16 is declined** at 1.061e-02 relative with nothing subnormal
+in it -- bfloat16's exponent range is float32's -- so that one is plain rounding
+at a width holding about three decimal digits, declined by the same rule that
+keeps `softmax` and `pow` off bfloat16.
+
+The same platform policy reaches the *served* width, and that is the increment's
+second finding because the first version of its gate note asserted otherwise.
+For float32 the flush is confined to the input band where the reference's own
+answer is subnormal-but-nonzero: `sigmoid(-87.0)` is 1.6458e-38 on both sides,
+`sigmoid(-88.0)` is 6.0546e-39 on the reference and exactly 0 on the graph, and
+by -89.0 the reference is subnormal-*and*-zero so the two agree again. It is
+recorded rather than gated, because a sigmoid is never evaluated there by a model
+and a per-call host decision on a value the graph cannot express would cost the
+common case to protect a point in the range; the float16 decline is what the same
+policy costs when the band is wide instead of a point. Two smaller corrections
+came out of the same pass. An integral or bool operand is **promoted** to float32
+rather than raising -- `at::sigmoid(torch.arange(-2, 3))` returns
+`[0.1192, 0.2689, 0.5, 0.7311, 0.8808]` on the CPU -- so the body declines those
+widths and lets the round-trip perform the promotion, and the note that claimed a
+reference error was wrong until a case caught it. And a tail case written to be
+bit-exact failed at `x = -20.0` by one ulp, which is the ordinary float32
+rounding and not a flush: the suite now holds the saturated ends and the
+subnormal band exactly and the mid-range to the served tolerance, which is what
+each of them actually is.
+
+This increment is verified with `tests/integration/ops/test_mps_sigmoid.py` (31
+cases): CPU equality at float32 across shapes including the 20-byte and
+16-byte-aligned rows, a rank-0 and an empty operand and a strided one, the
+saturated tails held exactly with the negative tail asserted nonzero so a weaker
+expression shows as a number, the two ends of the subnormal band pinned on both
+sides so a widening flush fails, the `inf`/`nan` triple, the three declined
+widths asserting the round-trip's own dtype, the float16 tail asserted against
+the reference's nonzero count, the bfloat16 round-trip asserted bit-exact where
+the graph is 8.3e-03 away, the integral and bool promotions asserted at float32,
+plan reuse across interleaved signatures, and the dispatch log naming `mps` on
+the served path and on a declined one.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real

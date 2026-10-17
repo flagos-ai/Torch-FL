@@ -203,7 +203,7 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 27, none: 2010}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 28, none: 2009}`: `abs`, `neg`, `silu`, `sigmoid`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
 `embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and

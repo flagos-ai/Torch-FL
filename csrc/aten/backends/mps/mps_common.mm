@@ -200,6 +200,16 @@ bool MpsSupportsSiluDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsSigmoidDtype(at::ScalarType dtype) {
+  // float32 alone, and the narrowness is the increment: see the note in
+  // mps_common.h. float16 is declined because this SDK flushes a subnormal
+  // float16 *result* to zero and the left tail of a sigmoid is subnormal at that
+  // width, so the graph and the reference part by 3.1e-02; bfloat16 is declined
+  // because the graph rounds differently from at::sigmoid at a width that holds
+  // about three decimal digits. Both keep the round-trip, which stays correct.
+  return dtype == at::kFloat;
+}
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {

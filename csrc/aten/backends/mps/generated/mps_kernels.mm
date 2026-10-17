@@ -751,6 +751,30 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
 
+at::Tensor SigmoidKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsSigmoidDtype(self.scalar_type())) {
+    return at::sigmoid(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sigmoid"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph sigmoidWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::sigmoid(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMps, SigmoidKernelMps)
+
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
     const at::Tensor& indices,

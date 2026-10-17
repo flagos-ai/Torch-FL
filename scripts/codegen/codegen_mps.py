@@ -149,6 +149,19 @@ OPS = {
     # `silu_backward` is a separate op with a separate selector question that
     # this increment does not answer.
     "silu": "silu",
+    # The activation `silu` is built from, and an op a model reaches for on its
+    # own -- a hand-written attention mask, a gating projection, a `sigmoid` in a
+    # loss. MPSGraph has a real selector (`sigmoidWithTensor:`) and it is the very
+    # same one the `silu` composition above builds, so this increment is small,
+    # and the interesting part is not the node but the width list: it is
+    # *narrower* than `silu`'s even though the two bodies share the node. See
+    # MpsSupportsSigmoidDtype for the measurement.
+    #
+    # Only `sigmoid` is registered. `sigmoid.out` and `sigmoid_` write into a
+    # tensor the caller owns, like every other `.out`/inplace spelling on this
+    # backend, and `sigmoid_backward` is a separate op with its own selector
+    # question.
+    "sigmoid": "sigmoid",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -328,6 +341,11 @@ AT_OP = {
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    # The CPU reference the `sigmoid` body round-trips to on the width it
+    # declines. `sigmoid` is its own aten kernel rather than a composition, so
+    # the round-trip lands on the reference's own implementation and reports its
+    # own values rather than a re-entrant composite.
+    "sigmoid": "sigmoid",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -397,6 +415,10 @@ SUPPORTS = {
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    # Deliberately *not* the sibling's predicate, even though the two bodies
+    # build the same node. A width list belongs to the op and not to the node:
+    # see MpsSupportsSigmoidDtype for the measurement that separates them.
+    "sigmoid": "MpsSupportsSigmoidDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -493,6 +515,10 @@ CALLS = {
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # The same selector the `silu` body above names as its first node, here as the
+    # whole body -- `sigmoid` *is* that node. Named separately because the two
+    # categories carry different dtype gates and different fallbacks.
+    "sigmoid": "sigmoidWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -628,6 +654,10 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # Empty for the same reason `silu`'s is: the graph is a function of the
+    # operand's dtype and shape, which MpsRunGraph folds into the key itself, and
+    # the body reads no other host value.
+    "sigmoid": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -1424,6 +1454,40 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # Only the int and long index widths are accepted, which is what the reference
 # accepts: a float index is a `RuntimeError` naming the two integer types, and a
 # bool index is not one either, so both take the round-trip and get that error.
+# `sigmoid` -- the one node the `silu` composition above already builds, and the
+# increment is the width list rather than the body. See MpsSupportsSigmoidDtype
+# for the measurement: two ops can share a graph node and still not share a dtype
+# gate, because what the node's rounding *means* depends on what the surrounding
+# graph does with it. A `silu` tail is multiplied by its own subnormal x, so the
+# platform's subnormal flush is what the reference does too; a bare sigmoid's
+# tail has no such partner, so the same flush is a visible 3.1e-02 error and the
+# width is declined.
+T_SIGMOID = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 T_EMBEDDING = """\
 at::Tensor {kernel}(
     const at::Tensor& weight,
@@ -2953,6 +3017,7 @@ CATEGORIES = {
     "pow_scalar": T_POW,
     "conv": T_CONV,
     "silu": T_SILU,
+    "sigmoid": T_SIGMOID,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,
