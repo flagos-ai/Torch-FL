@@ -45,9 +45,15 @@ paths_watch:
   - .github/scripts/set_env_kunlunxin.sh
   - scripts/codegen/codegen_kunlunxin.py
 
-container_volumes: []
 
-integration_environment: {}
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH, asserted
+# by environment_check.model_dir below.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 # The image ships no `build` module, and a missing one does not fail cleanly: the
 # checkout's own CMake `build/` directory shadows it as a namespace package, so
@@ -56,10 +62,23 @@ integration_build_tools:
   - python -m pip install --upgrade build
 
 # The isolated venv carries neither an upgraded pip nor pytest; the pipeline
-# installs both after the wheel.
+# installs both after the wheel, together with the model-test stack the shared
+# `inference` and `training` manifest entries need. Every platform loads
+# Qwen3-0.6B through transformers on the same mount, so a platform whose hook
+# does not provision it fails at import rather than at an operator. The mount
+# carries no tokenizer.json -- following the same reason set_env_ppu.sh records
+# -- so AutoTokenizer converts the slow sentencepiece form, which needs one of
+# the two backends (sentencepiece here) and protobuf for the spm proto.
+#
+# numpy is listed explicitly and pinned <2. It arrives as a transformers
+# dependency, this platform's hook deliberately never installs it
+# (set_env_kunlunxin.sh), and an unconstrained pull takes 2.x, which breaks the
+# stock +cpu torch C extensions at import (.github/constraints.txt).
+# transformers stays <5 for the Qwen3 slow-to-fast regression set_env_ppu.sh
+# documents.
 integration_test_dependencies:
   - python -m pip install --upgrade pip
-  - python -m pip install pytest
+  - python -m pip install pytest "transformers>=4.51,<5" "numpy<2" sentencepiece tiktoken protobuf
 
 container_options: >-
   --privileged
@@ -89,3 +108,4 @@ environment_check:
   flagos_devices:
     at_least: 1
   triton_backend: xpu
+  model_dir: true

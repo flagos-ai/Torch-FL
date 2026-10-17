@@ -6,6 +6,7 @@
 
 #include <ATen/ATen.h>
 #include <torch/library.h>
+#include <ATen/core/grad_mode.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/SDPBackend.h>
 #include <limits>
@@ -14,7 +15,9 @@
 // queries _fused_sdp_choice_stub via is_device_supported(PrivateUse1) to pick a
 // fused backend. Registering this stub makes the device "supported" and returns
 // efficient_attention (2), routing to _scaled_dot_product_efficient_attention
-// (our aclnnFlashAttentionScore kernel) instead of the math decomposition.
+// (our aclnnFlashAttentionScore kernel) instead of the math decomposition -- or
+// math (0) for a call the kernel cannot serve, which AscendFusedSdpEligible
+// below defines.
 // Must live in at::native for REGISTER_PRIVATEUSE1_DISPATCH (the macro references
 // the unqualified stub symbol and declares its registrar in the enclosing ns).
 //
@@ -34,6 +37,63 @@
 // dropout_p == 0.0 (inference, and the eval-mode BERT suite) still takes the
 // fused aclnn path unchanged.
 namespace at::native {
+
+// Whether this call may take the aclnn fused kernel, or has to be left on the
+// math decomposition. Two classes of call may not, and both were measured on CI
+// rather than argued (run 38691291294, job 116277922325, the first run of the
+// shared operator group on Ascend).
+//
+//   1. A call that will build an autograd graph. The aclnn kernel is forward-only
+//      on this configuration -- `_scaled_dot_product_efficient_attention_backward`
+//      is FlagGems' (`torch_fl/configs/backends_ascend.conf`) -- so a grad-enabled
+//      forward hands its backward to a Triton kernel that is not this kernel's and
+//      was never measured against it. On the shapes the operator group reaches,
+//      that backward cannot run at all: `flag_gems/ops/flash_attention_backward.py:52`
+//      reads `triton.knobs.autotuning.adjust_block_size`, which this FlagTree
+//      Ascend build does not carry, and raises `AttributeError: 'autotuning_knobs'
+//      object has no attribute 'adjust_block_size'` before any kernel is launched.
+//      That is five failures in tests/integration/ops/test_sdpa_dispatch_mode.py
+//      -- both grad cases at `(1, 4, 8, 8)` and at `(2, 4, 8, 16)` -- with the
+//      same line already recorded open in docs/reference/operator-support.md.
+//      The math decomposition completes the same backward, so the call declines
+//      to math instead of dying inside the backward.
+//
+//      The test is `requires_grad` and not grad mode alone. `torch.no_grad()` over
+//      a grad-requiring parameter builds no graph, and the vendor SDPA lane
+//      (`tests/integration/vendor_lanes/sdpa_lane_caps.py`, whose Ascend row
+//      states `no_grad=False`) drives the aclnn kernel with grad mode enabled and
+//      operands that do not require grad. Declining on grad mode alone would move
+//      that whole lane onto the math decomposition and leave the kernel it exists
+//      to pin unexercised, without saying so.
+//
+//   2. A call whose operands are not 4-D. The composite consults this stub before
+//      it knows the shape, so the 3-D `(B, S, E)` spelling a `Linear(32, 32)`
+//      projection produces -- the training-step case in
+//      tests/integration/ops/test_sdpa_dispatch_mode.py -- arrives here and meets
+//      the kernel's own `TORCH_CHECK(query.dim() == 4)` as
+//      `RuntimeError: query must be 4D [B, N, S, D]`. PyTorch's math path admits
+//      that spelling, so that is the answer for it.
+static bool AscendFusedSdpEligible(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value) {
+  if (!query.defined() || !key.defined() || !value.defined()) {
+    return false;
+  }
+  if (query.dim() != 4 || key.dim() != 4 || value.dim() != 4) {
+    return false;
+  }
+  if (!query.device().is_privateuseone() || key.device() != query.device() ||
+      value.device() != query.device()) {
+    return false;
+  }
+  if (c10::GradMode::is_enabled() &&
+      (query.requires_grad() || key.requires_grad() || value.requires_grad())) {
+    return false;
+  }
+  return true;
+}
+
 static int64_t fused_sdp_choice_ascend(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -46,7 +106,9 @@ static int64_t fused_sdp_choice_ascend(
   if (dropout_p != 0.0) {
     return static_cast<int64_t>(at::SDPBackend::math);
   }
-  return static_cast<int64_t>(at::SDPBackend::efficient_attention);
+  return static_cast<int64_t>(AscendFusedSdpEligible(query, key, value)
+                                  ? at::SDPBackend::efficient_attention
+                                  : at::SDPBackend::math);
 }
 
 REGISTER_PRIVATEUSE1_DISPATCH(_fused_sdp_choice_stub, &fused_sdp_choice_ascend);

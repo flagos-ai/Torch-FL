@@ -56,12 +56,21 @@ _platform = _load_platform()
 
 
 # Markers to skip per platform (tests for other backends are not compiled/available).
+#
+# `gcu` appears in every other platform's tuple for the same reason `cuda`,
+# `dcu` and `ascend` do: the manifest's vendor_ops group is one command for all
+# eight platforms and its selection names those four markers, so the gate table
+# is what decides where each one runs. A `gcu`-marked case asserts a route into
+# the topsaten kernel set -- the FlagGems-primary int64 escape and the
+# `new_ones` composite fallback are the two in the tree -- and neither route
+# exists off GCU, so a platform that does not skip it runs an assertion it
+# cannot satisfy.
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu"),
-    "ascend": ("cuda", "metax", "musa", "dcu"),
+    "metax": ("cuda", "ascend", "musa", "dcu", "gcu"),
+    "ascend": ("cuda", "metax", "musa", "dcu", "gcu"),
     # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
     # `-> cuda` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
+    "musa": ("cuda", "metax", "ascend", "dcu", "gcu", "flaggems_python"),
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
     "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
@@ -70,10 +79,10 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # where PPU implicitly landed before it was named. Naming it makes the
     # platform first-class in this gate instead of correct by accident of the
     # fallback bucket.
-    "ppu": ("metax", "ascend", "musa", "dcu"),
+    "ppu": ("metax", "ascend", "musa", "dcu", "gcu"),
     # cuda -- and an unidentified wheel, which detect_platform() defaults to --
     # runs the CUDA-marked tests and skips every other backend's.
-    "cuda": ("metax", "ascend", "musa", "dcu"),
+    "cuda": ("metax", "ascend", "musa", "dcu", "gcu"),
     "dcu": ("metax", "ascend", "musa", "gcu"),
     # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
     # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at

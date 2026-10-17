@@ -60,6 +60,23 @@ _GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
     "mps",
 )
 
+# The kineto adapter registers its PrivateUse1 activity only when the build's
+# device tracer reports itself available (csrc/profiler/flagos_kineto_profiler.cc,
+# static initialization at the bottom of the file), and pushCorrelationId is
+# behind that registration. Four accelerators compile `unavailable_device_tracer`
+# -- see the EXPECTED_TRACER table that tests/unit/test_device_tracer_selection.py
+# asserts against csrc/CMakeLists.txt -- so on those builds there is no
+# correlation callback to count and the stage-B test cannot hold. Kunlunxin is
+# the measured case: the vendor ships a CUPTI-shaped shim, but it instruments the
+# CUDA dispatch key the de-boxed kunlunxin backend no longer uses, so nothing is
+# collected (tests/integration/profiler_support.py records the same row).
+_NO_DEVICE_TRACER = torch_fl._build_accelerator() in (
+    "kunlunxin",
+    "tsingmicro",
+    "bpu",
+    "mps",
+)
+
 
 @pytest.mark.skipif(
     _GUARD_STREAM_IS_SYNTHETIC,
@@ -270,6 +287,11 @@ def _load_loaded_libtorch_fl(lib_path):
     return ctypes.CDLL(lib_path)
 
 
+@pytest.mark.skipif(
+    _NO_DEVICE_TRACER,
+    reason="this build compiles unavailable_device_tracer, so the kineto adapter "
+    "never registers a PrivateUse1 activity and pushCorrelationId is unreachable",
+)
 def test_stage_b_correlation_or_degrade():
     """Stage B correlation test: verify pushCorrelationId/popCorrelationId are
     called when profiling PrivateUse1 activities.

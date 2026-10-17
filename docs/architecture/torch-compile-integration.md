@@ -281,8 +281,8 @@ The naming side, at least, is already compatible: FlagTree's Ascend backend
 reports `name.conf` = `ascend` and `supports_target` accepts only
 `target.backend == "npu"` — exactly the pair `_ASCEND_PROFILE` already encodes,
 so `triton_device_type`/`triton_backend_key` need no change. The three
-workarounds below would still need re-testing, since that backend is separate
-code with its own defect surface.
+workarounds below have since been re-tested against it, because that backend is
+separate code with its own defect surface.
 
 No extra configuration is needed beyond
 the environment FlagGems already requires
@@ -291,27 +291,34 @@ picks the Ascend profile from `FLAGOS_ACCELERATOR=ascend`.
 
 Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0,
 torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and
-matmul+normalization graphs all compile and match eager. **This measurement is
-stale**: it was taken on triton-ascend, and the toolchain Ascend ships is now
-FlagTree. Nothing has re-run the compile suite on FlagTree, so whether these
-numbers, and whether the three workarounds below, still hold is unmeasured.
-Support is
-**experimental** — three vendor-toolchain defects had to be worked around, and
-each workaround is a place where a toolchain upgrade should let us delete code:
+matmul+normalization graphs all compile and match eager. The suite has since been
+re-run on the toolchain Ascend now ships -- FlagTree ascend3.5 with
+torch 2.10.0+cpu -- by the CI compile job, which exercises the whole file on
+every commit. That re-run retired the first workaround below; the rest still
+apply. Support is
+**experimental** — each vendor-toolchain defect worked around here is a place
+where a toolchain upgrade should let us delete code:
 
 | Defect | Symptom | Workaround |
 |---|---|---|
-| Masked 2-D load of an 8-bit dtype is miscompiled | Silently reads only the first two elements of each row, repeated. Surfaced as wrong `relu` gradients (4090/4096 elements off, max abs diff 3.05), no error raised | `triton_byte_loads.py`: pass `enable_linearize=True` on every compile, **and** rewrite bool kernel args from `*i1` to `*i8`. Both are needed — linearize does not fix the `*i1` pointer type, and the identical bytes read correctly through `*i8` |
+| The Ascend backend returns an empty libdevice module map | Inductor's generated `libdevice.*` calls resolve to the generic module's `...` stubs, so the trace fails inside Triton's semantics layer with `AttributeError: 'NoneType' object has no attribute 'type'` and no mention of the op | `triton_libdevice.py`: fill the map with the vendor's `triton.language.extra.cann.libdevice` |
 | `ub overflow` is raised as a generic compilation error | An oversized autotune config fails the whole compile instead of being dropped | `triton_resource_limits.py`: parse `requires N bits while M bits available` and re-raise as Triton's `OutOfResources`, which inductor already knows to skip |
 | A kernel built in a compile worker segfaults when the parent launches it | Crash in `NPULauncher.__call__` (`triton/backends/ascend/driver.py`), only with a cold inductor cache and two or more compiles in one process | `inductor_backend.py` defaults Ascend to `compile_threads=1`. `fork` and `spawn` both crash, so this is not the CUDA-after-fork problem the PPU path above hits |
 
-`triton_libdevice.py` additionally fills the Ascend backend's libdevice module
-map, which the vendor backend leaves empty.
-
-The first row's `enable_linearize` requirement is exercised directly by
-`test_ascend_masked_byte_load_requires_linearize`, which asserts the bug is
-*still present* without the option. That test failing is the signal that the
-toolchain was fixed and the workaround can go.
+The retired workaround was for a masked, strided 2-D load of an 8-bit dtype that
+returned only the first two elements of each row, repeated, with no error raised;
+`torch.compile` of `Linear -> ReLU` produced wrong gradients (4090 of 4096
+elements off, max abs diff 3.05) rather than failing. triton-ascend 3.2.0 needed
+`enable_linearize=True` in the compile options plus a bool `*i1` -> `*i8` kernel
+signature rewrite, and the file that installed both carried a canary test
+asserting the miscompile was *still present* -- a scheduled failure that named
+the workaround to delete once it fired. On FlagTree ascend3.5 it fired: the same
+kernel reads correct data with no options set, and `enable_linearize` no longer
+exists in the vendor compiler (`NPUOptions` has no such field, and
+`parse_options` drops keys it does not know), so injecting it had become a no-op.
+`test_ascend_masked_byte_load_is_not_miscompiled` now asserts the correct data
+instead, and `test_ascend_compile_backward_stays_on_flagos` keeps the end-to-end
+gradient guard.
 
 ## Architecture
 

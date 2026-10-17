@@ -189,9 +189,23 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build patchelf
   install_cpu_torch
   if [[ "$CI_STAGE" == "integration" ]]; then
-    # Pin numpy<2: the CPU torch wheel is built against the NumPy 1.x ABI, and
-    # transformers pulls numpy 2.x which breaks torch's C extensions at import.
-    "$VENV_PYTHON" -m pip install pytest transformers "numpy<2"
+    # The model-test stack, the same set every other platform's hook or config
+    # installs: pytest plus what the shared `inference` and `training` manifest
+    # entries need. Every platform loads Qwen3-0.6B through transformers off the
+    # same mount, so a platform that does not provision this fails at import
+    # rather than at an operator. The mount carries no tokenizer.json --
+    # following the reason set_env_ppu.sh records -- so AutoTokenizer converts
+    # the slow sentencepiece form, which needs one of the two backends
+    # (sentencepiece here) and protobuf for the spm proto; tiktoken is the other
+    # backend. transformers stays in [4.51, 5): 4.51 is where Qwen3 model_type
+    # support landed, and 5.x breaks the slow-to-fast conversion even with
+    # sentencepiece installed. An unpinned install picks whichever of the two
+    # failure modes is currently latest on the index. numpy is pinned <2 for the
+    # reason this branch already carried: the CPU torch wheel is built against
+    # the NumPy 1.x ABI, and transformers pulls numpy 2.x, which breaks torch's
+    # C extensions at import.
+    "$VENV_PYTHON" -m pip install \
+      pytest "transformers>=4.51,<5" "numpy<2" sentencepiece tiktoken protobuf
   fi
 fi
 

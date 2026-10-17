@@ -33,8 +33,9 @@ def masked_byte_row_load(
     """Masked 2-D strided load of an 8-bit dtype, widened to fp32 on store.
 
     This is the access pattern inductor emits when reducing over a boolean mask,
-    e.g. `threshold_backward` for `relu`, and the one triton-ascend miscompiles
-    without the workarounds in torch_fl/compile/triton_byte_loads.py.
+    e.g. `threshold_backward` for `relu`, and the one triton-ascend 3.2.0
+    miscompiled -- reading only the first two elements of each row, repeated,
+    with no error raised.
     """
     xindex = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)[:, None]
     xmask = xindex < xnumel

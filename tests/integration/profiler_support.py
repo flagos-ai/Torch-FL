@@ -31,6 +31,10 @@ class ProfilerCapabilities:
     platform: str
     device: bool
     kernel: bool
+    # Whether the tracer's kernel names are readable rather than raw Itanium
+    # symbols. Split from `kernel` because GCU emits kernel events whose names
+    # are the mangled topsaten template symbols.
+    demangled: bool
     runtime: bool
     cbid: bool
     memcpy: bool
@@ -157,7 +161,18 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     ``test_profiler_device_time_linkage`` runs as an ordinary case on the Ascend
     job instead of reporting as an XFAIL.
     """
-    device = True
+    # Kunlunxin is the one platform whose tracer emits no device records at all,
+    # so every device-side row below is off there rather than open. Its build is
+    # `unavailable_device_tracer`: the vendor ships a CUPTI-shaped shim, but it
+    # instruments the CUDA dispatch key that the de-boxed kunlunxin backend no
+    # longer uses, so nothing is collected. Measured on the P800 runner in the
+    # ci/unify-coverage run: of the twelve contract cases one passed (the CPU API
+    # and trace-export case), nine failed on "profiler produced no kernel
+    # events"/"no privateuse1_runtime events"/"no ac2g flow events", and the two
+    # memcpy/memset cases skipped. The step is still worth running there -- the
+    # CPU-side case is a real check -- and pointing that shim at the vendor key
+    # is what removes this row.
+    device = platform != "kunlunxin"
     runtime = device
     # Ascend memcpy interception is gated on process-start LD_PRELOAD rather
     # than on `device` above: measured on Ascend 910 with CANN 9.0, the shared
@@ -171,6 +186,14 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         platform=platform,
         device=device,
         kernel=device,
+        # GCU emits kernel events but names them with the raw topsaten symbols
+        # (`_ZN21topsop_global_kernels23reduceSumFlatten_kernelIffEEv...` in the
+        # ci/unify-coverage run), because TOPSPTI reports
+        # `ActivityKernel::name` exactly as the vendor recorded it and
+        # gcu_topspti_device_tracer.cc passes it through. The events are real, so
+        # this row is only about the names: the contract's other kernel
+        # assertions already run on GCU and pass.
+        demangled=device and platform != "gcu",
         runtime=runtime,
         # The tracers that resolve a runtime record's identity through a vendor
         # callback-id table also stamp that id onto the event's args (cupti,
@@ -206,7 +229,14 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         # kernel routing stays and the capability stays off.
         memset=device and platform in {"cuda", "metax"},
         flow=device,
-        linkage=device,
+        # GCU's device events exist and are timestamped, but they carry no link
+        # back to the operator that launched them: the same run recorded
+        # `self_device_time_total == 0.0` for both `aten::matmul` and `aten::mm`.
+        # The tracer resolves torch's correlation from the TOPSPTI API-enter
+        # callback against a process-global "current correlation", which is
+        # already popped by the time the record is delivered, so the mapping it
+        # needs is never recorded.
+        linkage=device and platform != "gcu",
         metadata=device,
     )
 

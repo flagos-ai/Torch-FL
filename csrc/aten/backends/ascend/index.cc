@@ -117,6 +117,25 @@ at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
 
   TORCH_CHECK(!defined_indices.empty(), "index: expected at least one index tensor");
 
+  // A CPU index tensor is legal at the dispatcher. ATen's index meta function
+  // (`check_indices_on_cpu_or_selfdevice` in TensorAdvancedIndexing.cpp) allows
+  // an index on `cpu` or on self's device, and the CUDA path it serves works
+  // because TensorIterator migrates the CPU input onto the output device. There
+  // is no TensorIterator here, so the migration is this kernel's: an aclTensor
+  // built over CPU storage addresses host memory as if it were NPU memory, and
+  // aclnnIndex then reads whatever is at those device addresses. Measured on
+  // 910, `q[index]` with `index = tensor([0, 2])` on a (4, 6) float32 tensor
+  // mismatched 11 of 12 elements, and `q[index, index]` mismatched 1 of 2 --
+  // wrong values rather than an error, which is what makes this worth a
+  // comment. The `.to` is a no-op for the index that is already on the device,
+  // which is the ordinary case.
+  const auto index_device = self.device();
+  for (auto& idx : defined_indices) {
+    if (idx.device() != index_device) {
+      idx = idx.to(index_device);
+    }
+  }
+
   size_t bool_index_count = 0;
   size_t bool_index_offset = 0;
   for (size_t i = 0; i < defined_indices.size(); ++i) {

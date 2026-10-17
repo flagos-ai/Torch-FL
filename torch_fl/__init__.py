@@ -1399,8 +1399,12 @@ def _real_cuda_is_available() -> bool:
     the flagos device count so that Inductor's CUDA-shaped FakeTensor probe finds
     the accelerator on a build that has no CUDA runtime, and saves the function
     it replaced as ``torch.cuda._flagos_original_is_available``. That import
-    lands before ``_phase_ecosystem`` reaches ``_alias_cuda_to_flagos``, so the
-    saved function is the only remaining answer to "is there real CUDA here".
+    does not always land before the alias -- it depends on which phase first
+    pulls ``torch_fl.compile`` in, and on kunlunxin it is the
+    optional-integration step of ``_phase_ecosystem``, after
+    ``_alias_cuda_to_flagos`` -- so whichever of the two runs first claims that
+    slot and neither overwrites the other. Either way the saved function is the
+    only remaining answer to "is there real CUDA here".
 
     Reading the redirected probe instead answers yes on exactly the builds the
     alias exists for. Measured on MUSA with the redirect in place and this guard
@@ -1445,6 +1449,19 @@ def _alias_cuda_to_flagos():
         return
     if not _env.flag("FLAGOS_ALIAS_CUDA", True):
         return
+
+    # Record what torch answers *before* this alias overwrites the probe, so the
+    # saved copy keeps meaning "torch's own answer" no matter which side of this
+    # call the torch_fl.compile import lands on. `_patch_native_cuda_probe` saves
+    # the attribute it replaces, and on kunlunxin that import runs *after* this
+    # alias (it is reached from the optional-integration step of
+    # `_phase_ecosystem`, which follows this call), so without this the patch
+    # would save the alias's own lambda and `_real_cuda_is_available` would answer
+    # True for the rest of the process on a build that has no CUDA device at all.
+    # In the MUSA/GCU order the patch has already run and saved torch's own probe,
+    # so this is then a no-op.
+    if not hasattr(torch.cuda, "_flagos_original_is_available"):
+        torch.cuda._flagos_original_is_available = torch.cuda.is_available
 
     # From here on, every "cuda" this process sees is this alias. Anything that
     # treats torch.cuda as a hardware probe has to be told, because it can no
@@ -1948,9 +1965,6 @@ def _register_compile_backend():
         from torch_fl.compile.triton_libdevice import (
             patch_triton_libdevice_module_map,
         )
-        from torch_fl.compile.triton_byte_loads import (
-            patch_triton_byte_load_workarounds,
-        )
         from torch_fl.compile.triton_resource_limits import (
             patch_triton_resource_limit_errors,
         )
@@ -1961,7 +1975,6 @@ def _register_compile_backend():
         register_flagos_codegen()
         patch_triton_libdevice_module_map()
         patch_triton_resource_limit_errors()
-        patch_triton_byte_load_workarounds()
 
         # The default `backend="inductor"` path bypasses `flagos_compile_backend`
         # entirely, and a GCU300 64-bit kernel kills the process from inside the
@@ -2291,6 +2304,16 @@ def _phase_ecosystem() -> None:
 
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()
+
+    # GCU and MUSA import flag_gems *during* `import torch_fl` -- the GCU runtime
+    # shims and the MUSA Philox bridge respectively -- and that import re-enters
+    # device init while `flag_gems/__init__.py` is still executing. The FlagGems
+    # patches flagos installs are a no-op against that half-built module and
+    # latch nothing, so the first point at which they can be installed on those
+    # two platforms is here, with the eager import above finished. It is a
+    # no-op on every other platform, where the import happens later and
+    # `flagos._lazy_init` installs the patches itself.
+    flagos._install_flaggems_patches()
 
     from . import quantization  # noqa: E402, F401
 

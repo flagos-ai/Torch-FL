@@ -49,8 +49,12 @@ paths_watch:
 # standard layout as any DCU box, so the source path is portable across hosts.
 container_volumes:
   - /usr/local/hyhal:/usr/local/hyhal:ro
+  # The shared Qwen3 smoke entries need the same checkpoint on every platform,
+  # so this is the CUDA mount plus DCU's own driver mount: both, not either.
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 # The per-file unit suite executes CI checkout resolution with the real jq.
 # Reuse it when present; provision it before tests in older DCU images.
@@ -104,3 +108,4 @@ environment_check:
     - lib/libtorch_fl.so
   flagos_devices:
     more_than: 0
+  model_dir: true

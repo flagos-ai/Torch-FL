@@ -188,6 +188,8 @@ def test_the_published_layer_serves_calls_with_no_stock_implementation():
     """
     stdout, stderr = _run(
         """
+        import json
+
         from torch.nn.parallel import comm
 
         if torch.flagos.device_count() < 2:
@@ -201,7 +203,29 @@ def test_the_published_layer_serves_calls_with_no_stock_implementation():
                 and str(back.device) == "flagos:0"
                 and torch.equal(back.cpu(), x)
             )
-            print("ROUNDTRIP:" + ("ok" if ok else str([str(c.device) for c in chunks])))
+            print("ROUNDTRIP:" + ("ok" if ok else "FAIL"))
+            if not ok:
+                # Name the failing half of the roundtrip. A single-device
+                # scatter/gather separates "the layer cannot transfer at all"
+                # from "it transfers, but not between two devices".
+                detail = {
+                    "chunk_devices": [str(c.device) for c in chunks],
+                    "back_device": str(back.device),
+                    "back_shape": list(back.shape),
+                    "equal": torch.equal(back.cpu(), x),
+                    "back": back.cpu().tolist(),
+                    "x": x.tolist(),
+                }
+                try:
+                    single = comm.scatter(x, [0], None, 0)
+                    single_back = comm.gather(list(single), 0, 0)
+                    detail["single_devices"] = [str(c.device) for c in single]
+                    detail["single_back_device"] = str(single_back.device)
+                    detail["single_equal"] = torch.equal(single_back.cpu(), x)
+                    detail["single_back"] = single_back.cpu().tolist()
+                except Exception as exc:  # noqa: BLE001
+                    detail["single_error"] = f"{type(exc).__name__}: {exc}"
+                print("DETAIL:" + json.dumps(detail))
         """
     )
-    assert _report(stdout, "ROUNDTRIP") in ("ok", "skipped"), stderr
+    assert _report(stdout, "ROUNDTRIP") in ("ok", "skipped"), stdout + stderr

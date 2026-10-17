@@ -72,9 +72,8 @@ def patch_triton_resource_limit_errors() -> None:
     except ImportError:
         return
 
-    # Flag on the module, not on the function: triton_byte_loads wraps the same
-    # function, so a flag on the wrapper is invisible once the other patch sits on
-    # top, and registration runs before every compile_fx.
+    # Flag on the module, not on the function: the wrapper is what the flag would
+    # otherwise live on, and registration runs before every compile_fx.
     if getattr(triton, _PATCH_FLAG, False):
         return
 
