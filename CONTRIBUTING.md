@@ -196,6 +196,13 @@ None.
 
 Reviewers may request changes to code style, test coverage, or documentation clarity. Address feedback by pushing new commits to the same branch (no force-push unless requested).
 
+`main` requires two approving reviews. One of them is an automated AI review
+posted on every push; the other must come from a human. The AI review approves
+only clean, small, non-protected changes, so treat a `COMMENT` verdict as
+feedback to address rather than a formality. See
+[docs/development/ai-reviewer.md](docs/development/ai-reviewer.md) for what it
+checks and how it is configured.
+
 ## License
 
 By contributing to torch_fl, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE). All new files must include the Apache 2.0 license header (see existing files for the template).
