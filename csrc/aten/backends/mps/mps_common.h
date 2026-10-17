@@ -386,6 +386,69 @@ bool MpsSupportsSigmoidDtype(at::ScalarType dtype);
 // rather than on the platform alone.
 bool MpsSupportsExpDtype(at::ScalarType dtype);
 
+// Whether `log` computes exactly on the MPSGraph path, and the increment whose
+// honest divergence is a property of the *input* domain rather than of the
+// magnitude -- which is the point of it.
+//
+// `log` is the inverse of the sibling `exp` above and the other half of every
+// logit-space composition a model writes by hand (a log-softmax, a
+// temperature-scaled score, a KL term), so it is served with a real selector
+// (`logarithmWithTensor:`) rather than a composition. Measured on an M5 against
+// at::log in the operand's own dtype, over 400001 samples per width and over
+// the domain's edges:
+//
+//   float32   129358 of 400001 samples land on a different ulp, max relative
+//             1.291e-07 and max absolute 7.629e-06 -- one ulp. Not
+//             bit-identical, and the reading is the one `silu`'s and `exp`'s
+//             float32 recorded: both roundings are correct and they simply
+//             differ.
+//   float16   3 of 400001 samples differ, max relative 6.184e-04 and max
+//             absolute 3.906e-03 -- one float16 ulp at 6.3. The three are a
+//             last-ulp rounding in which the *graph* is marginally closer to the
+//             exact answer than the CPU reference is (measured at x = 552.5:
+//             |graph - exact| = 1.953433e-03 against
+//             |cpu - exact| = 1.952817e-03), so this is the same "both are
+//             correct" reading rather than a graph error. Served, and worth
+//             spelling out because `sigmoid` declined this width: the flush that
+//             cost the sibling its place does not reach this node's arithmetic.
+//   bfloat16  bit-identical, zero mismatches.
+//
+// The domain's edges are all reproduced exactly, which is what makes this
+// increment's finding an *input* one: measured, log(0) = -inf, log(-0.0) = -inf,
+// log(1) = 0.0, log(-1) = nan, log(-5) = nan, log(inf) = inf, log(-inf) = nan
+// and log(nan) = nan, all matching the reference bit for bit.
+//
+// What does diverge at float32 is where the platform's subnormal policy does
+// show: it flushes a subnormal *input* to zero before the node evaluates, and
+// log(0) is -inf, so a positive input below the smallest normal comes back -inf
+// where the reference answers a finite (and large) number. Measured, the
+// boundary sits exactly at that normal: `1.1754944e-38` (the smallest normal
+// float32) agrees with the reference while `1.17e-38` flushes to -inf. This is
+// accepted on the same policy the `sigmoid`, `div`, `silu` and `exp` bodies
+// accepted their subnormal divergences, and it has the same shape: the wrong
+// answer is confined to the band where the reference's *input* is subnormal, and
+// it never reaches a normal input -- measured, every input at or above the
+// smallest normal reproduces the reference. A model's `log` operates on a
+// probability or a logit, where that band is not reached; a per-call host
+// decision there would be a check on a value the graph cannot express.
+//
+// float16 is the contrast that keeps this from being a blanket rule: measured,
+// it does *not* flush subnormal inputs -- `log(5.96e-8) = -16.640625`, exact --
+// so the boundary above is a float32 property of the platform rather than one
+// this gate can generalise across widths.
+//
+// float64 has no MPSGraph element type and takes the round-trip. An integral or
+// bool operand is *promoted* by the reference to float32, the same answer `exp`
+// measured, and the gate declines them for the same reason: the promotion rule
+// is the reference's, and the round-trip is where it lives.
+//
+// The gate's shape is therefore `exp`'s list with `exp`'s reasoning turned
+// around: where the exponential's honest cost was a subnormal *result* it
+// declines to express, the logarithm's is a subnormal *input* it flushes to
+// zero -- and both stay inside the band where the reference's own answer is
+// outside the range the graph can represent.
+bool MpsSupportsLogDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

@@ -203,7 +203,8 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 29, none: 2008}`: `abs`, `neg`, `silu`, `sigmoid`, `exp`, `reciprocal`, the elementwise
+`{mps: 30, none: 2007}`: `abs`, `neg`, `silu`, `sigmoid`, `exp`, `log`,
+`reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
 `embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and
@@ -478,7 +479,7 @@ per-op suites `test_mps_batch_norm.py`, `test_mps_binary.py`, `test_mps_cat.py`,
 `test_mps_conv.py`, `test_mps_embedding.py`, `test_mps_gather.py`,
 `test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_layer_norm.py`,
 `test_mps_pow.py`, `test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_exp.py`,
-`test_mps_softmax.py`, `test_mps_take.py`, `test_mps_unary.py` and
+`test_mps_log.py`, `test_mps_softmax.py`, `test_mps_take.py`, `test_mps_unary.py` and
 `test_mps_where.py`, run as
 `pytest tests/integration/ops -m mps` on an Apple
 Silicon host; the per-op dtype gates and the `index_select` argument contracts

@@ -181,6 +181,24 @@ OPS = {
     # `exp2`'s and `expm1`'s selectors are separate nodes with their own width
     # questions that this increment does not answer.
     "exp": "exp",
+    # The inverse of the node above and the second-largest elementwise unary left
+    # on a small model's fallback profile: measured on an M5 on a (3, 512, 3072)
+    # float32 operand, the `cpu_fallback` round-trip cost 4.51 ms. A model reaches
+    # it through a log-sum-exp, a KL divergence, a log-probability or a
+    # normalising flow, and it is the op the design doc's stage-4 cohort pairs
+    # with `exp`.
+    #
+    # MPSGraph names it directly (`logarithmWithTensor:`), so like `exp` the body
+    # is the plain unary template and the increment is the width list. See
+    # MpsSupportsLogDtype for the measurement -- the finding here is the *domain*
+    # rather than the flush: a logarithm on a non-positive operand is `-inf`,
+    # `0`/`-inf` or `nan` rather than a rounded magnitude, and the graph has to
+    # reproduce each of those edges rather than a value near them.
+    #
+    # Only `log` is registered. `log.out` and `log_` write into a tensor the caller
+    # owns, and `log2`, `log10` and `log1p` are separate ops with their own
+    # selectors and their own edge behaviour.
+    "log": "log",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -372,6 +390,12 @@ AT_OP = {
     # why the gate sends those widths here rather than evaluating them in the
     # graph.
     "exp": "exp",
+    # The CPU reference the `log` body round-trips to on the widths it declines.
+    # `log` is its own aten kernel rather than a composition, so the round-trip
+    # lands on the reference's own implementation -- which is where its domain
+    # edges and its integral/bool promotion rule live, and why the gate sends
+    # those widths here rather than evaluating them in the graph.
+    "log": "log",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -452,6 +476,11 @@ SUPPORTS = {
     # MpsSupportsExpDtype for the per-width numbers -- float32 and bfloat16 are
     # served and float16 is declined, which is *not* the sibling's list.
     "exp": "MpsSupportsExpDtype",
+    # Its own predicate, and the measurement is about the domain rather than a
+    # flush: a logarithm's edges (a zero operand, a negative operand, a subnormal
+    # operand the platform might flush) are not the magnitudes the sibling
+    # exponentials were gated on. See MpsSupportsLogDtype.
+    "log": "MpsSupportsLogDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -557,6 +586,10 @@ CALLS = {
     # exponential directly. The node is the whole body, so the width list is the
     # only thing the increment decides.
     "exp": "exponentWithTensor:",
+    # Its own selector, named directly like the exponential's, and the reason `log`
+    # is one node rather than the `log2`/`loge` composition a hand-written body
+    # would need.
+    "log": "logarithmWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -702,6 +735,11 @@ KEY_PARTS = {
     # reads no other host value. A body that bakes nothing into the graph has no
     # way to be handed a plan it did not build.
     "exp": "",
+    # Empty, for the same reason `exp`'s is: one selector over one operand, so the
+    # graph is a function of the operand's dtype and shape alone -- which
+    # MpsRunGraph folds into the cache key itself -- and the body bakes no host
+    # value into the graph.
+    "log": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -1532,12 +1570,15 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
-# `exp` -- the plain unary template, with its own width list rather than a body
-# of its own. MPSGraph names the exponential directly (`exponentWithTensor:`), so
-# there is no composition to compose and no node to build by hand: the operand
-# goes through `contiguous()` for the same reason every other body here does (the
-# graph reads one flat row of `numel` elements and a strided operand would be read
-# as the wrong bytes), and the whole increment is the gate the body opens with.
+# The one-node unary template for an op MPSGraph names directly -- `exp` today,
+# with `log` sharing it because the two differ only in the selector and the width
+# list. There is no composition to compose and no node to build by hand: the
+# operand goes through `contiguous()` for the same reason every other body here
+# does (the graph reads one flat row of `numel` elements and a strided operand
+# would be read as the wrong bytes), and the whole increment is the gate the body
+# opens with. Kept separate from T_UNARY rather than folded into it because the
+# two carry different gates, which is the point of both increments; a future op
+# that shares this body adds a CATEGORIES row pointing here.
 T_EXP = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -3095,6 +3136,7 @@ CATEGORIES = {
     "silu": T_SILU,
     "sigmoid": T_SIGMOID,
     "exp": T_EXP,
+    "log": T_EXP,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,

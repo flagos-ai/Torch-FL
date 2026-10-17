@@ -854,6 +854,60 @@ the round-trip's own dtype and bit-exactness, the integral and bool promotions
 asserted at float32, plan reuse across interleaved signatures, and the dispatch
 log naming `mps` on the served path and on a declined one.
 
+Stage 4 continued with `log`, the inverse of `exp` above and the other half of
+every logit-space composition a model writes by hand -- a log-sum-exp, a
+temperature-scaled score, a KL term -- and the second-largest elementwise unary
+left on the fallback profile, at 4.51 ms per `cpu_fallback` round-trip on a
+(3, 512, 3072) float32 operand on an M5. MPSGraph names it directly
+(`logarithmWithTensor:`), so like `exp` the body is the plain one-node template
+and the increment is the width list plus the *domain*: a logarithm's answer is
+not a magnitude near zero, it is `-inf` at 0, `nan` below 0 and unbounded above,
+and each of those edges is an answer the graph has to reproduce rather than
+approach.
+
+Measured on an M5 against `at::log` in the operand's own dtype, over 400001
+samples per width and over the domain's edges. **bfloat16 is bit-identical.**
+**float16** differs on 3 of 400001 samples, max relative 6.184e-04, which is one
+float16 ulp; at those points the *graph* is the one marginally closer to the
+exact answer (measured at `x = 552.5`, `|graph - exact| = 1.953433e-03` against
+`|cpu - exact| = 1.952817e-03`), so it is the same "both are correct" reading
+`silu` and `exp` took at float32 rather than a graph error -- and it is the
+answer the `sigmoid` increment's question deserves, because it is the sibling's
+*declined* width served here. **float32** differs on one ulp for 129358 of
+400001 samples (max relative 1.291e-07, max absolute 7.629e-06), the same
+rounding reading. All of `log(0)`, `log(-0.0)`, `log(1)`, `log(-1)`, `log(-5)`,
+`log(inf)`, `log(-inf)` and `log(nan)` reproduce the reference bit for bit, which
+is what makes this increment's finding a property of the *input* rather than of
+the magnitude: the one divergence is the platform's subnormal flush, which makes
+float32 flush a subnormal *input* to zero before the node evaluates, and since
+`log(0)` is `-inf`, a positive input below the smallest normal comes back `-inf`
+where the reference answers a finite and large number. Measured, the boundary
+sits exactly at the smallest normal float32 (`1.1754944e-38` agrees, `1.17e-38`
+flushes), so the wrong answer is confined to the band where the reference's own
+*input* is subnormal and never reaches a normal one. float16 does *not* flush
+subnormal inputs (`log(5.96e-8) = -16.640625`, exact), so the boundary is a
+float32 property of the platform rather than a width-independent rule -- the
+contrast the increment is written to record. float64 has no MPSGraph element type
+and an integral or bool operand is promoted by the reference to float32, so both
+keep the round-trip.
+
+This increment is verified with `tests/integration/ops/test_mps_log.py` (33
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, bfloat16 held *bit-exact*, the float16 sweep and the explicit one-ulp
+neighbourhood of `1.0` held against the reference so a body that followed the
+`sigmoid` gate would fail, a small positive operand near `1` asserted with both
+sides' sign so a flushed result shows, the saturated tails held with `log(1)`
+asserted exactly 0, the domain's eight edges asserted exactly rather than under
+a tolerance, the two ends of the float32 subnormal-input band pinned on both
+sides so a widening flush fails, a walk down the normals asserting the flush
+never reaches one, the float16 subnormal inputs asserted finite so the float32
+boundary is not generalised, the one declined width asserting the round-trip's
+own dtype and bit-exactness with the domain's edges intact, the integral and bool
+promotions asserted at float32 including the `log(0) = -inf` edge, plan reuse
+across interleaved signatures, and the dispatch log naming `mps` on the served
+path and on a declined one.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real

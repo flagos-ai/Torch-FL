@@ -221,6 +221,15 @@ bool MpsSupportsExpDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsLogDtype(at::ScalarType dtype) {
+  // The three widths measured to agree with at::log in the operand's own dtype:
+  // float16 and bfloat16 bit-for-bit or to a last-ulp rounding, and float32 to one
+  // ulp. See the note in mps_common.h. float64 has no MPSGraph element type and
+  // the integral/bool widths are promoted by the reference, so both keep the
+  // round-trip.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {
