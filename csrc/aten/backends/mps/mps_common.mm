@@ -458,13 +458,18 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   //
   // The tanh node was a *coarser approximation* of the reference's tanh at
   // float32. The erf node has a comparable error bound: measured against the
-  // exact float64 curve on a 498299-point probe grid, the node's float32 error
-  // reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the node
-  // is closer on 63.3% of the points where their roundings differ. The node's
-  // error can exceed the reference's on some points; where the reference error
-  // is above half a step, the excess is at most 0.98 of a step. So the width is
-  // served on a measured error bound; a tanh that is ~100x off the exact answer
-  // at every scale of the curve is the different failure.
+  // exact float64 curve on a 498299-point probe grid, on an M5 the node's
+  // float32 error reaches 1.64 steps at 1.0 where the reference's reaches 4.14,
+  // and the node is closer on 63.3% of the points where their roundings differ.
+  // The node's error can exceed the reference's on some points; where the
+  // reference error is above half a step, the excess is at most 0.98 of a step
+  // on that host. The hosted macos-14 runner's node orders the closer points
+  // differently; the node's error from the exact curve stays within two steps,
+  // and its excess over the reference where that error is material within one
+  // step. The exact-curve bound is a property of the node; the excess bound is
+  // asserted only where the reference has an error to rank against. A tanh that
+  // is ~100x off the exact answer at every scale of the curve is the different
+  // failure.
   //
   // The bit-level reading gives the bound. The node agrees with the reference
   // bit for bit on 249310 of 498299 probe points, and its largest gap is 4.19

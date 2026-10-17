@@ -274,11 +274,13 @@ OPS = {
     # reach directly.
     #
     # MPSGraph names it directly (`erfWithTensor:`), so the body is the plain
-    # one-node unary template and the increment is the *gate*: the node is
-    # closer to the exact float32 curve than `at::erf` on 63.3% of the probe
+    # one-node unary template and the increment is the *gate*: on an M5 the node
+    # is closer to the exact float32 curve than `at::erf` on 63.3% of the probe
     # points where their roundings differ, and its error is at most 1.64 steps
     # at 1.0 against the reference's 4.14. It can be farther by up to 0.98 of a
-    # step where the reference error is material, which bounds the comparison.
+    # step where the reference error is material on that host. The CI runner
+    # orders the closer points differently, so the gate is the host-stable
+    # bound: at most two steps of node error, and one step of material excess.
     # See MpsSupportsErfDtype for the measurement and for why the two serve
     # different width lists.
     #

@@ -582,18 +582,21 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 //     its largest gap is 4.19 steps at 1.0. The dense sweep alone agrees on
 //     186130 of 400001 with a largest gap of 4.19 steps, so the full probe grid
 //     adds the samples between regular grid points.
-//   * against the exact (float64) curve, the node's float32 error reaches 1.64
-//     steps at 1.0 where the reference's reaches 4.14, and the node is closer
-//     on 63.3% of the points where the two differ. Where the reference error
-//     is above half a step, the node's error can be larger, but by at most
-//     0.98 of a step.
+//   * against the exact (float64) curve, on an M5 the node's float32 error
+//     reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the
+//     node is closer on 63.3% of the points where the two differ. Where the
+//     reference error is above half a step, the node's error can be larger,
+//     but by at most 0.98 of a step on that host. The hosted macos-14 runner
+//     orders the closer points differently. Both hosts keep the node within
+//     two steps of exact, with at most one step of excess where the reference
+//     error is material.
 //
 // A "distance of a few float32 steps at 1.0" is larger than "last ulp", but it
 // is a bounded error against a reference that has an error of its own. The
-// node is closer to exact on most points where the two differ, and the excess
-// over the reference is bounded; both are valid erf implementations. A tanh
-// that is ~100x off the exact answer at every scale is the different, coarser
-// failure that declined the sibling.
+// node's excess over the reference is bounded on both measured hosts; both are
+// valid erf implementations. A tanh that is ~100x off the exact answer at every
+// scale is the different, coarser failure that declined the sibling. The test
+// pins the host-stable bounds rather than either host's share of closer points.
 //
 // The domain's edges are reproduced exactly at all three widths, and unlike
 // `tanh` there is no guard to add: measured, the bare node propagates a NaN at

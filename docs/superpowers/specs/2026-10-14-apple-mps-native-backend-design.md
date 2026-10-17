@@ -1110,11 +1110,13 @@ sweep and a probe grid that samples between grid points, the node's error
 against the exact (float64) erf stays bounded near the reference's own error.
 The probe grid is the dense sweep plus three samples per cell of a
 16384-part grid over `[0, 9]`, and their negatives, 498299 operands in all:
-the regular sweep alone misses much of float32's rounding. On that grid, at
-float32 the node's error reaches `1.64` steps at 1.0, against `4.14` for
+the regular sweep alone misses much of float32's rounding. On that grid, on an
+M5, the float32 node's error reaches `1.64` steps at 1.0, against `4.14` for
 `at::erf`; where the two round differently the node is closer on `63.3%`. Where
 the reference error is above half a step, the node's error can be larger by at
-most `0.98` of a step. The node's gap from the
+most `0.98` of a step. The hosted `macos-14` runner's node does not share that
+ordering, so neither the closer-point share nor the reference's maximum error
+is pinned. The node's gap from the
 reference is at most `4.19` steps at 1.0 across the 498299 points. At float16
 and bfloat16 the node agrees bit for bit on `498160` and `498290` points, with
 a gap of half a step at 1.0 and `0.0039` of one. On the dense sweep alone those
@@ -1130,8 +1132,8 @@ against one neighbouring step, hides differences in float32's own rounding and
 can make a drift near zero look thousands of steps wide. The suite therefore
 holds the gap to a bound read from the two answers in float64, and limits how
 far the node's error can exceed the reference's where that error is material to
-the measured `0.98` of a step. It does not claim that the node is closer on
-every point.
+one step. It does not claim that the node is closer on every point, or that
+either host's share of closer points is a property of the kernel.
 
 Two edges read exactly as `sqrt`'s and are worth stating because they are the
 ones a reader would otherwise expect to need the `tanh` guard. `erf(+-inf) =
