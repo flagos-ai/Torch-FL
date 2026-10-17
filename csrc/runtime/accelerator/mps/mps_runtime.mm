@@ -43,6 +43,9 @@
 #include <mutex>
 #include <set>
 #include <vector>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 
 namespace torch_fl_mps {
 namespace {
@@ -164,10 +167,37 @@ void CrashTraceHandler(int signo, siginfo_t* info, void* context) {
       const uintptr_t next = words[0];
       const uintptr_t ret = words[1];
       CrashWriteHex("frame", ret);
+      // Name the image each return address lands in, so a frame list whose
+      // addresses are all in a framework the developer has no symbols for still
+      // says *which* framework without a separate atos pass over a core that
+      // does not exist.
+      Dl_info info;
+      if (ret != 0 && ::dladdr(reinterpret_cast<void*>(ret), &info) != 0 &&
+          info.dli_fname != nullptr) {
+        CrashWrite("  in ");
+        CrashWrite(info.dli_fname);
+        CrashWrite("\n");
+      }
       if (next <= frame) {
         break;
       }
       frame = next;
+    }
+    // The image table with each library's load address, the input `atos -o <lib>
+    // -l <addr>` needs. Printed after the frames so a truncated log still has
+    // the frame list first.
+    CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: images ===\n");
+    const uint32_t image_count = _dyld_image_count();
+    for (uint32_t i = 0; i < image_count; ++i) {
+      const char* name = _dyld_get_image_name(i);
+      if (name == nullptr) {
+        continue;
+      }
+      CrashWriteHex("image load: ", static_cast<uintptr_t>(
+          reinterpret_cast<uintptr_t>(_dyld_get_image_header(i))));
+      CrashWrite(" ");
+      CrashWrite(name);
+      CrashWrite("\n");
     }
   }
 
