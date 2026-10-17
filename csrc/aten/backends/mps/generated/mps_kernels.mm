@@ -397,7 +397,7 @@ at::Tensor PrivSoftmaxKernelMps(
   int64_t axis = 0;
   if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
       !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {
-    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }
   at::Tensor self_c = self.to(out_dtype).contiguous();
   if (self_c.numel() == 0) {
@@ -412,7 +412,7 @@ at::Tensor PrivSoftmaxKernelMps(
         return [graph softMaxWithTensor:args[0] axis:axis name:nil];
       });
   if (!ran) {
-    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }
   return out;
 }

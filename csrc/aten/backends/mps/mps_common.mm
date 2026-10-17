@@ -23,6 +23,11 @@
 
 #include <c10/util/Exception.h>
 
+// The host-round-trip spelling the softmax declines ask for. Included here
+// rather than left to the generated kernel file so the helper and its only
+// callers agree on `at::_softmax` resolving to the composite-free operator.
+#include <ATen/ops/_softmax.h>
+
 // Pulls in the flagos C ABI (Stream_t, GetDevice, GetCurrentStreamForDevice)
 // plus the two Metal side-door helpers the operator layer needs, the same way
 // every other vendor backend includes runtime/accelerator/<vendor>/.
@@ -233,6 +238,27 @@ bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   }
   *out = resolved;
   return true;
+}
+
+at::Tensor MpsSoftmaxOnHost(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float) {
+  if (!half_to_float) {
+    return at::_softmax(self.cpu(), dim, false).to(self.device());
+  }
+  // The flag means "compute in float, hand back float", and that is exactly
+  // what the host can be asked for without the flag: widen first, then run the
+  // flag-clear kernel. Forwarding `half_to_float=true` to the CPU instead asks
+  // for a kernel that does not exist ("softmax with half to float conversion is
+  // not supported on CPU"), which would turn every declined width into a raise.
+  //
+  // An integral or bool operand still raises here, which is the reference's
+  // answer, and `at::_softmax` is the spelling that raises it: resolving to
+  // `at::softmax` would reach the composite and never report the flag's
+  // mismatch. A rank-0 operand has no `dim` in range, so its raise comes from
+  // the dim check rather than from the width.
+  return at::_softmax(self.cpu().to(at::kFloat), dim, false).to(self.device());
 }
 
 MpsGemmOperand MpsGemmOperandOf(const at::Tensor& t) {

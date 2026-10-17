@@ -198,6 +198,20 @@ bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent);
 // error to report: the wrappers decline that case without touching the input.
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
 
+// The answer `_softmax(self, dim, half_to_float)` has when the graph is not the
+// one producing it, computed on the host and moved back to `self`'s device.
+//
+// The flag cannot be handed to the CPU kernel: it is a CUDA spelling the host
+// build rejects outright, so a declined width would raise instead of answering.
+// This widens the operand and asks for the flag-clear result instead, which is
+// the same "compute in float, hand back float" the flag stands for -- the rule
+// the graph path follows by widening to its own `out_dtype`. Every decline in
+// the softmax bodies routes through here so the two paths cannot drift apart.
+at::Tensor MpsSoftmaxOnHost(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float);
+
 // Whether `silu` computes exactly on the MPSGraph path, composed as
 // `x * sigmoid(x)`.
 //

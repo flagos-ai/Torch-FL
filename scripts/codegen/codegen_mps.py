@@ -1051,6 +1051,16 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # The empty input is declined rather than handed to the graph: MPSGraph has no
 # empty tensor, and the reference's answer (an empty result) is free to produce
 # on the host.
+#
+# Every decline widens on the host when `half_to_float` is set rather than
+# forwarding the flag to `at::_softmax`. The flag is only a CUDA spelling: the
+# CPU kernel rejects it outright ("softmax with half to float conversion is not
+# supported on CPU"), so handing it along turns a declined width into a raise
+# instead of the reference's float answer. Widening the operand first and
+# asking for the flag-clear result is the same thing the flag means -- compute
+# in float, hand back float -- and it is what the graph path does by widening
+# to `out_dtype`. The dtype gate above decides the widened result, so the two
+# paths agree on the answer for every width that reaches them.
 T_SOFTMAX_BODY = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -1060,7 +1070,7 @@ at::Tensor {kernel}(
   int64_t axis = 0;
   if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
       !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {{
-    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }}
   at::Tensor self_c = self.to(out_dtype).contiguous();
   if (self_c.numel() == 0) {{
@@ -1075,7 +1085,7 @@ at::Tensor {kernel}(
         return [graph {call}args[0] axis:axis name:nil];
       }});
   if (!ran) {{
-    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }}
   return out;
 }}
