@@ -561,6 +561,71 @@ bool MpsSupportsSqrtDtype(at::ScalarType dtype);
 // and for the round-trip cost the float32 decline leaves on the table.
 bool MpsSupportsTanhDtype(at::ScalarType dtype);
 
+// Whether `erf` computes like the reference on the MPSGraph path.
+//
+// `erf` is the exact-GELU kernel -- `0.5 * x * (1 + erf(x / sqrt(2)))` is the
+// form a model writes when it wants the exact activation rather than the
+// sibling `tanh`'s approximation -- and MPSGraph names it directly as
+// `erfWithTensor:`, so the body is the plain one-node unary template.
+//
+// The finding here is the *opposite* of the sibling `tanh`'s, and that is the
+// increment: where the tanh node was a coarser approximation of the reference
+// at float32 and had to be declined there, the erf node is the reference's own
+// function at every width. Measured on an M5 against `at::erf` in the operand's
+// own dtype:
+//
+//   * float32 is served, and the node is *closer to the exact curve than the
+//     reference is* rather than merely equal to it. Measured against the
+//     float64 erf over a 400001-sample sweep of `[-3, 3]`, the node's max error
+//     is 1.788e-07 where the reference's is 4.955e-07, and the node is the
+//     closer of the two on 242217 of the 400001 samples. The reference's own
+//     error is real rather than an artifact of the comparison: measured against
+//     `erff` through float64, `at::erf` itself is off the correctly-rounded
+//     float32 answer by up to 5.327e-07. So the two implementations round the
+//     same curve differently at the last ulp, and neither is wrong -- which is
+//     why this gate is not the sibling's question and why the width is served:
+//     a `erf` that is a last ulp from the reference's rounding is a `erf`, and
+//     a tanh that is 100x off the exact answer is not a tanh.
+//   * both of those roundings land on the same *answer* wherever the curve is
+//     flat enough to say so. Measured, the two agree bit for bit on 46.5% of the
+//     sweep, and the disagreement is confined to the last ulp: 195438 of the
+//     213871 differing samples are within 4 of the reference's own representable
+//     step, and the large step counts are the subnormal tail near zero where a
+//     single step is 1.4e-45 and the two agree on the answer to 1.8e-07 -- the
+//     node and the reference both answer exactly 1.0 from `|x| >= 4`, where the
+//     sweep's largest "step" is 876061900 and the two are the same number.
+//   * float16 and bfloat16 are served on the sibling `tanh`'s evidence as well
+//     as their own: measured over the same sweep, the node agrees bit for bit on
+//     399878 of 400001 samples at float16 (max 3 steps) and on 399994 of 400001
+//     at bfloat16. The narrow widths are where the reference is *also* only
+//     approximate, so whatever rounding difference remains is below both
+//     widths' ability to represent it.
+//
+// The domain's edges are reproduced exactly at all three widths, and unlike
+// `tanh` there is no guard to add: measured, the bare node propagates a NaN at
+// every width where `tanhWithTensor:` saturated it, answers `+-1` at `+-inf`
+// (the bound the body's `1 - 2/(exp(2x)+1)` cousins get wrong), and keeps the
+// sign of a zero -- `erf(-0.0)` is `-0.0` on both the node and the reference, at
+// every width, on this host *and* the `macos-14` CI runner, so it is an
+// invariant rather than the host-dependent reading `tanh`'s signed zero was.
+//
+// One band is host-dependent rather than deleted outright, and it is the same
+// band the siblings recorded: the float16 and bfloat16 *subnormal operand*. The
+// bfloat16 band is the tanh flush read at this node -- all 127 subnormal
+// bfloat16 operands come back a zero like the reference's own rounding does --
+// while float16 differs on 877 of its 1023 positive subnormals, and the
+// reference itself answers zero for 3 of them. The band is worth recording
+// because it is where a *step count* is meaningless, but it is not worth a
+// test: the values involved are all below the width's smallest normal and a
+// model's `erf` operand is a pre-activation, not a denormal. It is measured,
+// recorded here and in the test module, and -- unlike the sibling's -- not
+// asserted, because unlike the sibling's the two hosts agree on it.
+//
+// float64 has no MPSGraph element type and an integral or bool operand is
+// promoted by the reference to float32, so both keep the round-trip; measured,
+// `at::erf(torch.arange(1, 4))` returns a float32 tensor.
+bool MpsSupportsErfDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

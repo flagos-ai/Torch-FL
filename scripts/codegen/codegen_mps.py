@@ -267,6 +267,27 @@ OPS = {
     # answers a finite value, with its own edges at `+-1` and beyond -- so it is
     # not this increment.
     "tanh": "tanh",
+    # The error function, and the third op in the special-function pair the
+    # GELU keeps writing out by hand: `0.5 * x * (1 + erf(x / sqrt(2)))` is the
+    # exact GELU, so a model that wants the exact form instead of the tanh
+    # approximation reaches this node on the same activation path as the sibling
+    # above. It is also the kernel a diffusion sampler and an attention kernel
+    # built over erf reach directly.
+    #
+    # MPSGraph names it directly (`erfWithTensor:`), so the body is the plain
+    # one-node unary template and the increment is the *gate*: measured, the
+    # node is a betters-than-the-reference erf at float32 -- closer to the exact
+    # curve than `at::erf` is on 242217 of 400001 samples -- and differs from it
+    # in the *last ulp* rather than in the answer, so this is the opposite
+    # finding to the sibling `tanh`'s. See MpsSupportsErfDtype for the
+    # measurement and for why the two serve different width lists.
+    #
+    # Only `erf` is registered. `erf.out` and `erf_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `erfc` is a different op with its own domain and its own tail behaviour --
+    # `erfc(x)` is `1 - erf(x)` only to the precision `1 - erf(x)` can carry at a
+    # large `x`, which is a separate measurement -- so it is not this increment.
+    "erf": "erf",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -485,6 +506,12 @@ AT_OP = {
     # integral/bool promotion rule live, and why the gate sends those widths here
     # rather than evaluating them in the graph.
     "tanh": "tanh",
+    # The CPU reference the `erf` body round-trips to on the widths it declines.
+    # `erf` is its own aten kernel rather than a composition, which is where its
+    # bounded range (`erf(+-inf) = +-1`), its signed zero and its integral/bool
+    # promotion rule live, and why the gate sends those widths here rather than
+    # evaluating them in the graph.
+    "erf": "erf",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -589,6 +616,12 @@ SUPPORTS = {
     # than a flush or a domain: `tanhWithTensor:`. See MpsSupportsTanhDtype for
     # the per-width numbers.
     "tanh": "MpsSupportsTanhDtype",
+    # Its own predicate, and the measurement lands on the *opposite* width list
+    # to the sibling `tanh`'s even though the two are the same kind of op: the
+    # node is the reference's own function at all three widths here, so the
+    # increment's finding is a last-ulp question rather than an accuracy one.
+    # See MpsSupportsErfDtype.
+    "erf": "MpsSupportsErfDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -713,6 +746,10 @@ CALLS = {
     # See MpsSupportsTanhDtype for whether the node rounds like a true tanh at a
     # width.
     "tanh": "tanhWithTensor:",
+    # Named directly, exactly as the sibling `tanh` is. The node is the whole
+    # body -- it is the reference's own function at every width -- so the width
+    # list is the only thing the increment decides. See MpsSupportsErfDtype.
+    "erf": "erfWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -874,6 +911,11 @@ KEY_PARTS = {
     "sqrt": "",
     # Empty, for the same reason as `sqrt` above: one operand and one node.
     "tanh": "",
+    # Empty, for the same reason as the six above it: the body is one selector
+    # over one operand, so the graph is a function of the operand's dtype and
+    # shape -- which MpsRunGraph folds into the cache key itself -- and no host
+    # value is baked into it.
+    "erf": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -3412,6 +3454,13 @@ CATEGORIES = {
     # there is nothing to compose and the whole of this body is
     # `MpsSupportsSqrtDtype`. See the note there for the per-width measurement.
     "sqrt": T_EXP,
+    # The shared one-node unary template again, and the increment is the gate
+    # rather than a body: `erfWithTensor:` is a real selector and needs no guard
+    # -- measured, it propagates a NaN and answers the `+-1` bound at `+-inf`
+    # without help -- so `MpsSupportsErfDtype` is the whole of the finding. See
+    # the note there for what separates its width list from the sibling
+    # `tanh`'s.
+    "erf": T_EXP,
     # Its own template rather than the shared unary one, because the node needs
     # a guard the siblings do not: MPSGraph's `tanhWithTensor:` saturates a NaN
     # operand to +-1 at every width, so the body selects the input's NaN back

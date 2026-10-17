@@ -918,6 +918,30 @@ at::Tensor TanhKernelMps(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMps, TanhKernelMps)
 
+at::Tensor ErfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsErfDtype(self.scalar_type())) {
+    return at::erf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("erf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph erfWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::erf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kMps, ErfKernelMps)
+
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
     const at::Tensor& indices,

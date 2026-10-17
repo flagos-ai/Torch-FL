@@ -107,8 +107,9 @@ two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
 the `silu` and `embedding` categories and then the `div`/`div_scalar`/
 `reciprocal` ones, and the `layer_norm`, `where`, `cat` and `batch_norm`
 ones that the runtime-conformance traversal and the normalisation lanes
-named, for twenty-seven in all.
-Those twenty-seven are claimed on the `PrivateUse1` `mps` slot by
+named, and then the `exp`, `sigmoid`, `log`, `rsqrt`, `sqrt`, `tanh` and `erf`
+increments that followed them, for thirty-four in all.
+Those thirty-four are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
@@ -117,12 +118,13 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated thirty-three are compared
+Results are correct on every op: the accelerated thirty-four are compared
 against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
 `test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py`,
 `test_mps_silu.py`, `test_mps_exp.py`, `test_mps_log.py`, `test_mps_rsqrt.py`,
 `test_mps_sqrt.py`, `test_mps_tanh.py`,
+`test_mps_erf.py`,
 `test_mps_sigmoid.py`,
 `test_mps_embedding.py`, `test_mps_div.py`,
 `test_mps_index_select.py`, `test_mps_take.py`, `test_mps_gather.py`,
@@ -167,7 +169,7 @@ where the CPU says `5e-39`), which is the same boundary `mul` and `add` have had
 since stage 2 (design doc section 7).
 A platform whose GPU
 never runs a kernel is a "Runtime only" row, not operator support;
-twenty-seven ops
+thirty-four ops
 is operator support for the unary, elementwise, reduction, matrix-product,
 softmax, convolution, activation, normalisation and table-read families and nothing more. Note that `softmax.int` is
 not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch

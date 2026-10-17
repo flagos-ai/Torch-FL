@@ -62,7 +62,7 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
   is the by-design BPU file and 67 the hand-written TsingMicro one. MPS also
-  reads 2037, but only 20 of those routes reach its own kernels — the other 2017
+  reads 2037, but only 34 of those routes reach its own kernels — the other 2003
   resolve to `none` (`cpu_fallback`), which is what an incrementally grown
   native backend looks like between operator stages.
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
@@ -95,10 +95,10 @@ build opts into boxing.
   the `torch.compile(backend="bpu")` path.
 - **MPS** (Apple Silicon) has the device runtime floor — allocate, copy,
   synchronize and real Metal streams/events work — plus the MPSGraph operator
-  layer as it stands: 33 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
+  layer as it stands: 34 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
   the elementwise `add`/`sub`/`mul`/`div` tensor and scalar forms (with aten's
   `alpha` and the float-only dtype gate `div.Tensor` needs to keep PyTorch's
-  promotion), `reciprocal`, `silu`, `sigmoid`, `exp`, `log`, `rsqrt`, `sqrt`, `tanh`, the
+  promotion), `reciprocal`, `silu`, `sigmoid`, `exp`, `log`, `rsqrt`, `sqrt`, `tanh`, `erf`, the
   `pow.Tensor_Scalar`
   form, the
   `sum`/`mean`/`_softmax` reductions, `native_layer_norm`, `native_batch_norm`,

@@ -499,14 +499,15 @@ def test_conf_route_counts_are_stable():
         # then ``index_select``, then ``take``, then ``gather``, then
         # ``native_layer_norm``, then ``where.self`` and ``cat``, then
         # ``native_batch_norm``, then ``sigmoid``, then ``exp``, then
-        # ``log``, then ``rsqrt``), so the conf
+        # ``log``, then ``rsqrt``, then ``sqrt``, then ``tanh``, then
+        # ``erf``), so the conf
         # routes those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 33, "none": 2004},
+        "mps": {"mps": 34, "none": 2003},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():
