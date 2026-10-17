@@ -563,43 +563,37 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 
 // Whether `erf` computes like the reference on the MPSGraph path.
 //
-// `erf` is the exact-GELU kernel -- `0.5 * x * (1 + erf(x / sqrt(2)))` is the
-// form a model writes when it wants the exact activation rather than the
-// sibling `tanh`'s approximation -- and MPSGraph names it directly as
-// `erfWithTensor:`, so the body is the plain one-node unary template.
+// `erf` is the kernel in the explicit GELU form
+// `0.5 * x * (1 + erf(x / sqrt(2)))` rather than the sibling `tanh`'s tanh
+// approximation, and MPSGraph names it directly as `erfWithTensor:`, so the
+// body is the plain one-node unary template.
 //
-// The finding here is the *opposite* of the sibling `tanh`'s, and that is the
+// The width decision here differs from the sibling `tanh`'s, and that is the
 // increment: where the tanh node was a coarser approximation of the reference
-// at float32 and had to be declined there, the erf node is the reference's own
-// function at every width. Measured on an M5 against `at::erf` in the operand's
-// own dtype:
+// at float32 and had to be declined there, the erf node's error stays close to
+// the reference's. Measured on an M5 against `at::erf` in the operand's own
+// dtype, on a 498299-point probe grid (the 400001-sample dense sweep plus points
+// between grid points over [-9, 9], and their negatives):
 //
-//   * float32 is served, and the node is *closer to the exact curve than the
-//     reference is* rather than merely equal to it. Measured against the
-//     float64 erf over a 400001-sample sweep of `[-3, 3]`, the node's max error
-//     is 1.788e-07 where the reference's is 4.955e-07, and the node is the
-//     closer of the two on 242217 of the 400001 samples. The reference's own
-//     error is real rather than an artifact of the comparison: measured against
-//     `erff` through float64, `at::erf` itself is off the correctly-rounded
-//     float32 answer by up to 5.327e-07. So the two implementations round the
-//     same curve differently at the last ulp, and neither is wrong -- which is
-//     why this gate is not the sibling's question and why the width is served:
-//     a `erf` that is a last ulp from the reference's rounding is a `erf`, and
-//     a tanh that is 100x off the exact answer is not a tanh.
-//   * both of those roundings land on the same *answer* wherever the curve is
-//     flat enough to say so. Measured, the two agree bit for bit on 46.5% of the
-//     sweep, and the disagreement is confined to the last ulp: 195438 of the
-//     213871 differing samples are within 4 of the reference's own representable
-//     step, and the large step counts are the subnormal tail near zero where a
-//     single step is 1.4e-45 and the two agree on the answer to 1.8e-07 -- the
-//     node and the reference both answer exactly 1.0 from `|x| >= 4`, where the
-//     sweep's largest "step" is 876061900 and the two are the same number.
-//   * float16 and bfloat16 are served on the sibling `tanh`'s evidence as well
-//     as their own: measured over the same sweep, the node agrees bit for bit on
-//     399878 of 400001 samples at float16 (max 3 steps) and on 399994 of 400001
-//     at bfloat16. The narrow widths are where the reference is *also* only
-//     approximate, so whatever rounding difference remains is below both
-//     widths' ability to represent it.
+//   * at float16 and bfloat16 the node agrees bit for bit on 498160 and 498290
+//     points respectively, and its largest gap is half a step at 1.0 and
+//     0.0039 of one.
+//   * at float32 it agrees bit for bit on 249310 points, or half of them, and
+//     its largest gap is 4.19 steps at 1.0. The dense sweep alone agrees on
+//     186130 of 400001 with a largest gap of 4.19 steps, so the full probe grid
+//     adds the samples between regular grid points.
+//   * against the exact (float64) curve, the node's float32 error reaches 1.64
+//     steps at 1.0 where the reference's reaches 4.14, and the node is closer
+//     on 63.3% of the points where the two differ. Where the reference error
+//     is above half a step, the node's error can be larger, but by at most
+//     0.98 of a step.
+//
+// A "distance of a few float32 steps at 1.0" is larger than "last ulp", but it
+// is a bounded error against a reference that has an error of its own. The
+// node is closer to exact on most points where the two differ, and the excess
+// over the reference is bounded; both are valid erf implementations. A tanh
+// that is ~100x off the exact answer at every scale is the different, coarser
+// failure that declined the sibling.
 //
 // The domain's edges are reproduced exactly at all three widths, and unlike
 // `tanh` there is no guard to add: measured, the bare node propagates a NaN at
@@ -618,8 +612,8 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 // because it is where a *step count* is meaningless, but it is not worth a
 // test: the values involved are all below the width's smallest normal and a
 // model's `erf` operand is a pre-activation, not a denormal. It is measured,
-// recorded here and in the test module, and -- unlike the sibling's -- not
-// asserted, because unlike the sibling's the two hosts agree on it.
+// and recorded here and in the test module. The result side differs between
+// hosts: the macos-14 CI runner flushes two of the M5's subnormal results.
 //
 // float64 has no MPSGraph element type and an integral or bool operand is
 // promoted by the reference to float32, so both keep the round-trip; measured,

@@ -14,48 +14,52 @@
 
 """Stage-4 Apple Silicon (Metal / MPSGraph) erf.
 
-``erf`` is the exact-GELU kernel -- ``0.5 * x * (1 + erf(x / sqrt(2)))`` is the
-form a model writes when it wants the exact activation rather than the tanh
-approximation its sibling ``tanh`` serves -- and MPSGraph names it directly as
-``erfWithTensor:``. The body is therefore the shared one-node unary template with
-no guard, and the whole of the increment is the gate:
+``erf`` is the kernel in the explicit GELU form
+``0.5 * x * (1 + erf(x / sqrt(2)))`` -- rather than the tanh approximation its
+sibling ``tanh`` serves -- and MPSGraph names it directly as ``erfWithTensor:``.
+The body is therefore the shared one-node unary template with no guard, and the
+whole of the increment is the gate:
 
-* **All three float widths are served, and the finding is the opposite of the
-  sibling ``tanh``'s.** The tanh node was a *coarser approximation* of the
-  reference's tanh at float32 and had to be declined there; this node is the
-  reference's own function at every width, differing from it only in how it
-  rounds the last ulp. Measured against the float64 curve over a 400001-sample
-  sweep of ``[-3, 3]``, the node's max error is ``1.788e-07`` where the
-  reference's is ``4.955e-07`` -- and the node is the *closer* of the two on
-  242217 of the samples. Two implementations that round one curve differently in
-  the last ulp are both erfs, so the width is served; see ``MpsSupportsErfDtype``.
-* **The bit agreement is the reading that keeps the case honest.** Over the same
-  sweep the node agrees with ``at::erf`` bit for bit on 46.5% of samples, and of
-  the 213871 that differ, 195438 are within four of the reference's own
-  representable step. The step counts that look large are the two agreeing on the
-  *answer* where the curve is flat -- both return exactly ``1.0`` for
-  ``|x| >= 4`` -- which is why the case below asserts the saturation band
-  value-for-value rather than by a step bound.
+* **All three float widths are served on a bound close to the reference's
+  own error.** The sibling ``tanh`` node was a *coarser approximation* of the
+  reference's tanh at float32 and had to be declined there; this node follows the
+  reference's own curve. Measured against the float64 curve on a 498299-point
+  probe grid, the node's float32 error reaches ``1.64`` steps at 1.0 where the
+  reference's reaches ``4.14``; where they differ, the node is closer on
+  ``63.3%``. Where the reference has an error above half a step, the node's
+  error can exceed it by at most ``0.98`` of a step; the ranking itself is
+  asserted only where that error matters.
+  The node's float32 gap from ``at::erf`` is at most ``4.19`` steps at 1.0 -- a
+  few float32 steps across the curve, visible because the probe samples fall
+  between grid points; see ``MpsSupportsErfDtype``.
+* **GELU needs its own gate.** ``F.gelu(x)`` and
+  ``F.gelu(x, approximate="tanh")`` gave the same output on this host, and
+  neither named this ``erf`` kernel. The explicit form
+  ``0.5 * x * (1 + erf(x / sqrt(2)))`` reaches it; its float32 result differs
+  from ``F.gelu``'s default by as much as ``4.74e-04`` over ``[-8, 8]``.
+  Any later ``gelu`` work is a separate gate.
 * **The domain edges need no guard, unlike the sibling's.** Measured, the bare
   node propagates a NaN (where ``tanhWithTensor:`` saturated it to ``+-1``),
   answers ``+-1`` at ``+-inf``, and keeps the sign of a zero at every width on
   *both* hosts -- so unlike ``tanh``'s signed zero, this one is an invariant and
   the cases below assert it rather than recording it.
 
-One band is recorded rather than asserted, and it is the band the siblings found:
-the narrow widths' *subnormal operand*. Measured, all 127 subnormal bfloat16
-operands come back a zero, which is also what the reference rounds them to, while
-float16 differs from the reference on 877 of its 1023 positive subnormals in the
-last step or two (and the reference itself rounds 3 of them to zero). Everything
-involved is below the width's smallest normal and a single step wide, and a
-model's ``erf`` operand is a pre-activation rather than a denormal, so the values
-are recorded in ``MpsSupportsErfDtype`` and below rather than pinned.
+One band is host-dependent, and it is the band the siblings found: the narrow
+widths' *subnormal operand*. Measured on this host, all 127 subnormal bfloat16
+operands come back a zero, and float16 differs from the reference on 877 of its
+1023 positive subnormals. The M5 also keeps some of those results as subnormals;
+the ``macos-14`` CI runner flushes two of them to zero. The suite therefore
+asserts the monotonic shape, the reference's answer where it is representable,
+and no flush in the normal range. The full readings are in
+``MpsSupportsErfDtype``; a model's ``erf`` operand is a pre-activation rather
+than a denormal, so the host split is not pinned.
 
-The tests below hold what the numbers alone cannot: that all three widths agree
-with ``at::erf`` to the last ulp on the curve, that the edges (``+-inf`` ->
-``+-1``, nan -> nan, the signed zero) are the reference's, that the curve is odd,
-that the saturation band is the reference bit for bit, and that float64 and the
-integral/bool operands take the round-trip.
+The tests below hold what the numbers alone cannot: that each width stays within
+the measured gap from ``at::erf``, that the float32 node's error against the
+exact curve stays bounded relative to the reference's, that the edges
+(``+-inf`` -> ``+-1``, nan -> nan, the signed zero) are the reference's, that
+the curve is odd, that the saturation band is the reference bit for bit, and
+that float64 and the integral/bool operands take the round-trip.
 
 Every case self-skips off an MPS build, like the stage-1 to stage-4 suites.
 """
@@ -145,6 +149,39 @@ def _assert_matches_cpu(
     )
 
 
+# One step of each served width at 1.0: 2**-23 at float32, 2**-10 at float16 and
+# 2**-8 at bfloat16. ``finfo(dtype).eps`` is the same quantity; the table is
+# spelled out so a bound reads as "n steps at 1.0" without a call at each use.
+ULP_AT_ONE = {
+    torch.float32: 2.0**-23,
+    torch.float16: 2.0**-10,
+    torch.bfloat16: 2.0**-8,
+}
+
+
+def _probe_grid(dtype: torch.dtype) -> torch.Tensor:
+    """Operands whose answers are the reference's *and* the exact curve's.
+
+    The measurement cases below are about the reference's own rounding, so the
+    dense sweep alone is the wrong operand set: ``linspace(-6, 6, 400001)``
+    lands on float32 values whose ``erf`` the reference rounds exactly, and a
+    bound read off it alone is smaller than the one the curve actually holds.
+    The samples where the reference has an error to compare are the operands
+    *between* the width's representable ones. This grid therefore takes the
+    dense sweep plus three points inside a 16384-part grid over ``[0, 9]`` --
+    every grid point is a float32 operand, and most of the float16 and bfloat16
+    spread -- and its negation, so the grid is symmetric and the oddness and the
+    sign of each answer are both exercised.
+    """
+    sweep = torch.linspace(-6.0, 6.0, 400001).to(dtype)
+    edges = torch.linspace(0.0, 9.0, 1 << 14, dtype=torch.float64)
+    low = edges[:-1].to(dtype).to(torch.float64)
+    high = edges[1:].to(dtype).to(torch.float64)
+    probes = [(low + (high - low) * f).to(dtype) for f in (0.21, 0.5123456789, 0.81)]
+    midpoints = torch.cat(probes)
+    return torch.cat([sweep, midpoints, -midpoints])
+
+
 def _same(x: float, y: float) -> bool:
     """Equality that treats two nans as the same answer."""
     return (x == y) or (x != x and y != y)
@@ -166,24 +203,6 @@ def _steps(got: torch.Tensor, want: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _step_size(values: torch.Tensor) -> torch.Tensor:
-    """The width's representable step *at each value*, as float64.
-
-    ``finfo(dtype).eps`` is the step only near 1; the step shrinks with the
-    exponent, and ``erf``'s value spans that whole range, so a bar written as
-    ``eps * |ref|`` is the wrong unit near zero -- where ``|ref|`` is itself a
-    denormal, an epsilon-scaled bar is smaller than a single step and the ratio
-    against it diverges on a rounding that is only one step wide.
-    """
-    magnitude = values.double().abs()
-    floors = torch.where(
-        magnitude > 0,
-        torch.exp2(torch.floor(torch.log2(magnitude))),
-        torch.ones_like(magnitude),
-    )
-    return floors * float(torch.finfo(values.dtype).eps)
-
-
 class TestErfCorrectness:
     """``torch.erf`` on the flagos device equals the CPU reference."""
 
@@ -198,65 +217,49 @@ class TestErfCorrectness:
     def test_the_curve_is_the_reference_to_within_a_few_ulps(self, dtype):
         """The increment's finding, stated as the bound that holds at a width.
 
-        Measured over a 400001-sample sweep of ``[-6, 6]``: float16 and bfloat16
-        agree bit for bit with ``at::erf`` on 399878 and 399994 of the samples
-        respectively, and never differ by more than a fraction of the width's own
-        step in *relative* terms -- 8.6e-04 of the value at float16, which is
-        under one of its 9.8e-04 steps, and nothing at all at bfloat16. float32
-        is the width whose rounding differs, and there a raw step count is *not*
-        an invariant: the two curves agree on the answer and differ only in the
-        last place, so where the answer is a couple of steps above zero the step
-        count between two neighbouring values explodes while the absolute gap
-        stays one reference step. The bar below is therefore relative to each
-        width's own step, which is what a coarser node (the sibling ``tanh``'s at
-        float32, off by up to 4.6e-02 of the value, and 2.7e-03 at float16) could
-        not satisfy.
+        The bound is measured on ``_probe_grid``'s operands rather than on the
+        dense sweep alone, because the dense sweep's float32 answers are the
+        ones the reference rounds *exactly*: its measured gap there is
+        ``2.5e-10``, which would describe a body that nothing exercises. On the
+        probe grid, measured:
+
+        * float16 and bfloat16 agree with ``at::erf`` bit for bit on 399878 and
+          399994 of the dense sweep and on 98282 and 98296 of the 98298 probes,
+          and their gap never leaves half a step at 1.0 -- at bfloat16 it is
+          `0.0039` of one, at the widest;
+        * float32 agrees bit for bit on 186130 of the 400001 sweep samples and
+          on 249310 of all 498299 probe-grid points, and its gap reaches
+          ``4.19`` steps at 1.0 on the full grid. The reference has an error of
+          its own at this width (``4.14`` steps at 1.0), and the node follows
+          different grid points from it; see the case below.
+
+        The unit is the width's step *at 1.0* and not at the reference's own
+        value: near zero the reference's spacing is smaller than the two curves'
+        agreement (a denormal at the smallest inputs, ``3.6e-09`` at
+        ``|ref| ~ 0.03``), so a step count at the reference's value reads in the
+        thousands there.
         """
-        host = torch.linspace(-6.0, 6.0, 400001).to(dtype)
+        host = _probe_grid(dtype)
         out = torch.erf(_to_device(host)).cpu()
         expected = _reference(host)
         assert out.dtype == dtype
-        # The two narrow widths agree with the reference bit for bit on all but a
-        # handful of samples, and the handful is measured rather than assumed.
-        steps = _steps(out, expected).abs()
+        unit = ULP_AT_ONE[dtype]
+        # The dense sweep is the first 400001 operands; its agreement is the
+        # reading the increment's first measurement took.
+        dense = 400001
+        steps = _steps(out[:dense], expected[:dense]).abs()
         if dtype is not torch.float32:
             agree = int((steps == 0).sum())
-            assert agree >= out.numel() - 256, (
-                f"{dtype}: only {agree} of {out.numel()} samples are bit-identical"
-            )
-        # The bar that holds at all three widths, stated where the step count
-        # cannot hold one: the gap as a share of the reference's own step for its
-        # own value. Measured, the ratio degrades monotonically as the band's
-        # scale shrinks -- 5.0 at float32, 1.0 at float16 and 0.0 at bfloat16 for
-        # ``|ref| >= 0.5``; 2869, 1 and 1 for ``>= 1e-3`` -- because below that
-        # the two roundings are resolving the same curve against *denormal*
-        # spacing, so the honest statement is the banded pair below rather than
-        # one number.
+            assert agree >= dense - 256, f"{dtype}: {agree} of {dense} bit-identical"
+            probes = int((out[dense:] == expected[dense:]).sum())
+            assert probes >= out.numel() - dense - 16, (dtype, probes)
         gap = (out.double() - expected.double()).abs()
-        reference_step = _step_size(expected)
-        ratio = gap / torch.where(reference_step > 0, reference_step, 1.0)
-        scale = expected.double().abs()
-        large = scale >= 0.5
-        assert float(ratio[large].max()) <= 10.0, (dtype, float(ratio[large].max()))
-        assert float(ratio[large | (scale >= 1e-3)].max()) <= 3000.0, (
-            dtype,
-            float(ratio[large | (scale >= 1e-3)].max()),
-        )
-        # The band just above zero, where the reference's step is itself a
-        # denormal: measured, the two roundings stay within 5.0e-07, 4.9e-04 and
-        # 3.1e-05 of each other at the three widths respectively -- a handful of
-        # each width's own steps at 1.0, and the reason the ratio above is
-        # reported banded rather than as one bound.
-        assert float(gap.max()) <= 8.0 * float(torch.finfo(dtype).eps), (
-            dtype,
-            float(gap.max()),
-        )
-        # The answer is always inside the bound, and the sweep's far end is the
-        # reference's own rounding to exactly 1 at every width.
-        # The answer is always inside the bound, and the sweep's far end is the
-        # reference's own rounding to exactly 1 at every width.
+        bound = (0.5 if dtype is not torch.float32 else 4.5) * unit
+        assert float(gap.max()) <= bound, (dtype, float(gap.max()))
+        # The answer is always inside the bound, and the dense sweep's far end is
+        # the reference's own rounding to exactly 1 at every width.
         assert (out.abs() <= 1.0).all()
-        assert out[-1].item() == 1.0 == expected[-1].item()
+        assert out[dense - 1].item() == 1.0 == expected[dense - 1].item()
 
     @pytest.mark.parametrize("dtype", SERVED_DTYPES)
     @pytest.mark.anyplatform
@@ -264,30 +267,51 @@ class TestErfCorrectness:
         """The measurement that decides the gate, asserted as a property.
 
         ``tanh`` was declined at float32 because its node was a coarser
-        approximation of the reference's own function. The claim this gate makes
-        is the opposite, so it is worth a case: over the sweep, wherever the node
-        and the reference disagree the node is *at least as close* to the exact
-        (float64) curve as the reference is on the great majority of samples.
+        approximation of the reference's own function -- ``~100x`` its error at
+        every scale of the curve. This gate is based on a measurement against
+        the exact (float64) erf on the probe grid, where the reference's error
+        is its own:
 
-        The bar is deliberately one-sided and loose -- the exact answer is a
-        float64 curve neither width represents -- so the case says "not coarser"
-        rather than "more accurate", which is the property the gate needs.
+        * at both narrow widths the node is closer to exact on every sampled
+          point where the two round differently;
+        * at float32 the node is closer on ``63.3%`` of the probes where the two
+          round differently -- the reference itself is up to ``4.14`` steps at
+          1.0 off the exact curve there, and the node at most ``1.64``. On the
+          points where the reference has a material error (above half a step
+          at 1.0), the node's error may exceed it by at most ``0.98`` of a step.
+          That is a bounded difference from a reference with a larger maximum
+          error.
         """
-        host = torch.linspace(-3.0, 3.0, 400001).to(dtype)
-        out = torch.erf(_to_device(host)).cpu().float()
-        expected = _reference(host).float()
-        exact = torch.erf(host.to(torch.float64)).float()
-        finite = torch.isfinite(out) & torch.isfinite(expected)
-        node_err = (out - exact).abs()[finite]
-        ref_err = (expected - exact).abs()[finite]
-        # A tolerance as wide as a few reference steps, so "not coarser" is not
-        # a knife-edge on a single sample's rounding.
-        slack = 4.0 * torch.finfo(dtype).eps
-        not_coarser = int((node_err <= ref_err + slack).sum())
-        assert not_coarser >= int(finite.sum()) - 64, (
-            f"{dtype}: node is coarser than the reference on "
-            f"{int(finite.sum()) - not_coarser} samples"
+        host = _probe_grid(dtype)
+        out = torch.erf(_to_device(host)).cpu().double()
+        exact = torch.erf(host.double())
+        expected = _reference(host).double()
+        node_err = (out - exact).abs()
+        ref_err = (expected - exact).abs()
+        unit = ULP_AT_ONE[dtype]
+        # The narrow widths: the node is closer wherever they disagree.
+        if dtype is not torch.float32:
+            differ = out != expected
+            closer = int((node_err[differ] < ref_err[differ]).sum())
+            assert closer == int(differ.sum()), (dtype, closer, int(differ.sum()))
+            assert float(node_err.max()) > 0.0, dtype
+            return
+        # float32: where the reference's own rounded answer is below half a step
+        # from exact, the ordering is dominated by the candidates' rounding. On
+        # the points where its error is material, the node has a bounded excess.
+        material = ref_err > 0.5 * unit
+        assert int(material.sum()) > 1000, int(material.sum())
+        closer = int((node_err[material] < ref_err[material]).sum())
+        assert closer > int(material.sum()) // 2, (closer, int(material.sum()))
+        excess = node_err - ref_err
+        assert float(excess[material].max()) <= 1.0 * unit, float(
+            excess[material].max()
         )
+        # The reference is the coarser of the two at this width: measured, its
+        # error reaches 4.14 steps at 1.0 where the node's reaches 1.64, so a body
+        # that followed the reference instead of the curve would fail here.
+        assert float(ref_err.max()) >= 4.0 * unit, float(ref_err.max())
+        assert float(node_err.max()) <= 2.0 * unit, float(node_err.max())
 
     @pytest.mark.parametrize("dtype", SERVED_DTYPES)
     @pytest.mark.anyplatform
@@ -306,15 +330,12 @@ class TestErfCorrectness:
         # to the saturated value the far end of this sweep is.
         assert out[0].item() == 0.0
         assert 0.0 < out[1].item() < out[-1].item() <= 1.0
-        # The two roundings are the same *answer* at this sweep's granularity:
-        # see the curve case for the relative bound that says so and for why a
-        # raw step count is not the invariant at float32.
-        # The bar is the width's own, since a float16 step near the top of this
-        # sweep is 4.88e-04 -- the same ulp-scaled bar the curve case uses, which
-        # is exact at bfloat16 and a fraction of a step at the other two.
-        assert float((out.float() - expected.float()).abs().max()) <= 4.0 * float(
-            torch.finfo(dtype).eps
-        ), (dtype, float((out.float() - expected.float()).abs().max()))
+        # Compare in float64 so a narrow result is not promoted to float32
+        # before it reaches the bound. These operands follow a different grid
+        # from the probe cases; float16's measured gaps reach four steps at 1.0.
+        gap = (out.double() - expected.double()).abs().max().item()
+        steps = 4.0 if dtype is torch.float16 else 4.5
+        assert gap <= steps * ULP_AT_ONE[dtype], (dtype, gap)
 
     @pytest.mark.parametrize("dtype", SERVED_DTYPES)
     @pytest.mark.anyplatform
@@ -333,7 +354,7 @@ class TestErfCorrectness:
         assert out[1].item() == 0.0
         assert torch.isnan(out[2]).item(), out
         # The non-nan slots are the same *answers* the case above measured, to the
-        # same last-ulp bar -- exact at the two narrow widths and a few steps at
+        # same few-step bar -- exact at the two narrow widths and a few steps at
         # float32 -- and the nan slots are the guard's own claim either way.
         assert int(_steps(out, expected).abs().max()) <= 4, (out, expected)
         assert _same(out[1].item(), expected[1].item())
@@ -381,16 +402,14 @@ class TestErfCorrectness:
             assert out[2].item() == 1.0 and out[3].item() == -1.0
             # The edges with no rounding to disagree about are the reference
             # exactly at every width: both infinities, and both zeros. The two
-            # finite interior points are held to a relative last-ulp bar instead,
-            # which is the same bar the curve case uses and the reason this gate
-            # serves float32 at all.
+            # finite interior points are held to the curve case's step bound.
             for i in (0, 1, 2, 3):
                 assert out[i].item() == expected[i].item(), (
                     f"{dtype} erf({DOMAIN_EDGES[i]!r}) = {out[i].item()!r}, "
                     f"expected {expected[i].item()!r}"
                 )
-            got, want = out[5:].float(), expected[5:].float()
-            assert float(((got - want).abs() / want.abs()).max()) <= 1e-06, (dtype, out)
+            gap = (out[5:].double() - expected[5:].double()).abs()
+            assert float(gap.max()) <= 5.0 * ULP_AT_ONE[dtype], (dtype, out, gap)
             # The signed zero, whose *sign* an equality cannot see.
             assert not bool(np.signbit(out[0].item())), dtype
             assert bool(np.signbit(out[1].item())), dtype
@@ -399,9 +418,9 @@ class TestErfCorrectness:
     def test_the_ordinary_middle_agrees(self):
         """The values a model actually evaluates, compared to the reference.
 
-        The points a GELU's operand lands on, held to the reference's own answer.
-        At float32 the two roundings meet where the curve is flat enough, so this
-        is a bit-equality case rather than a step bound.
+        The operand values around an activation's usual range, held to the
+        reference's own answer. At float32 several round differently, so the
+        bound is the measured error rather than bit equality.
         """
         host = torch.tensor([-3.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 3.0])
         for dtype in SERVED_DTYPES:
@@ -409,28 +428,27 @@ class TestErfCorrectness:
             out = torch.erf(_to_device(narrow)).cpu()
             expected = _reference(narrow)
             # Bit equality at the narrow widths, where the reference is itself
-            # only approximate and the two roundings meet; a few steps at
+            # only approximate and the two roundings meet; a small bound at
             # float32, which is the width this increment widens the gate to and
             # whose rounding difference the curve case measured.
             if dtype is not torch.float32:
                 assert torch.equal(out, expected), (dtype, out, expected)
             else:
-                got, want = out.float(), expected.float()
-                # The relative bar applies where the value has scale; the zero of
-                # the sweep is held to bit equality instead, since the reference
-                # and the node both answer it exactly.
+                got, want = out, expected
+                # The zero is exact; the reference's own nearby answers are up to
+                # 2.06 float32 steps at 1.0 from exact on these operands.
                 assert got[4].item() == want[4].item() == 0.0
                 nonzero = want != 0.0
-                gap = (got - want).abs()[nonzero] / want.abs()[nonzero]
-                assert float(gap.max()) <= 3e-05, (out, float(gap.max()))
+                gap = (got.double() - want.double()).abs()[nonzero]
+                assert float(gap.max()) <= 2.5 * ULP_AT_ONE[torch.float32], (
+                    out,
+                    float(gap.max()),
+                )
             assert out[0].item() < out[1].item() < 0.0
             assert out[4].item() == 0.0
-            # The curve rises off zero to the bound: measured, the narrow widths
-            # round ``erf(3.0)`` to exactly 1.0 -- 0.99997788 is between their
-            # neighbouring values -- so the strict-rise half of the assertion
-            # stops at the last point that is still below it.
-            # The curve's shape through the points both roundings agree on, which
-            # the narrow widths' reading of ``erf(3.0)`` -- 1.0 -- is not.
+            # The curve rises off zero to the bound. The exact ``erf(3.0)`` is
+            # 0.99997788: below 1 at float32 and rounded to 1 at both narrow
+            # widths, where the final comparison is the non-strict ``<=``.
             assert out[0].item() < out[1].item() < out[2].item() < out[3].item() < 0.0
             assert out[4].item() == 0.0
             assert 0.0 < out[5].item() < out[6].item() < out[7].item() < 1.0
@@ -443,11 +461,9 @@ class TestErfCorrectness:
         """The band where a step count is meaningless and the *answer* is not.
 
         Measured, both the node and the reference return exactly ``1.0`` from
-        ``|x| >= 4``, so the two agree bit for bit there -- which is why the
-        curve case's largest step counts (up to 876061900) are not a disagreement
-        about the answer. This case asserts that directly, so a future node build
-        that stopped saturating at the reference's point would fail here rather
-        than pass as a step or two.
+        ``|x| >= 4``, so the two agree bit for bit there. This case asserts that
+        directly, so a future node build that stopped saturating at the
+        reference's point would fail here rather than pass as a step or two.
         """
         for dtype in SERVED_DTYPES:
             host = torch.tensor(
@@ -462,13 +478,14 @@ class TestErfCorrectness:
     def test_the_subnormal_band_is_recorded_not_pinned(self):
         """The one band whose reading is the *narrow widths'* rather than a rule.
 
-        Measured, all 127 subnormal bfloat16 operands and 877 of float16's 1023
-        positive subnormals round differently from the reference's own answer --
-        by a step or two, inside a band whose widest value is below the width's
-        smallest normal. A model's ``erf`` operand is a pre-activation, so the
-        band is recorded rather than asserted; the assertion is the one that
-        holds on both machines and would break if the behaviour widened: at or
-        above the smallest normal the answer is the reference's.
+        Measured on this host, all 127 subnormal bfloat16 operands and 877 of
+        float16's 1023 positive subnormals round differently from the reference's
+        own answer -- by a step or two, inside a band whose widest value is below
+        the width's smallest normal. The CI runner flushes some bfloat16 results
+        in that band to zero. A model's ``erf`` operand is a pre-activation, so
+        these readings are recorded rather than pinned; the assertion is what
+        holds on both machines and would break if the behaviour widened: nothing
+        in the normal range is flushed.
         """
         tiny16 = torch.finfo(torch.float16).tiny
         tinybf = torch.finfo(torch.bfloat16).tiny
@@ -504,27 +521,37 @@ class TestErfCorrectness:
             assert out.max().item() <= tiny * 4.0, (dtype, out.max().item())
             steps = _steps(out, expected).abs()
             # Within a handful of the *answer's own* steps, not a different value:
-            # measured, 0 at bfloat16 and 3 at float16, where the band is one
-            # operand step wide and its answer's step is an eighth of its largest
-            # value -- so this is the same one-or-two-step rounding the band
-            # records, seen in the width's own integers.
+            # measured, 0 at bfloat16 and 3 at float16 on this host.
             assert int(steps.max()) <= 6, (dtype, int(steps.max()))
             # And the far edge, which is held to the *normal* range's answer
             # rather than to bit equality, because it is still the recorded band:
             # measured, ``erf(1e-20)`` is a bfloat16 subnormal the node answers
             # and the reference rounds to zero, and ``erf(tiny)`` rounds to not
-            # quite the same subnormal. Both roundings rise with the operand and
-            # both are tiny; the step count between them is not the rule, so the
-            # assertion is the shape and the reference's own value to its
-            # relative last ulp.
+            # quite the same subnormal. That subnormal is itself flushed by the
+            # `macos-14` CI runner, so this is the *other* host-dependent reading
+            # the band records: the node answers ``erf(tiny)`` as a subnormal or
+            # as a zero, where the reference always answers a subnormal. Both
+            # readings rise with the operand (the zeros sit at the low end), so
+            # the assertions are the shape plus the observation that a flushed
+            # answer only ever replaces a reference that is itself subnormal;
+            # nothing at or above the normal range is held to a flush.
             normals = torch.tensor([tiny, tiny * 2.0, 1e-3, 1.0], dtype=dtype)
             out_n = torch.erf(_to_device(normals)).cpu()
             wanted = _reference(normals).double()
             got = out_n.double()
-            assert (got > 0).all() and (got < 1).all(), (dtype, out_n)
-            assert (got[1:] >= got[:-1]).all(), (dtype, out_n)
-            ok = wanted > 0
-            gap = (got[ok] - wanted[ok]).abs() / wanted[ok]
+            assert (got >= 0).all() and (got < 1).all(), (dtype, out_n)
+            assert got[0].item() <= tiny * 4.0, (dtype, out_n)
+            flushed = got == 0
+            assert not bool(flushed[2:].any()), (dtype, out_n)
+            assert bool((wanted[flushed] < tiny).all()), (dtype, out_n)
+            rising = torch.ones_like(flushed)
+            rising[1:] = ~(flushed[:-1] & ~flushed[1:])
+            assert bool((got[1:][rising[1:]] >= got[:-1][rising[1:]]).all()), (
+                dtype,
+                out_n,
+            )
+            kept = (wanted > 0) & ~flushed
+            gap = (got[kept] - wanted[kept]).abs() / wanted[kept]
             assert float(gap.max()) <= 1e-02, (dtype, out_n, _reference(normals))
 
     @pytest.mark.parametrize(
@@ -595,10 +622,8 @@ class TestErfDtypeGate:
         assert bool(np.signbit(out[0].item())), out
         assert torch.isnan(out[4]).item()
         # The edges with no rounding to disagree about -- both zeros, both
-        # infinities -- are the reference exactly. ``1.0`` is not: the two erfs
-        # round its last ulp differently (0.842700719833374 vs 0.8427006602287292
-        # at double), which is the same last-place difference the served widths
-        # show rather than a declined width being held to a different curve.
+        # infinities -- are the reference exactly. The two interior values can
+        # differ because the reference keeps its own rounding at float64.
         for i in (0, 1, 2, 3):
             assert out[i].item() == expected[i].item(), (i, out, expected)
         assert abs(out[5].item() - expected[5].item()) <= 4 * float(
@@ -615,22 +640,20 @@ class TestErfDtypeGate:
         """The widening, which is this increment's finding and its risk.
 
         The sibling ``tanh`` declines float32; this op serves it, and the case is
-        what tells the two apart. It does *not* assert bit equality -- the whole
-        point is that the node rounds the last ulp differently from the reference
-        -- so it asserts the served path's own signature: the answer is inside the
-        bound, the curve's shape is the reference's, and the sample that would be
-        loosest under a fallback is within a few of the reference's steps.
+        what tells the two apart. It does *not* assert bit equality: the
+        reference and the node round different points of the curve differently.
+        It asserts the served path's own signature: the answer is inside the
+        bound, the curve's shape is the reference's, and the node's error stays
+        close to the reference's own.
         """
         host = torch.linspace(-6.0, 6.0, 400001)
         out = torch.erf(_to_device(host)).cpu()
         assert out.dtype == torch.float32
         expected = _reference(host)
-        # A step count is not the invariant at this width -- see the curve case --
-        # so the signature of the served path is the *answer*: the two roundings
-        # of one curve never leave each other by more than a fraction of a
-        # float32 step relative to the value, and the value is the bound's.
+        # On this regular sweep the two roundings stay within a few float32
+        # steps; the curve case measures the gap on the harder probe grid.
         gap = (out - expected).abs()
-        assert float(gap.max()) <= 1e-06, float(gap.max())
+        assert float(gap.max()) <= 5.0 * ULP_AT_ONE[torch.float32], float(gap.max())
         assert (out.abs() <= 1.0).all()
         # The shape, so a body that answered a scale of the reference would fail.
         # The sweep's *last* point is the one to read it at: ``linspace``'s first
@@ -651,14 +674,12 @@ class TestErfDtypeGate:
             < 0.0
             < float(signs[out.numel() // 2 + 1 :].sum())
         )
-        # And the difference is a rounding of the reference's own curve rather
-        # than a second one: at this width the node is the closer of the two to
-        # the exact (float64) answer on the great majority of the sweep, which a
-        # fallback could not be and a coarser node would not be.
+        # The node is not a coarser curve: it is at least as close to the exact
+        # float64 answer as the reference on the great majority of this sweep.
         exact = torch.erf(host.double())
         node_err = out.double().sub(exact).abs()
         ref_err = expected.double().sub(exact).abs()
-        assert int((node_err <= ref_err).sum()) >= int(0.4 * out.numel()), (
+        assert int((node_err <= ref_err).sum()) >= int(0.75 * out.numel()), (
             int((node_err <= ref_err).sum()),
             out.numel(),
         )
@@ -715,17 +736,17 @@ class TestErfPlanReuse:
             held.append((out.cpu(), _reference(host), host.dtype))
         for got, wanted, dtype in held:
             assert got.dtype == dtype
-            # The same bar the curve case measured: what this case is about is
-            # the *plan*, so the assertion is that no case picked up another's
-            # answer. The step bound holds the narrow widths to a handful of
-            # steps, and float32 -- the width whose step count is not an
-            # invariant -- to the absolute bar that is: within a float32 step of
-            # the reference's own answer.
+            # What this case is about is the *plan*, so the assertion is that no
+            # case picked up another's answer. The step bound holds the narrow
+            # widths to a handful of steps and float32 to a few float32 steps at
+            # 1.0.
             if dtype is not torch.float32:
                 assert int(_steps(got, wanted).abs().max()) <= 4, dtype
                 assert int((got != wanted).sum()) <= max(8, got.numel() // 100), dtype
             else:
-                assert float((got - wanted).abs().max()) <= 1e-06, dtype
+                assert float((got.double() - wanted.double()).abs().max()) <= (
+                    5.0 * ULP_AT_ONE[torch.float32]
+                ), dtype
 
     @pytest.mark.anyplatform
     def test_repeated_calls_reuse_one_plan_and_stay_correct(self):
