@@ -64,10 +64,19 @@ bool ConvSupportsDtype(at::ScalarType type) {
 
 // True when mudnn can run this configuration at all. Everything else (3D,
 // transposed, double/integral, mismatched dtypes) goes to CPU.
+//
+// The device term is load-bearing: ATen's `_convolution` Overrideable arm is the
+// only conv backend that does not call `check_input_same_type_as_parameters`, so
+// a CPU `weight`/`bias` is not refused above the kernel. Without this the raw
+// `data_ptr()` of a host tensor is handed to mudnn as device memory, which
+// faulting dereferences and poisons the context for every later op (#524).
 bool ConvSupported(
     const at::Tensor& input,
     const at::Tensor& weight,
     bool transposed) {
+  if (!input.is_privateuseone() || !weight.is_privateuseone()) {
+    return false;
+  }
   if (transposed) {
     return false;
   }
@@ -80,6 +89,15 @@ bool ConvSupported(
   }
   return ConvSupportsDtype(input.scalar_type()) &&
       input.scalar_type() == weight.scalar_type();
+}
+
+// A secondary operand (bias, grad_output) must sit on the same device as the
+// primary one it will be handed to mudnn alongside; `AddBias` reads it through
+// the same raw-pointer wrapper. An absent/undefined optional is fine.
+bool OnComputeDevice(
+    const std::optional<at::Tensor>& t,
+    const at::Tensor& primary) {
+  return !t.has_value() || !t->defined() || t->device() == primary.device();
 }
 
 // Repeats a size-1 IntArrayRef out to `spatial` entries, the way aten's
@@ -305,7 +323,8 @@ at::Tensor ConvolutionOverrideableKernelMusa(
     bool transposed,
     at::IntArrayRef output_padding,
     int64_t groups) {
-  if (!ConvSupported(input, weight, transposed)) {
+  if (!ConvSupported(input, weight, transposed) ||
+      !OnComputeDevice(bias, input)) {
     const auto bias_cpu = bias.has_value() && bias->defined()
         ? std::optional<at::Tensor>(bias->cpu())
         : std::nullopt;
@@ -394,6 +413,7 @@ ConvolutionBackwardOverrideableKernelMusa(
     int64_t groups,
     std::array<bool, 3> output_mask) {
   if (!ConvSupported(input, weight, transposed) ||
+      !grad_output.is_privateuseone() ||
       !ConvSupportsDtype(grad_output.scalar_type())) {
     auto res = at::convolution_backward(
         grad_output.cpu(),
