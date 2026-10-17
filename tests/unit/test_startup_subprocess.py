@@ -302,3 +302,25 @@ print('ok', flush=True)
 """,
         {"FLAGOS_MPS_SYNC_RUN": "1"},
     )
+
+
+def test_mps_mm_shape_sweep_reports_the_first_dying_shape():
+    """mm across a range of shapes, each in its own child, to find the boundary.
+
+    `(1,1) x (1,1)` runs clean on the runner while `(32,64) x (64,16)` dies, so
+    the trigger is not "mm" -- it is something about the shape that the small
+    case does not reach. This walks
+    shapes from the one that works toward the one that does not, one child per
+    size, so the first failure names the boundary rather than the extreme.
+    """
+    _require_mps()
+    shapes = [(1, 1, 1), (2, 2, 2), (4, 4, 4), (8, 8, 8), (16, 16, 16), (32, 16, 32)]
+    for m, k, n in shapes:
+        _probe(
+            f"""
+a = torch.randn({m}, {k}, device=dev)
+b = torch.randn({k}, {n}, device=dev)
+assert torch.mm(a, b).shape == ({m}, {n})
+print('ok', flush=True)
+"""
+        )
