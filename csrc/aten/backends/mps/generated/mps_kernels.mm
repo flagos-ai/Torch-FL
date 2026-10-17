@@ -42,6 +42,7 @@
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_batch_norm.h>
 #include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
@@ -1643,5 +1644,171 @@ at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMps, CatKernelMps)
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeBatchNormKernelMps(
+    const at::Tensor& input,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& running_mean,
+    const std::optional<at::Tensor>& running_var,
+    bool training,
+    double momentum,
+    double eps) {
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  const bool has_running_mean = running_mean.has_value() && running_mean->defined();
+  const bool has_running_var = running_var.has_value() && running_var->defined();
+  // The CPU round-trip every decline below takes, in one place. The running
+  // buffers are passed through as *host* copies for the same reason the input
+  // is: the reference updates them in place, and handing it the device tensors
+  // would write the update into Metal buffers the graph path does not own.
+  const auto round_trip = [&]() {
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    const at::Tensor host_mean = has_running_mean ? running_mean->cpu() : at::Tensor();
+    const at::Tensor host_var = has_running_var ? running_var->cpu() : at::Tensor();
+    auto host = at::native_batch_norm(
+        input.cpu(), host_weight, host_bias, host_mean, host_var, training,
+        momentum, eps);
+    // The in-place running update belongs to the caller's device tensors, so it
+    // is copied back rather than left on the host copy the reference wrote.
+    if (training && has_running_mean) {
+      running_mean->copy_(host_mean);
+    }
+    if (training && has_running_var) {
+      running_var->copy_(host_var);
+    }
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  };
+  // Training updates the running statistics in place and weights the update by
+  // the *unbiased* batch variance, neither of which the inference node does --
+  // see the block comment above. Declined rather than approximated.
+  if (training || !has_running_mean || !has_running_var) {
+    return round_trip();
+  }
+  if (!mps::MpsSupportsReduceDtype(input.scalar_type(), std::nullopt)) {
+    return round_trip();
+  }
+  // The channel axis is 1 for every rank the reference accepts; a rank below 2
+  // has no channel axis to normalise over and is the reference's own error.
+  const int64_t rank = input.dim();
+  if (rank < 2) {
+    return round_trip();
+  }
+  const int64_t channels = input.size(1);
+  if (has_weight && weight->numel() != channels) {
+    return round_trip();
+  }
+  if (has_bias && bias->numel() != channels) {
+    return round_trip();
+  }
+  if (running_mean->numel() != channels || running_var->numel() != channels) {
+    return round_trip();
+  }
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {
+    return round_trip();
+  }
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): the running statistics and the affine pair are
+  // moved to the input's device rather than described to the graph on the host,
+  // which would resolve no Metal buffer for them.
+  const auto to_device = [&](const at::Tensor& t) {
+    return t.device() == input.device() ? t.contiguous()
+                                        : t.to(input.device()).contiguous();
+  };
+  // The gamma the node broadcasts along the channel: the caller's weight when it
+  // has one, and an all-ones [C] when it does not -- because the node has no
+  // "no gamma" spelling here the way layer_norm's `nil` gamma is one. The
+  // substitute is what keeps the operand *list* fixed across a weight-less and a
+  // weighted call, so the plan cache key (which records dtypes and shapes and
+  // not values) cannot hand the first compiled graph to the second call. `beta`
+  // is the same with an all-zeros [C] for a missing bias.
+  at::Tensor weight_d = has_weight ? to_device(*weight)
+                                   : at::ones({channels}, input_c.options());
+  at::Tensor bias_d = has_bias ? to_device(*bias)
+                               : at::zeros({channels}, input_c.options());
+  at::Tensor mean_d = to_device(*running_mean);
+  at::Tensor var_d = to_device(*running_var);
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  // The reference's inference statistics are empty -- see the block comment
+  // above -- so there is nothing for the graph to write into these two. They are
+  // allocated (zero elements, on the input's device and dtype, which is the
+  // reference's own shape and placement) and returned untouched, and they are
+  // *not* listed among the graph's results: an MPSGraph result is described
+  // against an N-element buffer and MpsFlatten over zero elements is a reshape
+  // the graph rejects, so a result list carrying them would fail to build. The
+  // graph covers `out` alone.
+  at::Tensor stat_mean = at::empty({0}, input_c.options());
+  at::Tensor stat_var = at::empty({0}, input_c.options());
+  if (out.numel() == 0) {
+    return {out, stat_mean, stat_var};
+  }
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> operands{input_c, mean_d, var_d, weight_d, bias_d};
+  // The shape the mean, variance, gamma and beta operands reach the node as: one
+  // element per channel with every other axis a 1. The node's type inference
+  // requires its four statistics operands to be *broadcast compatible* with the
+  // input, and a `[C]` operand is not -- measured, the node rejects a `[2, 3, 4,
+  // 5]` input against `[3]` statistics with "output type 'tensor<2x3x4x5xf32>'
+  // and mean type 'tensor<3xf32>' are not broadcast compatible" and that abort is
+  // a process exit, not a declined node. So each of the four is reshaped in the
+  // graph, which is a metadata operation over the same buffer.
+  std::vector<int64_t> channel_shape(static_cast<size_t>(rank), 1);
+  channel_shape[1] = channels;
+  std::vector<at::Tensor> outs{out};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("native_batch_norm", eps),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {
+        // The operands arrive at their aten shapes: MpsRunGraph describes each
+        // one to the graph as the 1-D `numel` buffer the row-pitch note in
+        // mps_common.h requires and reapplies the aten shape over it before
+        // `build` is called, so `args[0]` is already the ranked input. The four
+        // statistics operands are `[C]` and are reshaped to the channel view
+        // above -- MPSGraph documents gamma and beta as broadcast along the axes
+        // they do not name ("shapes for gamma and beta must match the input data
+        // along at least one dimension and will be broadcast along the rest"),
+        // but its type inference wants a broadcast *compatible* rank rather than
+        // a trailing one, and a `[C]` operand is not that.
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* mean =
+            mps::MpsReshape(graph, args[1], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* var =
+            mps::MpsReshape(graph, args[2], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* gamma =
+            mps::MpsReshape(graph, args[3], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* beta =
+            mps::MpsReshape(graph, args[4], at::IntArrayRef(channel_shape));
+        if (mean == nil || var == nil || gamma == nil || beta == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // The inference normalisation: `(x - mean) / sqrt(var + eps) * gamma +
+        // beta` over the channel, which is exactly what the running statistics
+        // and this node express.
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:mean
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        return std::vector<MPSGraphTensor*>{y};
+      });
+  if (!ran) {
+    return round_trip();
+  }
+  return {out, stat_mean, stat_var};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kMps, NativeBatchNormKernelMps)
 
 } // namespace at::native::flagos

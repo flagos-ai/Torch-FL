@@ -487,14 +487,14 @@ def test_conf_route_counts_are_stable():
         # then ``convolution_overrideable``; stage 4 added ``silu`` and
         # ``embedding``, then ``div.Tensor``/``div.Scalar``/``reciprocal``,
         # then ``index_select``, then ``take``, then ``gather``, then
-        # ``native_layer_norm``, then ``where.self`` and ``cat``), so the conf
-        # routes those to ``mps``
+        # ``native_layer_norm``, then ``where.self`` and ``cat``, then
+        # ``native_batch_norm``), so the conf routes those to ``mps``
         # and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 26, "none": 2011},
+        "mps": {"mps": 27, "none": 2010},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

@@ -193,7 +193,7 @@ record.
 **One sentence.** `FLAGOS_ACCELERATOR=mps` serves **26** ATen overloads from
 `csrc/aten/backends/mps/` on the native PrivateUse1 `mps` key — the elementwise,
 reduction, convolution, embedding, matrix-multiply, normalisation and select
-families — with the remaining **2011** routes at `none` (`cpu_fallback`),
+families — with the remaining **2010** routes at `none` (`cpu_fallback`),
 measured overload by overload against a CPU reference on an Apple Silicon arm64
 host.
 
@@ -203,11 +203,12 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 26, none: 2011}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
+`{mps: 27, none: 2010}`: `abs`, `neg`, `silu`, `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
 `embedding`, `index_select`, `take`, `gather`, `mm`, `bmm` and
-`native_layer_norm`, `cat` and `where.self`. The backend is MPSGraph-first with a
+`native_layer_norm`, `native_batch_norm`, `cat` and `where.self`. The backend is
+MPSGraph-first with a
 hand-written Metal Shading Language fallback, and — as the name of this section
 insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
@@ -328,9 +329,70 @@ round trip yields many tensors rather than one.
 **One reported crash was a red herring and is recorded so it is not chased
 again.** An early probe blamed a segfault on `native_batch_norm` with null
 statistics; the same call aborts in plain PyTorch on *CPU* tensors, so it is
-neither this backend's nor this op's. `native_batch_norm` is the next item on
-the stage-4 list and is unrelated. Held in
+neither this backend's nor this op's. Held in
 `tests/integration/ops/test_mps_layer_norm.py` (61 cases).
+
+**`native_batch_norm` is the second three-tensor route, and it is two different
+computations behind one schema — the body branches on `training`, not on a
+tensor.** `native_batch_norm(input, weight?, bias?, running_mean?, running_var?,
+training, momentum, eps)` returns `(out, save_mean, save_invstd)`. The graph
+covers the *inference* path only, where the statistics are the running buffers
+the caller passes and the whole operation is one
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:
+epsilon:name:` node — the same node `native_layer_norm` uses, with the caller's
+running statistics in place of the graph's own reductions. Training is declined
+and takes the CPU round-trip, for a reason a forward-output comparison cannot
+see: it updates `running_mean`/`running_var` **in place** with an exponential
+moving average of the *unbiased* batch variance, and no graph node writes a
+caller's buffer. A body that served training while dropping the update would
+leave a model's running statistics frozen and still return a matching forward
+output.
+
+**Three contract details were measured against the reference rather than read
+off the header.** First, **`save_mean` and `save_invstd` in inference are
+*empty*** — shape `(0,)` on the input's device and dtype — and not the running
+statistics: measured, an inference call answers `(out, tensor([]), tensor([]))`
+while the same call with `training=True` answers two `[C]` tensors. The
+intuitive reading — the running statistics, which are right there in the
+arguments — produces a correctly-valued `out` and `[C]` statistics where the
+reference has `(0,)` ones. The empties are also *not* listed among the graph's
+results: an MPSGraph result is described against an N-element buffer and the
+auto-applied flatten over zero elements is a reshape the graph rejects, so a
+result list carrying them fails to build rather than returning them.
+
+Second, **the channel axis is 1 for every rank the reference accepts in
+inference** (rank-2, NCHW and NCDHW alike), so `weight`/`bias` are `[C]`. The
+node's type inference requires its four statistics operands to be broadcast
+*compatible* with the input and a trailing `[C]` operand is not — measured, the
+node rejects a `(2, 3, 4, 5)` input against `[3]` statistics with `output type
+'tensor<2x3x4x5xf32>' and mean type 'tensor<3xf32>' are not broadcast
+compatible`, and that is a **process exit rather than a declined build** — so all
+four are reshaped to `[1, C, 1, …]` inside the graph, which is a metadata
+operation over the same buffer. Third, **`momentum` is not an operand in
+inference**: it only weights the running update, so the graph is a function of
+`eps` alone among the host scalars and `momentum` is what the round-trip
+carries. A missing affine operand is filled with an all-ones `[C]` gamma or an
+all-zeros `[C]` beta rather than dropped, which keeps the operand *list* fixed
+across a weight-less and a weighted call — the node has no `nil` gamma spelling
+here the way `layer_norm` has one.
+
+An integral input is declined like every other reduction here, and in this case
+the reference itself has no answer: measured, `batch_norm` is not implemented
+for `Long` on the CPU either, so the round-trip is what raises the reference's
+own `NotImplementedError`. The **null-statistics call is left declined and is
+not an increment candidate**: measured, `native_batch_norm` with no running pair
+aborts in plain PyTorch on CPU tensors (rc=139, `torch_fl` not involved). The
+graph *does* have the whole thing — measured, `meanOfTensor:axes:` and
+`varianceOfTensor:meanTensor:axes:` build the batch statistics and
+`normalizationWithTensor:` accepts them — so serving that shape is a graph the
+body has not grown, not a missing node, and the test that covers it is written
+to pass on the reference's abort and to fail once the shape is served. Held in
+`tests/integration/ops/test_mps_batch_norm.py` (38 cases): CPU equality for the
+inference shapes across f32/f16/bf16, the empty-statistics contract, the affine
+pair in every combination including on the host, the training path's in-place
+running update including the unbiased weighting, the dtype gate reaching the
+reference's own error, plan reuse across dtypes/`eps`/channel counts and the
+affine substitutes, the dispatch log naming `mps`, and the cost case.
 
 **`cat` is one variadic node with almost none of the reference's contract, and
 the two bugs its body hit are the two halves of the shape work.** The node is
@@ -412,11 +474,12 @@ built — even though the dispatch log still names `div.Tensor`. Only
 graph, and both spellings are pinned in `tests/integration/ops/test_mps_div.py`.
 
 **Verified with.** `tests/integration/ops/test_mps_div.py` (97 cases) plus the
-per-op suites `test_mps_binary.py`, `test_mps_cat.py`, `test_mps_conv.py`,
-`test_mps_embedding.py`, `test_mps_gather.py`, `test_mps_gemm.py`,
-`test_mps_index_select.py`, `test_mps_layer_norm.py`, `test_mps_pow.py`,
-`test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_softmax.py`,
-`test_mps_take.py`, `test_mps_unary.py` and `test_mps_where.py`, run as
+per-op suites `test_mps_batch_norm.py`, `test_mps_binary.py`, `test_mps_cat.py`,
+`test_mps_conv.py`, `test_mps_embedding.py`, `test_mps_gather.py`,
+`test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_layer_norm.py`,
+`test_mps_pow.py`, `test_mps_reduce.py`, `test_mps_silu.py`,
+`test_mps_softmax.py`, `test_mps_take.py`, `test_mps_unary.py` and
+`test_mps_where.py`, run as
 `pytest tests/integration/ops -m mps` on an Apple
 Silicon host; the per-op dtype gates and the `index_select` argument contracts
 are asserted against the CPU reference in the same tests. This is the only

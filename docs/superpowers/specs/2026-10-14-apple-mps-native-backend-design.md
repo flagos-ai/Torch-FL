@@ -725,9 +725,20 @@ check, the trailing-run and rank declines reaching the reference's own error,
 the dtype gate, plan reuse across `normalized_shape`, `eps` and the affine
 flags, the dispatch log naming `mps`, and the cost case.
 
-The remaining stage-4 work is `native_batch_norm`, which is now the next op
-rather than the layer-norm substrate this document previously predicted.
-`embedding_dense_backward` stays dropped for the reason recorded above.
+`native_batch_norm` followed as the second three-tensor route, and it landed the
+prediction this document had made about it in the opposite direction: the plan
+was a `native_batch_norm`-plus-`addcmul` composition, read off the CPU fallback,
+and the graph answers the whole inference path with the same single
+normalisation node `native_layer_norm` uses, fed the caller's running statistics
+instead of the graph's own reductions. Training is declined — it writes the
+running statistics in place and weights the update by the unbiased batch
+variance, neither of which a graph node does — and so is the null-statistics
+shape, whose reference aborts in plain PyTorch. Measured, the graph does have
+the batch statistics behind `meanOfTensor:axes:` and
+`varianceOfTensor:meanTensor:axes:`, so that shape is a body that has not grown
+rather than a node that does not exist. The increment is verified with
+`tests/integration/ops/test_mps_batch_norm.py` (38 cases). `embedding_dense_backward`
+stays dropped for the reason recorded above.
 There is still no CI job: the lane below needs a
 GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.

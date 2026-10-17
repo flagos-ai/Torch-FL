@@ -288,6 +288,12 @@ OPS = {
     # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
     # node would otherwise answer with a broadcasted wrong answer.
     "cat": "cat",
+    # The normalisation a convolutional block calls. Its inference path is one
+    # `normalizationWithTensor:...` node fed by the *running* statistics; its
+    # training path is declined, because it updates the running buffers in place
+    # with the unbiased batch variance and no graph node writes a caller's
+    # buffer. See T_BATCH_NORM.
+    "native_batch_norm": "batch_norm",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -371,6 +377,10 @@ AT_OP = {
     # reference's shape message (`Sizes of tensors must match except in dimension
     # {dim}`) and its empty-list error live.
     "cat": "cat",
+    # `native_batch_norm` is its own aten kernel, so the round-trip lands on the
+    # implementation that owns the in-place running update, the unbiased
+    # correction and the inference statistics the body has to reproduce.
+    "native_batch_norm": "native_batch_norm",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -441,6 +451,13 @@ SUPPORTS = {
     # this gate checks the one width is carryable, so a promoted or uncarryable
     # list takes the round-trip. See T_CAT.
     "cat": "MpsSupportsCatDtype",
+    # The reduction family's wall again, and for the same reason `layer_norm`'s
+    # is: `native_batch_norm` normalises over the per-channel axes exactly as
+    # `mean` and `sum` reduce, and the reference computes an integral input in
+    # float. A graph at the operand's own width cannot express that, so an
+    # integral input takes the round-trip rather than a wrong answer. See
+    # T_BATCH_NORM.
+    "batch_norm": "MpsSupportsReduceDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -528,6 +545,11 @@ CALLS = {
     # because `render` reads `CALLS[op]` for every op in OPS.
     "where.self": "",
     "cat": "",
+    # Unused: the batch_norm body builds its own node
+    # (`normalizationWithTensor:...`) and its own `save_invstd` subgraph, so it
+    # names no prefix here. The entry exists because `render` reads `CALLS[op]`
+    # for every op in OPS.
+    "native_batch_norm": "",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -662,6 +684,31 @@ KEY_PARTS = {
     # bakes the axis into the compiled graph. A body that normalised the axis and
     # left it out of the key would hand the first plan to the second call.
     "cat": ", axis",
+    # The one host value the batch_norm body bakes into the graph, and the row a
+    # reviewer has to check against it: `eps` is the constant the node adds to
+    # the running variance and the same constant the `save_invstd` subgraph
+    # shifts by. The fixed `eps` it shadows is a non-issue -- a `fixed_eps` call
+    # bakes its own value into the same key slot -- so two calls that differ only
+    # in `eps` need two graphs.
+    #
+    # `rank` and `channels` are *not* named: they are the operands' own shapes,
+    # which MpsRunGraph folds into the cache key, and the gamma/beta reshape is a
+    # function of them.
+    #
+    # `has_weight` and `has_bias` are not named either, and that is the row worth
+    # the reviewer's attention. The body always hands the node five operands --
+    # an absent affine operand becomes an all-ones (gamma) or all-zeros (beta)
+    # `[C]` tensor -- so a weight-less call and a weighted one differ in the
+    # *values* of an operand and not in the operand list the key records. A plan
+    # is compiled against the operands' dtypes and shapes and reads their
+    # contents at run time, which is what makes substituting a constant tensor
+    # for a missing one sound here and is also why the two calls can share a
+    # graph.
+    #
+    # `momentum` is not read on this path at all: the graph covers inference
+    # only, and `momentum` weights the running update that only the training path
+    # performs. See T_BATCH_NORM.
+    "native_batch_norm": ", eps",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -2422,6 +2469,236 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 #     a (4, 1) condition against (4, 5) branches answers (4, 5). The body infers
 #     it over all three and lets the node broadcast, and a triple that cannot
 #     broadcast takes the round-trip so the reference raises.
+#
+# `native_batch_norm` is the normalisation a convolutional block calls, and the
+# second body here that answers with more than one tensor:
+# `native_batch_norm(input, weight?, bias?, running_mean?, running_var?,
+# training, momentum, eps)` returns `(out, save_mean, save_invstd)`.
+#
+# **It is two different computations behind one schema, and the body has to
+# branch on `training` because the difference is not a keyword argument but a
+# different set of sources for the mean and variance.**
+#
+#   * **Inference** (`training == false`): the statistics are the *running*
+#     ones the caller passes, so the graph is one `normalizationWithTensor:...`
+#     node whose mean and variance operands are the running buffers. Nothing is
+#     reduced, and `save_mean`/`save_invstd` are the running statistics the
+#     reference returns (see below).
+#   * **Training** (`training == true`): the statistics are the *batch* ones --
+#     `mean` and the biased (`unbiased=False`) variance over the per-channel
+#     axes -- and the reference also **updates `running_mean`/`running_var`
+#     in place** with an exponential moving average. That update is the reason
+#     this body is not simply "the same node with different feeds": the graph
+#     cannot write the caller's buffers, so a training call is *declined* and
+#     takes the round-trip, which is where the in-place update, the unbiased
+#     running-variance correction (`momentum` weights the *unbiased* variance,
+#     `count/(count-1)` -- a correction neither the node nor any single
+#     reduction here applies) and the exact `save_mean`/`save_invstd` semantics
+#     all live. Serving training while dropping the update would leave a model's
+#     running statistics frozen at their initial values, which is a wrong answer
+#     that a forward-output comparison cannot see.
+#
+# So the graph covers the inference path, which is what `model.eval()` presents
+# and what an inference server runs; training stays on the reference.
+#
+# Three contract details the inference path has to get right, each measured
+# against the reference rather than read off the header:
+#
+#   * **`save_mean` and `save_invstd` in inference are *empty* tensors**, shape
+#     `(0,)` on the input's device and dtype -- not the running statistics and
+#     not the batch ones. Measured: `native_batch_norm(x, w, b, rm, rv,
+#     training=False, ...)` on the reference answers `(out, tensor([]),
+#     tensor([]))`, while the same call with `training=True` answers two `[C]`
+#     tensors. The reason is that the two results are the *batch* statistics the
+#     backward pass consumes, and an inference call has none; a body that filled
+#     them with the running statistics -- the intuitive reading, and what this
+#     body originally did -- hands back a `[C]` tensor where the reference hands
+#     back an empty one, which a shape check sees and a forward comparison does
+#     not. The reference's empties are freshly allocated, so the graph path can
+#     allocate its own empties here; there is nothing to write into them.
+#   * **The channel axis is 1** for every rank the reference accepts (NCHW and
+#     NCDHW alike), so `weight` and `bias` reach the node as their own `[C]`
+#     selves and the node broadcasts them along the rest. MPSGraph documents
+#     exactly this ("Shapes for gamma and beta must match the input data along
+#     at least one dimension and will be broadcast along the rest"), and the
+#     body checks the length is `channels` rather than describing a reshaped
+#     operand -- a length that disagrees is the reference's error, not a
+#     broadcast to be guessed at.
+#   * **`momentum` is not an operand in inference.** It only weights the running
+#     update, which is the part this body declines, so the inference graph is a
+#     function of `eps` alone among the host scalars.
+#
+# The dtype gate is the reduction family's: an integral input is declined like
+# every other reduction here, because the reference computes it in float and a
+# graph at the operand's own width cannot express that.
+T_BATCH_NORM = """\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& input,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& running_mean,
+    const std::optional<at::Tensor>& running_var,
+    bool training,
+    double momentum,
+    double eps) {{
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  const bool has_running_mean = running_mean.has_value() && running_mean->defined();
+  const bool has_running_var = running_var.has_value() && running_var->defined();
+  // The CPU round-trip every decline below takes, in one place. The running
+  // buffers are passed through as *host* copies for the same reason the input
+  // is: the reference updates them in place, and handing it the device tensors
+  // would write the update into Metal buffers the graph path does not own.
+  const auto round_trip = [&]() {{
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    const at::Tensor host_mean = has_running_mean ? running_mean->cpu() : at::Tensor();
+    const at::Tensor host_var = has_running_var ? running_var->cpu() : at::Tensor();
+    auto host = at::{at_op}(
+        input.cpu(), host_weight, host_bias, host_mean, host_var, training,
+        momentum, eps);
+    // The in-place running update belongs to the caller's device tensors, so it
+    // is copied back rather than left on the host copy the reference wrote.
+    if (training && has_running_mean) {{
+      running_mean->copy_(host_mean);
+    }}
+    if (training && has_running_var) {{
+      running_var->copy_(host_var);
+    }}
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  }};
+  // Training updates the running statistics in place and weights the update by
+  // the *unbiased* batch variance, neither of which the inference node does --
+  // see the block comment above. Declined rather than approximated.
+  if (training || !has_running_mean || !has_running_var) {{
+    return round_trip();
+  }}
+  if (!mps::{supports}(input.scalar_type(), std::nullopt)) {{
+    return round_trip();
+  }}
+  // The channel axis is 1 for every rank the reference accepts; a rank below 2
+  // has no channel axis to normalise over and is the reference's own error.
+  const int64_t rank = input.dim();
+  if (rank < 2) {{
+    return round_trip();
+  }}
+  const int64_t channels = input.size(1);
+  if (has_weight && weight->numel() != channels) {{
+    return round_trip();
+  }}
+  if (has_bias && bias->numel() != channels) {{
+    return round_trip();
+  }}
+  if (running_mean->numel() != channels || running_var->numel() != channels) {{
+    return round_trip();
+  }}
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {{
+    return round_trip();
+  }}
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): the running statistics and the affine pair are
+  // moved to the input's device rather than described to the graph on the host,
+  // which would resolve no Metal buffer for them.
+  const auto to_device = [&](const at::Tensor& t) {{
+    return t.device() == input.device() ? t.contiguous()
+                                        : t.to(input.device()).contiguous();
+  }};
+  // The gamma the node broadcasts along the channel: the caller's weight when it
+  // has one, and an all-ones [C] when it does not -- because the node has no
+  // "no gamma" spelling here the way layer_norm's `nil` gamma is one. The
+  // substitute is what keeps the operand *list* fixed across a weight-less and a
+  // weighted call, so the plan cache key (which records dtypes and shapes and
+  // not values) cannot hand the first compiled graph to the second call. `beta`
+  // is the same with an all-zeros [C] for a missing bias.
+  at::Tensor weight_d = has_weight ? to_device(*weight)
+                                   : at::ones({{channels}}, input_c.options());
+  at::Tensor bias_d = has_bias ? to_device(*bias)
+                               : at::zeros({{channels}}, input_c.options());
+  at::Tensor mean_d = to_device(*running_mean);
+  at::Tensor var_d = to_device(*running_var);
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  // The reference's inference statistics are empty -- see the block comment
+  // above -- so there is nothing for the graph to write into these two. They are
+  // allocated (zero elements, on the input's device and dtype, which is the
+  // reference's own shape and placement) and returned untouched, and they are
+  // *not* listed among the graph's results: an MPSGraph result is described
+  // against an N-element buffer and MpsFlatten over zero elements is a reshape
+  // the graph rejects, so a result list carrying them would fail to build. The
+  // graph covers `out` alone.
+  at::Tensor stat_mean = at::empty({{0}}, input_c.options());
+  at::Tensor stat_var = at::empty({{0}}, input_c.options());
+  if (out.numel() == 0) {{
+    return {{out, stat_mean, stat_var}};
+  }}
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> operands{{input_c, mean_d, var_d, weight_d, bias_d}};
+  // The shape the mean, variance, gamma and beta operands reach the node as: one
+  // element per channel with every other axis a 1. The node's type inference
+  // requires its four statistics operands to be *broadcast compatible* with the
+  // input, and a `[C]` operand is not -- measured, the node rejects a `[2, 3, 4,
+  // 5]` input against `[3]` statistics with "output type 'tensor<2x3x4x5xf32>'
+  // and mean type 'tensor<3xf32>' are not broadcast compatible" and that abort is
+  // a process exit, not a declined node. So each of the four is reshaped in the
+  // graph, which is a metadata operation over the same buffer.
+  std::vector<int64_t> channel_shape(static_cast<size_t>(rank), 1);
+  channel_shape[1] = channels;
+  std::vector<at::Tensor> outs{{out}};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {{
+        // The operands arrive at their aten shapes: MpsRunGraph describes each
+        // one to the graph as the 1-D `numel` buffer the row-pitch note in
+        // mps_common.h requires and reapplies the aten shape over it before
+        // `build` is called, so `args[0]` is already the ranked input. The four
+        // statistics operands are `[C]` and are reshaped to the channel view
+        // above -- MPSGraph documents gamma and beta as broadcast along the axes
+        // they do not name ("shapes for gamma and beta must match the input data
+        // along at least one dimension and will be broadcast along the rest"),
+        // but its type inference wants a broadcast *compatible* rank rather than
+        // a trailing one, and a `[C]` operand is not that.
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* mean =
+            mps::MpsReshape(graph, args[1], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* var =
+            mps::MpsReshape(graph, args[2], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* gamma =
+            mps::MpsReshape(graph, args[3], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* beta =
+            mps::MpsReshape(graph, args[4], at::IntArrayRef(channel_shape));
+        if (mean == nil || var == nil || gamma == nil || beta == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // The inference normalisation: `(x - mean) / sqrt(var + eps) * gamma +
+        // beta` over the channel, which is exactly what the running statistics
+        // and this node express.
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:mean
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        return std::vector<MPSGraphTensor*>{{y}};
+      }});
+  if (!ran) {{
+    return round_trip();
+  }}
+  return {{out, stat_mean, stat_var}};
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 T_WHERE = """\
 at::Tensor {kernel}(
     const at::Tensor& condition,
@@ -2674,6 +2951,7 @@ CATEGORIES = {
     "layer_norm": T_LAYER_NORM,
     "where": T_WHERE,
     "cat": T_CAT,
+    "batch_norm": T_BATCH_NORM,
 }
 
 FILE_HEADER = """\
@@ -2721,6 +2999,7 @@ FILE_HEADER = """\
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_batch_norm.h>
 #include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
@@ -2820,13 +3099,29 @@ def render():
                 # The conv body's own reading of the optional bias, as a C++
                 # literal. Every other template ignores it.
                 has_bias="has_bias",
-                # The layer_norm body's two optional operands, read positionally
-                # out of the operands it built: input is args[0], weight is
-                # args[1] when it is present, and bias follows it. The absent
-                # case is the `nil` the node's own `_Nullable` gamma and beta
-                # document, so both spellings are one graph shape.
-                gamma="has_weight ? args[1] : nil",
-                beta="has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil)",
+                # The two optional operands the normalisation bodies read out of
+                # their own operand lists, as C++ literals.
+                #
+                # layer_norm builds `{input, weight?, bias?}` and passes the
+                # missing affine operands to the node as the `nil` its own
+                # `_Nullable` gamma and beta document, so both spellings are one
+                # graph shape.
+                #
+                # batch_norm builds `{input, mean, var, weight, bias}` and always
+                # fills the last two -- an absent affine operand becomes a
+                # constant tensor of the channel shape rather than a missing
+                # feed -- so gamma and beta are the two *trailing* entries of
+                # that list, unconditionally.
+                gamma=(
+                    "args[3]"
+                    if category == "batch_norm"
+                    else "has_weight ? args[1] : nil"
+                ),
+                beta=(
+                    "args[4]"
+                    if category == "batch_norm"
+                    else "has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil)"
+                ),
             )
         )
         covered.append((op, category))

@@ -29,6 +29,7 @@
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);
   m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("native_batch_norm", WrapperNativeBatchNorm);
   m.impl("native_layer_norm", WrapperNativeLayerNorm);
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
