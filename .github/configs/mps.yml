@@ -40,6 +40,7 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/mps/
+  - torch_fl/accelerator/_vendor_libtorch.py
   - torch_fl/configs/backends_mps.conf
   - csrc/aten/backends/mps/
   - csrc/runtime/accelerator/mps/

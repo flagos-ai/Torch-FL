@@ -56,7 +56,10 @@ classifiers = [
 # Declared dynamic so setup.py can drop flag_gems/triton on platforms built in
 # pure-boxing mode (FLAGOS_ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
 # is the wrong artifact — DTK ships its own. See _install_requires() in setup.py.
-dynamic = ["version", "dependencies", "requires-python"]
+# entry-points is dynamic so setup.py can omit it from the MPS wheel. PyTorch's
+# device-backend autoload runs at the end of `import torch`; on macOS that would
+# register flagos before a program that only wants torch.backends.mps says so.
+dynamic = ["version", "dependencies", "requires-python", "entry-points"]
 
 [project.optional-dependencies]
 dev = [
@@ -72,14 +75,6 @@ dev = [
 # extra could not have worked where it was not: `flagcx` is not on PyPI, and the
 # build is per-vendor (`0.14.0rc2.post2+dtk2604`). The four platforms without a
 # pin have no FlagCX build at all and fall back to the NCCL-shaped route.
-
-[project.entry-points."torch.backends"]
-# PyTorch calls this at the end of `import torch`, so processes torch_fl does not
-# start -- notably Inductor's parallel compile workers, which import torch and
-# triton but never torch_fl -- still get the flagos device registered. Without it
-# Triton's driver probe finds no active GPU backend in the worker and cold
-# compiles fail. See torch_fl/_autoload.py.
-torch_fl = "torch_fl._autoload:init"
 
 [tool.setuptools.packages.find]
 where = ["."]

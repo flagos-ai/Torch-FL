@@ -38,6 +38,12 @@ pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 FLAGOS_ACCELERATOR=mps pip install --no-build-isolation -e .
 ```
 
+An editable install creates `torch_fl.egg-info` beside the source tree. Use a
+separate checkout for each accelerator: an egg-info left by a vendor build
+would put that build's `torch.backends` entry point into a later MPS editable
+install. The MPS build rejects that stale metadata and asks you to remove it;
+for a regular wheel built with `python -m build`, no source egg-info is needed.
+
 There is **no vendor SDK to point at** and **no package-index lane**: Apple
 supplies the Metal stack with the operating system, and no FlagOS lane publishes
 an Apple wheel. The MPS wheel therefore declares only `torch` and `packaging`
@@ -64,12 +70,26 @@ whose `project_languages` includes `OBJCXX`.
 
 ## Verification
 
+An MPS installation deliberately has no `torch.backends` autoload entry point.
+A bare `import torch` keeps Apple's MPS backend active; use an explicit
+`import torch_fl` when you want the native `flagos` backend:
+
+```python
+import torch
+
+assert "torch_fl" not in __import__("sys").modules
+assert torch.accelerator.current_accelerator(False).type == "mps"
+x = torch.ones(3, device="mps", requires_grad=True)
+(x * x).sum().backward()                  # pure MPS: [2., 2., 2.]
+```
+
 Import and check the device runtime:
 
 ```python
 import torch, torch_fl
 from torch_fl import flagos
 
+print(torch._C._get_privateuse1_backend_name())  # flagos
 print(flagos.device_count())     # 1 on an Apple GPU, 0 without one
 print(flagos.is_available())
 
@@ -82,6 +102,14 @@ print(y.cpu())                   # host/device copy round trip
 z = torch.tensor([-3.5, 0.0, 2.25], device="flagos:0")
 print(torch.abs(z).cpu())        # the MPSGraph operator layer
 ```
+
+Explicit import makes both backends usable in one process. MPS and `flagos`
+forward work independently, and tensors round-trip between them. MPS autograd
+still stops at the PyTorch 2.10 engine's
+`opt_ready_stream && opt_parent_stream` assertion once `flagos` has claimed
+`PrivateUse1`; see design document section 10. Use the pure MPS path above for
+MPS training until PyTorch fixes that engine contract. Do not work around it
+with boxing or by patching PyTorch's native libraries.
 
 The stage-0 gate -- allocate, host/device copy, stream and event
 synchronization, allocator reuse -- is exercised by:

@@ -1004,6 +1004,29 @@ class BuildExtWithCmake(_build_ext):
 class EditableWheelWithCmake(_editable_wheel):
     """PEP 660 editable installs must build native libs (pip often skips build_ext)."""
 
+    def _find_egg_info_dir(self):
+        """Keep a selected MPS installation free of a stale autoload hook.
+
+        Setuptools copies an egg-info it finds beside the source into the
+        editable wheel. An egg-info left by an earlier build of another
+        accelerator can therefore add that accelerator's ``torch.backends``
+        entry point to a metadata-only MPS install. The source directory is not
+        a valid double-build location for an editable MPS install; build one
+        wheel per accelerator in a separate checkout.
+        """
+        if FLAGOS_ACCELERATOR != "mps":
+            return super()._find_egg_info_dir()
+
+        project = self.distribution.get_name().replace("-", "_")
+        egg_info = os.path.join(BASE_DIR, f"{project}.egg-info")
+        if os.path.isdir(egg_info):
+            raise RuntimeError(
+                f"{egg_info} was produced by another build. Remove it before "
+                "editable-installing FLAGOS_ACCELERATOR=mps; otherwise its "
+                "torch.backends entry point would autoload flagos."
+            )
+        return None
+
     def run(self):
         self.run_command("build_ext")
         super().run()
@@ -1165,7 +1188,7 @@ def _get_setup_kwargs():
     if local:
         version = f"{version}+{local}"
 
-    return dict(
+    kwargs = dict(
         name="torch_fl",
         version=version,
         description="FlagGems operators as a custom PyTorch device (flagos)",
@@ -1193,6 +1216,26 @@ def _get_setup_kwargs():
         # (_install_requires), and `pip install torch_fl[cuda]` is unaffected --
         # it never resolved to anything.
     )
+    if FLAGOS_ACCELERATOR == "mps":
+        # A bare import of PyTorch must leave torch.backends.mps as the active
+        # accelerator. The MPS build has no device-backend autoload consumer:
+        # it uses no FlagTree compile workers, and every user of the native
+        # flagos backend imports torch_fl explicitly. Omitting the entry point
+        # also keeps the two PrivateUse1 backends independent in a process that
+        # only asks for MPS. pyproject.toml lists entry-points as dynamic, so
+        # this omission is part of the wheel metadata rather than a runtime
+        # check.
+        kwargs["entry_points"] = {}
+    else:
+        # pyproject.toml must declare entry-points dynamic for the MPS branch
+        # above. An *empty* static table there still installs the `torch_fl`
+        # console script; restore the source's own table for every other wheel.
+        kwargs["entry_points"] = {
+            "torch.backends": [
+                "torch_fl = torch_fl._autoload:init",
+            ]
+        }
+    return kwargs
 
 
 # NVIDIA CUDA runtime libs that the bundled libtorch_cuda.so (cu12.x) links

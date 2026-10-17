@@ -45,17 +45,27 @@ def _require_torch():
         pytest.skip("PyTorch and a built torch_fl are needed for subprocess tests")
 
 
-def _require_torch_first_supported():
+def _build_accelerator():
     _require_torch()
     spec = importlib.util.find_spec("torch_fl")
     assert spec is not None and spec.origin, "torch_fl package is not installed"
     detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
-    if detector["build_accelerator"]() != "cuda":
+    return detector["build_accelerator"]()
+
+
+def _require_torch_first_supported():
+    if _build_accelerator() != "cuda":
         pytest.skip("Vendor libtorch overlays require torch_fl before torch")
+
+
+def _require_autoload():
+    if _build_accelerator() == "mps":
+        pytest.skip("MPS deliberately leaves bare import torch on the MPS backend")
 
 
 def test_minimal_import_and_explicit_repeated_activation():
     _require_torch()
+    _require_autoload()
     _run(
         """
 import torch_fl
@@ -86,6 +96,7 @@ assert first_status == 'active' or first_status.startswith('failed:'), first_sta
 
 def test_full_profile_activates_framework_hooks_during_import():
     _require_torch()
+    _require_autoload()
     _run(
         """
 import torch_fl
@@ -166,11 +177,7 @@ else:
 
 
 def _require_mps():
-    _require_torch()
-    spec = importlib.util.find_spec("torch_fl")
-    assert spec is not None and spec.origin, "torch_fl package is not installed"
-    detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
-    if detector["build_accelerator"]() != "mps":
+    if _build_accelerator() != "mps":
         pytest.skip("This check needs an MPS build")
 
 

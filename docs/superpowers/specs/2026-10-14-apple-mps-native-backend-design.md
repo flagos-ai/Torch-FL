@@ -1283,10 +1283,33 @@ directories must land together or unit tests fail.
 - **`MTLSharedEvent` timing.** `EventElapsedTime` has no direct Metal analogue;
   the `GPUStartTime`/`GPUEndTime` approach needs to be validated against a known
   duration.
-- **Coexistence with `torch.backends.mps`.** Both the `flagos` PrivateUse1
-  device and torch's own MPS backend will be live in the same process on a Mac.
-  They own separate command queues and allocations, so dispatch should not
-  conflict, but this needs an explicit test (import both, run on both).
+- **Coexistence with `torch.backends.mps`.** Registering `flagos` on
+  `PrivateUse1` makes `at::getAccelerator()` report `PrivateUse1`. In PyTorch
+  2.10, `torch::autograd::Node::stream()` asks that global accelerator for the
+  node's ready stream, and finds MPS input metadata with a ready stream but no
+  parent stream. The autograd engine asserts:
+
+  ```text
+  opt_ready_stream && opt_parent_stream INTERNAL ASSERT FAILED
+  at torch/csrc/autograd/engine.cpp
+  ```
+
+  The check in PyTorch 2.13 (`cf30153c4c131c8164ee7798e5022d810682e2cb`) still
+  searches only the global accelerator type's input metadata, so a newer
+  version alone is not the remedy. A process with only `import torch` runs
+  MPS backward, because `at::getAccelerator()` still reports MPS; explicitly
+  importing `torch_fl` changes that result. Forward dispatch, copies, streams
+  and the thirty-four native ops continue to work on both backends in one
+  process. MPS backward remains blocked until upstream autograd either matches
+  the node's actual device type or handles MPS stream metadata when another
+  accelerator claims `PrivateUse1`.
+
+  The MPS distribution therefore omits the `torch.backends` autoload entry
+  point. A bare `import torch` stays on the pure MPS path; an explicit
+  `import torch_fl` selects `flagos`. The integration tests cover both fresh
+  processes. Boxing, replacing the MPS stream metadata, or patching PyTorch's
+  native library sidesteps the engine contract and is not accepted as a
+  backend fix.
 - **The device copy is slower than it should be.** Materialising a strided
   operand on the device -- `w_t.contiguous()` -- measured 84.6 ms against the
   10.4 ms `torch.mps` needs for the same copy, so the fallback is 7-12x the
