@@ -279,10 +279,10 @@ OPS = {
     # points where their roundings differ, and its error is at most 1.64 steps
     # at 1.0 against the reference's 4.14. It can be farther by up to 0.98 of a
     # step where the reference error is material on that host. The CI runner
-    # orders the closer points differently, so the gate is the host-stable
-    # bound: at most two steps of node error, and one step of material excess.
-    # See MpsSupportsErfDtype for the measurement and for why the two serve
-    # different width lists.
+    # orders the closer points differently and its absolute error is larger, so
+    # the test holds both hosts to five steps from the reference and checks that
+    # float32 dispatches to MPS. See MpsSupportsErfDtype for the measurement and
+    # for why the two serve different width lists.
     #
     # Only `erf` is registered. `erf.out` and `erf_` write into a tensor the
     # caller owns, like every other `.out`/inplace spelling on this backend, and

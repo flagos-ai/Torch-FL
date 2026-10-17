@@ -464,12 +464,10 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // The node's error can exceed the reference's on some points; where the
   // reference error is above half a step, the excess is at most 0.98 of a step
   // on that host. The hosted macos-14 runner's node orders the closer points
-  // differently; the node's error from the exact curve stays within two steps,
-  // and its excess over the reference where that error is material within one
-  // step. The exact-curve bound is a property of the node; the excess bound is
-  // asserted only where the reference has an error to rank against. A tanh that
-  // is ~100x off the exact answer at every scale of the curve is the different
-  // failure.
+  // differently, and its error from exact reaches 4.14 steps. The suite therefore
+  // keeps the five-step gap from the reference that both hosts satisfy rather
+  // than pinning either host's ranking. A tanh that is ~100x off the exact
+  // answer at every scale of the curve is the different failure.
   //
   // The bit-level reading gives the bound. The node agrees with the reference
   // bit for bit on 249310 of 498299 probe points, and its largest gap is 4.19

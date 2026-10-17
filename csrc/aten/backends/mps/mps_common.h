@@ -587,16 +587,16 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 //     node is closer on 63.3% of the points where the two differ. Where the
 //     reference error is above half a step, the node's error can be larger,
 //     but by at most 0.98 of a step on that host. The hosted macos-14 runner
-//     orders the closer points differently. Both hosts keep the node within
-//     two steps of exact, with at most one step of excess where the reference
-//     error is material.
+//     orders the closer points differently and its node's error from exact
+//     reaches 4.14 steps; both hosts stay within five steps of at::erf.
 //
 // A "distance of a few float32 steps at 1.0" is larger than "last ulp", but it
 // is a bounded error against a reference that has an error of its own. The
-// node's excess over the reference is bounded on both measured hosts; both are
+// node's gap from the reference is bounded on both measured hosts; both are
 // valid erf implementations. A tanh that is ~100x off the exact answer at every
 // scale is the different, coarser failure that declined the sibling. The test
-// pins the host-stable bounds rather than either host's share of closer points.
+// pins the host-stable gap and the float32 dispatch rather than either host's
+// share of closer points.
 //
 // The domain's edges are reproduced exactly at all three widths, and unlike
 // `tanh` there is no guard to add: measured, the bare node propagates a NaN at
