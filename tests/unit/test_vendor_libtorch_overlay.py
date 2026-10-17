@@ -33,7 +33,13 @@ CORE = ("libc10.so", "libtorch_cpu.so")
 @pytest.fixture
 def preimport_state(monkeypatch):
     """This module runs before torch is imported in real vendor startup."""
-    import torch
+    torch = sys.modules.get("torch")
+    if torch is None:
+        if importlib.util.find_spec("torch") is None:
+            pytest.skip(
+                "This check needs PyTorch to restore it after the pre-import state"
+            )
+        import torch
 
     for name in ("torch", "torch_fl"):
         monkeypatch.delitem(sys.modules, name, raising=False)
