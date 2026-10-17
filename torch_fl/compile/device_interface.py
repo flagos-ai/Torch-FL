@@ -64,10 +64,11 @@ DEVICE_TYPE = "flagos"
 # redirected onto flagos by
 # torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). Kunlunxin
 # reaches it through FlagTree's XPU backend and, like the other two, runs with no
-# CUDA runtime at all. The distinction that matters to this module is the same
-# for all of them, so keep the checks keyed on this set rather than on a vendor
-# name.
-_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin"})
+# CUDA runtime at all. TsingMicro reaches it through FlagTree's TXDA backend, on
+# a wheel that pairs with a CPU-only torch. The distinction that matters to this
+# module is the same for all of them, so keep the checks keyed on this set rather
+# than on a vendor name.
+_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin", "tsingmicro"})
 
 
 def is_native_accelerator() -> bool:
@@ -170,6 +171,14 @@ def _raw_stream(device_idx: int) -> int:
         from torch_fl.compile.flagtree_shim import get_kunlunxin_current_raw_stream
 
         return get_kunlunxin_current_raw_stream(device_idx)
+    if profile.vendor == "tsingmicro":
+        # Unlike Ascend, handle 0 is the *right* answer here rather than a
+        # fallback: the TX runtime has one default queue per device and the eager
+        # FlagGems kernels this build already runs launch on it, so compiled and
+        # eager kernels are ordered against each other by construction.
+        from torch_fl.compile.flagtree_shim import get_tsingmicro_current_raw_stream
+
+        return get_tsingmicro_current_raw_stream(device_idx)
 
     from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream
 
@@ -193,6 +202,11 @@ def _set_stream(stream: Any) -> None:
         # The XPU runtime has one queue per device, denoted by handle 0, and the
         # stream stand-in carries it; there is no other stream to switch to.
         return
+    if profile.vendor == "tsingmicro":
+        # Same shape as kunlunxin: the TX runtime has the one default queue, and
+        # the stand-in torch.flagos.current_stream returns for it has no
+        # set_current to call.
+        return
     native.set_current()
 
 
@@ -211,6 +225,9 @@ def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> No
     if profile.vendor == "kunlunxin":
         # Single-queue device (handle 0): there is nothing else to switch to and
         # no torch stream-id registry to switch it through.
+        return
+    if profile.vendor == "tsingmicro":
+        # Same as kunlunxin: single default queue, no torch stream-id registry.
         return
     # Native ACL streams have no torch stream-id registry; the id *is* the
     # aclrtStream handle (see AclStream.stream_id), so switch on it directly.
@@ -332,6 +349,11 @@ class FlagOSDeviceInterface(DeviceInterface):
             # arch FlagTree's XPU backend compiles for from its driver, the same
             # number that backend puts in GPUTarget.arch.
             return _kunlunxin_arch()
+        if profile.vendor == "tsingmicro":
+            # Same reasoning as kunlunxin: the TX runtime reports no
+            # major/minor pair, and the number that reaches Triton as
+            # GPUTarget.arch is the one its own driver reports.
+            return _tsingmicro_arch()
         # Ascend: `cc` reaches Triton as GPUTarget.arch, and the Ascend backend
         # expects a SoC name there (e.g. "Ascend910_9382"), not a number. That is
         # what its own driver reports, so read it from the same place.
@@ -368,6 +390,10 @@ class FlagOSDeviceInterface(DeviceInterface):
                     "install Enflame's triton_gcu plugin and the /opt/triton_gcu "
                     "toolchain (see docs/vendors/gcu/installation.md)"
                 ),
+                "tsingmicro": (
+                    "install the TsingMicro FlagTree build, whose triton carries "
+                    "the 'tsingmicro' backend"
+                ),
             }.get(ACCELERATOR, "install the vendor Triton runtime")
             raise RuntimeError(
                 f"triton not built with the '{triton_backend}' backend; {hint}"
@@ -399,6 +425,23 @@ def _kunlunxin_arch(_cache: list = []) -> int:
     drift from what ``driver.active.get_current_target()`` would report. The XPU
     device reports no compute-capability pair to derive it from, so the driver is
     the only authority.
+    """
+    if not _cache:
+        from triton.runtime import driver
+
+        _cache.append(int(driver.active.get_current_target().arch))
+    return _cache[0]
+
+
+def _tsingmicro_arch(_cache: list = []) -> int:
+    """Arch FlagTree's TXDA backend compiles for, as ``GPUTarget.arch``.
+
+    Same shape as ``_kunlunxin_arch``, and read from the same authority. The TX
+    runtime exposes no compute-capability pair -- ``torch.flagos.
+    get_device_properties`` falls back to an Ascend-shaped stand-in with
+    major=8/minor=0 -- so the driver's own target is the only honest source. The
+    number is inert in the TX pipeline (``TXDAOptions.arch`` is read by nothing
+    but the cache key) which is exactly why it must not be invented.
     """
     if not _cache:
         from triton.runtime import driver
@@ -470,7 +513,7 @@ def _patch_device_properties() -> None:
             # runtimes keep the flagos device here: there is no torch.cuda to
             # look up, and our own interface is registered for flagos.
             device = torch.device("cuda", device.index or 0)
-        elif is_flagos and vendor in ("musa", "gcu", "kunlunxin"):
+        elif is_flagos and vendor in ("musa", "gcu", "kunlunxin", "tsingmicro"):
             # These vendor implementations of DeviceProperties.create cannot
             # read a flagos device, so build the record from our interface.
 
@@ -762,6 +805,48 @@ def _patch_benchmarker() -> None:
     obj._flagos_patched = True
 
 
+def _patch_triton_warp_size() -> None:
+    """Hand ``triton.compile`` the vendor's warp size, not CUDA's 32.
+
+    ``triton_heuristics`` builds the target it passes to ``triton.compile`` as
+    ``GPUTarget(device_type, cc, cc_warp_size(cc))``, and ``cc_warp_size``
+    hard-codes 32 for every non-HIP build. That is CUDA's warp. A vendor whose
+    own driver reports a different one gets a kernel compiled for the wrong
+    shape, and it does not raise -- it is wrong-but-running, so it shows up as a
+    bad result rather than a failed compile. Measured on a TX8: inductor built
+    ``GPUTarget('txda', 1, 32)`` while ``driver.active.get_current_target()``
+    reported ``warp_size=16``.
+
+    Scoped to TsingMicro deliberately. ``cc_warp_size`` returning 32 is
+    suspicious for every non-CUDA vendor, but the others have been compiling
+    against it and re-pointing them at their drivers' value is unverified
+    change; each should be measured on its own hardware before it is added here.
+
+    ``cc_warp_size`` is imported *into* ``triton_heuristics``'s namespace, so
+    the attribute has to be replaced there -- patching
+    ``triton_compat.cc_warp_size`` would not reach the call site. Idempotent, and
+    installed before every ``compile_fx`` like the other patches here.
+    """
+    if platform_profile().vendor != "tsingmicro":
+        return
+    from triton.runtime import driver
+
+    warp_size = getattr(driver.active.get_current_target(), "warp_size", None)
+    if not warp_size:
+        return
+
+    from torch._inductor.runtime import triton_heuristics
+
+    if getattr(triton_heuristics.cc_warp_size, "_flagos_warp_size", None) == warp_size:
+        return
+
+    def cc_warp_size(cc: Any) -> int:
+        return int(warp_size)
+
+    cc_warp_size._flagos_warp_size = int(warp_size)  # type: ignore[attr-defined]
+    triton_heuristics.cc_warp_size = cc_warp_size
+
+
 def register_flagos_device_interface() -> None:
     """Register the flagos device interface + GPU type with inductor.
 
@@ -770,6 +855,7 @@ def register_flagos_device_interface() -> None:
     from torch._dynamo.device_interface import register_interface_for_device
 
     _register_gpu_type()
+    _patch_triton_warp_size()
     _patch_device_properties()
     _patch_inductor_benchmark_device()
     _repair_stock_cuda_interface()

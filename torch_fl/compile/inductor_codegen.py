@@ -104,6 +104,14 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_kunlunxin_current_raw_stream as {name}"
             )
+        if ACCELERATOR == "tsingmicro":
+            # Same on TsingMicro: FlagTree's TX launcher takes a raw txStream_t
+            # and this wheel pairs with a CPU-only torch, so there is no CUDA
+            # runtime to import one from.
+            return (
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_tsingmicro_current_raw_stream as {name}"
+            )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 

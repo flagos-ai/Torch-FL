@@ -200,6 +200,30 @@ def get_kunlunxin_current_raw_stream(device: Any = None) -> int:
     return flagos.current_stream(index).handle
 
 
+def get_tsingmicro_current_raw_stream(device: Any = None) -> int:
+    """The raw TX stream handle kernels must be launched on.
+
+    The TX runtime has one default queue per device, denoted by handle 0, and
+    ``torch.flagos.current_stream`` returns the stand-in that carries it as
+    ``.txda_stream``. Reading that attribute rather than a literal 0 keeps the
+    value definitionally identical to what FlagTree's TsingMicro driver resolves
+    in ``get_txda_stream`` -- the stream the eager FlagGems kernels this build
+    already runs are launched on -- so compiled and eager kernels stay ordered
+    against each other.
+
+    There is no CUDA ``_cuda_getCurrentRawStream`` here and, unlike MUSA, no
+    vendor raw-stream binding in ``_C`` to read it from: the ``txStream_t`` the
+    C++ runtime creates for ``GetCurrentStreamForDevice`` is not reachable from
+    Python. This is the import target of the raw-stream line inductor writes into
+    generated code (see ``inductor_codegen.py``).
+    """
+    from torch_fl import flagos
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+    index = int(FlagOSDeviceInterface._vendor_device(device))
+    return flagos.current_stream(index).txda_stream
+
+
 _musa_driver_bound = False
 
 
