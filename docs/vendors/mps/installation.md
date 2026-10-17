@@ -101,7 +101,7 @@ landed: the 28-function C ABI plus the allocator, and the `unary`, `binary`,
 `binary_scalar` and `reduce` categories of the MPSGraph operator layer -- nine
 aten ops: `abs`; `add`/`sub`/`mul` over two tensors and over a tensor and a host
 scalar (with aten's `alpha`); and `sum.dim_IntList`/`mean.dim`. Stage 3 has
-added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`)
+added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`),
 two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
 (`convolution_overrideable`), which closes the stage-3 lanes. Stage 4 has added
 the `silu` and `embedding` categories and then the `div`/`div_scalar`/
@@ -168,7 +168,6 @@ dispatcher decomposes it before any backend key is consulted. `_softmax` -- what
 `convolution_overrideable` is the conv analogue: `aten.convolution` also
 decomposes above the backend key, so the spelling every `F.conv2d` and
 `nn.Conv2d` reaches is the one registered.
-
 ## MPSGraph answers measured on an M5
 
 The accepted strategy is MPSGraph-first with a hand-written MSL fallback

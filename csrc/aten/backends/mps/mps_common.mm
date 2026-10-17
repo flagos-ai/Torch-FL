@@ -164,7 +164,6 @@ bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype) {
   // other two-operand gates; the body passes the same dtype twice.
   return dtype == other_dtype && MpsSupportsUnaryDtype(dtype);
 }
-
 bool MpsSupportsSoftmaxDtype(
     at::ScalarType self_dtype,
     bool half_to_float,
@@ -223,7 +222,6 @@ bool MpsSupportsTakeDtype(
   const bool index = index_dtype == at::kLong;
   return readable && index;
 }
-
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out) {
   if (out == nullptr) {
     return false;

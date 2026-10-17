@@ -16,7 +16,10 @@
 # (`mm` and `bmm`), the `softmax` category (`_softmax`), the elementwise `neg`
 # and `pow.Tensor_Scalar`, and the `conv` category (`convolution_overrideable`),
 # each matching the CPU reference within tolerance.
-#
+# and the `reduce` family -- plus three stage-3 increments: the `gemm` category
+# (`mm` and `bmm`), the `softmax` category (`_softmax`) and the elementwise
+# `neg` and `pow.Tensor_Scalar`, each matching the CPU reference within tolerance.
+# The rest of stage 3 (conv) is still open.#
 # Two consequences worth stating up front, mirroring codegen_kunlunxin.py:
 #
 #   * There is no conf writer. torch_fl/configs/backends_mps.conf is generated
@@ -2930,7 +2933,6 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
-
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,

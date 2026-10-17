@@ -739,8 +739,7 @@ the batch statistics behind `meanOfTensor:axes:` and
 rather than a node that does not exist. The increment is verified with
 `tests/integration/ops/test_mps_batch_norm.py` (38 cases). `embedding_dense_backward`
 stays dropped for the reason recorded above.
-There is still no CI job: the lane below needs a
-GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
+There is still no CI job: the lane below needs a GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
 yet use, so the operator suite is run by hand until that lands.
 
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
