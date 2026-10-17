@@ -163,3 +163,98 @@ else:
         "minimal",
         autoload="0",
     )
+
+
+def _require_mps():
+    _require_torch()
+    spec = importlib.util.find_spec("torch_fl")
+    assert spec is not None and spec.origin, "torch_fl package is not installed"
+    detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
+    if detector["build_accelerator"]() != "mps":
+        pytest.skip("The MPS second-executable probe needs an MPS build")
+
+
+def _probe(body: str):
+    """Run one MPSGraph sequence in a child, and report how the child died.
+
+    The child is the point: the failure this is bisecting is a segfault inside
+    MetalPerformanceShadersGraph, and a segfault takes the whole process with
+    it, so an in-process test could never get past the first crashing sequence
+    to report on the others. Here each candidate kills only its own child, and
+    the parent reads the exit status.
+
+    The trace variables are stripped for the child: a candidate has to be
+    judged on whether it dies, not on how much it printed on the way.
+    """
+    env = os.environ.copy()
+    for name in ("FLAGOS_MPS_STAGE_TRACE", "FLAGOS_MPS_CRASH_TRACE"):
+        env.pop(name, None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch, torch_fl\n"
+            "torch_fl.flagos.init()\n"
+            "dev = torch.device('flagos', 0)\n" + body,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    print(
+        f"[probe] returncode={result.returncode} stdout={result.stdout!r}\n"
+        f"[probe] stderr tail={result.stderr[-600:]!r}",
+        flush=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_mps_one_executable_runs_clean():
+    """The shape the passing call has: one mm, one compiled executable."""
+    _require_mps()
+    _probe(
+        """
+a = torch.randn(32, 64, device=dev)
+b = torch.randn(64, 16, device=dev)
+assert torch.mm(a, b).shape == (32, 16)
+print('ok', flush=True)
+"""
+    )
+
+
+def test_mps_two_executables_run_clean():
+    """Two differently shaped mm calls, i.e. two compiled executables."""
+    _require_mps()
+    _probe(
+        """
+a = torch.randn(1, 1, device=dev)
+b = torch.randn(1, 1, device=dev)
+assert torch.mm(a, b).shape == (1, 1)
+a2 = torch.randn(32, 64, device=dev)
+b2 = torch.randn(64, 16, device=dev)
+assert torch.mm(a2, b2).shape == (32, 16)
+print('ok', flush=True)
+"""
+    )
+
+
+def test_mps_second_executable_after_allocation_churn_runs_clean():
+    """The CI shape: a tiny mm, allocation churn, then the mm that dies."""
+    _require_mps()
+    _probe(
+        """
+a = torch.randn(1, 1, device=dev)
+b = torch.randn(1, 1, device=dev)
+torch.mm(a, b)
+del a, b
+for size in (128, 1024 * 1024, 1024, 4096):
+    x = torch.randn(size, device=dev)
+    del x
+a2 = torch.randn(32, 64, device=dev)
+b2 = torch.randn(64, 16, device=dev)
+assert torch.mm(a2, b2).shape == (32, 16)
+print('ok', flush=True)
+"""
+    )
