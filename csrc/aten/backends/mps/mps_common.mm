@@ -1086,6 +1086,12 @@ MpsPlan* BuildPlan(
         [NSMutableArray arrayWithCapacity:inputs.size()];
     NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
         [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
+    // The input types the graph is specialized for, in the order `buffers`
+    // collects them. Specialization is what turns the compiled graph into the
+    // GPU program `runAsyncWithMTLCommandQueue:` executes, and it is the reason
+    // this list is kept: it is handed to `specializeWithDevice:` below.
+    NSMutableArray<MPSGraphShapedType*>* input_types =
+        [NSMutableArray arrayWithCapacity:inputs.size()];
     for (size_t i = 0; i < inputs.size(); ++i) {
       MPSDataType dtype;
       if (!MpsDataTypeOf(inputs[i].scalar_type(), &dtype)) {
@@ -1096,11 +1102,11 @@ MpsPlan* BuildPlan(
       // reapplied over it, because an MPSNDArray over N-D memory reads with its
       // own row pitch (see the row-pitch note in mps_common.h).
       MPSGraphTensor* buffer = MpsFlatPlaceholder(graph, count, dtype);
-      const int64_t dims[1] = {count};
       MPSGraphShapedType* type = [[MPSGraphShapedType alloc]
-          initWithShape:MpsShapeOf(at::IntArrayRef(dims, 1))
+          initWithShape:FlatShape(count)
                dataType:dtype];
       [feeds setObject:type forKey:buffer];
+      [input_types addObject:type];
       MpsRelease(type);
       [buffers addObject:buffer];
       [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
@@ -1130,6 +1136,23 @@ MpsPlan* BuildPlan(
                                 targetTensors:targets
                              targetOperations:nil
                         compilationDescriptor:nil] retain];
+        // Specialize here rather than leaving it to the first run. The SDK
+        // documents that without this call specialization "occurs at encode
+        // time automatically", and on macOS 14 that encode-time path is what
+        // dies: a SIGSEGV inside MPSGraph's own
+        // convertMPSGraphShapesToMLIRTypes for a graph whose placeholders are
+        // flat buffers, with every operand resolved and a compiled executable
+        // already in hand -- i.e. past every point torch_fl can decline at.
+        //
+        // Calling it explicitly moves the same work to where a failure is
+        // observable: `specializeWithDevice:` returns void, so the only signal
+        // is whether the executable is usable afterwards. A graph that cannot
+        // be specialized there is one this build cannot run, and the honest
+        // answer is the CPU round-trip the caller already has, not a crash on
+        // the encode that would have followed.
+        [executable specializeWithDevice:device
+                              inputTypes:input_types
+                   compilationDescriptor:nil];
       }
     }
     placeholders = [buffers retain];
