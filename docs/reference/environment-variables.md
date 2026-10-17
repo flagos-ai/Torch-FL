@@ -113,8 +113,6 @@ Logging and tracing. None of these changes routing.
 | `FLAGOS_LOG` | Runtime | No default (all off) | Comma-separated stderr diagnostics: `dispatch` (backend chosen per operator), `fallback` (each `cpu_fallback` dispatch), `op_cache` (Ascend operator-cache hit/miss statistics). An entry naming none of the three is reported once per process rather than silently ignored |
 | `FLAGOS_TRACE` | Runtime | `0` (off) | Verbose logging in the device profiler shim compiled into this build. One switch covers every accelerator: exactly one device tracer is compiled per build, so the name is never ambiguous |
 | `FLAGOS_TRACER_LIBRARY` | Runtime | Auto-discovered | Override the tracer library the profiler shim `dlopen`s, when the default path does not match the installed driver |
-| `FLAGOS_MPS_CRASH_TRACE` | Runtime | Unset | Set to `1` to make the MPS runtime install a fatal-signal handler that prints a native backtrace before re-raising, so a segfault inside an MPS op names the frame that faulted instead of only the Python trampoline above it. Read by the C++ runtime, not by Python |
-| `FLAGOS_MPS_STAGE_TRACE` | Runtime | Unset | Set to `1` to trace statement-by-statement how far a queued MPS graph run got, so a segfault with no usable backtrace still names the statement it died in. Read by the C++ runtime, not by Python |
 
 ### Distributed
 

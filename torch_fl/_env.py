@@ -659,21 +659,6 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Directory of import-only stand-ins for numba and torch, which hbdk4's "
         "ONNX entry point imports unconditionally",
     ),
-    "FLAGOS_MPS_CRASH_TRACE": (
-        SCOPE_RUNTIME,
-        "Unset",
-        "Set to 1 to make the MPS runtime install a fatal-signal handler that "
-        "prints a native backtrace before re-raising, so a segfault inside an "
-        "MPS op names the frame that faulted instead of only the Python "
-        "trampoline above it. Read by the C++ runtime, not by Python",
-    ),
-    "FLAGOS_MPS_STAGE_TRACE": (
-        SCOPE_RUNTIME,
-        "Unset",
-        "Set to 1 to trace statement-by-statement how far a queued MPS graph "
-        "run got, so a segfault with no usable backtrace still names the "
-        "statement it died in. Read by the C++ runtime, not by Python",
-    ),
 }
 
 # Names torch_fl used to read and no longer does. An exported value is inert:

@@ -26,27 +26,9 @@
 #include "mps.h"
 #include "mps_runtime.h"
 
-// _XOPEN_SOURCE is what makes <ucontext.h> declare ucontext_t at all: on this
-// SDK the header is an #error without it. Define before the first system
-// include, and only for this translation unit.
-#ifndef _XOPEN_SOURCE
-#define _XOPEN_SOURCE 700
-#endif
-
-#include <csignal>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cstdint>
-#include <execinfo.h>
-#include <unistd.h>
-#include <ucontext.h>
 #include <mutex>
 #include <set>
 #include <vector>
-#include <dlfcn.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
 
 namespace torch_fl_mps {
 namespace {
@@ -54,197 +36,6 @@ namespace {
 std::mutex gDeviceMutex;
 id<MTLDevice> gDevice = nil;
 bool gDeviceResolved = false;
-
-// Optional native backtrace on a fatal signal, off unless the environment asks
-// for it.
-//
-// Why this exists: a segfault inside an MPS op reaches the interpreter as a
-// Python traceback that names only `torch_fl/__init__.py`'s __torch_function__
-// trampoline -- the crash is several frames *below* the last Python frame, so
-// the log says which aten call was in flight and nothing about where in the
-// Metal or allocator code it died. That is enough to know an op crashed and not
-// enough to fix it, which is exactly the position a hosted macOS runner leaves
-// you in: no debugger, no core, and a host whose GPU and OS differ from the
-// developer's.
-//
-// So the handler is installed in-process, and only when the operator asks for
-// it, because a signal handler that prints is not something to enable by
-// default: it can deadlock (the crashing thread may hold the malloc or stdio
-// lock backtrace_symbols needs) and it changes the post-crash behaviour a test
-// might observe. Ungated it would also be dead weight in every process that
-// merely links the backend.
-//
-// It is a diagnostic, not a fix: it prints and then re-raises with the default
-// disposition so the process still dies from the original signal and CI still
-// reports the failure.
-//
-// The report is deliberately more than a frame list, because the frame list is
-// not always there. `backtrace()` walks the frame-pointer chain, and a fault
-// that has damaged that chain returns zero frames -- which is itself a finding
-// (it says the crash is not an ordinary call into a bad pointer) but leaves the
-// address unknown. So the faulting address and the register file are printed
-// too: they come from the kernel's signal context, not from the stack, and are
-// available whatever happened to the stack.
-ssize_t CrashWrite(const char* text) {
-  // write(2) rather than printf: stdio is not async-signal-safe, and the
-  // buffered half of a message is exactly what gets lost on a fatal signal.
-  return ::write(2, text, ::strlen(text));
-}
-
-void CrashWriteHex(const char* label, uintptr_t value) {
-  char line[64];
-  int n = 0;
-  for (const char* p = label; *p != '\0' && n < 40; ++p) {
-    line[n++] = *p;
-  }
-  const char* digits = "0123456789abcdef";
-  line[n++] = '0';
-  line[n++] = 'x';
-  // 16 nibbles, high to low, with the leading zeros kept: a fault address of
-  // 0x0 is a different finding from one of 0x1f3a..., so nothing is trimmed.
-  for (int shift = 60; shift >= 0; shift -= 4) {
-    line[n++] = digits[(value >> shift) & 0xf];
-  }
-  line[n++] = '\n';
-  ::write(2, line, static_cast<size_t>(n));
-}
-
-void CrashTraceHandler(int signo, siginfo_t* info, void* context) {
-  CrashWrite("\n=== FLAGOS_MPS_CRASH_TRACE: begin ===\n");
-  CrashWrite("signal: ");
-  const char* name = "?";
-  switch (signo) {
-    case SIGSEGV: name = "SIGSEGV"; break;
-    case SIGBUS:  name = "SIGBUS";  break;
-    case SIGABRT: name = "SIGABRT"; break;
-    case SIGILL:  name = "SIGILL";  break;
-    case SIGFPE:  name = "SIGFPE";  break;
-    default: break;
-  }
-  CrashWrite(name);
-  CrashWrite("\n");
-
-  // si_addr is the faulting address for the memory-fault signals, which is the
-  // single most useful number here: it distinguishes a null dereference from a
-  // wild pointer from a guard-page strike.
-  if (info != nullptr) {
-    CrashWriteHex("fault address: ", reinterpret_cast<uintptr_t>(info->si_addr));
-    CrashWriteHex("si_code: ", static_cast<uintptr_t>(info->si_code));
-  }
-
-  // backtrace() returned nothing on the runner -- the frame chain is gone by the
-  // time the handler runs, most likely because the faulting frame had already
-  // pushed a large stack adjustment or unwound through a leaf. The ucontext
-  // still carries the register file the kernel saved at the fault, so the
-  // program counter and the frame-pointer chain are read straight out of it and
-  // walked by hand. That is the only way to name the caller of a call that died
-  // inside a library with a broken/unwind-hostile prologue.
-  if (context != nullptr) {
-    const ucontext_t* uc = static_cast<const ucontext_t*>(context);
-#if defined(__arm64__) || defined(__aarch64__)
-    const uintptr_t pc = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__pc);
-    const uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__fp);
-    const uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__lr);
-    CrashWriteHex("pc: ", pc);
-    CrashWriteHex("lr: ", lr);
-#elif defined(__x86_64__)
-    const uintptr_t pc = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__rip);
-    const uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__rbp);
-    CrashWriteHex("pc: ", pc);
-#else
-    const uintptr_t pc = 0;
-    const uintptr_t fp = 0;
-#endif
-    CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: frame-pointer walk ===\n");
-    CrashWriteHex("frame00: ", pc);
-    // A frame-pointer walk over a destroyed stack can read anything; every
-    // dereference is a fault away from a nested crash, which on a broken stack
-    // is exactly what makes this useful rather than reckless -- a nested fault
-    // here re-raises the original signal through the same handler and prints
-    // "begin" a second time, which is itself evidence.
-    uintptr_t frame = fp;
-    for (int i = 1; i < 48 && frame != 0; ++i) {
-      const uintptr_t* words = reinterpret_cast<const uintptr_t*>(frame);
-      const uintptr_t next = words[0];
-      const uintptr_t ret = words[1];
-      CrashWriteHex("frame", ret);
-      // Name the image each return address lands in, so a frame list whose
-      // addresses are all in a framework the developer has no symbols for still
-      // says *which* framework without a separate atos pass over a core that
-      // does not exist.
-      Dl_info info;
-      if (ret != 0 && ::dladdr(reinterpret_cast<void*>(ret), &info) != 0 &&
-          info.dli_fname != nullptr) {
-        CrashWrite("  in ");
-        CrashWrite(info.dli_fname);
-        CrashWrite("\n");
-      }
-      if (next <= frame) {
-        break;
-      }
-      frame = next;
-    }
-    // The image table with each library's load address, the input `atos -o <lib>
-    // -l <addr>` needs. Printed after the frames so a truncated log still has
-    // the frame list first.
-    CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: images ===\n");
-    const uint32_t image_count = _dyld_image_count();
-    for (uint32_t i = 0; i < image_count; ++i) {
-      const char* name = _dyld_get_image_name(i);
-      if (name == nullptr) {
-        continue;
-      }
-      CrashWriteHex("image load: ", static_cast<uintptr_t>(
-          reinterpret_cast<uintptr_t>(_dyld_get_image_header(i))));
-      CrashWrite(" ");
-      CrashWrite(name);
-      CrashWrite("\n");
-    }
-  }
-
-  void* frames[128];
-  const int count = ::backtrace(frames, 128);
-  CrashWrite("backtrace frames: ");
-  CrashWriteHex("", static_cast<uintptr_t>(count));
-  CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: native backtrace ===\n");
-  if (count > 0) {
-    ::backtrace_symbols_fd(frames, count, 2);
-  }
-  CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: end ===\n");
-
-  // Default disposition, so the signal that killed us is the one reported and
-  // the exit status is the same as it would have been without this handler.
-  ::signal(signo, SIG_DFL);
-  ::raise(signo);
-}
-
-void MaybeInstallCrashTrace() {
-  static bool installed = false;
-  if (installed) {
-    return;
-  }
-  installed = true;
-  const char* wanted = ::getenv("FLAGOS_MPS_CRASH_TRACE");
-  if (wanted == nullptr || wanted[0] == '\0' || wanted[0] == '0') {
-    return;
-  }
-  // SA_SIGINFO is what makes the fault address available; SA_RESETHAND would
-  // restore the default disposition on delivery for free, but the handler
-  // re-raises explicitly so the intent stays legible at the call site.
-  struct sigaction action;
-  ::memset(&action, 0, sizeof(action));
-  action.sa_sigaction = CrashTraceHandler;
-  action.sa_flags = SA_SIGINFO | SA_NODEFER;
-  // Not `::sigemptyset`: it is a macro that expands to an expression, so the
-  // qualified spelling is a syntax error. `sigaction` is a real function and
-  // keeps the `::`.
-  sigemptyset(&action.sa_mask);
-  ::sigaction(SIGSEGV, &action, nullptr);
-  ::sigaction(SIGBUS, &action, nullptr);
-  ::sigaction(SIGABRT, &action, nullptr);
-  ::sigaction(SIGILL, &action, nullptr);
-  ::sigaction(SIGFPE, &action, nullptr);
-}
 
 std::mutex gDefaultStreamMutex;
 StreamState* gDefaultStream = nullptr;
@@ -297,7 +88,6 @@ void MaybeRegisterShutdownDrain() {
 id<MTLDevice> MetalDevice() {
   std::lock_guard<std::mutex> lock(gDeviceMutex);
   if (!gDeviceResolved) {
-    MaybeInstallCrashTrace();
     // +1 (Create rule). Held for the life of the process; a Mac has one GPU and
     // re-querying here would only rebuild the same object.
     gDevice = MTLCreateSystemDefaultDevice();
@@ -330,23 +120,6 @@ bool MetalGraphUsable() {
                   options:NSCaseInsensitiveSearch].location != NSNotFound;
   const bool usable =
       device != nil && device.hasUnifiedMemory && !paravirtual;
-  // DIAGNOSTIC (reverted once it has answered): the gate is a name test, and
-  // the one host it has to trip is a CI runner whose name string has never been
-  // read. Printing the raw device facts from the process doing the deciding
-  // turns "the gate fired" from an inference into an observation, and it
-  // separates "this host is genuinely paravirtualized" from "the name test is
-  // matching something that is not", which are the two readings a green MPS
-  // suite could otherwise hide behind.
-  if (::getenv("FLAGOS_MPS_CRASH_TRACE") != nullptr && name != nil) {
-    std::fprintf(stderr,
-                 "[mps-device] name=\"%s\" unified=%d paravirtual=%d "
-                 "graph_usable=%d\n",
-                 name.UTF8String,
-                 static_cast<int>(device.hasUnifiedMemory),
-                 static_cast<int>(paravirtual),
-                 static_cast<int>(usable));
-    std::fflush(stderr);
-  }
   return usable;
 }
 
