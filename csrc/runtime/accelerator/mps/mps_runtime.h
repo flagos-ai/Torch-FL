@@ -44,6 +44,28 @@ id<MTLDevice> MetalDevice();
 // memory is the discriminator rather than a non-nil device.
 bool MetalAvailable();
 
+// Whether this host's Metal device is one MPSGraph can actually encode on.
+//
+// MetalAvailable answers "is there an Apple GPU with unified memory", which is
+// the right question for allocation and memcpy -- those go straight to MTLDevice
+// and a paravirtualized device serves them fine. It is the wrong question for
+// the graph path: MPSGraph compiles through MLIR and re-specializes at encode
+// time, and on a paravirtualized device (`AppleParavirtGPUMetalIOGPUFamily`,
+// what the hosted macOS runners expose) that encode faults inside MPSGraph's own
+// `runAsyncWithMTLCommandQueue:` with a SIGSEGV at a small address -- past every
+// point the operator layer can decline at, because the graph is built and the
+// handler is committed before the dying call is reached.
+//
+// A fatal signal cannot be caught and unwound from, so there is nothing to
+// recover with at the call site: the only place the answer can be honoured is
+// before the graph is built at all. Hence a capability query the operator layer
+// consults, and a device-name test for the one family known to fault.
+//
+// False whenever no device is present, so a caller can treat
+// `MetalAvailable() && MetalGraphUsable()` as the single "the native graph path
+// is open" predicate.
+bool MetalGraphUsable();
+
 // One command queue plus the last command buffer committed to it. Tracking the
 // latest buffer is enough to drain the queue: Metal executes a queue in order,
 // so waiting on the newest committed buffer waits on everything before it.

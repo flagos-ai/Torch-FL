@@ -1288,6 +1288,19 @@ bool RunGraphImpl(
   if (build == nil || outs.empty()) {
     return false;
   }
+  // The graph path is only open on a device MPSGraph can encode for. This is
+  // checked before anything is allocated or built, because the failure it
+  // guards against is a SIGSEGV inside MPSGraph's own encode -- a fatal signal,
+  // so a check placed after the executable exists would be a check placed after
+  // the process is already committed to the crash. See MetalGraphUsable.
+  //
+  // Declining is safe by the same contract every other decline uses: false
+  // sends the op to the CPU round-trip its body already implements, which is
+  // the reference result -- slow on a device with no working graph compiler,
+  // and correct.
+  if (!torch_fl_mps::MetalGraphUsable()) {
+    return false;
+  }
   // `defined` and a non-empty numel are the two things a body's `out` has always
   // had to satisfy, now checked per result. An empty result is a decline rather
   // than an error, exactly as before: MPSGraph has no empty tensor and the

@@ -313,6 +313,27 @@ bool MetalAvailable() {
   return device != nil && device.hasUnifiedMemory;
 }
 
+bool MetalGraphUsable() {
+  id<MTLDevice> device = MetalDevice();
+  if (device == nil || !device.hasUnifiedMemory) {
+    return false;
+  }
+  // The paravirtualized family is the one MPSGraph encode is known to fault on,
+  // and the device class is the only thing that distinguishes those hosts from a
+  // physical GPU: the same OS build, the same MPSGraph, the same unified memory.
+  // `MTLDevice.name` is the family string ("Apple Paravirtual device"), and the
+  // loaded IOKit personality is AppleParavirtGPUMetalIOGPUFamily. The name is
+  // checked rather than the loaded bundle because it is the documented property
+  // and does not depend on an internal framework's filename.
+  NSString* name = device.name;
+  if (name != nil && [name rangeOfString:@"paravirtual"
+                                 options:NSCaseInsensitiveSearch].location !=
+                        NSNotFound) {
+    return false;
+  }
+  return true;
+}
+
 StreamState* DefaultStream() {
   std::lock_guard<std::mutex> lock(gDefaultStreamMutex);
   if (gDefaultStream == nullptr) {
