@@ -563,13 +563,19 @@ class TestIndexSelectCost:
         def run(n):
             for _ in range(3):
                 torch.index_select(table, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(n):
                 torch.index_select(table, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / n * 1e3
 
         per_call = run(10)

@@ -634,13 +634,19 @@ class TestTakeCost:
         def run(n):
             for _ in range(3):
                 torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(n):
                 torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / n * 1e3
 
         per_call = run(10)
@@ -670,13 +676,19 @@ class TestTakeCost:
         def per_call(operand):
             for _ in range(3):
                 torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(10):
                 torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / 10 * 1e3
 
         small = per_call(torch.randn(1024, 16, device=DEVICE))

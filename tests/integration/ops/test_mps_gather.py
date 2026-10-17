@@ -713,13 +713,19 @@ class TestGatherCost:
         def run(n):
             for _ in range(3):
                 torch.gather(operand, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(n):
                 torch.gather(operand, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / n * 1e3
 
         per_call = run(10)
@@ -750,13 +756,19 @@ class TestGatherCost:
         def per_call(operand):
             for _ in range(3):
                 torch.gather(operand, 1, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(10):
                 torch.gather(operand, 1, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / 10 * 1e3
 
         # dim=1 over these shapes leaves the index's own 16 columns as the only
@@ -793,13 +805,19 @@ class TestGatherCost:
         def per_call(fn):
             for _ in range(3):
                 fn()
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             start = time.perf_counter()
             for _ in range(10):
                 fn()
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
+            # The accelerator's own barrier, not a Python-level alias: the
+            # runtime exposes it on the extension module only, so a
+            # `hasattr(torch_fl, "synchronize")` guard is always false and the
+            # measurement below would time the launch rather than the work.
+            torch_fl._C._synchronize()
             return (time.perf_counter() - start) / 10 * 1e3
 
         trim_only = per_call(lambda: view.contiguous())
