@@ -308,6 +308,9 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         # container. The job passes the configured values through one
         # expression, which it can turn into a mapping or null.
         if isinstance(container, str):
+            assert "needs.configuration.outputs.ci_image" in container
+            assert "needs.configuration.outputs.container_volumes" in container
+            assert "needs.configuration.outputs.container_options" in container
             return
         container_image, volumes, options = yaml.safe_load(
             '{"image":"${{ needs.configuration.outputs.ci_image }}",'
