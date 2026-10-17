@@ -183,12 +183,16 @@ def _probe(body: str):
     to report on the others. Here each candidate kills only its own child, and
     the parent reads the exit status.
 
-    The trace variables are stripped for the child: a candidate has to be
-    judged on whether it dies, not on how much it printed on the way.
+    The traces are KEPT for the child. The earlier run stripped them so a
+    candidate could be judged on whether it died rather than on how much it
+    printed, and that answered the first question ("do the children die at
+    all": all three did). The question left is *where* a fresh process's first
+    `mm` dies, which is exactly what the two traces print, so they are on for
+    this run.
     """
     env = os.environ.copy()
-    for name in ("FLAGOS_MPS_STAGE_TRACE", "FLAGOS_MPS_CRASH_TRACE"):
-        env.pop(name, None)
+    env["FLAGOS_MPS_STAGE_TRACE"] = "1"
+    env["FLAGOS_MPS_CRASH_TRACE"] = "1"
     result = subprocess.run(
         [
             sys.executable,
@@ -204,8 +208,8 @@ def _probe(body: str):
         check=False,
     )
     print(
-        f"[probe] returncode={result.returncode} stdout={result.stdout!r}\n"
-        f"[probe] stderr tail={result.stderr[-600:]!r}",
+        f"[probe] returncode={result.returncode}\n"
+        f"[probe] stderr={result.stderr}",
         flush=True,
     )
     assert result.returncode == 0, result.stderr
@@ -255,6 +259,25 @@ for size in (128, 1024 * 1024, 1024, 4096):
 a2 = torch.randn(32, 64, device=dev)
 b2 = torch.randn(64, 16, device=dev)
 assert torch.mm(a2, b2).shape == (32, 16)
+print('ok', flush=True)
+"""
+    )
+
+
+def test_mps_minimal_add_runs_clean():
+    """The smallest native MPS op there is: one add, no compiled matmul.
+
+    If this dies too, the trigger is not `mm` and not the compiled-executable
+    path at all -- it is the first native MPS op of any kind in a fresh
+    process, which points at device/queue/graph bring-up rather than at the
+    matmul node.
+    """
+    _require_mps()
+    _probe(
+        """
+a = torch.randn(4, device=dev)
+b = torch.randn(4, device=dev)
+assert (a + b).shape == (4,)
 print('ok', flush=True)
 """
     )
