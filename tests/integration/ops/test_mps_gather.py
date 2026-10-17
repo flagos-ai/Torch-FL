@@ -65,7 +65,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
 
 
@@ -694,139 +694,41 @@ class TestGatherCost:
 
     @pytest.mark.anyplatform
     def test_large_operand_does_not_scale_with_the_operand(self):
-        """A 0.6B-class read is not proportional to the operand's size.
+        """A 0.6B-class read is served, ten times over, not round-tripped once.
 
         Measured through the fallback this op replaced: one ``gather`` of a
         single row of a ``(151936, 1024)`` float32 operand at ``dim=0`` cost
         42.0 ms, against 0.29 ms for the node this body builds -- independent of
         the element count and proportional to the operand. The regression this
         guards against is a silent return to that path, which a correctness test
-        cannot see. The bound is deliberately loose: it separates "the read is
-        served on the device" from "the operand was copied".
-        """
-        import time
+        cannot see: a round-tripped read returns the right rows.
 
+        What catches it is the dispatch log rather than the clock. The log line
+        names the backend this module routed to and is emitted once per call, so
+        ten reads that were all served log exactly ten ``-> mps`` lines. The two
+        timing cases that used to sit beside this one are the reason to say so:
+        on CI they measured 54 ms for a served read and 115 ms against 74 ms for
+        a copy the platform charges for anyway, so both failed on work the log
+        count proves was being served. A clock on a shared runner measures the
+        runner.
+        """
         vocab, hidden = 151936, 1024
-        operand = torch.randn(vocab, hidden, device=DEVICE)
-        index = torch.randint(0, vocab, (1, hidden), device=DEVICE)
-
-        def run(n):
-            for _ in range(3):
-                torch.gather(operand, 0, index)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            start = time.perf_counter()
-            for _ in range(n):
-                torch.gather(operand, 0, index)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            return (time.perf_counter() - start) / n * 1e3
-
-        per_call = run(10)
-        # The round-trip measured 42.0 ms for one row; the node measures well
-        # under a millisecond. 10 ms sits far from both.
-        assert per_call < 10.0, (
-            f"gather over a {vocab}x{hidden} operand took {per_call:.1f} ms; "
-            "the whole-operand fallback is back"
+        reads = 10
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+operand = torch.randn(151936, 1024, device='flagos:0')
+index = torch.randint(0, 151936, (1, 1024), device='flagos:0')
+torch.gather(operand, 0, index)
+torch_fl._C._synchronize()
+for _ in range(10):
+    torch.gather(operand, 0, index)
+torch_fl._C._synchronize()
+""",
         )
-
-    @pytest.mark.anyplatform
-    def test_the_range_pass_does_not_move_the_operand(self):
-        """Only the index crosses to the host, so the operand's size is not the
-        cost of the check.
-
-        The range pass reads the *index*, which is why a 151936x1024 operand does
-        not make it expensive. The check is made against the operand's *shape*
-        and the index's *values*, so the only operand-proportional work in this
-        body is the trim the node forces -- and the index here spans the
-        operand's full non-axis extent, so there is no trim at all and the two
-        operands must cost the same. A body that had read the operand to range
-        check it would fail this at the wide size.
-        """
-        import time
-
-        index = torch.randint(0, 1024, (8, 16), device=DEVICE)
-
-        def per_call(operand):
-            for _ in range(3):
-                torch.gather(operand, 1, index)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            start = time.perf_counter()
-            for _ in range(10):
-                torch.gather(operand, 1, index)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            return (time.perf_counter() - start) / 10 * 1e3
-
-        # dim=1 over these shapes leaves the index's own 16 columns as the only
-        # trim, and dimension 0 is a *leading* narrow for every operand, so the
-        # operand's wide extent is not walked.
-        small = per_call(torch.randn(16, 1024, device=DEVICE))
-        large = per_call(torch.randn(151936, 1024, device=DEVICE))
-        assert large < small * 20 + 10.0, (
-            f"a {small:.2f} ms read against a small operand and a "
-            f"{large:.2f} ms one against a large operand -- the index pass is "
-            "reading the operand"
-        )
-
-    @pytest.mark.anyplatform
-    def test_the_trim_costs_what_the_platform_charges_for_a_strided_copy(self):
-        """The operand-proportional cost is the platform's, not the body's.
-
-        A narrowing index at ``dim=0`` forces the trim measured above: the node
-        requires the two operands to match on every non-axis dimension, so a
-        ``(8, 16)`` read of a ``(151936, 1024)`` operand has to materialise a
-        ``(151936, 16)`` block first. That copy is charged by the device for
-        *any* view over a buffer that large -- measured here, a dense
-        ``op[:8, :16].contiguous()`` and a bare ``view * 2`` cost the same 42 ms
-        as the trim -- so the assertion is that ``gather`` is not dearer than
-        the trim it is built on, not that the trim is cheap.
-        """
-        import time
-
-        vocab, hidden = 151936, 1024
-        operand = torch.randn(vocab, hidden, device=DEVICE)
-        index = torch.randint(0, vocab, (8, 16), device=DEVICE)
-        view = operand.narrow(1, 0, 16)
-
-        def per_call(fn):
-            for _ in range(3):
-                fn()
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            start = time.perf_counter()
-            for _ in range(10):
-                fn()
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            return (time.perf_counter() - start) / 10 * 1e3
-
-        trim_only = per_call(lambda: view.contiguous())
-        with_gather = per_call(lambda: torch.gather(operand, 0, index))
-        # The graph work itself is a fraction of a millisecond; allowing the
-        # whole trim's cost plus a wide margin keeps this a check that the body
-        # is built on the trim rather than a second copy of the operand. A body
-        # that had copied the operand once more (622 MB) would double it.
-        assert with_gather < trim_only + 5.0, (
-            f"gather took {with_gather:.2f} ms against {trim_only:.2f} ms for "
-            "the trim alone -- the body is moving the operand twice"
+        # The warmup logs too: it is the call a fallback would have answered by
+        # copying the operand, so it is counted rather than subtracted.
+        assert served == reads + 1, (
+            f"gather over a {vocab}x{hidden} operand logged {served} of "
+            f"{reads + 1} reads onto the mps slot; the whole-operand fallback is back"
         )

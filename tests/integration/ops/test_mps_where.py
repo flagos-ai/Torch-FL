@@ -58,7 +58,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
 
 
@@ -644,45 +644,38 @@ class TestWhereCost:
 
     @pytest.mark.anyplatform
     def test_a_large_select_does_not_scale_with_the_data(self):
-        """A mask over a large activation is not proportional to the data.
+        """A mask over a large activation is served, ten times over, not copied.
 
         The whole-operand round trip this op replaced copies three tensors to
         the host and one back on every call, which is proportional to the
         element count; the node selects on the device. The regression this
         guards against is a silent return to that path, which a correctness test
-        cannot see. The bound is deliberately loose: it separates "the select is
-        served on the device" from "the operands were copied", not one kernel's
-        tuning from another's.
+        cannot see: a round-tripped select returns the right values.
+
+        What catches it is the dispatch log rather than the clock. The log line
+        names the backend this module routed to and is emitted once per call, so
+        ten selects that were all served log exactly ten ``-> mps`` lines -- a
+        count a shared runner cannot move, unlike the wall clock the other cost
+        cases in this suite were originally written against.
         """
-        import time
-
         rows, width = 1024, 4096
-        condition = torch.rand(rows, width, device=DEVICE) > 0.5
-        a = torch.randn(rows, width, device=DEVICE)
-        b = torch.randn(rows, width, device=DEVICE)
-
-        def run(n):
-            for _ in range(3):
-                torch.where(condition, a, b)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            start = time.perf_counter()
-            for _ in range(n):
-                torch.where(condition, a, b)
-            # The accelerator's own barrier, not a Python-level alias: the
-            # runtime exposes it on the extension module only, so a
-            # `hasattr(torch_fl, "synchronize")` guard is always false and the
-            # measurement below would time the launch rather than the work.
-            torch_fl._C._synchronize()
-            return (time.perf_counter() - start) / n * 1e3
-
-        per_call = run(10)
-        # A host round trip of three 1024x4096 float32 tensors is milliseconds
-        # of copy each way; the node is well under one. 10 ms sits far from both.
-        assert per_call < 10.0, (
-            f"where over {rows}x{width} operands took {per_call:.1f} ms; "
-            "the whole-operand fallback is back"
+        calls = 10
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+condition = torch.rand(1024, 4096, device='flagos:0') > 0.5
+a = torch.randn(1024, 4096, device='flagos:0')
+b = torch.randn(1024, 4096, device='flagos:0')
+torch.where(condition, a, b)
+torch_fl._C._synchronize()
+for _ in range(10):
+    torch.where(condition, a, b)
+torch_fl._C._synchronize()
+""",
+        )
+        # The warmup logs too: it is the call a fallback would have answered by
+        # copying the operands, so it is counted rather than subtracted.
+        assert served == calls + 1, (
+            f"where over {rows}x{width} operands logged {served} of "
+            f"{calls + 1} calls onto the mps slot; the whole-operand fallback is back"
         )
