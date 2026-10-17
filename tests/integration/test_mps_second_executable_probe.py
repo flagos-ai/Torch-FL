@@ -31,12 +31,12 @@ executable, and an intervening allocation churn.
 Diagnostic only -- deleted once it has answered.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
 
 import pytest
-import torch
 import torch_fl  # noqa: F401
 
 pytestmark = pytest.mark.multi_device
@@ -56,8 +56,6 @@ def _run(body: str) -> subprocess.CompletedProcess:
         dev = torch.device("flagos", 0)
         """
     ) + textwrap.dedent(body)
-    import os
-
     env = dict(os.environ)
     for name in ("FLAGOS_MPS_STAGE_TRACE", "FLAGOS_MPS_CRASH_TRACE"):
         env.pop(name, None)
