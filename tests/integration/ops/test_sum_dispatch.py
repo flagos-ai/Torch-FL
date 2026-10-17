@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import route_is_served, routed_backend
 
 
 DEVICE = "flagos:0"
@@ -156,7 +156,20 @@ class TestSumDimDispatch:
         FlagGems route still log flagos_python, so asserting the conf's own value
         keeps this test meaningful on every platform rather than pinning it to
         the one it was written on.
+
+        Skipped where this wheel did not compile the backend the conf names: the
+        default FlagGems-primary wheel links no CUDA boxing kernels, so on the
+        platforms whose conf returns this overload to ``cuda`` the op is never
+        claimed on PrivateUse1, reaches cpu_fallback and logs nothing. That gap
+        is what this lane's follow-up re-wires to a vendor or FlagGems route.
         """
+        if not route_is_served("sum.dim_IntList"):
+            pytest.skip(
+                f"the conf routes sum.dim_IntList to "
+                f"{routed_backend('sum.dim_IntList')}, a backend this wheel did "
+                "not compile (see KERNELS in torch_fl/_build_config.py): the call "
+                "reaches cpu_fallback and logs no dispatch"
+            )
         result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("sum.dim_IntList")

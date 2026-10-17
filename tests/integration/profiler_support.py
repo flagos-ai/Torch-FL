@@ -52,6 +52,19 @@ def _torch_module():
     return torch
 
 
+def _boxing_built() -> bool:
+    """True when this wheel carries the generated CUDA boxing kernels.
+
+    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
+    rather than inferred from the platform name: boxing became an explicit
+    opt-in on every CUDA-ABI platform in #520, so a ``cuda`` wheel answers False
+    here unless it was deliberately built with ``FLAGOS_BUILD_BOXING=1``.
+    """
+    from torch_fl import _env
+
+    return "boxing" in _env.build_kernels()
+
+
 def _mspti_in_link_map() -> bool:
     """Whether libmspti.so is mapped into this process right now."""
     try:
@@ -204,7 +217,18 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         # measured on Ascend 910 to cost 12.7us -> 133us at 1 MiB and
         # 17.4us -> 9080us at 64 MiB (aclrtMemsetAsync is worse still), so the
         # kernel routing stays and the capability stays off.
-        memset=device and platform in {"cuda", "metax"},
+        # The memset this row asserts is cuBLAS zeroing its gemm workspace, and
+        # cuBLAS is reachable on a CUDA-ABI platform only through the generated
+        # boxing kernels: FlagGems' matmul is a Triton kernel that zeroes
+        # nothing, and a `cuda`-routed op on a wheel without boxing kernels
+        # reaches cpu_fallback rather than a device kernel. Boxing became an
+        # opt-in in #520, so the default (FlagGems-primary) CUDA wheel
+        # answers False here and the memset cases report as skipped instead of
+        # failing on a cuBLAS call the wheel cannot make. Keyed on the build
+        # record rather than the platform name for the same reason as the
+        # `cuda` marker gate in tests/integration/ops/conftest.py: the two
+        # stopped being interchangeable when boxing became an opt-in.
+        memset=device and platform in {"cuda", "metax"} and _boxing_built(),
         flow=device,
         linkage=device,
         metadata=device,

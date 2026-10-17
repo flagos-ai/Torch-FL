@@ -286,14 +286,17 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
 
 
 def test_setup_kwargs_survive_a_boxing_lane_walking_the_table(monkeypatch):
-    """Every CUDA-ABI lane builds boxing, so its hook exports FLAGOS_BUILD_BOXING=1.
+    """A boxing lane's FLAGOS_BUILD_BOXING=1 must not leak onto another platform.
 
-    That value is inherited by the unit tests, including the loop above, which
-    points FLAGOS_ACCELERATOR at every accelerator in the table. One of them --
-    iluvatar -- pins boxing off, so resolving the switch while computing another
-    platform's requirements raises and fails the DCU lane. `_get_setup_kwargs()`
-    describes the wheel for the platform it is asked about, so it must not reject
-    an environment value that belongs to a different platform's build.
+    The DCU, MetaX and PPU lanes still export FLAGOS_BUILD_BOXING=1, because
+    their wheels keep the CUDA boxing path; the CUDA lane deliberately does not,
+    since it now tests the FlagGems-primary default. That value is inherited by
+    the unit tests, including the loop above, which points FLAGOS_ACCELERATOR at
+    every accelerator in the table. One of them -- iluvatar -- pins boxing off,
+    so resolving the switch while computing another platform's requirements
+    raises and fails the DCU lane. `_get_setup_kwargs()` describes the wheel for
+    the platform it is asked about, so it must not reject an environment value
+    that belongs to a different platform's build.
     """
     globals_ = _setup_globals()
     monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")

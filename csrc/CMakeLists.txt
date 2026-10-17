@@ -429,10 +429,12 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 )
 
 # The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
-# c10/cuda/impl/cuda_cmake_macros.h. cuda_memory.h includes CUDACachingAllocator.h
-# to delegate flagos allocation to the CUDA caching allocator; this macro tells
-# CUDAMacros.h to skip that generated configure file. Not needed for Ascend
-# (which does not include c10/cuda headers) -- the flag is per platform in the table.
+# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's cuda_memory.h includes
+# CUDACachingAllocator.h to delegate flagos allocation to the CUDA caching
+# allocator; this macro tells CUDAMacros.h to skip that generated configure
+# file. Not needed for Ascend (which does not include c10/cuda headers), and
+# inert on the default FlagGems-primary wheel, where boxing is off and no
+# c10/cuda header is pulled in at all -- the flag is per platform in the table.
 if(FLAGOS_PLATFORM_C10_CUDA_CONFIGURE)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
 endif()

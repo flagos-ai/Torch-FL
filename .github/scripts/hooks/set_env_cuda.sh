@@ -291,39 +291,16 @@ else
   export FLAGOS_BUILD_FLAGGEMS_CPP=0
 fi
 
-# Copy only accelerator-side PyTorch libraries. libc10.so, libtorch.so,
-# libtorch_cpu.so and libtorch_python.so deliberately come from the upstream
-# CPU wheel installed below. setup.py copies these assets into torch_fl/lib,
-# and torch_fl preloads them before importing torch.
-CUDA_ASSETS_DIR="$REPO_ROOT/.libtorch_cuda_assets"
-rm -rf "$CUDA_ASSETS_DIR"
-mkdir -p "$CUDA_ASSETS_DIR"
-shopt -s nullglob
-for pattern in \
-  'libc10_cuda.so*' \
-  'libtorch_cuda.so*' \
-  'libtorch_cuda_linalg.so*' \
-  'libtorch_nvshmem.so*' \
-  'libcaffe2_nvrtc.so*'; do
-  for source in "$VENDOR_TORCH_LIB"/$pattern; do
-    cp -a "$source" "$CUDA_ASSETS_DIR/"
-  done
-done
-shopt -u nullglob
-
-# The CUDA dispatcher library is the only mandatory accelerator asset. Some
-# vendor Torch layouts (including cu130 images) do not ship a standalone
-# libc10_cuda.so; torch_fl treats that library as optional and loads it when
-# present. Keep the check layout-agnostic instead of requiring a fixed set of
-# files on every CUDA image.
-if [[ ! -e "$CUDA_ASSETS_DIR/libtorch_cuda.so" ]]; then
-  echo "::error::Required CUDA asset was not found: $VENDOR_TORCH_LIB/libtorch_cuda.so"
-  exit 1
-fi
-if [[ ! -e "$CUDA_ASSETS_DIR/libc10_cuda.so" ]]; then
-  echo "::notice::Optional CUDA asset not present: $VENDOR_TORCH_LIB/libc10_cuda.so"
-fi
-echo "CUDA assets staged: $(find "$CUDA_ASSETS_DIR" -maxdepth 1 -type f -name '*.so*' | wc -l)"
+# No accelerator-side libtorch is staged. This lane builds the default
+# (FlagGems-primary) CUDA wheel: boxing is off, so setup.py's
+# _bundle_cuda_assets() returns early and the wheel carries no libtorch_cuda.so
+# to preload. Staging the vendor image's copy here would put a libtorch_cuda.so
+# on LD_LIBRARY_PATH that nothing in the wheel refers to, which is exactly the
+# hidden dependency on the vendor torch package this lane exists to remove --
+# and the asset assertions below used to require it, so a boxing-off build could
+# not pass them. The vendor image interpreter is still resolved above, because
+# its nvidia-*-cu12 runtime wheels are what the FlagTree Triton kernels link
+# against at run time.
 
 # The isolated environment runs on the Python version FlagTree is built for, so
 # `python` inside it is the same interpreter that owns the Triton provider. The
@@ -483,15 +460,18 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=cuda
-# This lane deliberately exercises the CUDA boxing coverage: it stages the
-# vendor image's libtorch_cuda.so (below) and the factory/operator suites assert
-# -> cuda routing. Boxing is off by default for every accelerator now
-# (cmake/flagos_platforms.json), so the lane must ask for it explicitly or the
-# wheel would ship no CUDA kernels and the staged asset would go unused.
-export FLAGOS_BUILD_BOXING=1
+# This lane builds and tests the default CUDA wheel: FlagGems-primary, with
+# boxing off. That is the shape a user gets from `pip install` -- boxing is off
+# by default for every accelerator (cmake/flagos_platforms.json) and the opt-in
+# is an explicit FLAGOS_BUILD_BOXING=1 the lane deliberately does not set, so CI
+# measures the configuration that actually ships. What boxing used to serve --
+# the ops backends_cuda.conf routes to `cuda` rather than to a FlagGems kernel
+# -- is consequently unregistered here and reaches cpu_fallback; the `cuda`
+# marker gate in tests/integration/ops/conftest.py skips the cases that assert
+# that routing rather than letting them fail on a kernel the wheel does not
+# have.
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
-export FLAGOS_CUDA_ASSETS_DIR="$CUDA_ASSETS_DIR"
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
 export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 export FLAGTREE_VERSION
@@ -514,8 +494,8 @@ CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
 CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
 export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${VENDOR_FLAGGEMS_DIR:+:$VENDOR_FLAGGEMS_DIR}${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
 export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
-export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64:$CUDA_ASSETS_DIR${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$CUDA_ASSETS_DIR${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"
 # Verify that the source-free wheel installed the Triton provider it ships,
@@ -547,8 +527,8 @@ print(f"Triton version: {triton.__version__}")
 PY
 
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
-  # Prebuild so package_data sees libtorch_fl.so and the bundled CUDA assets
-  # before the common workflow invokes python -m build.
+  # Prebuild so package_data sees libtorch_fl.so before the common workflow
+  # invokes python -m build.
   build_flagos_inplace
 fi
 
@@ -559,8 +539,12 @@ fi
 nvidia-smi
 
 python - <<'PY'
-from pathlib import Path
+import importlib.machinery
+import importlib.util
+import os
 import sys
+from pathlib import Path
+
 import torch
 
 torch_path = Path(torch.__file__).resolve()
@@ -568,11 +552,28 @@ assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
-assert Path(".libtorch_cuda_assets/libtorch_cuda.so").is_file()
+
+# The lane's whole premise is the default build, so assert it from the record
+# the build just wrote rather than from an environment variable this script
+# could itself have set. torch_fl/_env.py is loaded by path for the same reason
+# setup.py does: importing the package would run torch_fl/__init__.py, which
+# claims the flagos device before the tests are ready for it.
+_record = Path("torch_fl/_build_config.py")
+assert _record.is_file(), _record
+_loader = importlib.machinery.SourceFileLoader("_flagos_build_config", str(_record))
+_spec = importlib.util.spec_from_loader(_loader.name, _loader)
+_config = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_config)
+assert os.environ.get("FLAGOS_BUILD_BOXING") is None, (
+    "this lane must not force FLAGOS_BUILD_BOXING; it tests the default wheel"
+)
+assert "boxing" not in tuple(_config.KERNELS), _config.KERNELS
+assert "flaggems" in tuple(_config.KERNELS), _config.KERNELS
+
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
-print(f"CUDA assets: {Path('.libtorch_cuda_assets').resolve()}")
+print(f"Kernel sets: {tuple(_config.KERNELS)}")
 PY
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
@@ -588,7 +589,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING CUDA_HOME CUDA_PATH FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi

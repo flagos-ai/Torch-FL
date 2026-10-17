@@ -917,6 +917,107 @@ def _patch_flaggems_philox():
         pass
 
 
+def _patch_flaggems_layer_norm_backward() -> None:
+    """Correct flag_gems' layer-norm backward for inputs above 2-D.
+
+    flag_gems' wrapper derives the reduced-row count from ``input.shape[0]``:
+
+        M = input.shape[0]
+        N = input.numel() // M
+
+    That is only the row count for a 2-D input. On a 3-D transformer tensor
+    ``shape[0]`` is the batch size, so the dX kernel's grid is short by the
+    sequence length and the weight/bias reduction sums the wrong number of
+    rows. Measured on A100 (flag_gems 5.4.0, no boxing kernels compiled, so
+    ``native_layer_norm_backward`` can only route to the FlagGems Python path):
+    for a (13, 7, 32) input with a ones/zeros affine the bias gradient must be
+    the constant 91.0 and comes back with max 13.0 -- exactly ``shape[0]``.
+    The error is large, not a rounding artifact (dX off by 4.96, dbeta by 96.5)
+    and it makes the result non-reproducible: 40 identical forward/backward
+    passes over one frozen BERT gave 23 distinct losses, while vendor CUDA
+    torch on the same box gave 1.
+
+    The kernels are correct for a 2-D input -- the 2-D case is bit-exact -- so
+    the fix is to feed the existing wrapper a contiguous (M, N) view, which
+    makes its own M/N derivation right, and reshape dX back. That relies only
+    on the 2-D contract the wrapper already satisfies, rather than restating
+    its kernel launch code here, so it keeps working as flag_gems evolves.
+
+    Cross-platform: this is a flag_gems defect, not a CUDA one, but it is
+    deliberately not applied to every platform. Only the routing decides
+    whether the op reaches this wrapper at all, and a platform whose conf keeps
+    ``native_layer_norm_backward`` on its own kernels (metax, dcu, ppu, ascend)
+    never calls it. Installing it unconditionally would replace a correct
+    vendor kernel with the patched gems one on those platforms, which is a
+    behaviour change this evidence does not cover. The gate is therefore the
+    same one the other flag_gems patches use -- some op in the selected conf
+    routes to a FlagGems path -- and it is a no-op wherever the op is not
+    routed there.
+
+    Remove this once the wrapper computes M from ``normalized_shape`` itself.
+    """
+    if not _conf_routes_to_flaggems():
+        return
+    if _build_accelerator() not in ("cuda", "", "ppu", "musa", "tsingmicro"):
+        return
+
+    try:
+        import math
+
+        import flag_gems
+        import flag_gems.ops.layernorm as _layernorm
+
+        _orig = flag_gems.layer_norm_backward
+
+        def _patched(
+            grad_out,
+            input,
+            normalized_shape,
+            mean,
+            rstd,
+            weight=None,
+            bias=None,
+            output_mask=None,
+        ):
+            if input.dim() <= 2:
+                return _orig(
+                    grad_out,
+                    input,
+                    normalized_shape,
+                    mean,
+                    rstd,
+                    weight,
+                    bias,
+                    output_mask,
+                )
+            shape = tuple(input.shape)
+            n = math.prod(normalized_shape)
+            m = input.numel() // n
+            dx, dweight, dbias = _orig(
+                grad_out.reshape(m, n),
+                input.reshape(m, n),
+                [n],
+                mean,
+                rstd,
+                weight,
+                bias,
+                output_mask,
+            )
+            if dx is not None:
+                dx = dx.reshape(shape)
+            return dx, dweight, dbias
+
+        # The generated kernel calls the package-level name
+        # ("flag_gems.layer_norm_backward" in flaggems_python_kernels.cc) and
+        # resolves it on first use, so patch both bindings before any op runs.
+        flag_gems.layer_norm_backward = _patched
+        _layernorm.layer_norm_backward = _patched
+    except Exception:
+        # FlagGems remains optional; a missing or renamed entry point must not
+        # make torch_fl unimportable.
+        pass
+
+
 def _restore_dcu_hip_version() -> None:
     """Set torch.version.hip/rocm for a self-contained DCU wheel.
 
@@ -2288,6 +2389,10 @@ def _phase_ecosystem() -> None:
     # has no attribute 'vendor_name'` for the life of the process.
     flagos._stand_down_foreign_triton_drivers()
     _patch_flaggems_philox()
+
+    # Correct flag_gems' layer-norm backward for 3-D+ inputs; must precede the
+    # first op call, which is where the generated kernel resolves the callable.
+    _patch_flaggems_layer_norm_backward()
 
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()

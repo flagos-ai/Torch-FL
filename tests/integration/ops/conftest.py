@@ -65,14 +65,18 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
     "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
-    # PPU is a CUDA-ABI boxing backend: the CUDA dispatch key carries vendor
-    # kernels, so cuda-marked tests run here -- same skip set as cuda, which is
-    # where PPU implicitly landed before it was named. Naming it makes the
-    # platform first-class in this gate instead of correct by accident of the
-    # fallback bucket.
+    # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
+    # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
+    # here -- same skip set as cuda, which is where PPU implicitly landed before
+    # it was named. Naming it makes the platform first-class in this gate
+    # instead of correct by accident of the fallback bucket. On a default
+    # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
+    # set, because that key has no kernel behind it.
     "ppu": ("metax", "ascend", "musa", "dcu"),
     # cuda -- and an unidentified wheel, which detect_platform() defaults to --
-    # runs the CUDA-marked tests and skips every other backend's.
+    # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
+    # skips every other backend's. The build-record gate below covers the
+    # default FlagGems-primary wheel, where the `cuda` route has no kernels.
     "cuda": ("metax", "ascend", "musa", "dcu"),
     "dcu": ("metax", "ascend", "musa", "gcu"),
     # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
@@ -123,6 +127,21 @@ def _flaggems_cpp_enabled() -> bool:
     return "flaggems_cpp" in _env.build_kernels()
 
 
+def _boxing_enabled() -> bool:
+    """True when this wheel has the generated CUDA boxing kernels compiled in.
+
+    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``),
+    for the same reason ``_flaggems_cpp_enabled()`` is: the record cannot
+    disagree with the wheel it lives in. Boxing became an explicit opt-in on
+    every CUDA-ABI platform in #520, so the default wheel answers False here and
+    a ``cuda``-marked case -- which asserts that an op dispatches to the CUDA
+    dispatch key -- has no kernel behind that key to reach.
+    """
+    from torch_fl import _env
+
+    return "boxing" in _env.build_kernels()
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -136,6 +155,16 @@ def pytest_collection_modifyitems(
     if platform == "metax":
         markers_to_skip.append("metax")
     flaggems_cpp_on = _flaggems_cpp_enabled()
+    # The `cuda` mark asserts a `-> cuda` dispatch, and on a CUDA-ABI platform
+    # that route is served by the generated boxing kernels. A FlagGems-primary
+    # wheel (the default since #520, and the only wheel the CUDA-ABI CI lanes
+    # build now) compiles none, so the ops the conf routes to `cuda` are left
+    # unregistered and reach cpu_fallback: the assertion has nothing to hold on
+    # and the case skips rather than failing. Platforms whose conf has no `cuda`
+    # route at all (ascend, gcu, musa, kunlunxin, bpu, mps) already skip the mark
+    # from the table above; appending it again is a no-op for them.
+    if not _boxing_enabled():
+        markers_to_skip.append("cuda")
     for item in items:
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             item.add_marker(

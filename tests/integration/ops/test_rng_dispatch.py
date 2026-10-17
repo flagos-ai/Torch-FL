@@ -33,6 +33,25 @@ backend configs -- pure vendor (`-m main_ops`) and FlagGems
 always `torch.flagos`; backend-specific generator representations are not part
 of the cross-backend test contract.
 
+The second path only exists in a wheel that carries the generated CUDA boxing
+kernels. Boxing is off by default for every CUDA-ABI platform (#520) and the
+CUDA lane builds that default wheel, so on it the ops `backends_cuda.conf`
+routes to `cuda` -- `normal_`, `randint`, `randperm`, `log_normal_` and the
+`*_out`/`.generator` overloads -- reach cpu_fallback instead. The cases that
+assert the boxing path's translation behaviour are therefore gated on the build
+record (`_boxing_built()`), the same way the `cuda` marker is gated in
+`tests/integration/ops/conftest.py`, rather than on the accelerator name: the
+two stopped being interchangeable when boxing became an opt-in.
+
+That wheel is not unclaimed everywhere. `backends_cuda.conf` routes `rand`,
+`randn`, the two `_like` factories and `uniform_` to a FlagGems arm, and the
+factory path goes along with it: `torch.rand(..., generator=)` has no
+PrivateUse1 kernel of its own, so the composite fills a device tensor and calls
+`uniform_`. The generated FlagGems wrapper takes the explicit generator instead
+of rejecting it, so the rejection asserted below describes only the routes the
+wheel leaves unclaimed, and the factory case skips itself where FlagGems already
+answers the call (`_factory_rng_served_by_flag_gems()`).
+
 Every test carries `main_ops` because CI's operator jobs select on it; a test
 without that marker never runs in CI.
 
@@ -50,23 +69,99 @@ def _is_musa() -> bool:
     return torch_fl._build_accelerator() == "musa"
 
 
+def _boxing_built() -> bool:
+    """True when this wheel has the generated CUDA boxing kernels compiled in.
+
+    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
+    because it cannot disagree with the wheel it lives in, and because the
+    accelerator name no longer implies it: since #520 boxing is an explicit
+    opt-in on every CUDA-ABI platform, so a default ``cuda`` wheel answers False.
+    """
+    return "boxing" in torch_fl._env.build_kernels()
+
+
+def _device_rng_reads_flagos_seed() -> bool:
+    """True when a device RNG op draws from the generator the flagos seed writes.
+
+    ascend/gcu/musa/kunlunxin consume a flagos generator natively (their rng.cc
+    takes the seed from c10::flagos::ReserveSeed); the CUDA-compatible boxing
+    backends (cuda/dcu/metax/ppu) accept one because the generated boxing prelude
+    translates it per call (covered by the translation tests below). Either way
+    the seed `torch.flagos.manual_seed` writes is the one the kernel reads, which
+    is what makes both the generator-acceptance and the state-round-trip
+    assertions below meaningful. aclnn-style CPU-seeded paths are not in this
+    list and must keep rejecting it.
+
+    The translation the boxing backends rely on is compiled into the boxing
+    kernels, so a FlagGems-primary wheel (boxing off) answers False for the same
+    reason the aclnn paths do: the op is not on a device route the wheel can
+    claim, and the generator is rejected rather than silently reinterpreted.
+    """
+    if torch_fl._build_accelerator() in ("ascend", "gcu", "musa", "kunlunxin"):
+        return True
+    return _boxing_built()
+
+
 def _supports_flagos_generator() -> bool:
-    # ascend/gcu/musa/kunlunxin consume a flagos generator natively (their
-    # rng.cc takes the seed from c10::flagos::ReserveSeed); the CUDA-compatible
-    # boxing backends (cuda/dcu/metax/ppu) accept one because the generated
-    # boxing prelude translates it per call (covered by the translation tests
-    # below). aclnn-style CPU-seeded paths are not in this list and must keep
-    # rejecting it.
-    return torch_fl._build_accelerator() in (
-        "ascend",
-        "gcu",
-        "musa",
-        "kunlunxin",
-        "cuda",
-        "dcu",
-        "metax",
-        "ppu",
-    )
+    """The generator-acceptance face of ``_device_rng_reads_flagos_seed``."""
+    return _device_rng_reads_flagos_seed()
+
+
+#: The conf backends whose route ends in a FlagGems kernel.
+_FLAGGEMS_BACKENDS = frozenset({"flaggems", "flaggems_cpp", "flaggems_python"})
+
+
+def _conf_route(op: str) -> str:
+    """The backend the conf this wheel resolved routes ``op`` to, or "".
+
+    Parsed the way the C++ reader does: drop anything after ``#``, split the
+    rest on the first ``=``. An empty answer covers "unlisted" and "no conf
+    resolved" together, which is all the caller needs to tell apart from a
+    named backend.
+    """
+    path = torch_fl.backend_config_path()
+    if not path:
+        return ""
+    with open(path) as conf:
+        for line in conf:
+            name, sep, value = line.split("#")[0].partition("=")
+            if sep and name.strip() == op:
+                return value.strip()
+    return ""
+
+
+def _factory_rng_served_by_flag_gems() -> bool:
+    """True when this wheel answers the factory RNG path with a FlagGems kernel.
+
+    ``torch.rand(..., generator=...)`` reaches the device through ``uniform_``
+    (see the module docstring), so the factory path is exactly as unclaimed as
+    the conf's ``uniform_`` route. When that route is a FlagGems arm the call is
+    served -- the generated wrapper takes the explicit generator instead of
+    rejecting it -- and the rejection this file asserts for an unrouted
+    generator has nothing to hold on. Three facts about the wheel, no platform
+    name: the route the conf states, the kernel set the build record lists, and
+    whether the package that arm calls is importable.
+    """
+    if _conf_route("uniform_") not in _FLAGGEMS_BACKENDS:
+        return False
+    if "flaggems" not in torch_fl._env.build_kernels():
+        return False
+    try:
+        import flag_gems  # noqa: F401
+    except Exception:  # noqa: BLE001 - an unimportable arm cannot serve the call
+        return False
+    return True
+
+
+_NEEDS_DEVICE_RNG = pytest.mark.skipif(
+    not _device_rng_reads_flagos_seed(),
+    reason=(
+        "the device RNG ops this file draws with are unrouted on this wheel "
+        "(no generated CUDA boxing kernels): they reach cpu_fallback, whose "
+        "generator is ATen's own and is not the one the flagos state API "
+        "reads, so the stream assertion cannot hold"
+    ),
+)
 
 
 DEVICE = "flagos:0"
@@ -293,6 +388,15 @@ class TestRngSeedSource:
             gen.manual_seed(99)
             second = torch.rand(8, device=DEVICE, generator=gen).cpu()
             assert torch.equal(first, second)
+        elif _factory_rng_served_by_flag_gems():
+            # The composite factory path is answered by a FlagGems kernel on
+            # this wheel, so nothing here rejects the generator and the
+            # assertion below has nothing to hold on.
+            pytest.skip(
+                "the factory RNG path is served by a FlagGems kernel on this "
+                "wheel, which accepts an explicit generator instead of "
+                "rejecting it"
+            )
         else:
             with pytest.raises(RuntimeError, match="device type for generator"):
                 torch.rand(8, device=DEVICE, generator=gen)
@@ -304,7 +408,7 @@ class TestRngSeedSource:
         # a *clone* of the shared CUDA generator is reseeded per call. If it
         # reseeded the shared generator itself, every explicit-generator call
         # would restart the default stream -- the exact failure this guards.
-        if torch_fl._build_accelerator() not in ("cuda", "dcu", "metax", "ppu"):
+        if not _boxing_built():
             pytest.skip("shared-generator isolation is a CUDA boxing concern")
         gen = torch.Generator(device="flagos")
         gen.manual_seed(7)
@@ -326,7 +430,7 @@ class TestRngSeedSource:
         # from one flagos generator must differ, because each call consumes
         # one mt19937 draw via ReserveSeed and the per-op philox seed advances
         # with it. Covers both the `normal_` and factory translation sites.
-        if torch_fl._build_accelerator() not in ("cuda", "dcu", "metax", "ppu"):
+        if not _boxing_built():
             pytest.skip("per-call seed translation is a CUDA boxing behavior")
         gen = torch.Generator(device="flagos").manual_seed(4242)
         first = _empty(8).normal_(generator=gen).cpu()
@@ -382,6 +486,7 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_NEEDS_DEVICE_RNG
     def test_rng_state_round_trip(self):
         torch.flagos.manual_seed(SEED)
         state = torch.flagos.get_rng_state()

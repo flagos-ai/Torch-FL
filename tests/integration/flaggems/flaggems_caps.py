@@ -163,7 +163,7 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ascend": 221,
-    "cuda": 416,
+    "cuda": 392,
     "dcu": 454,
     "gcu": 251,
     "kunlunxin": 0,

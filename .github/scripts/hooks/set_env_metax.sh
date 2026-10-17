@@ -134,6 +134,11 @@ export MACA_HOME=/opt/maca
 # in torch_fl/_build_config.py, and the runtime derives its conf from that record
 # (torch_fl._select_backend_config), so there is no mode variable to keep in
 # agreement with the build any more.
+#
+# The CUDA lane no longer opts in: it measures the FlagGems-primary default a
+# `pip install` gets. MetaX keeps the vendor path until the ops
+# backends_metax.conf routes to `cuda` have a FlagGems route of their own --
+# flipping it first would leave them on cpu_fallback.
 export FLAGOS_BUILD_VENDOR=OFF
 export FLAGOS_BUILD_BOXING=1
 export FLAGOS_METAX_CUDART_SHIM=1
