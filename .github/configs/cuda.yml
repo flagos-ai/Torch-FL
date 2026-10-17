@@ -48,6 +48,14 @@ container_volumes:
 integration_environment:
   MODEL_PATH: /models/Qwen3-0.6B
 
+# Environment one step alone needs on this platform, keyed by manifest step id.
+# CUDA is the platform that compiles its Triton routes through FlagTree, and the
+# switch is stated here rather than as a different command, so every platform
+# runs the same torch.compile step and the difference stays a value.
+step_environment:
+  torch_compile:
+    FLAGOS_USE_FLAGTREE: "1"
+
 container_options: >-
   --gpus all
   --ipc=host

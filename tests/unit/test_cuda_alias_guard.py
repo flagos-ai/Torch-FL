@@ -22,14 +22,17 @@ that is not what `torch.cuda.is_available()` answers once torch_fl is imported:
 attribute at the flagos device count so Inductor's CUDA-shaped FakeTensor probe
 finds the accelerator on a build without a CUDA runtime.
 
-`torch_fl.compile` is imported eagerly during `_phase_claim`, which runs before
-`_phase_ecosystem` calls `_alias_cuda_to_flagos`, so the redirect is always in
-place by the time the guard reads it. On MUSA that made the guard answer "yes,
-there is CUDA", the alias never installed, and every hardcoded `"cuda"` in the
-ecosystem kept dying in `torch.cuda._lazy_init` -- including the
-`torch.cuda.current_device()` call dynamo's `cuda_extra_check` makes while
-building compilation metrics, so `torch.compile(model, fullgraph=True)` could not
-compile at all.
+Which import of `torch_fl.compile` installs that redirect before the guard reads
+it depends on the platform: an earlier phase pulls it in on MUSA and the boxing
+backends, while on kunlunxin it arrives with the optional-integration step of
+`_phase_ecosystem` -- after `_alias_cuda_to_flagos`. On MUSA the redirect was in
+place first, which made the guard answer "yes, there is CUDA", the alias never
+installed, and every hardcoded `"cuda"` in the ecosystem kept dying in
+`torch.cuda._lazy_init` -- including the `torch.cuda.current_device()` call
+dynamo's `cuda_extra_check` makes while building compilation metrics, so
+`torch.compile(model, fullgraph=True)` could not compile at all. Both orders now
+record torch's own probe in that slot, so the guard reads the same answer either
+way.
 
 The guard now reads `_real_cuda_is_available`, which answers from the copy
 `_patch_native_cuda_probe` saved before overwriting the attribute. The first
@@ -128,8 +131,14 @@ _CHILD = textwrap.dedent(
     import json
     import os
 
-    import torch
+    # torch_fl before torch, the same order tests/unit/conftest.py uses and the
+    # only order a vendor-core build supports: torch_fl has to select its forked
+    # libtorch core before torch starts. Reaching ``import torch`` first maps the
+    # upstream libtorch, and PPU's own ``_preload_global`` then aborts the
+    # process while static init registers the Conjugate dispatch fallback a
+    # second time (run 38723076856, test_cuda_alias_guard).
     import torch_fl
+    import torch
 
     def device_type(dev):
         try:
@@ -175,13 +184,19 @@ _CHILD = textwrap.dedent(
 
 
 def _child_state(alias_env: str) -> dict:
-    """Import torch and torch_fl in a fresh interpreter, and report the result.
+    """Import torch_fl and torch in a fresh interpreter, and report the result.
 
     `TORCH_DEVICE_BACKEND_AUTOLOAD` is cleared for the same reason
     `tests/manual/transformers_hf_tests.py` clears it for its children: torch_fl
     then runs from an explicit `import torch_fl` rather than from inside
     `import torch`, which is the order the ecosystem reaches it in -- a
     transformers script imports torch_fl last, and MUSA never autoloads at all.
+
+    The child still imports torch_fl *before* torch, because that is what the
+    explicit-import path has to look like on a vendor-core build: PPU, DCU and
+    MetaX relink their forked libtorch core from `torch_fl/__init__.py`, and an
+    upstream libtorch mapped first cannot be replaced afterwards. The alias has
+    to install on that path too, which is what these tests assert.
     """
     env = {
         **os.environ,

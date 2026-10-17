@@ -67,6 +67,11 @@ def test_activation_keeps_read_only_install_unchanged(
 ):
     stock, vendor = fake_runtime
     module = _load_module()
+    # tests/unit/conftest.py imports torch_fl for its import-order side effect,
+    # which drags ``torch`` into sys.modules. The overlay path is only reachable
+    # while torch is not imported yet, so hide that entry for this test and let
+    # monkeypatch put it back afterwards.
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
     cache = tmp_path / "cache"
     cache.mkdir()
     monkeypatch.setattr(module, "_overlay_cache_root", lambda: str(cache))
@@ -156,6 +161,7 @@ def test_equal_core_still_selects_missing_vendor_device_lib(
     for name in CORE:
         (stock / name).write_bytes((vendor / name).read_bytes())
     module = _load_module()
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
     cache = tmp_path / "cache"
     cache.mkdir()
     monkeypatch.setattr(module, "_overlay_cache_root", lambda: str(cache))
@@ -164,6 +170,7 @@ def test_equal_core_still_selects_missing_vendor_device_lib(
         module, "discover_vendor_torch_lib", lambda *a, **k: str(vendor)
     )
     monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    overlay = None
     try:
         assert module.ensure_vendor_libtorch_links(
             "vendor", CORE, extra_so=("libtorch_cuda.so",)
@@ -173,7 +180,8 @@ def test_equal_core_still_selects_missing_vendor_device_lib(
             vendor / "libtorch_cuda.so"
         )
     finally:
-        sys.path.remove(str(overlay))
+        if overlay is not None:
+            sys.path.remove(str(overlay))
 
 
 def test_inherited_facade_imports_in_child(fake_runtime, tmp_path):

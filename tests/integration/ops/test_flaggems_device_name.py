@@ -64,6 +64,21 @@ import torch_fl  # noqa: F401
 DEVICE = "flagos:0"
 SEED = 1234
 
+# Kunlunxin's flagtree XPU stack cannot import flag_gems at all: the XPU TLE
+# backend raises NotImplementedError for `tle.device_mesh`, and
+# `pytest.importorskip` catches ImportError only, so without this gate the file
+# errors there instead of skipping. The whole file is gated because every case
+# goes through `_aligned_device_detector` and needs the import to succeed.
+# Recorded in tests/integration/platform_gates.py; a flagtree XPU build that
+# imports flag_gems is what removes it.
+_NO_XPU_FLAG_GEMS = pytest.mark.skipif(
+    torch_fl._build_accelerator() == "kunlunxin",
+    reason=(
+        "Kunlunxin's flagtree XPU backend raises NotImplementedError importing "
+        "flag_gems (tle.device_mesh); see tests/integration/platform_gates.py"
+    ),
+)
+
 
 def _aligned_device_detector():
     """FlagGems' DeviceDetector, or a skip when no aligned vendor is in play."""
@@ -112,6 +127,7 @@ def _assert_matches_cpu(produce, reference):
     torch.testing.assert_close(result.to("cpu"), reference, rtol=1e-4, atol=1e-4)
 
 
+@_NO_XPU_FLAG_GEMS
 class TestFlaggemsDeviceName:
     """The name FlagGems uses must be the one torch_fl registered."""
 
@@ -180,6 +196,7 @@ class TestFlaggemsDeviceName:
         assert torch.allclose((value * 1.3333333333333333).to("cpu"), reference)
 
 
+@_NO_XPU_FLAG_GEMS
 class TestFlaggemsGuardedRoutes:
     """Routes whose FlagGems kernel refuses an operand it cannot recognise.
 
@@ -393,6 +410,7 @@ class TestFlaggemsGuardedRoutes:
         assert not value.is_cuda
 
 
+@_NO_XPU_FLAG_GEMS
 class TestFlaggemsDeviceSpecifiers:
     """The realignment also reaches a global used as a device *specifier*.
 

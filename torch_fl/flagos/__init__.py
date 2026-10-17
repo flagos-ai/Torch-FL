@@ -153,6 +153,13 @@ def synchronize(device=None):
 
 def init():
     _lazy_init()
+    # Device init can arrive while flag_gems is still importing, which is what
+    # happens on the platforms whose torch_fl import path imports it itself. That
+    # call leaves `_lazy_init` through the early exit below with the FlagGems
+    # patches still uninstalled, and latches nothing, because the patches only
+    # install against a module that has finished importing. Repeating the call
+    # here is what finishes them; see `_install_flaggems_patches`.
+    _install_flaggems_patches()
 
 
 def is_initialized():
@@ -162,6 +169,7 @@ def is_initialized():
 def _lazy_init():
     global _initialized
     if is_initialized():
+        _install_flaggems_patches()
         return
     _C._init()
     _initialized = True
@@ -218,6 +226,90 @@ def _lazy_init():
     # still materialising weights. See the function for the measurement.
     _prewarm_triton_key()
 
+    # Everything else that has to be in place before the first routed op, behind
+    # one re-entrant entry point: it declines a call that arrives while flag_gems
+    # is still importing rather than latching against the half-built module, so
+    # whichever of its callers runs first against a finished import installs the
+    # lot. See the function for why that distinction is load-bearing.
+    _install_flaggems_patches()
+
+    # Advanced indexing on this device takes the C++ dispatcher and needs no
+    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
+    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
+    # reach `IndexTensorKernelCuda` directly.
+    #
+    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
+    # CPython special method, so assigning to it also populates the type's
+    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
+    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
+    # takes the sequence-protocol branch in
+    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
+    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
+    # including for CPU tensors, in a process that merely touched a non-CPU
+    # device. Restoring the attribute afterwards does not undo it; only never
+    # assigning it does.
+
+
+_flaggems_patches_installed = False
+
+
+def _flaggems_op_names_are_bound() -> bool:
+    """Whether ``flag_gems`` has been imported far enough for the patches below.
+
+    Every one of them reaches for a top-level op name -- ``slice_backward``,
+    ``where``, ``vector_norm`` -- and installs nothing when it is missing, so
+    the two states that can produce a missing name have to be told apart: a
+    build that never had the op, and an import that has not finished yet. The
+    modules' shared ``getattr(flag_gems, name, None) is None`` guard cannot see
+    the difference, and the two call for opposite answers.
+
+    The import that has to be survived is torch_fl's own. GCU's runtime shims
+    and MUSA's Philox bridge both import flag_gems while ``torch_fl`` is still
+    executing, and triton asks for the active device on the way through, which
+    runs ``torch::utils::device_lazy_init(PrivateUse1)`` -> ``torch_flagos`` ->
+    ``_lazy_init`` from *inside* ``flag_gems/__init__.py``. The op tree is
+    imported at the top of that module and ``_FULL_CONFIG`` is built after it,
+    so by the time the module body returns every name the patches want exists.
+    CPython marks the in-progress import on the module's spec and clears it when
+    the body finishes, which is the whole question asked here.
+    """
+    module = sys.modules.get("flag_gems")
+    if module is None:
+        return False
+    return not getattr(getattr(module, "__spec__", None), "_initializing", False)
+
+
+def _install_flaggems_patches() -> bool:
+    """Install every FlagGems patch that has to precede the first routed op.
+
+    The C++ bridge resolves ``flag_gems.<name>`` once and caches the callable
+    (``csrc/aten/backends/flagos/python_op_caller.cc``), so each of these has to
+    be in place before the first routed op of the process; there is no second
+    chance once a callable has been cached.
+
+    They used to run inline from ``_lazy_init`` and nowhere else, which is not
+    where device init actually lands on the two platforms that import flag_gems
+    at ``import torch_fl`` time: the re-entrant call reaches ``_lazy_init``
+    while ``flag_gems/__init__.py`` is still executing, every patch declines
+    silently against that half-built module -- the guard cannot tell a missing
+    name from an unfinished import -- the same call then sets ``_initialized``,
+    and the early exit makes sure no later call retries. On those platforms the
+    patches were installed by nobody until this function existed.
+
+    So the install is latched only once it has run against a module that has
+    finished importing, and every caller repeats it until then -- ``_lazy_init``
+    on both of its paths, ``init()``, and ``torch_fl``'s ecosystem phase, which
+    is where the eager import above returns. A repeat costs a ``sys.modules``
+    lookup while the module is absent, and each patch keeps its own idempotency
+    marker (``_torch_fl_*`` on the wrapper it installs), so a repeat against a
+    finished module is a no-op.
+    """
+    global _flaggems_patches_installed
+    if _flaggems_patches_installed:
+        return True
+    if not _flaggems_op_names_are_bound():
+        return False
+
     # FlagGems locates itself in the device namespace by the vendor's own device
     # string ("cuda" for nvidia), while torch_fl registers this accelerator as
     # "flagos". Its ops compare the two and hand the call back to ATen when they
@@ -255,21 +347,17 @@ def _lazy_init():
     # repaired rather than retried. See the function for the measurement.
     _patch_flaggems_tune_space()
 
-    # Advanced indexing on this device takes the C++ dispatcher and needs no
-    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
-    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
-    # reach `IndexTensorKernelCuda` directly.
-    #
-    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
-    # CPython special method, so assigning to it also populates the type's
-    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
-    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
-    # takes the sequence-protocol branch in
-    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
-    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
-    # including for CPU tensors, in a process that merely touched a non-CPU
-    # device. Restoring the attribute afterwards does not undo it; only never
-    # assigning it does.
+    # Two more of the same window and the same caching rule, but these are
+    # contract repairs rather than host-cost ones: FlagGems' `where` never grows
+    # an `out=` destination the way ATen's overload does, and its
+    # `slice_backward` walks its operand as if it were contiguous when autograd
+    # hands it an expanded or strided gradient. Both are reached through the
+    # cached callable, so both have to be in place before the first routed op.
+    _patch_flaggems_where_out()
+    _patch_flaggems_slice_backward()
+
+    _flaggems_patches_installed = True
+    return True
 
 
 from .random import *  # noqa: F403, E402
@@ -459,14 +547,11 @@ class Stream(torch.cuda.Stream):
                 # with no stream class of its own is a property of the runtime
                 # (one queue, handle 0), not a name to keep adding to a list.
                 self._stream = _DefaultStreamHandle(_device_index(device))
-            # Set device attribute for __repr__ compatibility with torch.cuda.Stream
-            self.device = self._stream.device
         elif not hasattr(torch._C, "_cuda_getCurrentStream"):
             # CUDA runtime present, but torch.cuda.Stream is the wheel's dummy base
             # class rather than a real stream. Delegate to the same shim
             # torch.cuda.current_stream hands out.
             self._stream = _cuda_stream_shim(device)
-            self.device = self._stream.device
         # else: real torch.cuda.Stream path -- __new__ constructed it, do nothing.
 
     def __repr__(self):
@@ -504,6 +589,25 @@ class Stream(torch.cuda.Stream):
         if hasattr(self, "_stream"):
             return self._stream.handle
         return super().cuda_stream
+
+    @property
+    def device(self):
+        """The device whose queue this stream denotes.
+
+        Both vendor arms above used to write this attribute for
+        ``__repr__`` compatibility with ``torch.cuda.Stream``, which works where
+        the wheel's ``torch._C._CudaStreamBase`` is the dummy Python class it
+        synthesises over a CPU-only torch. It is the real C type on the
+        CUDA-shaped wheels (PPU), derived from ``torch.Stream``, and there
+        ``device`` is a read-only property: the assignment raised
+        ``AttributeError: attribute 'device' of 'torch.Stream' objects is not
+        writable`` out of ``__init__``. Answering it as a property keeps the
+        vendor arms from writing the attribute at all, and defers to the base
+        for the real ``torch.cuda.Stream`` that ``__new__`` constructed.
+        """
+        if hasattr(self, "_stream"):
+            return self._stream.device
+        return super().device
 
     @property
     def gcu_stream(self):
@@ -2531,6 +2635,144 @@ def _patch_flaggems_tune_space():
         run.__wrapped__ = original_run
         libtuner.run = run
         setattr(libtuner, _TUNE_SPACE_PATCHED, True)
+    except Exception:
+        pass
+
+
+def _patch_flaggems_where_out():
+    """Grow an ``out=`` destination the way ATen's ``where`` does, not reject it.
+
+    ``flag_gems.ops.where.where_self_out`` only computes the broadcast shape
+    when ``out is None``; when the caller supplies one it hands it straight to
+    ``where_inner(..., out0=out)``, and ``pointwise_dynamic.prepare_args``
+    validates that destination instead of resizing it. ATen's own overload does
+    the opposite: ``torch.where(cond, a, b, out=torch.empty(0))`` grows the
+    destination to the broadcast shape and returns it. On the FlagGems route the
+    same call raises
+
+        RuntimeError: out tensor at index 0 shape is invalid,
+        should be (2, 4) but is torch.Size([0])!
+
+    measured on the PPU lane of the unify-coverage run (job 116296487481,
+    ``tests/integration/ops/test_where_dispatch.py::TestWhereOutCorrectness::
+    test_out_grows_from_empty``). The destination is resized to the broadcast
+    shape before the call when the two differ, which is the same tensor ATen
+    would have handed the kernel. CPU reference: on torch 2.10.0 the ATen
+    spelling leaves ``out.shape == (2, 4)`` over an ``empty(0)`` destination.
+
+    The gap is not PPU's: the conf routes ``where.self_out`` to FlagGems on
+    ``cuda``, ``dcu``, ``metax`` and ``ppu`` alike, so every one of them fails
+    the case. MUSA met it first and moved the overload off FlagGems onto a
+    generated native kernel (see the MUSA entry in
+    ``docs/reference/operator-support.md``), leaving the same gap latent on the
+    four FlagGems-first confs; this fixes the shared cause once instead of
+    pinning each conf away from FlagGems in turn.
+
+    Gated on ``_conf_routes_to_flaggems`` rather than on a platform name: the
+    wrapper is only ever reached through the generated bridge for an op whose
+    route *is* FlagGems, so a conf that sends the overload elsewhere (``musa``,
+    ``gcu``, ``ascend``, ``kunlunxin``) never calls it. Best-effort, like the
+    patches around it: this must not be able to take down device init.
+    """
+    try:
+        from .. import _conf_routes_to_flaggems
+
+        if not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        original = getattr(flag_gems, "where_self_out", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_grows_where_out", False):
+            return
+
+        def where_self_out(condition, self, other, out=None):
+            if isinstance(out, torch.Tensor):
+                # ATen broadcasts all three operands, not just the ones that
+                # are tensors, so a scalar-only spelling still has a shape.
+                shapes = [
+                    tuple(operand.shape)
+                    for operand in (condition, self, other)
+                    if isinstance(operand, torch.Tensor)
+                ]
+                try:
+                    want = torch.broadcast_shapes(*shapes) if shapes else None
+                except Exception:
+                    # Not broadcastable: ATen's own overload raises the same
+                    # error out of the original, so let it.
+                    want = None
+                if want is not None and tuple(out.shape) != tuple(want):
+                    out.resize_(want)
+            return original(condition, self, other, out)
+
+        where_self_out.__wrapped__ = original
+        where_self_out._torch_fl_grows_where_out = True
+        _rebind_flag_gems_name("where_self_out", original, where_self_out)
+    except Exception:
+        pass
+
+
+def _patch_flaggems_slice_backward():
+    """Give FlagGems' ``slice_backward`` a contiguous operand to walk.
+
+    ``slice_backward_kernel`` loads ``grad_output_ptr + offsets`` and derives the
+    destination index with
+    ``outer_idx * dim_size * inner + dim_index * inner + inner_idx``, both of
+    which assume the operand's storage is exactly ``numel`` contiguous elements.
+    It never consults a stride, so anything else is read as the wrong element --
+    or past the end of the storage entirely.
+
+    The gradients autograd hands this op are not contiguous, and the common
+    spelling is not merely strided: ``(x[:, 2:6]).sum().backward()`` arrives as
+    an *expanded* expansion of a single element -- shape ``(4, 4)`` with stride
+    ``(0, 0)`` over a one-element storage (verified against torch 2.10.0 on the
+    CPU), so ``numel`` is 16 while the allocation holds 1 and 15 of the 16 reads
+    are out of bounds. ``torch.narrow(x.t(), 0, 1, 5)`` arrives as shape
+    ``(5, 4)``, stride ``(1, 5)``, where the storage is large enough to be read
+    and the kernel silently returns the wrong gradient -- the 18-of-32 mismatch
+    the PPU lane of the unify-coverage run reports for
+    ``tests/integration/ops/test_narrow_dispatch.py::TestNarrowAutograd::
+    test_narrow_backward_non_contiguous`` (job 116296487481), and the reason the
+    three ``TestSliceBackwardCorrectness`` cases in
+    ``tests/integration/ops/test_slice_backward_dispatch.py`` are marked xfail.
+
+    Materialising the operand with ``.contiguous()`` when it is not contiguous
+    is what the kernel was written against, and it reproduces ATen's
+    ``slice_backward`` element for element on all three layouts above
+    (``index_copy_`` reference). Contiguous callers -- ``x[:, 1:4]``,
+    ``x[:, ::3]`` -- are left alone and pay nothing.
+
+    Gated on ``_conf_routes_to_flaggems`` rather than on a platform name: the
+    overload is FlagGems-routed on ``cuda``, ``musa``, ``ascend``, ``gcu`` and
+    ``ppu``, and pinned to ``cuda`` on ``dcu``/``metax`` and to ``none`` on
+    ``kunlunxin``, where the wrapper is never reached. Best-effort, like the
+    patches around it: this must not be able to take down device init.
+    """
+    try:
+        from .. import _conf_routes_to_flaggems
+
+        if not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+
+        original = getattr(flag_gems, "slice_backward", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_contiguous_slice_backward", False):
+            return
+
+        def slice_backward(grad_output, input_sizes, dim, start, end, step):
+            if (
+                isinstance(grad_output, torch.Tensor)
+                and not grad_output.is_contiguous()
+            ):
+                grad_output = grad_output.contiguous()
+            return original(grad_output, input_sizes, dim, start, end, step)
+
+        slice_backward.__wrapped__ = original
+        slice_backward._torch_fl_contiguous_slice_backward = True
+        _rebind_flag_gems_name("slice_backward", original, slice_backward)
     except Exception:
         pass
 

@@ -60,6 +60,24 @@ def main() -> None:
     check("host_to_device", lambda: bool(torch.equal(device_value.cpu(), source)))
     check("device_to_host", lambda: bool(torch.equal(device_value.to("cpu"), source)))
 
+    if torch_fl.flagos.device_count() >= 2:
+        # Cross-card copies cannot go through a direct xpu_memcpy: XPU device
+        # pointers are device-scoped and libxpurt has no peer entry point, so the
+        # runtime stages them through host memory. Both directions are checked
+        # because each one puts a different card on the destination side.
+        to_zero = device_value.to("flagos:0")
+        check(
+            "peer_copy_to_device_zero",
+            lambda: bool(torch.equal(to_zero.cpu(), source)),
+        )
+        to_one = to_zero.to(DEVICE)
+        check(
+            "peer_copy_to_device_one",
+            lambda: bool(torch.equal(to_one.cpu(), source)),
+        )
+    else:
+        print("peer_copy: SKIPPED (needs two XPUs)", flush=True)
+
     result = torch.mm(device_value, device_value)
     expected = torch.mm(source, source)
     check("mm", lambda: bool(torch.allclose(result.cpu(), expected)))

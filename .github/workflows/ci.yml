@@ -66,6 +66,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # `jq` is not in every vendor image, and this script is also executed
+          # inside those images by tests/unit/test_ci_resolution.py, so it reads
+          # the API payload with the interpreter every image in the matrix
+          # already has. The other jq use in this workflow stays: it runs on
+          # ubuntu-latest, where jq is part of the image.
+          python_bin=$(command -v python || command -v python3)
+          # Print the value at a dotted path, or nothing when any link in the
+          # path is missing. A fork whose repository was deleted reports
+          # `"head": {"repo": null}`, so a non-object in the middle is "absent"
+          # rather than an error -- the format checks below report it.
+          json_field() {
+            "$python_bin" -c 'import functools,json,sys; v=functools.reduce(lambda n,k: n.get(k) if isinstance(n,dict) else None, sys.argv[1].split("."), json.load(sys.stdin)); print("" if v is None else v)' "$1"
+          }
+
           repository="$EVENT_REPOSITORY"
           ref="$EVENT_REF"
           if [[ -n "$PR_NUMBER" ]]; then
@@ -74,9 +88,9 @@ jobs:
               exit 1
             fi
             pr=$(gh api "repos/${EVENT_REPOSITORY}/pulls/${PR_NUMBER}")
-            repository=$(jq -r '.head.repo.full_name // empty' <<<"$pr")
-            ref=$(jq -r '.head.sha // empty' <<<"$pr")
-            state=$(jq -r '.state // empty' <<<"$pr")
+            repository=$(json_field head.repo.full_name <<<"$pr")
+            ref=$(json_field head.sha <<<"$pr")
+            state=$(json_field state <<<"$pr")
             if [[ "$state" != "open" ]]; then
               echo "::error::PR #${PR_NUMBER} is not open"
               exit 1

@@ -121,13 +121,18 @@ def test_all_manifest_commands_are_valid_shell():
 
 
 def test_musa_withholds_torch_compile_until_the_image_ships_the_vendor_stack():
-    # The manifest excludes MUSA from the torch.compile group with a recorded
-    # image-gap rationale: torch.compile needs the vendor flagtree (Triton with
-    # a "mthreads" backend), and a stock PyPI triton cannot compile a MUSA
-    # kernel at all. Adding the group to this image would record a pass that
-    # measured nothing, so the exclusion is asserted rather than assumed.
+    # MUSA runs every manifest entry, so the torch.compile group is *named* by
+    # MUSA's composition and withheld by the pytest gate instead: torch.compile
+    # needs the vendor flagtree (Triton with a "mthreads" backend), and a stock
+    # PyPI triton cannot compile a MUSA kernel at all. The exclusion is asserted
+    # here, in the gate table, rather than assumed from an absent manifest entry.
     musa = {step["name"] for step in _steps("musa")}
-    assert not any("torch.compile" in name for name in musa), sorted(musa)
+    assert any("torch.compile" in name for name in musa), sorted(musa)
+
+    from tests.integration.platform_gates import _GATES
+
+    gate = next(g for g in _GATES if g.step == "torch_compile")
+    assert "musa" in gate.platforms
 
 
 def test_preflight_imports_torch_fl_before_flaggems(runtime, monkeypatch):

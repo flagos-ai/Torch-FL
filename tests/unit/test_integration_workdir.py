@@ -84,6 +84,18 @@ _PREPARE_STEP = "Prepare wheel-only test workspace"
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 # A command that leaves the prepared workspace for the checkout.
 _CHECKOUT_CD_RE = re.compile(r"""\bcd\s+["']?\$GITHUB_WORKSPACE["']?""")
+# The eight platforms the pipeline schedules, written out so a parametrized
+# check cannot shrink silently by way of the config directory.
+_MANIFEST_PLATFORMS = (
+    "ascend",
+    "cuda",
+    "dcu",
+    "gcu",
+    "kunlunxin",
+    "metax",
+    "musa",
+    "ppu",
+)
 
 
 def _indent(line: str) -> int:
@@ -223,21 +235,24 @@ def test_there_is_at_least_one_prepare_step_to_check():
     assert _prepare_steps(), f"no '{_PREPARE_STEP}' step found under {_WORKFLOW_DIR}"
 
 
-def test_dcu_manifest_still_runs_a_repository_script():
+@pytest.mark.parametrize("platform", _MANIFEST_PLATFORMS)
+def test_the_manifest_still_runs_a_repository_script(platform):
     """The case the checks below exist for, kept from going vacuous.
 
-    The DCU manifest is the one place a group runs a repository script, and
-    that group is also the one that has to leave the prepared workspace to
-    reach it: ``tests/unit`` reads ``scripts/``, ``csrc/`` and
-    ``.github/workflows/`` relative to the repository root. If either half of
-    that stops being true, the guards have nothing to hold, and this says so
-    rather than letting them pass by accident.
+    Two groups run a repository script -- the environment check and the
+    per-file unit suite -- and both are also the ones that have to leave the
+    prepared workspace to reach it: ``tests/unit`` reads ``scripts/``,
+    ``csrc/`` and ``.github/workflows/`` relative to the repository root. If
+    either half of that stops being true, the guards have nothing to hold, and
+    this says so rather than letting them pass by accident. Every platform is
+    checked because the pipeline runs every entry everywhere: a group that lost
+    its ``cd`` on one platform would be that platform quietly changing a step.
     """
-    references = _script_references("dcu")
-    assert references, "the reader found no repository script in the DCU manifest"
+    references = _script_references(platform)
+    assert references, f"the reader found no repository script in {platform}"
     assert all(_runs_in_the_checkout(command) for command, _ in references), (
-        "the DCU manifest names a repository script from a command that stays in "
-        "the prepared workspace, so the workspace would have to contain it"
+        f"the {platform} pipeline names a repository script from a command that "
+        "stays in the prepared workspace, so the workspace would have to contain it"
     )
 
 
@@ -590,15 +605,22 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "exclusion unless a job that installs apex is added"
     ),
     "tests/integration/test_fallback_trace.py": (
-        "needs --model and a mounted Qwen3 checkpoint, which only the CUDA "
-        "runner mounts; wiring it in needs a step on that manifest and a "
-        "decision about what the other six do with it"
+        "a diagnostic trace of which aten ops fall back to CPU during Qwen3 "
+        "inference, run by hand with --model. The checkpoint it needs is mounted "
+        "on every platform now and MODEL_PATH is set, so the mount is no longer "
+        "what stands in the way: no manifest entry names the file, and naming it "
+        "is a decision about whether a diagnostic belongs in the pipeline at all"
     ),
     "tests/integration/test_fallback_trace_train.py": (
-        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
+        "the training half of test_fallback_trace.py's diagnostic; same "
+        "exclusion, and the same decision about whether it belongs in the "
+        "pipeline now that every platform mounts the checkpoint"
     ),
     "tests/integration/test_profiler_qwen3_infer.py": (
-        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
+        "a manual profiler run over Qwen3 inference, invoked with --model; the "
+        "checkpoint is mounted everywhere now, so this is the same exclusion as "
+        "test_fallback_trace.py -- a diagnostic with no manifest entry rather "
+        "than one blocked on a mount"
     ),
     "tests/integration/ops/test_flaggems_cpp_dispatch.py": (
         "carries only flaggems_cpp, and every set_env_*.sh builds FlagGems "

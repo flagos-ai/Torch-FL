@@ -47,6 +47,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB = REPO_ROOT / ".github" / "scripts" / "lib" / "set_env_common.sh"
 
+# Every proxy variable blanked, both spellings. The library reads the runner's
+# proxy configuration -- ``ensure_index_host_route`` and ``index_download_bps``
+# both do, and that is the point of the two tests below -- so a test whose
+# subject is the runner's own egress has to say which configuration it means.
+# The PPU integration container injects HTTP_PROXY/HTTPS_PROXY with no matching
+# NO_PROXY, and urllib then sent index_download_bps's request to 127.0.0.1
+# through the proxy: HTTPError 403 on a socket the test had just opened. The
+# local-server fixtures therefore clear these, so the request reaches the test
+# server however the image is configured.
+_BLANK_PROXY_ENV = {
+    name: ""
+    for name in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    )
+}
+
 
 def _run_bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
     """Source the library and run ``script`` with its stdout/stderr captured."""
@@ -97,16 +120,7 @@ def test_pip_retry_refuses_an_unresolvable_index_without_running_pip(tmp_path):
         f'export PIP_RETRY_PYTHON="{fake}"\n'
         "if pip_retry --index-url https://no-such-host.invalid/simple somepkg; "
         "then echo UNEXPECTED-SUCCESS; fi\n",
-        env={
-            "HTTPS_PROXY": "",
-            "HTTP_PROXY": "",
-            "ALL_PROXY": "",
-            "https_proxy": "",
-            "http_proxy": "",
-            "all_proxy": "",
-            "NO_PROXY": "",
-            "no_proxy": "",
-        },
+        env=_BLANK_PROXY_ENV,
     )
     assert "::error::Cannot reach the package index host" in done.stdout
     assert "UNEXPECTED-SUCCESS" not in done.stdout
@@ -176,22 +190,9 @@ def test_ensure_index_host_route_unexempts_a_host_the_runner_exempted():
 
 def test_ensure_index_host_route_still_fails_with_no_proxy_to_fall_back_on():
     """Without a proxy the pod itself must resolve the host, or nothing can."""
-    blank = {
-        name: ""
-        for name in (
-            "HTTPS_PROXY",
-            "HTTP_PROXY",
-            "ALL_PROXY",
-            "https_proxy",
-            "http_proxy",
-            "all_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        )
-    }
     done = _run_bash(
         "if ensure_index_host_route no-such-host.invalid; then echo RESOLVED; fi\n",
-        env=blank,
+        env=_BLANK_PROXY_ENV,
     )
     assert "RESOLVED" not in done.stdout
     assert "does not resolve from this runner" in done.stderr
@@ -358,7 +359,9 @@ def test_index_download_bps_reads_a_listing_with_hash_fragments(tmp_path):
 
     server, base = _serve(tmp_path)
     try:
-        done = _run_bash(f'index_download_bps "{base}/cpu" 10 200000\n')
+        done = _run_bash(
+            f'index_download_bps "{base}/cpu" 10 200000\n', env=_BLANK_PROXY_ENV
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -370,7 +373,9 @@ def test_index_download_bps_reads_a_listing_with_hash_fragments(tmp_path):
 def test_index_download_bps_reports_zero_for_a_missing_index(tmp_path):
     server, base = _serve(tmp_path)
     try:
-        done = _run_bash(f'index_download_bps "{base}/absent" 5 1000\n')
+        done = _run_bash(
+            f'index_download_bps "{base}/absent" 5 1000\n', env=_BLANK_PROXY_ENV
+        )
     finally:
         server.shutdown()
         server.server_close()

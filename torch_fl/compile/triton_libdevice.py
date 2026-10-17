@@ -23,11 +23,12 @@ own implementation module for that name via ``CompilerBackend.get_module_map()``
 which the AST walker consults for every module-typed global
 (`triton/compiler/code_generator.py`, `self.gscope[k] = module_map.get(...)`).
 
-triton-ascend ships the implementations (``triton.language.extra.ascend.libdevice``,
-46 functions) but returns ``{}`` from ``AscendBackend.get_module_map()``, so
-nothing connects the two. Tracing a generated kernel then walks into a stub and
-fails inside Triton's own semantics layer, where the diagnostic no longer names
-the op::
+FlagTree's Ascend backend ships the implementations
+(``triton.language.extra.cann.libdevice`` -- 37 functions, plus 20 more that the
+``cann`` package's ``__init__`` binds onto the same module) but returns ``{}``
+from ``AscendBackend.get_module_map()``, so nothing connects the two. Tracing a
+generated kernel then walks into a stub and fails inside Triton's own semantics
+layer, where the diagnostic no longer names the op::
 
     tmp21 = libdevice.rsqrt(tmp20)
             ^
@@ -35,7 +36,7 @@ the op::
 
 Filling the map in is the whole fix. It is what the NVIDIA backend does, and it
 is per-backend state, so nothing outside Triton's Ascend compile path changes.
-FlagGems' handwritten kernels already import the ascend module directly and are
+FlagGems' handwritten kernels already import the CANN module directly and are
 unaffected either way.
 
 Coverage is Ascend's, not ours: of the 41 names inductor can emit, 38 have an
@@ -46,10 +47,15 @@ a stub's internals. That is the honest report of a toolchain gap; substituting a
 approximation would be a silent accuracy change.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 
 _MODULE_MAP_FLAG = "_flagos_libdevice_module_map"
+
+# A vendor does not always name its language-extra package after its backend
+# key: FlagTree's Ascend backend (``triton.backends.ascend``) keeps its
+# implementations under the CANN toolkit's name, ``triton.language.extra.cann``.
+_LANGUAGE_EXTRA_ALIASES = {"ascend": ("cann",)}
 
 
 def _generic_libdevice_name() -> str:
@@ -101,16 +107,24 @@ def patch_triton_libdevice_module_map() -> None:
     setattr(compiler, _MODULE_MAP_FLAG, True)
 
 
+def _vendor_libdevice_candidates(backend_key: str) -> Tuple[str, ...]:
+    """Module names to try for a backend, most specific first."""
+    keys = (backend_key, *_LANGUAGE_EXTRA_ALIASES.get(backend_key, ()))
+    return tuple(f"triton.language.extra.{key}.libdevice" for key in keys)
+
+
 def _vendor_libdevice(backend_key: str) -> Any:
     """The backend's own libdevice module, or None if it ships none.
 
-    Vendor backends that provide implementations put them in
-    ``triton.language.extra.<key>.libdevice``, mirroring upstream's
-    ``extra.cuda.libdevice``.
+    Upstream's shape is ``triton.language.extra.<backend-key>.libdevice``,
+    mirroring ``extra.cuda.libdevice``; the alias table covers vendors whose
+    package name differs from their backend key.
     """
     import importlib
 
-    try:
-        return importlib.import_module(f"triton.language.extra.{backend_key}.libdevice")
-    except ImportError:
-        return None
+    for module_name in _vendor_libdevice_candidates(backend_key):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            continue
+    return None

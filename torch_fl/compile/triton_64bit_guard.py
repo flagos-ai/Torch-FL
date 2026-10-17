@@ -105,9 +105,9 @@ def patch_triton_64bit_guard() -> None:
     except ImportError:
         return
 
-    # Flag on the module, not on the function: triton_byte_loads and the
-    # resource-limit patch both wrap shared entry points, so a flag stored on
-    # the function object can end up under another wrapper and read as absent.
+    # Flag on the module, not on the wrapper: the wrapped attribute is shared, so
+    # a flag stored on the function object can end up underneath a second wrapper
+    # and read as absent.
     if getattr(triton_heuristics, _PATCH_FLAG, False):
         return
 

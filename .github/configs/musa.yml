@@ -39,9 +39,14 @@ paths_watch:
   - scripts/codegen/codegen_musa_flaggems.py
   - scripts/codegen/codegen_mudnn.py
 
-container_volumes: []
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH, asserted
+# by environment_check.model_dir below.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
-integration_environment: {}
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
 
 # MUSA is non-NVIDIA: expose the /dev/mtgpu* device nodes through --privileged
 # (mirrors the MetaX layout). MTHREADS_VISIBLE_DEVICES=all lets musart see every
@@ -54,7 +59,12 @@ container_options: >-
   --cap-add=SYS_PTRACE
   --env MTHREADS_VISIBLE_DEVICES=all
 
-timeout_minutes: 60
+# 90, not the 60 the other platforms use, for the same reason as MetaX: the
+# unified manifest puts 37m36s of tests behind 17m30s of environment setup and
+# wheel build, so a green run measured 56m08s of a 60m budget
+# (2026-10-15T22:29Z). Four minutes is inside the run-to-run spread that
+# cancelled MetaX, so this carries the same 90 rather than the 60.
+timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-musa
 
@@ -78,3 +88,4 @@ environment_check:
   flagos_devices:
     more_than: 0
   torch_musa_shim_only: true
+  model_dir: true

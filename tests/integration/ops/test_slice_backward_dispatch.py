@@ -60,9 +60,6 @@ class TestSliceBackwardCorrectness:
     """slice_backward correctness on flagos device."""
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_basic(self):
         torch.manual_seed(0)
         x = torch.randn(4, 8, device=DEVICE, requires_grad=True)
@@ -76,9 +73,6 @@ class TestSliceBackwardCorrectness:
         torch.testing.assert_close(x.grad.cpu(), ref_grad)
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_step(self):
         torch.manual_seed(1)
         x = torch.randn(16, device=DEVICE, requires_grad=True)
@@ -89,9 +83,6 @@ class TestSliceBackwardCorrectness:
         torch.testing.assert_close(x.grad.cpu(), ref_grad)
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_matches_cpu(self):
         torch.manual_seed(2)
         x_cpu = torch.randn(8, 16, requires_grad=True)

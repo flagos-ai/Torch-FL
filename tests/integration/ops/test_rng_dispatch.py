@@ -75,6 +75,25 @@ SEED = 1234
 # arbitrary -- any different seed must produce a different draw.
 OTHER_SEED = SEED + 977
 
+# MUSA's vendor RNG library, murand, is broken on the CI runner: the seed-source
+# and multi-device generator paths fail with err 700 (illegal memory access), and
+# the first such failure poisons the MUSA context for the rest of the pytest
+# session, so every later kernel in that session fails with the same symptom even
+# though it is healthy. The four classes below draw through those paths, so they
+# are gated at collection on MUSA rather than left to fail. `TestRngReproducible`
+# draws through the op entry points directly and stays green there, so it is not
+# gated. Recorded in tests/integration/platform_gates.py; docs/vendors/musa/
+# installation.md has the same suite passing on an S5000, which is why this is a
+# driver/toolkit/image regression and the gate's removal is the fix.
+_MUSA_MURAND_BROKEN = pytest.mark.skipif(
+    _is_musa(),
+    reason=(
+        "MUSA's murand seed-source/multi-device path fails with err 700 and "
+        "poisons the MUSA context for the rest of the pytest session; see "
+        "tests/integration/platform_gates.py"
+    ),
+)
+
 aten = torch.ops.aten
 
 
@@ -235,6 +254,7 @@ class TestRngReproducible:
         )
 
 
+@_MUSA_MURAND_BROKEN
 class TestRngSeedSource:
     """The seed plumbing itself, independent of any single op."""
 
@@ -462,6 +482,7 @@ class TestRngSeedSource:
         assert torch.equal(mixed_state, reservation_state)
 
 
+@_MUSA_MURAND_BROKEN
 class TestRngMultiDevice:
     """Per-device generators must be independently seeded and addressed.
 
@@ -550,6 +571,7 @@ class TestRngMultiDevice:
         assert torch.equal(_draw(op, SEED), _draw(op, SEED))
 
 
+@_MUSA_MURAND_BROKEN
 class TestRngDistribution:
     """Reproducibility is worthless if the numbers are wrong.
 
@@ -639,6 +661,7 @@ class TestRngDistribution:
         assert abs((picks == 1).float().mean().item() - 0.9) < 0.02
 
 
+@_MUSA_MURAND_BROKEN
 class TestRngDropout:
     """dropout is the RNG op models actually depend on for correctness.
 

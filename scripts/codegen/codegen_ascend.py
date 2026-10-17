@@ -814,14 +814,33 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 """
 
+# binary_scalar_cmp: (Tensor, Scalar) -> bool, same shape.
+#   aclnn<Name>(self, other, out)   e.g. le.Scalar->aclnnLeScalar
+#
+# `self` and `other` are promoted to the type aten compares them in, which is
+# `result_type(self, other)` and NOT self's own dtype. `int32_tensor <= 0.5`
+# compares in float32 -- measured on the CPU, `arange(4, int32) <= -0.5` is all
+# False, while a bound reduced into int32 truncates -0.5 to 0 and answers True
+# at 0 -- whereas `int32_tensor <= 2` stays an int32 comparison, and
+# `int32_tensor <= 16777216.0` is True because 16777217 is not representable in
+# the float32 it is compared in. AclScalarWrapper casts with `toLong()` for an
+# integral dtype, so passing it `self.scalar_type()` silently answers the wrong
+# question for every pair whose promoted type differs from self's. Casting both
+# operands to the promoted type is a no-op whenever the two already agree, which
+# is every same-dtype pair and every integral bound.
 T_BINARY_SCALAR_CMP = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_out.get());
@@ -4673,6 +4692,7 @@ FILE_HEADER = """\
 
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
+#include <ATen/ScalarOps.h>
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>

@@ -271,6 +271,20 @@ pip_retry --index-url "$PIP_INDEX_URL" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL" 'numpy<2'
 
+# The model-test stack the shared `inference` and `training` manifest entries
+# need. They load Qwen3-0.6B through transformers on every platform now, so a
+# platform whose provisioning skips it fails at import rather than at an
+# operator. The mount carries no tokenizer.json -- the same reason
+# set_env_ppu.sh records -- so AutoTokenizer converts the slow sentencepiece
+# form, which needs one of the two backends (sentencepiece here) and protobuf
+# for the spm proto. transformers stays <5 for the Qwen3 slow-to-fast
+# regression documented there. numpy is not restated: <2 is already pinned
+# above and satisfies transformers' floor, so pip has no reason to replace it.
+pip_retry --index-url "$PIP_INDEX_URL" 'transformers>=4.51,<5'
+pip_retry --index-url "$PIP_INDEX_URL" sentencepiece
+pip_retry --index-url "$PIP_INDEX_URL" tiktoken
+pip_retry --index-url "$PIP_INDEX_URL" protobuf
+
 # --- Verify the isolation held ----------------------------------------------
 # torch_fl does not depend on torch_npu -- that is a hard requirement of this
 # backend, not a preference: the real extension claims PrivateUse1 on import and

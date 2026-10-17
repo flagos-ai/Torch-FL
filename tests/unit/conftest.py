@@ -18,6 +18,21 @@ import sys
 
 import pytest
 
+try:
+    # Imported for its side effect, and here rather than in each test module
+    # because the order is the whole point. torch's device-backend autoload
+    # imports torch_fl from *inside* ``import torch``, and that arrives too late
+    # on PPU: torch_fl has to relink the vendor libtorch core before torch
+    # starts, so a module that reaches ``import torch`` first fails the entire
+    # file -- every test in it -- at collection. Every unit test module does
+    # that at module scope, and this conftest is imported before any of them.
+    import torch_fl  # noqa: F401
+except ImportError:
+    # No built wheel in this checkout (there is no ``torch_fl._C``). This
+    # import exists for ordering, not for coverage, and the tests that need a
+    # wheel skip themselves through ``importorskip``.
+    pass
+
 
 @pytest.fixture(autouse=True)
 def _restore_backend_config_path():
@@ -39,9 +54,9 @@ def _restore_backend_config_path():
     is why the leak went unnoticed.
 
     Only act when torch_fl is already imported. Several unit tests deliberately
-    never import it (tests/unit/test_import_phase_order.py parses the source in
-    the AST precisely so it can avoid the import), and importing it here would
-    change what they observe.
+    observe the module without it (tests/unit/test_import_phase_order.py parses
+    the source in the AST precisely so it does not have to execute it, and the
+    tests here that build a stub torch_fl pop the real one first).
     """
     torch_fl = sys.modules.get("torch_fl")
     if torch_fl is None:

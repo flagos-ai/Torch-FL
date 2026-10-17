@@ -256,8 +256,8 @@ def test_profiler_capture_window_contains_device_events(
 @pytest.mark.profiler_kernel
 def test_profiler_kernel_names_are_demangled(profile_result, profiler_capabilities):
     """Kernel names are readable rather than raw Itanium symbols."""
-    if not profiler_capabilities.kernel:
-        pytest.skip(f"{profiler_capabilities.platform} has no kernel activity")
+    if not profiler_capabilities.demangled:
+        pytest.skip(f"{profiler_capabilities.platform} kernel names are not demangled")
 
     kernels = events_in(profile_result[1], "kernel")
     assert kernels

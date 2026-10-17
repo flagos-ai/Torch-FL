@@ -35,7 +35,11 @@ paths_watch:
   - .github/scripts/set_env_metax.sh
   - scripts/vendor/bundle_maca_libtorch.sh
 
-container_volumes: []
+# The Qwen3 smoke groups are one shared pair of manifest entries now, so every
+# platform states the same checkpoint: this host mount plus MODEL_PATH below,
+# asserted by environment_check.model_dir.
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
 
 # Issue #253. The MetaX image exports TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, which
 # ATen reads while it initialises its TF32 state, so
@@ -61,6 +65,7 @@ container_volumes: []
 # silently.
 integration_environment:
   TORCH_ALLOW_TF32_CUBLAS_OVERRIDE: "0"
+  MODEL_PATH: /models/Qwen3-0.6B
 
 container_options: >-
   --privileged
@@ -69,7 +74,13 @@ container_options: >-
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
 
-timeout_minutes: 60
+# 90, not the 60 the other platforms use. Every integration group runs on every
+# platform now, and on this one the wheel build plus the whole manifest lands on
+# the limit rather than under it: measured on this job, 59m40s for a green run
+# (2026-10-15T19:37Z) and 60m02s for the next, which the limit cancelled with
+# every step already green -- the 51m45s test step itself reported success. The
+# limit was the only thing that was red, the same shape as DCU's 90.
+timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-metax
 
@@ -98,3 +109,4 @@ environment_check:
   triton_backend: metax
   require_imports:
     - flag_gems
+  model_dir: true

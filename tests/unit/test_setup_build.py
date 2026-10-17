@@ -50,6 +50,14 @@ def clean_kernel_env(monkeypatch):
     monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
     for name in KERNEL_SWITCHES:
         monkeypatch.delenv(name, raising=False)
+    # The MetaX image bakes FLAGOS_WHEEL_LOCAL=metax3.8.0 into the container
+    # environment. setup.py reads it as an explicit override of the platform
+    # table's wheel_local, so every wheel_version assertion below would
+    # otherwise compare against that platform's segment (or, worse, pass for
+    # the wrong reason). The build hooks deliberately do not set it -- see the
+    # "deliberately not set here" note in .github/scripts/hooks/set_env_metax.sh
+    # and set_env_ppu.sh -- which makes this the one place it can leak in.
+    monkeypatch.delenv("FLAGOS_WHEEL_LOCAL", raising=False)
 
 
 def test_build_ext_stages_generated_build_config(

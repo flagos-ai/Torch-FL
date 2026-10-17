@@ -42,9 +42,43 @@ except ImportError:
 # skip there rather than fail with TritonMissing.
 HAS_TRITON = importlib.util.find_spec("triton") is not None
 
-pytestmark = pytest.mark.skipif(
-    not HAS_COMPILE, reason="torch.compile not available (torch < 2.0)"
-)
+
+def _musa_has_no_vendor_triton() -> bool:
+    """Whether this MUSA build's Triton cannot compile a MUSA kernel.
+
+    Compiling on MUSA needs the vendor flagtree (flagtree-0.5.0+mthreads3.1,
+    Triton 3.1, backend ``mthreads``); set_env_musa.sh deliberately does not link
+    one, and stock PyPI triton is not a substitute -- it carries no mthreads
+    backend and cannot compile a MUSA kernel at all. Keyed on the active Triton
+    rather than on the platform name so that provisioning the vendor flagtree
+    removes the gate by itself. The suite is green on an MTT S5000 with that
+    runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1 failed -- the
+    failure being the ``torch.backends`` entry-point case, which asserts an
+    installed wheel and cannot hold in a build-tree run). Recorded in
+    tests/integration/platform_gates.py.
+    """
+    if ACCELERATOR != "musa":
+        return False
+    from torch_fl.compile import flagtree_shim
+
+    return flagtree_shim.flagtree_backend() != "mthreads"
+
+
+MUSA_WITHOUT_VENDOR_TRITON = _musa_has_no_vendor_triton()
+
+pytestmark = [
+    pytest.mark.skipif(
+        not HAS_COMPILE, reason="torch.compile not available (torch < 2.0)"
+    ),
+    pytest.mark.skipif(
+        MUSA_WITHOUT_VENDOR_TRITON,
+        reason=(
+            "this MUSA image links no vendor FlagTree/mthreads Triton, so there "
+            "is no compiler for a MUSA kernel; see "
+            "tests/integration/platform_gates.py"
+        ),
+    ),
+]
 
 # flagos tensors report either name depending on how the device was spelled.
 FLAGOS_DEVICE_TYPES = ("privateuseone", "flagos")
@@ -749,6 +783,49 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     assert patches["compile_threads"] == 4
 
 
+def test_dcu_defaults_to_serial_compile(monkeypatch):
+    """DCU must not resolve its device from a fresh compile worker.
+
+    The DTK torch is a HIP build, so `triton_helpers.set_driver_to_gpu()` looks
+    for the active device through `torch.cuda`, which only answers once
+    `torch_fl`'s shim is installed. Inductor's compile worker imports `torch` and
+    `triton` but never `torch_fl`, so a cold compile died there with "Could not
+    find an active GPU backend" while the parent process was fine -- which is why
+    the failure only appears on a cache miss and only once the group runs on DCU.
+    """
+    from torch_fl.compile import inductor_backend
+
+    monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "hcu"
+    )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "dcu")
+
+    patches = {}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+
+    assert patches["compile_threads"] == 1
+
+
+def test_dcu_preserves_explicit_compile_threads(monkeypatch):
+    """An explicit per-compile or environment setting remains authoritative."""
+    from torch_fl.compile import inductor_backend
+
+    monkeypatch.setattr(
+        "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "hcu"
+    )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "dcu")
+
+    patches = {"compile_threads": 4}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert patches["compile_threads"] == 4
+
+    monkeypatch.setenv("TORCHINDUCTOR_COMPILE_THREADS", "8")
+    patches = {}
+    inductor_backend._patch_vendor_flagtree_compile_workers(patches)
+    assert "compile_threads" not in patches
+
+
 def test_flagtree_compiler_is_reached_through_triton():
     """Guard the packaging trap: the compiler is imported as `triton`.
 
@@ -1170,21 +1247,23 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
 # Keep the fallback test below independent of vendor availability.
 @pytest.mark.ascend
 @ascend_only
-def test_ascend_masked_byte_load_requires_linearize(device):
-    """Reduction of the miscompile behind wrong `relu` gradients on Ascend.
+def test_ascend_masked_byte_load_is_not_miscompiled(device):
+    """The reduction `relu` backward is built on must read correct data.
 
-    A masked 2-D strided load of an 8-bit dtype returns only the first two elements
-    of each row, repeated, with no error raised. `enable_linearize=True` -- which
-    torch_fl/compile/triton_byte_loads.py injects into every inductor compile --
-    makes the same kernel read correct data. Written against triton directly
-    because the defect is in the vendor codegen, not in any one fused graph.
+    triton-ascend 3.2.0 returned only the first two elements of each row of a
+    masked, strided 2-D load of an 8-bit dtype, repeated, with no error raised:
+    `torch.compile` of `Linear -> ReLU` produced wrong gradients rather than
+    failing. torch_fl worked around it with `enable_linearize=True` plus a bool
+    ``*i1`` -> ``*i8`` signature rewrite (this file's historic canary asserted the
+    bug was *still* present, so that a vendor fix would surface as a failure).
+    FlagTree ascend3.5 fixed the codegen, so the option half and the canary are
+    gone; the pointer-type half is still needed and lives in
+    torch_fl/compile/triton_bool_pointers.py.
 
-    The option is passed explicitly here: a bare `@triton.jit` launch compiles
-    through `JITFunction.compile`, bound from `triton.compiler.compile` when the
-    binder is built, so it does not see the patch on the `triton.compile` alias
-    that inductor calls. End-to-end coverage of the patched path is
-    test_ascend_compile_backward_stays_on_flagos, whose relu backward is what
-    surfaced this in the first place.
+    This is that reduction, kept as a plain regression test on the vendor path:
+    a bare `@triton.jit` launch, no options, correct data required. End-to-end
+    coverage of the compiled graph is
+    test_ascend_compile_backward_stays_on_flagos.
     """
     pytest.importorskip("triton")
     from compile_support import masked_byte_row_load
@@ -1192,17 +1271,11 @@ def test_ascend_masked_byte_load_requires_linearize(device):
     # Distinct values per element, so a repeated-element read cannot pass by luck.
     expected = (torch.arange(32 * 128) % 100).to(torch.int8).view(32, 128)
     source = expected.to(device)
+    out = torch.zeros(32, 128, device=device)
 
-    def run(**options):
-        out = torch.zeros(32, 128, device=device)
-        masked_byte_row_load[(4,)](source, out, 128, XBLOCK=32, R0_BLOCK=32, **options)
-        return out.cpu()
+    masked_byte_row_load[(4,)](source, out, 128, XBLOCK=32, R0_BLOCK=32)
 
-    assert not torch.equal(run(), expected.to(torch.float32)), (
-        "masked byte load is correct without enable_linearize: the vendor bug this "
-        "workaround exists for is fixed, so drop the workaround"
-    )
-    torch.testing.assert_close(run(enable_linearize=True), expected.to(torch.float32))
+    torch.testing.assert_close(out.cpu(), expected.to(torch.float32))
 
 
 @pytest.mark.ascend
@@ -1210,18 +1283,21 @@ def test_ascend_masked_byte_load_requires_linearize(device):
 def test_ascend_bool_tensors_declared_as_byte_pointers():
     """Bool tensor args must reach Triton as ``*i8``, not ``*i1``.
 
-    ``enable_linearize`` does not fix the ``*i1`` pointer type, so the signature
-    rewrite is the half of the workaround that makes boolean masks -- and therefore
-    `relu` backward -- read correct data.
+    This is the half of the masked byte-load workaround that FlagTree ascend3.5
+    still needs: the access pattern above reads correct data there without
+    `enable_linearize`, but a bool mask loaded through a declared ``*i1`` pointer
+    does not, and `relu` backward reduces over exactly that.
     """
     pytest.importorskip("triton")
     from torch._inductor.codegen import triton_utils
     from torch._inductor.codegen.common import TensorArg
     from torch._inductor.virtualized import V
 
-    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
+    from torch_fl.compile.triton_bool_pointers import (
+        patch_triton_bool_pointer_signatures,
+    )
 
-    patch_triton_byte_load_workarounds()
+    patch_triton_bool_pointer_signatures()
 
     class _Graph:
         """`signature_of` asks the graph whether an arg was an unspec scalar."""

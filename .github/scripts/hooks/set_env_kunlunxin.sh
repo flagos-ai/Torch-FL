@@ -285,7 +285,10 @@ install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time for the same
 # IncompleteRead reason pip_retry exists for. numpy is deliberately not listed:
-# the CPU torch wheel does not pull it in, and nothing on this path imports it.
+# the CPU torch wheel does not pull it in, nothing on this path imports it, and
+# the one the model-test stack pulls in is installed after the wheel by
+# integration_test_dependencies in .github/configs/kunlunxin.yml, so its pin
+# lives in a single place.
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'

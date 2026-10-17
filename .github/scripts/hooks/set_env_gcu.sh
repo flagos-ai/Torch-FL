@@ -231,11 +231,12 @@ if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
 fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
-# reason above. numpy is deliberately not listed: the CPU torch wheel does not
-# pull it in, and nothing on this path imports it -- FlagGems' GCU route and the
-# integration tests are both numpy-free. pip still warns that flag_gems declares
-# a numpy requirement it cannot satisfy; that warning is expected here and is not
-# a failure, because flag_gems is installed with --no-deps.
+# reason above. numpy is deliberately not listed here: flag_gems goes in with
+# --no-deps, this script imports none, and the one the model-test stack pulls in
+# is installed after the wheel by integration_test_dependencies in
+# .github/configs/gcu.yml, so its pin lives in a single place. pip still warns
+# that flag_gems declares a numpy requirement it cannot satisfy at this point;
+# that warning is expected and is not a failure.
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
@@ -275,11 +276,21 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
 fi
 
 cd "$REPO_ROOT"
-if [[ "$CI_STAGE" == "build" ]]; then
-  # Prebuild so package_data contains the generated libtorch_fl.so before the
-  # common wheel workflow stages the final artifact.
-  build_flagos_inplace
+# GCU builds and tests the same wheel in one hardware job, so this has to run in
+# both stages, the same way set_env_musa.sh documents it. Two things need it:
+# package_data has to contain the generated libtorch_fl.so before the wheel is
+# staged, and the checkout itself has to hold torch_fl/_C, because the manifest's
+# `Run unit tests (per file)` group runs in $GITHUB_WORKSPACE rather than in the
+# wheel-only workspace (see tests/unit/test_integration_workdir.py) and imports
+# torch_fl from there. Gating it on CI_STAGE=build left that group importing a
+# checkout with no extension module: 50 of its 83 files died on
+# "No module named 'torch_fl._C'" in run 38723076856.
+build_flagos_inplace
 
+if [[ "$CI_STAGE" == "build" ]]; then
+  # Build-stage device probe. The integration stage asserts the same thing from
+  # the manifest's first group, which runs check_platform_environment.py against
+  # the installed wheel, so this stays with the stage that has no other check.
   python - <<'PY'
 import torch_fl
 
