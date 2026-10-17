@@ -172,6 +172,18 @@ if [[ "$CI_STAGE" == "integration" ]]; then
 fi
 export FLAGOS_MPS_CRASH_TRACE
 
+# Companion to the above, and set with it for the same reason. The crash trace
+# answers "what signal, at what address" and comes back empty for the step-3
+# segfault because the frame chain is gone; this answers the other half, "which
+# statement", by printing a marker before each stage of the queued graph run.
+# Both are diagnostics rather than fixes, and neither changes a successful run's
+# result.
+FLAGOS_MPS_STAGE_TRACE=""
+if [[ "$CI_STAGE" == "integration" ]]; then
+  FLAGOS_MPS_STAGE_TRACE=1
+fi
+export FLAGOS_MPS_STAGE_TRACE
+
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
@@ -226,7 +238,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES FLAGOS_MPS_CRASH_TRACE
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES FLAGOS_MPS_CRASH_TRACE FLAGOS_MPS_STAGE_TRACE
 fi
 
 cd "$REPO_ROOT"

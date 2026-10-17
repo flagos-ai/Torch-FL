@@ -667,6 +667,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "MPS op names the frame that faulted instead of only the Python "
         "trampoline above it. Read by the C++ runtime, not by Python",
     ),
+    "FLAGOS_MPS_STAGE_TRACE": (
+        SCOPE_RUNTIME,
+        "Unset",
+        "Set to 1 to trace statement-by-statement how far a queued MPS graph "
+        "run got, so a segfault with no usable backtrace still names the "
+        "statement it died in. Read by the C++ runtime, not by Python",
+    ),
 }
 
 # Names torch_fl used to read and no longer does. An exported value is inert:

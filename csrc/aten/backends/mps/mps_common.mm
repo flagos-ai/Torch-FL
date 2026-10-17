@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -34,6 +35,48 @@
 #include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {
+
+// Statement-level trace for the MPS graph run, off unless the environment asks.
+//
+// A SIGSEGV inside this path arrives as a Python traceback that stops at
+// torch_fl's __torch_function__ trampoline, so the log names `mm` and not the
+// statement that faulted -- and a fatal-signal backtrace has already come back
+// empty on the runner for this op (see CrashTraceHandler in the runtime), which
+// means the frame chain is gone and not merely symbol-less. What is left is to
+// have the code say how far it got: each marker below is flushed to stderr
+// before the work it names, so the last one printed names the statement the
+// process died in.
+//
+// C++ rather than the runtime's signal handler, so it is gated separately and
+// can be left on across a whole suite: it is a handful of lines per op, not a
+// backtrace per signal. Diagnostic only -- reverted once it has answered.
+namespace {
+
+bool StageTraceWanted() {
+  static const bool wanted = [] {
+    const char* value = ::getenv("FLAGOS_MPS_STAGE_TRACE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return wanted;
+}
+
+void StageTrace(const char* stage, const at::TensorList& inputs) {
+  if (!StageTraceWanted()) {
+    return;
+  }
+  std::fprintf(stderr, "[mps-stage] %s shapes=", stage);
+  for (const at::Tensor& t : inputs) {
+    std::fprintf(stderr, "(");
+    for (const int64_t dim : t.sizes()) {
+      std::fprintf(stderr, "%lld,", static_cast<long long>(dim));
+    }
+    std::fprintf(stderr, ")");
+  }
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+}
+
+} // namespace
 
 bool MpsDataTypeOf(at::ScalarType dtype, MPSDataType* out) {
   if (out == nullptr) {
@@ -1249,15 +1292,26 @@ bool RunGraphImpl(
   // through both loops below so the result of one operand cannot be handed the
   // buffer a sibling operand's input was staged into.
   ClaimedStaging claimed;
+  StageTrace("inputs.begin", inputs);
   for (size_t i = 0; i < inputs.size(); ++i) {
     if (!ResolveOperand(inputs[i], &buffers[i], &offsets[i], &claimed)) {
       return false;
+    }
+    if (StageTraceWanted()) {
+      std::fprintf(stderr,
+                   "[mps-stage] input[%zu] buffer=%p offset=%zu numel=%lld\n",
+                   i,
+                   static_cast<void*>(buffers[i]),
+                   offsets[i],
+                   static_cast<long long>(inputs[i].numel()));
+      std::fflush(stderr);
     }
     TORCH_CHECK(
         MpsDataTypeOf(inputs[i].scalar_type(), &dtypes[i]),
         "mps: no MPSGraph element type for ",
         inputs[i].scalar_type());
   }
+  StageTrace("outputs.begin", outs);
   std::vector<id<MTLBuffer>> out_buffers(outs.size(), nil);
   std::vector<size_t> out_offsets(outs.size(), 0);
   // A result is the other direction: the graph writes the staging buffer, and
@@ -1288,6 +1342,13 @@ bool RunGraphImpl(
   id<MTLCommandQueue> queue = MpsCurrentQueue();
   TORCH_CHECK(
       queue != nil, "mps: no Metal command queue for the flagos device");
+  if (StageTraceWanted()) {
+    std::fprintf(stderr,
+                 "[mps-stage] queue=%p stream=%p\n",
+                 static_cast<void*>(queue),
+                 static_cast<void*>(stream));
+    std::fflush(stderr);
+  }
   // The caller's key names the body and its host constants; the operand
   // signature is added here, which is what keeps a body key from being too coarse
   // about a tensor. It cannot keep a body from reading a host value the caller
@@ -1312,7 +1373,9 @@ bool RunGraphImpl(
   const auto found = PlanCache().find(full_key);
   if (found != PlanCache().end()) {
     plan = found->second;
+    StageTrace("plan.cached", inputs);
   } else {
+    StageTrace("plan.build.begin", inputs);
     @autoreleasepool {
       MPSGraphDevice* device =
           [MPSGraphDevice deviceWithMTLDevice:queue.device];
@@ -1321,13 +1384,22 @@ bool RunGraphImpl(
     if (plan == nullptr) {
       return false;
     }
+    StageTrace("plan.build.done", inputs);
   }
   bool ran = false;
+  StageTrace("run.begin", inputs);
   @autoreleasepool {
     std::vector<MPSGraphTensorData*> operands(inputs.size(), nil);
     for (size_t i = 0; i < inputs.size(); ++i) {
       operands[i] =
           MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtypes[i]);
+      if (StageTraceWanted()) {
+        std::fprintf(stderr,
+                     "[mps-stage] operand[%zu] tensorData=%p\n",
+                     i,
+                     static_cast<void*>(operands[i]));
+        std::fflush(stderr);
+      }
       // nil is either a zero-element tensor -- which the caller already
       // short-circuits for `out` and which a graph could not express anyway --
       // or an operand whose byte offset the SDK in force cannot describe. Both
@@ -1349,6 +1421,13 @@ bool RunGraphImpl(
       MPSGraphTensorData* data =
           MpsTensorData(out_buffers[i], out_offsets[i], outs[i].numel(),
                         out_dtypes[i]);
+      if (StageTraceWanted()) {
+        std::fprintf(stderr,
+                     "[mps-stage] result[%zu] tensorData=%p\n",
+                     i,
+                     static_cast<void*>(data));
+        std::fflush(stderr);
+      }
       if (data == nil) {
         for (MPSGraphTensorData* operand : operands) {
           MpsRelease(operand);
@@ -1373,6 +1452,7 @@ bool RunGraphImpl(
                                       inputsArray:array
                                      resultsArray:result_data
                               executionDescriptor:plan->descriptor];
+    StageTrace("run.scheduled", inputs);
     ran = true;
     for (MPSGraphTensorData* data : result_data) {
       MpsRelease(data);
@@ -1382,10 +1462,12 @@ bool RunGraphImpl(
     }
   }
   if (ran) {
+    StageTrace("sentinel.begin", inputs);
     // Puts the graph's work behind a buffer the stream layer can see, without
     // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
     // -- what allocator block reuse and a host read ask -- now covers this op.
     ::FlagosMPSStreamSentinel(stream);
+    StageTrace("sentinel.done", inputs);
 
     // The sentinel above makes the *stream* report the work, but that is not
     // enough on its own, because the caching allocator's block-reuse check
@@ -1420,6 +1502,7 @@ bool RunGraphImpl(
         }
       }
     }
+    StageTrace("record.done", inputs);
   }
   // The run is asynchronous, so anything the host has to do with a staging
   // buffer -- a result's copy-back, or a private buffer's release -- has to be
