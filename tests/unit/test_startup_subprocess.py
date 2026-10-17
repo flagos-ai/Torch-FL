@@ -189,18 +189,38 @@ def _probe(body: str, extra_env: dict | None = None):
     all": all three did). The question left is *where* a fresh process's first
     `mm` dies, which is exactly what the two traces print, so they are on for
     this run.
+
+    The drain is the point of *this* run. The shape sweep found two different
+    deaths: a large shape dies during encode, but `(16,16) x (16,16)` runs the
+    whole op, prints its sentinel, and only then dies at process exit with no
+    crash trace at all -- i.e. after the trace handler itself was gone. Nothing
+    in torch_fl ever waits for the committed MTLCommandBuffers at shutdown (the
+    device, the default stream and the plan cache are all deliberately leaked),
+    so the exit death is a queue-drain race against Metal's own teardown.
+    Draining inside the child separates that from the encode death: if a shape
+    that died at exit now exits 0, the shutdown drain is a real fix, and any
+    shape still dying has an encode-time cause that a drain cannot reach.
     """
     env = os.environ.copy()
     env["FLAGOS_MPS_STAGE_TRACE"] = "1"
     env["FLAGOS_MPS_CRASH_TRACE"] = "1"
     env.update(extra_env or {})
+    # The drain runs *before* the interpreter starts shutting down, which is
+    # where it has to be to be a fair test of the shutdown sequence: an atexit
+    # hook would run after much of Metal's own teardown, which is the race
+    # being tested for in the first place.
+    drain = (
+        "torch_fl._C._synchronize()\n"
+        if extra_env is None or extra_env.get("FLAGOS_MPS_PROBE_DRAIN", "1") != "0"
+        else ""
+    )
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             "import torch, torch_fl\n"
             "torch_fl.flagos.init()\n"
-            "dev = torch.device('flagos', 0)\n" + body,
+            "dev = torch.device('flagos', 0)\n" + body + drain,
         ],
         env=env,
         capture_output=True,
