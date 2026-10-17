@@ -659,6 +659,14 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Directory of import-only stand-ins for numba and torch, which hbdk4's "
         "ONNX entry point imports unconditionally",
     ),
+    "FLAGOS_MPS_CRASH_TRACE": (
+        SCOPE_RUNTIME,
+        "Unset",
+        "Set to 1 to make the MPS runtime install a fatal-signal handler that "
+        "prints a native backtrace before re-raising, so a segfault inside an "
+        "MPS op names the frame that faulted instead of only the Python "
+        "trampoline above it. Read by the C++ runtime, not by Python",
+    ),
 }
 
 # Names torch_fl used to read and no longer does. An exported value is inert:
@@ -705,11 +713,6 @@ RETIRED: frozenset[str] = frozenset(
         "FLAGOS_USE_FLAGGEMS",
         "FLAGOS_USE_FLAGGEMS_CPP",
         "FLAGOS_USE_VENDOR_OPS",
-        # Read by the MPS runtime's signal handler, not by Python: exports a
-        # native backtrace before a fatal signal takes the process down. Kept
-        # here for the same reason as the three above -- it is a real variable
-        # and exporting it must not warn.
-        "FLAGOS_MPS_CRASH_TRACE",
     }
 )
 
