@@ -233,6 +233,38 @@ endif()
 set(_torch_fl_sources ${SOURCE_FILES})
 
 add_library(${LIBRARY_NAME} SHARED ${_torch_fl_sources})
+
+# This provider requires vendor libtorch's HIP stream registry. Keep it out of
+# the default FlagGems-primary build, including its Python bindings.
+if(FLAGOS_ACCELERATOR STREQUAL "dcu" AND FLAGOS_BUILD_BOXING)
+  target_compile_definitions(${LIBRARY_NAME} PUBLIC FLAGOS_DCU_VENDOR_STREAMS=1)
+  # CPU torch packages need not ship c10/hip. Take only the matching HIP
+  # subtree from the selected vendor SDK; do not let vendor headers replace
+  # official ATen/c10 core headers across this build.
+  find_path(FLAGOS_DCU_HIP_INCLUDE_DIR c10/hip/HIPStream.h
+      HINTS "$ENV{FLAGOS_VENDOR_TORCH_LIB}/../include"
+            "${PYTORCH_INSTALL_DIR}/include"
+      DOC "Matching vendor torch include directory for boxed DCU streams"
+      REQUIRED)
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dcu-stream-include/c10")
+  file(COPY "${FLAGOS_DCU_HIP_INCLUDE_DIR}/c10/hip"
+       DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/dcu-stream-include/c10")
+  # DTK's hipified headers include this generated version-macro file. It is
+  # not an ATen API header and must come from the same vendor installation.
+  if(EXISTS "${FLAGOS_DCU_HIP_INCLUDE_DIR}/ATen/dtk_macros.h")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dcu-stream-include/ATen")
+    configure_file("${FLAGOS_DCU_HIP_INCLUDE_DIR}/ATen/dtk_macros.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/dcu-stream-include/ATen/dtk_macros.h" COPYONLY)
+  endif()
+  # Never mix HIP and CUDA compatibility headers in the same translation unit.
+  set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/runtime/dcu_stream.cc"
+      PROPERTIES INCLUDE_DIRECTORIES "${ROCM_PATH}/include;${CMAKE_CURRENT_BINARY_DIR}/dcu-stream-include"
+                 COMPILE_DEFINITIONS "__HIP_PLATFORM_AMD__=1")
+else()
+  set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/runtime/dcu_stream.cc"
+      PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
+
 set_target_properties(${LIBRARY_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # CUPTI headers for the profiler child (Stage B). Runtime symbols are dlopen'd,

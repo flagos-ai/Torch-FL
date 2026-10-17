@@ -5,6 +5,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #pragma once
+#include "dcu_stream.h"
 
 #include <c10/core/DeviceType.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
@@ -17,7 +18,8 @@
 #include "runtime/accelerator/ascend/acl_stream.h"
 #endif
 
-// Real c10::cuda:: stream/event plumbing. Gated the same way as
+// Real c10::cuda:: stream/event plumbing. Boxed DCU uses the separately gated
+// c10::hip provider before these fallback branches. Gated the same way as
 // runtime/allocator/caching_device_allocator.cc's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
@@ -149,6 +151,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   // returned Device from the resolved index.
 
   c10::Stream getStream(c10::Device d) const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Current(d.index());
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getCurrentCUDAStream(d.index());
     return c10::Stream(
@@ -169,6 +175,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getDefaultStream(c10::Device d) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Default(d.index());
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getDefaultCUDAStream(d.index());
     return c10::Stream(
@@ -189,6 +199,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getStreamFromGlobalPool(c10::Device d, bool isHighPriority = false) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::New(d.index(), isHighPriority ? -1 : 0);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getStreamFromPool(isHighPriority, d.index());
     return c10::Stream(
@@ -214,6 +228,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream exchangeStream(c10::Stream s) const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Exchange(s);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     // CUDAStream::UNCHECKED does not itself validate device_type, but
     // setCurrentCUDAStream() stores the wrapped c10::Stream verbatim in its
@@ -250,6 +268,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getNewStream(c10::Device d, int priority = 0) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::New(d.index(), priority);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getStreamFromPool(priority, d.index());
     return c10::Stream(
@@ -272,6 +294,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   bool queryStream(const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Query(stream);
+#endif
+
 #ifdef USE_ASCEND
     aclrtStream handle = AscendStreamHandle(stream);
     aclrtStreamStatus status;
@@ -293,6 +319,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void synchronizeStream(const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Synchronize(stream); return;
+#endif
+
 #ifdef USE_ASCEND
     aclrtSynchronizeStream(AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
@@ -326,6 +356,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void synchronizeEvent(void* event) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::SynchronizeEvent(event); return;
+#endif
+
     if (event) {
       ::EventSynchronize((Event_t)event);
     }
@@ -334,6 +368,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void recordDataPtrOnStream(
       const c10::DataPtr& data_ptr,
       const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::RecordDataPtr(data_ptr, stream); return;
+#endif
+
     // No-op: flagos uses CUDA memory which is already tracked
   }
 
@@ -341,6 +379,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       void* event1,
       void* event2,
       const c10::DeviceIndex device_index) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Elapsed(event1, event2, device_index);
+#endif
+
     float ms = 0.0f;
     if (event1 && event2) {
       ::EventElapsedTime(&ms, (Event_t)event1, (Event_t)event2);
@@ -366,6 +408,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       const c10::Stream& stream,
       const c10::DeviceIndex device_index,
       const c10::EventFlag flag) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Record(event, stream, device_index, flag); return;
+#endif
+
     if (!*event) {
       ::EventCreate((Event_t*)event);
     }
@@ -395,6 +441,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void block(void* event, const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Block(event, stream); return;
+#endif
+
 #ifdef USE_ASCEND
     ::StreamWaitEvent(
         (Stream_t)AscendStreamHandle(stream), (Event_t)event, 0);
@@ -406,11 +456,19 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   bool queryEvent(void* event) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::QueryEvent(event);
+#endif
+
     return ::EventQuery((Event_t)event) == Success;
   }
 
   void destroyEvent(void* event, const c10::DeviceIndex device_index)
       const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::DestroyEvent(event, device_index); return;
+#endif
+
     ::EventDestroy((Event_t)event);
   }
 };

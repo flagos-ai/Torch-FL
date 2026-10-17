@@ -561,6 +561,23 @@ def patch_torch_cuda_for_dcu() -> bool:
     except Exception:
         pass
 
+    # Capability comes from the binary, not a mutable environment variable.
+    # Native DTK torch returns before this facade installation.
+    if hasattr(getattr(torch.flagos, "_C", None), "_dcu_stream_info"):
+        from torch_fl.accelerator.dcu import dcu_stream
+
+        torch.cuda.Stream = dcu_stream.DcuStream
+        torch.cuda.Event = dcu_stream.DcuEvent
+        torch.cuda.ExternalStream = dcu_stream.DcuExternalStream
+        torch.cuda.current_stream = dcu_stream.current_stream
+        torch.cuda.default_stream = dcu_stream.default_stream
+        torch.cuda.set_stream = dcu_stream.set_stream
+        torch.cuda._set_stream_by_id = dcu_stream.set_stream_by_id
+        torch.cuda.stream = dcu_stream.stream_context
+        torch._C._cuda_getCurrentRawStream = lambda idx=0: (
+            dcu_stream.current_stream(idx).cuda_stream
+        )
+
     # Memory queries. Every torch.cuda.memory_* entry point, plus empty_cache and
     # the peak resets, reaches torch._C._cuda_*/_cuda_memoryStats, none of which
     # the CPU wheel builds -- they live in libtorch_cuda. flagos owns a caching
