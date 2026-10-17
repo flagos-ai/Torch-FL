@@ -26,6 +26,11 @@
 #include "mps.h"
 #include "mps_runtime.h"
 
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <execinfo.h>
+#include <unistd.h>
 #include <mutex>
 #include <set>
 #include <vector>
@@ -36,6 +41,64 @@ namespace {
 std::mutex gDeviceMutex;
 id<MTLDevice> gDevice = nil;
 bool gDeviceResolved = false;
+
+// Optional native backtrace on a fatal signal, off unless the environment asks
+// for it.
+//
+// Why this exists: a segfault inside an MPS op reaches the interpreter as a
+// Python traceback that names only `torch_fl/__init__.py`'s __torch_function__
+// trampoline -- the crash is several frames *below* the last Python frame, so
+// the log says which aten call was in flight and nothing about where in the
+// Metal or allocator code it died. That is enough to know an op crashed and not
+// enough to fix it, which is exactly the position a hosted macOS runner leaves
+// you in: no debugger, no core, and a host whose GPU and OS differ from the
+// developer's.
+//
+// So the handler is installed in-process, and only when the operator asks for
+// it, because a signal handler that prints is not something to enable by
+// default: it can deadlock (the crashing thread may hold the malloc or stdio
+// lock backtrace_symbols needs) and it changes the post-crash behaviour a test
+// might observe. Ungated it would also be dead weight in every process that
+// merely links the backend.
+//
+// It is a diagnostic, not a fix: it prints and then re-raises with the default
+// disposition so the process still dies from the original signal and CI still
+// reports the failure.
+void CrashTraceHandler(int signo) {
+  void* frames[128];
+  const int count = ::backtrace(frames, 128);
+  // write(2) rather than printf: stdio is not async-signal-safe, and the
+  // buffered half of a message is exactly what gets lost on a fatal signal.
+  const char* banner = "\n=== FLAGOS_MPS_CRASH_TRACE: native backtrace ===\n";
+  ssize_t ignored = ::write(2, banner, ::strlen(banner));
+  (void)ignored;
+  ::backtrace_symbols_fd(frames, count, 2);
+  const char* footer = "=== FLAGOS_MPS_CRASH_TRACE: end ===\n";
+  ignored = ::write(2, footer, ::strlen(footer));
+  (void)ignored;
+
+  // Default disposition, so the signal that killed us is the one reported and
+  // the exit status is the same as it would have been without this handler.
+  ::signal(signo, SIG_DFL);
+  ::raise(signo);
+}
+
+void MaybeInstallCrashTrace() {
+  static bool installed = false;
+  if (installed) {
+    return;
+  }
+  installed = true;
+  const char* wanted = ::getenv("FLAGOS_MPS_CRASH_TRACE");
+  if (wanted == nullptr || wanted[0] == '\0' || wanted[0] == '0') {
+    return;
+  }
+  ::signal(SIGSEGV, CrashTraceHandler);
+  ::signal(SIGBUS, CrashTraceHandler);
+  ::signal(SIGABRT, CrashTraceHandler);
+  ::signal(SIGILL, CrashTraceHandler);
+  ::signal(SIGFPE, CrashTraceHandler);
+}
 
 std::mutex gDefaultStreamMutex;
 StreamState* gDefaultStream = nullptr;
@@ -50,6 +113,7 @@ std::set<StreamState*> gLiveStreams;
 id<MTLDevice> MetalDevice() {
   std::lock_guard<std::mutex> lock(gDeviceMutex);
   if (!gDeviceResolved) {
+    MaybeInstallCrashTrace();
     // +1 (Create rule). Held for the life of the process; a Mac has one GPU and
     // re-querying here would only rebuild the same object.
     gDevice = MTLCreateSystemDefaultDevice();

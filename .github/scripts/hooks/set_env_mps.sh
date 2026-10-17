@@ -151,6 +151,27 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   pip_retry pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
 fi
 
+# --- Native backtraces on a fatal signal -------------------------------------
+# A segfault inside an MPS op surfaces in the pytest log as a Python traceback
+# whose deepest frame is torch_fl's __torch_function__ trampoline, so the log
+# names the aten call that was in flight and nothing below it. On a hosted runner
+# there is no debugger attachment and no core file, which leaves the crash
+# address-less and the fix a guess. The MPS runtime installs a SIGSEGV/SIGBUS/
+# SIGABRT/SIGILL/SIGFPE handler that prints a backtrace when this variable is
+# set (see CrashTraceHandler in csrc/runtime/accelerator/mps/mps_runtime.mm), and
+# the handler re-raises with the default disposition so the exit status and the
+# reported failure are unchanged.
+#
+# Integration only: the build stage never runs an op, so there is nothing there
+# for it to catch. Assigned unconditionally as well as exported, because
+# export_ci_env reads every name it is given with ${!name} under `set -u`, so an
+# unset FLAGOS_MPS_CRASH_TRACE would abort this hook on the build stage.
+FLAGOS_MPS_CRASH_TRACE=""
+if [[ "$CI_STAGE" == "integration" ]]; then
+  FLAGOS_MPS_CRASH_TRACE=1
+fi
+export FLAGOS_MPS_CRASH_TRACE
+
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
@@ -205,7 +226,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES FLAGOS_MPS_CRASH_TRACE
 fi
 
 cd "$REPO_ROOT"

@@ -705,6 +705,11 @@ RETIRED: frozenset[str] = frozenset(
         "FLAGOS_USE_FLAGGEMS",
         "FLAGOS_USE_FLAGGEMS_CPP",
         "FLAGOS_USE_VENDOR_OPS",
+        # Read by the MPS runtime's signal handler, not by Python: exports a
+        # native backtrace before a fatal signal takes the process down. Kept
+        # here for the same reason as the three above -- it is a real variable
+        # and exporting it must not warn.
+        "FLAGOS_MPS_CRASH_TRACE",
     }
 )
 
