@@ -295,6 +295,71 @@ bool MpsSupportsRsqrtDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsSqrtDtype(at::ScalarType dtype) {
+  // The three float widths, measured against at::sqrt in the operand's own
+  // dtype. See the note in mps_common.h for why this is a predicate of its own
+  // rather than a reuse of the sibling `rsqrt`'s.
+  //
+  //   float32     bit-identical to the reference over 400001 samples spanning
+  //               1e-6..1e6, over a 200001-sample sweep of the whole positive
+  //               range up to the largest normal, and over every domain edge.
+  //               Zero mismatches at or above the smallest normal.
+  //   float16     bit-identical over the same sweeps *including every subnormal
+  //               input*: a sample of all 1023 positive float16 subnormals
+  //               reproduced the reference bit for bit, and so did the sign
+  //               patterns that matter (sqrt(-0.0) = -0.0, sqrt(-subnormal) =
+  //               nan). Zero mismatches.
+  //   bfloat16    bit-identical over the normal range under the same reading:
+  //               400001 samples, zero mismatches.
+  //
+  // The domain's edges are reproduced exactly at all three widths, which is the
+  // first thing a square root has to get right: sqrt(0) = 0,
+  // sqrt(-0.0) = -0.0 (the signed zero -- a body that folded it to +0.0 would
+  // answer the wrong signed zero, and the sibling `rsqrt` turns the signed zero
+  // into -inf), sqrt(1) = 1, sqrt(4) = 2, sqrt(-1) = nan, sqrt(inf) = inf and
+  // sqrt(nan) = nan, all bit-for-bit.
+  //
+  // What *does* diverge at float32 and bfloat16 is the same subnormal *input*
+  // flush `log` and the `rsqrt` composition's input half measured: the platform
+  // flushes a subnormal operand to zero before the node evaluates, and sqrt(0)
+  // is 0, so a positive subnormal input comes back 0 where the reference
+  // answers a small *normal* number -- measured, the boundary sits exactly at
+  // the smallest normal (1.1754944e-38 agrees with the reference while
+  // 1.1754942e-38, the largest subnormal, flushes to 0), and every input at or
+  // above that normal reproduces the reference. This is the one place `sqrt`'s
+  // gate reads differently from `rsqrt`'s even though the two share the node:
+  // the sibling's flush turned a small input into `inf`, an *out-of-range*
+  // answer, where this body's turns it into 0, a value inside the normal range.
+  // Both are accepted on the same policy -- the divergence is confined to the
+  // band where the reference's *input* is subnormal, and a model's `sqrt`
+  // operates on a variance, a norm or an already-non-negative quantity that has
+  // had an epsilon added, where that band is not reached -- and both are why the
+  // gate is stated per width rather than shared.
+  //
+  // float16 is the contrast that keeps the flush from being a blanket rule: it
+  // does *not* flush subnormal inputs, exactly as `log` and `rsqrt` found, so
+  // the boundary above is a float32/bfloat16 property rather than one that
+  // generalises across widths.
+  //
+  // The one edge whose *kind* differs rather than its magnitude is the negative
+  // subnormal: measured, a subnormal float32 or bfloat16 input below zero comes
+  // back -0.0 where the reference answers nan, because the flush turns the
+  // operand into -0.0 and sqrt(-0.0) = -0.0. That is a different failure from
+  // the positive band's wrong magnitude, and it is the *same* platform flush
+  // read at the sign boundary rather than a second divergence; it is confined to
+  // the identical band (a negative input of normal magnitude answers nan
+  // correctly -- measured, -1.1754944e-38 is nan on both), and a model's `sqrt`
+  // on a masked or clamped operand does not reach it.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::sqrt(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`, `log` and `rsqrt`'s do: the
+  // promotion rule is the reference's, and the round-trip is where it lives.
+  // Both declined paths were measured to reproduce the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {

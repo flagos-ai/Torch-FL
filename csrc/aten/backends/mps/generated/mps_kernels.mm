@@ -852,6 +852,30 @@ at::Tensor RsqrtKernelMps(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMps, RsqrtKernelMps)
 
+at::Tensor SqrtKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsSqrtDtype(self.scalar_type())) {
+    return at::sqrt(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sqrt"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph squareRootWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::sqrt(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMps, SqrtKernelMps)
+
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
     const at::Tensor& indices,

@@ -39,6 +39,7 @@
   m.impl("rsqrt", WrapperRsqrt);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("silu", WrapperSilu);
+  m.impl("sqrt", WrapperSqrt);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);

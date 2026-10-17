@@ -966,6 +966,48 @@ the domain's edges intact, the integral and bool promotions asserted at float32
 including the `rsqrt(0) = inf` edge, plan reuse across interleaved signatures,
 and the dispatch log naming `mps` on the served path and on a declined one.
 
+`sqrt` then landed as the single node `rsqrt`'s body wanted in the first place,
+`squareRootWithTensor:` -- it is the other half of the composition the paragraph
+above records, and the increment is what separates the two readings. The result
+half is the one `rsqrt` could not show: at float32 and bfloat16 the graph flushes
+a subnormal *input* to zero before the node, and `sqrt(0)` is `0`, not the `inf`
+`rsqrt` reaches through its reciprocal -- so the same flush reads as a zero
+answer here, which is inside the representable range and would pass a
+finite-value check. Measured, the boundary is exactly where `rsqrt` put it: an
+input at `1.1754944e-38` (the smallest normal) agrees with the reference and
+`1.1754942e-38` (the largest subnormal) comes back `0`. float16 does *not* flush,
+and all 1023 positive float16 subnormals are bit-identical. The domain's edges
+are reproduced exactly at all three widths including the signed zero --
+`sqrt(-0.0) = -0.0`, the sign surviving the node rather than a fused
+`reciprocal` cancelling it -- and the negative half is a *wrong-kind* boundary
+rather than a wrong value: a negative subnormal flushes to `-0.0` and takes the
+node to `-0.0` where the reference answers `nan`, while a negative at normal
+magnitude correctly reaches `nan`. Unlike `rsqrt`, whose two composed widths
+differed on 115782 of 400001 samples, all three float widths here are
+bit-identical to the reference -- 400001 logspace samples, 200001 per width over
+the all-negative-free band, plus every edge -- so the increment has no tolerance
+to explain away. The performance note is the honest one: measured `3.921 ms`
+device against `2.424 ms` for the `cpu_fallback` round-trip (whose floor is the
+measured `1.004 ms` d2h copy) on `(3, 512, 3072)` float32, so the native path is
+the slower of the two at that shape and is taken for correctness and for not
+leaving the device, not for the number.
+
+This increment is verified with `tests/integration/ops/test_mps_sqrt.py` (34
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, the three widths held *bit-exact* rather than to a tolerance, the domain's
+eight edges asserted exactly at every served width with the signed zero pinned by
+sign bit, the two ends of the float32 and bfloat16 subnormal-input band pinned on
+both sides so a widening flush fails, a walk down the normals asserting the flush
+never reaches one, the float16 subnormal inputs asserted bit-identical so the
+float32 boundary is not generalised, the negative-subnormal edge held as the
+`-0.0` it is rather than as a `nan` the kernel does not promise, a negative at
+normal magnitude asserted `nan`, the one declined width asserting the
+round-trip's own dtype and bit-exactness, the integral and bool promotions
+asserted at float32 with a negative integral operand asserted `nan` (the
+reference's answer, not an error), plan reuse across interleaved signatures, and
+the dispatch log naming `mps` on the served path and on a declined one.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real

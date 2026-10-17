@@ -226,6 +226,26 @@ OPS = {
     # caller owns, like every other `.out`/inplace spelling on this backend, and
     # `_foreach_rsqrt` is the batched spelling with its own list contract.
     "rsqrt": "rsqrt",
+    # The square root on its own, and the node the `rsqrt` composition above
+    # already builds: `squareRootWithTensor:` is the inner half of
+    # `reciprocal(sqrt(x))`, so serving it standalone adds no new arithmetic and
+    # no selector this tree has not already measured. What it adds is a caller
+    # who wants the root rather than its reciprocal -- a distance, a standard
+    # deviation, a magnitude, or the `1 / sqrt(d)` a model writes out in two
+    # steps -- and every one of those takes the `cpu_fallback` today because
+    # `sqrt` is routed to `none` in the conf.
+    #
+    # The gate is `MpsSupportsSqrtDtype`, and the interest is that the node is
+    # *not* the composition: the `rsqrt` finding split between a sqrt input half
+    # and a reciprocal result half, and this body is the input half alone, so
+    # whether a width is served here is a question the sibling's gate answered
+    # only as part of a product. See the note there for the per-width numbers.
+    #
+    # Only `sqrt` is registered, exactly as `rsqrt` is: `sqrt.out` and `sqrt_`
+    # write into a tensor the caller owns, like every other `.out`/inplace
+    # spelling on this backend, and `_foreach_sqrt` is the batched spelling with
+    # its own list contract.
+    "sqrt": "sqrt",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -431,6 +451,13 @@ AT_OP = {
     # rule live, and why the gate sends those widths here rather than evaluating
     # them in the composition.
     "rsqrt": "rsqrt",
+    # The CPU reference the `sqrt` body round-trips to on the widths it declines.
+    # `sqrt` is its own aten kernel rather than a composition on the reference
+    # side, so the round-trip lands on the reference's own implementation --
+    # which is where its domain edges (`sqrt(-1) = nan`,
+    # `sqrt(-0.0) = -0.0`) and its integral/bool promotion rule live, and why
+    # the gate sends those widths here rather than evaluating them in the graph.
+    "sqrt": "sqrt",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -522,6 +549,15 @@ SUPPORTS = {
     # the reciprocal of a subnormal result -- and the increment's finding is that
     # the two halves fail at different widths. See MpsSupportsRsqrtDtype.
     "rsqrt": "MpsSupportsRsqrtDtype",
+    # Its own predicate rather than a share with `rsqrt`'s, and the measurement
+    # is what separates them: `rsqrt` is `reciprocal(sqrt(x))` here, so its gate
+    # had to be right about two nodes, while this body is the sqrt alone -- the
+    # *input* half of that composition with no reciprocal after it. A width that
+    # the composition serves is not automatically served here (a float32 input
+    # the platform flushes to zero cost the sibling its non-zero answer, and this
+    # body answers zero for it rather than inf), and the widening is the
+    # increment's finding. See MpsSupportsSqrtDtype.
+    "sqrt": "MpsSupportsSqrtDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -638,6 +674,10 @@ CALLS = {
     # prefix -- see the note there for why the fused
     # `reciprocalSquareRootWithTensor:` is not used.
     "rsqrt": "reciprocalWithTensor:",
+    # The selector the `rsqrt` composition above already names as its inner node,
+    # here as the whole body -- `sqrt` *is* that node. Named separately because
+    # the two categories carry different dtype gates, which is the increment.
+    "sqrt": "squareRootWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -792,6 +832,11 @@ KEY_PARTS = {
     # of the operand's dtype and shape, which MpsRunGraph folds into the cache key
     # itself, and the body bakes no host value into the graph.
     "rsqrt": "",
+    # Empty for the same reason the four above are: the body is one selector over
+    # one operand, so the graph is a function of the operand's dtype and shape --
+    # which MpsRunGraph folds into the cache key itself -- and no host value is
+    # baked into it.
+    "sqrt": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -3250,6 +3295,12 @@ CATEGORIES = {
     "exp": T_EXP,
     "log": T_EXP,
     "rsqrt": T_RSQRT,
+    # The shared one-node unary template, and the increment is which node and
+    # which gate rather than a body: the graph is `squareRootWithTensor:` over
+    # one operand, exactly the inner node the `rsqrt` composition builds, so
+    # there is nothing to compose and the whole of this body is
+    # `MpsSupportsSqrtDtype`. See the note there for the per-width measurement.
+    "sqrt": T_EXP,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,

@@ -479,6 +479,39 @@ bool MpsSupportsLogDtype(at::ScalarType dtype);
 // numbers and for which half is the one that decides each width.
 bool MpsSupportsRsqrtDtype(at::ScalarType dtype);
 
+// Whether `sqrt` computes exactly on the MPSGraph path.
+//
+// A predicate of its own rather than `MpsSupportsRsqrtDtype` reused, and the
+// reason is the same one that gave the sibling its own predicate read the other
+// way: `rsqrt` here is the *composition* `reciprocal(sqrt(x))`, so its gate had
+// to be right about two nodes at once -- the sqrt's input half and the
+// reciprocal's result half -- while this body is the sqrt alone. A width the
+// composition serves is therefore not automatically served here, and a width it
+// declines is not automatically declined: the two gates ask about different
+// computations and their answers come out different at the edges.
+//
+// What the body inherits from the sibling is the node itself.
+// `squareRootWithTensor:` is the inner half of `T_RSQRT`, on both the SDK this
+// backend is verified against and the one after it, so the selector is the same
+// one the composition already builds rather than a new question. The domain
+// edges are the ones a square root has rather than a reciprocal's:
+// `sqrt(0) = 0` (and `sqrt(-0.0) = -0.0`, the signed zero the sibling's
+// reciprocal turns into `-inf`), `sqrt(1) = 1`, `sqrt(4) = 2`,
+// `sqrt(-1) = nan`, `sqrt(inf) = inf` and `sqrt(nan) = nan`.
+//
+// All three float widths are served, and the finding is *where* this differs
+// from the sibling that shares the node: the same subnormal *input* flush that
+// cost `log` and the `rsqrt` composition's input half shows up here at float32
+// and bfloat16, but it reads differently -- the flushed operand comes back 0,
+// a value inside the normal range, where the sibling's reciprocal turned the
+// same flush into `inf`. float16 does not flush at all, as `log` and `rsqrt`
+// both found.
+//
+// The gate is measured per width; see the note in mps_common.mm for the numbers,
+// for the flush that decides the low-precision widths, and for the one edge
+// whose failure is a wrong *kind* of answer rather than a wrong magnitude.
+bool MpsSupportsSqrtDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

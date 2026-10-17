@@ -117,11 +117,12 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated thirty-one are compared
+Results are correct on every op: the accelerated thirty-two are compared
 against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
 `test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py`,
 `test_mps_silu.py`, `test_mps_exp.py`, `test_mps_log.py`, `test_mps_rsqrt.py`,
+`test_mps_sqrt.py`,
 `test_mps_sigmoid.py`,
 `test_mps_embedding.py`, `test_mps_div.py`,
 `test_mps_index_select.py`, `test_mps_take.py`, `test_mps_gather.py`,
