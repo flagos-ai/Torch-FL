@@ -1463,6 +1463,17 @@ bool RunGraphImpl(
       [array addObject:operands[operand]];
     }
     StageTrace("array.built", inputs);
+    if (StageTraceWanted()) {
+      std::fprintf(stderr,
+                   "[mps-stage] about-to-run executable=%p descriptor=%p "
+                   "queue=%p inputs=%zu results=%zu\n",
+                   static_cast<void*>(plan->executable),
+                   static_cast<void*>(plan->descriptor),
+                   static_cast<void*>(queue),
+                   static_cast<size_t>(array.count),
+                   static_cast<size_t>(result_data.count));
+      std::fflush(stderr);
+    }
     // Asynchronous on purpose: see the contract in mps_common.h. Measured on an
     // M5, the same one-node executable costs ~18 us scheduled this way against
     // ~370 us when awaited inline, because the wait is a round trip to the GPU

@@ -26,12 +26,20 @@
 #include "mps.h"
 #include "mps_runtime.h"
 
+// _XOPEN_SOURCE is what makes <ucontext.h> declare ucontext_t at all: on this
+// SDK the header is an #error without it. Define before the first system
+// include, and only for this translation unit.
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <execinfo.h>
 #include <unistd.h>
+#include <ucontext.h>
 #include <mutex>
 #include <set>
 #include <vector>
@@ -98,11 +106,6 @@ void CrashWriteHex(const char* label, uintptr_t value) {
 }
 
 void CrashTraceHandler(int signo, siginfo_t* info, void* context) {
-  // The ucontext is deliberately unused: the frame list and the fault address
-  // are the two things this report is for, and reaching into the register file
-  // to reconstruct a stack the kernel's own unwinder could not would be a
-  // second, less trustworthy unwinder.
-  (void)context;
   CrashWrite("\n=== FLAGOS_MPS_CRASH_TRACE: begin ===\n");
   CrashWrite("signal: ");
   const char* name = "?";
@@ -123,6 +126,49 @@ void CrashTraceHandler(int signo, siginfo_t* info, void* context) {
   if (info != nullptr) {
     CrashWriteHex("fault address: ", reinterpret_cast<uintptr_t>(info->si_addr));
     CrashWriteHex("si_code: ", static_cast<uintptr_t>(info->si_code));
+  }
+
+  // backtrace() returned nothing on the runner -- the frame chain is gone by the
+  // time the handler runs, most likely because the faulting frame had already
+  // pushed a large stack adjustment or unwound through a leaf. The ucontext
+  // still carries the register file the kernel saved at the fault, so the
+  // program counter and the frame-pointer chain are read straight out of it and
+  // walked by hand. That is the only way to name the caller of a call that died
+  // inside a library with a broken/unwind-hostile prologue.
+  if (context != nullptr) {
+    const ucontext_t* uc = static_cast<const ucontext_t*>(context);
+#if defined(__arm64__) || defined(__aarch64__)
+    const uintptr_t pc = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__pc);
+    const uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__fp);
+    const uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__lr);
+    CrashWriteHex("pc: ", pc);
+    CrashWriteHex("lr: ", lr);
+#elif defined(__x86_64__)
+    const uintptr_t pc = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__rip);
+    const uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__rbp);
+    CrashWriteHex("pc: ", pc);
+#else
+    const uintptr_t pc = 0;
+    const uintptr_t fp = 0;
+#endif
+    CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: frame-pointer walk ===\n");
+    CrashWriteHex("frame00: ", pc);
+    // A frame-pointer walk over a destroyed stack can read anything; every
+    // dereference is a fault away from a nested crash, which on a broken stack
+    // is exactly what makes this useful rather than reckless -- a nested fault
+    // here re-raises the original signal through the same handler and prints
+    // "begin" a second time, which is itself evidence.
+    uintptr_t frame = fp;
+    for (int i = 1; i < 48 && frame != 0; ++i) {
+      const uintptr_t* words = reinterpret_cast<const uintptr_t*>(frame);
+      const uintptr_t next = words[0];
+      const uintptr_t ret = words[1];
+      CrashWriteHex("frame", ret);
+      if (next <= frame) {
+        break;
+      }
+      frame = next;
+    }
   }
 
   void* frames[128];
