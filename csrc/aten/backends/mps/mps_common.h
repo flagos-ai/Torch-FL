@@ -512,6 +512,55 @@ bool MpsSupportsRsqrtDtype(at::ScalarType dtype);
 // whose failure is a wrong *kind* of answer rather than a wrong magnitude.
 bool MpsSupportsSqrtDtype(at::ScalarType dtype);
 
+// Whether `tanh` computes like the reference on the MPSGraph path.
+//
+// `tanh` is the activation a transformer block reaches for at both ends -- the
+// tanh approximation inside a GELU and the one inside a recurrent or attention
+// gate -- and MPSGraph names it directly as `tanhWithTensor:`. The body is
+// therefore the plain one-node unary template plus one guard, and the guard is
+// the first thing the node needs: measured at all three widths, the node
+// *saturates* a NaN operand to +-1 rather than propagating it, so
+// `isNaNWithTensor:` selects a NaN back over the node's answer and the body
+// answers the reference's `nan` rather than the node's `1.0`.
+//
+// With the NaN guard in place the predicate is a pure node-fidelity question,
+// and its answer is the first one on this backend that declines the *widest*
+// float:
+//
+//   * float16 and bfloat16 are served. The node is the reference's own function
+//     at these widths rather than an approximation of it -- measured, both have
+//     the *reference's* max error against the exact tanh to the digit, and both
+//     are *exactly* odd (max |g(x) + g(-x)| is 0.0 where the float32 node breaks
+//     the same measurement by 1.788e-07). Two deviations survive and are
+//     recorded rather than hidden: bfloat16 flushes a subnormal operand (all 127
+//     accessible, none of float16's 1023), and both widths answer +0.0 for
+//     tanh(-0.0). See the note in mps_common.mm.
+//   * float32 is *declined*. The node is a coarser approximation of a tanh at
+//     this width, not a differently-rounded exact one, and the measurement says
+//     so three ways: it breaks odd symmetry by 1.788e-07 where the reference is
+//     exactly symmetric; its error against the exact answer is ~100x the
+//     reference's at every scale of the curve (4.321e-08 against 4.328e-10 over
+//     [0.001, 0.01), 1.069e-07 against 2.981e-08 over [0.5, 1)); and 165340 of
+//     400001 samples over [-10, 10] come back a different float32 value, up to a
+//     visibly different number inside the saturation band rather than a
+//     neighbouring ulp. On a `torch.randn(1000000)` operand 545055 samples
+//     differ and the graph is the less accurate of the two on 544303 of them.
+//
+// Serving that would replace the reference's answer with a coarser one on a
+// majority of the values the most-called activation in a transformer block is
+// handed, so the float32 caller keeps the `cpu_fallback` round-trip and only the
+// two narrow widths -- where the node *is* the reference's function -- take the
+// graph. This is the first gate here whose narrowness is about accuracy rather
+// than a subnormal flush or a domain edge, and it is stated per width for that
+// reason.
+//
+// float64 has no MPSGraph element type and an integral or bool operand is
+// promoted by the reference to float32, so both keep the round-trip.
+//
+// The gate is measured per width; see the note in mps_common.mm for the numbers
+// and for the round-trip cost the float32 decline leaves on the table.
+bool MpsSupportsTanhDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

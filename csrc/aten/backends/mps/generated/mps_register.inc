@@ -44,4 +44,5 @@
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
   m.impl("take", WrapperTake);
+  m.impl("tanh", WrapperTanh);
   m.impl("where.self", WrapperWhereSelf);

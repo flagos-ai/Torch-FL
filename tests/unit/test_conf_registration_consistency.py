@@ -506,7 +506,7 @@ def test_conf_route_counts_are_stable():
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 32, "none": 2005},
+        "mps": {"mps": 33, "none": 2004},
         "tsingmicro": {"flaggems": 51, "flagos_python": 2, "tsingmicro": 14},
     }
     for platform, exp in expected.items():

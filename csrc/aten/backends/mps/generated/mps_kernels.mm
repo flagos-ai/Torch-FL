@@ -876,6 +876,48 @@ at::Tensor SqrtKernelMps(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMps, SqrtKernelMps)
 
+at::Tensor TanhKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTanhDtype(self.scalar_type())) {
+    return at::tanh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tanh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* tanh = [graph tanhWithTensor:args[0] name:nil];
+        if (tanh == nil) {
+          return nil;
+        }
+        // The node saturates a NaN operand to +-1 rather than propagating it --
+        // measured, `tanh(nan)` is 1.0 at all three widths where the reference
+        // answers nan -- so a NaN input is selected back to NaN rather than
+        // left to the node's own answer. This is the one deviation here that is
+        // a wrong *answer* rather than a rounding, and it is the check that
+        // makes the body a tanh rather than a saturating approximation.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:[graph constantWithScalar:NAN
+                                                                 dataType:args[0].dataType]
+                           falsePredicateTensor:tanh
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::tanh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMps, TanhKernelMps)
+
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
     const at::Tensor& indices,

@@ -203,8 +203,8 @@ wheel, so there is no Python/Triton routing surface to survey; the cohort here i
 a hand-grown native kernel set, and its denominator is the conf file, not the
 FlagGems ceiling. The routes, countable from
 [`backends_mps.conf`](../../torch_fl/configs/backends_mps.conf), are
-`{mps: 32, none: 2005}`: `abs`, `neg`, `silu`, `sigmoid`, `exp`, `log`,
-`rsqrt`, `sqrt`,
+`{mps: 33, none: 2004}`: `abs`, `neg`, `silu`, `sigmoid`, `exp`, `log`,
+`rsqrt`, `sqrt`, `tanh`,
 `reciprocal`, the elementwise
 `add`/`sub`/`mul`/`div` tensor and scalar forms, `pow.Tensor_Scalar`,
 `sum.dim_IntList`, `mean.dim`, `_softmax`, `convolution_overrideable`,
@@ -480,7 +480,8 @@ per-op suites `test_mps_batch_norm.py`, `test_mps_binary.py`, `test_mps_cat.py`,
 `test_mps_conv.py`, `test_mps_embedding.py`, `test_mps_gather.py`,
 `test_mps_gemm.py`, `test_mps_index_select.py`, `test_mps_layer_norm.py`,
 `test_mps_pow.py`, `test_mps_reduce.py`, `test_mps_silu.py`, `test_mps_exp.py`,
-`test_mps_log.py`, `test_mps_rsqrt.py`, `test_mps_sqrt.py`, `test_mps_softmax.py`,
+`test_mps_log.py`, `test_mps_rsqrt.py`, `test_mps_sqrt.py`, `test_mps_tanh.py`,
+`test_mps_softmax.py`,
 `test_mps_take.py`, `test_mps_unary.py` and
 `test_mps_where.py`, run as
 `pytest tests/integration/ops -m mps` on an Apple

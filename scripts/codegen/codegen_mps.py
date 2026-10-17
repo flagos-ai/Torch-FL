@@ -246,6 +246,27 @@ OPS = {
     # spelling on this backend, and `_foreach_sqrt` is the batched spelling with
     # its own list contract.
     "sqrt": "sqrt",
+    # The activation a transformer block reaches for at both ends -- the tanh
+    # approximation inside a GELU and the one inside a recurrent or attention
+    # gate -- and the reason it is the next increment after the unaries rather
+    # than one of them.
+    #
+    # MPSGraph names `tanhWithTensor:` directly, so the body is the plain
+    # one-node unary template plus one guard, and the increment is the *gate*:
+    # measured at all three widths the node saturates a NaN operand to +-1
+    # rather than propagating it, so `isNaNWithTensor:` selects a NaN back over
+    # the node's answer -- see T_TANH. With that guard in place the gate is a
+    # node-fidelity question, and it is the first one here to decline the
+    # *widest* float: the node is the reference's own function at float16 and
+    # bfloat16 but a coarser approximation of a tanh at float32, so the float32
+    # caller keeps the round-trip. See MpsSupportsTanhDtype for the measurement.
+    #
+    # Only `tanh` is registered. `tanh.out` and `tanh_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `atanh` is a different op with its own domain -- `|x| < 1` is where it
+    # answers a finite value, with its own edges at `+-1` and beyond -- so it is
+    # not this increment.
+    "tanh": "tanh",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -458,6 +479,12 @@ AT_OP = {
     # `sqrt(-0.0) = -0.0`) and its integral/bool promotion rule live, and why
     # the gate sends those widths here rather than evaluating them in the graph.
     "sqrt": "sqrt",
+    # The CPU reference the `tanh` body round-trips to on the widths it declines.
+    # `tanh` is its own aten kernel rather than a composition on the reference
+    # build, which is where its saturation contract (`tanh(+-inf) = +-1`) and its
+    # integral/bool promotion rule live, and why the gate sends those widths here
+    # rather than evaluating them in the graph.
+    "tanh": "tanh",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -558,6 +585,10 @@ SUPPORTS = {
     # body answers zero for it rather than inf), and the widening is the
     # increment's finding. See MpsSupportsSqrtDtype.
     "sqrt": "MpsSupportsSqrtDtype",
+    # Its own predicate, and the measurement is a *node fidelity* question rather
+    # than a flush or a domain: `tanhWithTensor:`. See MpsSupportsTanhDtype for
+    # the per-width numbers.
+    "tanh": "MpsSupportsTanhDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -678,6 +709,10 @@ CALLS = {
     # here as the whole body -- `sqrt` *is* that node. Named separately because
     # the two categories carry different dtype gates, which is the increment.
     "sqrt": "squareRootWithTensor:",
+    # Named directly by the eval path, so the body is the plain unary template.
+    # See MpsSupportsTanhDtype for whether the node rounds like a true tanh at a
+    # width.
+    "tanh": "tanhWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -837,6 +872,8 @@ KEY_PARTS = {
     # which MpsRunGraph folds into the cache key itself -- and no host value is
     # baked into it.
     "sqrt": "",
+    # Empty, for the same reason as `sqrt` above: one operand and one node.
+    "tanh": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -3281,6 +3318,80 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
+# `tanh` is the activation a transformer block reaches for at both ends -- the
+# tanh approximation inside a GELU and the one inside a recurrent or attention
+# gate -- and the body is the shared one-node unary shape with exactly one
+# addition.
+#
+# The addition is a NaN guard, and it is the node's doing rather than a
+# defensive check: measured at all three widths, `tanhWithTensor:` *saturates* a
+# NaN operand to +-1 instead of propagating it -- `tanh(nan)` is 1.0 on the graph
+# where the reference answers nan -- so the body builds `isNaNWithTensor:` over
+# the operand and selects a NaN back over the node's answer. `isNaNWithTensor:`
+# is on both the SDK this backend is verified against and the one after it (no
+# availability annotation in `MPSGraphArithmeticOps.h`), unlike the fused
+# `reciprocalSquareRootWithTensor:` T_RSQRT had to avoid, so the guard is
+# available where the lane runs. The library helper is a second `nil` to check,
+# and a `nil` from it round-trips like any other declined build.
+#
+# Everything else this body does is the shared unary contract, and the increment
+# is the gate rather than the graph. See MpsSupportsTanhDtype: the node is the
+# reference's own function at float16 and bfloat16 -- bfloat16 bit-identical
+# with exact odd symmetry, float16 within two last-ulp roundings of 400001 -- and
+# a coarser approximation of a tanh at float32, where it breaks odd symmetry by
+# 1.788e-07 and sits ~100x further from the exact answer at every scale. That
+# width keeps the round-trip.
+#
+# Only `tanh` is registered. `tanh.out` and `tanh_` write into a tensor the
+# caller owns, like every other `.out`/inplace spelling on this backend, and
+# `tanh_backward`, `atanh` and `_foreach_tanh` are separate ops with their own
+# selectors and contracts -- `atanh`'s domain is `|x| < 1`, which is not this
+# node's domain at all.
+
+T_TANH = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* tanh = [graph {call}args[0] name:nil];
+        if (tanh == nil) {{
+          return nil;
+        }}
+        // The node saturates a NaN operand to +-1 rather than propagating it --
+        // measured, `tanh(nan)` is 1.0 at all three widths where the reference
+        // answers nan -- so a NaN input is selected back to NaN rather than
+        // left to the node's own answer. This is the one deviation here that is
+        // a wrong *answer* rather than a rounding, and it is the check that
+        // makes the body a tanh rather than a saturating approximation.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:[graph constantWithScalar:NAN
+                                                                 dataType:args[0].dataType]
+                           falsePredicateTensor:tanh
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -3301,6 +3412,13 @@ CATEGORIES = {
     # there is nothing to compose and the whole of this body is
     # `MpsSupportsSqrtDtype`. See the note there for the per-width measurement.
     "sqrt": T_EXP,
+    # Its own template rather than the shared unary one, because the node needs
+    # a guard the siblings do not: MPSGraph's `tanhWithTensor:` saturates a NaN
+    # operand to +-1 at every width, so the body selects the input's NaN back
+    # over the node's answer. Everything else is the one-node unary shape, and
+    # the gate is where the increment is -- MpsSupportsTanhDtype serves the two
+    # narrow widths and declines float32.
+    "tanh": T_TANH,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,

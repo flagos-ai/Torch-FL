@@ -360,6 +360,94 @@ bool MpsSupportsSqrtDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsTanhDtype(at::ScalarType dtype) {
+  // The two narrow widths, measured against at::tanh in the operand's own dtype.
+  // This is the first gate on this backend that *declines the widest float*,
+  // and the reason is a node-fidelity finding rather than the flush or the
+  // domain the sibling gates measured. See the note in mps_common.h.
+  //
+  // float16 and bfloat16 are served, and the reading is the one `rsqrt`'s
+  // composed widths recorded: the node reproduces the reference's own function.
+  // Measured over a 400001-sample sweep of [-12, 12], the graph and the
+  // reference have the *same* max error against the exact (float64) tanh, to
+  // the digit -- 4.3226e-04 at float16 and 3.3111e-03 at bfloat16 -- over the
+  // part of the curve that is not saturated, and the two tensors differ on 5
+  // samples at float16 and 1 at bfloat16, every one of them a step or three of
+  // the width's own representation rather than a coarser answer. The sharper
+  // test is symmetry: max |g(x) + g(-x)| is *exactly* 0.0 at both widths, the
+  // reference's own value, where the float32 node breaks the same measurement by
+  // 1.788e-07.
+  //
+  // Two deviations do survive at these widths, both measured and both narrow
+  // enough to accept on the same policy the siblings used:
+  //
+  //   * bfloat16 flushes a subnormal *operand*. All 127 of the float32
+  //     subnormals this width can represent -- bits 0x0001 to 0x007f -- come
+  //     back 0 where the reference answers a subnormal bfloat16, and the band
+  //     stops exactly at the smallest normal, which is reproduced bit for bit.
+  //     This is the flush `sigmoid` recorded at the *result* side, read at the
+  //     operand, and float16 does not flush at all: all 1023 of its positive
+  //     subnormals reproduce the reference.
+  //   * the sign of a zero is lost. tanh(-0.0) comes back +0.0 at both widths
+  //     where the reference answers -0.0. The value is identical and the curve
+  //     is odd at every other sample, so this is a sign rather than a magnitude,
+  //     and it is the one edge the served widths miss. The float32 round-trip
+  //     below keeps it.
+  //
+  // float32 is declined, and this is the increment's finding. The node is not a
+  // differently-rounded exact tanh at this width, it is a coarser approximation
+  // of one, and the measurements that say so are three:
+  //
+  //   * a break in odd symmetry. Measured, max |g(x) + g(-x)| is 1.788e-07 over
+  //     [0.01, 3.0] where the reference is *exactly* 0.0 -- measured as
+  //     `(torch.tanh(x) + torch.tanh(-x)).abs().max()` on the host. A tanh that
+  //     is not odd is not a rounding of the reference's tanh.
+  //   * a uniform accuracy gap rather than an edge effect. Measured against the
+  //     exact (float64) answer over [0.001, 3.0], the graph's error is ~100x the
+  //     reference's at every scale and not only at the ends: 4.321e-08 against
+  //     4.328e-10 over [0.001, 0.01), 5.002e-08 against 3.696e-09 over
+  //     [0.01, 0.1), 7.365e-08 against 1.505e-08 over [0.1, 0.5), and
+  //     1.069e-07 against 2.981e-08 over [0.5, 1). The reference is a float32
+  //     tanh at roughly a float32 ulp; the graph is an order of magnitude off it.
+  //   * a share of the curve that differs at all. Measured over a 400001-sample
+  //     sweep of [-10, 10], 165340 samples (41%) come back a different float32
+  //     value, and the distance is not a neighbouring ulp: `tanh` near +-1 has
+  //     its ulps packed close together and the node lands up to the int32
+  //     distance 1597438 away, i.e. on a *visibly* different number inside the
+  //     saturation band. On a model-like `torch.randn(1000000)` operand, 545055
+  //     of 1000000 samples differ and the graph is the less accurate of the two
+  //     on 544303 of them.
+  //
+  // On a transformer block's operand that is the wrong trade to make silently.
+  // `tanh` is the activation such a block reaches for most, and this body would
+  // replace the reference's answer with a coarser one on a majority of the
+  // values it is handed -- a different result from the reference on the op a
+  // reader is least likely to re-measure. The float32 caller keeps the
+  // `cpu_fallback` round-trip, which is correct, and the two *narrow* widths --
+  // where the node is the reference's own function -- take the graph. The
+  // round-trip's cost at that width is the note in mps_common.h: measured on an
+  // M5 with `(3, 512, 3072)` float32, 5.394 ms on the CPU plus a 1.253 ms
+  // device-to-host copy, against 3.168 ms for the node -- so this is a real
+  // 2x left on the table at float32, taken because the number it would buy is
+  // not the reference's.
+  //
+  // The NaN guard in the body is separate from this gate and is not what
+  // declines float32: the node saturates a NaN operand to +-1 at *every* width
+  // -- measured, `tanh(nan)` is 1.0 where the reference answers nan -- so
+  // `isNaNWithTensor:` selects a NaN back over the node's answer on all three,
+  // and the guard is what makes the two served widths answer the reference's
+  // nan rather than the node's 1.0.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::tanh(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`, `log`, `rsqrt` and `sqrt` do: the
+  // promotion rule is the reference's, and the round-trip is where it lives.
+  // Both declined paths were measured to reproduce the reference.
+  return dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {

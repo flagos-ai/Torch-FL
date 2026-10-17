@@ -1008,6 +1008,79 @@ asserted at float32 with a negative integral operand asserted `nan` (the
 reference's answer, not an error), plan reuse across interleaved signatures, and
 the dispatch log naming `mps` on the served path and on a declined one.
 
+`tanh` followed, the activation a transformer block reaches for at both ends --
+the tanh approximation inside a GELU and the one inside a recurrent or attention
+gate -- and MPSGraph names it directly as `tanhWithTensor:`. The body is the
+shared one-node unary template plus one guard, and both the guard and the gate
+are the increment's findings.
+
+The guard comes first because the node deviates from the reference in a way that
+is a wrong *answer* rather than a rounding: measured at all three float widths,
+the bare node answers `tanh(nan) = 1.0` -- it saturates a NaN operand rather than
+propagating it -- where the reference answers `nan`. `isNaNWithTensor:` therefore
+selects a NaN back over the node's answer, and all three widths propagate nan
+through the body. This is the first guard on the backend that is not a dtype
+gate: the body is the node *plus* an operation, because the node alone is not the
+reference's function.
+
+The gate is the increment's real finding, and it is the first one here to decline
+the *widest* float. float32 is **not** served. The node is not a differently-
+rounded exact tanh at that width, it is a coarser approximation of one, and three
+measurements say so. It breaks odd symmetry by `1.788e-07` over `max |g(x) +
+g(-x)|` where the reference is *exactly* symmetric. Its error against the exact
+(float64) answer is roughly `100x` the reference's at every scale of the curve
+and not only at the ends -- `4.321e-08` against `4.328e-10` over `[0.001, 0.01)`,
+`1.069e-07` against `2.981e-08` over `[0.5, 1)`. And 165340 of a 400001 sample
+sweep of `[-10, 10]` -- 41% -- come back a different float32 value, up to an
+int32 distance of 1597438 inside the saturation band, which is a *visibly*
+different number rather than a neighbouring ulp. On a `torch.randn(1000000)`
+operand 545055 samples differ and the graph is the less accurate of the two on
+544303 of them.
+
+The two narrow widths are served, and they are served because the node *is* the
+reference's function there rather than an approximation of it. Over the same
+400001-sample sweep the graph and the reference have the same max error against
+the exact tanh to the digit -- `4.3226e-04` at float16 and `3.3111e-03` at
+bfloat16 -- and the two tensors differ on 5 samples at float16 and 1 at
+bfloat16, every one of them within a few of the width's own representable steps.
+The sharper reading is symmetry: `max |g(x) + g(-x)|` is exactly `0.0` at both
+widths, the reference's own value, where the float32 node breaks the same
+measurement by `1.788e-07`. A coarser node does not stay odd.
+
+Two deviations survive at the served widths and are recorded rather than hidden
+behind a tolerance. bfloat16 flushes a subnormal operand: all 127 of the float32
+subnormals that width represents come back `0` where the reference answers a
+subnormal bfloat16, and the band stops exactly at the smallest normal, which is
+reproduced bit for bit -- the same platform flush `sigmoid` recorded at the
+result side, read at the operand. float16 does not flush at all: all 1023 of its
+positive subnormals reproduce the reference. Both widths also answer `+0.0` for
+`tanh(-0.0)` where the reference answers `-0.0`; the value is identical and the
+curve is odd at every other sample, so this is a sign rather than a magnitude,
+and it is the one edge the served widths miss. The float32 round-trip keeps it.
+
+The decline costs something and the number is on the record: measured on an M5
+with a `(3, 512, 3072)` float32 operand, the node is `3.168 ms` against
+`5.394 ms` on the CPU plus a `1.253 ms` device-to-host copy for the round-trip,
+so the float32 decline leaves roughly a factor of two on the table. It is taken
+anyway, because the number it buys is not the reference's answer, and `tanh` is
+the op a reader is least likely to re-measure.
+
+This increment is verified with `tests/integration/ops/test_mps_tanh.py` (42
+cases): CPU equality at the two served widths, the sweep held to a *handful* of
+samples and a few of the width's own steps rather than to a share of the curve,
+the odd-symmetry invariant asserted exactly at both served widths and at float32
+through the round-trip, the nan guard asserted at every served width (the case
+that fails if the `isNaNWithTensor:` select is dropped), the saturation edges
+`tanh(+-inf) = +-1` and a near-bound `-7.0` asserted exactly, the bfloat16
+subnormal band pinned at both ends so a widening flush fails while float16's 1023
+subnormals are asserted bit-identical, the signed-zero miss asserted as a miss on
+the served widths and as the reference's sign on the float32 and float64
+round-trips, float32 asserted bit-exact over the whole `[-10, 10]` curve (the
+case that would fail if the gate were widened), the declined widths asserting the
+round-trip's own dtype, the integral and bool promotions asserted at float32,
+plan reuse across interleaved signatures, and the dispatch log naming `mps` on
+the served path and on both declined ones.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real
