@@ -34,6 +34,7 @@
 #endif
 
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -315,9 +316,6 @@ bool MetalAvailable() {
 
 bool MetalGraphUsable() {
   id<MTLDevice> device = MetalDevice();
-  if (device == nil || !device.hasUnifiedMemory) {
-    return false;
-  }
   // The paravirtualized family is the one MPSGraph encode is known to fault on,
   // and the device class is the only thing that distinguishes those hosts from a
   // physical GPU: the same OS build, the same MPSGraph, the same unified memory.
@@ -325,13 +323,31 @@ bool MetalGraphUsable() {
   // loaded IOKit personality is AppleParavirtGPUMetalIOGPUFamily. The name is
   // checked rather than the loaded bundle because it is the documented property
   // and does not depend on an internal framework's filename.
-  NSString* name = device.name;
-  if (name != nil && [name rangeOfString:@"paravirtual"
-                                 options:NSCaseInsensitiveSearch].location !=
-                        NSNotFound) {
-    return false;
+  NSString* name = device != nil ? device.name : nil;
+  const bool paravirtual =
+      name != nil &&
+      [name rangeOfString:@"paravirtual"
+                  options:NSCaseInsensitiveSearch].location != NSNotFound;
+  const bool usable =
+      device != nil && device.hasUnifiedMemory && !paravirtual;
+  // DIAGNOSTIC (reverted once it has answered): the gate is a name test, and
+  // the one host it has to trip is a CI runner whose name string has never been
+  // read. Printing the raw device facts from the process doing the deciding
+  // turns "the gate fired" from an inference into an observation, and it
+  // separates "this host is genuinely paravirtualized" from "the name test is
+  // matching something that is not", which are the two readings a green MPS
+  // suite could otherwise hide behind.
+  if (::getenv("FLAGOS_MPS_CRASH_TRACE") != nullptr && name != nil) {
+    std::fprintf(stderr,
+                 "[mps-device] name=\"%s\" unified=%d paravirtual=%d "
+                 "graph_usable=%d\n",
+                 name.UTF8String,
+                 static_cast<int>(device.hasUnifiedMemory),
+                 static_cast<int>(paravirtual),
+                 static_cast<int>(usable));
+    std::fflush(stderr);
   }
-  return true;
+  return usable;
 }
 
 StreamState* DefaultStream() {
