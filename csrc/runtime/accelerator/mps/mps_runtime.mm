@@ -29,6 +29,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <execinfo.h>
 #include <unistd.h>
 #include <mutex>
@@ -64,18 +65,75 @@ bool gDeviceResolved = false;
 // It is a diagnostic, not a fix: it prints and then re-raises with the default
 // disposition so the process still dies from the original signal and CI still
 // reports the failure.
-void CrashTraceHandler(int signo) {
-  void* frames[128];
-  const int count = ::backtrace(frames, 128);
+//
+// The report is deliberately more than a frame list, because the frame list is
+// not always there. `backtrace()` walks the frame-pointer chain, and a fault
+// that has damaged that chain returns zero frames -- which is itself a finding
+// (it says the crash is not an ordinary call into a bad pointer) but leaves the
+// address unknown. So the faulting address and the register file are printed
+// too: they come from the kernel's signal context, not from the stack, and are
+// available whatever happened to the stack.
+ssize_t CrashWrite(const char* text) {
   // write(2) rather than printf: stdio is not async-signal-safe, and the
   // buffered half of a message is exactly what gets lost on a fatal signal.
-  const char* banner = "\n=== FLAGOS_MPS_CRASH_TRACE: native backtrace ===\n";
-  ssize_t ignored = ::write(2, banner, ::strlen(banner));
-  (void)ignored;
-  ::backtrace_symbols_fd(frames, count, 2);
-  const char* footer = "=== FLAGOS_MPS_CRASH_TRACE: end ===\n";
-  ignored = ::write(2, footer, ::strlen(footer));
-  (void)ignored;
+  return ::write(2, text, ::strlen(text));
+}
+
+void CrashWriteHex(const char* label, uintptr_t value) {
+  char line[64];
+  int n = 0;
+  for (const char* p = label; *p != '\0' && n < 40; ++p) {
+    line[n++] = *p;
+  }
+  const char* digits = "0123456789abcdef";
+  line[n++] = '0';
+  line[n++] = 'x';
+  // 16 nibbles, high to low, with the leading zeros kept: a fault address of
+  // 0x0 is a different finding from one of 0x1f3a..., so nothing is trimmed.
+  for (int shift = 60; shift >= 0; shift -= 4) {
+    line[n++] = digits[(value >> shift) & 0xf];
+  }
+  line[n++] = '\n';
+  ::write(2, line, static_cast<size_t>(n));
+}
+
+void CrashTraceHandler(int signo, siginfo_t* info, void* context) {
+  // The ucontext is deliberately unused: the frame list and the fault address
+  // are the two things this report is for, and reaching into the register file
+  // to reconstruct a stack the kernel's own unwinder could not would be a
+  // second, less trustworthy unwinder.
+  (void)context;
+  CrashWrite("\n=== FLAGOS_MPS_CRASH_TRACE: begin ===\n");
+  CrashWrite("signal: ");
+  const char* name = "?";
+  switch (signo) {
+    case SIGSEGV: name = "SIGSEGV"; break;
+    case SIGBUS:  name = "SIGBUS";  break;
+    case SIGABRT: name = "SIGABRT"; break;
+    case SIGILL:  name = "SIGILL";  break;
+    case SIGFPE:  name = "SIGFPE";  break;
+    default: break;
+  }
+  CrashWrite(name);
+  CrashWrite("\n");
+
+  // si_addr is the faulting address for the memory-fault signals, which is the
+  // single most useful number here: it distinguishes a null dereference from a
+  // wild pointer from a guard-page strike.
+  if (info != nullptr) {
+    CrashWriteHex("fault address: ", reinterpret_cast<uintptr_t>(info->si_addr));
+    CrashWriteHex("si_code: ", static_cast<uintptr_t>(info->si_code));
+  }
+
+  void* frames[128];
+  const int count = ::backtrace(frames, 128);
+  CrashWrite("backtrace frames: ");
+  CrashWriteHex("", static_cast<uintptr_t>(count));
+  CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: native backtrace ===\n");
+  if (count > 0) {
+    ::backtrace_symbols_fd(frames, count, 2);
+  }
+  CrashWrite("=== FLAGOS_MPS_CRASH_TRACE: end ===\n");
 
   // Default disposition, so the signal that killed us is the one reported and
   // the exit status is the same as it would have been without this handler.
@@ -93,11 +151,22 @@ void MaybeInstallCrashTrace() {
   if (wanted == nullptr || wanted[0] == '\0' || wanted[0] == '0') {
     return;
   }
-  ::signal(SIGSEGV, CrashTraceHandler);
-  ::signal(SIGBUS, CrashTraceHandler);
-  ::signal(SIGABRT, CrashTraceHandler);
-  ::signal(SIGILL, CrashTraceHandler);
-  ::signal(SIGFPE, CrashTraceHandler);
+  // SA_SIGINFO is what makes the fault address available; SA_RESETHAND would
+  // restore the default disposition on delivery for free, but the handler
+  // re-raises explicitly so the intent stays legible at the call site.
+  struct sigaction action;
+  ::memset(&action, 0, sizeof(action));
+  action.sa_sigaction = CrashTraceHandler;
+  action.sa_flags = SA_SIGINFO | SA_NODEFER;
+  // Not `::sigemptyset`: it is a macro that expands to an expression, so the
+  // qualified spelling is a syntax error. `sigaction` is a real function and
+  // keeps the `::`.
+  sigemptyset(&action.sa_mask);
+  ::sigaction(SIGSEGV, &action, nullptr);
+  ::sigaction(SIGBUS, &action, nullptr);
+  ::sigaction(SIGABRT, &action, nullptr);
+  ::sigaction(SIGILL, &action, nullptr);
+  ::sigaction(SIGFPE, &action, nullptr);
 }
 
 std::mutex gDefaultStreamMutex;
