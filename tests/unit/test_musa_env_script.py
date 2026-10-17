@@ -45,7 +45,13 @@ def _bash_major():
 
 def run_shell(body, **environment):
     env = os.environ.copy()
-    env.update(PYTHONPATH="", PYTHONNOUSERSITE="1")
+    # A real checkout may have a build/ directory, which shadows the Build
+    # frontend's build.py.
+    env.update(
+        PYTHONPATH="",
+        PYTHONNOUSERSITE="1",
+        PYTHONSAFEPATH="1",
+    )
     env.update(environment)
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + body],
@@ -252,7 +258,11 @@ def test_flaggems_reuse_requires_published_version(tmp_path, condition, reuse):
         STUB_MODULE=str(tmp_path / "flag_gems.py"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert ("INSTALL_REQUESTED" not in result.stdout) == reuse
+    # "preinstalled" contains "installed"; match the stub's whole output line.
+    installed = any(
+        line.startswith("INSTALL_REQUESTED") for line in result.stdout.splitlines()
+    )
+    assert (not installed) == reuse
     if not reuse:
         assert "--only-binary=:all:" in result.stdout
         assert "flag-gems===5.4.0" in result.stdout

@@ -200,10 +200,14 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
 def _pyproject_build_requirements() -> list[str]:
     """The requirement names in `[build-system].requires`, normalised.
 
-    `tomllib` is stdlib on the 3.11+ interpreters every lane here uses, so the
-    test reads the real file rather than restating the list and drifting from it.
+    Read the real file rather than restating the list and drifting from it. The
+    DCU runner still uses Python 3.10, so use the tomli backport when tomllib is
+    unavailable.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
 
     with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
         requires = tomllib.load(handle)["build-system"]["requires"]
