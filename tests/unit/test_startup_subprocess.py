@@ -174,7 +174,7 @@ def _require_mps():
         pytest.skip("The MPS second-executable probe needs an MPS build")
 
 
-def _probe(body: str):
+def _probe(body: str, extra_env: dict | None = None):
     """Run one MPSGraph sequence in a child, and report how the child died.
 
     The child is the point: the failure this is bisecting is a segfault inside
@@ -193,6 +193,7 @@ def _probe(body: str):
     env = os.environ.copy()
     env["FLAGOS_MPS_STAGE_TRACE"] = "1"
     env["FLAGOS_MPS_CRASH_TRACE"] = "1"
+    env.update(extra_env or {})
     result = subprocess.run(
         [
             sys.executable,
@@ -279,4 +280,25 @@ b = torch.randn(4, device=dev)
 assert (a + b).shape == (4,)
 print('ok', flush=True)
 """
+    )
+
+
+def test_mps_mm_runs_clean_when_the_run_is_awaited():
+    """The same `mm`, with the executable awaited inline instead of queued.
+
+    The crash names a frame inside MetalPerformanceShadersGraph, so the two
+    readings still open are "the queued schedule is the problem" and "this
+    executable cannot run at all on this host". Awaiting the one run separates
+    them: if this passes, what the runner cannot take is the leave-it-queued
+    schedule, not the graph.
+    """
+    _require_mps()
+    _probe(
+        """
+a = torch.randn(32, 64, device=dev)
+b = torch.randn(64, 16, device=dev)
+assert torch.mm(a, b).shape == (32, 16)
+print('ok', flush=True)
+""",
+        {"FLAGOS_MPS_SYNC_RUN": "1"},
     )

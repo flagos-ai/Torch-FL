@@ -1478,6 +1478,14 @@ bool RunGraphImpl(
     // M5, the same one-node executable costs ~18 us scheduled this way against
     // ~370 us when awaited inline, because the wait is a round trip to the GPU
     // per op rather than the work itself.
+    //
+    // DIAGNOSTIC (reverted once it has answered): FLAGOS_MPS_SYNC_RUN makes the
+    // run awaited inline instead, which bisects "the queued schedule itself"
+    // against "the compiled `mm` executable at all" -- the two readings the
+    // macos-14 crash does not yet distinguish.
+    if (getenv("FLAGOS_MPS_SYNC_RUN") != nullptr) {
+      plan->descriptor.waitUntilCompleted = YES;
+    }
     [plan->executable runAsyncWithMTLCommandQueue:queue
                                       inputsArray:array
                                      resultsArray:result_data
