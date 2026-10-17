@@ -28,6 +28,13 @@ def check(name: str, fn) -> None:
     except BaseException as exc:
         print(f"{name}: FAIL ({type(exc).__name__}: {exc})", flush=True)
         raise
+    if isinstance(value, torch.Tensor):
+        # Tensor formatting performs reductions, including FP64 min on this
+        # vendor stack. Log metadata without reading uninitialized storage or
+        # requiring operators outside the runtime allocation check.
+        value = (
+            f"shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device}"
+        )
     print(f"{name}: PASS ({value})", flush=True)
 
 
