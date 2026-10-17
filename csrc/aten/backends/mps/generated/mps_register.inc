@@ -36,6 +36,7 @@
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("reciprocal", WrapperReciprocal);
+  m.impl("rsqrt", WrapperRsqrt);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("silu", WrapperSilu);
   m.impl("sub.Scalar", WrapperSubScalar);

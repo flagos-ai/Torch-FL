@@ -47,6 +47,7 @@
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
+#include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
@@ -822,6 +823,34 @@ at::Tensor LogKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kMps, LogKernelMps)
+
+at::Tensor RsqrtKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRsqrtDtype(self.scalar_type())) {
+    return at::rsqrt(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("rsqrt"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* root = [graph squareRootWithTensor:args[0] name:nil];
+        if (root == nil) {
+          return nil;
+        }
+        return [graph reciprocalWithTensor:root name:nil];
+      });
+  if (!ran) {
+    return at::rsqrt(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMps, RsqrtKernelMps)
 
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,

@@ -230,6 +230,71 @@ bool MpsSupportsLogDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsRsqrtDtype(at::ScalarType dtype) {
+  // The three float widths, measured against at::rsqrt in the operand's own
+  // dtype. See the note in mps_common.h for why this is a predicate of its own
+  // rather than a reuse of the sibling unaries': the body is the two-node
+  // `reciprocal(sqrt(x))` composition, so both halves' subnormal policy applies.
+  //
+  //   float32   bit-identical to the reference over 400001 samples spanning
+  //             1e-5..100 plus the domain's edges, and over a 100001-sample
+  //             sweep of the top of the range. Zero mismatches.
+  //   float16   115782 of 400001 samples differ, max relative 9.756e-04 and max
+  //             absolute 1.563e-02 -- one float16 ulp. Every one of them is a
+  //             last-ulp rounding in which the *graph* is closer to the exact
+  //             answer than the CPU reference is: summed over the sweep, the
+  //             graph is worse than the reference on 0 samples, better on
+  //             115782, and equal on the remaining 284219. The maximum relative
+  //             distance from the exact (float64) answer is 4.877e-04 for the
+  //             graph against 7.322e-04 for the reference.
+  //   bfloat16  122658 of 400001 samples differ under the same reading, and the
+  //             same shape: worse on 0, better on 122658, equal on 277343, with
+  //             a max relative distance of 3.868e-03 against the reference's
+  //             5.842e-03.
+  //
+  // The domain's edges are reproduced exactly at all three widths, which is the
+  // first thing the composition had to get right: rsqrt(0) = inf,
+  // rsqrt(-0.0) = -inf, rsqrt(1) = 1, rsqrt(4) = 0.5, rsqrt(-1) = nan,
+  // rsqrt(inf) = 0 and rsqrt(nan) = nan, all bit-for-bit. The signed zero is the
+  // one worth naming: the sqrt of -0.0 is -0.0 and the reciprocal of -0.0 is
+  // -inf, so the composition reaches the reference's answer through two nodes
+  // rather than a fused one, and does.
+  //
+  // What the *input* half costs is the same divergence `log` measured, and it is
+  // accepted on the same policy: the platform flushes a subnormal float32 input
+  // to zero before the sqrt, and rsqrt of zero is inf, so an input below the
+  // smallest normal comes back inf where the reference answers a finite (and
+  // large) number. Measured, the boundary sits exactly at that normal:
+  // 1.1754944e-38 agrees with the reference while 1.1754942e-38 (the largest
+  // subnormal) flushes to inf. This never reaches a normal input -- measured,
+  // every input at or above the smallest normal reproduces the reference at
+  // float32 -- and a model's rsqrt operates inside a normalisation on a variance
+  // that has had an epsilon added, where that band is not reached.
+  //
+  // float16 is the width that keeps this from being a blanket rule about inputs
+  // as well: measured, it does *not* flush subnormal inputs --
+  // rsqrt(3.051758e-05) = 181.0 and rsqrt(1.525879e-05) = 256.0, both exact --
+  // so the float32 flush is a float32 property, exactly as `log` found.
+  //
+  // The *result* half turned out to cost nothing, which is worth recording
+  // because it was the half a composition was expected to risk: a reciprocal
+  // whose output is subnormal is the band `sigmoid` declined float16 for, and
+  // the band is simply not reachable here -- rsqrt is subnormal at float32 or
+  // bfloat16 only for an input beyond the largest representable value (measured:
+  // the boundary is above 3.4e38), and at float16 the curve saturates at
+  // rsqrt(inf) = 0 before it goes subnormal (measured: a 200001-sample sweep of
+  // the top half of the float16 range contains no subnormal result). So no width
+  // is declined for the result half.
+  //
+  // float64 has no MPSGraph element type and takes the round-trip. An integral
+  // or bool operand is *promoted* by the reference to float32 -- measured,
+  // `at::rsqrt(torch.arange(1, 4))` returns a float32 tensor -- and the gate
+  // declines them for the same reason `exp`'s and `log`'s do: the promotion rule
+  // is the reference's, and the round-trip is where it lives. Both declined
+  // paths were measured to reproduce the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {

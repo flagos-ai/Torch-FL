@@ -449,6 +449,36 @@ bool MpsSupportsExpDtype(at::ScalarType dtype);
 // outside the range the graph can represent.
 bool MpsSupportsLogDtype(at::ScalarType dtype);
 
+// Whether `rsqrt` computes exactly on the MPSGraph path -- and the first gate
+// here whose subject is a *composition* rather than a node.
+//
+// The body is `reciprocal(sqrt(x))`, two MPSGraph nodes rather than the fused
+// `reciprocalSquareRootWithTensor:` MPSGraph names, for the reason recorded
+// above the `T_RSQRT` template: the fused selector is macOS 15+ and the hosted
+// MPS lane is not, so building it raises an `NSInvalidArgumentException` that
+// aborts the process rather than declining. The composition is the same
+// arithmetic on two nodes the SDK this backend is verified against does have.
+//
+// That the subject is a composition is what makes an independent predicate
+// necessary rather than a reuse of a sibling's: two subnormal policies apply
+// where `exp` and `log` had one each. The input half is the *sqrt's* -- a
+// subnormal operand, if the platform flushes it, becomes zero before the node,
+// and `rsqrt` of a value approaching zero is large rather than small, so the
+// flush is a divergent magnitude and not a rounding. The result half is the
+// *reciprocal's*, the same flush `sigmoid` and `div` measured: a reciprocal
+// that is subnormal at the operand's width can come back zero where the
+// reference answers a denormal.
+//
+// The domain edges were measured first, against the reference on the CPU, and
+// every one of them has to be reproduced for the composition to be served at
+// that width: `rsqrt(0) = inf`, `rsqrt(-0.0) = -inf`, `rsqrt(1) = 1`,
+// `rsqrt(4) = 0.5`, `rsqrt(-1) = nan` (the sqrt of a negative is a nan and the
+// reciprocal of a nan is a nan), `rsqrt(inf) = 0` and `rsqrt(nan) = nan`.
+//
+// The gate is measured per width; see the note in mps_common.mm for the
+// numbers and for which half is the one that decides each width.
+bool MpsSupportsRsqrtDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //

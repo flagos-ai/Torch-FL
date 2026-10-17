@@ -908,6 +908,64 @@ promotions asserted at float32 including the `log(0) = -inf` edge, plan reuse
 across interleaved signatures, and the dispatch log naming `mps` on the served
 path and on a declined one.
 
+The same stage took `rsqrt`, and it is the first body here built from *two*
+MPSGraph nodes rather than one. `1 / sqrt(x)` is the tail every normalisation is
+written in terms of -- `x * rsqrt(v + eps)` is a layer norm, an RMS norm and a
+batch norm, and the `1 / sqrt(d)` attention scale is the same shape -- and
+MPSGraph names the fused `reciprocalSquareRootWithTensor:`. That selector is
+macOS 15+, and the hosted MPS lane is a `macos-14` image, where building it
+raises `NSInvalidArgumentException: -[MPSGraph reciprocalSquareRootWithTensor:
+name:]: unrecognized selector` from inside the graph-building block with no
+handler, so the process aborts rather than the op declining. The body therefore
+composes the two selectors both SDKs have and this tree already uses --
+`squareRootWithTensor:` (the `sqrt` node) and `reciprocalWithTensor:` (the
+`reciprocal` kernel's node and `layer_norm`'s rstd) -- which is the same
+arithmetic at one extra node, amortised over every call that shares the plan.
+
+The finding is what a *composition* does at the widths, and it has three parts.
+The first is the result half a composition was expected to risk: a reciprocal
+whose output is subnormal is exactly the band `sigmoid` declined float16 for,
+and it turns out to be unreachable here, because `rsqrt` is subnormal at float32
+or bfloat16 only for an input beyond the largest representable value (the
+boundary is above `3.4e38`) and at float16 the curve saturates at
+`rsqrt(inf) = 0` before it goes subnormal. The second is the input half, which
+is the `log` finding unchanged: float32 flushes a subnormal *input* to zero
+before the sqrt and `rsqrt(0)` is `inf`, so an input below the smallest normal
+comes back `inf` where the reference answers a finite and large number --
+measured, the boundary sits exactly at `1.1754944e-38`, and float16 does *not*
+flush (`rsqrt(3.051758e-05) = 181.0`, exact). The third is the width list, and
+it is where the composition reads differently from its siblings: float32 is
+bit-identical to the reference over 400001 samples and over a sweep of the top
+of the range, while float16 and bfloat16 differ on 115782 and 122658 of 400001
+samples respectively. Ranked against the exact answer rather than against the
+reference, every one of those differences is a last-ulp rounding in which the
+*graph* is the closer of the two: measured, the graph is farther from
+`1 / sqrt(x)` on zero samples at either width, so both roundings are correct and
+the graph's is the better one -- the same "both are correct" reading `log`'s
+float16 recorded, at a far larger share. The domain's edges are reproduced
+exactly at all three widths, the signed zero included: the composition reaches
+`-inf` through `sqrt(-0.0) = -0.0` and `reciprocal(-0.0) = -inf` rather than
+through a fused node. float64 has no MPSGraph element type and an integral or
+bool operand is promoted by the reference to float32, so both keep the
+round-trip.
+
+This increment is verified with `tests/integration/ops/test_mps_rsqrt.py` (34
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, float32 held *bit-exact*, the two wide-difference widths held to two eps
+*and* ranked so the graph is asserted never to round farther from exact than the
+reference, the middle of the curve held as equality so a wrong node ordering
+shows as a scale, the domain's eight edges asserted exactly at every served
+width rather than under a tolerance, the two ends of the float32
+subnormal-input band pinned on both sides so a widening flush fails, a walk down
+the normals asserting the flush never reaches one, the float16 subnormal inputs
+asserted finite so the float32 boundary is not generalised, the top of each
+width's range swept so the result-side band is asserted still unreachable, the
+one declined width asserting the round-trip's own dtype and bit-exactness with
+the domain's edges intact, the integral and bool promotions asserted at float32
+including the `rsqrt(0) = inf` edge, plan reuse across interleaved signatures,
+and the dispatch log naming `mps` on the served path and on a declined one.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real

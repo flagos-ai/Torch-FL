@@ -199,6 +199,33 @@ OPS = {
     # owns, and `log2`, `log10` and `log1p` are separate ops with their own
     # selectors and their own edge behaviour.
     "log": "log",
+    # The reciprocated square root, and the op a normalisation is written in
+    # terms of: `x * rsqrt(v + eps)` is the tail of a layer norm, an RMS norm and
+    # a batch norm, and the `1 / sqrt(d)` attention scale is the same shape.
+    # Measured on an M5 on a (3, 512, 3072) float32 operand, the `cpu_fallback`
+    # round-trip cost 3.703 ms against a 1.03 ms device-to-host copy floor for the
+    # same shape.
+    #
+    # The node is the increment's constraint rather than its body: MPSGraph names
+    # the fused `reciprocalSquareRootWithTensor:`, but that selector is macOS 15+
+    # and the hosted `macos-14` MPS lane is on the other side of that line --
+    # measured on the runner, the fused selector raises
+    # `NSInvalidArgumentException: -[MPSGraph reciprocalSquareRootWithTensor:
+    # name:]: unrecognized selector` and aborts the process. So the body is the
+    # two-node composition `reciprocal(sqrt(x))`, built from the two selectors the
+    # `reciprocal` kernel and the `layer_norm` rstd already use, which is the same
+    # arithmetic at one extra node. See T_RSQRT.
+    #
+    # The gate is `MpsSupportsRsqrtDtype`, and the note there is the measurement:
+    # this is a composition rather than one node, so both halves' subnormal
+    # policy applies -- the sqrt of a subnormal, and the reciprocal of a subnormal
+    # result -- and the increment's finding is which of those the platform gets
+    # right at which width.
+    #
+    # Only `rsqrt` is registered. `rsqrt.out` and `rsqrt_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `_foreach_rsqrt` is the batched spelling with its own list contract.
+    "rsqrt": "rsqrt",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -396,6 +423,14 @@ AT_OP = {
     # edges and its integral/bool promotion rule live, and why the gate sends
     # those widths here rather than evaluating them in the graph.
     "log": "log",
+    # The CPU reference the `rsqrt` body round-trips to on the widths it
+    # declines. `rsqrt` is its own aten kernel rather than a composition on the
+    # reference side, so the round-trip lands on the reference's own
+    # implementation -- which is where its domain edges (`rsqrt(0) = inf`,
+    # `rsqrt(-0.0) = -inf`, `rsqrt(-1) = nan`) and its integral/bool promotion
+    # rule live, and why the gate sends those widths here rather than evaluating
+    # them in the composition.
+    "rsqrt": "rsqrt",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -481,6 +516,12 @@ SUPPORTS = {
     # operand the platform might flush) are not the magnitudes the sibling
     # exponentials were gated on. See MpsSupportsLogDtype.
     "log": "MpsSupportsLogDtype",
+    # Its own predicate, and the measurement is about a *composition* rather than
+    # a node: `rsqrt` is `reciprocal(sqrt(x))` here, so two subnormal policies
+    # apply where the siblings above had one -- the sqrt of a subnormal input, and
+    # the reciprocal of a subnormal result -- and the increment's finding is that
+    # the two halves fail at different widths. See MpsSupportsRsqrtDtype.
+    "rsqrt": "MpsSupportsRsqrtDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -590,6 +631,13 @@ CALLS = {
     # is one node rather than the `log2`/`loge` composition a hand-written body
     # would need.
     "log": "logarithmWithTensor:",
+    # The *second* node of the two-node composition, and the reason the
+    # first is named separately in T_RSQRT: `squareRootWithTensor:` builds the
+    # inner node and this selector reciprocates it. The body writes both out in
+    # full, so this entry is a record of the outer half rather than a `{call}`
+    # prefix -- see the note there for why the fused
+    # `reciprocalSquareRootWithTensor:` is not used.
+    "rsqrt": "reciprocalWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -740,6 +788,10 @@ KEY_PARTS = {
     # MpsRunGraph folds into the cache key itself -- and the body bakes no host
     # value into the graph.
     "log": "",
+    # Empty for the same reason the three above are: the two nodes are a function
+    # of the operand's dtype and shape, which MpsRunGraph folds into the cache key
+    # itself, and the body bakes no host value into the graph.
+    "rsqrt": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -1595,6 +1647,66 @@ at::Tensor {kernel}(const at::Tensor& self) {{
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
         return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `rsqrt` -- `1 / sqrt(x)`, the tail of every normalisation, and the second body
+# here (after `silu`) built from two nodes rather than one.
+#
+# MPSGraph names the fused `reciprocalSquareRootWithTensor:`, and on a modern SDK
+# that would be the whole body -- one node, one selector, exactly the arithmetic
+# the reference performs. It is not usable here, and the reason is the *hosted
+# runner* rather than the graph: the selector is macOS 15+, while the MPS lane
+# this backend is verified on is a `macos-14` image (SDK 14.5, Xcode 15.4). The
+# failure is not subtle, and it is why this was measured rather than assumed:
+# built against the older SDK the fused selector is absent, and the first call
+# that builds the node raises `NSInvalidArgumentException: -[MPSGraph
+# reciprocalSquareRootWithTensor:name:]: unrecognized selector` -- an Objective-C
+# exception from inside a `^` block with no handler, so the process aborts rather
+# than the op declining. See the same note above T_LAYER_NORM's rstd node, which
+# takes the identical decision for `1 / sqrt(var + eps)` for the identical
+# reason.
+#
+# So the body composes the two selectors that *are* on both SDKs and are already
+# in this tree: `squareRootWithTensor:` (the `sqrt` node) and
+# `reciprocalWithTensor:` (the `reciprocal` kernel's node, and
+# `layer_norm`'s rstd). Measured on an M5, the composition is the same answer as
+# the fused node would have given -- the two are one rounding of the same
+# arithmetic -- at one extra node in the graph, which a compiled plan amortises
+# over every call that shares the cache key.
+#
+# The two halves are why the gate is its own predicate rather than a reuse: the
+# subnormal policy that matters at the input is the *sqrt's*, and the one that
+# matters at the result is the *reciprocal's*, so a width can be right on one
+# half and wrong on the other. See MpsSupportsRsqrtDtype for the per-width
+# measurement.
+T_RSQRT = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* root = [graph squareRootWithTensor:args[0] name:nil];
+        if (root == nil) {{
+          return nil;
+        }}
+        return [graph reciprocalWithTensor:root name:nil];
       }});
   if (!ran) {{
     return at::{at_op}(self.cpu()).to(self.device());
@@ -3137,6 +3249,7 @@ CATEGORIES = {
     "sigmoid": T_SIGMOID,
     "exp": T_EXP,
     "log": T_EXP,
+    "rsqrt": T_RSQRT,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,
@@ -3200,6 +3313,7 @@ FILE_HEADER = """\
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
+#include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
