@@ -105,6 +105,9 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # it on the device the parent already holds, so the child blocks until the
     # test's 60 s subprocess timeout. Skipping them would hide that.
     "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    # CoreX exposes a CUDA-shaped runtime, but Iluvatar uses its native vendor
+    # slot rather than CUDA boxing. Keep FlagGems coverage enabled.
+    "iluvatar": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
 }
 
 

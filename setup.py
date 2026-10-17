@@ -160,6 +160,15 @@ def make_relative_rpath_args(path):
 
 
 def get_pytorch_dir():
+    # The isolated Iluvatar interpreter uses official CPU torch, while native
+    # code links the matched old-ABI CoreX SDK assets staged outside Python.
+    if FLAGOS_ACCELERATOR == "iluvatar" and os.environ.get("FLAGOS_VENDOR_TORCH_LIB"):
+        root = os.path.dirname(os.path.realpath(os.environ["FLAGOS_VENDOR_TORCH_LIB"]))
+        if not os.path.isfile(
+            os.path.join(root, "share", "cmake", "Torch", "TorchConfig.cmake")
+        ):
+            raise RuntimeError(f"CoreX libtorch build assets are incomplete: {root}")
+        return root
     import torch
 
     return os.path.dirname(os.path.realpath(torch.__file__))
@@ -767,7 +776,11 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
         vendor_torch_libraries=entry["vendor_torch_libraries"]
         and (gate is None or kernels[gate]),
         requirements=_install_requires(),
-        torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
+        # The Iluvatar CMake branch explicitly compiles against the old-ABI
+        # CoreX binary assets, independently of the CPU Python build frontend.
+        torch_abi=False
+        if FLAGOS_ACCELERATOR == "iluvatar"
+        else bool(torch._C._GLIBCXX_USE_CXX11_ABI),
         sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
         vendor_torch_version=os.environ.get("FLAGOS_VENDOR_TORCH_VERSION"),
     )
@@ -981,6 +994,8 @@ class BuildExtWithCmake(_build_ext):
             patterns.extend(("lib_maca/*.so*", "lib_maca/vendor_version.py"))
         if FLAGOS_ACCELERATOR == "ppu":
             patterns.extend(("lib_ppu/*.so*", "lib_ppu/vendor_version.py"))
+        if FLAGOS_ACCELERATOR == "iluvatar":
+            patterns.extend(("lib_iluvatar/*.so*", "lib_iluvatar/vendor_version.py"))
         if FLAGOS_ACCELERATOR == "dcu":
             # cmake installs the core-ABI shim straight into lib_dcu during
             # build_ext. build_py has already cached its file list by then, so
@@ -1112,6 +1127,8 @@ def _get_setup_kwargs():
             "lib_dcu/vendor_version.py",
             "lib_ppu/*.so*",
             "lib_ppu/vendor_version.py",
+            "lib_iluvatar/*.so*",
+            "lib_iluvatar/vendor_version.py",
             "include/*.h",
             # The native comm bridge's source, so the standalone builder
             # (comm/_nccl_ext/build.py) can still rebuild the extension from an

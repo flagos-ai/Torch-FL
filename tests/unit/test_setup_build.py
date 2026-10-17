@@ -44,6 +44,54 @@ def _load_setup(monkeypatch):
     return namespace, kwargs
 
 
+def test_iluvatar_native_build_uses_separate_corex_assets(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
+    root = tmp_path / "corex-libtorch"
+    (root / "lib").mkdir(parents=True)
+    config = root / "share/cmake/Torch/TorchConfig.cmake"
+    config.parent.mkdir(parents=True)
+    config.write_text("# CoreX build config\n")
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(root / "lib"))
+    namespace, _ = _load_setup(monkeypatch)
+    # No torch import is needed to find the native SDK: Python can remain CPU-only.
+    assert namespace["get_pytorch_dir"]() == str(root)
+
+
+def test_iluvatar_rejects_runtime_only_assets_for_native_build(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(tmp_path / "lib"))
+    namespace, _ = _load_setup(monkeypatch)
+    with pytest.raises(RuntimeError, match="build assets are incomplete"):
+        namespace["get_pytorch_dir"]()
+
+
+def test_iluvatar_manifest_records_native_abi_separately_from_cpu_frontend(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
+    namespace, _ = _load_setup(monkeypatch)
+    root = tmp_path / "src"
+    (root / "torch_fl").mkdir(parents=True)
+    monkeypatch.setitem(
+        namespace["_write_compatibility_manifest"].__globals__, "BASE_DIR", str(root)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True)),
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "2.10.0+cpu" if name == "torch" else None,
+    )
+    namespace["_write_compatibility_manifest"]("2.10.0+corex4.5.0")
+    manifest = json.loads((root / "torch_fl/compatibility.json").read_text())
+    assert manifest["build"]["distributions"]["torch"] == "2.10.0+cpu"
+    assert manifest["build"]["torch_cxx11_abi"] is False
+    assert manifest["build"]["bundle_libdir"] == "lib_iluvatar"
+
+
 @pytest.fixture
 def clean_kernel_env(monkeypatch):
     """No build switch inherited from the ambient environment."""

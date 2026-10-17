@@ -3,7 +3,7 @@
 The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers eight of the twelve — so this page is the
+is aten-only, and CI configures nine of the twelve — so this page is the
 authoritative answer.
 
 The directory inventory at the end is machine-checked by
@@ -24,7 +24,7 @@ when a platform gains or loses one.
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `cuda` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `cuda` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: `abs`, the elementwise `add`/`sub`/`mul` forms, `sum`/`mean`) | `mps` (stream/event only) | 2037 | no |
 
 Column notes:
@@ -131,12 +131,13 @@ build opts into boxing.
   Most of the 37 are the
   `device_name="cuda"` vs `flagos` mismatch the DCU `patch_flaggems_device_name()`
   realignment addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is
-  the follow-up that would return them. It has no CI job and no runner lane — it
-  builds locally only — and its wheel carries the local version segment
+  the follow-up that would return them. Its shared CI lane uses the
+  `ts-v150-cicd-pytorch` runner label and a pinned CoreX development image;
+  initial PR acceptance remains pending. Its wheel carries the local version segment
   `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
   ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
   BI-V150) but the full cohort has not been re-measured.
-- **CI covers 8 of 12**: TsingMicro, BPU, Iluvatar and MPS have no
+- **CI configures 9 of 12**: TsingMicro, BPU and MPS have no
   `.github/configs/` entry.
 
 ## Directory inventory

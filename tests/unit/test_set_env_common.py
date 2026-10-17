@@ -104,10 +104,12 @@ def test_no_script_redefines_a_shared_phase():
 
 
 def test_every_script_calls_the_common_phases():
-    """The four phases every platform runs, called by name.
+    """Shared phases remain shared; Iluvatar reuses a prebuilt CPU venv.
 
     install_flagcx is defined for the platforms whose hook installs a published
     FlagCX wheel, which is not every one of them, so it is not asserted here.
+    Iluvatar keeps CPU torch in its image but can replace the compiler cohort
+    through a helper that delegates installation to the common phases.
     """
     for script in _scripts():
         text = script.read_text(encoding="utf-8")
@@ -117,7 +119,14 @@ def test_every_script_calls_the_common_phases():
             "build_flagos_inplace",
             "export_ci_env",
         ):
-            assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
+            phase_text = text
+            if script.name == "set_env_iluvatar.sh":
+                if phase == "install_cpu_torch":
+                    assert not re.search(rf"^[ \t]*{phase}\b", text, re.M)
+                    continue
+                if phase == "install_flagtree":
+                    phase_text = (SCRIPTS_DIR / "lib/iluvatar_packages.sh").read_text()
+            assert re.search(rf"^[ \t]*{phase}\b", phase_text, re.M), (
                 f"{script.name}: {phase}"
             )
 

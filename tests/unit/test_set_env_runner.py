@@ -34,7 +34,17 @@ RUNNER = SCRIPTS / "set_env.sh"
 HOOKS = SCRIPTS / "hooks"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
-PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu"]
+PLATFORMS = [
+    "cuda",
+    "ascend",
+    "dcu",
+    "gcu",
+    "iluvatar",
+    "kunlunxin",
+    "metax",
+    "musa",
+    "ppu",
+]
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:

@@ -120,10 +120,12 @@ def test_shared_cuda_runtime_selects_all_consumers():
     assert _run(files="csrc/runtime/accelerator/cuda/device.cc")[1] == [
         "cuda",
         "dcu",
+        "iluvatar",
         "ppu",
     ]
     assert _run(files="csrc/runtime/allocator/backends/cuda_memory.h")[1] == [
         "cuda",
+        "iluvatar",
         "metax",
         "ppu",
     ]

@@ -219,7 +219,7 @@
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "cuda",
-      "bundle_libdir": "lib",
+      "bundle_libdir": "lib_iluvatar",
       "vendor_torch_libraries": true,
       "wheel_local": "corex4.5.0",
       "pypi_lane": "",

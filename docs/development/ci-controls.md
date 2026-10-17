@@ -1,8 +1,8 @@
 # CI selection and maintainer controls
 
-CI keeps hardware tests in the eight dedicated platform workflows. Their test
-commands, runner labels, images and pip-cache fallback are unchanged by these
-controls.
+CI schedules nine configured hardware platforms through the shared integration
+workflow. Runner labels, images and device access come from each platform config;
+test groups come from the shared integration manifest.
 
 ## Automatic platform selection
 
@@ -17,7 +17,7 @@ controls.
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
 Routing labels take precedence over file filtering. Adding or removing labels
-reruns PR CI. Supported platform names are `ascend`, `cuda`, `dcu`, `gcu`,
+reruns PR CI. Supported platform names are `ascend`, `cuda`, `dcu`, `gcu`, `iluvatar`,
 `kunlunxin`, `metax`, `musa` and `ppu`.
 
 Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,

@@ -1,0 +1,7 @@
+**
+!.github/
+!.github/version-pins.env
+!docker/
+!docker/iluvatar/
+!docker/iluvatar/verify.py
+!docker/iluvatar/copy_flagtree.py

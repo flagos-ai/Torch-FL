@@ -48,10 +48,20 @@ from manifest_composer import (
 )
 
 
-# The eight platforms this layer has to keep in step. Written out rather than
+# The configured platforms this layer has to keep in step. Written out rather than
 # taken from the directory: a config that quietly disappeared would otherwise
 # take its platform out of every check below and leave the suite green.
-_PLATFORMS = ("ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu")
+_PLATFORMS = (
+    "ascend",
+    "cuda",
+    "dcu",
+    "gcu",
+    "iluvatar",
+    "kunlunxin",
+    "metax",
+    "musa",
+    "ppu",
+)
 
 _BOUND_KEYS = {"at_least", "more_than", "exactly"}
 _FLAGTREE_KEYS = {"version_env", "version_default", "triton_prefix"}
@@ -67,27 +77,46 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
     "rng": ("ppu",),
-    "soft_lowp_matrix": ("ascend", "cuda", "gcu", "kunlunxin", "musa", "ppu"),
+    "soft_lowp_matrix": (
+        "ascend",
+        "cuda",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "musa",
+        "ppu",
+    ),
     "amp_contract": ("kunlunxin", "ppu"),
     "profiler_contract": ("gcu", "kunlunxin"),
     "profiler_parity": ("ascend", "gcu", "kunlunxin", "metax", "musa", "ppu"),
     "torch_compile": ("ascend", "dcu", "musa", "ppu"),
-    "inference": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "musa"),
-    "training": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "musa"),
+    "inference": ("ascend", "dcu", "gcu", "iluvatar", "kunlunxin", "metax", "musa"),
+    "training": ("ascend", "dcu", "gcu", "iluvatar", "kunlunxin", "metax", "musa"),
     "native_comm_bridge": (
         "ascend",
         "cuda",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "metax",
         "musa",
         "ppu",
     ),
-    "musa_dispatch": ("ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "ppu"),
+    "musa_dispatch": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "ppu",
+    ),
     "unit_tests_per_file": (
         "ascend",
         "cuda",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "metax",
         "musa",
