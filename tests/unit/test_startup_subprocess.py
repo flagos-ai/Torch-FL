@@ -208,8 +208,7 @@ def _probe(body: str):
         check=False,
     )
     print(
-        f"[probe] returncode={result.returncode}\n"
-        f"[probe] stderr={result.stderr}",
+        f"[probe] returncode={result.returncode}\n[probe] stderr={result.stderr}",
         flush=True,
     )
     assert result.returncode == 0, result.stderr
