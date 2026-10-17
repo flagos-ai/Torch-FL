@@ -69,7 +69,6 @@ import os
 import subprocess
 import sys
 
-import numpy as np
 import pytest
 import torch
 import torch_fl  # noqa: F401
@@ -205,8 +204,8 @@ class TestSqrtCorrectness:
             assert torch.isnan(out[4]) and torch.isnan(out[6]) and torch.isnan(out[7])
             assert out[0].item() == 0.0 and out[5].item() == float("inf")
             # The signed zero, compared by sign rather than by value: ``-0.0 ==
-            # 0.0`` is True in Python, so ``np.signbit`` is the assertion.
-            assert np.signbit(out[1].item()), dtype
+            # 0.0`` is True in Python, so ``signbit`` is the assertion.
+            assert out[1].signbit().item(), dtype
             assert out[2].item() == 1.0 and out[3].item() == 2.0
             assert out[8].item() == 1.5 and out[9].item() == 0.5
             # ... and the same compared value by value, so a body that answered
@@ -336,7 +335,7 @@ class TestSqrtCorrectness:
         expected = _reference(negative)
         for x, got, want in zip(negative.tolist(), out.tolist(), expected.tolist()):
             assert want != want, f"the reference should answer nan for {x!r}"
-            assert got != got or (got == 0.0 and np.signbit(got)), (
+            assert got != got or (got == 0.0 and got.signbit()), (
                 f"sqrt({x!r}) = {got!r}, expected nan or the flush's -0.0"
             )
         # And the invariant that would break if the rule widened: a negative
@@ -391,7 +390,7 @@ class TestSqrtDtypeGate:
         host = torch.tensor(DOMAIN_EDGES, dtype=torch.float64)
         out = torch.sqrt(_to_device(host)).cpu()
         expected = _reference(host)
-        assert out[0].item() == 0.0 and np.signbit(out[1].item())
+        assert out[0].item() == 0.0 and out[1].signbit().item()
         assert out[2].item() == 1.0 and out[3].item() == 2.0
         assert out[5].item() == float("inf")
         for i in (4, 6, 7):

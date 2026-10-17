@@ -69,7 +69,6 @@ import os
 import subprocess
 import sys
 
-import numpy as np
 import pytest
 import torch
 import torch_fl  # noqa: F401
@@ -411,8 +410,8 @@ class TestErfCorrectness:
             gap = (out[5:].double() - expected[5:].double()).abs()
             assert float(gap.max()) <= 5.0 * ULP_AT_ONE[dtype], (dtype, out, gap)
             # The signed zero, whose *sign* an equality cannot see.
-            assert not bool(np.signbit(out[0].item())), dtype
-            assert bool(np.signbit(out[1].item())), dtype
+            assert not out[0].signbit().item(), dtype
+            assert out[1].signbit().item(), dtype
 
     @pytest.mark.anyplatform
     def test_the_ordinary_middle_agrees(self):
@@ -619,7 +618,7 @@ class TestErfDtypeGate:
         out = torch.erf(_to_device(host)).cpu()
         expected = _reference(host)
         assert out[2].item() == 1.0 and out[3].item() == -1.0
-        assert bool(np.signbit(out[0].item())), out
+        assert out[0].signbit().item(), out
         assert torch.isnan(out[4]).item()
         # The edges with no rounding to disagree about -- both zeros, both
         # infinities -- are the reference exactly. The two interior values can

@@ -81,7 +81,6 @@ import os
 import subprocess
 import sys
 
-import numpy as np
 import pytest
 import torch
 import torch_fl  # noqa: F401
@@ -330,15 +329,15 @@ class TestTanhCorrectness:
         host = torch.tensor([-0.0, 0.0, -1e-3, -1.0, -7.0], dtype=dtype)
         out = torch.tanh(_to_device(host)).cpu()
         expected = _reference(host)
-        assert np.signbit(expected[0].item()), "the reference keeps -0.0"
+        assert expected[0].signbit().item(), "the reference keeps -0.0"
         # The value is the reference's -- a zero either way -- and the bits may
         # differ only in that sign, which is what the magnitude check says.
         assert out[0].item() == 0.0 and expected[0].item() == 0.0
         assert abs(out[0].item()) == abs(expected[0].item())
         # The sign is preserved everywhere the operand is not a zero, so what
         # would be a regression is the ambiguity widening past the zero.
-        assert np.signbit(out[2].item()) and np.signbit(out[3].item()), out
-        assert np.signbit(out[4].item()), out
+        assert out[2].signbit().item() and out[3].signbit().item(), out
+        assert out[4].signbit().item(), out
         assert torch.equal(out[1:], expected[1:]), out
 
     @pytest.mark.anyplatform
@@ -494,7 +493,7 @@ class TestTanhDtypeGate:
         out = torch.tanh(_to_device(host)).cpu()
         expected = _reference(host)
         assert out[2].item() == 1.0 and out[3].item() == -1.0
-        assert np.signbit(out[0].item()), out
+        assert out[0].signbit().item(), out
         assert torch.isnan(out[4]).item()
         assert torch.equal(out.view(torch.int32), expected.view(torch.int32)), (
             out,
@@ -536,7 +535,7 @@ class TestTanhDtypeGate:
         )
         out = torch.tanh(_to_device(host)).cpu()
         expected = _reference(host)
-        assert out[0].item() == 0.0 and np.signbit(out[0].item())
+        assert out[0].item() == 0.0 and out[0].signbit().item()
         assert out[2].item() == 1.0 and out[3].item() == -1.0
         assert torch.isnan(out[4]).item()
         # The sign of the zero is the assertion the value cannot make, so it is
