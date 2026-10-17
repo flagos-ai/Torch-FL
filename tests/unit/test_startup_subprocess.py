@@ -314,7 +314,17 @@ def test_mps_mm_shape_sweep_reports_the_first_dying_shape():
     size, so the first failure names the boundary rather than the extreme.
     """
     _require_mps()
-    shapes = [(1, 1, 1), (2, 2, 2), (4, 4, 4), (8, 8, 8), (16, 16, 16), (32, 16, 32)]
+    shapes = [
+        (1, 1, 1),
+        (2, 2, 2),
+        (4, 4, 4),
+        (8, 8, 8),
+        (16, 16, 16),
+        (32, 4, 16),
+        (32, 8, 16),
+        (32, 16, 16),
+        (32, 16, 32),
+    ]
     for m, k, n in shapes:
         _probe(
             f"""
@@ -324,3 +334,36 @@ assert torch.mm(a, b).shape == ({m}, {n})
 print('ok', flush=True)
 """
         )
+
+
+def test_mps_host_and_device_report(capsys):
+    """What the runner's host reports, so the crash can be placed.
+
+    The fault is inside MPSGraph's own encode path and reproduces on a
+    paravirtualized GPU on macOS 14 but not on a physical GPU on macOS 26, so
+    the two candidates left are the device and the MPSGraph build. This prints
+    the host side from the machine that dies, which is the only place it can be
+    read; the device side is in the "images" block the crash trace already
+    dumps.
+    """
+    _require_mps()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import platform\n"
+            "print('mac_ver', platform.mac_ver())\n"
+            "print('machine', platform.machine())\n"
+            "print('python', platform.python_version())\n",
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    print(f"[host] returncode={result.returncode}")
+    print(f"[host] stdout={result.stdout}")
+    print(f"[host] stderr={result.stderr}")
+    captured = capsys.readouterr()
+    print(captured.out)
