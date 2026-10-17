@@ -1106,29 +1106,32 @@ worth a measurement rather than a reused verdict. `tanh` declined the *widest*
 float because the node is a coarser approximation of the exact curve there --
 its float32 error against exact is roughly `100x` the reference's at every
 scale. `erf`'s node is not that. Over the same kind of `[-6, 6]`, 400001-sample
-sweep the node's error against the exact (float64) erf is the reference's own
-at every scale of the curve, and on the band where the two answers differ the
-node is the closer of the two: over `[-3, 3]` the node is nearer exact than the
-reference on 242217 of 400001 samples and `|node_err| <= |ref_err|` holds on at
-least 40% of the whole `[-6, 6]` range. That is the `sqrt` and `rsqrt` reading
-rather than the `tanh` one -- both roundings are correct and neither is the
-lossy one -- so all three float widths are served and the width list is the
-inverse of `tanh`'s.
+sweep and a probe grid that samples between grid points, the node's error
+against the exact (float64) erf stays bounded near the reference's own error.
+The probe grid is the dense sweep plus three samples per cell of a
+16384-part grid over `[0, 9]`, and their negatives, 498299 operands in all:
+the regular sweep alone misses much of float32's rounding. On that grid, at
+float32 the node's error reaches `1.64` steps at 1.0, against `4.14` for
+`at::erf`; where the two round differently the node is closer on `63.3%`. Where
+the reference error is above half a step, the node's error can be larger by at
+most `0.98` of a step. The node's gap from the
+reference is at most `4.19` steps at 1.0 across the 498299 points. At float16
+and bfloat16 the node agrees bit for bit on `498160` and `498290` points, with
+a gap of half a step at 1.0 and `0.0039` of one. On the dense sweep alone those
+agreement counts are `399878` and `399994` of `400001`; the handful of differing
+interleaved probes are ordinary narrow-width roundings below one step, not the
+exact equality the dense sweep alone could suggest. That is the `sqrt` and
+`rsqrt` reading rather than `tanh`'s: the error is bounded and close to the
+reference's own error, so all three float widths are served.
 
-What the widths do differ in is *where* they differ, and the step counts are
-not an invariant at float32, which is the measurement lesson this increment
-adds. At float16 and bfloat16 the node is bit-identical to `at::erf` on 399878
-and 399994 of the 400001 samples respectively; the handful that move are a step
-or two of the width's own spacing. float32 differs on 53% of the sweep, and the
-raw distance in floats is not a bound a test can hold: measured, the ratio of
-the graph-versus-reference gap to the reference's *own* step from its
-neighbouring float grows to `5.0` for `|ref| >= 0.5` (and beyond that as the
-result approaches zero, where the reference's spacing is denormal and the ratio
-stops meaning anything), against `1.0` at float16 and `0.0` at bfloat16. A test
-that turned those numbers into assertions would be pinning the host's rounding
-rather than the body, so the suite holds the middle of the curve to a banded
-bound plus an absolute floor and leans on the ranking -- asserted, not
-recorded -- to say the node never rounds farther from exact than the reference.
+The measurement lesson is to test operands between grid points and compare the
+exact curve in float64. Comparing the two float32 answers with one another, or
+against one neighbouring step, hides differences in float32's own rounding and
+can make a drift near zero look thousands of steps wide. The suite therefore
+holds the gap to a bound read from the two answers in float64, and limits how
+far the node's error can exceed the reference's where that error is material to
+the measured `0.98` of a step. It does not claim that the node is closer on
+every point.
 
 Two edges read exactly as `sqrt`'s and are worth stating because they are the
 ones a reader would otherwise expect to need the `tanh` guard. `erf(+-inf) =
@@ -1141,25 +1144,28 @@ is the operand side, the `tanh` finding read again: a bfloat16 subnormal
 operand rounds to `0` on both the node and the reference (they agree), while
 float16 differs from the reference on 877 of its 1023 positive subnormals, by
 one or two steps. As with `tanh`, the suite asserts only the reading that
-survives both hosts -- the subnormal band answers the reference's value or a
-flushed zero, the smallest normal and up is the reference bit for bit -- and
-the finer float16 discrepancy is recorded in the docstring rather than pinned.
+survives both hosts, and the finer readings are recorded in the docstring
+rather than pinned. The CI runner flushed two bfloat16 results, `erf(tiny)` and
+`erf(2 * tiny)`, to zero while this M5 kept them subnormal. The suite checks the
+monotonic shape of that band and asserts that the smallest normal and the
+values above it are never flushed.
 
 This increment is verified with `tests/integration/ops/test_mps_erf.py` (45
 cases): CPU equality at the three served widths across shapes including the
 20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
-one, bit-exactness asserted where the widths can hold it (float16 and
-bfloat16 across the whole curve, and every width across the saturating
-`|x| >= 4` band where both answers are exactly `+-1`), the wrong-answer cases
-for the float32 band held to the two-eps band *and* the exact-vs-graph ranking
-so a coarser node -- the `tanh` failure mode -- would fail as a ranking rather
-than squeak by under a tolerance, the nan-propagation case that would fail if a
+one, bit-exactness asserted where it holds (the narrow widths on ordinary
+points, and every width across the saturating `|x| >= 4` band where both
+answers are exactly `+-1`), the wrong-answer cases
+for the float32 band held to the measured probe-grid error bounds, including
+how far the node's error may exceed the reference's against the exact curve,
+so a coarser node -- the `tanh` failure mode -- would still fail, the
+nan-propagation case that would fail if a
 `tanh`-style guard were ever bolted on, the signed zero pinned by sign bit at
 every served width, the saturation edges `erf(+-inf) = +-1` and the `|x| >= 4`
 plateau asserted exactly, the bfloat16 subnormal band held to the reference's
-answer or a flushed zero with the cone at the smallest normal asserted
-bit-exact, the float16 subnormal band asserted to the reference's value or a
-flushed zero rather than bit-exact, the declined float64 asserting the
+answer or a flushed zero with no flush at or above the smallest normal, the
+float16 subnormal band checked without pinning either host's result, the
+declined float64 asserting the
 round-trip's own dtype, the integral and bool promotions asserted at float32,
 plan reuse across interleaved signatures, and the dispatch log naming `mps` on
 the served path and on a declined one.

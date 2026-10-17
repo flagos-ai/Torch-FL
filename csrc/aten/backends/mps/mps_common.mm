@@ -456,35 +456,30 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // `tanh`'s even though the two are the same kind of node, and the reason is
   // the finding itself:
   //
-  // `erfWithTensor:` is the reference's own function at every width -- its
-  // arithmetic is an erf at the width it is handed -- and where the tanh node
-  // was a *coarser approximation* of the reference's tanh at float32, this node
-  // is not coarser, it is differently rounded. Measured against the float64
-  // curve over a 400001-sample sweep of [-3, 3], the node's max error is
-  // 1.788e-07 where the reference's is 4.955e-07 -- the node is the *more*
-  // accurate of the two -- and it is the closer one on 242217 of the 400001
-  // samples. The reference's error there is its own and not an artifact of the
-  // comparison: measured against `erff` through float64, `at::erf` is off the
-  // correctly-rounded float32 answer by up to 5.327e-07. Two implementations
-  // rounding one curve differently in the last ulp are both erfs, so the width
-  // is served; a tanh that is ~100x off the exact answer at every scale of the
-  // curve is not a tanh, which is what declined that sibling.
+  // The tanh node was a *coarser approximation* of the reference's tanh at
+  // float32. The erf node has a comparable error bound: measured against the
+  // exact float64 curve on a 498299-point probe grid, the node's float32 error
+  // reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the node
+  // is closer on 63.3% of the points where their roundings differ. The node's
+  // error can exceed the reference's on some points; where the reference error
+  // is above half a step, the excess is at most 0.98 of a step. So the width is
+  // served on a measured error bound; a tanh that is ~100x off the exact answer
+  // at every scale of the curve is the different failure.
   //
-  // The bit-level reading matches that: over the same sweep the node agrees
-  // with the reference bit for bit on 46.5% of samples, and of the 213871 that
-  // differ, 195438 are within four of the reference's own representable step.
-  // The step counts that look large (up to 876061900) are the two agreeing on
-  // the *answer* where the curve is flat: both return exactly 1.0 for
-  // |x| >= 4, and near zero a single float32 step is 1.4e-45 against an agreed
-  // absolute error of 1.8e-07. Neither is a different number, and the
-  // measurement that says so is the sweep of the saturation band.
+  // The bit-level reading gives the bound. The node agrees with the reference
+  // bit for bit on 249310 of 498299 probe points, and its largest gap is 4.19
+  // steps at 1.0. Over the dense sweep alone it agrees on 186130 of 400001
+  // points with the same 4.19-step largest gap. The latter is deliberately not
+  // compared with `erff` in float32 or with one ulp of the reference's answer:
+  // those comparisons hide the difference in float32's own rounding, and a
+  // step near zero is 1.4e-45 next to an agreed error of about 5e-07. Both the
+  // node and the reference answer exactly 1.0 from |x| >= 4.
   //
   // The two narrow widths are served on the same reading and on the sibling
-  // tanh's: measured over the same sweep the node agrees bit for bit on 399878
-  // of 400001 samples at float16 (max 3 steps, all in the subnormal band
-  // below) and on 399994 of 400001 at bfloat16. There the reference is itself
-  // only approximate, so whatever rounding difference is left is below what the
-  // width can represent.
+  // tanh's: on the probe grid the node agrees bit for bit on 498160 of 498299
+  // points at float16 and 498290 at bfloat16, with a largest gap of half a step
+  // at 1.0 and 0.0039 of one. Over the dense sweep, float16 agrees on 399878 of
+  // 400001 and bfloat16 on 399994.
   //
   // The domain edges are exact at all three widths and need no guard, which is
   // the second difference from the sibling: measured, the bare node propagates
@@ -499,10 +494,12 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // subnormal bfloat16 operands come back a zero -- which is also what the
   // reference rounds them to, so the two agree -- while float16 differs from the
   // reference on 877 of its 1023 positive subnormals in the last step or two,
-  // and the reference itself rounds 3 of them to zero. Everything involved is
-  // below the width's smallest normal and a single step wide, and a model's
-  // `erf` operand is a pre-activation rather than a denormal, so it is recorded
-  // here and in the test module rather than pinned as an assertion.
+  // and the reference itself rounds 3 of them to zero. The host split is on
+  // the *result* side as well: the macos-14 CI runner flushed `erf(tiny)` and
+  // `erf(2 * tiny)` from bfloat16 to zero, while this M5 kept both subnormal.
+  // Everything involved is below the width's smallest normal. A model's `erf`
+  // operand is a pre-activation, so the band is recorded rather than pinned;
+  // the suite checks that nothing in the normal range is flushed.
   //
   // float64 has no MPSGraph element type and takes the round-trip, and an
   // integral or bool operand is promoted by the reference to float32 -- measured,

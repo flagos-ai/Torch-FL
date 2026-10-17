@@ -267,20 +267,20 @@ OPS = {
     # answers a finite value, with its own edges at `+-1` and beyond -- so it is
     # not this increment.
     "tanh": "tanh",
-    # The error function, and the third op in the special-function pair the
-    # GELU keeps writing out by hand: `0.5 * x * (1 + erf(x / sqrt(2)))` is the
-    # exact GELU, so a model that wants the exact form instead of the tanh
-    # approximation reaches this node on the same activation path as the sibling
-    # above. It is also the kernel a diffusion sampler and an attention kernel
-    # built over erf reach directly.
+    # The error function, which the explicit GELU form writes out by hand:
+    # `0.5 * x * (1 + erf(x / sqrt(2)))`. `F.gelu`'s default path does not
+    # dispatch `erf` on this host, so a `gelu` kernel is a separate gate. It is
+    # also the kernel a diffusion sampler and an attention kernel built over erf
+    # reach directly.
     #
     # MPSGraph names it directly (`erfWithTensor:`), so the body is the plain
-    # one-node unary template and the increment is the *gate*: measured, the
-    # node is a betters-than-the-reference erf at float32 -- closer to the exact
-    # curve than `at::erf` is on 242217 of 400001 samples -- and differs from it
-    # in the *last ulp* rather than in the answer, so this is the opposite
-    # finding to the sibling `tanh`'s. See MpsSupportsErfDtype for the
-    # measurement and for why the two serve different width lists.
+    # one-node unary template and the increment is the *gate*: the node is
+    # closer to the exact float32 curve than `at::erf` on 63.3% of the probe
+    # points where their roundings differ, and its error is at most 1.64 steps
+    # at 1.0 against the reference's 4.14. It can be farther by up to 0.98 of a
+    # step where the reference error is material, which bounds the comparison.
+    # See MpsSupportsErfDtype for the measurement and for why the two serve
+    # different width lists.
     #
     # Only `erf` is registered. `erf.out` and `erf_` write into a tensor the
     # caller owns, like every other `.out`/inplace spelling on this backend, and
