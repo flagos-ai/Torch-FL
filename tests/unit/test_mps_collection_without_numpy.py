@@ -12,15 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep MPS-only tests from breaking a shared suite's collection."""
+"""Keep shared operator collection independent of the MPS-only tests' imports.
+
+The GCU and Kunlunxin lanes intentionally install no NumPy, but they select
+``tests/integration/ops/`` and therefore import every MPS-only module there.
+An MPS module with a module-level ``import numpy`` turned those sweeps into
+collection errors before any operator ran. This test models that environment
+in a subprocess, so the failure is caught in a lightweight unit run as well as
+in the MPS lane itself.
+"""
 
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
-def test_mps_test_modules_collect_without_numpy(tmp_path):
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_OPS_DIR = _REPO_ROOT / "tests/integration/ops"
+_SHARED_MPS_MODULES = ("test_mps_erf.py", "test_mps_sqrt.py", "test_mps_tanh.py")
+
+
+def test_shared_mps_modules_collect_without_numpy(tmp_path):
+    """The no-NumPy shared sweep must reach collection, not report import errors."""
     package = tmp_path / "numpy"
     package.mkdir()
     (package / "__init__.py").write_text(
@@ -28,11 +43,16 @@ def test_mps_test_modules_collect_without_numpy(tmp_path):
         encoding="utf-8",
     )
     env = dict(os.environ, PYTHONPATH=str(tmp_path))
-    directory = os.path.dirname(__file__)
-    modules = ["test_mps_erf.py", "test_mps_sqrt.py", "test_mps_tanh.py"]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", *modules, "--collect-only", "-q"],
-        cwd=directory,
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *_SHARED_MPS_MODULES,
+            "--collect-only",
+            "-q",
+        ],
+        cwd=_OPS_DIR,
         env=env,
         capture_output=True,
         text=True,
