@@ -775,6 +775,30 @@ at::Tensor SigmoidKernelMps(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMps, SigmoidKernelMps)
 
+at::Tensor ExpKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::exp(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("exp"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph exponentWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::exp(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kMps, ExpKernelMps)
+
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
     const at::Tensor& indices,

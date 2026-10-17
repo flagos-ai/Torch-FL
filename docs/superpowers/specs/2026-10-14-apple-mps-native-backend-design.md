@@ -807,6 +807,53 @@ the graph is 8.3e-03 away, the integral and bool promotions asserted at float32,
 plan reuse across interleaved signatures, and the dispatch log naming `mps` on
 the served path and on a declined one.
 
+Stage 4 continued with `exp`, the largest elementwise unary left on a small
+model's fallback profile and the node the rest of the cohort is written in terms
+of -- a `log`, an `rsqrt` and a hand-written `tanh` are all built over an
+exponential. MPSGraph names it directly (`exponentWithTensor:`), so the body is
+the plain unary template and, as with `sigmoid`, the increment is the width
+list. This time the list *widens* past the sibling activations', and that is the
+finding: it is the case the `sigmoid` increment predicted. That increment
+concluded that the widths a category serves are a property of the op rather than
+of the node, because a flush or a rounding means something different in a
+different surrounding graph; `exp` is the first op where the difference runs the
+*other* way, serving two widths `sigmoid` declined.
+
+Measured on an M5 against `at::exp` in the operand's own dtype, over each width's
+whole representable curve. **float16 is served** and bit-identical -- 400001
+points spanning `[-30, 11]`, which reaches the lowest subnormal an `exp` can
+produce, with zero mismatches. Where the `sigmoid` float16 decline was the
+platform's subnormal flush, this is the same platform and the same width with no
+flush at all: the flush is a property of the *node*, not of the width, and the
+exponential keeps the subnormals the sigmoid dropped. **bfloat16 is served** and
+bit-identical over `[-30, 88]`, where the `sigmoid` bfloat16 decline was a
+1.061e-02 rounding at a width holding about three decimal digits; the
+exponential has no such rounding. **float32 is served** on the same reading the
+`silu` increment accepted: 1.897e-07 max relative, two ulp at the top of the
+range, and against an exact float64 evaluation at `x = 20.0` the graph sits
+2.06e+01 above it and the CPU reference 1.14e+01 below -- both one ulp from
+exact, on opposite sides, so the two round differently rather than one being
+wrong. The subnormal flush that does appear, at float32 and bfloat16 below about
+`-87.3`, is the same policy the `div` and `sigmoid` bodies record and is confined
+to the band where the reference's own answer is subnormal; measured, it never
+reaches a normal answer. float64 has no MPSGraph element type, and an integral or
+bool operand is promoted by the reference to float32, so both keep the
+round-trip -- the promotion rule lives in the reference even though the graph
+path happens to reproduce it for a small input.
+
+This increment is verified with `tests/integration/ops/test_mps_exp.py` (30
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, the narrow widths held *bit-exact* when the cohort's other ops are held to a
+tolerance, the float16 low tail asserted against the reference across the whole
+subnormal band so a body that started flushing it like the sibling would fail,
+the saturated tails held with the top asserted `inf` and the low tail a small
+positive, the two ends of the float32 subnormal band pinned on both sides so a
+widening flush fails, the `inf`/`nan` triple, the one declined width asserting
+the round-trip's own dtype and bit-exactness, the integral and bool promotions
+asserted at float32, plan reuse across interleaved signatures, and the dispatch
+log naming `mps` on the served path and on a declined one.
+
 Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
 runtime-conformance traversal named both: `tests/integration/runtime/
 runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real

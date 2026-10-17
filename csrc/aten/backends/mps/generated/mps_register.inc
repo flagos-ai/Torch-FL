@@ -23,6 +23,7 @@
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("embedding", WrapperEmbedding);
+  m.impl("exp", WrapperExp);
   m.impl("gather", WrapperGather);
   m.impl("index_select", WrapperIndexSelect);
   m.impl("mean.dim", WrapperMeanDim);

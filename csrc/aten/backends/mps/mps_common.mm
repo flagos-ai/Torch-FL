@@ -210,6 +210,17 @@ bool MpsSupportsSigmoidDtype(at::ScalarType dtype) {
   return dtype == at::kFloat;
 }
 
+bool MpsSupportsExpDtype(at::ScalarType dtype) {
+  // The three widths measured bit-identical to at::exp in the operand's own
+  // dtype, where a "difference" would mean a wrong answer: float16 over its whole
+  // representable curve including every subnormal, and bfloat16 over the normal
+  // range. float32 is served on the same reading `silu`'s float32 is -- see the
+  // note in mps_common.h -- and float64 and the integral/bool widths keep the
+  // round-trip, float64 because MPSGraph has no element type for it and the
+  // others because the promotion rule lives in the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSupportsEmbeddingDtype(
     at::ScalarType weight_dtype,
     at::ScalarType index_dtype) {

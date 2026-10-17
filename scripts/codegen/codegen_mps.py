@@ -162,6 +162,25 @@ OPS = {
     # backend, and `sigmoid_backward` is a separate op with its own selector
     # question.
     "sigmoid": "sigmoid",
+    # The largest elementwise unary left on a small model's fallback profile, and
+    # the one the three ops after it are written in terms of: `log`, `rsqrt` and a
+    # hand-written `tanh` are all built over an exponential, so serving this node
+    # is the increment the rest of the cohort is measured against. Measured on an
+    # M5 on a (3, 512, 3072) float32 operand, the `cpu_fallback` round-trip cost
+    # 3.51 ms against a 1.03 ms device-to-host copy floor for the same shape --
+    # the cheapest large win of the six unaries profiled, and the reason it is the
+    # one this increment takes.
+    #
+    # MPSGraph has a real selector (`exponentWithTensor:`), so the body is the
+    # plain unary template rather than a composition, and the interesting part is
+    # the width list rather than the node -- see MpsSupportsExpDtype for the
+    # measurement.
+    #
+    # Only `exp` is registered. `exp.out` and `exp_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `exp2`'s and `expm1`'s selectors are separate nodes with their own width
+    # questions that this increment does not answer.
+    "exp": "exp",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -346,6 +365,13 @@ AT_OP = {
     # the round-trip lands on the reference's own implementation and reports its
     # own values rather than a re-entrant composite.
     "sigmoid": "sigmoid",
+    # The CPU reference the `exp` body round-trips to on the widths it declines.
+    # `exp` is its own aten kernel rather than a composition, so the round-trip
+    # lands on the reference's own implementation -- which is where the
+    # reference's own promotion rule for an integral or bool operand lives, and
+    # why the gate sends those widths here rather than evaluating them in the
+    # graph.
+    "exp": "exp",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -419,6 +445,13 @@ SUPPORTS = {
     # build the same node. A width list belongs to the op and not to the node:
     # see MpsSupportsSigmoidDtype for the measurement that separates them.
     "sigmoid": "MpsSupportsSigmoidDtype",
+    # Its own predicate rather than the sibling `silu`/`sigmoid` one, and the
+    # measurement behind it is the increment's finding: an exponential is a
+    # magnitude op, not a saturated one, so the subnormal band that cost the bare
+    # `sigmoid` its float16 width is not where an `exp` lives. See
+    # MpsSupportsExpDtype for the per-width numbers -- float32 and bfloat16 are
+    # served and float16 is declined, which is *not* the sibling's list.
+    "exp": "MpsSupportsExpDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -519,6 +552,11 @@ CALLS = {
     # whole body -- `sigmoid` *is* that node. Named separately because the two
     # categories carry different dtype gates and different fallbacks.
     "sigmoid": "sigmoidWithTensor:",
+    # Its own selector rather than a composition, and the reason `exp` is one
+    # node where a hand-written `tanh` would be two: MPSGraph names the
+    # exponential directly. The node is the whole body, so the width list is the
+    # only thing the increment decides.
+    "exp": "exponentWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -658,6 +696,12 @@ KEY_PARTS = {
     # operand's dtype and shape, which MpsRunGraph folds into the key itself, and
     # the body reads no other host value.
     "sigmoid": "",
+    # Empty for the same reason `silu`'s and `sigmoid`'s are: the graph is one
+    # selector over one operand, so it is a function of the operand's dtype and
+    # shape -- which MpsRunGraph folds into the cache key itself -- and the body
+    # reads no other host value. A body that bakes nothing into the graph has no
+    # way to be handed a plan it did not build.
+    "exp": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -1463,6 +1507,38 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # tail has no such partner, so the same flush is a visible 3.1e-02 error and the
 # width is declined.
 T_SIGMOID = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `exp` -- the plain unary template, with its own width list rather than a body
+# of its own. MPSGraph names the exponential directly (`exponentWithTensor:`), so
+# there is no composition to compose and no node to build by hand: the operand
+# goes through `contiguous()` for the same reason every other body here does (the
+# graph reads one flat row of `numel` elements and a strided operand would be read
+# as the wrong bytes), and the whole increment is the gate the body opens with.
+T_EXP = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
     return at::{at_op}(self.cpu()).to(self.device());
@@ -3018,6 +3094,7 @@ CATEGORIES = {
     "conv": T_CONV,
     "silu": T_SILU,
     "sigmoid": T_SIGMOID,
+    "exp": T_EXP,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,

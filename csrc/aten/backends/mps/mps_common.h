@@ -320,6 +320,72 @@ bool MpsSupportsSiluDtype(at::ScalarType dtype);
 // depends on what the surrounding graph does with it.
 bool MpsSupportsSigmoidDtype(at::ScalarType dtype);
 
+// Whether `exp` computes exactly on the MPSGraph path, and the increment that
+// *widened* the served list past the sibling activations' -- which is the point
+// of it.
+//
+// `exp` is the largest elementwise unary left on a small model's fallback
+// profile and the node the rest of the cohort (`log`, `rsqrt`, a hand-written
+// `tanh`) is written over, so it is served with a real selector
+// (`exponentWithTensor:`) rather than a composition. Measured on an M5 against
+// at::exp in the operand's own dtype, over each width's whole representable
+// curve and over the saturated tails:
+//
+//   float32   1.897e-07 max relative, which is two ulp at the top of the range
+//             (the largest argues are ~1e+38, so the ulp there is ~1e+31 and the
+//             absolute difference is large while the relative one is tiny). Not
+//             bit-identical, and the right reading is the same one `silu`'s
+//             float32 recorded: measured against an exact float64 evaluation at
+//             x = 20.0, the graph sits 2.06e+01 above it and the CPU reference
+//             1.14e+01 below -- both are one ulp from exact, on opposite sides, so
+//             the two round differently rather than one being wrong. 39.6% of a
+//             linspace over [-87, 88] lands on a different ulp for the same
+//             reason, and no sample is farther than two ulps apart.
+//   float16   bit-identical, and this is the increment's finding: the entire
+//             representable curve agrees, *including every subnormal*. Measured
+//             over 400001 points spanning [-30, 11] -- which reaches the lowest
+//             subnormal an `exp` can produce -- there are zero mismatches, so the
+//             subnormal flush the `sigmoid` body recorded for this width is a
+//             property of *that node* rather than of the platform: the same
+//             exponential keeps subnormal results that the sigmoid node flushed.
+//             Served, where the sibling activation is declined.
+//   bfloat16  bit-identical over the normal range, measured over [-30, 88] with
+//             zero mismatches. The subnormal band behaves like float32's below
+//             (the graph flushes an `exp` whose reference answer is subnormal,
+//             and the flush never reaches a normal answer), which is the platform
+//             policy the `div` body records rather than a rounding difference.
+//             Served, where the sibling `sigmoid` declined this width for a
+//             rounding difference that an `exp` does not have: measured, the two
+//             agree bit for bit here.
+//
+// The subnormal flush that does appear -- at float32 and bfloat16, on an input
+// below about -87.3 where the reference's own `exp` is subnormal while the graph
+// answers 0 -- is a *wrong answer* at those points, and it is accepted on the
+// same policy the `sigmoid`, `div` and `silu` bodies accepted it: the flush is
+// confined to the input band where the reference answer is itself subnormal, and
+// measured, it never reaches one that is normal (the smallest normal float32 is
+// 1.1755e-38, and the graph answers exactly down to -87.336, the largest input
+// whose reference answer is normal). A model's `exp` operates on the logits of a
+// softmax or the exponent of a power, where this band is not reached; the
+// round trip at these extremes would be a per-call host decision on a value the
+// graph cannot express.
+//
+// float64 has no MPSGraph element type and takes the round-trip. An integral or
+// bool operand is *promoted* by the reference to float32 -- measured,
+// `at::exp(torch.arange(-2, 3))` returns a float32 tensor, and the graph path
+// reproduces it for a small input because MpsRunGraph allocates `out` from the
+// operand's options and the width is widened by the promotion before the graph
+// sees it -- but the gate declines them anyway, because the promotion rule is the
+// reference's and a gate that is right for the wrong reason is the failure this
+// file keeps recording. They keep the round-trip, which is where the rule lives.
+//
+// The gate is deliberately *wider* than `MpsSupportsSigmoidDtype`'s, and the
+// contrast is the increment's finding read the other way round: two ops that
+// share a node -- or here, two nodes of the same family -- do not share a width
+// list, because what a flush or a rounding means depends on what the op computes
+// rather than on the platform alone.
+bool MpsSupportsExpDtype(at::ScalarType dtype);
+
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
 //
