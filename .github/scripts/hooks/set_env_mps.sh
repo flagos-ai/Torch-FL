@@ -64,21 +64,15 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
-# --- MPS allocator limit -----------------------------------------------------
-# A GitHub macos-14 runner reports a 7.93 GiB MPS ceiling above the same Metal
-# allocator used by the flagos device. PyTorch derives its own ceiling from the
-# recommended working set, which leaves too little headroom beside the runner's
-# OS and display processes. The first MPS runtime run failed trying to allocate
-# 256 bytes with only 8 MiB allocated -- in a child process that had never
-# imported torch_fl, so this is the host's limit rather than a leak in the new
-# device.
-#
-# This lane has no large MPS workload. Remove the upper limit so the allocator
-# can grow into memory the host already reports as available, and require that
-# growth after importing torch: if the small probe cannot pass the 7.93 GiB
-# ceiling, fail here rather than in every MPS test. Torch reads the variable
-# when its MPS allocator first allocates.
-export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
+# --- MPS allocator headroom --------------------------------------------------
+# PyTorch allows 7.93 GiB before it refuses an MPS allocation on a hosted
+# macos-14 runner. The runtime test saw a 256-byte request fail with only 8 MiB
+# of MPS memory in use, as did a torch-only child, so this is the runner's
+# allocator ceiling rather than an allocation retained by torch_fl. The ratio
+# is the fraction of Metal's recommended working set available above current
+# use. A finite 0.7 leaves room for the Metal commands issued by an operator
+# and is inherited by the integration tests.
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7
 
 # --- One architecture, the one this runner has -------------------------------
 # The python.org installer on a GitHub macOS runner is a universal2 build, so
@@ -199,13 +193,6 @@ print(f"CPU PyTorch: {torch.__version__}")
 print(f"Machine: {platform.machine()}")
 print(f"MPS built: {torch.backends.mps.is_built()}")
 print(f"MPS available: {torch.backends.mps.is_available()}")
-if torch.backends.mps.is_available():
-    allocation = torch.empty(8 << 20, dtype=torch.uint8, device="mps")
-    allocation.fill_(0)
-    torch.mps.synchronize()
-    assert torch.mps.driver_allocated_memory() > 7.93 * (1 << 30)
-    del allocation
-    torch.mps.empty_cache()
 PY
 
 # --- Verify the accelerator is visible through torch_fl ----------------------
@@ -228,7 +215,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS PYTORCH_MPS_HIGH_WATERMARK_RATIO ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
+  export_ci_env PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS PYTORCH_MPS_HIGH_WATERMARK_RATIO ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
 fi
 
 cd "$REPO_ROOT"

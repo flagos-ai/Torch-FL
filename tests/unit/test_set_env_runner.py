@@ -197,23 +197,49 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
         )
 
 
-def test_mps_hook_lifts_the_runner_allocator_ceiling_for_tests():
-    """The hosted runner's MPS ceiling is below its own usable memory.
+def test_runner_resolves_repository_shorthand_names():
+    runner = RUNNER.read_text(encoding="utf-8")
+    assert "${!prefix[@]}" not in runner
 
-    GitHub's macos-14 runner reports only 7.93 GiB -- where an MPS runtime test
-    failed to allocate 256 bytes while holding 8 MiB. The child process setting
-    proves this is the host allocator, not torch_fl. The hook has to persist an
-    explicit limit to later test steps and verify that its setting takes effect.
+
+def test_runner_persists_the_environment_with_bash_3_2(tmp_path):
+    """Saving the environment must not use bash 4's `${!name}` indirection.
+
+    macOS runners invoke the script with /bin/bash 3.2; the machine running
+    these tests may have a newer bash on PATH.
     """
+    common = SCRIPTS / "lib" / "set_env_common.sh"
+    assert "${!name}" not in common.read_text(encoding="utf-8")
+    macos_bash = Path("/bin/bash")
+    shell = str(macos_bash) if macos_bash.exists() else "bash"
+    output = tmp_path / "github-env"
+    done = subprocess.run(
+        [
+            shell,
+            "-c",
+            f'set -u; source "{common}"; TEST_VALUE=--help; export_ci_env TEST_VALUE',
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            "GITHUB_ENV": str(output),
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    assert done.returncode == 0, done.stderr
+    assert output.read_text() == "TEST_VALUE=--help\n"
+
+
+def test_mps_hook_keeps_a_finite_allocator_limit_for_the_tests():
+    """The test steps need headroom, but the limit must stay finite."""
     hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
-    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0" in hook
+    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7" in hook
     exports = [
-        line for line in hook.splitlines() if line.strip().startswith("export_ci_env ")
+        line.split()
+        for line in hook.splitlines()
+        if line.strip().startswith("export_ci_env ")
     ]
-    assert any(
-        "PYTORCH_MPS_HIGH_WATERMARK_RATIO" in line.split() for line in exports
-    ), "the allocator setting does not reach the integration test step"
-    assert "driver_allocated_memory() > 7.93 * (1 << 30)" in hook
+    assert any("PYTORCH_MPS_HIGH_WATERMARK_RATIO" in line for line in exports)
 
 
 def _pyproject_build_requirements() -> list[str]:

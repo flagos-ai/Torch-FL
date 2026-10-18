@@ -467,12 +467,15 @@ build_flagos_inplace() {
 }
 
 # Persist the named variables to $GITHUB_ENV for later workflow steps. Every
-# name must be assigned before the call: they are read with ${!name} under
-# `set -u`.
+# name must be assigned before the call: they are read with eval under `set -u`.
 export_ci_env() {
   [[ -n "${GITHUB_ENV:-}" ]] || return 0
-  local name
+  local name value=""
+  # Indirection is a bash 4 feature. macOS still ships bash 3.2, so get each
+  # value with printf -v. Its optional `-v name` is unambiguous; the format is
+  # fixed, so a value such as --help cannot be read as printf's option.
   for name in "$@"; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+    eval "printf -v value '%s' \"\${$name}\""
+    printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
   done
 }
