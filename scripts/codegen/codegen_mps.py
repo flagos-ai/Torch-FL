@@ -1431,14 +1431,13 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # into `aten.convolution_overrideable` (see the OPS comment).
 #
 # MPSGraph has one convolution pair of selectors -- `convolution2D...` and
-# `convolution3D...` -- and no 1-D one, so the body resolves the spatial rank
-# first and every other rank takes the CPU round-trip. What the descriptor
-# carries is the whole geometry: NCHW data and OIHW weights, per-axis stride and
-# dilation, `groups`, and an explicit padding style whose per-axis
-# `paddingFront`/`paddingBack` are aten's own padding list -- aten's `padding` is
-# [front_0, front_1, ..., back_0, back_1, ...], which is the order
-# `MpsConvDescriptor` fills, and a list that is not two entries per axis is
-# declined so the reference reports its own error.
+# `convolution3D...` -- and no 1-D one. A 1-D convolution is served by the 2-D
+# selector over a unit-high view of its input and kernel, with a reshape on each
+# side of the node. Its padding list is `[front]` or `[front, back]` for the one
+# axis, which `MpsConvResolve` folds into the `[0, front, 0, back]` list the
+# descriptor reads; ranks above three take the CPU round-trip. What the
+# descriptor carries is the whole geometry: NCHW data and OIHW weights,
+# per-axis stride and dilation, `groups`, and an explicit padding style.
 #
 # The checks before the graph are the reference's contract rather than the
 # graph's, and each would otherwise be a wrong answer instead of an error:
@@ -1496,17 +1495,33 @@ at::Tensor {kernel}(
                        transposed, output_padding, groups)
         .to(input.device());
   }}
-  // The spatial rank: 1-D has no MPSGraph selector, and a rank above 3 has no
-  // graph either, so both take the round-trip and the reference reports what it
-  // reports.
+  // The spatial rank. A 1-D convolution is folded into the 2-D selector; a rank
+  // above 3 has no graph and takes the round-trip.
   const int64_t dim = input.dim() - 2;
   const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
-  if (dim < 2 || dim > 3 || weight.dim() != input.dim() ||
-      stride.size() != ndim || padding.size() != 2 * ndim ||
-      dilation.size() != ndim || groups < 1) {{
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  if (dim < 1 || dim > 3 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1) {{
     return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
                        transposed, output_padding, groups)
         .to(input.device());
+  }}
+  for (const int64_t entry : stride) {{
+    if (entry <= 0) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
+  }}
+  for (const int64_t entry : dilation) {{
+    if (entry <= 0) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
   }}
   if (input.size(1) / groups != weight.size(1) ||
       weight.size(0) % groups != 0) {{
@@ -1558,7 +1573,15 @@ at::Tensor {kernel}(
   if (has_bias) {{
     operands.push_back(bias_c);
   }}
-  const int64_t spatial = out.dim() - 2;
+  const int64_t spatial = dim < 2 ? 2 : dim;
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> result_shape(out.sizes().vec());
+  if (dim == 1) {{
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    result_shape.insert(result_shape.end() - 1, 1);
+  }}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       operands,
@@ -1569,14 +1592,24 @@ at::Tensor {kernel}(
         if (descriptor == nil) {{
           return nil;
         }}
+        MPSGraphTensor* source = args[0];
+        MPSGraphTensor* kernel = args[1];
+        if (dim == 1) {{
+          source = mps::MpsReshape(graph, source, source_shape);
+          kernel = mps::MpsReshape(graph, kernel, weight_shape);
+          if (source == nil || kernel == nil) {{
+            mps::MpsRelease(descriptor);
+            return nil;
+          }}
+        }}
         MPSGraphTensor* y =
             (spatial == 2)
-                ? [graph {call2d}args[0]
-                              weightsTensor:args[1]
+                ? [graph {call2d}source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution2DOpDescriptor*)descriptor
                                  name:nil]
-                : [graph {call3d}args[0]
-                              weightsTensor:args[1]
+                : [graph {call3d}source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution3DOpDescriptor*)descriptor
                                  name:nil];
 
@@ -1593,6 +1626,9 @@ at::Tensor {kernel}(
           y = [graph additionWithPrimaryTensor:y
                                secondaryTensor:bias_t
                                           name:nil];
+        }}
+        if (y != nil && dim == 1) {{
+          y = mps::MpsReshape(graph, y, result_shape);
         }}
         mps::MpsRelease(descriptor);
         return y;

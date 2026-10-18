@@ -619,13 +619,24 @@ bool MpsConvResolve(
     return false;
   }
   const int64_t dim = input.dim() - 2;
-  if (dim < 2 || dim > 3 || weight.dim() != input.dim()) {
+  if (dim < 1 || dim > 3 || weight.dim() != input.dim()) {
     return false;
   }
-  const int64_t spatial = dim;
-  if (stride.size() != spatial || dilation.size() != spatial ||
-      padding.size() != 2 * spatial || groups < 1) {
+  // The spatial rank the descriptor works in. A 1-D convolution has no
+  // selector of its own; it is the 2-D convolution of a unit-high input.
+  const int64_t spatial = std::max<int64_t>(dim, 2);
+  if (stride.size() != dim || dilation.size() != dim || groups < 1 ||
+      (dim == 1 && padding.size() != 1 && padding.size() != 2) ||
+      (dim > 1 && padding.size() != 2 * dim)) {
     return false;
+  }
+  // A non-positive step is a zero-step graph, and aten divides by it while
+  // computing the output extent. Decline before that division so the
+  // reference reports its own error.
+  for (int64_t axis = 0; axis < dim; ++axis) {
+    if (stride[axis] <= 0 || dilation[axis] <= 0) {
+      return false;
+    }
   }
   const int64_t in_channels = input.size(1);
   const int64_t out_channels = weight.size(0);
@@ -633,16 +644,29 @@ bool MpsConvResolve(
     return false;
   }
 
-  params->stride.assign(stride.begin(), stride.end());
-  params->dilation.assign(dilation.begin(), dilation.end());
+  params->stride.assign(spatial, 1);
+  params->dilation.assign(spatial, 1);
+  std::copy(stride.begin(), stride.end(), params->stride.end() - dim);
+  std::copy(dilation.begin(), dilation.end(), params->dilation.end() - dim);
   params->padding_front.clear();
   params->padding_back.clear();
-  // aten's flat `padding` is [front_0, front_1, ..., back_0, back_1, ...], and
-  // MPSGraph takes the two halves as two arrays -- the same split, so the first
-  // `spatial` entries are the fronts and the rest are the backs.
-  for (int64_t axis = 0; axis < spatial; ++axis) {
-    params->padding_front.push_back(padding[axis]);
-    params->padding_back.push_back(padding[axis + spatial]);
+  if (dim == 1) {
+    // The folded height is not padded; the length axis takes the one or two
+    // entries aten gives it. `[p]` is the symmetric spelling, `[p0, p1]` the
+    // explicit front/back one.
+    params->padding_front.push_back(0);
+    params->padding_back.push_back(0);
+    params->padding_front.push_back(padding[0]);
+    params->padding_back.push_back(padding.size() == 2 ? padding[1]
+                                                       : padding[0]);
+  } else {
+    // aten's flat `padding` is [front_0, front_1, ..., back_0, back_1, ...],
+    // and MPSGraph takes the two halves as two arrays -- the same split, so the
+    // first `spatial` entries are the fronts and the rest are the backs.
+    for (int64_t axis = 0; axis < spatial; ++axis) {
+      params->padding_front.push_back(padding[axis]);
+      params->padding_back.push_back(padding[axis + spatial]);
+    }
   }
   params->groups = groups;
 
@@ -651,12 +675,13 @@ bool MpsConvResolve(
   std::vector<int64_t> shape;
   shape.push_back(input.size(0));
   shape.push_back(out_channels);
-  for (int64_t axis = 0; axis < spatial; ++axis) {
-    const int64_t padded = input.size(axis + 2) + params->padding_front[axis] +
-        params->padding_back[axis];
+  for (int64_t axis = 0; axis < dim; ++axis) {
+    const int64_t folded = spatial - dim + axis;
+    const int64_t padded = input.size(axis + 2) +
+        params->padding_front[folded] + params->padding_back[folded];
     const int64_t window =
-        params->dilation[axis] * (weight.size(axis + 2) - 1) + 1;
-    const int64_t extent = (padded - window) / params->stride[axis] + 1;
+        params->dilation[folded] * (weight.size(axis + 2) - 1) + 1;
+    const int64_t extent = (padded - window) / params->stride[folded] + 1;
     if (extent <= 0) {
       // What the reference reports as "Kernel size can't be greater than actual
       // input size": there is no output extent to give the graph.
@@ -664,19 +689,11 @@ bool MpsConvResolve(
     }
     shape.push_back(extent);
   }
-  // A non-positive step is a zero-stride graph, and the reference rejects it in
-  // its own words; the formula above already divided by it, so this can only
-  // catch it before the descriptor does.
-  for (int64_t axis = 0; axis < spatial; ++axis) {
-    if (params->stride[axis] <= 0 || params->dilation[axis] <= 0) {
-      return false;
-    }
-  }
   *out_shape = std::move(shape);
 
   // The bias broadcasts over the spatial axes and along the channel axis, so it
   // becomes (1, OC, 1, ...) -- see T_CONV for the two shapes that do not work.
-  params->bias_shape.assign(static_cast<size_t>(dim), 1);
+  params->bias_shape.assign(static_cast<size_t>(spatial + 1), 1);
   params->bias_shape[1] = out_channels;
   return true;
 }
@@ -725,38 +742,49 @@ MPSGraphObject* MpsConvDescriptor(
     const NSUInteger front =
         static_cast<NSUInteger>(params.padding_front[0]);
     const NSUInteger back = static_cast<NSUInteger>(params.padding_back[0]);
-    return [[MPSGraphConvolution3DOpDescriptor alloc]
-        initWithStrideInX:sx
-                strideInY:sy
-                strideInZ:sz
-          dilationRateInX:dx
-          dilationRateInY:dy
-          dilationRateInZ:dz
-                   groups:groups
-             paddingLeft:left
-            paddingRight:right
-              paddingTop:top
-           paddingBottom:bottom
-             paddingFront:front
-              paddingBack:back
-             paddingStyle:MPSGraphPaddingStyleExplicit
-               dataLayout:MPSGraphTensorNamedDataLayoutNCDHW
-            weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
+    // The initializer this used to call is not part of the headless SDK: the
+    // class there exposes the geometry as properties plus
+    // setExplicitPaddingWith..., so build it that way and set every field the
+    // selector did. The class factory cannot supply the padding arguments on
+    // this SDK for the same reason.
+    auto* descriptor = [[MPSGraphConvolution3DOpDescriptor alloc] init];
+    if (descriptor == nil) {
+      return nil;
+    }
+    descriptor.strideInX = sx;
+    descriptor.strideInY = sy;
+    descriptor.strideInZ = sz;
+    descriptor.dilationRateInX = dx;
+    descriptor.dilationRateInY = dy;
+    descriptor.dilationRateInZ = dz;
+    descriptor.groups = groups;
+    [descriptor setExplicitPaddingWithPaddingLeft:left
+                                     paddingRight:right
+                                       paddingTop:top
+                                    paddingBottom:bottom
+                                     paddingFront:front
+                                      paddingBack:back];
+    descriptor.dataLayout = MPSGraphTensorNamedDataLayoutNCDHW;
+    descriptor.weightsLayout = MPSGraphTensorNamedDataLayoutOIDHW;
+    return descriptor;
   }
   if (spatial == 2) {
-    return [[MPSGraphConvolution2DOpDescriptor alloc]
-        initWithStrideInX:sx
-                strideInY:sy
-          dilationRateInX:dx
-          dilationRateInY:dy
-                   groups:groups
-             paddingLeft:left
-            paddingRight:right
-              paddingTop:top
-           paddingBottom:bottom
-             paddingStyle:MPSGraphPaddingStyleExplicit
-               dataLayout:MPSGraphTensorNamedDataLayoutNCHW
-            weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+    auto* descriptor = [[MPSGraphConvolution2DOpDescriptor alloc] init];
+    if (descriptor == nil) {
+      return nil;
+    }
+    descriptor.strideInX = sx;
+    descriptor.strideInY = sy;
+    descriptor.dilationRateInX = dx;
+    descriptor.dilationRateInY = dy;
+    descriptor.groups = groups;
+    [descriptor setExplicitPaddingWithPaddingLeft:left
+                                     paddingRight:right
+                                       paddingTop:top
+                                    paddingBottom:bottom];
+    descriptor.dataLayout = MPSGraphTensorNamedDataLayoutNCHW;
+    descriptor.weightsLayout = MPSGraphTensorNamedDataLayoutOIHW;
+    return descriptor;
   }
   return nil;
 }

@@ -839,6 +839,12 @@ struct MpsConvParams {
 // list -- every case where the reference's own error message is the right answer
 // and a graph would be the wrong one.
 //
+// A one-dimensional convolution is resolved as the two-dimensional one with a
+// unit height that `convolution2DWithSourceTensor:` serves. aten lists its
+// length-axis padding as `[front]` or `[front, back]`, where every spatial rank
+// above one lists all the fronts and then all the backs; the returned padding
+// is the `[0, front, 0, back]` form the descriptor uses.
+//
 // The output shape is the dilation-aware forward formula; a kernel larger than
 // the padded input falls out of it as a non-positive extent, which is a decline
 // here and the reference's own "Kernel size can't be greater than actual input

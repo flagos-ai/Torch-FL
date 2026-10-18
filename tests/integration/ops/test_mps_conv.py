@@ -16,7 +16,7 @@
 
 Convolution is the last lane of stage 3: the ``gemm`` and ``softmax`` categories
 cover what a transformer calls, and a vision model -- or a mixer's depthwise
-causal ``conv1d`` -- is what needs this one. Four properties are pinned here.
+causal ``conv1d`` -- is what needs this one. Five properties are pinned here.
 
 * **Which spelling is registered.** On this PyTorch build
   ``aten.convolution`` is ``CompositeImplicitAutograd``: it validates its
@@ -41,6 +41,11 @@ causal ``conv1d`` -- is what needs this one. Four properties are pinned here.
   M5, which is why this gate is wider than the softmax one. float64 has no
   MPSGraph element type and the integral and bool widths are the reference's own
   errors, so all three take the CPU round-trip and get exactly that.
+* **One dimension is a unit-high two-dimensional convolution.** MPSGraph has
+  no 1-D selector, so a 1-D call is served through its 2-D selector with a
+  reshape on each side of the node. The cases below cover its geometry, its
+  depthwise form and its symmetric padding, and the dispatch case proves the
+  result did not come from the CPU round-trip.
 
 Every case self-skips off an MPS build, like the stage-1 and stage-2 suites.
 """
@@ -357,23 +362,119 @@ class TestConv3dCorrectness:
         )
 
 
-class TestConvDeclined:
-    """The cases the graph does not serve stay correct through the round-trip."""
+class TestConv1dCorrectness:
+    """``F.conv1d`` takes the 2-D selector over a unit-high view."""
 
     @pytest.mark.anyplatform
-    def test_conv1d_declines_to_the_round_trip(self):
-        """MPSGraph has no 1-D convolution selector, so conv1d round-trips.
-
-        The value is what matters: a declined case is a slow path, not a wrong
-        one.
-        """
-        host_x = torch.randn(1, 3, 8)
-        host_w = torch.randn(4, 3, 3)
-        out = torch.nn.functional.conv1d(
-            _to_device(host_x), _to_device(host_w), padding=1
+    def test_plain_3x3(self):
+        host_x = torch.randn(2, 3, 16)
+        host_w = torch.randn(8, 3, 3)
+        host_b = torch.randn(8)
+        _assert_matches_cpu(
+            torch.nn.functional.conv1d(
+                _to_device(host_x), _to_device(host_w), _to_device(host_b), padding=1
+            ),
+            torch.nn.functional.conv1d(host_x, host_w, host_b, padding=1),
         )
-        assert out.shape == (1, 4, 8)
-        _assert_matches_cpu(out, torch.nn.functional.conv1d(host_x, host_w, padding=1))
+
+    @pytest.mark.anyplatform
+    def test_without_bias(self):
+        host_x = torch.randn(2, 3, 16)
+        host_w = torch.randn(5, 3, 3)
+        _assert_matches_cpu(
+            torch.nn.functional.conv1d(
+                _to_device(host_x), _to_device(host_w), padding=1
+            ),
+            torch.nn.functional.conv1d(host_x, host_w, padding=1),
+        )
+
+    @pytest.mark.parametrize(
+        "kernel,stride,padding,dilation,groups",
+        [
+            (5, 2, 2, 1, 1),
+            (3, 1, 2, 2, 1),
+            (1, 3, 0, 1, 1),
+            (3, 2, 0, 1, 4),
+        ],
+    )
+    @pytest.mark.anyplatform
+    def test_geometry(self, kernel, stride, padding, dilation, groups):
+        """The length geometry reaches the folded axis unchanged."""
+        host_x = torch.randn(2, 4, 16)
+        host_w = torch.randn(4, 4 // groups, kernel)
+        host_b = torch.randn(4)
+        _assert_matches_cpu(
+            torch.nn.functional.conv1d(
+                _to_device(host_x),
+                _to_device(host_w),
+                _to_device(host_b),
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            ),
+            torch.nn.functional.conv1d(
+                host_x,
+                host_w,
+                host_b,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            ),
+        )
+
+    @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+    @pytest.mark.anyplatform
+    def test_every_served_dtype(self, dtype):
+        host_x = torch.randn(2, 3, 12, dtype=dtype)
+        host_w = torch.randn(4, 3, 3, dtype=dtype)
+        host_b = torch.randn(4, dtype=dtype)
+        _assert_matches_cpu(
+            torch.nn.functional.conv1d(
+                _to_device(host_x), _to_device(host_w), _to_device(host_b), padding=1
+            ),
+            torch.nn.functional.conv1d(host_x, host_w, host_b, padding=1),
+        )
+
+    @pytest.mark.anyplatform
+    def test_strided_operand_is_materialised(self):
+        host_x = torch.randn(2, 3, 16)
+        host_w = torch.randn(4, 3, 3)
+        device_x = _to_device(host_x)[:, :, ::2]
+        assert not device_x.is_contiguous()
+        _assert_matches_cpu(
+            torch.nn.functional.conv1d(device_x, _to_device(host_w)),
+            torch.nn.functional.conv1d(host_x[:, :, ::2], host_w),
+        )
+
+    @pytest.mark.main_ops
+    def test_dispatch_log_names_mps(self):
+        """The answer comes from the kernel, not the CPU round-trip."""
+        env = os.environ.copy()
+        env["FLAGOS_LOG"] = "dispatch"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch, torch_fl; "
+                "x = torch.randn(1, 3, 8, device='flagos:0'); "
+                "w = torch.randn(4, 3, 3, device='flagos:0'); "
+                "torch.nn.functional.conv1d(x, w, padding=1)",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (
+            result.stderr.count("[flagos dispatch] convolution_overrideable -> mps")
+            == 1
+        )
+
+
+class TestConvDeclined:
+    """The cases the graph does not serve stay correct through the round-trip."""
 
     @pytest.mark.anyplatform
     def test_float64_is_correct(self):
