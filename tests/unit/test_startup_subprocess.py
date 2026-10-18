@@ -211,3 +211,26 @@ def test_mps_minimal_add_runs_clean():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_mps_allocator_shutdown_survives_persistent_test_tensors():
+    """Leaving test tensors alive must not turn a clean suite into exit 134."""
+    _require_mps()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch, torch_fl\n"
+            "a = torch.arange(12, dtype=torch.float32, device='mps')\n"
+            "b = torch.empty(3, 4, device='flagos')\n"
+            "b.copy_(a.reshape(3, 4))\n"
+            "assert torch.equal(b.cpu(), a.reshape(3, 4).cpu())\n"
+            "raise SystemExit(0)\n",
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

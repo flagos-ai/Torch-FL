@@ -407,6 +407,15 @@ PyObject* _empty_cache(PyObject* self, PyObject* noargs) {
   END_HANDLE_TH_ERRORS
 }
 
+PyObject* _shutdown_allocator(PyObject* self, PyObject* noargs) {
+  HANDLE_TH_ERRORS
+  if (c10::flagos::CachingDeviceAllocator::is_enabled()) {
+    c10::flagos::GetCachingAllocator()->shutdown();
+  }
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* _memory_stats(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   int device = THPUtils_unpackInt(arg);
@@ -527,6 +536,7 @@ static PyMethodDef methods[] = {
     {"_cuda_to_flagos_view", _cuda_to_flagos_view, METH_VARARGS, nullptr},
     {"_flagos_identity_view", _flagos_identity_view, METH_O, nullptr},
     {"_empty_cache", _empty_cache, METH_NOARGS, nullptr},
+    {"_shutdown_allocator", _shutdown_allocator, METH_NOARGS, nullptr},
     {"_memory_stats", _memory_stats, METH_O, nullptr},
     {"_memory_allocated", _memory_allocated, METH_O, nullptr},
     {"_memory_reserved", _memory_reserved, METH_O, nullptr},

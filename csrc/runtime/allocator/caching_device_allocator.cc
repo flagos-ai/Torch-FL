@@ -114,6 +114,10 @@ CachingDeviceAllocator::DeviceState& CachingDeviceAllocator::get_device_state(
 }
 
 at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
+  TORCH_CHECK(
+      !shut_down_.load(std::memory_order_relaxed),
+      "flagos caching allocator is shut down; no allocation is possible "
+      "after interpreter exit");
   int device = -1;
   backend_->get_device_index(&device);
 
@@ -237,6 +241,12 @@ Block* CachingDeviceAllocator::alloc_block(
 }
 
 void CachingDeviceAllocator::free_block(Block* block) {
+  if (shut_down_.load(std::memory_order_relaxed)) {
+    // The device runtime may already be gone. The OS reclaims this allocation
+    // with the process; keep the Block out of a pool initialised during exit.
+    static_cast<void>(block);
+    return;
+  }
   auto& state = get_device_state(block->device);
   std::lock_guard<std::recursive_mutex> lock(state.mutex);
 
@@ -465,6 +475,31 @@ void CachingDeviceAllocator::empty_cache() {
       release_cached_blocks(*state_ptr);
     }
   }
+}
+
+void CachingDeviceAllocator::shutdown() {
+  std::lock_guard<std::recursive_mutex> lock(device_states_mutex_);
+  // A C++ destructor may free the final tensor after Python's exit hooks have
+  // run. Once this allocator is down, every later insertion in the block pools
+  // is disallowed, so no DataPtr may enter a free list.
+  shut_down_.store(true, std::memory_order_release);
+
+  if (backend_->provides_caching()) {
+    // Delegated allocators have already provided the cache. There is no flagos
+    // free list to receive a late DataPtr.
+    backend_->caching_empty_cache();
+  } else {
+    for (auto& state_ptr : device_states_) {
+      if (state_ptr) {
+        std::lock_guard<std::recursive_mutex> dev_lock(state_ptr->mutex);
+        process_events(*state_ptr);
+        release_cached_blocks(*state_ptr);
+      }
+    }
+  }
+  // Keep the statistics alive for late observers. Every late free is rejected
+  // above, so the remaining device states hold no reusable or releasable data.
+  device_states_.clear();
 }
 
 void CachingDeviceAllocator::record_stream(

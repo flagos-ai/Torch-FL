@@ -275,6 +275,17 @@ print("torch_fl" in sys.modules, torch._C._get_privateuse1_backend_name(),
 )
 def test_mps_process_boundaries(code, expected, tmp_path):
     """A fresh process proves both the MPS baseline and explicit coexistence."""
+    # The suite has already run flagos and torch op tests against the one
+    # process-wide MPS budget. Let go of their tensors and caches before a
+    # child process allocates on the same device.
+    import gc
+
+    flagos.synchronize()
+    gc.collect()
+    flagos.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
     env = _child_env(tmp_path)
     result = subprocess.run(
         [sys.executable, "-c", code],

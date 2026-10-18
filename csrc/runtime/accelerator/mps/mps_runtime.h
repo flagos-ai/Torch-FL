@@ -31,6 +31,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 
 namespace torch_fl_mps {
 
@@ -116,6 +117,10 @@ void DrainAll();
 // Live-queue registry, used by DrainAll(). StreamDestroy removes its entry.
 void RegisterStream(StreamState* stream);
 void UnregisterStream(StreamState* stream);
+
+// Install the allocator's process-exit cache release. It runs from the Metal
+// runtime's own atexit hook, after Python has let go of its tensors.
+void SetShutdownReleaseCache(std::function<void()> release_cache);
 
 // EventState cast helpers.
 EventState* AsEvent(Event_t event);

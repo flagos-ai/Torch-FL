@@ -136,6 +136,10 @@ class MemoryManager {
     }
 
     if (block.buffer != nil) {
+      // Python objects may be released in an exit hook after this runtime's
+      // own drain. Drain before the final buffer goes away so no queued graph
+      // still names it.
+      torch_fl_mps::DrainAll();
       [block.buffer release];
     } else {
       std::free(ptr);
@@ -214,6 +218,28 @@ class MemoryManager {
 
  private:
   MemoryManager() = default;
+
+  ~MemoryManager() {
+    // The allocation registry outlives the C++ stream module. Its holder is
+    // released after that module's own atexit hook, so encode the wait against
+    // the queue directly here, without looking up any C++ static state.
+    id<MTLCommandQueue> queue =
+        (id<MTLCommandQueue>)FlagosMPSDefaultCommandQueue();
+    if (queue != nil) {
+      id<MTLCommandBuffer> buffer = [queue commandBuffer];
+      if (buffer != nil) {
+        [buffer commit];
+        [buffer waitUntilCompleted];
+      }
+    }
+    for (auto& [ptr, block] : m_registry) {
+      if (block.type == MemoryType::MemoryTypeHost) {
+        std::free(ptr);
+      } else if (block.buffer != nil) {
+        [block.buffer release];
+      }
+    }
+  }
 
   // The block whose allocation contains `ptr`. A pointer may be offset into a
   // live allocation (a tensor view's storage plus an offset), so look at the

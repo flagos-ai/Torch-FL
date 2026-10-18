@@ -64,17 +64,21 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
-# --- MPS allocator headroom --------------------------------------------------
-# PyTorch allows 7.93 GiB before it refuses an MPS allocation on a hosted
-# macos-14 runner. The runtime test saw a 256-byte request fail with only 8 MiB
-# of MPS memory in use, as did a torch-only child, so this is the runner's
-# allocator ceiling rather than an allocation retained by torch_fl. The ratio
-# is the fraction of the GPU's usable memory that allocator-managed buffers may
-# reach. A finite 0.7 leaves room for the Metal commands issued by an operator.
-# The low ratio is a soft limit, and PyTorch requires it to stay below the high
-# ratio; a small workload otherwise inherits the 1.4 unified-memory default and
-# fails with `invalid low watermark ratio 1.4` before the first test.
-export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7
+# --- MPS allocator limit -----------------------------------------------------
+# A GitHub macos-14 runner reports a 7.93 GiB MPS ceiling above the same Metal
+# allocator used by the flagos device. PyTorch derives its own ceiling from the
+# recommended working set, which leaves too little headroom beside the runner's
+# OS and display processes. The first MPS runtime run failed trying to allocate
+# 256 bytes with only 8 MiB allocated -- in a child process that had never
+# imported torch_fl, so this is the host's limit rather than a leak in the new
+# device. A finite 0.7 limit also failed at the same 3.27 GiB ceiling.
+#
+# This lane has no large MPS workload. Remove the upper limit so the allocator
+# can grow into memory the host already reports as available. The low ratio is
+# a soft limit, and PyTorch requires it to stay below the high ratio; a small
+# workload otherwise inherits the 1.4 unified-memory default and fails with
+# `invalid low watermark ratio 1.4` before the first test.
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5
 
 # --- One architecture, the one this runner has -------------------------------

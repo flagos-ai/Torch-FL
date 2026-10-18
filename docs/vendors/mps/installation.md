@@ -121,14 +121,12 @@ pytest tests/integration/test_mps_runtime.py -q
 Every case in that file self-skips off an MPS build, so a broad
 `pytest tests/integration` collection on a non-Apple machine stays quiet.
 
-PyTorch's default MPS allocator limit on a GitHub `macos-14` runner was 7.93 GiB.
-The MPS integration hook lowers
-`PYTORCH_MPS_HIGH_WATERMARK_RATIO`
-to 0.7 for its small workloads, and sets the soft
-`PYTORCH_MPS_LOW_WATERMARK_RATIO` limit to 0.5 so it stays below the high limit.
-This gives them enough headroom without setting
-the high ratio to 0.0, which removes the allocator's upper limit. Keep a finite
-limit on your own machine unless it is too small for the workload.
+PyTorch's MPS allocator limit is tight on a GitHub `macos-14` runner: a minimal
+test could not allocate 256 bytes while holding only 8 MiB. The MPS integration
+hook removes the upper limit with
+`PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` for its small workloads, and keeps the
+soft `PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5` below it. Keep PyTorch's finite
+default on your own machine unless the workload requires more headroom.
 
 ## Current status
 

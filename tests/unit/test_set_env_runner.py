@@ -230,11 +230,18 @@ def test_runner_persists_the_environment_with_bash_3_2(tmp_path):
     assert output.read_text() == "TEST_VALUE=--help\n"
 
 
-def test_mps_hook_keeps_a_finite_allocator_limit_for_the_tests():
-    """The test steps need headroom, but the limit must stay finite."""
+def test_mps_hook_uses_a_reachable_allocator_limit_for_the_tests():
+    """The test lane must retain PyTorch's verified MPS allocator headroom."""
     hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
-    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7" in hook
+    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0" in hook
+
+    # PyTorch parses the low watermark before the high one. A leftover default
+    # (1.4) would reject this lane for exceeding the high watermark.
     assert "export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5" in hook
+    high = hook.index("export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0")
+    low = hook.index("export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5")
+    assert high < low
+
     exports = [
         line.split()
         for line in hook.splitlines()
