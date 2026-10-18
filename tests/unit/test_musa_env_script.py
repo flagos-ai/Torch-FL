@@ -44,14 +44,15 @@ def _bash_major():
 
 
 def run_shell(body, **environment):
-    env = os.environ.copy()
-    # A real checkout may have a build/ directory, which shadows the Build
-    # frontend's build.py.
-    env.update(
-        PYTHONPATH="",
-        PYTHONNOUSERSITE="1",
-        PYTHONSAFEPATH="1",
-    )
+    # Keep the build frontend, FlagGems stubs, and the host image's Python
+    # modules out of process launchers that the shell script only emulates.
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LC_ALL": "C",
+        "PYTHONPATH": "",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+    }
     env.update(environment)
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + body],
@@ -81,16 +82,25 @@ def fake_build_tools(site, *, editable=True, frontend=True):
     [(True, True, True), (False, True, False), (True, False, False)],
 )
 def test_build_tools_require_real_imports(tmp_path, editable, frontend, usable):
-    root = tmp_path / "venv"
-    subprocess.run(
-        [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True
-    )
-    site = next((root / "lib").glob("python*/site-packages"))
+    root = tmp_path / "python-env"
+    site = root / "site-packages"
     fake_build_tools(site, editable=editable, frontend=frontend)
+    bootstrap = tmp_path / "python"
+    bootstrap.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'exec "$REAL_PYTHON" -S -c \'import site, sys; '
+        "site.addsitedir(sys.argv.pop(1)); "
+        'exec(compile(sys.stdin.read(), "<stdin>", "exec"))\' '
+        '"$STUB_SITE"\n'
+    )
+    bootstrap.chmod(0o755)
     result = run_shell(
         shell_function("musa_validate_build_tools")
         + '\nmusa_validate_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
-        VENV_PYTHON=str(root / "bin/python"),
+        VENV_PYTHON=str(bootstrap),
+        REAL_PYTHON=sys.executable,
+        STUB_SITE=str(site),
         TORCH_DEVICE_BACKEND_AUTOLOAD="1",
     )
     assert (result.returncode == 0) == usable, result.stdout + result.stderr
@@ -232,30 +242,32 @@ def test_venv_reuse_requires_isolation(tmp_path, condition, usable):
     ],
 )
 def test_flaggems_reuse_requires_published_version(tmp_path, condition, reuse):
-    dist = tmp_path / "flag_gems-5.4.0.dist-info"
-    dist.mkdir()
+    stub = tmp_path / "stub"
+    dist = stub / "flag_gems-5.4.0.dist-info"
+    dist.mkdir(parents=True)
     if condition != "missing_metadata":
         version = "5.3.0" if condition == "different_version" else "5.4.0"
         (dist / "METADATA").write_text(f"Name: flag_gems\nVersion: {version}\n")
     if condition != "missing_module":
-        (tmp_path / "flag_gems.py").touch()
+        (stub / "flag_gems.py").touch()
 
     result = run_shell(
         "pip_retry() {\n"
         '  printf "INSTALL_REQUESTED %s\\n" "$*"\n'
+        '  mkdir -p "$(dirname "$STUB_METADATA")"\n'
         '  printf "Name: flag_gems\\nVersion: 5.4.0\\n" > "$STUB_METADATA"\n'
-        '  touch "$STUB_MODULE"\n'
+        '  printf "module" > "$STUB_MODULE"\n'
         "}\n"
         + shell_function("flag_gems_installed", COMMON)
         + "\n"
         + shell_function("install_flag_gems", COMMON)
         + "\ninstall_flag_gems",
         VENV_PYTHON=sys.executable,
-        PYTHONPATH=str(tmp_path),
+        PYTHONPATH=str(stub),
         FLAGGEMS_VERSION="5.4.0",
         FLAGGEMS_INDEX_URL="https://example.invalid/mthreads/simple",
         STUB_METADATA=str(dist / "METADATA"),
-        STUB_MODULE=str(tmp_path / "flag_gems.py"),
+        STUB_MODULE=str(stub / "flag_gems.py"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     # "preinstalled" contains "installed"; match the stub's whole output line.
