@@ -124,9 +124,11 @@ Every case in that file self-skips off an MPS build, so a broad
 PyTorch's default MPS allocator limit on a GitHub `macos-14` runner was 7.93 GiB.
 The MPS integration hook lowers
 `PYTORCH_MPS_HIGH_WATERMARK_RATIO`
-to 0.7 for its small workloads. This gives them enough headroom without setting
-the ratio to 0.0, which removes the allocator's upper limit. Keep a finite limit
-on your own machine unless it is too small for the workload.
+to 0.7 for its small workloads, and sets the soft
+`PYTORCH_MPS_LOW_WATERMARK_RATIO` limit to 0.5 so it stays below the high limit.
+This gives them enough headroom without setting
+the high ratio to 0.0, which removes the allocator's upper limit. Keep a finite
+limit on your own machine unless it is too small for the workload.
 
 ## Current status
 
@@ -172,9 +174,12 @@ handed to MPSGraph's transpose node, which measured free next to the copy it
 replaces. The `conv` kernel serves `nn.Conv2d`/`nn.Conv3d` -- including the
 pointwise, grouped and depthwise shapes a vision or mixer model reaches for -- by
 carrying the stride, dilation, groups and per-axis padding into the MPSGraph
-descriptor; `conv1d` and transposed convolutions have no selector there and take
-the round-trip. The `silu` kernel -- what a SwiGLU MLP multiplies its gate
-projection by -- is the first op here MPSGraph has no selector for, so it is a
+descriptor. The `conv1d` call is served through the 2-D selector: a unit-high
+view of the input and kernel fills the folded axis, and a reshape on each side of
+the node restores the `(N, C, L)` input and output shapes. Transposed convolutions
+have no matching node and take the round-trip. The `silu` kernel -- what a SwiGLU
+MLP multiplies its gate projection by -- is the first op here MPSGraph has no
+selector for, so it is a
 composition of `sigmoid` and a multiply rather than one node; the gate for it is
 a measurement against `at::silu` rather than the identity, because aten's own
 `silu` is not `x * sigmoid(x)` on the narrow widths (design doc section 7).

@@ -216,6 +216,13 @@ insists — it re-tags nothing: `FLAGOS_BUILD_BOXING` is pinned off in
 `cmake/flagos_platforms.json`, so there is no CUDA dispatch key and no vendor
 libtorch bundle to land a re-dispatch on.
 
+**The convolution route serves one, two and three spatial dimensions on the
+MPSGraph backend.** MPSGraph has a 2-D and a 3-D convolution selector, and no
+1-D selector. A 1-D call is reshaped into a unit-high 2-D convolution and back,
+inside the graph; its stride, padding, dilation, groups and bias use the same
+descriptor as the 2-D form. The CPU round-trip remains for transposed
+convolutions and ranks the graph does not carry.
+
 **`index_select` is the `embedding` gather reached by name, and it is the first
 route here whose op has an argument contract rather than a dtype one.** The node
 is the same one `embedding` builds (`gatherWithUpdatesTensor:indicesTensor:axis:0
