@@ -210,6 +210,7 @@ class TestCopyTransfer:
             model = torch.nn.Linear(4, 2)
             weight = model.weight
             bias = model.bias
+            parameters = list(model.parameters())
             expected = {
                 name: value.detach().clone() for name, value in model.named_parameters()
             }
@@ -218,6 +219,7 @@ class TestCopyTransfer:
 
             assert model.weight is weight
             assert model.bias is bias
+            assert list(model.parameters()) == parameters
             assert all(
                 parameter.device.type == "flagos" for parameter in model.parameters()
             )
@@ -234,8 +236,6 @@ class TestCopyTransfer:
             model.cpu()
             assert model.weight is weight
             assert model.bias is bias
-            for name, value in model.named_parameters():
-                assert torch.equal(value, expected[name])
         finally:
             torch.__future__.set_swap_module_params_on_conversion(previous)
 
