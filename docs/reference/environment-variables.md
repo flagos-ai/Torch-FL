@@ -114,6 +114,14 @@ Logging and tracing. None of these changes routing.
 | `FLAGOS_TRACE` | Runtime | `0` (off) | Verbose logging in the device profiler shim compiled into this build. One switch covers every accelerator: exactly one device tracer is compiled per build, so the name is never ambiguous |
 | `FLAGOS_TRACER_LIBRARY` | Runtime | Auto-discovered | Override the tracer library the profiler shim `dlopen`s, when the default path does not match the installed driver |
 
+### Vendor runtime libraries
+
+Where the platform's vendor operator library finds its own dependencies.
+
+| Variable | Scope | Default | Purpose |
+|----------|-------|---------|---------|
+| `FLAGOS_KUNLUNXIN_XDNN_LIB_DIR` | Runtime | No default | Colon-separated directories holding the component libraries `libxdnn_pytorch.so` names in `DT_NEEDED` (`libxpu_blas.so`, `libxpu_dnn.so`, `libxpu_flash_attention.so`). The vendor torch package ships them as `<site-packages>/torch_xmlir/*.so`; importing that Python package is not required. Set it and put the same directories on `LD_LIBRARY_PATH` before starting the interpreter — the loader resolves `DT_NEEDED` before any of the wheel's code runs, so the variable alone cannot rescue a first import that fails with `libxpu_blas.so: cannot open shared object file`. The wheel loads the XPU SDK's CUDA-compat runtime (`libxpucuda.so`, `libcudart.so.12`, `libxpurt.so.2`) before these components, because `libxpu_blas.so` resolves `cudaGetDriverEntryPoint` out of the global scope rather than through its own `DT_NEEDED` |
+
 ### Distributed
 
 How `torch.distributed` picks a backend for the flagos device. The `"flagos"`
