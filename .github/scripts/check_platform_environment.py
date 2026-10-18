@@ -313,7 +313,18 @@ def assert_flagtree(dependencies, flagtree):
 
 def assert_model_dir():
     model_path = os.environ.get("MODEL_PATH", "")
-    assert model_path and Path(model_path).is_dir(), model_path
+    model_root = Path(model_path) if model_path else None
+    assert model_root and model_root.is_dir(), model_path
+    config_path = model_root / "config.json"
+    assert config_path.is_file(), config_path
+    try:
+        config = json.loads(config_path.read_text())
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"{config_path} is not valid JSON: {error}") from error
+    assert isinstance(config, dict), config_path
+    assert isinstance(config.get("model_type"), str) and config["model_type"], (
+        f"{config_path} has no model_type"
+    )
 
 
 def macho_architectures(path):

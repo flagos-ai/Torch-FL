@@ -681,6 +681,30 @@ def test_something_that_is_not_a_macho_file_reports_nothing(tmp_path):
     assert environment_check.macho_architectures(absurd) is None
 
 
+def test_a_model_mount_must_carry_a_recognized_config(tmp_path, monkeypatch):
+    """A mounted directory without a usable config.json fails before the suite.
+
+    PPU's Qwen3 group found an unrecognized checkpoint only after the test
+    session started, so the report named Transformers' model-type list rather
+    than the mount that supplied the config.
+    """
+    monkeypatch.setenv("MODEL_PATH", str(tmp_path))
+    with pytest.raises(AssertionError, match="config.json"):
+        environment_check.assert_model_dir()
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"model_type": "qwen3"}))
+    environment_check.assert_model_dir()
+
+    config_path.write_text("{}")
+    with pytest.raises(AssertionError, match="no model_type"):
+        environment_check.assert_model_dir()
+
+    config_path.write_text("{")
+    with pytest.raises(SystemExit, match="not valid JSON"):
+        environment_check.assert_model_dir()
+
+
 def test_the_architecture_assertion_names_what_it_found(tmp_path):
     """The platform states one architecture; a dylib for another has to fail.
 

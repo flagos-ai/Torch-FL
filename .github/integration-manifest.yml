@@ -79,7 +79,8 @@ steps:
   #   require_imports                             modules that must import
   #   torch_musa_shim_only                        the vendor package must not leak
   #   flagtree                                    the FlagTree build, as a nested map
-  #   model_dir                                   MODEL_PATH must be a mount
+  #   model_dir                                   MODEL_PATH must be a mount carrying
+  #                                               a valid config.json model_type
   #
   # The vocabulary is documented on the script, not repeated per platform: what
   # a platform states is a value, and why it states it is in that platform's
