@@ -224,7 +224,9 @@ class TestCopyTransfer:
                 parameter.device.type == "flagos" for parameter in model.parameters()
             )
             for name, value in model.named_parameters():
-                assert torch.equal(value.cpu(), expected[name])
+                actual_value = value.cpu()
+                assert torch.equal(actual_value, expected[name])
+                del actual_value
 
             inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]], device=device)
             actual = torch.ops.aten.linear(inputs, weight, bias).cpu()
@@ -232,6 +234,7 @@ class TestCopyTransfer:
                 inputs.cpu(), expected["weight"], expected["bias"]
             )
             assert torch.allclose(actual, reference)
+            del inputs, actual, reference
 
             model.cpu()
             assert model.weight is weight
