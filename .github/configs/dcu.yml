@@ -77,7 +77,7 @@ container_options: >-
 # reported -- 72/72 unit files PASS and no failing step. The limit was the only
 # thing that was red. Raise this rather than trim the group: the unit directory
 # is the per-file coverage that caught the cp310 `tomllib` collection error, and
-# nothing else runs it. Ascend, the other long manifest, is already at 120.
+# nothing else runs it.
 timeout_minutes: 90
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-dcu
