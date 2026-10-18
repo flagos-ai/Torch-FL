@@ -234,12 +234,14 @@ def test_mps_hook_keeps_a_finite_allocator_limit_for_the_tests():
     """The test steps need headroom, but the limit must stay finite."""
     hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
     assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7" in hook
+    assert "export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5" in hook
     exports = [
         line.split()
         for line in hook.splitlines()
         if line.strip().startswith("export_ci_env ")
     ]
     assert any("PYTORCH_MPS_HIGH_WATERMARK_RATIO" in line for line in exports)
+    assert any("PYTORCH_MPS_LOW_WATERMARK_RATIO" in line for line in exports)
 
 
 def _pyproject_build_requirements() -> list[str]:
