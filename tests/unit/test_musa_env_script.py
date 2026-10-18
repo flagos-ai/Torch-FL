@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_PATH = REPO_ROOT / ".github/scripts/lib/set_env_common.sh"
 COMMON = COMMON_PATH.read_text()
 SCRIPT = (REPO_ROOT / ".github/scripts/hooks/set_env_musa.sh").read_text()
+VENDORED_BUILD_VERSION = "1.4.0"
 
 
 def shell_function(name, script=SCRIPT):
@@ -43,9 +44,9 @@ def _bash_major():
     return int(out) if out.isdigit() else 0
 
 
-def run_shell(body, **environment):
-    # Keep the build frontend, FlagGems stubs, and the host image's Python
-    # modules out of process launchers that the shell script only emulates.
+def run_shell(body, *, cwd=None, **environment):
+    # Keep the build frontend and the host's Python modules out of process
+    # launchers that the shell script only emulates.
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LC_ALL": "C",
@@ -56,6 +57,7 @@ def run_shell(body, **environment):
     env.update(environment)
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + body],
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -77,48 +79,46 @@ def fake_build_tools(site, *, editable=True, frontend=True):
         (site / "build.py").write_text("__version__ = '1.4.0'\n")
 
 
-def fake_python_bootstrap(tmp_path, site):
-    bootstrap = tmp_path / "python"
-    probe = tmp_path / "probe.py"
-    probe.write_text(
-        "import sys\n"
-        f"sys.path.insert(0, {str(site)!r})\n"
-        'exec(compile(sys.stdin.read(), "<stdin>", "exec"))\n'
-    )
-    bootstrap.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        'stub_args=("$@")\n'
-        '[[ "${stub_args[0]:-}" == "-" ]] && stub_args=("${stub_args[@]:1}")\n'
-        "if (( ${#stub_args[@]} )); then\n"
-        '  exec "$REAL_PYTHON" -s -S "$STUB_PROBE" "${stub_args[@]}"\n'
-        "fi\n"
-        'exec "$REAL_PYTHON" -s -S "$STUB_PROBE"\n'
-    )
-    bootstrap.chmod(0o755)
-    return bootstrap, probe
-
-
 @pytest.mark.parametrize(
     "editable,frontend,usable",
     [(True, True, True), (False, True, False), (True, False, False)],
 )
-def test_build_tools_require_real_imports(tmp_path, editable, frontend, usable):
-    root = tmp_path / "python-env"
-    site = root / "site-packages"
+@pytest.mark.parametrize("built_checkout", [False, True])
+@pytest.mark.parametrize("ambient_build", [False, True])
+def test_build_tools_require_real_imports(
+    tmp_path, monkeypatch, editable, frontend, usable, built_checkout, ambient_build
+):
+    if ambient_build:
+        ambient = tmp_path / "ambient-python"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(ambient)], check=True
+        )
+        ambient_site = next((ambient / "lib").glob("python*/site-packages"))
+        (ambient_site / "build.py").write_text("__version__ = '9.9.9'\n")
+        monkeypatch.setattr(sys, "executable", str(ambient / "bin/python"))
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    if built_checkout:
+        (checkout / "build").mkdir()
+    monkeypatch.chdir(checkout)
+    root = tmp_path / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True
+    )
+    site = next((root / "lib").glob("python*/site-packages"))
     fake_build_tools(site, editable=editable, frontend=frontend)
-    bootstrap, probe = fake_python_bootstrap(tmp_path, site)
     result = run_shell(
         shell_function("musa_validate_build_tools")
         + '\nmusa_validate_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
-        VENV_PYTHON=str(bootstrap),
-        REAL_PYTHON=sys.executable,
-        STUB_PROBE=str(probe),
+        # Do not import the checkout's build/ directory as a namespace package.
+        cwd=tmp_path,
+        VENV_PYTHON=str(root / "bin/python"),
         TORCH_DEVICE_BACKEND_AUTOLOAD="1",
     )
     assert (result.returncode == 0) == usable, result.stdout + result.stderr
     if usable:
         assert "editable_wheel available" in result.stdout
+        assert f"Build frontend: {VENDORED_BUILD_VERSION}" in result.stdout
         assert "AUTOLOAD=1" in result.stdout
     else:
         assert "ModuleNotFoundError" in result.stderr
@@ -254,40 +254,59 @@ def test_venv_reuse_requires_isolation(tmp_path, condition, usable):
         ("missing_metadata", False),
     ],
 )
-def test_flaggems_reuse_requires_published_version(tmp_path, condition, reuse):
-    site = tmp_path / "site"
+@pytest.mark.parametrize("ambient_flaggems", [False, True])
+def test_flaggems_reuse_requires_published_version(
+    tmp_path, monkeypatch, condition, reuse, ambient_flaggems
+):
+    if ambient_flaggems:
+        ambient = tmp_path / "ambient-python"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(ambient)], check=True
+        )
+        ambient_site = next((ambient / "lib").glob("python*/site-packages"))
+        (ambient_site / "flag_gems.py").touch()
+        ambient_dist = ambient_site / "flag_gems-5.3.0.dist-info"
+        ambient_dist.mkdir()
+        (ambient_dist / "METADATA").write_text("Name: flag_gems\nVersion: 5.3.0\n")
+        # A module of the requested version still has to be importable from the
+        # selected environment; the host copy must not make the probe pass.
+        ambient_dist = ambient_site / "flag_gems-5.4.0.dist-info"
+        ambient_dist.mkdir()
+        (ambient_dist / "METADATA").write_text("Name: flag_gems\nVersion: 5.4.0\n")
+        monkeypatch.setattr(sys, "executable", str(ambient / "bin/python"))
+    # Missing-module cases must not discover the runner's installed FlagGems.
+    root = tmp_path / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True
+    )
+    site = next((root / "lib").glob("python*/site-packages"))
     dist = site / "flag_gems-5.4.0.dist-info"
-    dist.mkdir(parents=True)
+    dist.mkdir()
     if condition != "missing_metadata":
         version = "5.3.0" if condition == "different_version" else "5.4.0"
         (dist / "METADATA").write_text(f"Name: flag_gems\nVersion: {version}\n")
     if condition != "missing_module":
         (site / "flag_gems.py").touch()
-    module = site / "flag_gems.py"
-    bootstrap, probe = fake_python_bootstrap(tmp_path, site)
 
     result = run_shell(
         "pip_retry() {\n"
         '  printf "INSTALL_REQUESTED %s\\n" "$*"\n'
-        f'  printf "Name: flag_gems\\nVersion: 5.4.0\\n" > {str(dist / "METADATA")!r}\n'
-        f"  touch {str(module)!r}\n"
+        '  printf "Name: flag_gems\\nVersion: 5.4.0\\n" > "$STUB_METADATA"\n'
+        '  touch "$STUB_MODULE"\n'
         "}\n"
         + shell_function("flag_gems_installed", COMMON)
         + "\n"
         + shell_function("install_flag_gems", COMMON)
         + "\ninstall_flag_gems",
-        VENV_PYTHON=str(bootstrap),
-        REAL_PYTHON=sys.executable,
-        STUB_PROBE=str(probe),
+        cwd=tmp_path,
+        VENV_PYTHON=str(root / "bin/python"),
         FLAGGEMS_VERSION="5.4.0",
         FLAGGEMS_INDEX_URL="https://example.invalid/mthreads/simple",
+        STUB_METADATA=str(dist / "METADATA"),
+        STUB_MODULE=str(site / "flag_gems.py"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    # "preinstalled" contains "installed"; match the stub's whole output line.
-    installed = any(
-        line.startswith("INSTALL_REQUESTED") for line in result.stdout.splitlines()
-    )
-    assert (not installed) == reuse
+    assert ("INSTALL_REQUESTED" not in result.stdout) == reuse
     if not reuse:
         assert "--only-binary=:all:" in result.stdout
         assert "flag-gems===5.4.0" in result.stdout
