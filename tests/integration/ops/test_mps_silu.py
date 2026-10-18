@@ -61,6 +61,7 @@ import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend_or_none
 from platform_support import detect_platform
+from test_mps_runtime import _child_env
 
 
 DEVICE = "flagos:0"
@@ -606,9 +607,14 @@ class TestSiluDispatch:
         assert result.stderr.count("[flagos dispatch] silu -> mps") == 2
 
     @pytest.mark.main_ops
-    def test_autograd_and_aten_backward_keep_their_reference_answer(self):
+    def test_autograd_and_aten_backward_keep_their_reference_answer(self, tmp_path):
         """Both the autograd path and an explicit call reach ``silu_backward``."""
-        env = os.environ.copy()
+        if not torch.backends.mps.is_available():
+            pytest.skip("torch.backends.mps is unavailable in this torch build")
+        # Once torch_fl claims PrivateUse1, PyTorch 2.10's autograd engine asserts
+        # in the native MPS process. Use the installed backend without exposing
+        # the checkout here; the process boundary is pinned in the runtime suite.
+        env = _child_env(tmp_path)
         env["FLAGOS_LOG"] = "dispatch"
         result = subprocess.run(
             [

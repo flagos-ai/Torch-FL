@@ -354,6 +354,8 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
     # ``convolution_overrideable`` is the conv category's only op, and the one
     # every ``F.conv2d``/``F.conv3d`` lowers to, because ``aten.convolution`` is
     # CompositeImplicitAutograd and decomposes above the backend key.
+    # ``silu_backward`` is the first backward-only op, so it has no forward
+    # representative.
     for op in (
         "abs",
         "neg",
@@ -368,6 +370,7 @@ def test_mps_conf_is_a_generated_full_coverage_conf():
         "bmm",
         "convolution_overrideable",
         "silu",
+        "silu_backward",
         "embedding",
         "index_select",
         "take",
@@ -486,21 +489,13 @@ def test_conf_route_counts_are_stable():
         # duplicate-registration error. See _derived_iluvatar_counts().
         "iluvatar": _derived_iluvatar_counts(),
         # MPS is a native vendor backend at stage 4: the codegen'd
-        # mps_register.inc claims the MPSGraph kernels the ``unary``, ``binary``,
-        # ``binary_scalar``, ``reduce``, ``gemm``, ``softmax``, ``pow_scalar``
-        # ``conv``, ``silu``, ``embedding``, ``index_select``, ``gather``,
-        # ``div``, ``div_scalar``, ``reciprocal``, ``take``, ``layer_norm``,
-        # ``where`` and ``cat``
-        # categories generate (26 ops
-        # so far -- stage 3 added
-        # ``mm``/``bmm``, then ``_softmax``, ``neg`` and ``pow.Tensor_Scalar``,
-        # then ``convolution_overrideable``; stage 4 added ``silu`` and
-        # ``embedding``, then ``div.Tensor``/``div.Scalar``/``reciprocal``,
-        # then ``index_select``, then ``take``, then ``gather``, then
-        # ``native_layer_norm``, then ``where.self`` and ``cat``, then
-        # ``native_batch_norm``, then ``sigmoid``, then ``exp``, then
-        # ``log``, then ``rsqrt``, then ``sqrt``, then ``tanh``, then
-        # ``erf``), so the conf
+        # mps_register.inc claims the MPSGraph kernels registered for the
+        # ``unary``, ``binary``, ``binary_scalar``, ``reduce``, ``gemm``,
+        # ``softmax``, ``pow_scalar``, ``conv``, ``silu``, ``silu_backward``,
+        # ``embedding``, ``index_select``, ``gather``, ``div``, ``div_scalar``,
+        # ``reciprocal``, ``take``, ``layer_norm``, ``batch_norm``, ``sigmoid``,
+        # ``exp``, ``log``, ``rsqrt``, ``sqrt``, ``tanh``, ``erf``, ``where``
+        # and ``cat`` categories (35 ops so far), so the conf
         # routes those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is

@@ -375,6 +375,26 @@ plan reuse across interleaved dtypes and shapes, and the dispatch log naming
 guards the *reference* rather than the kernel: it fails if a future PyTorch makes
 `silu` the composition, because then the note this gate rests on would be stale.
 
+`silu_backward` followed as the first backward body and the first op here whose
+graph takes the upstream gradient alongside the forward operand. It computes
+`g * sigmoid(x) * (1 + x * (1 - sigmoid(x)))`, keeping `sigmoid` as a node rather
+than differentiating through `exp`, which overflows before the host reference's
+cancellation settles the derivative at a large positive `x`. Equal float32 and
+float16 operands are served; bfloat16 is declined because its graph and
+autograd reference differ by up to 3.1e-02 around `x = 3`. Mixed widths,
+incompatible devices and non-broadcastable shapes take the CPU round-trip so the
+reference keeps its promotion and error behaviour. The functional op is
+registered; `silu_backward.grad_input` remains on the fallback.
+
+This increment is verified with the backward cases in
+`tests/integration/ops/test_mps_silu.py`: explicit and autograd gradients at both
+served widths, broadcasting, strided operands, plan reuse, the decline paths,
+and the dispatch log naming `mps`. PyTorch 2.10's autograd engine still asserts
+on backward after an explicit `import torch_fl` in a process where MPS is also
+available, so those cases use the backend's own autograd path. The upstream
+coexistence limitation recorded in §10 remains; this op does not change it.
+The conf moves from 34 to 35 native routes.
+
 Stage 4 continued with the `embedding` category, which section 7 recorded as
 ~47% of a Qwen3-0.6B layer's device dispatch time -- the largest single item
 left. It is the first op here whose cost is a *read* of its operand rather than
