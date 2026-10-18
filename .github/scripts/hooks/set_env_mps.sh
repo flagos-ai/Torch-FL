@@ -159,25 +159,17 @@ if ! persist_python_import_isolation; then
 fi
 
 # --- Metal buffer wrapper ----------------------------------------------------
-# The display-diagnostics wrapper (type 1) is a reasonable default. A Python
-# framework whose binary links the private MetalTools framework already carries
-# it (type 0); selecting type 1 there redirects the same Metal work through an
-# extra wrapper and can fail after the first heap is created.
 METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0
 if [[ -n "${METAL_DEVICE_WRAPPER_TYPE:-}" ]]; then
   METAL_DEVICE_WRAPPER_TYPE_WAS_SET=1
+elif [[ "$(sw_vers -productVersion | cut -d. -f1)" -ge 14 ]]; then
+  # The Python.framework interpreter on the GitHub macOS 14 runner links the
+  # private MetalTools framework, but linking it does not select the wrapper.
+  # Use the explicit wrapper because a fresh MPS heap still fails its first
+  # small allocation after import with type 0.
+  METAL_DEVICE_WRAPPER_TYPE=1
 else
   METAL_DEVICE_WRAPPER_TYPE=0
-  for candidate in \
-    /Library/Frameworks/Python.framework/Versions/Current/Resources/Python.app/Contents/MacOS/Python \
-    "$(dirname "$(dirname "$(realpath "$BOOTSTRAP_PYTHON")")")/Resources/Python.app/Contents/MacOS/Python" \
-    "$VENV_PYTHON"; do
-    if [[ -f "$candidate" ]] && otool -L "$candidate" 2>/dev/null | grep -q '/System/Library/PrivateFrameworks/MetalTools.framework/'; then
-      METAL_DEVICE_WRAPPER_TYPE=1
-      echo "Python framework Metal wrapper found: $candidate"
-      break
-    fi
-  done
 fi
 if (( ! METAL_DEVICE_WRAPPER_TYPE_WAS_SET )); then
   export METAL_DEVICE_WRAPPER_TYPE

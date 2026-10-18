@@ -231,11 +231,11 @@ def test_runner_persists_the_environment_with_bash_3_2(tmp_path):
 
 
 def test_mps_hook_selects_the_metal_buffer_wrapper_before_torch():
-    """The framework Python carries the buffer wrapper used by MPS."""
+    """The hook selects the Metal wrapper that accepts a fresh MPS allocation."""
     hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
     assert "METAL_DEVICE_WRAPPER_TYPE=1" in hook
-    assert "MetalTools.framework" in hook
     assert "METAL_DEVICE_WRAPPER_TYPE=0" in hook
+    assert "sw_vers -productVersion | cut -d. -f1" in hook
     assert hook.index("METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0") < hook.index(
         "import torch"
     )
