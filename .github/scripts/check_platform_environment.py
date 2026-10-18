@@ -35,6 +35,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,16 @@ from types import SimpleNamespace
 ENVIRONMENT_VARIABLE = "FLAGOS_ENVIRONMENT_CHECK"
 
 _BOUNDS = ("at_least", "more_than", "exactly")
+
+# Mach-O cputype -> the name distutils tags a wheel with. Only the two this
+# project can produce are named; anything else is reported by number, because a
+# wrong name would read as a matched architecture.
+_CPU_TYPES = {7: "x86_64", 16777223: "x86_64", 12: "arm64", 16777228: "arm64"}
+
+# A fat file states its own entry count, which is read from the file and then
+# used to size the read that follows. Bounded so a corrupt or hostile header
+# cannot ask for an unbounded one.
+FAT_ARCH_LIMIT = 64
 
 # Every key a platform may state. The list is closed on purpose: a misspelled
 # key reads as an expectation that was never checked, and the platform would
@@ -65,6 +76,7 @@ SUPPORTED_KEYS = frozenset(
         "triton_backend",
         "flaggems_vendor",
         "require_imports",
+        "native_extensions_arch",
         "torch_musa_shim_only",
         "flagtree",
         "model_dir",
@@ -304,6 +316,84 @@ def assert_model_dir():
     assert model_path and Path(model_path).is_dir(), model_path
 
 
+def macho_architectures(path):
+    """The architectures one Mach-O file carries, or None if it is not one.
+
+    Read from the file itself rather than asked of `lipo` or `file`: this step
+    runs in the venv and the format is two fixed headers wide, so the only
+    dependency a subprocess would add is a tool that might be spelled
+    differently on the next runner image. `torch_fl._C` is already imported by
+    the time this is called, so its own `__file__` is the artifact to inspect --
+    a wheel built for the wrong architecture on a host that can still dlopen it
+    is the case the caller exists to catch, and its tag cannot be trusted for
+    that.
+    """
+    with open(path, "rb") as handle:
+        header = handle.read(8)
+    if len(header) < 8:
+        return None
+    magic = struct.unpack(">I", header[:4])[0]
+
+    # One architecture is a thin file: the load-bearing fact is the cputype
+    # that follows the magic, in the header's own byte order.
+    mentally_thin = {
+        0xFEEDFACE: ">",
+        0xCEFAEDFE: "<",
+        0xFEEDFACF: ">",
+        0xCFFAEDFE: "<",
+    }
+    if magic in mentally_thin:
+        cputype = struct.unpack(mentally_thin[magic] + "i", header[4:8])[0]
+        return [_CPU_TYPES.get(cputype, str(cputype))]
+
+    # Both architectures is a fat file, and this is the case the check exists
+    # for: "universal2" is two entries, and the quiet failure is a wheel that
+    # lists two and contains one. 0xCAFEBABE is the big-endian table, its
+    # byte-swapped self the little-endian one; the "fat64" pair carries 32-byte
+    # entries and a 64-bit offset the entries beyond the first are useless
+    # without. Two architectures fit in 20 bytes either way, so the count and
+    # the cputypes are all that is read.
+    fat = {0xCAFEBABE: (">", 20), 0xBEBAFECA: ("<", 20)}
+    fat |= {0xCAFEBABF: (">", 32), 0xBFBAFECA: ("<", 32)}
+    if magic not in fat:
+        return None
+    endian, entry_size = fat[magic]
+    with open(path, "rb") as handle:
+        blob = handle.read(8 + entry_size * FAT_ARCH_LIMIT)
+    count = struct.unpack(endian + "I", blob[4:8])[0]
+    if not 0 < count <= FAT_ARCH_LIMIT:
+        return None
+    arches = []
+    for index in range(count):
+        entry = blob[8 + entry_size * index : 8 + entry_size * (index + 1)]
+        if len(entry) < 4:
+            break
+        cputype = struct.unpack(endian + "i", entry[:4])[0]
+        arches.append(_CPU_TYPES.get(cputype, str(cputype)))
+    return arches or None
+
+
+def assert_native_extensions_arch(dependencies, expected):
+    """The compiled extension is built for the architecture it claims.
+
+    The macOS lane found this the expensive way: a universal2 interpreter makes
+    distutils tag the wheel `macosx-10.13-universal2` and compile with `-arch
+    arm64 -arch x86_64` while CMake builds the host's architecture alone, so
+    `ld` drops the dylib it cannot match and `_C.so` is left without the link
+    its platform needs -- a wheel that installs on both architectures and works
+    on one. Asserting the architecture of the loaded extension is what makes
+    the wheel's tag describe the artifact instead of the interpreter that
+    produced it.
+    """
+    extension = getattr(dependencies.torch_fl, "_C", None)
+    assert extension is not None, "torch_fl._C was not imported"
+    path = Path(extension.__file__).resolve()
+    arches = macho_architectures(path)
+    assert arches is not None, f"{path} is not a Mach-O file"
+    assert expected in arches, f"{path} is built for {arches}, expected {expected}"
+    print(f"native extension: {path} built for {arches}")
+
+
 def main():
     spec = load_spec()
     dependencies = import_dependencies(spec)
@@ -346,6 +436,8 @@ def main():
         flagtree_version = assert_flagtree(dependencies, spec["flagtree"])
     if spec.get("model_dir"):
         assert_model_dir()
+    if spec.get("native_extensions_arch"):
+        assert_native_extensions_arch(dependencies, spec["native_extensions_arch"])
 
     print(f"environment expectations: {json.dumps(spec, sort_keys=True)}")
     print(f"CPU PyTorch: {torch.__version__}")

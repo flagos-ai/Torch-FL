@@ -38,6 +38,12 @@ pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 FLAGOS_ACCELERATOR=mps pip install --no-build-isolation -e .
 ```
 
+An editable install creates `torch_fl.egg-info` beside the source tree. Use a
+separate checkout for each accelerator: an egg-info left by a vendor build
+would put that build's `torch.backends` entry point into a later MPS editable
+install. The MPS build rejects that stale metadata and asks you to remove it;
+for a regular wheel built with `python -m build`, no source egg-info is needed.
+
 There is **no vendor SDK to point at** and **no package-index lane**: Apple
 supplies the Metal stack with the operating system, and no FlagOS lane publishes
 an Apple wheel. The MPS wheel therefore declares only `torch` and `packaging`
@@ -64,12 +70,26 @@ whose `project_languages` includes `OBJCXX`.
 
 ## Verification
 
+An MPS installation deliberately has no `torch.backends` autoload entry point.
+A bare `import torch` keeps Apple's MPS backend active; use an explicit
+`import torch_fl` when you want the native `flagos` backend:
+
+```python
+import torch
+
+assert "torch_fl" not in __import__("sys").modules
+assert torch.accelerator.current_accelerator(False).type == "mps"
+x = torch.ones(3, device="mps", requires_grad=True)
+(x * x).sum().backward()                  # pure MPS: [2., 2., 2.]
+```
+
 Import and check the device runtime:
 
 ```python
 import torch, torch_fl
 from torch_fl import flagos
 
+print(torch._C._get_privateuse1_backend_name())  # flagos
 print(flagos.device_count())     # 1 on an Apple GPU, 0 without one
 print(flagos.is_available())
 
@@ -82,6 +102,14 @@ print(y.cpu())                   # host/device copy round trip
 z = torch.tensor([-3.5, 0.0, 2.25], device="flagos:0")
 print(torch.abs(z).cpu())        # the MPSGraph operator layer
 ```
+
+Explicit import makes both backends usable in one process. MPS and `flagos`
+forward work independently, and tensors round-trip between them. MPS autograd
+still stops at the PyTorch 2.10 engine's
+`opt_ready_stream && opt_parent_stream` assertion once `flagos` has claimed
+`PrivateUse1`; see design document section 10. Use the pure MPS path above for
+MPS training until PyTorch fixes that engine contract. Do not work around it
+with boxing or by patching PyTorch's native libraries.
 
 The stage-0 gate -- allocate, host/device copy, stream and event
 synchronization, allocator reuse -- is exercised by:
@@ -101,9 +129,15 @@ landed: the 28-function C ABI plus the allocator, and the `unary`, `binary`,
 `binary_scalar` and `reduce` categories of the MPSGraph operator layer -- nine
 aten ops: `abs`; `add`/`sub`/`mul` over two tensors and over a tensor and a host
 scalar (with aten's `alpha`); and `sum.dim_IntList`/`mean.dim`. Stage 3 has
-added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`)
-and two elementwise unaries (`neg`, `pow.Tensor_Scalar`) for fourteen in all.
-Those fourteen are claimed on the `PrivateUse1` `mps` slot by
+added the `gemm` category (`mm`, `bmm`), the `softmax` category (`_softmax`),
+two elementwise unaries (`neg`, `pow.Tensor_Scalar`) and the `conv` category
+(`convolution_overrideable`), which closes the stage-3 lanes. Stage 4 has added
+the `silu` and `embedding` categories and then the `div`/`div_scalar`/
+`reciprocal` ones, and the `layer_norm`, `where`, `cat` and `batch_norm`
+ones that the runtime-conformance traversal and the normalisation lanes
+named, and then the `exp`, `sigmoid`, `log`, `rsqrt`, `sqrt`, `tanh` and `erf`
+increments that followed them, for thirty-four in all.
+Those thirty-four are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
@@ -112,22 +146,67 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated fourteen are compared against the
-CPU reference in `tests/integration/ops/test_mps_unary.py`,
+Results are correct on every op: the accelerated thirty-four are compared
+against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
-`test_mps_softmax.py` and `test_mps_pow.py`, and a case their kernels decline
-takes the CPU round-trip rather than a wrong answer. The
+`test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py`,
+`test_mps_silu.py`, `test_mps_exp.py`, `test_mps_log.py`, `test_mps_rsqrt.py`,
+`test_mps_sqrt.py`, `test_mps_tanh.py`,
+`test_mps_erf.py`,
+`test_mps_sigmoid.py`,
+`test_mps_embedding.py`, `test_mps_div.py`,
+`test_mps_index_select.py`, `test_mps_take.py`, `test_mps_gather.py`,
+`test_mps_layer_norm.py`, `test_mps_cat.py`, `test_mps_where.py` and
+`test_mps_batch_norm.py`, and a case their
+kernels decline takes the CPU round-trip rather than a wrong answer. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
 than copying it: a transposed last two axes over dense memory is recognised and
 handed to MPSGraph's transpose node, which measured free next to the copy it
-replaces. `conv` is the last lane of stage 3. A platform whose GPU
-never runs a kernel is a "Runtime only" row, not operator support; fourteen ops
-is operator support for the unary, elementwise, reduction, matrix-product and
-softmax families and nothing more. Note that `softmax.int` is not among them and
-cannot be: it is `CompositeImplicitAutograd` on this PyTorch build, so the
+replaces. The `conv` kernel serves `nn.Conv2d`/`nn.Conv3d` -- including the
+pointwise, grouped and depthwise shapes a vision or mixer model reaches for -- by
+carrying the stride, dilation, groups and per-axis padding into the MPSGraph
+descriptor; `conv1d` and transposed convolutions have no selector there and take
+the round-trip. The `silu` kernel -- what a SwiGLU MLP multiplies its gate
+projection by -- is the first op here MPSGraph has no selector for, so it is a
+composition of `sigmoid` and a multiply rather than one node; the gate for it is
+a measurement against `at::silu` rather than the identity, because aten's own
+`silu` is not `x * sigmoid(x)` on the narrow widths (design doc section 7).
+The `embedding` kernel -- the table read every transformer's head and token
+embedding is -- is the first op here whose cost is a read of its operand rather
+than a computation over it. It replaced a `cpu_fallback` that copied the whole
+`(151936, 1024)` weight to the host on every call, which measured 55.8 ms of a
+55.3 ms call on an M5 against 0.697 ms for the same read performed on the CPU;
+the gather node itself measures well under a millisecond. The interesting part
+of that kernel is not the node but the two things the reference's contract
+forces on the host: an out-of-range index must raise rather than take the
+graph's silent first-row answer, and `padding_idx` must *not* be read, because
+the forward op's output does not depend on it -- treating it as though it did
+cost the whole-table round-trip on every `F.embedding` call, since the Python
+front end passes `None` as `-1` (design doc section 7).
+The `div` increment closes the elementwise arithmetic set -- `add`/`sub`/`mul`
+have been served since stage 2 -- and carries `div.Tensor`, `div.Scalar` and
+`reciprocal` together, because `1 / x` is division with a constant numerator and
+the two come from one MPSGraph node family. Its gate is the one place on this
+backend where the dtype predicate is *not* the dtype-preserving one its
+siblings use: `div(int, int)` is a float tensor on the reference
+(`-7 / 2` is `-3.5`), while the graph's integral division truncates in place and
+returns int64 `-3`, so an integral operand takes the round-trip. The one
+measured difference from the reference is recorded in the kernel and pinned in
+the test: the graph flushes a subnormal *result* to zero (`1e-38 / 2` is `0`
+where the CPU says `5e-39`), which is the same boundary `mul` and `add` have had
+since stage 2 (design doc section 7).
+A platform whose GPU
+never runs a kernel is a "Runtime only" row, not operator support;
+thirty-four ops
+is operator support for the unary, elementwise, reduction, matrix-product,
+softmax, convolution, activation, normalisation and table-read families and nothing more. Note that `softmax.int` is
+not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch
+build, so the
 dispatcher decomposes it before any backend key is consulted. `_softmax` -- what
 `torch.softmax` and SDPA lower to -- is the spelling that runs.
-
+`convolution_overrideable` is the conv analogue: `aten.convolution` also
+decomposes above the backend key, so the spelling every `F.conv2d` and
+`nn.Conv2d` reaches is the one registered.
 ## MPSGraph answers measured on an M5
 
 The accepted strategy is MPSGraph-first with a hand-written MSL fallback

@@ -298,10 +298,28 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         is False
     )
     job = workflow["jobs"]["integration-tests"]
-    assert (
-        job["container"]["options"]
-        == "${{ needs.configuration.outputs.container_options }}"
-    )
+    container = job.get("container")
+    if isinstance(container, dict):
+        container_image = container["image"]
+        volumes = container["volumes"]
+        options = container["options"]
+    else:
+        # MPS runs directly on macOS because a macOS runner cannot start a
+        # container. The job passes the configured values through one
+        # expression, which it can turn into a mapping or null.
+        if isinstance(container, str):
+            assert "needs.configuration.outputs.ci_image" in container
+            assert "needs.configuration.outputs.container_volumes" in container
+            assert "needs.configuration.outputs.container_options" in container
+            return
+        container_image, volumes, options = yaml.safe_load(
+            '{"image":"${{ needs.configuration.outputs.ci_image }}",'
+            '"volumes":"${{ fromJson(needs.configuration.outputs.container_volumes) }}",'
+            '"options":"${{ needs.configuration.outputs.container_options }}"}'
+        ).values()
+    assert container_image == "${{ needs.configuration.outputs.ci_image }}"
+    assert volumes == "${{ fromJson(needs.configuration.outputs.container_volumes) }}"
+    assert options == "${{ needs.configuration.outputs.container_options }}"
     steps = {step.get("id", step.get("name")): step for step in job["steps"]}
     assert "!cancelled()" in steps["merge-report"]["if"]
     assert "steps.integration-tests.outcome" in steps["merge-report"]["if"]
