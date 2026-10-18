@@ -64,23 +64,6 @@ export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
 
-# --- MPS allocator limit -----------------------------------------------------
-# A GitHub macos-14 runner reports a 7.93 GiB MPS ceiling above the same Metal
-# allocator used by the flagos device. PyTorch derives its own ceiling from the
-# recommended working set, which leaves too little headroom beside the runner's
-# OS and display processes. The first MPS runtime run failed trying to allocate
-# 256 bytes with only 8 MiB allocated -- in a child process that had never
-# imported torch_fl, so this is the host's limit rather than a leak in the new
-# device. A finite 0.7 limit also failed at the same 3.27 GiB ceiling.
-#
-# This lane has no large MPS workload. Remove the upper limit so the allocator
-# can grow into memory the host already reports as available. The low ratio is
-# a soft limit, and PyTorch requires it to stay below the high ratio; a small
-# workload otherwise inherits the 1.4 unified-memory default and fails with
-# `invalid low watermark ratio 1.4` before the first test.
-export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
-export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5
-
 # --- One architecture, the one this runner has -------------------------------
 # The python.org installer on a GitHub macOS runner is a universal2 build, so
 # distutils tags everything it compiles `macosx-10.13-universal2` and passes
@@ -170,46 +153,126 @@ fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
-export PYTHONNOUSERSITE=1
-export PYTHONPATH=""
-
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  {
-    echo "VIRTUAL_ENV=$VENV_ROOT"
-    echo "PATH=$VENV_ROOT/bin:$PATH"
-    echo "PYTHONNOUSERSITE=1"
-    echo "PYTHONPATH="
-  } >> "$GITHUB_ENV"
+if ! persist_python_import_isolation; then
+  echo "::error::Failed to persist the isolated MPS Python environment" >&2
+  exit 1
 fi
 
+# --- Metal buffer wrapper ----------------------------------------------------
+# The display-diagnostics wrapper (type 1) is a reasonable default. A Python
+# framework whose binary links the private MetalTools framework already carries
+# it (type 0); selecting type 1 there redirects the same Metal work through an
+# extra wrapper and can fail after the first heap is created.
+METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0
+if [[ -n "${METAL_DEVICE_WRAPPER_TYPE:-}" ]]; then
+  METAL_DEVICE_WRAPPER_TYPE_WAS_SET=1
+else
+  METAL_DEVICE_WRAPPER_TYPE=0
+  for candidate in \
+    /Library/Frameworks/Python.framework/Versions/Current/Resources/Python.app/Contents/MacOS/Python \
+    "$(dirname "$(dirname "$(realpath "$BOOTSTRAP_PYTHON")")")/Resources/Python.app/Contents/MacOS/Python" \
+    "$VENV_PYTHON"; do
+    if [[ -f "$candidate" ]] && otool -L "$candidate" 2>/dev/null | grep -q '/System/Library/PrivateFrameworks/MetalTools.framework/'; then
+      METAL_DEVICE_WRAPPER_TYPE=1
+      echo "Python framework Metal wrapper found: $candidate"
+      break
+    fi
+  done
+fi
+if (( ! METAL_DEVICE_WRAPPER_TYPE_WAS_SET )); then
+  export METAL_DEVICE_WRAPPER_TYPE
+fi
+echo "Metal buffer wrapper: $METAL_DEVICE_WRAPPER_TYPE"
+
+# --- MPS allocator limit -----------------------------------------------------
+# A GitHub macos-14 runner reports a 7.93 GiB MPS ceiling above the same Metal
+# allocator used by the flagos device. A finite 0.7 limit failed at the same
+# 3.27 GiB ceiling. This lane has no large MPS workload, so remove the upper
+# limit. The low ratio is a soft limit, and PyTorch requires it to stay below
+# the high ratio; 0.5 is finite and validated below because the unified-memory
+# default (1.4) is rejected once the upper limit is removed.
+TORCH_FL_MPS_HIGH_WATERMARK_RATIO=0.0
+TORCH_FL_MPS_LOW_WATERMARK_RATIO=0.5
+
 # --- Verify the interpreter --------------------------------------------------
-CI_STAGE="$CI_STAGE" "$VENV_PYTHON" - <<'PY'
+CI_STAGE="$CI_STAGE" \
+TORCH_FL_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" \
+TORCH_FL_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO" \
+"$VENV_PYTHON" - <<'PY'
 import os
 import platform
 import sys
 
-import torch
+
+high_ratio = os.environ["TORCH_FL_MPS_HIGH_WATERMARK_RATIO"]
+low_ratio = os.environ["TORCH_FL_MPS_LOW_WATERMARK_RATIO"]
+# Both knobs are read when the MPS allocator is created, so set them before
+# the import. The explicit test below uses a fresh process to change them.
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = high_ratio
+os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = low_ratio
+
+import torch  # noqa: E402
 
 # The un-suffixed PyPI build, not the `+cpu` Linux wheel: torch.version.cuda is
 # None and the version carries no local tag.
-assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-assert torch.version.cuda is None, torch.version.cuda
-assert torch.backends.mps.is_built(), "this torch build has no MPS support"
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"Machine: {platform.machine()}")
 print(f"MPS built: {torch.backends.mps.is_built()}")
 print(f"MPS available: {torch.backends.mps.is_available()}")
+print(f"Recommended MPS memory: {torch.mps.recommended_max_memory()} bytes")
+print(f"MPS high watermark: {high_ratio}")
+print(f"MPS low watermark: {low_ratio}")
+print(f"METAL_DEVICE_WRAPPER_TYPE: {os.environ.get('METAL_DEVICE_WRAPPER_TYPE')}")
+try:
+    # The output is consumed before the process exits: the shutdown test below
+    # deliberately keeps its tensors alive until interpreter teardown.
+    tensor = torch.arange(12, dtype=torch.float32, device="mps")
+    tensor_cpu = tensor.cpu()
+except RuntimeError:
+    print(
+        "MPS probe failed: "
+        f"driver allocated={torch.mps.driver_allocated_memory()} bytes, "
+        f"current allocated={torch.mps.current_allocated_memory()} bytes",
+        file=sys.stderr,
+    )
+    torch.mps.synchronize()
+    raise
+assert tensor_cpu.tolist() == list(range(12))
+del tensor_cpu
+torch.mps.synchronize()
+
+assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+assert torch.backends.mps.is_built(), "this torch build has no MPS support"
+print("MPS allocation: ok")
 PY
 
 # --- Verify the accelerator is visible through torch_fl ----------------------
-if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
+if [[ "$CI_STAGE" == "integration" ]]; then
+  TORCH_FL_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" \
+  TORCH_FL_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO" \
   "$VENV_PYTHON" - <<'PY'
-import torch_fl
+import os
+
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = os.environ[
+    "TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
+]
+os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = os.environ[
+    "TORCH_FL_MPS_LOW_WATERMARK_RATIO"
+]
+
+import torch_fl  # noqa: E402
+import torch  # noqa: E402
 
 assert torch_fl.flagos.is_available(), "flagos device is unavailable"
 assert torch_fl.flagos.device_count() >= 1, torch_fl.flagos.device_count()
+a = torch.arange(12, dtype=torch.float32, device="mps")
+b = torch.empty(3, 4, device="flagos")
+b.copy_(a.reshape(3, 4))
+assert torch.equal(b.cpu(), a.reshape(3, 4).cpu())
 print(f"flagos devices: {torch_fl.flagos.device_count()}")
+print("MPS to flagos copy: ok")
 PY
 fi
 
@@ -218,11 +281,12 @@ if command -v system_profiler >/dev/null 2>&1; then
 fi
 
 # --- Export to later workflow steps ------------------------------------------
-if [[ -n "${GITHUB_PATH:-}" ]]; then
-  printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
-fi
+# A new workflow step starts a Python process again, so the allocator limit has
+# to be established before torch's import rather than only in this hook.
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS PYTORCH_MPS_HIGH_WATERMARK_RATIO PYTORCH_MPS_LOW_WATERMARK_RATIO ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
+  export TORCH_FL_MPS_HIGH_WATERMARK_RATIO
+  export TORCH_FL_MPS_LOW_WATERMARK_RATIO
+  export_ci_env PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS METAL_DEVICE_WRAPPER_TYPE TORCH_FL_MPS_HIGH_WATERMARK_RATIO TORCH_FL_MPS_LOW_WATERMARK_RATIO ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
 fi
 
 cd "$REPO_ROOT"

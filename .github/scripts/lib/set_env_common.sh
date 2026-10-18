@@ -466,6 +466,26 @@ build_flagos_inplace() {
   python setup.py build_ext --inplace
 }
 
+# Isolate pytest from user-site and source-only imports. The hook checks this
+# function on the job's bash 3.2; a capture is an assignment there, which would
+# hide a failed write to GITHUB_PATH when sourced under `set -e`.
+persist_python_import_isolation() {
+  export PYTHONNOUSERSITE=1
+  export PYTHONPATH=""
+  if [[ -n "${GITHUB_PATH:-}" && -n "${VIRTUAL_ENV:-}" ]]; then
+    printf '%s\n' "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
+  fi
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    {
+      echo "PYTHONNOUSERSITE=1"
+      echo "PYTHONPATH="
+      if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        echo "VIRTUAL_ENV=$VIRTUAL_ENV"
+      fi
+    } >> "$GITHUB_ENV"
+  fi
+}
+
 # Persist the named variables to $GITHUB_ENV for later workflow steps. Every
 # name must be assigned before the call: they are read with eval under `set -u`.
 export_ci_env() {

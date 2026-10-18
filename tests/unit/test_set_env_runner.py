@@ -230,25 +230,43 @@ def test_runner_persists_the_environment_with_bash_3_2(tmp_path):
     assert output.read_text() == "TEST_VALUE=--help\n"
 
 
-def test_mps_hook_uses_a_reachable_allocator_limit_for_the_tests():
-    """The test lane must retain PyTorch's verified MPS allocator headroom."""
+def test_mps_hook_selects_the_metal_buffer_wrapper_before_torch():
+    """The framework Python carries the buffer wrapper used by MPS."""
     hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
-    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0" in hook
+    assert "METAL_DEVICE_WRAPPER_TYPE=1" in hook
+    assert "MetalTools.framework" in hook
+    assert "METAL_DEVICE_WRAPPER_TYPE=0" in hook
+    assert hook.index("METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0") < hook.index(
+        "import torch"
+    )
 
-    # PyTorch parses the low watermark before the high one. A leftover default
-    # (1.4) would reject this lane for exceeding the high watermark.
-    assert "export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5" in hook
-    high = hook.index("export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0")
-    low = hook.index("export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.5")
-    assert high < low
+    workflow = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
+    assert "METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}" in (
+        workflow
+    )
+    assert "PYTORCH_MPS_HIGH_WATERMARK_RATIO=" in workflow
+    assert 'if [[ -n "$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" ]]' in workflow
 
-    exports = [
-        line.split()
-        for line in hook.splitlines()
-        if line.strip().startswith("export_ci_env ")
-    ]
-    assert any("PYTORCH_MPS_HIGH_WATERMARK_RATIO" in line for line in exports)
-    assert any("PYTORCH_MPS_LOW_WATERMARK_RATIO" in line for line in exports)
+
+def test_mps_hook_removes_the_upper_limit_and_probes_a_real_allocation():
+    """Setup must test the allocator in the same venv as the integration lane."""
+    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    assert "TORCH_FL_MPS_HIGH_WATERMARK_RATIO=0.0" in hook
+    assert "TORCH_FL_MPS_LOW_WATERMARK_RATIO=0.5" in hook
+    probe = hook.index('torch.arange(12, dtype=torch.float32, device="mps")')
+    assert hook.index("install_cpu_torch") < probe < hook.index("build_flagos_inplace")
+    assert 'b.copy_(a.reshape(3, 4))' in hook
+
+    workflow = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
+    assert (
+        'export PYTORCH_MPS_HIGH_WATERMARK_RATIO='
+        '"$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"'
+    ) in workflow
+    assert (
+        'export PYTORCH_MPS_LOW_WATERMARK_RATIO='
+        '"$TORCH_FL_MPS_LOW_WATERMARK_RATIO"'
+    ) in workflow
+    assert ':="${TORCH_FL_MPS_' not in workflow
 
 
 def _pyproject_build_requirements() -> list[str]:
