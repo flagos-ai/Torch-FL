@@ -228,13 +228,20 @@ class TestCopyTransfer:
                 assert torch.equal(actual_value, expected[name])
                 del actual_value
 
-            inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]], device=device)
-            actual = torch.ops.aten.linear(inputs, weight, bias).cpu()
+            inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+            with torch.no_grad():
+                device_weight = weight.detach().clone()
+                device_bias = bias.detach().clone()
+                actual = torch.ops.aten.linear(
+                    inputs.to(device),
+                    device_weight,
+                    device_bias,
+                ).cpu()
             reference = torch.ops.aten.linear(
-                inputs.cpu(), expected["weight"], expected["bias"]
+                inputs, expected["weight"], expected["bias"]
             )
             assert torch.allclose(actual, reference)
-            del inputs, actual, reference
+            del inputs, device_weight, device_bias, actual, reference
 
             model.cpu()
             assert model.weight is weight
