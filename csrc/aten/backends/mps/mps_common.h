@@ -247,6 +247,27 @@ at::Tensor MpsSoftmaxOnHost(
 // and get exactly that.
 bool MpsSupportsSiluDtype(at::ScalarType dtype);
 
+// Whether the SiLU derivative computes on the MPSGraph path. The reference
+// promotes a mixed pair to the wider width. MpsRunGraph requires the inputs and
+// result to share an element type, so this predicate serves only equal-width
+// float32 and float16 pairs; the body also checks the operands' device and
+// broadcastable shape, and declines a mixed, float64, bfloat16 or invalid pair
+// to the round-trip.
+//
+// The derivative is a separate formula: an exp-based reading can overflow while
+// the sigmoid-based one remains finite for a large positive operand. Its
+// correctness is therefore held by the backward cases in
+// tests/integration/ops/test_mps_silu.py rather than inferred from the forward
+// gate. bfloat16 is declined because its graph rounds differently from the
+// reference by up to 3.1e-02 around x=3; float32 and float16 stay within their
+// measured tolerances.
+//
+// float64 has no MPSGraph element type. Integral or bool operands are the
+// reference's error. All of them take the round-trip.
+bool MpsSupportsSiluBackwardDtype(
+    at::ScalarType grad_output_dtype,
+    at::ScalarType self_dtype);
+
 // Whether `sigmoid` computes exactly on the MPSGraph path, and the increment
 // that declined a width the sibling above serves -- which is the point of it.
 //

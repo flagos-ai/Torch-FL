@@ -144,11 +144,30 @@ OPS = {
     # `sigmoidWithTensor:`, and `x * sigmoid(x)` is the definition, so this is
     # the first body here whose graph is two nodes rather than one.
     #
-    # Only `silu` is registered. `silu.out` and `silu_` write into a tensor the
-    # caller owns, like every other `.out`/inplace spelling on this backend, and
-    # `silu_backward` is a separate op with a separate selector question that
-    # this increment does not answer.
+    # `silu.out` and `silu_` write into a tensor the caller owns, like every
+    # other `.out`/inplace spelling on this backend, so they stay unregistered.
+    # `silu_backward` is a separate body below: it uses the derivative
+    # `sigmoid(x) * (1 + x * (1 - sigmoid(x)))` and has its own dtype gate.
     "silu": "silu",
+    # The first backward body on this backend, and the one a SwiGLU projection
+    # needs before it can train: the forward `silu` is already served, so every
+    # autograd step that reaches its gradient would otherwise leave the device.
+    #
+    # The derivative is built from `sigmoid` directly rather than by symbolic
+    # differentiation through an exponential. `exp(x)` overflows before the host
+    # reference's cancellation settles the same derivative at a large positive
+    # x, so a graph written that way has the wrong answer at the edge where the
+    # gradient is closest to 1. The direct expression keeps that cancellation
+    # in the same order the reference uses. See T_SILU_BACKWARD.
+    #
+    # float32 and float16 are served. bfloat16 is declined because its graph
+    # differs from the reference by up to 3.1e-02 around x=3, while float32 and
+    # float16 stay within their measured tolerances.
+    #
+    # The schema's `.grad_input` spelling writes into a tensor the caller owns
+    # and stays on the fallback, like every other in-place spelling here. Only
+    # the functional op, which autograd names for the derivative, is registered.
+    "silu_backward": "silu_backward",
     # The activation `silu` is built from, and an op a model reaches for on its
     # own -- a hand-written attention mask, a gating projection, a `sigmoid` in a
     # loss. MPSGraph has a real selector (`sigmoidWithTensor:`) and it is the very
@@ -469,6 +488,10 @@ AT_OP = {
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    # The CPU reference behind a declined `silu_backward`. The op has its own
+    # derivative kernel -- it is not a prompted composition -- so this is where
+    # the reference's promotion rule and gradient values live.
+    "silu_backward": "silu_backward",
     # The CPU reference the `sigmoid` body round-trips to on the width it
     # declines. `sigmoid` is its own aten kernel rather than a composition, so
     # the round-trip lands on the reference's own implementation and reports its
@@ -583,6 +606,11 @@ SUPPORTS = {
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    # Two equal float widths, float32 and float16. The reference promotes a
+    # mixed pair to a common width, while MpsRunGraph requires every operand and
+    # its result to share an element type, so a mixed pair takes the round-trip.
+    # See MpsSupportsSiluBackwardDtype for why bfloat16 is declined.
+    "silu_backward": "MpsSupportsSiluBackwardDtype",
     # Deliberately *not* the sibling's predicate, even though the two bodies
     # build the same node. A width list belongs to the op and not to the node:
     # see MpsSupportsSigmoidDtype for the measurement that separates them.
@@ -720,6 +748,11 @@ CALLS = {
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # Unused: T_SILU_BACKWARD writes the sigmoid, the residual `1 - sigmoid`
+    # and both multiplies in full, because the second operand appears only in
+    # the final multiply. The entry exists because `render` reads `CALLS[op]`
+    # for every op in OPS.
+    "silu_backward": "",
     # The same selector the `silu` body above names as its first node, here as the
     # whole body -- `sigmoid` *is* that node. Named separately because the two
     # categories carry different dtype gates and different fallbacks.
@@ -887,6 +920,10 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # Empty for the same reason: the graph is a function of both operands'
+    # dtypes and shapes, which MpsRunGraph folds into the key itself, and the
+    # body bakes no host value into it.
+    "silu_backward": "",
     # Empty for the same reason `silu`'s is: the graph is a function of the
     # operand's dtype and shape, which MpsRunGraph folds into the key itself, and
     # the body reads no other host value.
@@ -1700,6 +1737,78 @@ at::Tensor {kernel}(const at::Tensor& self) {{
       }});
   if (!ran) {{
     return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The SiLU derivative, shared by autograd's `silu_backward` and a call to
+# `torch.ops.aten.silu_backward`. Its operand is the upstream gradient rather
+# than `silu`'s own output, so the body is a function of both tensors:
+#
+#     g * sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+#
+# The graph keeps `sigmoid` as a node instead of differentiating through
+# `exp(x)`: `exp` overflows before the cancellation in the derivative settles
+# for a large positive x, while this expression remains finite. Both operands
+# are checked for a supported common width, device and broadcastable shape. The
+# node then broadcasts the operands to the result shape exactly as aten does,
+# and an invalid pair takes the round-trip so the reference raises its own
+# error.
+T_SILU_BACKWARD = """\
+at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& self) {{
+  if (!mps::{supports}(grad_output.scalar_type(), self.scalar_type()) ||
+      grad_output.device() != self.device()) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }}
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(grad_output_c.sizes(), self_c.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }}
+  at::Tensor out = at::empty(out_shape, grad_output_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{grad_output_c, self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* gate = [graph sigmoidWithTensor:args[1] name:nil];
+        MPSGraphTensor* residual = [graph subtractionWithPrimaryTensor:
+                                              [graph constantWithScalar:1
+                                                               dataType:args[1].dataType]
+                                                    secondaryTensor:gate
+                                                               name:nil];
+        if (gate == nil || residual == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* curve = [graph additionWithPrimaryTensor:
+                                        [graph constantWithScalar:1
+                                                         dataType:args[1].dataType]
+                                                secondaryTensor:
+                                        [graph multiplicationWithPrimaryTensor:args[1]
+                                                              secondaryTensor:residual
+                                                                         name:nil]
+                                                           name:nil];
+        if (curve == nil) {{
+          return nil;
+        }}
+        return [graph multiplicationWithPrimaryTensor:
+                        [graph multiplicationWithPrimaryTensor:args[0]
+                                              secondaryTensor:gate
+                                                         name:nil]
+                                      secondaryTensor:curve
+                                                 name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
   }}
   return out;
 }}
@@ -3483,6 +3592,7 @@ CATEGORIES = {
     "pow_scalar": T_POW,
     "conv": T_CONV,
     "silu": T_SILU,
+    "silu_backward": T_SILU_BACKWARD,
     "sigmoid": T_SIGMOID,
     "exp": T_EXP,
     "log": T_EXP,
@@ -3572,6 +3682,7 @@ FILE_HEADER = """\
 #include <ATen/ops/reciprocal.h>
 #include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
+#include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/take.h>

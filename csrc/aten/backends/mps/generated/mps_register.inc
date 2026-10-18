@@ -40,6 +40,7 @@
   m.impl("rsqrt", WrapperRsqrt);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("silu", WrapperSilu);
+  m.impl("silu_backward", WrapperSiluBackward);
   m.impl("sqrt", WrapperSqrt);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);

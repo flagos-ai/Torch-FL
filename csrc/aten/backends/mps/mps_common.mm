@@ -200,6 +200,18 @@ bool MpsSupportsSiluDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsSiluBackwardDtype(
+    at::ScalarType grad_output_dtype,
+    at::ScalarType self_dtype) {
+  // Equal widths only: the reference promotes a mixed pair, while every
+  // MpsRunGraph operand and its result must have the same element type. The
+  // backward graph rounds bfloat16 differently from the reference while
+  // float32 and float16 stay within their measured tolerances. Integral and
+  // bool pairs have no floating result to hand to the graph.
+  return grad_output_dtype == self_dtype &&
+      (self_dtype == at::kFloat || self_dtype == at::kHalf);
+}
+
 bool MpsSupportsSigmoidDtype(at::ScalarType dtype) {
   // float32 alone, and the narrowness is the increment: see the note in
   // mps_common.h. float16 is declined because this SDK flushes a subnormal

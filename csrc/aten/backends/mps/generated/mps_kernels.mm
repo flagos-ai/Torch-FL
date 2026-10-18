@@ -49,6 +49,7 @@
 #include <ATen/ops/reciprocal.h>
 #include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
+#include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/take.h>
@@ -788,6 +789,63 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
+
+at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor& self) {
+  if (!mps::MpsSupportsSiluBackwardDtype(grad_output.scalar_type(), self.scalar_type()) ||
+      grad_output.device() != self.device()) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(grad_output_c.sizes(), self_c.sizes());
+  } catch (const std::exception&) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  at::Tensor out = at::empty(out_shape, grad_output_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("silu_backward"),
+      {grad_output_c, self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* gate = [graph sigmoidWithTensor:args[1] name:nil];
+        MPSGraphTensor* residual = [graph subtractionWithPrimaryTensor:
+                                              [graph constantWithScalar:1
+                                                               dataType:args[1].dataType]
+                                                    secondaryTensor:gate
+                                                               name:nil];
+        if (gate == nil || residual == nil) {
+          return nil;
+        }
+        MPSGraphTensor* curve = [graph additionWithPrimaryTensor:
+                                        [graph constantWithScalar:1
+                                                         dataType:args[1].dataType]
+                                                secondaryTensor:
+                                        [graph multiplicationWithPrimaryTensor:args[1]
+                                                              secondaryTensor:residual
+                                                                         name:nil]
+                                                           name:nil];
+        if (curve == nil) {
+          return nil;
+        }
+        return [graph multiplicationWithPrimaryTensor:
+                        [graph multiplicationWithPrimaryTensor:args[0]
+                                              secondaryTensor:gate
+                                                         name:nil]
+                                      secondaryTensor:curve
+                                                 name:nil];
+      });
+  if (!ran) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kMps, SiluBackwardKernelMps)
 
 at::Tensor SigmoidKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsSigmoidDtype(self.scalar_type())) {

@@ -39,11 +39,14 @@ that is what most of this file is about. Four properties are pinned here.
   its graph key is the op name and nothing else -- ``MpsRunGraph`` folds the
   operand's dtype and shape in itself. The interleaved case below is what holds
   that a dtype or shape on a warm cache still gets its own plan.
-* **Which spelling is registered.** ``silu.out`` and ``silu_`` write into a
-  tensor the caller owns and ``silu_backward`` is a separate op, so all three
-  stay on the fallback. The dispatch-log cases hold that ``F.silu`` and
-  ``aten.silu`` reach the kernel, because a numeric-only test passes on the
-  fallback too.
+* **Which spelling is registered.** ``silu.out``, ``silu_`` and
+  ``silu_backward.grad_input`` write into a tensor the caller owns, so all three
+  stay on the fallback. The functional ``silu_backward`` is registered on the
+  same device for equal float32 and float16 pairs, so the backward pass and an
+  explicit aten call stay on MPS. bfloat16 is declined because its graph
+  differed from the reference by up to 3.1e-02 around x=3. The dispatch-log
+  cases hold that the calls reach their kernels, because a numeric-only test
+  passes on the fallback too.
 
 Every case self-skips off an MPS build, like the stage-1 to stage-3 suites.
 """
@@ -77,6 +80,7 @@ TOLERANCE = {"rtol": 1e-5, "atol": 1e-5}
 # float16 and bfloat16 carry ~3 decimal digits, so a graph that rounds once and a
 # reference that rounds once can differ by an ulp or two of the narrow type.
 LOW_PRECISION_TOLERANCE = {"rtol": 1e-3, "atol": 1e-3}
+NATIVE_BACKWARD_DTYPES = [torch.float32, torch.float16]
 
 
 def _to_device(t: torch.Tensor) -> torch.Tensor:
@@ -95,6 +99,11 @@ def _reference(host: torch.Tensor) -> torch.Tensor:
     wrong.
     """
     return torch.ops.aten.silu(host)
+
+
+def _backward_reference(grad_output: torch.Tensor, host: torch.Tensor) -> torch.Tensor:
+    """The functional derivative, promoted exactly as the reference promotes."""
+    return torch.ops.aten.silu_backward(grad_output, host)
 
 
 def _tolerance(dtype: torch.dtype) -> dict:
@@ -283,6 +292,175 @@ class TestSiluCompositionIsNotTheFormula:
         )
 
 
+class TestSiluBackwardCorrectness:
+    """The derivative stays on MPS and equals the reference."""
+
+    @pytest.mark.parametrize("dtype", NATIVE_BACKWARD_DTYPES)
+    @pytest.mark.anyplatform
+    def test_autograd_matches_cpu(self, dtype):
+        """A forward and backward pass through ``F.silu`` use the native pair."""
+        host = (torch.randn(4, 64) * 3.0).to(dtype)
+        expected_input = host.detach().clone().requires_grad_()
+        (expected,) = torch.autograd.grad(
+            torch.nn.functional.silu(expected_input).sum(),
+            expected_input,
+        )
+
+        operand = _to_device(host).requires_grad_()
+        (got,) = torch.autograd.grad(torch.nn.functional.silu(operand).sum(), operand)
+        assert operand.grad is None
+        _assert_matches_cpu(got, expected)
+
+    @pytest.mark.parametrize("dtype", NATIVE_BACKWARD_DTYPES)
+    @pytest.mark.anyplatform
+    def test_direct_aten_call_matches_cpu(self, dtype):
+        grad_host = (torch.randn(3, 7) * 2.0).to(dtype)
+        host = (torch.randn(3, 7) * 4.0).to(dtype)
+        _assert_matches_cpu(
+            torch.ops.aten.silu_backward(
+                _to_device(grad_host),
+                _to_device(host),
+            ),
+            _backward_reference(grad_host, host),
+        )
+
+    @pytest.mark.anyplatform
+    def test_broadcasting_and_rank_zero(self):
+        """The node broadcasts both operands into the reference result shape."""
+        grad_host = torch.randn(4, 1, 5)
+        host = torch.randn(3, 1)
+        _assert_matches_cpu(
+            torch.ops.aten.silu_backward(
+                _to_device(grad_host),
+                _to_device(host),
+            ),
+            _backward_reference(grad_host, host),
+        )
+        scalar_grad = torch.tensor(0.5)
+        scalar_host = torch.tensor(2.0)
+        out = torch.ops.aten.silu_backward(
+            _to_device(scalar_grad),
+            _to_device(scalar_host),
+        )
+        assert out.shape == ()
+        _assert_matches_cpu(out, _backward_reference(scalar_grad, scalar_host))
+
+    @pytest.mark.anyplatform
+    def test_large_positive_operand_does_not_overflow(self):
+        """The derivative settles at one; an ``exp``-based graph could overflow."""
+        host = torch.tensor([20.0, 40.0, 80.0, 100.0])
+        grad_host = torch.tensor([1.0, 0.0, -1.0, 2.0])
+        got = torch.ops.aten.silu_backward(
+            _to_device(grad_host),
+            _to_device(host),
+        )
+        expected = _backward_reference(grad_host, host)
+        _assert_matches_cpu(got, expected)
+        assert torch.isfinite(got.cpu()).all()
+        assert expected[1:].tolist() == [0.0, -1.0, 2.0]
+
+    @pytest.mark.anyplatform
+    def test_edges_follow_the_reference(self):
+        """Zeros, infinities and NaN are compared by their reference semantics."""
+        host = torch.tensor(
+            [0.0, -0.0, float("inf"), float("-inf"), float("nan"), -1e30]
+        )
+        grad_host = torch.ones_like(host)
+        got = torch.ops.aten.silu_backward(
+            _to_device(grad_host),
+            _to_device(host),
+        ).cpu()
+        expected = _backward_reference(grad_host, host)
+        finite = torch.isfinite(expected)
+        assert got.shape == expected.shape
+        assert got.dtype == expected.dtype
+        assert torch.equal(torch.isnan(got), torch.isnan(expected))
+        torch.testing.assert_close(got[finite], expected[finite], **TOLERANCE)
+
+    @pytest.mark.anyplatform
+    def test_strided_operands_are_materialised(self):
+        host = torch.randn(6, 8)
+        grad_host = torch.randn(3, 8)
+        got = torch.ops.aten.silu_backward(
+            _to_device(grad_host)[:, ::2],
+            _to_device(host)[::2, ::2],
+        )
+        _assert_matches_cpu(
+            got,
+            _backward_reference(grad_host[:, ::2], host[::2, ::2]),
+        )
+
+    @pytest.mark.anyplatform
+    def test_empty_operands(self):
+        host = torch.empty(0, 4)
+        grad_host = torch.empty(1, 4)
+        out = torch.ops.aten.silu_backward(
+            _to_device(grad_host),
+            _to_device(host),
+        )
+        assert out.shape == (0, 4)
+        assert out.device.type == "flagos"
+
+
+class TestSiluBackwardDeclinedInputs:
+    """The reference owns the answers for cases the graph cannot share a dtype."""
+
+    @pytest.mark.parametrize(
+        ("grad_dtype", "self_dtype"),
+        [
+            (torch.float64, torch.float64),
+            (torch.float16, torch.float32),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.float32, torch.bfloat16),
+            (torch.int64, torch.int64),
+            (torch.bool, torch.bool),
+        ],
+    )
+    @pytest.mark.anyplatform
+    def test_declined_pairs_follow_the_reference(self, grad_dtype, self_dtype):
+        grad_host = torch.tensor([1, 2, 3], dtype=grad_dtype)
+        host = torch.tensor([-1, 0, 1], dtype=self_dtype)
+        expected_error = None
+        try:
+            expected = _backward_reference(grad_host, host)
+        except Exception as error:
+            expected_error = error
+
+        if expected_error is not None:
+            with pytest.raises(type(expected_error)):
+                torch.ops.aten.silu_backward(
+                    _to_device(grad_host),
+                    _to_device(host),
+                )
+            return
+        out = torch.ops.aten.silu_backward(
+            _to_device(grad_host),
+            _to_device(host),
+        )
+        assert out.dtype == expected.dtype
+        torch.testing.assert_close(
+            out.cpu().float(),
+            expected.float(),
+            **_tolerance(self_dtype),
+        )
+
+    @pytest.mark.anyplatform
+    def test_non_broadcastable_pair_raises_like_cpu(self):
+        grad_host = torch.randn(3)
+        host = torch.randn(4)
+        try:
+            _backward_reference(grad_host, host)
+        except RuntimeError:
+            pass
+        else:
+            pytest.fail("the CPU reference accepted incompatible shapes")
+        with pytest.raises(RuntimeError):
+            torch.ops.aten.silu_backward(
+                _to_device(grad_host),
+                _to_device(host),
+            )
+
+
 class TestSiluScheduleAndPlanReuse:
     """The marshalling contract every MPS kernel shares (mps_common.mm)."""
 
@@ -394,9 +572,12 @@ class TestSiluDispatch:
         assert routed_backend_or_none("silu_") is None
 
     @pytest.mark.main_ops
-    def test_conf_leaves_the_backward_on_the_fallback(self):
-        """The backward is its own op with its own selector question."""
-        assert routed_backend_or_none("silu_backward") is None
+    def test_conf_routes_the_functional_backward_to_mps(self):
+        assert routed_backend_or_none("silu_backward") == "mps"
+
+    @pytest.mark.main_ops
+    def test_conf_leaves_the_backward_out_spelling_on_the_fallback(self):
+        assert routed_backend_or_none("silu_backward.grad_input") is None
 
     @pytest.mark.main_ops
     def test_dispatch_log_names_mps_for_both_spellings(self):
@@ -423,6 +604,28 @@ class TestSiluDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert result.stderr.count("[flagos dispatch] silu -> mps") == 2
+
+    @pytest.mark.main_ops
+    def test_autograd_and_aten_backward_keep_their_reference_answer(self):
+        """Both the autograd path and an explicit call reach ``silu_backward``."""
+        env = os.environ.copy()
+        env["FLAGOS_LOG"] = "dispatch"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch, torch_fl; "
+                "a = torch.randn(4, 8, device='flagos:0', requires_grad=True); "
+                "torch.nn.functional.silu(a).sum().backward(); "
+                "torch.ops.aten.silu_backward("
+                "torch.ones(4, 8, device='flagos:0'), a.detach())",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stderr.count("[flagos dispatch] silu_backward -> mps") == 2
 
     @pytest.mark.main_ops
     def test_declined_dtype_does_not_reach_the_kernel(self):
