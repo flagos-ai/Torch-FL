@@ -170,6 +170,7 @@ if mps_available:
     x = torch.ones(3, device="mps")
     (x * x).sum()
     round_trip = torch.equal(x.cpu(), torch.ones(3))
+    forward = True
     value = x.detach().requires_grad_(True)
     try:
         (value * value).sum().backward()
@@ -179,7 +180,6 @@ if mps_available:
             raise
     else:
         raise AssertionError("MPS autograd unexpectedly accepted flagos")
-    forward = True
 print("torch_fl" in sys.modules, torch._C._get_privateuse1_backend_name(),
       mps_built, mps_available, forward, round_trip)
 """,
