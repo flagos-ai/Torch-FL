@@ -202,6 +202,43 @@ class TestCopyTransfer:
         finally:
             torch.__future__.set_swap_module_params_on_conversion(previous)
 
+    def test_module_to_device_migrates_parameters_in_place(self, device):
+        previous = torch.__future__.get_swap_module_params_on_conversion()
+        torch.__future__.set_swap_module_params_on_conversion(True)
+
+        try:
+            model = torch.nn.Linear(4, 2)
+            weight = model.weight
+            bias = model.bias
+            expected = {
+                name: value.detach().clone() for name, value in model.named_parameters()
+            }
+
+            model.to(device)
+
+            assert model.weight is weight
+            assert model.bias is bias
+            assert all(
+                parameter.device.type == "flagos" for parameter in model.parameters()
+            )
+            for name, value in model.named_parameters():
+                assert torch.equal(value.cpu(), expected[name])
+
+            inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]], device=device)
+            actual = torch.ops.aten.linear(inputs, weight, bias).cpu()
+            reference = torch.ops.aten.linear(
+                inputs.cpu(), expected["weight"], expected["bias"]
+            )
+            assert torch.allclose(actual, reference)
+
+            model.cpu()
+            assert model.weight is weight
+            assert model.bias is bias
+            for name, value in model.named_parameters():
+                assert torch.equal(value, expected[name])
+        finally:
+            torch.__future__.set_swap_module_params_on_conversion(previous)
+
     def test_module_cpu_after_forward(self, device):
         model = torch.nn.Sequential(
             torch.nn.Linear(8, 8),

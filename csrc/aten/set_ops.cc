@@ -11,7 +11,19 @@
 namespace at::native::flagos {
 
 at::Tensor& set_source_Tensor_(at::Tensor& self, const at::Tensor& source) {
-  return at::native::set_tensor_(self, source);
+  // Directly manipulate TensorImpl as the storage spellings below do.
+  // at::native::set_tensor_ re-enters the dispatcher through set_, whose
+  // source_Tensor case reaches this registration again. Module._apply calls
+  // this path for every parameter, so the recursion ends in a stack overflow.
+  auto* self_impl = self.unsafeGetTensorImpl();
+  const auto* source_impl = source.unsafeGetTensorImpl();
+  TORCH_CHECK(
+      self_impl->dtype() == source_impl->dtype(),
+      "set_ must not be called on a Tensor with different types");
+  self_impl->set_storage_keep_dtype(source_impl->storage());
+  self_impl->set_storage_offset(source_impl->storage_offset());
+  self_impl->set_sizes_and_strides(source_impl->sizes(), source_impl->strides());
+  return self;
 }
 
 at::Tensor& set_source_Storage_(at::Tensor& self, at::Storage source) {

@@ -53,6 +53,13 @@ paths_watch:
   # routing them through "unknown code runs every platform".
   - tests/integration/ops/test_mps_*.py
   - tests/integration/test_mps_runtime.py
+  # These enter through shared PrivateUse1 code rather than an MPS directory.
+  # Both suites run on every lane; the MPS membership here is what keeps a
+  # change to their path in this lane when no other file sends it the whole
+  # matrix. The module migration case in test_factory_ops.py exercises
+  # set_.source_Tensor through module-to-module migration.
+  - csrc/aten/set_ops.cc
+  - tests/integration/test_factory_ops.py
 
 container_volumes: []
 
