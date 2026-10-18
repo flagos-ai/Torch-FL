@@ -150,11 +150,21 @@ _KNOWN_GAPS = {
         "musa",
         "ppu",
     ),
-    # The id the MPS lane adds, recorded as a gap for the eight original
+    # The ids the MPS lane adds, recorded as gaps for the eight original
     # platforms the same way every other platform-specific group is. MPS needs
     # no entry for the shared groups: it runs every step that names no platform,
-    # so its only absence-from-the-others is this one.
+    # so its only absences-from-the-others are these.
     "backend_ops": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "kunlunxin",
+        "metax",
+        "musa",
+        "ppu",
+    ),
+    "mps_runtime": (
         "ascend",
         "cuda",
         "dcu",

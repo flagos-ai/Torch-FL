@@ -623,13 +623,6 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "exclusion on the same terms (it would also self-skip: no job builds "
         "the TileOPs kernel set)"
     ),
-    "tests/integration/test_mps_runtime.py": (
-        "the MPS runtime floor (device, stream, event, memory) has no CI job: "
-        "the pipeline runs accelerator container images on self-hosted Linux "
-        "runners and no macOS arm64 runner is wired in, so the file is run by "
-        "hand on an M-series host. Accepted exclusion until such a runner and "
-        "an mps manifest exist"
-    ),
 }
 
 
