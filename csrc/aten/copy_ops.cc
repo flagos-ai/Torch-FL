@@ -29,6 +29,9 @@
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
+#if defined(USE_MPS)
+#include "backends/mps/mps_copy.h"
+#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -454,7 +457,9 @@ at::Tensor _copy_from(
       // Kunlunxin via the XPU op library's own strided copy; all honor the src
       // and dst strides and storage offset. Avoids the CPU round-trip below,
       // which on GCU also D2H's the entire destination storage.
-#if defined(USE_GCU)
+#if defined(USE_MPS)
+      const bool copied_on_device = mps::CopyStridedToDense(self, dst);
+#elif defined(USE_GCU)
       const bool copied_on_device = gcu::StridedCopy(dst, self);
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(dst, self);

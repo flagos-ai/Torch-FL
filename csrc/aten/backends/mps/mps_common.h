@@ -1070,6 +1070,11 @@ MPSGraphTensorData* MpsTensorData(
     int64_t count,
     MPSDataType dtype);
 
+// Whether this build and host can describe an MTLBuffer at a nonzero byte
+// offset. False under the Xcode 15.4 SDK or a macOS 14 runtime; a caller that
+// cannot stage its own asynchronous operands should then take its host fallback.
+bool MpsOffsetTensorDataAvailable();
+
 // The 1-D placeholder matching a MpsTensorData over `count` elements. This is
 // the only shape a buffer-backed tensor is given; `MpsReshape` turns it into the
 // aten shape inside the graph.

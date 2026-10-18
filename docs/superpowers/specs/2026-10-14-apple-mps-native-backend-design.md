@@ -1310,12 +1310,21 @@ directories must land together or unit tests fail.
   processes. Boxing, replacing the MPS stream metadata, or patching PyTorch's
   native library sidesteps the engine contract and is not accepted as a
   backend fix.
-- **The device copy is slower than it should be.** Materialising a strided
-  operand on the device -- `w_t.contiguous()` -- measured 84.6 ms against the
-  10.4 ms `torch.mps` needs for the same copy, so the fallback is 7-12x the
-  reference on the one path the gemm kernels no longer need. Stage 3 took the
-  copy off the hot path rather than fixing it; the copy itself is an open
-  measurement on the runtime floor, not the op layer.
+- **Strided copies now run on the device.** `contiguous()`, non-contiguous
+  `clone()` and `copy_` from a strided flagos source into a contiguous flagos
+  destination use MPSGraph over the runtime's Metal buffers. A dense prefix is
+  an MPSGraph slice; any other layout, including negative strides, is gathered
+  with per-axis coordinates. The compiled plan is cached by device, storage
+  length, shape, offset, strides and dtype. A scalar copy uses a Metal blit.
+  Non-contiguous destinations and dtype-converting copies retain the existing
+  fallback. Copies between MPS and flagos storage still pass through the host;
+  retaining the storage boundary is part of the no-boxing design.
+
+  A standalone M5 probe covers the gather floor, excluding tensor dispatch and
+  the plan cache: 1M float32 elements took about 0.3 ms; the large-parent cases
+  measured about 1.0 ms for 16 MB, 2.3 ms for 64 MB and 1.4 ms for 100 MB.
+  The earlier 84.6 ms `w_t.contiguous()` was the host round-trip, against
+  10.4 ms for `torch.mps`; the native copy removes that round-trip.
 - **No CI lane.** The MPS suite is gated on an Apple Silicon host and run by
   hand. The pipeline is container-based and does not schedule a GitHub-hosted
   `macos-14`/`macos-15` runner, so until one is wired up a green MPS run is a

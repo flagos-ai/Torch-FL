@@ -21,6 +21,9 @@
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
+#if defined(USE_MPS)
+#include "backends/mps/mps_copy.h"
+#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -150,6 +153,29 @@ void copy_strided_via_host(
 
 } // namespace
 
+#if defined(USE_MPS)
+namespace {
+
+void finish_strided_copy(
+    const at::Tensor& self,
+    const at::Tensor& result,
+    c10::MemoryFormat memory_format,
+    bool copied_on_device) {
+  if (!copied_on_device && self.numel() > 0) {
+    copy_strided_via_host(self, result, memory_format);
+  }
+}
+
+bool copy_strided_to_contiguous(
+    const at::Tensor& self,
+    const at::Tensor& result,
+    c10::MemoryFormat memory_format) {
+  return mps::CopyStridedToDense(self, result);
+}
+
+} // namespace
+#endif
+
 at::Tensor materialize_math_bits(
     const at::Tensor& self,
     c10::MemoryFormat memory_format) {
@@ -190,6 +216,11 @@ at::Tensor contiguous(
       // kernel in this wheel, so gather through host memory.
       copy_strided_via_host(self, result, memory_format);
 #endif
+#elif defined(USE_MPS)
+      const bool copied_on_device =
+          copy_strided_to_contiguous(self, result, memory_format);
+      finish_strided_copy(
+          self, result, memory_format, copied_on_device);
 #else
       // Ascend copies the strided source into the contiguous result on-device
       // via aclnnInplaceCopy, GCU via topsatenCopy, Kunlunxin via the XPU
@@ -243,11 +274,16 @@ at::Tensor clone(
 
   // Non-contiguous clone.
   if (self.is_privateuseone()) {
+    auto result = at::empty(
+        self.sizes(), self.options().memory_format(memory_format));
+#if defined(USE_MPS)
+    const bool copied_on_device =
+        copy_strided_to_contiguous(self, result, memory_format);
+    finish_strided_copy(self, result, memory_format, copied_on_device);
+#else
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
-    auto result = at::empty(
-        self.sizes(), self.options().memory_format(memory_format));
 #if FLAGOS_CONTIGUOUS_CUDA_BOXING
     // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
     // instead of an expensive CPU round-trip.
@@ -258,12 +294,9 @@ at::Tensor clone(
     // dispatch to; gather through host memory instead.
     copy_strided_via_host(self, result, memory_format);
 #endif
-    return result;
 #else
     // MUSA joins the non-boxing group: copy_ reaches _copy_from, which
     // torch_musa implements for strided/dtype-casting copies on device.
-    auto result = at::empty(
-        self.sizes(), self.options().memory_format(memory_format));
     // On-device strided copy -- aclnnInplaceCopy on Ascend, topsatenCopy on
     // GCU, the XPU runtime's own copy on Kunlunxin -- instead of
     // result.copy_(self), which would bounce through a CPU round-trip. This is
@@ -281,8 +314,9 @@ at::Tensor clone(
     if (!copied_on_device) {
       result.copy_(self);
     }
-    return result;
 #endif
+#endif
+    return result;
   }
 
   auto result = at::empty(self.sizes(), self.options().memory_format(memory_format));
