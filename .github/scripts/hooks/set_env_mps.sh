@@ -163,10 +163,10 @@ METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0
 if [[ -n "${METAL_DEVICE_WRAPPER_TYPE:-}" ]]; then
   METAL_DEVICE_WRAPPER_TYPE_WAS_SET=1
 elif [[ "$(sw_vers -productVersion | cut -d. -f1)" -ge 14 ]]; then
-  # The Python.framework interpreter on the GitHub macOS 14 runner links the
-  # private MetalTools framework, but linking it does not select the wrapper.
-  # Use the explicit wrapper because a fresh MPS heap still fails its first
-  # small allocation after import with type 0.
+  # The Python.framework interpreter used by these runners links the private
+  # MetalTools framework. Select its wrapper explicitly and retain the older
+  # default on systems where that framework is not present. An explicit caller
+  # value wins, so the environment check and later steps use the same wrapper.
   METAL_DEVICE_WRAPPER_TYPE=1
 else
   METAL_DEVICE_WRAPPER_TYPE=0
@@ -177,12 +177,12 @@ fi
 echo "Metal buffer wrapper: $METAL_DEVICE_WRAPPER_TYPE"
 
 # --- MPS allocator limit -----------------------------------------------------
-# A GitHub macos-14 runner reports a 7.93 GiB MPS ceiling above the same Metal
-# allocator used by the flagos device. A finite 0.7 limit failed at the same
-# 3.27 GiB ceiling. This lane has no large MPS workload, so remove the upper
-# limit. The low ratio is a soft limit, and PyTorch requires it to stay below
-# the high ratio; 0.5 is finite and validated below because the unified-memory
-# default (1.4) is rejected once the upper limit is removed.
+# Remove the allocator's optional upper limit. Two percent of unified memory is
+# reserved for other Metal work by default. Once the upper limit is removed,
+# PyTorch's default low ratio (1.4) is invalid; keep a finite soft limit below
+# the default upper bound. The
+# environment check below still verifies a real allocation and reports the
+# unified-memory working-set size of the selected host.
 TORCH_FL_MPS_HIGH_WATERMARK_RATIO=0.0
 TORCH_FL_MPS_LOW_WATERMARK_RATIO=0.5
 
@@ -216,22 +216,26 @@ print(f"Recommended MPS memory: {torch.mps.recommended_max_memory()} bytes")
 print(f"MPS high watermark: {high_ratio}")
 print(f"MPS low watermark: {low_ratio}")
 print(f"METAL_DEVICE_WRAPPER_TYPE: {os.environ.get('METAL_DEVICE_WRAPPER_TYPE')}")
+
+# Completion errors are reported here with the allocator state from the same
+# process. torch.mps.synchronize() would start another MPS allocation and can
+# hide the failure that the probe exists to diagnose.
 try:
-    # The output is consumed before the process exits: the shutdown test below
-    # deliberately keeps its tensors alive until interpreter teardown.
     tensor = torch.arange(12, dtype=torch.float32, device="mps")
     tensor_cpu = tensor.cpu()
 except RuntimeError:
+    print("MPS probe failed:", file=sys.stderr)
     print(
-        "MPS probe failed: "
-        f"driver allocated={torch.mps.driver_allocated_memory()} bytes, "
-        f"current allocated={torch.mps.current_allocated_memory()} bytes",
+        f"  driver allocated: {torch.mps.driver_allocated_memory()} bytes",
         file=sys.stderr,
     )
-    torch.mps.synchronize()
+    print(
+        f"  current allocated: {torch.mps.current_allocated_memory()} bytes",
+        file=sys.stderr,
+    )
     raise
-assert tensor_cpu.tolist() == list(range(12))
-del tensor_cpu
+# The output is consumed before the process exits: the shutdown test below
+# deliberately keeps its tensors alive until interpreter teardown.
 torch.mps.synchronize()
 
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__

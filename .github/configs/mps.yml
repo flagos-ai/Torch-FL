@@ -34,7 +34,7 @@ ci_image: ""
 # has no Metal device and the environment check below would fail on
 # flagos_devices, which is the intended outcome rather than a silent skip.
 runner_labels:
-  - macos-14
+  - macos-15
 
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
