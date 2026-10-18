@@ -437,6 +437,18 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "explicit activation. FlagTree, FlagGems, and FlagCX remain required "
         "dependencies in both profiles",
     ),
+    # --- Vendor runtime libraries ----------------------------------------
+    "FLAGOS_KUNLUNXIN_XDNN_LIB_DIR": (
+        SCOPE_RUNTIME,
+        "No default",
+        "Colon-separated directories holding libxdnn_pytorch.so's component "
+        "libraries (libxpu_blas.so, libxpu_dnn.so, libxpu_flash_attention.so). "
+        "The vendor torch package ships them as "
+        "<site-packages>/torch_xmlir/*.so, and importing that Python package is "
+        "not required. The same directories must be on LD_LIBRARY_PATH before "
+        "the interpreter starts: the loader resolves DT_NEEDED before any of "
+        "the wheel's code runs",
+    ),
     # --- Runtime diagnostics ---------------------------------------------
     "FLAGOS_LOG": (
         SCOPE_RUNTIME,
