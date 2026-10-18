@@ -46,7 +46,8 @@ are the increment's findings:
   decline leaves on the table.
 
 Two edges are host-dependent rather than this body's, and both were measured
-*both* ways -- on an M5 with a current SDK and on the ``macos-14`` runner CI uses:
+*both* ways -- on an M5 with a current SDK and on the ``macos-14`` runner used
+by the initial CI lane:
 
 * the sign of a **signed zero**. On the M5, ``tanh(-0.0)`` comes back ``+0.0``
   where the reference answers ``-0.0`` at float16 and bfloat16; the CI runner

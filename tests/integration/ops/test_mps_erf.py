@@ -30,9 +30,10 @@ whole of the increment is the gate:
   error above half a step, the node's error can exceed it by at most ``0.98`` of
   a step. The node's float32 gap from ``at::erf`` is at most ``4.19`` steps at
   1.0 -- a few float32 steps across the curve, visible because the probe samples
-  fall between grid points. The ``macos-14`` runner uses an older MPSGraph and
-  reports a larger absolute node error (``4.14`` steps); both hosts stay within
-  ``5.0`` steps of the reference. See ``MpsSupportsErfDtype``.
+  fall between grid points. The earlier ``macos-14`` runner used an older
+  MPSGraph and reported a larger absolute node error (``4.14`` steps); both
+  hosts stay within ``5.0`` steps of the reference. See
+  ``MpsSupportsErfDtype``.
 * **GELU needs its own gate.** ``F.gelu(x)`` and
   ``F.gelu(x, approximate="tanh")`` gave the same output on this host, and
   neither named this ``erf`` kernel. The explicit form
@@ -49,7 +50,7 @@ One band is host-dependent, and it is the band the siblings found: the narrow
 widths' *subnormal operand*. Measured on this host, all 127 subnormal bfloat16
 operands come back a zero, and float16 differs from the reference on 877 of its
 1023 positive subnormals. The M5 also keeps some of those results as subnormals;
-the ``macos-14`` CI runner flushes two of them to zero. The suite therefore
+the ``macos-14`` CI runner flushed two of them to zero. The suite therefore
 asserts the monotonic shape, the reference's answer where it is representable,
 and no flush in the normal range. The full readings are in
 ``MpsSupportsErfDtype``; a model's ``erf`` operand is a pre-activation rather
@@ -527,13 +528,14 @@ class TestErfCorrectness:
             # measured, ``erf(1e-20)`` is a bfloat16 subnormal the node answers
             # and the reference rounds to zero, and ``erf(tiny)`` rounds to not
             # quite the same subnormal. That subnormal is itself flushed by the
-            # `macos-14` CI runner, so this is the *other* host-dependent reading
-            # the band records: the node answers ``erf(tiny)`` as a subnormal or
-            # as a zero, where the reference always answers a subnormal. Both
-            # readings rise with the operand (the zeros sit at the low end), so
-            # the assertions are the shape plus the observation that a flushed
-            # answer only ever replaces a reference that is itself subnormal;
-            # nothing at or above the normal range is held to a flush.
+            # historical `macos-14` CI runner, so this is the *other*
+            # host-dependent reading the band records: the node answers
+            # ``erf(tiny)`` as a subnormal or as a zero, where the reference
+            # always answers a subnormal. Both readings rise with the operand
+            # (the zeros sit at the low end), so the assertions are the shape
+            # plus the observation that a flushed answer only ever replaces a
+            # reference that is itself subnormal; nothing at or above the normal
+            # range is held to a flush.
             normals = torch.tensor([tiny, tiny * 2.0, 1e-3, 1.0], dtype=dtype)
             out_n = torch.erf(_to_device(normals)).cpu()
             wanted = _reference(normals).double()

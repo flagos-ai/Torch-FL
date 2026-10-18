@@ -26,8 +26,8 @@
 //     offset either, so it is not used.
 //
 //     That initializer is macOS 15 API, and it is *not* declared by the
-//     MetalPerformanceShaders framework in the Xcode 15.4 SDK that the hosted
-//     macos-14 image pins -- measured on the first CI run of the MPS lane, where
+//     MetalPerformanceShaders framework in the Xcode 15.4 SDK that the earlier
+//     macos-14 image pinned -- measured on the first CI run of the MPS lane, where
 //     the compiler resolved the same selector to the MPSMatrix initializer and
 //     rejected the argument ("cannot initialize a parameter of type
 //     'MPSMatrixDescriptor *' with an lvalue of type 'MPSNDArrayDescriptor *'").
@@ -454,10 +454,11 @@ bool MpsSupportsLogDtype(at::ScalarType dtype);
 //
 // The body is `reciprocal(sqrt(x))`, two MPSGraph nodes rather than the fused
 // `reciprocalSquareRootWithTensor:` MPSGraph names, for the reason recorded
-// above the `T_RSQRT` template: the fused selector is macOS 15+ and the hosted
-// MPS lane is not, so building it raises an `NSInvalidArgumentException` that
-// aborts the process rather than declining. The composition is the same
-// arithmetic on two nodes the SDK this backend is verified against does have.
+// above the `T_RSQRT` template: the fused selector is macOS 15+, and building
+// it on the earlier hosted `macos-14` lane raised an
+// `NSInvalidArgumentException` that aborts the process rather than declining.
+// The composition is the same arithmetic on two nodes the SDK this backend is
+// verified against does have.
 //
 // That the subject is a composition is what makes an independent predicate
 // necessary rather than a reuse of a sibling's: two subnormal policies apply
@@ -586,9 +587,9 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 //     reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the
 //     node is closer on 63.3% of the points where the two differ. Where the
 //     reference error is above half a step, the node's error can be larger,
-//     but by at most 0.98 of a step on that host. The hosted macos-14 runner
-//     orders the closer points differently and its node's error from exact
-//     reaches 4.14 steps; both hosts stay within five steps of at::erf.
+//     but by at most 0.98 of a step on that host. The earlier hosted macos-14
+//     runner ordered the closer points differently and its node's error from
+//     exact reached 4.14 steps; both hosts stay within five steps of at::erf.
 //
 // A "distance of a few float32 steps at 1.0" is larger than "last ulp", but it
 // is a bounded error against a reference that has an error of its own. The
@@ -603,8 +604,8 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 // every width where `tanhWithTensor:` saturated it, answers `+-1` at `+-inf`
 // (the bound the body's `1 - 2/(exp(2x)+1)` cousins get wrong), and keeps the
 // sign of a zero -- `erf(-0.0)` is `-0.0` on both the node and the reference, at
-// every width, on this host *and* the `macos-14` CI runner, so it is an
-// invariant rather than the host-dependent reading `tanh`'s signed zero was.
+// every width, on this host *and* the earlier `macos-14` CI runner, so it is
+// an invariant rather than the host-dependent reading `tanh`'s signed zero was.
 //
 // One band is host-dependent rather than deleted outright, and it is the same
 // band the siblings recorded: the float16 and bfloat16 *subnormal operand*. The
@@ -616,7 +617,8 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype);
 // test: the values involved are all below the width's smallest normal and a
 // model's `erf` operand is a pre-activation, not a denormal. It is measured,
 // and recorded here and in the test module. The result side differs between
-// hosts: the macos-14 CI runner flushes two of the M5's subnormal results.
+// hosts: the earlier macos-14 CI runner flushed two of the M5's subnormal
+// results.
 //
 // float64 has no MPSGraph element type and an integral or bool operand is
 // promoted by the reference to float32, so both keep the round-trip; measured,
@@ -1077,8 +1079,9 @@ MPSGraphTensorData* MpsTensorData(
     MPSDataType dtype);
 
 // Whether this build and host can describe an MTLBuffer at a nonzero byte
-// offset. False under the Xcode 15.4 SDK or a macOS 14 runtime; a caller that
-// cannot stage its own asynchronous operands should then take its host fallback.
+// offset. False under an SDK older than Xcode 16 or a macOS runtime older than
+// 15; a caller that cannot stage its own asynchronous operands should then take
+// its host fallback.
 bool MpsOffsetTensorDataAvailable();
 
 // The 1-D placeholder matching a MpsTensorData over `count` elements. This is

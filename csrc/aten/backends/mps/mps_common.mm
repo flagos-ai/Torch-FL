@@ -380,7 +380,7 @@ bool MpsSupportsTanhDtype(at::ScalarType dtype) {
   //
   // Two edges at these widths are the *host's* rather than this body's, and both
   // were measured both ways -- on an M5 with a current SDK and on the macos-14
-  // runner CI uses:
+  // runner the first CI lane used:
   //
   //   * the sign of a zero. On the M5, tanh(-0.0) comes back +0.0 at both widths
   //     where the reference answers -0.0; the CI runner answers the reference's
@@ -463,11 +463,11 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // and the node is closer on 63.3% of the points where their roundings differ.
   // The node's error can exceed the reference's on some points; where the
   // reference error is above half a step, the excess is at most 0.98 of a step
-  // on that host. The hosted macos-14 runner's node orders the closer points
-  // differently, and its error from exact reaches 4.14 steps. The suite therefore
-  // keeps the five-step gap from the reference that both hosts satisfy rather
-  // than pinning either host's ranking. A tanh that is ~100x off the exact
-  // answer at every scale of the curve is the different failure.
+  // on that host. The earlier hosted macos-14 runner's node ordered the closer
+  // points differently, and its error from exact reached 4.14 steps. The suite
+  // therefore keeps the five-step gap from the reference that both hosts
+  // satisfy rather than pinning either host's ranking. A tanh that is ~100x
+  // off the exact answer at every scale of the curve is the different failure.
   //
   // The bit-level reading gives the bound. The node agrees with the reference
   // bit for bit on 249310 of 498299 probe points, and its largest gap is 4.19
@@ -489,8 +489,9 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // a NaN (where `tanhWithTensor:` saturated it to +-1), answers +-1 at +-inf
   // (the bound a `1 - 2/(exp(2x)+1)`-style composition gets wrong), and keeps
   // the sign of a zero -- `erf(-0.0)` is `-0.0` on this host *and* on the
-  // `macos-14` CI runner at every width, so unlike the tanh's signed zero this
-  // one is an invariant and the test suite asserts it.
+  // `macos-14` CI runner used by the earlier lane at every width, so unlike
+  // the tanh's signed zero this one is an invariant and the test suite asserts
+  // it.
   //
   // The one band recorded rather than asserted is the *subnormal operand* at
   // the narrow widths, the same band the siblings found: measured, all 127
@@ -498,8 +499,9 @@ bool MpsSupportsErfDtype(at::ScalarType dtype) {
   // reference rounds them to, so the two agree -- while float16 differs from the
   // reference on 877 of its 1023 positive subnormals in the last step or two,
   // and the reference itself rounds 3 of them to zero. The host split is on
-  // the *result* side as well: the macos-14 CI runner flushed `erf(tiny)` and
-  // `erf(2 * tiny)` from bfloat16 to zero, while this M5 kept both subnormal.
+  // the *result* side as well: the earlier macos-14 CI runner flushed
+  // `erf(tiny)` and `erf(2 * tiny)` from bfloat16 to zero, while this M5 kept
+  // both subnormal.
   // Everything involved is below the width's smallest normal. A model's `erf`
   // operand is a pre-activation, so the band is recorded rather than pinned;
   // the suite checks that nothing in the normal range is flushed.
@@ -868,13 +870,13 @@ namespace {
 // Whether this build/host can describe a buffer at a byte offset to MPSGraph.
 //
 // Two independent gates have to agree, and the second is the one that fires on
-// the hosted macos-14 runner. The *SDK* gate is compile-time: the initializer is
-// only declared from macOS 15, so an Xcode 15.4 SDK (14.5, what the runner
-// ships) cannot name it at all. The *runtime* gate is separate: a process
-// running on macOS 14 may or may not have loaded a framework that implements a
-// macOS 15 selector. `__builtin_available` answers the runtime half, and the
-// preprocessor answer below is constant per build, so this whole function folds
-// away to a constant on either kind of toolchain.
+// the earlier hosted macos-14 runner. The *SDK* gate is compile-time: the
+// initializer is only declared from macOS 15, so an Xcode 15.4 SDK (14.5, what
+// that runner shipped) cannot name it at all. The *runtime* gate is separate: a
+// process running on macOS 14 may or may not have loaded a framework that
+// implements a macOS 15 selector. `__builtin_available` answers the runtime
+// half, and the preprocessor answer below is constant per build, so this whole
+// function folds away to a constant on either kind of toolchain.
 bool OffsetTensorDataAvailable() {
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
   return __builtin_available(macOS 15.0, *);
@@ -900,9 +902,9 @@ bool OffsetTensorDataAvailable() {
 // The allocation is cached by size and reused across calls. These operands come
 // in a handful of sizes (an attention weight, a token embedding table, a batch
 // of activations) and a fresh MTLBuffer per call would put an allocation on the
-// hot path of every op the runner otherwise serves natively. Bounded like the
-// plan cache is, and for the same reason: a long run must not grow it without
-// limit.
+// hot path of every op the earlier runner otherwise served natively. Bounded
+// like the plan cache is, and for the same reason: a long run must not grow it
+// without limit.
 constexpr size_t kMaxStagingBuffers = 16;
 
 struct StagingBuffer {
@@ -1096,7 +1098,8 @@ MPSGraphTensorData* MpsTensorData(
   // compiled against the SDK, not the host) and on the runtime the process
   // actually loaded.
   //
-  // Measured against Xcode 15.4 (the SDK the hosted macos-14 image ships):
+  // Measured against Xcode 15.4 (the SDK the earlier hosted macos-14 image
+  // shipped):
   // MPSNDArray.h there declares neither `initWithBuffer:offset:descriptor:` nor
   // `initWithBuffer:descriptor:`. With that SDK in force a later `if
   // (@available(macos 15.0))` does not help, because the selector does not

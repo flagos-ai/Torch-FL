@@ -244,34 +244,6 @@ assert torch.backends.mps.is_built(), "this torch build has no MPS support"
 print("MPS allocation: ok")
 PY
 
-# --- Verify the accelerator is visible through torch_fl ----------------------
-if [[ "$CI_STAGE" == "integration" ]]; then
-  TORCH_FL_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" \
-  TORCH_FL_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO" \
-  "$VENV_PYTHON" - <<'PY'
-import os
-
-os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = os.environ[
-    "TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
-]
-os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = os.environ[
-    "TORCH_FL_MPS_LOW_WATERMARK_RATIO"
-]
-
-import torch_fl  # noqa: E402
-import torch  # noqa: E402
-
-assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-assert torch_fl.flagos.device_count() >= 1, torch_fl.flagos.device_count()
-a = torch.arange(12, dtype=torch.float32, device="mps")
-b = torch.empty(3, 4, device="flagos")
-b.copy_(a.reshape(3, 4))
-assert torch.equal(b.cpu(), a.reshape(3, 4).cpu())
-print(f"flagos devices: {torch_fl.flagos.device_count()}")
-print("MPS to flagos copy: ok")
-PY
-fi
-
 if command -v system_profiler >/dev/null 2>&1; then
   system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
 fi

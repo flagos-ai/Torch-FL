@@ -19,9 +19,10 @@ of -- ``x * rsqrt(v + eps)`` is a layer norm, an RMS norm and a batch norm, and
 the ``1 / sqrt(d)`` attention scale is the same shape. It is the first body here
 built from *two* MPSGraph nodes rather than one: MPSGraph names the fused
 ``reciprocalSquareRootWithTensor:``, but that selector is macOS 15+ and the
-hosted MPS lane is a ``macos-14`` image, so the fused node aborts the process.
-The body composes ``reciprocal(sqrt(x))`` from the two selectors the SDK does
-have, and the finding is what the *composition* does at the widths:
+earlier hosted MPS lane used a ``macos-14`` image, where the fused node
+aborted the process. The body composes ``reciprocal(sqrt(x))`` from the two
+selectors the SDK does have, and the finding is what the *composition* does at
+the widths:
 
 * **All three float widths are served.** float32 is bit-identical to the
   reference over 400001 samples and over a sweep of the top of the range.

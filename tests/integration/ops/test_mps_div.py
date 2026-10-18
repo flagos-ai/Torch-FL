@@ -131,7 +131,7 @@ def _graph_flushes_subnormals() -> bool:
     side of it the graph lands on is a property of the Metal the process is
     running on rather than of this backend. Measured on the two lanes this
     suite runs on: an **M5** (macOS 26 / Metal 4) returns ``0`` for
-    ``1e-38 / 2.0``, and an **M1** (macOS 14 / Metal 3, the hosted
+    ``1e-38 / 2.0``, and an **M1** (macOS 14 / Metal 3, the earlier hosted
     ``macos-14`` runner) returns ``5e-39`` -- the subnormal itself. The same
     split shows through ``mul.Tensor``, which has shared the behaviour since
     stage 2, so it is the graph's arithmetic rather than this op's.
@@ -526,11 +526,12 @@ class TestSubnormalBoundaryIsDocumented:
     A subnormal *result* lands on a boundary between this backend and the CPU
     reference, and which side of it the graph falls on is a property of the GPU
     the process is running on rather than of division: the M5 (macOS 26 /
-    Metal 4) flushes it to zero, and the M1 (macOS 14 / Metal 3, the hosted
-    runner) represents it. Both are the same arithmetic seen through different
-    Metal feature sets, and the case is shared with the ops already routed to
-    this backend since stage 2, so it is recorded here -- as a boundary a reader
-    meets deliberately -- rather than quietly tolerated by a loose tolerance.
+    Metal 4) flushes it to zero, and the M1 (macOS 14 / Metal 3, the earlier
+    hosted ``macos-14`` runner) represents it. Both are the same arithmetic
+    seen through different Metal feature sets, and the case is shared with the
+    ops already routed to this backend since stage 2, so it is recorded here --
+    as a boundary a reader meets deliberately -- rather than quietly tolerated
+    by a loose tolerance.
 
     ``GRAPH_FLUSHES_SUBNORMALS`` is measured once at import and the cases below
     assert the documented outcome for whichever policy is present, so each

@@ -6,7 +6,7 @@ fallback, delivered stage by stage per §7.
 
 ## 1. Goal
 
-Add Apple M-series GPUs (Apple Silicon: M1/M2/M3/M4) as a supported `flagos`
+Add Apple M-series GPUs (Apple Silicon: M1 through M5) as a supported `flagos`
 accelerator. A Mac with Apple Silicon should be able to run ordinary PyTorch
 eager code on the `flagos` device, the way the CUDA, Ascend, GCU and MUSA
 platforms do, by building a macOS arm64 wheel with `FLAGOS_ACCELERATOR=mps`.
@@ -739,8 +739,8 @@ the batch statistics behind `meanOfTensor:axes:` and
 rather than a node that does not exist. The increment is verified with
 `tests/integration/ops/test_mps_batch_norm.py` (38 cases). `embedding_dense_backward`
 stays dropped for the reason recorded above.
-There is still no CI job: the lane below needs a GitHub-hosted `macos-14`/`macos-15` runner the container-based pipeline does not
-yet use, so the operator suite is run by hand until that lands.
+The MPS lane uses a GitHub-hosted `macos-15` runner and runs directly on
+that runner's Metal GPU, without a container.
 
 Stage 4 continued with `sigmoid`, and the increment is small on purpose -- it is
 the smallest body in the layer, one node, and it is the *same* node the `silu`
@@ -913,11 +913,12 @@ MPSGraph nodes rather than one. `1 / sqrt(x)` is the tail every normalisation is
 written in terms of -- `x * rsqrt(v + eps)` is a layer norm, an RMS norm and a
 batch norm, and the `1 / sqrt(d)` attention scale is the same shape -- and
 MPSGraph names the fused `reciprocalSquareRootWithTensor:`. That selector is
-macOS 15+, and the hosted MPS lane is a `macos-14` image, where building it
-raises `NSInvalidArgumentException: -[MPSGraph reciprocalSquareRootWithTensor:
-name:]: unrecognized selector` from inside the graph-building block with no
-handler, so the process aborts rather than the op declining. The body therefore
-composes the two selectors both SDKs have and this tree already uses --
+macOS 15+. The earlier hosted MPS lane ran on a `macos-14` image, where building
+that selector raised `NSInvalidArgumentException: -[MPSGraph
+reciprocalSquareRootWithTensor: name:]: unrecognized selector` from inside the
+graph-building block with no handler, so the process aborts rather than the op
+declining. The body therefore composes the two selectors both SDKs have and
+this tree already uses --
 `squareRootWithTensor:` (the `sqrt` node) and `reciprocalWithTensor:` (the
 `reciprocal` kernel's node and `layer_norm`'s rstd) -- which is the same
 arithmetic at one extra node, amortised over every call that shares the plan.
@@ -1242,7 +1243,7 @@ naming `mps`, and the cost cases.
 | `tests/integration/ops/test_mps_binary.py`, `test_mps_reduce.py` | stage-2 elementwise and reduction suites, `@pytest.mark.mps` |
 | `tests/unit/test_platform_capability_matrix.py` inventory lines | add `mps` to the three inventories |
 | `docs/reference/{compatibility,platform-capability-matrix,operator-support}.md`, `docs/vendors/mps/installation.md` | platform rows and guide |
-| `.github/configs/mps.yml` + workflow job | CI on a GitHub-hosted `macos-14`/`macos-15` arm64 runner |
+| `.github/configs/mps.yml` + workflow job | CI on a GitHub-hosted `macos-15` arm64 runner |
 
 `tests/unit/test_platform_capability_matrix.py` machine-checks the three
 directory inventories against the tree, so those doc lines and the new
@@ -1260,9 +1261,8 @@ directories must land together or unit tests fail.
   1-element, every claimed dtype, and non-contiguous inputs.
 - Confirm tensors stay on `flagos` through a compute chain (no silent CPU
   fallback) and that `torch.__version__` still reports the expected build.
-- CI: `macos-14`/`macos-15` GitHub runners are Apple Silicon and run MPS
-  headless, so the smoke test and the operator suites can be CI-gated here more
-  cheaply than on any vendor runner.
+- CI: the GitHub `macos-15` runner is Apple Silicon and runs MPS headless, so
+  the smoke test and the operator suites are CI-gated there.
 
 ## 10. Risks and unknowns
 
@@ -1328,9 +1328,9 @@ directories must land together or unit tests fail.
   measured about 1.0 ms for 16 MB, 2.3 ms for 64 MB and 1.4 ms for 100 MB.
   The earlier 84.6 ms `w_t.contiguous()` was the host round-trip, against
   10.4 ms for `torch.mps`; the native copy removes that round-trip.
-- **No CI lane.** The MPS suite is gated on an Apple Silicon host and run by
-  hand. The pipeline is container-based and does not schedule a GitHub-hosted
-  `macos-14`/`macos-15` runner, so until one is wired up a green MPS run is a
-  local result rather than a checked one.
+- **CI scope.** The MPS suite is gated on an Apple Silicon host. The shared
+  pipeline schedules it on a GitHub-hosted `macos-15` arm64 runner directly,
+  outside a container. A local M5 run remains the check for hosts beyond the CI
+  machine.
 - **Scope.** Option B is a multi-week project; the staged plan exists so value
   lands at every stage instead of only at the end.
