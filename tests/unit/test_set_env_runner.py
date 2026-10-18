@@ -255,16 +255,14 @@ def test_mps_hook_removes_the_upper_limit_and_probes_a_real_allocation():
     assert "TORCH_FL_MPS_LOW_WATERMARK_RATIO=0.5" in hook
     probe = hook.index('torch.arange(12, dtype=torch.float32, device="mps")')
     assert hook.index("install_cpu_torch") < probe < hook.index("build_flagos_inplace")
-    assert 'b.copy_(a.reshape(3, 4))' in hook
+    assert "b.copy_(a.reshape(3, 4))" in hook
 
     workflow = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
     assert (
-        'export PYTORCH_MPS_HIGH_WATERMARK_RATIO='
-        '"$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"'
+        'export PYTORCH_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"'
     ) in workflow
     assert (
-        'export PYTORCH_MPS_LOW_WATERMARK_RATIO='
-        '"$TORCH_FL_MPS_LOW_WATERMARK_RATIO"'
+        'export PYTORCH_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO"'
     ) in workflow
     assert ':="${TORCH_FL_MPS_' not in workflow
 
