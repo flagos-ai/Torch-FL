@@ -198,13 +198,17 @@ def test_mps_to_flagos_converts_dtype_and_empty_tensor():
 def test_module_mps_flagos_round_trip_preserves_parameters(swap):
     _require_mps()
     model = torch.nn.Linear(4, 3)
-    expected = {name: value.detach().clone() for name, value in model.named_parameters()}
+    expected = {
+        name: value.detach().clone() for name, value in model.named_parameters()
+    }
     previous = torch.__future__.get_swap_module_params_on_conversion()
     torch.__future__.set_swap_module_params_on_conversion(swap)
     try:
         model.to("mps")
         model.to(DEVICE)
-        assert all(parameter.device.type == "flagos" for parameter in model.parameters())
+        assert all(
+            parameter.device.type == "flagos" for parameter in model.parameters()
+        )
         for name, value in model.named_parameters():
             assert torch.equal(value.cpu(), expected[name])
 
