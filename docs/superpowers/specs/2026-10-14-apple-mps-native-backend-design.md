@@ -1294,15 +1294,18 @@ directories must land together or unit tests fail.
   at torch/csrc/autograd/engine.cpp
   ```
 
-  The check in PyTorch 2.13 (`cf30153c4c131c8164ee7798e5022d810682e2cb`) still
-  searches only the global accelerator type's input metadata, so a newer
-  version alone is not the remedy. A process with only `import torch` runs
-  MPS backward, because `at::getAccelerator()` still reports MPS; explicitly
-  importing `torch_fl` changes that result. Forward dispatch, copies, streams
-  and the thirty-four native ops continue to work on both backends in one
-  process. MPS backward remains blocked until upstream autograd either matches
-  the node's actual device type or handles MPS stream metadata when another
-  accelerator claims `PrivateUse1`.
+  [PyTorch issue #161129](https://github.com/pytorch/pytorch/issues/161129)
+  tracks this coexistence failure. PyTorch main still contains the same check,
+  so a newer release alone is not the remedy. Maintainers have not accepted
+  deriving the stream from each node's actual input devices; their current
+  autograd contract assumes a single available accelerator. A process with
+  only `import torch` runs MPS backward, because `at::getAccelerator()` still
+  reports MPS; explicitly importing `torch_fl` changes that result. Forward
+  dispatch, copies, streams and the thirty-four native ops continue to work on
+  both backends in one process. MPS training with an explicit `import torch_fl`
+  remains blocked until upstream autograd either matches the node's actual
+  device type or handles MPS stream metadata when another accelerator claims
+  `PrivateUse1`.
 
   The MPS distribution therefore omits the `torch.backends` autoload entry
   point. A bare `import torch` stays on the pure MPS path; an explicit

@@ -116,7 +116,12 @@ build opts into boxing.
   macOS arm64 runner (`macos-14`) rather than a vendor image, which is the one
   place the pipeline's `container:` block is omitted; the lane runs the backend
   operator suite (`pytest tests/integration/ops -m mps`) and picks up every
-  platform-agnostic group in the shared manifest.
+  platform-agnostic group in the shared manifest. It also runs the runtime
+  contract, including fresh-process boundaries. A pure `import torch` process
+  can train on MPS, but explicit `import torch_fl` leaves MPS backward blocked
+  by [PyTorch issue #161129](https://github.com/pytorch/pytorch/issues/161129):
+  autograd chooses the stream from the global accelerator, which differs from
+  the MPS device on this node.
 - **TsingMicro** has a sparse hand-written conf (67 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
