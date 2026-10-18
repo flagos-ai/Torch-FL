@@ -197,6 +197,25 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
         )
 
 
+def test_mps_hook_lifts_the_runner_allocator_ceiling_for_tests():
+    """The hosted runner's MPS ceiling is below its own usable memory.
+
+    GitHub's macos-14 runner reports only 7.93 GiB -- where an MPS runtime test
+    failed to allocate 256 bytes while holding 8 MiB. The child process setting
+    proves this is the host allocator, not torch_fl. The hook has to persist an
+    explicit limit to later test steps and verify that its setting takes effect.
+    """
+    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    assert "export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0" in hook
+    exports = [
+        line for line in hook.splitlines() if line.strip().startswith("export_ci_env ")
+    ]
+    assert any(
+        "PYTORCH_MPS_HIGH_WATERMARK_RATIO" in line.split() for line in exports
+    ), "the allocator setting does not reach the integration test step"
+    assert "driver_allocated_memory() > 7.93 * (1 << 30)" in hook
+
+
 def _pyproject_build_requirements() -> list[str]:
     """The requirement names in `[build-system].requires`, normalised.
 
