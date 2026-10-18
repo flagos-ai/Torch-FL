@@ -144,7 +144,10 @@ class MemoryManager {
   }
 
   Error_t memcpy_(void* dst, const void* src, size_t count, MemcpyKind /*kind*/) {
-    if (!dst || !src || count == 0) {
+    if (count == 0) {
+      return Success;
+    }
+    if (!dst || !src) {
       return ErrorUnknown;
     }
     // Every buffer this runtime hands out is shared, so the copy direction does

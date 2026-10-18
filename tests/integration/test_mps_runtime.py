@@ -135,6 +135,87 @@ def test_coexists_with_torch_backends_mps():
     assert flagos_value.device.type == "flagos"
 
 
+def _require_mps():
+    if not torch.backends.mps.is_available():
+        pytest.skip("torch.backends.mps is unavailable in this torch build")
+
+
+def test_mps_to_flagos_and_back():
+    _require_mps()
+    host = torch.arange(24, dtype=torch.float32).reshape(4, 6).t()
+    source = host.to("mps")
+    assert not source.is_contiguous()
+
+    on_flagos = source.to(DEVICE)
+    assert on_flagos.device.type == "flagos"
+    assert on_flagos.shape == source.shape
+    assert torch.equal(on_flagos.cpu(), host)
+
+    back = on_flagos.to("mps")
+    assert back.device.type == "mps"
+    assert torch.equal(back.cpu(), host)
+
+
+def test_copy_between_mps_and_flagos():
+    _require_mps()
+    host = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    source = host.to("mps")
+
+    on_flagos = torch.empty(3, 4, device=DEVICE)
+    on_flagos.copy_(source)
+    assert torch.equal(on_flagos.cpu(), host)
+
+    on_mps = on_flagos.to("mps")
+    assert torch.equal(on_mps.cpu(), host)
+
+
+def test_copy_mps_to_noncontiguous_flagos():
+    _require_mps()
+    host = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    on_flagos_storage = torch.empty(4, 3, device=DEVICE)
+    on_flagos = on_flagos_storage.t()
+    assert not on_flagos.is_contiguous()
+    on_flagos.copy_(host.to("mps"))
+    assert torch.equal(on_flagos.cpu(), host)
+
+
+def test_mps_to_flagos_converts_dtype_and_empty_tensor():
+    _require_mps()
+    host = torch.arange(6, dtype=torch.float32)
+    on_flagos = host.to("mps").to(DEVICE, dtype=torch.float64)
+    assert on_flagos.dtype == torch.float64
+    assert torch.equal(on_flagos.cpu(), host.to(torch.float64))
+
+    empty = torch.empty(0, 3, device="mps")
+    copied = empty.to(DEVICE)
+    assert copied.shape == empty.shape
+    on_flagos_empty = torch.empty(0, 3, device=DEVICE)
+    on_flagos_empty.copy_(empty)
+    assert torch.equal(on_flagos_empty.cpu(), empty.cpu())
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_module_mps_flagos_round_trip_preserves_parameters(swap):
+    _require_mps()
+    model = torch.nn.Linear(4, 3)
+    expected = {name: value.detach().clone() for name, value in model.named_parameters()}
+    previous = torch.__future__.get_swap_module_params_on_conversion()
+    torch.__future__.set_swap_module_params_on_conversion(swap)
+    try:
+        model.to("mps")
+        model.to(DEVICE)
+        assert all(parameter.device.type == "flagos" for parameter in model.parameters())
+        for name, value in model.named_parameters():
+            assert torch.equal(value.cpu(), expected[name])
+
+        model.to("mps")
+        assert all(parameter.device.type == "mps" for parameter in model.parameters())
+        for name, value in model.named_parameters():
+            assert torch.equal(value.cpu(), expected[name])
+    finally:
+        torch.__future__.set_swap_module_params_on_conversion(previous)
+
+
 @pytest.mark.parametrize(
     "code, expected",
     [
