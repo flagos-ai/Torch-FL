@@ -162,7 +162,7 @@ jobs:
           fi
 
   lint:
-    needs: resolve-checkout
+    needs: [resolve-checkout, ci-lifecycle]
     uses: ./.github/workflows/lint.yml
     with:
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
@@ -173,7 +173,7 @@ jobs:
   # matrix, so fork on-demand runs test the submitted PR rather than base main.
   agnostic-checks:
     name: Platform-agnostic checks
-    needs: [resolve-checkout, lint]
+    needs: [resolve-checkout, ci-lifecycle, lint]
     concurrency:
       group: ci-agnostic-${{ github.event_name }}-${{ needs.resolve-checkout.outputs.pull_request || needs.resolve-checkout.outputs.branch }}
       cancel-in-progress: true
@@ -184,7 +184,7 @@ jobs:
 
   codegen-checks:
     name: Codegen checks
-    needs: [resolve-checkout, lint]
+    needs: [resolve-checkout, ci-lifecycle, lint]
     concurrency:
       group: ci-codegen-${{ github.event_name }}-${{ needs.resolve-checkout.outputs.pull_request || needs.resolve-checkout.outputs.branch }}
       cancel-in-progress: true
@@ -195,7 +195,7 @@ jobs:
 
   discover-platforms:
     name: Discover platforms
-    needs: [resolve-checkout, lint, agnostic-checks, codegen-checks]
+    needs: [resolve-checkout, ci-lifecycle, lint, agnostic-checks, codegen-checks]
     concurrency:
       group: ci-discover-${{ github.event_name }}-${{ needs.resolve-checkout.outputs.pull_request || needs.resolve-checkout.outputs.branch }}
       cancel-in-progress: true
@@ -257,7 +257,7 @@ jobs:
   # for any lane that did not pass -- see tests/unit/test_ci_fail_fast.py.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
-    needs: [resolve-checkout, discover-platforms]
+    needs: [resolve-checkout, ci-lifecycle, discover-platforms]
     concurrency:
       group: ci-platform-${{ github.event_name }}-${{ needs.resolve-checkout.outputs.pull_request || needs.resolve-checkout.outputs.branch }}-${{ matrix.platform }}
       cancel-in-progress: true
