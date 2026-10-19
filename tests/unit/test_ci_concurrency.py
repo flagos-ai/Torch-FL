@@ -15,6 +15,8 @@
 """Cancel only CI runs replaced by a newer PR head or branch push."""
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -218,6 +220,53 @@ def test_cancel_failure_is_a_warning_and_other_runs_are_still_processed():
     assert ci_concurrency.cancel_pull_request(github, SHA, "42") == [2]
 
 
+def test_read_only_fork_token_skips_cleanup_without_failing_the_lifecycle(monkeypatch):
+    github = FakeGitHub([_run(1)])
+
+    def read_only(*args, **kwargs):
+        raise ci_concurrency.GitHubError(
+            "HTTP 403: Resource not accessible by integration"
+        )
+
+    github.repo_api = read_only
+    monkeypatch.setattr(ci_concurrency, "GitHub", lambda repository: github)
+    assert (
+        ci_concurrency.main(
+            [
+                "--repository",
+                REPOSITORY,
+                "--revision",
+                SHA,
+                "--pull-request=42",
+                "--current-run=2",
+            ]
+        )
+        == 0
+    )
+
+
+def test_other_cleanup_failures_are_errors(monkeypatch):
+    github = FakeGitHub()
+
+    def unavailable(*args, **kwargs):
+        raise ci_concurrency.GitHubError("GitHub API unavailable")
+
+    github.command = unavailable
+    monkeypatch.setattr(ci_concurrency, "GitHub", lambda repository: github)
+    assert (
+        ci_concurrency.main(
+            [
+                "--repository",
+                REPOSITORY,
+                "--revision",
+                SHA,
+                "--branch=main",
+            ]
+        )
+        == 1
+    )
+
+
 def test_rejects_unsafe_command_line_values():
     with pytest.raises(ValueError):
         ci_concurrency.cancel_push(FakeGitHub(), "main; echo unsafe", "main")
@@ -225,3 +274,57 @@ def test_rejects_unsafe_command_line_values():
         ci_concurrency.cancel_push(FakeGitHub(), SHA, "main\n::error::injected")
     with pytest.raises(ValueError):
         ci_concurrency.cancel_pull_request(FakeGitHub(), SHA, "0")
+
+
+@pytest.mark.parametrize(
+    ("source", "selectors"),
+    [
+        (
+            "pr",
+            ["--revision", SHA, "--pull-request=42"],
+        ),
+        (
+            "push",
+            ["--revision", SHA, "--branch=main"],
+        ),
+    ],
+)
+def test_lifecycle_step_runs_the_cleanup_script(tmp_path, source, selectors):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    run = workflow["jobs"]["ci-lifecycle"]["steps"][0]["run"]
+    output = tmp_path / "record"
+
+    stub = tmp_path / "python3"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "pathlib.Path(os.environ['RECORD_PATH']).write_text(\n"
+        "    os.environ['PYTHONPATH'] + '\\n' + '\\n'.join(sys.argv[1:])\n"
+        ")\n"
+    )
+    stub.chmod(0o755)
+    process = subprocess.run(
+        ["bash", "-e", "-c", run],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "SOURCE": source,
+            "GITHUB_REPOSITORY": REPOSITORY,
+            "REVISION": SHA,
+            "PR_NUMBER": "42",
+            "BRANCH": "main",
+            "GITHUB_RUN_ID": "123",
+            "RECORD_PATH": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 0, process.stderr
+    recorded = output.read_text().splitlines()
+    assert recorded[0] == ".github/scripts/ci"
+    assert recorded[1] == ".github/scripts/ci/ci_concurrency.py"
+    assert recorded[2:4] == ["--repository", REPOSITORY]
+    assert all(selector in recorded for selector in selectors)
+    assert recorded[-2:] == ["--current-run", "123"]

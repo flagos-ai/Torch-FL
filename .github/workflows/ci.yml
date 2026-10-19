@@ -145,13 +145,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SOURCE" = "pr" ]]; then
-            python3 -m .github.scripts.ci.ci_concurrency \
+            PYTHONPATH=.github/scripts/ci python3 \
+              .github/scripts/ci/ci_concurrency.py \
               --repository "$GITHUB_REPOSITORY" \
               --revision "$REVISION" \
               --pull-request="$PR_NUMBER" \
               --current-run "$GITHUB_RUN_ID"
           elif [[ "$SOURCE" = "push" ]]; then
-            python3 -m .github.scripts.ci.ci_concurrency \
+            PYTHONPATH=.github/scripts/ci python3 \
+              .github/scripts/ci/ci_concurrency.py \
               --repository "$GITHUB_REPOSITORY" \
               --revision "$REVISION" \
               --branch="$BRANCH" \
