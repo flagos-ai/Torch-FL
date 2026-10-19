@@ -136,7 +136,13 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
                         static_cast<c10::DeviceIndex>(device < 0 ? 0 : device))};
   }
 
-  TORCH_CHECK(device >= 0, "CachingDeviceAllocator: invalid device index");
+  // A failed current-device probe must be reported before the allocation path.
+  // In particular, the zero-byte fallback must not mask a runtime failure.
+  TORCH_CHECK(
+      device >= 0,
+      "CachingDeviceAllocator: invalid device index for ",
+      nbytes,
+      " byte allocation");
 
   // Delegation path: the backend ships its own caching allocator (e.g. CUDA).
   // Route the allocation through it so flagos `empty` and boxed-kernel outputs

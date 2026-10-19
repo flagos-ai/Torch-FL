@@ -454,33 +454,71 @@ def test_device_properties_avoid_torch_cuda_on_a_cpu_torch(as_cuda, monkeypatch)
 
 
 @pytest.mark.anyplatform
-def test_device_properties_keep_the_torch_cuda_path_on_a_cuda_torch(
-    as_cuda, monkeypatch
+@pytest.mark.parametrize("torch_cuda_kernels", [False, True])
+def test_device_properties_follow_the_torch_cuda_availability(
+    as_cuda, monkeypatch, torch_cuda_kernels
 ):
-    """A CUDA-enabled torch keeps upstream's lookup, as the vendor wheels do."""
+    """A CUDA profile routes property lookup by the torch build it is running on.
+
+    A CUDA-enabled torch keeps upstream's lookup, as the vendor wheels do. A
+    CPU torch, as used by the FlagGems-primary build, has no CUDA kernels even
+    when this platform profile is CUDA-like; it reads properties through the
+    flagos interface instead of entering torch's unimplemented CUDA path.
+    """
     from torch._inductor.runtime.hints import DeviceProperties
 
     from torch_fl.compile import device_interface as di
 
-    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
+    monkeypatch.setattr(di, "_torch_has_cuda_kernels", lambda: torch_cuda_kernels)
+    monkeypatch.setattr(di, "DEVICE_TYPE", "flagos")
     _stub_flagos_properties(monkeypatch, _StubProps())
+    monkeypatch.setattr(
+        di.FlagOSDeviceInterface,
+        "get_compute_capability",
+        staticmethod(lambda device=None: 80),
+    )
+    monkeypatch.setattr(di, "_triton_current_target", lambda: None)
 
     delegated = []
+    flagos_properties = []
+    result = DeviceProperties(
+        type="cuda",
+        index=0,
+        multi_processor_count=108,
+        cc=80,
+        major=8,
+        warp_size=32,
+    )
 
     def _record(device):
         delegated.append(device)
-        raise AssertionError("stop here; the delegation is what is under test")
+        return result
+
+    def _record_flagos(device=None):
+        flagos_properties.append(device)
+        return result
 
     monkeypatch.setattr(DeviceProperties, "create", _record)
+    monkeypatch.setattr(
+        di.FlagOSDeviceInterface, "get_device_properties", _record_flagos
+    )
     monkeypatch.delattr(DeviceProperties.create, "_flagos_patched", raising=False)
 
     di._patch_device_properties()
 
-    with pytest.raises(AssertionError, match="the delegation is what is under test"):
-        DeviceProperties.create(torch.device("flagos", 0))
-    # Translated to the cuda device, which is where torch.cuda looks up the
-    # properties of the same physical GPU.
-    assert [d.type for d in delegated] == ["cuda"]
+    record = DeviceProperties.create(torch.device("flagos", 0))
+    if torch_cuda_kernels:
+        # The stock path receives the same device and may rewrite its record.
+        assert [str(d) for d in delegated] == ["flagos:0"]
+        assert flagos_properties == []
+    else:
+        assert delegated == []
+        assert flagos_properties == [torch.device("flagos", 0)]
+    assert record.type == "cuda"
+    assert record.index == 0
+    assert record.multi_processor_count == 108
+    assert record.cc == 80
+    assert record.warp_size == 32
 
 
 @pytest.mark.anyplatform
