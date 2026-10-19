@@ -23,8 +23,13 @@ on:
     - cron: '0 18 * * *'   # 02:00 CST daily
   push:
     branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.MARKDOWN'
+      - '**/*.mdown'
+      - '**/*.rst'
   pull_request:
-    branches: [main, dev, devops, dev-hygon]
+    branches: [main, dev, devops, dev-hygon, dev-musa]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:
@@ -38,10 +43,11 @@ on:
         required: false
         default: ''
         type: string
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
-  cancel-in-progress: true
+      revision:
+        description: 'PR head commit expected by a trusted on-demand run'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   # Resolve the source repository and immutable commit before any reusable
@@ -52,9 +58,14 @@ jobs:
     name: Resolve checkout source
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
     outputs:
       repository: ${{ steps.resolve.outputs.repository }}
       ref: ${{ steps.resolve.outputs.ref }}
+      pull_request: ${{ steps.resolve.outputs.pull_request }}
     steps:
       - name: Resolve trusted source
         id: resolve
@@ -62,23 +73,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_REPOSITORY: ${{ github.repository }}
           EVENT_REF: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ inputs.pr_number || '' }}
+          EXPECTED_REVISION: ${{ inputs.revision || '' }}
         run: |
           set -euo pipefail
 
           repository="$EVENT_REPOSITORY"
           ref="$EVENT_REF"
-          if [[ -n "$PR_NUMBER" ]]; then
-            if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
-              echo "::error::pr_number must be a positive integer"
+          pull_request="$PR_NUMBER"
+          if [[ "$EVENT_NAME" = "pull_request" && -z "$pull_request" ]]; then
+            candidates=$(gh api \
+              "repos/${EVENT_REPOSITORY}/commits/${EVENT_REF}/pulls?per_page=100")
+            if [[ "$(jq '[.[] | select(.state == "open")] | length' <<<"$candidates")" = "1" ]]; then
+              pull_request=$(jq -r '.[] | select(.state == "open") | .number' <<<"$candidates")
+            fi
+          fi
+          if [[ "$EVENT_NAME" = "pull_request" || -n "$pull_request" ]]; then
+            if [[ -z "$pull_request" ]]; then
+              echo "::error::Could not identify this commit's pull request."
               exit 1
             fi
-            pr=$(gh api "repos/${EVENT_REPOSITORY}/pulls/${PR_NUMBER}")
+            if [[ ! "$pull_request" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::pull request number must be a positive integer"
+              exit 1
+            fi
+            pr=$(gh api "repos/${EVENT_REPOSITORY}/pulls/${pull_request}")
             repository=$(jq -r '.head.repo.full_name // empty' <<<"$pr")
             ref=$(jq -r '.head.sha // empty' <<<"$pr")
             state=$(jq -r '.state // empty' <<<"$pr")
             if [[ "$state" != "open" ]]; then
-              echo "::error::PR #${PR_NUMBER} is not open"
+              echo "::error::PR #${pull_request} is not open"
               exit 1
             fi
             if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -89,11 +114,39 @@ jobs:
               echo "::error::PR head SHA is not a full commit SHA"
               exit 1
             fi
-            echo "Testing PR #${PR_NUMBER} from ${repository}@${ref}"
+            if [[ -n "$EXPECTED_REVISION" && "$ref" != "$EXPECTED_REVISION" ]]; then
+              echo "::error::The PR no longer points at ${EXPECTED_REVISION}."
+              exit 1
+            fi
+            echo "Testing PR #${pull_request} from ${repository}@${ref}"
+          fi
+
+          # An older head no longer describes this review. Cancel its active
+          # CI runs before this run requests shared or hardware runners. Match
+          # the current open PR so another PR that still has this commit does
+          # not lose its checks. Runs for this exact commit, pushes and the
+          # nightly schedule are kept; a newer commit will cancel this run.
+          if [[ -n "$pull_request" ]]; then
+            page=1
+            while :; do
+              runs=$(gh api \
+                "repos/${EVENT_REPOSITORY}/actions/workflows/ci.yml/runs?per_page=50&page=${page}")
+              for run in $(jq -r \
+                '(.workflow_runs // [])[] | select(.id != null) | select(.head_sha != $head) | select(.status == "queued" or .status == "in_progress" or .status == "waiting") | select(.event == "pull_request" or .event == "workflow_dispatch") | select(.pull_requests | any(.number == $pull_request or .number == ($pull_request | tonumber))) | .id' \
+                --arg head "$ref" --arg pull_request "$pull_request" <<<"$runs"); do
+              gh api "repos/${EVENT_REPOSITORY}/actions/runs/${run}/cancel" \
+                --method POST >/dev/null || echo "::warning::Could not cancel CI run ${run}."
+              done
+              if [[ "$(jq '.workflow_runs // [] | length' <<<"$runs")" -lt 50 ]]; then
+                break
+              fi
+              page=$((page + 1))
+            done
           fi
 
           printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+          printf 'pull_request=%s\n' "$pull_request" >> "$GITHUB_OUTPUT"
 
   lint:
     needs: resolve-checkout
@@ -124,8 +177,13 @@ jobs:
   discover-platforms:
     name: Discover platforms
     needs: [resolve-checkout, lint, agnostic-checks, codegen-checks]
+    if: ${{ needs.resolve-checkout.result == 'success' && needs.lint.result == 'success' && needs.agnostic-checks.result == 'success' && needs.codegen-checks.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
     outputs:
       platforms: ${{ steps.detect.outputs.platforms }}
     steps:
@@ -144,17 +202,48 @@ jobs:
       - name: Detect configured platforms
         id: detect
         env:
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.resolve-checkout.outputs.pull_request }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref || 'main' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ needs.resolve-checkout.outputs.ref }}
+          WORKFLOW_RUN: ${{ github.run_id }}
+          # A GitHub "rerun failed jobs" publishes a new shared-check owner
+          # instead of reusing a possibly superseded result from the old run.
+          WORKFLOW_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           PR_LABELS=""
+          PR_BASE_REF=""
+          BASE_REF="main"
+          BASE_SHA=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            PR_LABELS=$(jq -r 'join(",")' <<<"$PR_LABELS_JSON")
+            labels=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --slurp)
+            PR_LABELS=$(jq -r '[.[][] | .name] | unique | join(",")' <<<"$labels")
+            PR_BASE_REF="${{ github.base_ref }}"
+          fi
+          if [ -n "$PR_NUMBER" ]; then
+            pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+            if [ "$(jq -r '.head.sha // empty' <<<"$pr")" != "$HEAD_SHA" ]; then
+              echo "::error::PR head changed while the shared checks were running."
+              exit 1
+            fi
+            BASE_SHA=$(jq -r '.base.sha // empty' <<<"$pr")
+            if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The PR base commit is unavailable."
+              exit 1
+            fi
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              if [ "$(jq -r '.base.ref // empty' <<<"$pr")" != "$PR_BASE_REF" ]; then
+                echo "::error::The PR base branch changed while the shared checks were running."
+                exit 1
+              fi
+              BASE_REF="$PR_BASE_REF"
+            else
+              BASE_REF=""
+            fi
           fi
 
           python .github/scripts/ci/generate_matrix.py \
@@ -165,13 +254,18 @@ jobs:
             --configs-dir .github/configs \
             --pr-labels "$PR_LABELS" \
             --dispatch-platforms "$DISPATCH_PLATFORMS" \
+            --pr-number "$PR_NUMBER" \
+            --workflow-run "$WORKFLOW_RUN" \
+            --workflow-attempt "$WORKFLOW_ATTEMPT" \
             >> "$GITHUB_OUTPUT"
 
-  # One hardware pipeline per configured platform. The reusable workflow reads
-  # runner, image, timeout, and test manifest values from that platform config.
+  # One hardware pipeline per configured platform. Each call starts its own
+  # configuration and admission job, so the lanes do not queue behind one
+  # another while waiting for a runner.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
+    if: ${{ needs.discover-platforms.outputs.platforms != '' && needs.discover-platforms.outputs.platforms != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -183,6 +277,8 @@ jobs:
       platform: ${{ matrix.platform }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+      pr_number: ${{ needs.resolve-checkout.outputs.pull_request }}
+      revision: ${{ needs.resolve-checkout.outputs.ref }}
 
   # Single required-check gate for branch protection.
   ci-complete:
@@ -194,8 +290,12 @@ jobs:
       - agnostic-checks
       - codegen-checks
       - discover-platforms
-      - platform-pipeline
     runs-on: ubuntu-latest
+    concurrency:
+      # A fork pull request uses its source branch because fork events omit the
+      # pull request number. Each branch event has its own group.
+      group: ${{ (github.event_name == 'pull_request' && format('CI-pr-{0}', github.head_ref)) || (github.event_name == 'push' && format('CI-push-{0}', github.ref_name)) || format('CI-{0}-{1}', github.event_name, github.ref_name) }}
+      cancel-in-progress: true
     steps:
       - name: Verify shared checks and selected platforms passed
         env:
@@ -208,7 +308,7 @@ jobs:
 
           jobs = json.loads(os.environ["RESULTS"])
           errors = []
-          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "discover-platforms"):
+          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks"):
               if jobs[name]["result"] != "success":
                   errors.append(f"{name}: {jobs[name]['result']}")
 
@@ -216,19 +316,21 @@ jobs:
               selected = json.loads(jobs["discover-platforms"]["outputs"]["platforms"])
               if not isinstance(selected, list) or not all(isinstance(p, str) for p in selected):
                   raise ValueError("platforms must be an array of strings")
+              if jobs["discover-platforms"]["result"] != "success":
+                  raise ValueError(f"platform routing did not succeed: {jobs['discover-platforms']['result']}")
           except (KeyError, TypeError, ValueError) as exc:
               errors.append(f"Invalid platform discovery: {exc}")
               selected = []
 
-          platform_result = jobs["platform-pipeline"]["result"]
-          if selected and platform_result != "success":
-              errors.append(f"platform-pipeline: {platform_result}")
-          elif not selected and platform_result not in ("success", "skipped"):
-              errors.append(f"platform-pipeline: {platform_result}")
-
+          # Hardware runs independently after shared checks pass. Platform
+          # results are recorded as ci-platform statuses so shared checks do
+          # not wait for a busy hardware queue.
           for error in errors:
               print(f"::error::{error}")
           if errors:
               sys.exit(1)
-          print("Shared checks and all selected platforms passed.")
+          # Hardware lanes are checked separately on the commit and can wait
+          # for their own runner queues. This summary covers the shared checks
+          # needed before hardware admission.
+          print("Shared checks and platform routing passed.")
           PY
