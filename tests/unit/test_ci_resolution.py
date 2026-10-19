@@ -28,7 +28,7 @@ RUN = WORKFLOW["jobs"]["resolve-checkout"]["steps"][0]["run"]
 SHA = "a" * 40
 
 
-def _resolve(tmp_path, number="", pr=None):
+def _resolve(tmp_path, number="", pr=None, event_name="workflow_dispatch", **env):
     binary = tmp_path / "bin"
     binary.mkdir()
     gh = binary / "gh"
@@ -44,6 +44,10 @@ def _resolve(tmp_path, number="", pr=None):
         "PR_NUMBER": number,
         "GITHUB_OUTPUT": str(output),
         "FAKE_PR": json.dumps(pr or {}),
+        "EVENT_NAME": event_name,
+        "EVENT_PR_NUMBER": "",
+        "EVENT_BRANCH": "main",
+        **env,
     }
     process = subprocess.run(
         ["bash", "-e", "-c", RUN], env=env, capture_output=True, text=True
@@ -54,17 +58,47 @@ def _resolve(tmp_path, number="", pr=None):
 def test_normal_run_pins_the_event_commit(tmp_path):
     process, output = _resolve(tmp_path)
     assert process.returncode == 0, process.stderr
-    assert output == f"repository=flagos-ai/Torch-FL\nref={SHA}\n"
+    assert output == (
+        f"repository=flagos-ai/Torch-FL\nref={SHA}\npull_request=\nbranch=main\n"
+    )
+
+
+def test_pull_request_event_emits_ownership_without_an_extra_api_call(tmp_path):
+    process, output = _resolve(
+        tmp_path,
+        event_name="pull_request",
+        EVENT_PR_NUMBER="42",
+        EVENT_BRANCH="contributor:feature",
+    )
+    assert process.returncode == 0, process.stderr
+    assert output == (
+        f"repository=flagos-ai/Torch-FL\nref={SHA}\n"
+        "pull_request=42\nbranch=contributor:feature\n"
+    )
+
+
+def test_pull_request_without_a_number_fails_before_checkout(tmp_path):
+    process, output = _resolve(tmp_path, event_name="pull_request")
+    assert process.returncode == 1
+    assert "pull request number is unavailable" in process.stdout
+    assert output == ""
 
 
 def test_fork_run_resolves_both_repository_and_immutable_head(tmp_path):
     pr = {
         "state": "open",
-        "head": {"repo": {"full_name": "contributor/fork"}, "sha": "b" * 40},
+        "head": {
+            "repo": {"full_name": "contributor/fork"},
+            "sha": "b" * 40,
+            "ref": "feature",
+        },
     }
     process, output = _resolve(tmp_path, "42", pr)
     assert process.returncode == 0, process.stderr
-    assert output == f"repository=contributor/fork\nref={'b' * 40}\n"
+    assert output == (
+        f"repository=contributor/fork\nref={'b' * 40}\n"
+        "pull_request=42\nbranch=feature\n"
+    )
 
 
 @pytest.mark.parametrize("number", ["0", "-1", "01", "42; echo unsafe", "$(whoami)"])
@@ -79,16 +113,36 @@ def test_invalid_pr_numbers_fail_before_any_checkout(tmp_path, number):
     [
         {
             "state": "closed",
-            "head": {"repo": {"full_name": "contributor/fork"}, "sha": SHA},
+            "head": {
+                "repo": {"full_name": "contributor/fork"},
+                "sha": SHA,
+                "ref": "feature",
+            },
         },
-        {"state": "open", "head": {"repo": None, "sha": SHA}},
+        {"state": "open", "head": {"repo": None, "sha": SHA, "ref": "feature"}},
         {
             "state": "open",
-            "head": {"repo": {"full_name": "contributor/fork"}, "sha": "main"},
+            "head": {
+                "repo": {"full_name": "contributor/fork"},
+                "sha": "main",
+                "ref": "feature",
+            },
         },
         {
             "state": "open",
-            "head": {"repo": {"full_name": "bad/repo/extra"}, "sha": SHA},
+            "head": {
+                "repo": {"full_name": "bad/repo/extra"},
+                "sha": SHA,
+                "ref": "feature",
+            },
+        },
+        {
+            "state": "open",
+            "head": {
+                "repo": {"full_name": "contributor/fork"},
+                "sha": SHA,
+                "ref": "",
+            },
         },
     ],
 )
@@ -98,14 +152,10 @@ def test_unavailable_or_invalid_heads_fail_before_checkout(tmp_path, pr):
     assert output == ""
 
 
-def test_label_events_and_dispatches_do_not_cancel_each_other_or_main_runs():
+def test_label_events_keep_their_platform_routing_rerun():
     events = WORKFLOW[True]
     assert {"labeled", "unlabeled"} <= set(events["pull_request"]["types"])
     assert "paths-ignore" not in events["push"]
-    group = WORKFLOW["concurrency"]["group"]
-    assert "github.event_name" in group
-    assert "github.event.pull_request.number" in group
-    assert "inputs.pr_number" in group
 
 
 def test_privileged_control_workflows_only_checkout_the_trusted_event_commit():
