@@ -420,3 +420,44 @@ mapping is injected into the containers.
 Validate the upload's HTTP response and the corresponding FlagCICD record: a
 green workflow alone does not prove ingestion. Backend parsing and dashboard
 interpretation of the merged report require an actual authenticated upload.
+
+## FlagCICD Python line coverage
+
+Hardware jobs also collect real line coverage with coverage.py 7.10.7 and upload
+`coverage-<platform>.json` with `file_type: coverage` and a distinct
+`coverage-<platform>` job name. The pytest outcome report above remains a
+separate upload. Test pass rate, workflow pass rate, Python line coverage and
+operator support are different metrics.
+
+The scope is **all Python source in the installed `torch_fl` wheel**, including
+modules no test imports. Preparation resolves that directory through distribution
+metadata without importing the accelerator. The collector starts before initial
+conftest/test-module imports and writes a unique coverage.py data file for each
+top-level pytest invocation, including DCU's per-file runs. Fixture-launched
+sample subprocesses do not inherit activation. Python code executed only in
+subprocesses spawned by a test, C/C++ extensions, external dependencies and
+device kernels are outside this first implementation's scope. Source-tree unit
+tests only contribute when they execute the installed package, not a checkout or
+a fake package.
+
+`python_coverage.py merge` combines executed-line sets with coverage.py, rather
+than averaging session percentages. JSON filenames are portable `torch_fl/...`
+paths; the denominator remains the installed wheel's Python files. No coverage
+threshold is enforced. Failures retain the coverage saved before the failure;
+missing/corrupt process data and the integration outcome are recorded in the
+artifact's `metadata.json`. Its `complete` flag is false when the integration run failed or a
+started coverage session did not finalize. No executed package lines means no
+report, rather than a fabricated 0%/100% result. A killed process can lose its
+unsaved coverage. Raw data, session markers and the merged JSON are retained in
+`coverage-<platform>-<run_attempt>` artifacts, including on fork PRs. The uploaded
+JSON itself is the unmodified native coverage.py report (`meta`, `files`,
+`totals`); provenance/completeness metadata stays in the separate artifact file.
+
+Both uploads keep the same optional-token/fork boundary and nonblocking error
+policy. The MetaX job installs missing `curl` and CA certificates through its
+Ubuntu image's package manager before credentialed uploads, inside the job
+container. This requires root/package-mirror access; preparing these tools in a
+future image removes that runtime dependency. DNS/routing problems on other
+platforms still require runner network fixes. An HTTP 2xx plus the corresponding
+parsed FlagCICD record is required to validate service ingestion for each report
+type; green test/artifact steps alone do not establish it.

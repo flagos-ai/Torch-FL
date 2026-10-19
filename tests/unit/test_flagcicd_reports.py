@@ -361,17 +361,26 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
 
 
 @pytest.mark.parametrize(
-    "checkout,event,head,cancelled,merged,expected",
+    "checkout,event,head,cancelled,merged,covered,expected",
     [
-        ("flagos-ai/Torch-FL", "push", "", False, "success", True),
-        ("", "workflow_dispatch", "", False, "success", True),
-        ("contributor/fork", "workflow_dispatch", "", False, "success", False),
+        ("flagos-ai/Torch-FL", "push", "", False, "success", "skipped", True),
+        ("", "workflow_dispatch", "", False, "success", "skipped", True),
+        (
+            "contributor/fork",
+            "workflow_dispatch",
+            "",
+            False,
+            "success",
+            "skipped",
+            False,
+        ),
         (
             "flagos-ai/Torch-FL",
             "pull_request",
             "contributor/fork",
             False,
             "success",
+            "success",
             False,
         ),
         (
@@ -380,13 +389,26 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
             "flagos-ai/Torch-FL",
             False,
             "success",
+            "skipped",
             True,
         ),
-        ("flagos-ai/Torch-FL", "push", "", True, "success", False),
-        ("flagos-ai/Torch-FL", "push", "", False, "failure", False),
+        ("flagos-ai/Torch-FL", "push", "", True, "success", "success", False),
+        ("flagos-ai/Torch-FL", "push", "", False, "failure", "skipped", False),
+        ("flagos-ai/Torch-FL", "push", "", False, "failure", "success", True),
+        (
+            "contributor/fork",
+            "workflow_dispatch",
+            "",
+            False,
+            "failure",
+            "success",
+            False,
+        ),
     ],
 )
-def test_workflow_upload_boundary(checkout, event, head, cancelled, merged, expected):
+def test_workflow_upload_boundary(
+    checkout, event, head, cancelled, merged, covered, expected
+):
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/integration-tests.yml").read_text()
     )
@@ -402,6 +424,7 @@ def test_workflow_upload_boundary(checkout, event, head, cancelled, merged, expe
         "github.repository": "flagos-ai/Torch-FL",
         "github.event_name": event,
         "steps.merge-report.outcome": merged,
+        "steps.merge-coverage.outcome": covered,
     }.items():
         expression = expression.replace(key, repr(value))
     expression = expression.replace("cancelled()", repr(cancelled))

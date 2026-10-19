@@ -47,6 +47,8 @@
 # needs no torch to be read, only setuptools. It is listed explicitly rather
 # than assumed from the runner image.
 # PyYAML parses the workflows exercised by the pip-cache regression tests.
+# coverage.py exercises the hardware collector against a small installed test
+# package without importing torch or loading any accelerator libraries.
 
 name: Platform-agnostic checks
 
@@ -85,7 +87,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install platform-agnostic test dependencies
-        run: pip install pytest pytest-json-report==1.5.0 "transformers>=4.51" setuptools PyYAML
+        run: pip install pytest pytest-json-report==1.5.0 coverage==7.10.7 "transformers>=4.51" setuptools PyYAML
 
       - name: Check setup-script syntax
         run: |
@@ -109,6 +111,7 @@ jobs:
             tests/unit/test_ci_commands.py \
             tests/unit/test_ci_resolution.py \
             tests/unit/test_flagcicd_reports.py \
+            tests/unit/test_flagcicd_coverage.py \
             tests/unit/test_ci_version_pins.py \
             tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
