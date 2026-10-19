@@ -139,6 +139,13 @@ jobs:
       BRANCH: ${{ needs.resolve-checkout.outputs.branch }}
       REVISION: ${{ needs.resolve-checkout.outputs.ref }}
     steps:
+      - name: Check out the resolved revision
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-checkout.outputs.repository }}
+          ref: ${{ needs.resolve-checkout.outputs.ref }}
+          persist-credentials: false
+
       - name: Cancel active runs replaced by this revision
         # Selector arguments are passed as separate shell words so a branch
         # name cannot inject an option into the Python command.
