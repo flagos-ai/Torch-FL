@@ -39,10 +39,6 @@ on:
         default: ''
         type: string
 
-concurrency:
-  group: ci-probe
-  cancel-in-progress: true
-
 jobs:
   # Resolve the source repository and immutable commit before any reusable
   # workflow starts. Fork on-demand runs are dispatched from this workflow on
@@ -94,6 +90,11 @@ jobs:
 
           printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+  ci-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "probe"
 
   lint:
     needs: resolve-checkout
