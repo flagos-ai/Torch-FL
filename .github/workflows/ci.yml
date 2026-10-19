@@ -40,32 +40,18 @@ on:
         default: ''
         type: string
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # Lifecycle cleanup has a queue of its own. Sharing it with tests or the gate
-  # would let cancelling an older run also remove the newer run's jobs.
-  ci-lifecycle:
-    name: Record lifecycle event
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || inputs.pr_number != '' }}
-    concurrency:
-      group: ci-lifecycle-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-${{ github.run_id }}
-      cancel-in-progress: false
-    permissions: {}
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    steps:
-      - name: Record automatic cleanup
-        run: echo "The cancellation implementation is supplied by the next commit."
-
   # Resolve the source repository and immutable commit before any reusable
   # workflow starts. Fork on-demand runs are dispatched from this workflow on
   # the base branch, so the workflow definition remains trusted while the jobs
   # test the PR head commit supplied by the API.
   resolve-checkout:
     name: Resolve checkout source
+    # A newer PR head or push to the same branch supersedes source resolution.
+    # Leaving automatic runs out of cancellation also keeps /ci independent.
+    concurrency:
+      group: ci-resolve-${{ github.event_name }}-${{ github.event.pull_request.number || format('dispatch-{0}', inputs.pr_number) || github.ref }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -82,7 +68,7 @@ jobs:
           EVENT_REF: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          EVENT_BRANCH: ${{ github.event.pull_request.head.ref || github.event.pull_request.head.label || github.ref_name }}
+          EVENT_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
           PR_NUMBER: ${{ inputs.pr_number || '' }}
         run: |
           set -euo pipefail
@@ -131,6 +117,49 @@ jobs:
           printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
           printf 'pull_request=%s\n' "$pull_request" >> "$GITHUB_OUTPUT"
           printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+
+  # Lifecycle cleanup has a queue of its own. Sharing it with tests or the gate
+  # would let cancelling an older run also remove the newer run's jobs.
+  ci-lifecycle:
+    name: Cancel superseded runs
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || inputs.pr_number != '' }}
+    needs: resolve-checkout
+    concurrency:
+      group: ci-lifecycle-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE: ${{ needs.resolve-checkout.outputs.pull_request && 'pr' || 'push' }}
+      PR_NUMBER: ${{ needs.resolve-checkout.outputs.pull_request }}
+      BRANCH: ${{ needs.resolve-checkout.outputs.branch }}
+      REVISION: ${{ needs.resolve-checkout.outputs.ref }}
+    steps:
+      - name: Cancel active runs replaced by this revision
+        # Selector arguments are passed as separate shell words so a branch
+        # name cannot inject an option into the Python command.
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE" = "pr" ]]; then
+            python3 -m .github.scripts.ci.ci_concurrency \
+              --repository "$GITHUB_REPOSITORY" \
+              --revision "$REVISION" \
+              --pull-request="$PR_NUMBER" \
+              --current-run "$GITHUB_RUN_ID"
+          elif [[ "$SOURCE" = "push" ]]; then
+            python3 -m .github.scripts.ci.ci_concurrency \
+              --repository "$GITHUB_REPOSITORY" \
+              --revision "$REVISION" \
+              --branch="$BRANCH" \
+              --current-run "$GITHUB_RUN_ID"
+          else
+            echo "::error::automatic cleanup requires a pull request or push"
+            exit 1
+          fi
 
   lint:
     needs: resolve-checkout
