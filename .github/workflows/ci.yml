@@ -98,6 +98,9 @@ jobs:
   lint:
     needs: resolve-checkout
     uses: ./.github/workflows/lint.yml
+    concurrency:
+      group: CI-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name }}
+      cancel-in-progress: true
     with:
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
