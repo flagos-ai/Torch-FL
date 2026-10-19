@@ -291,7 +291,14 @@ def test_rejects_unsafe_command_line_values():
 )
 def test_lifecycle_step_runs_the_cleanup_script(tmp_path, source, selectors):
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    run = workflow["jobs"]["ci-lifecycle"]["steps"][0]["run"]
+    steps = workflow["jobs"]["ci-lifecycle"]["steps"]
+    assert steps[0]["uses"] == "actions/checkout@v4"
+    assert steps[0]["with"] == {
+        "repository": "${{ needs.resolve-checkout.outputs.repository }}",
+        "ref": "${{ needs.resolve-checkout.outputs.ref }}",
+        "persist-credentials": False,
+    }
+    run = steps[1]["run"]
     output = tmp_path / "record"
 
     stub = tmp_path / "python3"
