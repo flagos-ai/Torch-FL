@@ -82,6 +82,8 @@ def test_platform_owned_files_select_only_that_lane(platform, path):
         "docs/development/testing.md",
         "docs/assets/ci.png",
         "README.md\ndocs/guide.rst",
+        "docs/assets/diagram.PNG",
+        "docs/guide/appendix.MD",
     ],
 )
 def test_documentation_needs_no_hardware(files):
