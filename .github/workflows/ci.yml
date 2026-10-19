@@ -101,6 +101,7 @@ jobs:
     with:
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+      concurrency_group: ${{ needs.resolve-checkout.outputs.repository }}
 
   # Repository-wide checks that need no accelerator, no vendor image, and no
   # built wheel. They run against the same immutable source as the hardware
