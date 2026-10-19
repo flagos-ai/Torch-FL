@@ -109,6 +109,20 @@ def test_summary_line_is_recognised_with_a_banner_and_without_one():
         _RUNNER.clean_summary("===== 2 passed, 1 skipped in 0.01s =====")
         == "2 passed, 1 skipped in 0.01s"
     )
+    assert _RUNNER.clean_summary("2 passed, 1 xfailed in 0.01s") is None
+
+
+def test_missing_mpirun_is_caught_before_the_group_starts(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    tests = [
+        {"name": "mpi", "command": "mpirun -np 2 python -m pytest"},
+        {"name": "next", "command": "touch should_not_run"},
+    ]
+
+    with pytest.raises(SystemExit, match="mpirun is required"):
+        _run_main(monkeypatch, tmp_path, tests)
+
+    assert not (tmp_path / "should_not_run").exists()
 
 
 def test_teardown_crash_after_clean_summary_is_tolerated_when_opted_in(
