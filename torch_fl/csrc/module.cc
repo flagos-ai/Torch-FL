@@ -28,6 +28,14 @@
 #include <runtime/accelerator/musa/musa_stream.h>
 #endif
 
+#ifdef USE_ILUVATAR
+// corex ships the CUDA-shaped C runtime, and this build links the CPU torch
+// wheel, so the device properties, the current stream and the stream-priority
+// range below come from the runtime itself rather than from torch.cuda.
+#include <cuda_runtime.h>
+#include <flagos.h>
+#endif
+
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/utils.h>
 #include <torch/csrc/utils/device_lazy_init.h>
@@ -311,6 +319,81 @@ static PyObject* _getMusaCurrentRawStream(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+// Iluvatar's counterpart of the MUSA getter above, and for the same reason: the
+// backend links the CPU torch wheel, so there is no `_cuda_getCurrentRawStream`
+// and no torch stream to read. The handle comes from the platform's own stream
+// registry (libflagos.so, csrc/runtime/accelerator/iluvatar/stream.cc), which is
+// the queue the eager iluvatar kernels submit to, so a FlagTree/FlagGems kernel
+// launched on it is ordered against eager work.
+//
+// Unlike MUSA the index is not rejected when it is not the current device. The
+// registry is keyed by device and a current-stream entry is therefore per
+// device, while MUSA's single shared stream exists only for the current one --
+// so a wrong index there describes the wrong stream, but here it names the
+// stream that device would use.
+static PyObject* _getIluvatarCurrentRawStream(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+#ifdef USE_ILUVATAR
+  TORCH_CHECK(
+      THPUtils_checkLong(arg),
+      "_get_iluvatar_current_raw_stream expects an int, but got ",
+      THPUtils_typename(arg));
+  const auto idx = static_cast<int>(THPUtils_unpackLong(arg));
+  auto stream = GetCurrentStreamForDevice(idx);
+  return PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(stream));
+#else
+  TORCH_CHECK(false, "Iluvatar streams are unavailable in this build");
+#endif
+  END_HANDLE_TH_ERRORS
+}
+
+// Iluvatar device properties, in the same dict shape as the MUSA getter so
+// torch.flagos._DeviceProperties can read either. Corex ships a complete
+// cuda_runtime.h, so this is cudaGetDeviceProperties rather than the stand-in
+// the Ascend-shaped arms fall back to: inductor derives warp size and the
+// launch-grid limits from it, and a falsely narrow device produces kernels that
+// cannot be launched.
+static PyObject* _getIluvatarDeviceProperties(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+#ifdef USE_ILUVATAR
+  TORCH_CHECK(
+      THPUtils_checkLong(arg),
+      "_get_iluvatar_device_properties expects an int, but got ",
+      THPUtils_typename(arg));
+  const auto idx = static_cast<int>(THPUtils_unpackLong(arg));
+  cudaDeviceProp prop;
+  TORCH_CHECK(
+      cudaGetDeviceProperties(&prop, idx) == cudaSuccess,
+      "cudaGetDeviceProperties failed for device ",
+      idx);
+  return Py_BuildValue(
+      "{s:s,s:i,s:K,s:i,s:i,s:i,s:K,s:i,s:i,s:K}",
+      "name",
+      prop.name,
+      "multi_processor_count",
+      prop.multiProcessorCount,
+      "total_memory",
+      static_cast<unsigned long long>(prop.totalGlobalMem),
+      "major",
+      prop.major,
+      "minor",
+      prop.minor,
+      "warp_size",
+      prop.warpSize,
+      "l2_cache_size",
+      static_cast<unsigned long long>(prop.l2CacheSize),
+      "max_threads_per_multi_processor",
+      prop.maxThreadsPerMultiProcessor,
+      "regs_per_block",
+      prop.regsPerBlock,
+      "shared_memory_per_multiprocessor",
+      static_cast<unsigned long long>(prop.sharedMemPerMultiprocessor));
+#else
+  TORCH_CHECK(false, "Iluvatar device properties are unavailable in this build");
+#endif
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* _setDevice(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   TORCH_CHECK(THPUtils_checkLong(arg), "invalid argument to setDevice");
@@ -517,6 +600,12 @@ static PyMethodDef methods[] = {
 #ifdef USE_MUSA
     {"_get_musa_device_properties", _getMusaDeviceProperties, METH_O, nullptr},
     {"_get_musa_current_raw_stream", _getMusaCurrentRawStream, METH_O, nullptr},
+#endif
+#ifdef USE_ILUVATAR
+    {"_get_iluvatar_device_properties", _getIluvatarDeviceProperties, METH_O,
+     nullptr},
+    {"_get_iluvatar_current_raw_stream", _getIluvatarCurrentRawStream, METH_O,
+     nullptr},
 #endif
     {"_get_device", _getDevice, METH_NOARGS, nullptr},
     {"_set_device", _setDevice, METH_O, nullptr},

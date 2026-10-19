@@ -749,9 +749,9 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const int device = iluvatar::IluvatarDeviceIndex(a);
   cublasHandle_t handle = iluvatar::GetCublasHandle(device);
   at::Tensor out = at::empty({{m, n}}, a.options());
-  const cudaDataType_t ab_type = iluvatar::ToCudaDataType(a.scalar_type());
-  const cudaDataType_t c_type = iluvatar::ToCudaDataType(out.scalar_type());
-  const cudaDataType_t compute_type =
+  const ixblasDataType_t ab_type = iluvatar::ToBlasDataType(a.scalar_type());
+  const ixblasDataType_t c_type = iluvatar::ToBlasDataType(out.scalar_type());
+  const ixblasDataType_t compute_type =
       iluvatar::IluvatarGemmComputeType(a.scalar_type());
   const float alpha = 1.0f;
   const float beta = 0.0f;
@@ -795,9 +795,9 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const int device = iluvatar::IluvatarDeviceIndex(a);
   cublasHandle_t handle = iluvatar::GetCublasHandle(device);
   at::Tensor out = at::empty({{batch, m, n}}, a.options());
-  const cudaDataType_t ab_type = iluvatar::ToCudaDataType(a.scalar_type());
-  const cudaDataType_t c_type = iluvatar::ToCudaDataType(out.scalar_type());
-  const cudaDataType_t compute_type =
+  const ixblasDataType_t ab_type = iluvatar::ToBlasDataType(a.scalar_type());
+  const ixblasDataType_t c_type = iluvatar::ToBlasDataType(out.scalar_type());
+  const ixblasDataType_t compute_type =
       iluvatar::IluvatarGemmComputeType(a.scalar_type());
   const float alpha = 1.0f;
   const float beta = 0.0f;
@@ -863,9 +863,9 @@ at::Tensor {kernel}(
   const int device = iluvatar::IluvatarDeviceIndex(a);
   cublasHandle_t handle = iluvatar::GetCublasHandle(device);
   at::Tensor out = at::empty({{m, n}}, a.options());
-  const cudaDataType_t ab_type = iluvatar::ToCudaDataType(a.scalar_type());
-  const cudaDataType_t c_type = iluvatar::ToCudaDataType(out.scalar_type());
-  const cudaDataType_t compute_type =
+  const ixblasDataType_t ab_type = iluvatar::ToBlasDataType(a.scalar_type());
+  const ixblasDataType_t c_type = iluvatar::ToBlasDataType(out.scalar_type());
+  const ixblasDataType_t compute_type =
       iluvatar::IluvatarGemmComputeType(a.scalar_type());
   // beta*self is folded in first, by broadcasting self into the output and then
   // calling the GEMM with beta = 1 so it accumulates onto that.

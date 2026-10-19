@@ -53,9 +53,15 @@
 // dispatch key, so c10::cuda is a hollow shell in that build -- including
 // <c10/cuda/CUDAStream.h> there would resolve against headers the runtime does
 // not back with symbols. It still needs *some* barrier; see the arm below.
+// USE_ILUVATAR is excluded for the same reason as USE_KUNLUNXIN, and the same
+// reason as runtime/guard.h: the platform links the CPU torch wheel and owns its
+// streams (runtime/accelerator/iluvatar/stream.cc), so <c10/cuda/CUDAStream.h>
+// has no symbols behind it in that build. Unlike the CUDA-ABI platforms below it
+// does have a stream to name; it just cannot be asked for through c10::cuda. It
+// still needs *some* barrier; see the arm below.
 //
 // FLAGOS_COPY_CUDA_ABI marks the platforms that DO share the vendor's CUDA
-// streams -- cuda, ppu, metax, iluvatar -- i.e. where a barrier is required but
+// streams -- cuda, ppu, metax -- i.e. where a barrier is required but
 // the stream cannot be named without c10::cuda. On those, the actual stream
 // query is still gated on FLAGOS_BOXING_BUILD: c10::cuda lives in
 // libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
@@ -63,7 +69,7 @@
 // symbol there. The de-boxed arm below covers both cases.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR)
 #define FLAGOS_COPY_CUDA_ABI 1
 #else
 #define FLAGOS_COPY_CUDA_ABI 0
@@ -179,6 +185,20 @@ class BlockingCopyGuard {
     // this is a device-wide drain: a superset of the per-stream wait, and so
     // still correct, just coarser. Only reached on the blocking-copy paths.
     ::DeviceSynchronize();
+#elif defined(USE_ILUVATAR)
+    // iluvatar owns its streams, so the queue every producer submits to is
+    // reachable directly. The guard above selected *this tensor's* device
+    // before this runs, so the current device is the one to ask about -- the
+    // same assumption the MUSA arm makes about GetDefaultMusaStream(). Waiting
+    // on that stream is what the CUDA arm gets from c10::cuda's current stream.
+    // Only reached on the blocking-copy paths.
+    int device = 0;
+    if (::GetDevice(&device) == Success) {
+      Stream_t stream = GetCurrentStreamForDevice(device);
+      if (stream != nullptr) {
+        ::StreamSynchronize(stream);
+      }
+    }
 #elif FLAGOS_COPY_CUDA_ABI
     // A CUDA-ABI platform with boxing OFF. The vendor runtime still shares its
     // streams with flagos, so a barrier is required -- but this wheel carries

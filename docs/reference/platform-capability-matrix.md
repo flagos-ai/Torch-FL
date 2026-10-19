@@ -24,7 +24,7 @@ when a platform gains or loses one.
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `cuda` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: `abs`, the elementwise `add`/`sub`/`mul` forms, `sum`/`mean`) | `mps` (stream/event only) | 2037 | no |
 
 Column notes:
@@ -41,10 +41,13 @@ Column notes:
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
 toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   `kunlunxin` has its own `kunlunxin/` dir, built on the XPU SDK's native
-  `libxpurt` runtime rather than the CUDA-shaped surface. `iluvatar` reuses
-  `cuda` (the corex SDK presents a usable CUDA-shaped runtime, so the shared
-  `cuda` sources are built as-is and there is no
-  `csrc/runtime/accelerator/iluvatar/` directory).
+  `libxpurt` runtime rather than the CUDA-shaped surface. `iluvatar` has its
+  own `iluvatar/` dir too, and for the same reason: the corex SDK does present a
+  usable CUDA-shaped C runtime, but the wheel links the *CPU* torch, so the
+  stream half cannot come from `c10::cuda` the way the shared `cuda` sources
+  take it. `iluvatar/` builds the CUDA sources against corex's runtime and keeps
+  its own per-device stream registry, which is what keeps `libtorch_cuda.so` /
+  `libc10_cuda.so` out of the platform's NEEDED list.
 - **aten backend** is the `csrc/aten/backends/<dir>` vendor kernel tree, when one
   exists. `flagos/` (the Python op caller) and `soft_lowp/` (the software
   low-precision matmul path shared by DCU/MetaX) are shared, not per-platform.
@@ -154,6 +157,6 @@ build opts into boxing.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, kunlunxin, metax, mps, musa, tsingmicro
+- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, kunlunxin, metax, mps, musa, tsingmicro
 - `csrc/aten/backends/`: ascend, flagos, gcu, iluvatar, kunlunxin, mps, musa, soft_lowp
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, mps, musa, ppu
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu

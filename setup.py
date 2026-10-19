@@ -605,6 +605,22 @@ def _cmake_build_jobs() -> int:
     return multiprocessing.cpu_count()
 
 
+def _torch_cxx11_abi() -> str:
+    """The C++ ABI of the torch this build links, as "1" or "0".
+
+    Returns ``""`` when torch cannot be imported, so the CMake-side probe decides
+    instead of this failing the configure with an unrelated error. setup.py is a
+    script, not a module: the other torch reads below import it locally, and a
+    reference from here (or from ``build_deps``, which runs in the same scope)
+    would be a NameError rather than the module-global it looks like.
+    """
+    try:
+        import torch
+    except ImportError:
+        return ""
+    return "1" if torch._C._GLIBCXX_USE_CXX11_ABI else "0"
+
+
 def build_deps():
     build_dir = os.path.join(BASE_DIR, "build")
     os.makedirs(build_dir, exist_ok=True)
@@ -620,6 +636,16 @@ def build_deps():
         "-DPYTHON_EXECUTABLE=" + sys.executable,
         "-DPYTORCH_INSTALL_DIR=" + get_pytorch_dir(),
     ]
+
+    # The ABI derives from the torch this build links. Passing it removes the
+    # CMake-side probe (which would run the same query in a subprocess) from the
+    # picture entirely, so the compile flag and the value recorded in
+    # compatibility.json cannot disagree. Only iluvatar consults the flag today
+    # (the platform that can be built against more than one kind of torch), so
+    # an unreadable torch is left to CMake rather than made fatal here.
+    torch_cxx11_abi = _torch_cxx11_abi()
+    if torch_cxx11_abi:
+        cmake_args.append("-DFLAGOS_TORCH_CXX11_ABI=" + torch_cxx11_abi)
 
     cmake_args.append(f"-DFLAGOS_ACCELERATOR={FLAGOS_ACCELERATOR}")
 

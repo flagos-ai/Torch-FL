@@ -24,7 +24,9 @@ set(LIBRARY_NAME flagos)
 # The runtime sources live under <runtime_dir>/, except DCU which reuses the CUDA
 # runtime sources (DTK's CUDA compatibility toolkit provides cuda_runtime.h and a
 # libcudart shim over libgalaxyhip, so they build unchanged) and adds its own
-# DTK-core ABI shim below.
+# DTK-core ABI shim below. Iluvatar used to reuse them too and no longer does:
+# its sources are a copy of the CUDA ones with the stream half replaced by the
+# platform's own registry, so the build needs no c10::cuda (see iluvatar/stream.cc).
 file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/*.cc"
 )
@@ -140,12 +142,13 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   target_link_directories(${LIBRARY_NAME} PRIVATE ${XPU_LIB_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
 elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
-  # Iluvatar corex: unlike kunlunxin the SDK ships a *usable* CUDA runtime
-  # (cuda_runtime.h + libcudart.so.10.2 at /usr/local/corex) and corex's torch is
-  # a real CUDA build exporting c10::cuda, so the runtime sources are the shared
-  # cuda/ ones (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda") and there is no iluvatar/
-  # subdir. Link the shim rather than find_package, which would want a CUDA
-  # toolkit the corex-only host does not provide.
+  # Iluvatar corex: the SDK ships a *usable* CUDA runtime (cuda_runtime.h +
+  # libcudart.so.10.2 at /usr/local/corex), which is what iluvatar/ is built
+  # against -- but not torch's CUDA, which is what it deliberately avoids. The
+  # platform owns its per-device streams (iluvatar/stream.cc) instead of reading
+  # c10::cuda's, so libflagos.so carries no c10::cuda symbol and the wheel can
+  # link the CPU torch. Link the corex shim rather than find_package, which
+  # would want a CUDA toolkit the corex-only host does not provide.
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 elseif(FLAGOS_ACCELERATOR STREQUAL "mps")

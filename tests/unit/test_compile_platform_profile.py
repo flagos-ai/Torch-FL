@@ -114,6 +114,25 @@ def _cuda_platform_without_cuda_torch(monkeypatch) -> None:
     )
 
 
+@pytest.fixture
+def as_iluvatar(monkeypatch):
+    """Force every profile consumer onto the Iluvatar profile.
+
+    Same shape as Kunlunxin -- not CUDA-like, yet the reported Triton device type
+    is "cuda" because corex's runtime really is CUDA-shaped -- but for the
+    opposite reason: iluvatar's *runtime* is CUDA, and what it lacks is a CUDA
+    torch. It links the CPU wheel and answers streams from its own registry.
+    """
+    for module in ("platform_profile", "device_interface", "inductor_codegen"):
+        monkeypatch.setattr(
+            f"torch_fl.compile.{module}.platform_profile",
+            lambda: pp._ILUVATAR_PROFILE,
+            raising=False,
+        )
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "iluvatar")
+    return pp._ILUVATAR_PROFILE
+
+
 # --- profile selection ------------------------------------------------------
 
 
@@ -126,6 +145,8 @@ def _cuda_platform_without_cuda_torch(monkeypatch) -> None:
         ("dcu", pp._DCU_PROFILE),
         ("musa", pp._MUSA_PROFILE),
         ("gcu", pp._GCU_PROFILE),
+        ("kunlunxin", pp._KUNLUNXIN_PROFILE),
+        ("iluvatar", pp._ILUVATAR_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -218,6 +239,46 @@ def test_raw_stream_comes_from_acl_registry_on_ascend(as_ascend, monkeypatch):
 
     assert di._raw_stream(3) == 0x1234
     assert seen == [3]
+
+
+@pytest.mark.anyplatform
+def test_raw_stream_comes_from_the_platform_registry_on_iluvatar(as_iluvatar):
+    """Iluvatar must not fall back to the CUDA binding, which the CPU wheel lacks.
+
+    The profile looks CUDA-ish -- corex's runtime is CUDA-shaped and the Triton
+    target name really is "cuda" -- but ``torch._C._cuda_getCurrentRawStream``
+    does not exist on a CPU torch wheel. The handle has to come from the
+    platform's own registry, which is the stream eager kernels submit to.
+    """
+    from torch_fl.compile import device_interface as di
+    from torch_fl.compile import flagtree_shim
+
+    seen = []
+    original = flagtree_shim.get_iluvatar_current_raw_stream
+    try:
+        flagtree_shim.get_iluvatar_current_raw_stream = lambda idx: (
+            seen.append(idx) or 0x5678
+        )
+        assert di._raw_stream(1) == 0x5678
+        assert seen == [1]
+    finally:
+        flagtree_shim.get_iluvatar_current_raw_stream = original
+
+
+@pytest.mark.anyplatform
+def test_generated_code_imports_the_iluvatar_stream_getter(as_iluvatar):
+    """The snippet inductor emits must name the getter that exists in this build."""
+    from torch_fl.compile.inductor_codegen import (
+        _device_op_overrides,
+        FlagOSAscendDeviceOpOverrides,
+    )
+
+    overrides = _device_op_overrides()
+    assert not isinstance(overrides, FlagOSAscendDeviceOpOverrides)
+    assert overrides.import_get_raw_stream_as("s") == (
+        "from torch_fl.compile.flagtree_shim import "
+        "get_iluvatar_current_raw_stream as s"
+    )
 
 
 @pytest.mark.anyplatform

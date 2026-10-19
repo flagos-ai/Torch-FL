@@ -1249,6 +1249,37 @@ def _patch_flaggems_codegen_config():
     # the two, so the build record is the only authoritative key.
     if _build_accelerator() == "iluvatar":
         _env.set_foreign("GEMS_VENDOR", "iluvatar")
+        # FlagGems' _iluvatar descriptor is a copy of its NVIDIA one, so it reads
+        # torch.cuda directly in two places the CPU wheel does not back: the
+        # philox generators behind every generator-less RNG op, and the device
+        # name every op compares its input against.
+        from torch_fl.accelerator.iluvatar._ilu_compat import (
+            _ensure_corex_headers_on_path,
+            install_ilu_cuda_shim,
+            install_ilu_rng_generators,
+            patch_iluvatar_flag_gems_device_name,
+            patch_triton_benchmark_allocator,
+        )
+
+        _ensure_corex_headers_on_path()
+        install_ilu_cuda_shim()
+        install_ilu_rng_generators()
+        # Triton's autotuner flushes the L2 with a buffer it allocates on
+        # "cuda", which this build does not have; without this every autotuned
+        # kernel (layernorm among them) fails before it is benchmarked.
+        try:
+            patch_triton_benchmark_allocator()
+        except Exception:
+            pass
+        try:
+            import flag_gems  # noqa: F401
+        except Exception:
+            pass
+        else:
+            try:
+                patch_iluvatar_flag_gems_device_name()
+            except Exception:
+                pass
         return
 
     # --- Generic NVIDIA CUDA branch (default) ---

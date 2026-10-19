@@ -38,9 +38,12 @@
 // (cudnnTensorDescriptor_t etc.) from the aten tensor's sizes and strides.
 //
 // The build defines __ILUVATAR__ (matching the vendor torch's own ABI selection)
-// and compiles with the pre-cxx11 ABI against that torch; USE_ILUVATAR selects
-// the platform and this file. See cmake/flagos_platforms.json and
-// CMakeLists.txt's iluvatar arm.
+// and links only the CPU torch wheel: the platform has its own runtime sources
+// (runtime/accelerator/{iluvatar,allocator/backends/iluvatar_memory.h}) that talk
+// to corex's C runtime directly, so no c10::cuda symbol -- and therefore not
+// libtorch_cuda.so / libc10_cuda.so -- is needed. USE_ILUVATAR selects the
+// platform and this file. See cmake/flagos_platforms.json and CMakeLists.txt's
+// iluvatar arm.
 
 #pragma once
 
@@ -49,10 +52,11 @@
 #include <ATen/ATen.h>
 #include <ATen/ops/empty.h>
 #include <c10/core/Scalar.h>
-#include <c10/cuda/CUDAStream.h>
 
 #include <cublas_v2.h>
 #include <cudnn.h>
+#include <cuda_runtime.h>
+#include "runtime/accelerator/iluvatar/iluvatar_context.h"
 
 #include <cstdint>
 #include <mutex>
@@ -61,11 +65,10 @@
 
 namespace at::native::flagos::iluvatar {
 
-// The flagos device index of `tensor`. flagos aliases the same physical device
-// as torch's CUDA backend, so a flagos tensor's index is directly the corex
-// device ordinal -- no translation table is needed the way a separate-runtime
-// backend would require. An undefined or non-privateuseone tensor resolves to
-// device 0, which is what the kernels pass for their (always-privateuseone)
+// The flagos device index of `tensor`. The flagos device ordinal is the corex
+// device ordinal -- flagos is registered on the corex device set directly, so no
+// translation table is needed. An undefined or non-privateuseone tensor resolves
+// to device 0, which is what the kernels pass for their (always-privateuseone)
 // operands.
 inline int IluvatarDeviceIndex(const at::Tensor& tensor) {
   if (!tensor.defined() || !tensor.device().is_privateuseone()) {
@@ -80,17 +83,18 @@ inline int IluvatarDeviceIndex(const at::Tensor& tensor) {
 // device, so an op on flagos:1 has to run with device 1 selected or the vendor
 // library reads / writes the wrong card. corex's runtime is CUDA-shaped and its
 // cudaSetDevice (the vendor ixSetDevice) is the same thread-local current-device
-// torch's own CUDA guard moves, so this and torch agree -- the raw corex calls
-// are used rather than the flagos ::GetDevice/::SetDevice wrappers, matching the
-// sibling backends' direct use of their vendor runtime (xpu_set_device,
-// musaSetDevice).
+// the flagos runtime's own ::SetDevice moves, so the raw corex calls and the
+// contract wrappers agree -- the raw calls are used, matching the sibling
+// backends' direct use of their vendor runtime (xpu_set_device, musaSetDevice).
 //
 // The index is read from cudaGetDevice rather than a shadow copy for the reason
-// runtime/accelerator/cuda/device.cc records: torch.cuda.set_device() moves the
-// driver's index without going through us, so a cached value can only diverge.
+// runtime/accelerator/iluvatar/device.cc records: the driver's index can be
+// moved without going through our ::SetDevice, so a cached value can only
+// diverge.
 class IluvatarDeviceGuard {
  public:
   explicit IluvatarDeviceGuard(const at::Tensor& tensor) {
+    c10::flagos::iluvatar::EnsureIluvatarContext();
     const int target = IluvatarDeviceIndex(tensor);
     int current = -1;
     if (cudaGetDevice(&current) != cudaSuccess || current == target) {
@@ -117,21 +121,26 @@ class IluvatarDeviceGuard {
 
 // The corex stream an op's work must be queued on.
 //
-// On a CUDA-compatible platform the flagos device shares torch's CUDA streams,
-// so the current stream is readable from c10::cuda (this is why copy_ops.cc and
-// runtime/guard.h keep `c10::cuda::getCurrentCUDAStream` for USE_ILUVATAR and
-// exclude only the de-boxed / hipified platforms). corex's own stream type is
-// aliased to cudaStream_t by the mapping headers, so the handle passes straight
-// to cudnnSetStream / cublasSetStream with a cast.
+// This is torch_fl's own per-device stream, from the flagos runtime contract
+// (runtime/accelerator/iluvatar/stream.cc), and NOT torch's. Reading torch's
+// stream here -- `c10::cuda::getCurrentCUDAStream`, which is what this did --
+// is what made every iluvatar build link libtorch_cuda.so and libc10_cuda.so,
+// so no CPU torch wheel could load it; the platform therefore had no compliant
+// test environment. Iluvatar is not a boxing platform, nothing in the build
+// enters the CUDA dispatch key, and there is no torch stream to be ordered
+// against in the first place.
 //
-// Triton (FlagGems) launches on the same torch current CUDA stream, so binding
-// the vendor handle to it orders vendor work against the FlagGems path without
-// an explicit barrier -- the property the MUSA backend has to reconstruct by
-// hand with a single shared stream (musa_stream.h) but CUDA-compat platforms
-// inherit from torch.
+// corex's own stream type is aliased to cudaStream_t by the mapping headers, so
+// the handle passes straight to cudnnSetStream / cublasSetStream with a cast.
+//
+// The ordering property the old arrangement got from torch is kept, by the same
+// mechanism the MUSA and Kunlunxin backends use: one default stream per device
+// shared by every producer. The vendor kernels submit to it through this
+// function, and FlagTree's Triton launcher is handed the same handle by
+// flagtree_shim.get_iluvatar_current_raw_stream, so a FlagGems kernel and the
+// vendor op consuming its output are ordered without an explicit barrier.
 inline cudaStream_t IluvatarCurrentStream(int device) {
-  return reinterpret_cast<cudaStream_t>(
-      c10::cuda::getCurrentCUDAStream(device).stream());
+  return reinterpret_cast<cudaStream_t>(GetCurrentStreamForDevice(device));
 }
 
 // Drain the current stream of `device`. CUDA-family ops are asynchronous, so a
@@ -140,7 +149,10 @@ inline cudaStream_t IluvatarCurrentStream(int device) {
 // queued on the same stream. Cheap in the steady state because the previous op
 // already drained.
 inline void IluvatarSynchronizeStream(int device) {
-  c10::cuda::getCurrentCUDAStream(device).synchronize();
+  cudaStream_t stream = IluvatarCurrentStream(device);
+  if (stream != nullptr) {
+    cudaStreamSynchronize(stream);
+  }
 }
 
 // The vendor handle, created once per device and bound to that device's current
@@ -199,7 +211,7 @@ inline cublasHandle_t GetCublasHandle(int device) {
 // The base set of aten dtypes mapped to a vendor type below. Necessary but not
 // sufficient: the per-op predicates narrow it, and the first cohort's vendor
 // entry points were only exercised on the float types. Everything outside the
-// mapped set has no vendor scalar type, and ToCudnnDataType / ToCudaDataType
+// mapped set has no vendor scalar type, and ToCudnnDataType / ToBlasDataType
 // raise on it rather than reinterpreting the bytes as some neighbouring type.
 inline bool IluvatarSupportsDtype(at::ScalarType type) {
   switch (type) {
@@ -281,20 +293,24 @@ inline cudnnDataType_t ToCudnnDataType(at::ScalarType type) {
   }
 }
 
-// The same mapping into the ixblas data type (aliased to cudaDataType_t by
-// mapping_cublas.h). ixblasGemmEx takes its A/B/C type and its computeType as
+// The same mapping into the ixblas data type. Deliberately *not* called
+// cudaDataType_t: cublas_v2.h names its enum cudaDataType_t only because
+// mapping_cublas.h #defines it to ixblasDataType_t, and cudnn.h's umbrella pulls
+// mapping_cudnn.h into the same translation unit, so the two vendor mapping
+// headers see each other's renames. The vendor type names are used directly
+// instead, so this file does not depend on which mapping header was included
+// first -- which is exactly how the aliased spelling failed to compile. ixblasGemmEx takes its A/B/C type and its computeType as
 // this enum, which is why gemm needs it in addition to cudnnDataType_t.
 //
-// The enum values are deliberately aligned with CUDA's for the common cases
-// (CUDA_R_32F == IX_R_32F == 0, CUDA_R_16F == IX_R_16F == 2), but the names are
-// used rather than raw integers so a future divergence does not silently pick
-// the wrong type.
-inline cudaDataType_t ToCudaDataType(at::ScalarType type) {
+// The enum values are the vendor's own (IX_R_32F, IX_R_16F, ...), used by their
+// names rather than raw integers so a change in the vendor enum does not
+// silently pick the wrong type.
+inline ixblasDataType_t ToBlasDataType(at::ScalarType type) {
   switch (type) {
-    case at::kFloat:    return CUDA_R_32F;
-    case at::kDouble:   return CUDA_R_64F;
-    case at::kHalf:     return CUDA_R_16F;
-    case at::kBFloat16: return CUDA_R_16BF;
+    case at::kFloat:    return IX_R_32F;
+    case at::kDouble:   return IX_R_64F;
+    case at::kHalf:     return IX_R_16F;
+    case at::kBFloat16: return IX_R_16BF;
     default:
       TORCH_CHECK(
           false, "iluvatar: unsupported dtype for the corex backend: ", type);
@@ -306,13 +322,13 @@ inline cudaDataType_t ToCudaDataType(at::ScalarType type) {
 // input's type otherwise. torch's matmul keeps TF32 off by default, so this
 // names the full-precision float path rather than a tensor-op variant; a
 // kernel that wants TF32 has to ask for it explicitly, as it would on CUDA.
-inline cudaDataType_t IluvatarGemmComputeType(at::ScalarType type) {
+inline ixblasDataType_t IluvatarGemmComputeType(at::ScalarType type) {
   switch (type) {
     case at::kHalf:
     case at::kBFloat16:
-      return CUDA_R_32F;
+      return IX_R_32F;
     default:
-      return ToCudaDataType(type);
+      return ToBlasDataType(type);
   }
 }
 

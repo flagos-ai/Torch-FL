@@ -104,6 +104,15 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_kunlunxin_current_raw_stream as {name}"
             )
+        if ACCELERATOR == "iluvatar":
+            # Same on iluvatar: corex's launcher takes a cudaStream_t, and the
+            # build links the CPU torch wheel, which has no
+            # _cuda_getCurrentRawStream. The handle comes from the platform's own
+            # stream registry so a compiled kernel is ordered against eager work.
+            return (
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_iluvatar_current_raw_stream as {name}"
+            )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 

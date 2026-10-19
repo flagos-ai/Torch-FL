@@ -67,7 +67,7 @@ DEVICE_TYPE = "flagos"
 # CUDA runtime at all. The distinction that matters to this module is the same
 # for all of them, so keep the checks keyed on this set rather than on a vendor
 # name.
-_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin"})
+_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin", "iluvatar"})
 
 
 def is_native_accelerator() -> bool:
@@ -232,6 +232,10 @@ def _raw_stream(device_idx: int) -> int:
         from torch_fl.compile.flagtree_shim import get_kunlunxin_current_raw_stream
 
         return get_kunlunxin_current_raw_stream(device_idx)
+    if profile.vendor == "iluvatar":
+        from torch_fl.compile.flagtree_shim import get_iluvatar_current_raw_stream
+
+        return get_iluvatar_current_raw_stream(device_idx)
 
     from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream
 
@@ -273,6 +277,11 @@ def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> No
     if profile.vendor == "kunlunxin":
         # Single-queue device (handle 0): there is nothing else to switch to and
         # no torch stream-id registry to switch it through.
+        return
+    if profile.vendor == "iluvatar":
+        from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+        IluStream.borrowed(stream_id, device=device_index).set_current()
         return
     # Native ACL streams have no torch stream-id registry; the id *is* the
     # aclrtStream handle (see AclStream.stream_id), so switch on it directly.
@@ -405,7 +414,9 @@ class FlagOSDeviceInterface(DeviceInterface):
                 return int(digits)
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
-        if profile.vendor in ("musa", "gcu"):
+        if profile.vendor in ("musa", "gcu", "iluvatar"):
+            # All three report a real capability pair through torch.flagos;
+            # iluvatar reads it from corex's cudaGetDeviceProperties.
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
         if profile.vendor == "kunlunxin":

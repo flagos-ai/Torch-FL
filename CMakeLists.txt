@@ -610,37 +610,41 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   # Pre-create torch::cudart so PyTorch's cuda.cmake returns early while the
   # host-only runtime sources are compiled (no NVIDIA toolkit probe).
   add_library(torch::cudart INTERFACE IMPORTED)
-  # corex's torch is a real CUDA build, but a pre-cxx11-ABI one: it reports
-  # torch._C._GLIBCXX_USE_CXX11_ABI == False, so libtorch_cpu.so defines e.g.
-  # c10::ivalue::ConstantString::create(std::basic_string) and not the
-  # __cxx11:: form. GCC 13 defaults to the new ABI, so an unqualified build emits
-  # ~40 new-ABI references in libtorch_fl.so that no vendor library satisfies and
-  # the import dies with "undefined symbol:
-  # _ZN3c106ivalue14ConstantString6createENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE".
-  # Match the vendor ABI explicitly. -D_GLIBCXX_USE_CXX11_ABI=0 is the value
-  # corex's own headers are built with; hardcode it rather than reading
-  # torch._C at configure time so the CMake and setup.py paths agree.
-  add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
-  # corex's torch headers and libraries are a matched pair built with __ILUVATAR__
-  # defined, and c10/cuda/CUDAException.h keys C10_CUDA_CHECK on it: the
-  # `#ifndef __ILUVATAR__` arm calls the 5-argument
-  # c10_cuda_check_implementation, the `#else` arm the 6-argument one that
-  # libc10_cuda.so actually exports (with the stringified expression as a 6th
-  # parameter). Without the define a consumer compiles the 5-arg call and the
-  # import dies with "undefined symbol:
-  # _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb". Every translation unit
-  # that goes through a c10/cuda exception macro needs it.
-  add_compile_definitions(__ILUVATAR__)
-  # corex's torch exports an `c10_cuda` whose INTERFACE_LINK_LIBRARIES names
-  # caffe2::cuda, but that target is created only inside Caffe2/public/cuda.cmake
-  # -- the file the torch::cudart guard above returns out of. find_package(Torch)
-  # therefore fails with "The link interface of target c10_cuda contains:
-  # caffe2::cuda but the target was not found". Pre-create it here, empty of a
-  # link library (the CUDA::cuda_driver cuda.cmake would give it is the NVIDIA
-  # driver, which corex neither ships nor needs), so the export resolves.
-  if(NOT TARGET caffe2::cuda)
-    add_library(caffe2::cuda INTERFACE IMPORTED)
+  # The ABI is the *linked* torch's, not the vendor torch's. Iluvatar builds
+  # against the CPU torch wheel, and the two used to disagree: corex's torch is a
+  # real CUDA build reporting torch._C._GLIBCXX_USE_CXX11_ABI == False, so a
+  # hardcoded -D_GLIBCXX_USE_CXX11_ABI=0 made libtorch_fl.so reference the
+  # pre-cxx11 mangling of e.g. c10::ivalue::ConstantString::create(std::string)
+  # -- which the CPU wheel (new ABI) does not define, so the import dies with
+  # "undefined symbol: _ZN3c106ivalue14ConstantString6createENSt7__cxx1112...".
+  # Read the value from the interpreter that will own the build instead, exactly
+  # as setup.py::_torch_abi does, so the CMake and setup.py paths agree. Guarded
+  # because a configure that never builds a torch-linked target still runs here.
+  if(DEFINED FLAGOS_TORCH_CXX11_ABI)
+    set(_iluvatar_cxx11_abi "${FLAGOS_TORCH_CXX11_ABI}")
+  else()
+    execute_process(
+      COMMAND "${PYTHON_EXECUTABLE}" -c
+              "import torch; print('1' if torch._C._GLIBCXX_USE_CXX11_ABI else '0')"
+      OUTPUT_VARIABLE _iluvatar_cxx11_abi
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _iluvatar_cxx11_ret)
+    if(NOT _iluvatar_cxx11_ret EQUAL 0 OR NOT _iluvatar_cxx11_abi MATCHES "^[01]$")
+      message(FATAL_ERROR
+          "Iluvatar build: cannot read torch._C._GLIBCXX_USE_CXX11_ABI from "
+          "${PYTHON_EXECUTABLE}. Pass -DFLAGOS_TORCH_CXX11_ABI=0/1, or build "
+          "through setup.py, which resolves it from the same interpreter.")
+    endif()
   endif()
+  if(_iluvatar_cxx11_abi STREQUAL "0")
+    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+  endif()
+  # __ILUVATAR__ exists for corex's *torch* headers (c10/cuda/CUDAException.h keys
+  # C10_CUDA_CHECK on it to pick the 6-argument c10_cuda_check_implementation
+  # libc10_cuda.so exports). This build includes no c10/cuda header and links no
+  # libc10_cuda.so, so the define would select an ABI no linked library backs;
+  # it is deliberately not added here.
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()

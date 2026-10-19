@@ -425,6 +425,12 @@ class Stream(torch.cuda.Stream):
                 from torch_fl.accelerator.mps.mps_stream import MpsStream
 
                 self._stream = MpsStream(device, priority)
+            elif vendor == "iluvatar":
+                # Corex is CUDA-shaped, so this really creates a stream like
+                # MPS rather than borrowing the one shared queue MUSA has.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+                self._stream = IluStream(device, priority)
             else:
                 # The accelerators with a stream class of their own are named
                 # above; everything else denotes its one queue with handle 0.
@@ -680,6 +686,14 @@ def _real_current_stream(device=None):
             from torch_fl.accelerator.mps.mps_stream import current_mps_stream
 
             return current_mps_stream(idx)
+        if _platform() == "iluvatar":
+            # A real stream from the platform's own registry, not a stand-in:
+            # corex has per-device queues and the registry tracks which one is
+            # current, so every caller below can wait, record and synchronize on
+            # it. It is the same handle the eager kernels submit to.
+            from torch_fl.accelerator.iluvatar.ilu_stream import current_ilu_stream
+
+            return current_ilu_stream(idx)
         # MUSA answers from the C++ runtime at the top of this function and never
         # arrives here; an accelerator with no stream class of its own has no
         # current stream to describe and gets this same handle-only stand-in,
@@ -789,6 +803,15 @@ class Event(torch.cuda.Event):
                 obj = object.__new__(cls)
                 obj._event = MpsEvent(**host_timed)
                 return obj
+            if _platform() == "iluvatar":
+                # Corex events carry a device timestamp, so timing is measured
+                # on the queue rather than read from the host clock -- the same
+                # reason the MPS arm above takes this path.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluEvent
+
+                obj = object.__new__(cls)
+                obj._event = IluEvent(**host_timed)
+                return obj
             # MUSA, whose vendor events live behind the shared C ABI: its timing
             # flags are not musa_runtime's, so there is nothing here to wrap and
             # the host clock is the clock that is left. Any other accelerator with
@@ -893,6 +916,12 @@ def stream(s):
             from torch_fl.accelerator.mps.mps_stream import MpsStream
 
             native_type = MpsStream
+        elif vendor == "iluvatar":
+            # Corex has real per-device streams and the runtime tracks which one
+            # is current (SetCurrentStreamForDevice), so this really switches.
+            from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+            native_type = IluStream
         else:
             # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
             # with no stream class of its own -- the TX runtime and the CUDA-ABI
@@ -971,6 +1000,33 @@ class _DeviceProperties:
             self.L2_cache_size = props.get("l2_cache_size", 0)
             self.max_threads_per_multi_processor = props.get(
                 "max_threads_per_multi_processor", 2048
+            )
+            self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
+            self.shared_memory_per_multiprocessor = props.get(
+                "shared_memory_per_multiprocessor", 0
+            )
+            return
+
+        # Iluvatar corex ships a complete cuda_runtime.h, so the same fields come
+        # from cudaGetDeviceProperties. It is not the MUSA getter because that one
+        # is compiled only into a MUSA build; the dict shape is deliberately the
+        # same.
+        get_ilu_properties = getattr(_C, "_get_iluvatar_device_properties", None)
+        if get_ilu_properties is not None:
+            props = get_ilu_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = props["major"]
+            self.minor = props["minor"]
+            # Same reason as the MUSA arm above: Inductor's cache fingerprint
+            # reads gcnArchName whenever torch.version.cuda is None, which is
+            # every CPU-torch build.
+            self.gcnArchName = self.name
+            self.warp_size = props.get("warp_size", 32)
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.max_threads_per_multi_processor = props.get(
+                "max_threads_per_multi_processor", 1024
             )
             self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
             self.shared_memory_per_multiprocessor = props.get(

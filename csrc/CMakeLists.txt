@@ -538,9 +538,11 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
-  # Iluvatar's vendor torch is a real CUDA build over the corex CUDA-shaped
-  # runtime, so the standard allocator and the c10/cuda stream path apply and the
-  # CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside ${_torch_fl_link_libs}.
+  # Iluvatar owns its runtime: backends/iluvatar_memory.h (no c10::cuda caching
+  # delegation) and runtime/accelerator/iluvatar/ (its own stream registry). The
+  # corex CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside
+  # ${_torch_fl_link_libs}; nothing on that line resolves to libtorch_cuda.so or
+  # libc10_cuda.so, so the wheel installs against a CPU torch.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_ILUVATAR_KERNEL gates the m.impl subset in register.cc, mirroring
