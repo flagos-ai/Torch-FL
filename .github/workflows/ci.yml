@@ -183,6 +183,8 @@ jobs:
       platform: ${{ matrix.platform }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+      ci_input: ${{ needs.resolve-checkout.outputs.repository }}
+      ci_workflow: ${{ github.workflow }}
 
   # Single required-check gate for branch protection.
   ci-complete:
