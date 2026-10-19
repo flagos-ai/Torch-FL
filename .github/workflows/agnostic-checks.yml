@@ -108,6 +108,7 @@ jobs:
             tests/unit/test_ci_commands.py \
             tests/unit/test_ci_concurrency.py \
             tests/unit/test_ci_matrix.py \
+            tests/unit/test_ci_notifications.py \
             tests/unit/test_ci_platform_routing.py \
             tests/unit/test_ci_resolution.py \
             tests/unit/test_flagcicd_reports.py \
