@@ -508,8 +508,11 @@ def test_device_properties_follow_the_torch_cuda_availability(
 
     record = DeviceProperties.create(torch.device("flagos", 0))
     if torch_cuda_kernels:
-        # The stock path receives the same device and may rewrite its record.
-        assert [str(d) for d in delegated] == ["flagos:0"]
+        # CUDA-enabled vendor builds receive the equivalent torch.cuda device,
+        # whose index must match the flagos device.
+        assert len(delegated) == 1
+        assert delegated[0].type == "cuda"
+        assert delegated[0].index == 0
         assert flagos_properties == []
     else:
         assert delegated == []
