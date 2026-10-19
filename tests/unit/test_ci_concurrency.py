@@ -187,11 +187,11 @@ def test_closed_or_invalid_pr_does_not_cancel_anything():
     assert not missing_source.cancelled()
 
 
-def test_pr_cleanup_uses_the_live_head_and_cancels_a_run_that_started_late():
+def test_pr_cleanup_uses_the_live_branch_after_a_concurrent_update():
     newer_head = "c" * 40
     github = FakeGitHub(
         [
-            _run(1, sha=newer_head),
+            _run(1),
         ],
         pull_request={
             "state": "open",

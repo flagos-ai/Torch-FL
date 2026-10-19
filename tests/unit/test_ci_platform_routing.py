@@ -59,6 +59,39 @@ def test_required_gate_covers_matrix_pipeline():
     assert not (WORKFLOWS / "all-tests-common.yml").exists()
 
 
+@pytest.mark.parametrize(
+    "job",
+    [
+        "lint",
+        "agnostic-checks",
+        "codegen-checks",
+        "discover-platforms",
+        "platform-pipeline",
+    ],
+)
+def test_shared_checks_and_platforms_follow_lifecycle_cleanup(job):
+    jobs = _workflow("ci.yml")["jobs"]
+    assert "ci-lifecycle" in jobs[job]["needs"]
+
+
+def test_shared_checks_and_platform_queues_are_independent():
+    jobs = _workflow("ci.yml")["jobs"]
+    groups = {
+        jobs[name]["concurrency"]["group"].split("${{")[0]
+        for name in (
+            "agnostic-checks",
+            "codegen-checks",
+            "discover-platforms",
+            "platform-pipeline",
+        )
+    }
+    assert len(groups) == 4
+    assert (
+        "-${{ matrix.platform }}" in jobs["platform-pipeline"]["concurrency"]["group"]
+    )
+    assert "max-parallel" not in jobs["platform-pipeline"]["strategy"]
+
+
 def test_platform_tests_and_manifest_use_the_resolved_source():
     caller = _workflow("ci.yml")["jobs"]["platform-pipeline"]
     assert "resolve-checkout" in caller["needs"]
