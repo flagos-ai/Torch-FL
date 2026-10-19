@@ -85,7 +85,7 @@ def clean_summary(output):
         if _SUMMARY_RE.search(line):
             if _SUMMARY_FAILURE_RE.search(line):
                 return None
-            return line.strip(" =")
+            return line.strip("= ")
     return None
 
 

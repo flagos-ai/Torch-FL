@@ -124,7 +124,7 @@ def clean_summary(output):
         if _SUMMARY_RE.search(line):
             if _SUMMARY_FAILURE_RE.search(line):
                 return None
-            return line.strip(" =")
+            return line.strip("= ")
     return None
 
 
@@ -227,7 +227,7 @@ def main():
                 f"Integration test '{test['name']}' failed with exit code {returncode}",
                 flush=True,
             )
-            return returncode
+            raise SystemExit(returncode)
     return 0
 
 
