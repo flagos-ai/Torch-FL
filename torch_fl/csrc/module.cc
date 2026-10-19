@@ -36,6 +36,14 @@
 #include <flagos.h>
 #endif
 
+#ifdef USE_KUNLUNXIN
+// The XPU runtime's per-attribute query, which is the whole of what this build
+// can ask a P800 about itself: see _getKunlunxinDeviceProperties below.
+#include <cstdio>
+
+#include <xpu/runtime.h>
+#endif
+
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/utils.h>
 #include <torch/csrc/utils/device_lazy_init.h>
@@ -394,6 +402,85 @@ static PyObject* _getIluvatarDeviceProperties(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+#ifdef USE_KUNLUNXIN
+// One device attribute, as the XPU runtime answers it. The SDK has no
+// per-device property struct -- xpu_device_get_attr is the entire query surface
+// -- and no free-memory or device-name entry point (names live in XPUML, which
+// this wheel does not link), so the properties below are assembled from the
+// individual attributes the runtime does report.
+static uint64_t KunlunxinDeviceAttr(XPUDeviceAttr attr, int idx) {
+  uint64_t value = 0;
+  const int err = xpu_device_get_attr(&value, attr, idx);
+  TORCH_CHECK(
+      err == 0,
+      "xpu_device_get_attr(",
+      static_cast<int>(attr),
+      ") failed for device ",
+      idx,
+      " with error ",
+      err);
+  return value;
+}
+#endif
+
+// Kunlunxin device properties, in the same dict shape as the MUSA and iluvatar
+// getters. What the XPU runtime reports is much narrower than a cudaDeviceProp,
+// so this is a genuine subset rather than a stand-in: before it existed,
+// torch.flagos._DeviceProperties fell through to the Ascend-shaped arm and
+// described a P800 as an "Ascend NPU" with 0 bytes -- which is what Inductor
+// saw when it sized its workspace.
+static PyObject* _getKunlunxinDeviceProperties(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+#ifdef USE_KUNLUNXIN
+  TORCH_CHECK(
+      THPUtils_checkLong(arg),
+      "_get_kunlunxin_device_properties expects an int, but got ",
+      THPUtils_typename(arg));
+  auto idx = static_cast<int>(THPUtils_unpackLong(arg));
+  TORCH_CHECK(
+      idx >= 0 && idx < c10::flagos::DeviceCount(),
+      "Kunlunxin device index ",
+      idx,
+      " is out of range");
+
+  const auto total_memory = KunlunxinDeviceAttr(XPUATTR_MEM_MAIN_CAPACITY, idx);
+  const auto l3_capacity = KunlunxinDeviceAttr(XPUATTR_MEM_L3_CAPACITY, idx);
+  const auto cluster_count = KunlunxinDeviceAttr(XPUATTR_NUM_CLUSTER, idx);
+  // The board product number. It is the only identity libxpurt reports, so the
+  // name is built from it rather than invented; it reaches Inductor's cache key
+  // purely as a string.
+  const auto model = KunlunxinDeviceAttr(XPUATTR_MODEL, idx);
+
+  char name[64];
+  std::snprintf(
+      name,
+      sizeof(name),
+      "Kunlunxin XPU %llu",
+      static_cast<unsigned long long>(model));
+
+  // The trailing fields are what Inductor's Triton heuristics and its
+  // benchmarking buffer read.
+  return Py_BuildValue(
+      "{s:s,s:K,s:i,s:i,s:i}",
+      "name",
+      name,
+      "total_memory",
+      static_cast<unsigned long long>(total_memory),
+      "multi_processor_count",
+      static_cast<int>(cluster_count),
+      // A fabricated zero leaves that flush buffer empty. The XPU reports the
+      // on-die L3 (96 MiB on a P800), the cache level these kernels' working
+      // set lives in; the SDK has no separate L2 query.
+      "l2_cache_size",
+      static_cast<int>(l3_capacity),
+      "model",
+      static_cast<int>(model));
+#else
+  TORCH_CHECK(false, "Kunlunxin device properties are unavailable in this build");
+#endif
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* _setDevice(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   TORCH_CHECK(THPUtils_checkLong(arg), "invalid argument to setDevice");
@@ -605,6 +692,10 @@ static PyMethodDef methods[] = {
     {"_get_iluvatar_device_properties", _getIluvatarDeviceProperties, METH_O,
      nullptr},
     {"_get_iluvatar_current_raw_stream", _getIluvatarCurrentRawStream, METH_O,
+     nullptr},
+#endif
+#ifdef USE_KUNLUNXIN
+    {"_get_kunlunxin_device_properties", _getKunlunxinDeviceProperties, METH_O,
      nullptr},
 #endif
     {"_get_device", _getDevice, METH_NOARGS, nullptr},

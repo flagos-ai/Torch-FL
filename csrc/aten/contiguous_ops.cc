@@ -5,10 +5,10 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "contiguous_ops.h"
+#include "copy_ops.h"
 
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
-#include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 #include "device_boxing.h"
 // ascend_copy.h and gcu_copy.h are included unconditionally: each supplies an
@@ -101,31 +101,29 @@ at::Tensor materialize_math_bits_impl(
 // backends have, and what the CUDA platform uses when it has no native CUDA copy
 // kernel to dispatch to (see FLAGOS_CONTIGUOUS_CUDA_BOXING above, which is the
 // predicate for whether the DeviceBoxingGuard arms below exist).
+//
+// Both legs go through BlockingMemcpy, which binds the device of the tensor each
+// transfer touches and drains that device's queue first: a bare Memcpy is only
+// ordered against whichever device happens to be current when it is issued, so
+// gathering a flagos:1 source while flagos:0 is current would read what that
+// buffer held before its kernels ran (issue #281, MUSA -- the same hazard, and
+// the same two-precondition barrier, that copy_ops uses for every other copy).
 #if !FLAGOS_CONTIGUOUS_CUDA_BOXING
 void copy_strided_via_host(
     const at::Tensor& self,
     const at::Tensor& result,
     c10::MemoryFormat memory_format) {
-  // A blocking cudaMemcpy orders against whichever device is current when it is
-  // issued and drains that device's queue, so the source's device has to be
-  // made current first -- reading a flagos:1 buffer while flagos:0 is current
-  // otherwise returns that buffer's pre-kernel contents. This is the pair of
-  // reasons copy_ops' BlockingCopyGuard exists, and it takes the same device-wide
-  // sync here (rather than a per-stream wait) because a wheel without the boxing
-  // kernels also has no libtorch_cuda.so to ask which stream is current.
-  c10::DeviceGuard on_source(self.device());
-  ::DeviceSynchronize();
-
   size_t storage_size = self.storage().nbytes();
   at::Tensor storage_cpu = at::empty(
       {static_cast<int64_t>(storage_size)},
       at::TensorOptions().dtype(at::kByte).device(at::kCPU));
   if (storage_size > 0) {
-    Memcpy(
+    BlockingMemcpy(
         storage_cpu.data_ptr(),
         self.storage().data(),
         storage_size,
-        MemcpyDeviceToHost);
+        MemcpyDeviceToHost,
+        self);
   }
 
   at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
@@ -142,8 +140,12 @@ void copy_strided_via_host(
 
   size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
   if (nbytes > 0) {
-    Memcpy(
-        result.data_ptr(), cpu_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+    BlockingMemcpy(
+        result.data_ptr(),
+        cpu_contig.data_ptr(),
+        nbytes,
+        MemcpyHostToDevice,
+        result);
   }
 }
 #endif
@@ -228,7 +230,17 @@ at::Tensor clone(
       auto result = at::empty_like(self);
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
-        Memcpy(result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice);
+        // Blocking, and against `self`'s device rather than whichever device is
+        // ambient: a bare Memcpy only orders against the current device, so
+        // cloning a flagos:1 tensor while flagos:0 is current copies the buffer
+        // as it was before that device's kernels ran (issue #281, MUSA; the
+        // same read-after-write hazard copy_ops guards against).
+        BlockingMemcpy(
+            result.data_ptr(),
+            self.data_ptr(),
+            nbytes,
+            MemcpyDeviceToDevice,
+            self);
       } else if (nbytes > 0) {
         result.copy_(self);
       }

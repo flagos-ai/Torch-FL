@@ -222,15 +222,10 @@ class BlockingCopyGuard {
 // a D2H or D2D copy, the destination for an H2D one. Callers that hold the raw
 // pointers already, and need the guard to span more than one memcpy, use
 // BlockingCopyGuard directly.
-void BlockingMemcpy(
-    void* dst,
-    const void* src,
-    size_t nbytes,
-    MemcpyKind kind,
-    const at::Tensor& on_device) {
-  BlockingCopyGuard barrier(on_device);
-  Memcpy(dst, src, nbytes, kind);
-}
+//
+// Defined outside this anonymous namespace (below) because contiguous_ops.cc
+// needs it too, for the same hazard in clone()'s contiguous fast path; see the
+// declaration in copy_ops.h.
 
 // A blocking `Memcpy` is blocking only against the device that is current when
 // it is issued: the transfer is submitted to that device's queue, and nothing
@@ -365,6 +360,20 @@ void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
 }
 
 } // namespace
+
+// Defined here, outside the anonymous namespace, because contiguous_ops.cc
+// needs it too: clone()'s contiguous fast path issues the same device-to-device
+// memcpy this file's copies do, against a tensor that need not live on the
+// device that is current (issue #281, MUSA). Declared in copy_ops.h.
+void BlockingMemcpy(
+    void* dst,
+    const void* src,
+    size_t nbytes,
+    MemcpyKind kind,
+    const at::Tensor& on_device) {
+  BlockingCopyGuard barrier(on_device);
+  Memcpy(dst, src, nbytes, kind);
+}
 
 ADD_IMPL_TO_DISPATCHER(
     LocalScalarDenseFn, local_scalar_dense_dispatcher, "_local_scalar_dense")

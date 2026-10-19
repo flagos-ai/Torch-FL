@@ -1034,6 +1034,27 @@ class _DeviceProperties:
             )
             return
 
+        # Kunlunxin: the XPU runtime has no per-device property struct, only the
+        # individual xpu_device_get_attr queries the binding wraps. The XPU
+        # reports no compute-capability pair at all, and nothing downstream asks
+        # it for one -- FlagOSDeviceInterface reads the arch FlagTree's XPU
+        # backend compiles for (_kunlunxin_arch) instead -- so major/minor stay
+        # the CUDA-shaped sentinels torch.utils._triton's probes expect.
+        get_kunlunxin_properties = getattr(_C, "_get_kunlunxin_device_properties", None)
+        if get_kunlunxin_properties is not None:
+            props = get_kunlunxin_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = 8
+            self.minor = 0
+            # Inductor sizes its benchmarking L2 flush buffer from this field;
+            # a zero leaves it empty. The binding reports the on-die L3, the
+            # only cache capacity the XPU SDK exposes.
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.gcnArchName = self.name
+            return
+
         # Ascend analogue: use the AICore count reported by the Ascend Triton
         # backend. The module path is the same on FlagTree and triton-ascend.
         self.name = f"Ascend NPU {device_id}"

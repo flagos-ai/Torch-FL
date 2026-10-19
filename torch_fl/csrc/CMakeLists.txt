@@ -33,6 +33,16 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_ILUVATAR=1)
   target_include_directories(${LIBRARY_NAME} PRIVATE "${COREX_PATH}/include")
   target_link_libraries(${LIBRARY_NAME} PRIVATE cuda_runtime_compat)
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # module.cc's device-properties binding queries xpu_device_get_attr from
+  # <xpu/runtime.h>. The SDK root and the runtime's library directory are both
+  # resolved for this accelerator by the top-level CMakeLists, and libxpurt is
+  # where those attributes come from; the rest of the native XPU surface stays in
+  # csrc/, so nothing else here needs the vendor headers.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_KUNLUNXIN=1)
+  target_include_directories(${LIBRARY_NAME} PRIVATE "${XPU_ROOT}/include")
+  target_link_directories(${LIBRARY_NAME} PRIVATE "${XPU_LIB_DIR}")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)
   if(NOT MUSA_HOME)
