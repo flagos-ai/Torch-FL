@@ -106,6 +106,19 @@ def _cancel(github, runs, current_run):
     return cancelled
 
 
+def _read_only(message):
+    message = message.lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "resource not accessible",
+            "permission required",
+            "actions: write",
+            "must have administration permission",
+        )
+    )
+
+
 def cancel_pull_request(github, revision, number, current_run=None):
     """Cancel active runs from an older commit of the same pull request.
 
@@ -114,7 +127,17 @@ def cancel_pull_request(github, revision, number, current_run=None):
     """
     revision = _revision(revision)
     number = _pull_request(number)
-    pull = github.repo_api(f"pulls/{number}")
+    try:
+        pull = github.repo_api(f"pulls/{number}")
+    except GitHubError as exc:
+        if _read_only(str(exc)):
+            print(
+                "::warning::GitHub token cannot read the pull request; "
+                f"skipping superseded-run cleanup: {exc}",
+                file=sys.stderr,
+            )
+            return []
+        raise
     if not isinstance(pull, dict) or pull.get("state") != "open":
         raise ValueError(f"PR #{number} is not open")
     head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
@@ -195,7 +218,17 @@ def main(argv=None):
             )
         else:
             cancelled = cancel_push(github, args.revision, args.branch, current_run)
-    except (GitHubError, ValueError, OSError) as exc:
+    except GitHubError as exc:
+        if _read_only(str(exc)):
+            print(
+                "::warning::GitHub token has read-only Actions access; "
+                f"skipping superseded-run cleanup: {exc}",
+                file=sys.stderr,
+            )
+            return 0
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     print(f"Cancelled {len(cancelled)} superseded CI run(s).")
