@@ -203,6 +203,27 @@ def test_dcu_compiles_for_hip_on_a_cuda_like_runtime():
     assert profile.triton_device_type != pp._CUDA_PROFILE.triton_device_type
 
 
+@pytest.mark.anyplatform
+def test_dcu_passes_the_gfx_arch_to_the_hcu_compiler(monkeypatch):
+    """HCU's compiler needs a string target; DCU's target is the gfx name."""
+    from torch_fl.compile import device_interface as di
+
+    class _DCUProperties:
+        gcnArchName = "gfx936:sramecc+:xnack-"
+
+    for module in ("platform_profile", "device_interface", "inductor_codegen"):
+        monkeypatch.setattr(
+            f"torch_fl.compile.{module}.platform_profile",
+            lambda: pp._DCU_PROFILE,
+            raising=False,
+        )
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda index: _DCUProperties()
+    )
+
+    assert di.FlagOSDeviceInterface.get_compute_capability() == "gfx936"
+
+
 # --- device interface -------------------------------------------------------
 
 

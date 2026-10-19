@@ -397,6 +397,12 @@ class FlagOSDeviceInterface(DeviceInterface):
     @staticmethod
     def get_compute_capability(device: Any = None) -> Union[int, str]:
         profile = platform_profile()
+        if profile.vendor == "dcu":
+            # DTK reports major/minor 9/3, so CUDA's numeric capability is 93.
+            # HCU Triton forwards this value unchanged as GPUTarget.arch and
+            # its compiler requires the device's string instruction-set name.
+            arch = torch.cuda.get_device_properties(_device_index(device)).gcnArchName
+            return str(arch).split(":", 1)[0]
         if profile.is_cuda_like and _torch_has_cuda_kernels():
             major, minor = torch.cuda.get_device_capability(_device_index(device))
             return major * 10 + minor
