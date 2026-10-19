@@ -17,6 +17,7 @@ name: CI
 permissions:
   contents: read
   pull-requests: read
+  actions: write
 
 on:
   schedule:
@@ -44,6 +45,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Lifecycle cleanup has a queue of its own. Sharing it with tests or the gate
+  # would let cancelling an older run also remove the newer run's jobs.
+  ci-lifecycle:
+    name: Record lifecycle event
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || inputs.pr_number != '' }}
+    concurrency:
+      group: ci-lifecycle-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Record automatic cleanup
+        run: echo "The cancellation implementation is supplied by the next commit."
+
   # Resolve the source repository and immutable commit before any reusable
   # workflow starts. Fork on-demand runs are dispatched from this workflow on
   # the base branch, so the workflow definition remains trusted while the jobs
@@ -223,6 +239,7 @@ jobs:
     if: always()
     needs:
       - resolve-checkout
+      - ci-lifecycle
       - lint
       - agnostic-checks
       - codegen-checks
@@ -241,7 +258,15 @@ jobs:
 
           jobs = json.loads(os.environ["RESULTS"])
           errors = []
-          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "discover-platforms"):
+          names = (
+              "resolve-checkout",
+              "ci-lifecycle",
+              "lint",
+              "agnostic-checks",
+              "codegen-checks",
+              "discover-platforms",
+          )
+          for name in names:
               if jobs[name]["result"] != "success":
                   errors.append(f"{name}: {jobs[name]['result']}")
 

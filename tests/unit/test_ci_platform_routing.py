@@ -42,6 +42,7 @@ def test_required_gate_covers_matrix_pipeline():
     gate = jobs["ci-complete"]
     assert set(gate["needs"]) == {
         "resolve-checkout",
+        "ci-lifecycle",
         "lint",
         "agnostic-checks",
         "codegen-checks",
@@ -145,6 +146,7 @@ def test_required_gate_checks_platform_result(selected, result):
     "name",
     [
         "resolve-checkout",
+        "ci-lifecycle",
         "lint",
         "agnostic-checks",
         "codegen-checks",
