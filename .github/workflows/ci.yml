@@ -177,6 +177,9 @@ jobs:
       matrix:
         platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
     uses: ./.github/workflows/integration-tests.yml
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name }}
+      cancel-in-progress: true
     secrets:
       FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
