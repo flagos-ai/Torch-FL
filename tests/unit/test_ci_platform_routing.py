@@ -188,6 +188,16 @@ def test_the_container_is_empty_when_the_config_names_no_image(name):
     assert expression.count("container_options") == 1
 
 
+def test_the_container_expression_uses_empty_config_fields_as_placeholders():
+    """Every input still has a value even though its resulting object is null."""
+    for config in CONFIGS.glob("*.yml"):
+        if config.stem in {"template", "image_sources", "platforms"}:
+            continue
+        values = yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert isinstance(values.get("container_options"), str), config
+        assert isinstance(values.get("ci_image"), str), config
+
+
 def test_the_one_platform_without_a_container_is_mps():
     """An empty image is allowed only for MPS.
 
