@@ -202,6 +202,53 @@ class TestCopyTransfer:
         finally:
             torch.__future__.set_swap_module_params_on_conversion(previous)
 
+    def test_module_to_device_migrates_parameters_in_place(self, device):
+        previous = torch.__future__.get_swap_module_params_on_conversion()
+        torch.__future__.set_swap_module_params_on_conversion(True)
+
+        try:
+            model = torch.nn.Linear(4, 2)
+            weight = model.weight
+            bias = model.bias
+            parameters = list(model.parameters())
+            expected = {
+                name: value.detach().clone() for name, value in model.named_parameters()
+            }
+
+            model.to(device)
+
+            assert model.weight is weight
+            assert model.bias is bias
+            assert list(model.parameters()) == parameters
+            assert all(
+                parameter.device.type == "flagos" for parameter in model.parameters()
+            )
+            for name, value in model.named_parameters():
+                actual_value = value.cpu()
+                assert torch.equal(actual_value, expected[name])
+                del actual_value
+
+            inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+            with torch.no_grad():
+                device_weight = weight.detach().clone()
+                device_bias = bias.detach().clone()
+                actual = torch.ops.aten.linear(
+                    inputs.to(device),
+                    device_weight,
+                    device_bias,
+                ).cpu()
+            reference = torch.ops.aten.linear(
+                inputs, expected["weight"], expected["bias"]
+            )
+            assert torch.allclose(actual, reference)
+            del inputs, device_weight, device_bias, actual, reference
+
+            model.cpu()
+            assert model.weight is weight
+            assert model.bias is bias
+        finally:
+            torch.__future__.set_swap_module_params_on_conversion(previous)
+
     def test_module_cpu_after_forward(self, device):
         model = torch.nn.Sequential(
             torch.nn.Linear(8, 8),

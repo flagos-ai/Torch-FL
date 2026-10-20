@@ -267,6 +267,7 @@ def _overlay_marker(active):
 
 
 def _link_entries(src, dst, *, skip=()):
+    """Link every entry of ``src`` into ``dst``."""
     for entry in os.scandir(src):
         if entry.name in skip:
             continue
@@ -295,6 +296,8 @@ def _prepare_overlay(active, src):
         os.mkdir(facade)
         facade_lib = os.path.join(facade, "lib")
         os.mkdir(facade_lib)
+        # ``stage`` is private to this user; keep its lib directory that way.
+        os.chmod(facade_lib, 0o700)
         _link_entries(torch_root, facade, skip=("lib",))
         # Vendor files take precedence.  Including the whole bundle is required
         # for auditwheel-mangled and other $ORIGIN-relative dependencies.

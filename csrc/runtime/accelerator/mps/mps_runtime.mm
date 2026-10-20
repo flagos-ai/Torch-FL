@@ -26,6 +26,7 @@
 #include "mps.h"
 #include "mps_runtime.h"
 
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <vector>
@@ -45,7 +46,66 @@ StreamState* gDefaultStream = nullptr;
 std::mutex gRegistryMutex;
 std::set<StreamState*> gLiveStreams;
 
+// The runtime's shutdown drain.
+//
+// Ops commit their MTLCommandBuffer and return; nothing on the ordinary path
+// ever waits for one to finish, because a Metal queue runs in order and the
+// next host read is what forces the wait. That is fine while the process keeps
+// running and wrong at the very end: an MTLCommandBuffer still in flight when
+// libmetal / MTLCompilerService tear themselves down faults inside the encode
+// machinery, which is a crash the operator sees as an inexplicable segfault in
+// a program whose last GPU op finished correctly.
+//
+// Python's atexit hook calls this after Python has released its tensors. It
+// drains the queues and invokes the allocator's cache release while Metal is
+// still intact. The C++ atexit hook registered below runs later and only drains
+// again, because the allocator's static storage may already be gone by then.
+std::atomic<bool> gShutdownDrainRunning{false};
+std::function<void()> gShutdownReleaseCache;
+void* gShutdownReleaseCacheContext = nullptr;
+
+void DrainAtExit() {
+  if (gShutdownDrainRunning.exchange(true)) {
+    return;
+  }
+  DrainAll();
+}
+
+void ReleaseCachedBlocks(void* expected_allocator) {
+  if (expected_allocator == nullptr) {
+    return;
+  }
+  std::function<void()> release_cache;
+  {
+    std::lock_guard<std::mutex> lock(gRegistryMutex);
+    if (expected_allocator == gShutdownReleaseCacheContext) {
+      release_cache = gShutdownReleaseCache;
+    }
+  }
+  if (release_cache) {
+    release_cache();
+  }
+}
+
+void DrainDefaultQueue() {
+  std::lock_guard<std::mutex> lock(gDefaultStreamMutex);
+  if (gDefaultStream != nullptr) {
+    Drain(gDefaultStream);
+  }
+}
+
 } // namespace
+
+extern "C" void FlagosMPSDrainAtExit(void) {
+  DrainDefaultQueue();
+  DrainAtExit();
+}
+
+extern "C" void FlagosMPSClearAllocatorShutdown(void) {
+  std::lock_guard<std::mutex> lock(gRegistryMutex);
+  gShutdownReleaseCache = {};
+  gShutdownReleaseCacheContext = nullptr;
+}
 
 id<MTLDevice> MetalDevice() {
   std::lock_guard<std::mutex> lock(gDeviceMutex);
@@ -66,6 +126,25 @@ bool MetalAvailable() {
   return device != nil && device.hasUnifiedMemory;
 }
 
+bool MetalGraphUsable() {
+  id<MTLDevice> device = MetalDevice();
+  // The paravirtualized family is the one MPSGraph encode is known to fault on,
+  // and the device class is the only thing that distinguishes those hosts from a
+  // physical GPU: the same OS build, the same MPSGraph, the same unified memory.
+  // `MTLDevice.name` is the family string ("Apple Paravirtual device"), and the
+  // loaded IOKit personality is AppleParavirtGPUMetalIOGPUFamily. The name is
+  // checked rather than the loaded bundle because it is the documented property
+  // and does not depend on an internal framework's filename.
+  NSString* name = device != nil ? device.name : nil;
+  const bool paravirtual =
+      name != nil &&
+      [name rangeOfString:@"paravirtual"
+                  options:NSCaseInsensitiveSearch].location != NSNotFound;
+  const bool usable =
+      device != nil && device.hasUnifiedMemory && !paravirtual;
+  return usable;
+}
+
 StreamState* DefaultStream() {
   std::lock_guard<std::mutex> lock(gDefaultStreamMutex);
   if (gDefaultStream == nullptr) {
@@ -81,6 +160,10 @@ StreamState* DefaultStream() {
     state->queue = queue; // +1, owned by the state for the process lifetime
     gDefaultStream = state;
     RegisterStream(state);
+    // Keep the existing safety net for a process that exits without running
+    // Python atexit handlers. The allocator's release is installed in
+    // SetShutdownReleaseCache below.
+    ::atexit(&FlagosMPSDrainAtExit);
   }
   return gDefaultStream;
 }
@@ -152,6 +235,22 @@ void RegisterStream(StreamState* stream) {
   gLiveStreams.insert(stream);
 }
 
+void SetShutdownReleaseCache(
+    void* allocator,
+    std::function<void()> release_cache) {
+  std::lock_guard<std::mutex> lock(gRegistryMutex);
+  gShutdownReleaseCache = std::move(release_cache);
+  gShutdownReleaseCacheContext = allocator;
+}
+
+extern "C" void FlagosMPSRegisterAllocatorShutdown(
+    void (*release_cache)(void*),
+    void* allocator) {
+  SetShutdownReleaseCache(
+      allocator,
+      [release_cache, allocator] { ReleaseCachedBlocks(allocator); });
+}
+
 void UnregisterStream(StreamState* stream) {
   if (stream == nullptr) {
     return;
@@ -174,6 +273,13 @@ EventState* AsEvent(Event_t event) {
 extern "C" void* FlagosMPSCommandQueue(Stream_t stream) {
   torch_fl_mps::StreamState* state = torch_fl_mps::AsStream(stream);
   return state == nullptr ? nullptr : (void*)state->queue;
+}
+
+extern "C" void* FlagosMPSDefaultCommandQueue(void) {
+  std::lock_guard<std::mutex> lock(torch_fl_mps::gDefaultStreamMutex);
+  return torch_fl_mps::gDefaultStream == nullptr
+      ? nullptr
+      : (void*)torch_fl_mps::gDefaultStream->queue;
 }
 
 // See mps.h. The buffer is committed and released immediately: Commit() hands

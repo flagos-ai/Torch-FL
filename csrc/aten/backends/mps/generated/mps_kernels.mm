@@ -32,6 +32,7 @@
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
+#include <ATen/ops/cat.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
@@ -41,13 +42,18 @@
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_batch_norm.h>
+#include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
+#include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
+#include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/take.h>
+#include <ATen/ops/where.h>
 #include <c10/core/ScalarType.h>
 #include <exception>
 #include <optional>
@@ -393,7 +399,7 @@ at::Tensor PrivSoftmaxKernelMps(
   int64_t axis = 0;
   if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
       !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {
-    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }
   at::Tensor self_c = self.to(out_dtype).contiguous();
   if (self_c.numel() == 0) {
@@ -408,7 +414,7 @@ at::Tensor PrivSoftmaxKernelMps(
         return [graph softMaxWithTensor:args[0] axis:axis name:nil];
       });
   if (!ran) {
-    return at::_softmax(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }
   return out;
 }
@@ -606,17 +612,33 @@ at::Tensor ConvolutionOverrideableKernelMps(
                        transposed, output_padding, groups)
         .to(input.device());
   }
-  // The spatial rank: 1-D has no MPSGraph selector, and a rank above 3 has no
-  // graph either, so both take the round-trip and the reference reports what it
-  // reports.
+  // The spatial rank. A 1-D convolution is folded into the 2-D selector; a rank
+  // above 3 has no graph and takes the round-trip.
   const int64_t dim = input.dim() - 2;
   const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
-  if (dim < 2 || dim > 3 || weight.dim() != input.dim() ||
-      stride.size() != ndim || padding.size() != 2 * ndim ||
-      dilation.size() != ndim || groups < 1) {
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  if (dim < 1 || dim > 3 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1) {
     return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
                        transposed, output_padding, groups)
         .to(input.device());
+  }
+  for (const int64_t entry : stride) {
+    if (entry <= 0) {
+      return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }
+  }
+  for (const int64_t entry : dilation) {
+    if (entry <= 0) {
+      return at::convolution(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }
   }
   if (input.size(1) / groups != weight.size(1) ||
       weight.size(0) % groups != 0) {
@@ -668,7 +690,15 @@ at::Tensor ConvolutionOverrideableKernelMps(
   if (has_bias) {
     operands.push_back(bias_c);
   }
-  const int64_t spatial = out.dim() - 2;
+  const int64_t spatial = dim < 2 ? 2 : dim;
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> result_shape(out.sizes().vec());
+  if (dim == 1) {
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    result_shape.insert(result_shape.end() - 1, 1);
+  }
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("convolution_overrideable", stride, padding, dilation, groups, transposed, output_padding, has_bias),
       operands,
@@ -679,14 +709,24 @@ at::Tensor ConvolutionOverrideableKernelMps(
         if (descriptor == nil) {
           return nil;
         }
+        MPSGraphTensor* source = args[0];
+        MPSGraphTensor* kernel = args[1];
+        if (dim == 1) {
+          source = mps::MpsReshape(graph, source, source_shape);
+          kernel = mps::MpsReshape(graph, kernel, weight_shape);
+          if (source == nil || kernel == nil) {
+            mps::MpsRelease(descriptor);
+            return nil;
+          }
+        }
         MPSGraphTensor* y =
             (spatial == 2)
-                ? [graph convolution2DWithSourceTensor:args[0]
-                              weightsTensor:args[1]
+                ? [graph convolution2DWithSourceTensor:source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution2DOpDescriptor*)descriptor
                                  name:nil]
-                : [graph convolution3DWithSourceTensor:args[0]
-                              weightsTensor:args[1]
+                : [graph convolution3DWithSourceTensor:source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution3DOpDescriptor*)descriptor
                                  name:nil];
 
@@ -703,6 +743,9 @@ at::Tensor ConvolutionOverrideableKernelMps(
           y = [graph additionWithPrimaryTensor:y
                                secondaryTensor:bias_t
                                           name:nil];
+        }
+        if (y != nil && dim == 1) {
+          y = mps::MpsReshape(graph, y, result_shape);
         }
         mps::MpsRelease(descriptor);
         return y;
@@ -746,6 +789,253 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
+
+at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor& self) {
+  if (!mps::MpsSupportsSiluBackwardDtype(grad_output.scalar_type(), self.scalar_type()) ||
+      grad_output.device() != self.device()) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(grad_output_c.sizes(), self_c.sizes());
+  } catch (const std::exception&) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  at::Tensor out = at::empty(out_shape, grad_output_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("silu_backward"),
+      {grad_output_c, self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* gate = [graph sigmoidWithTensor:args[1] name:nil];
+        MPSGraphTensor* residual = [graph subtractionWithPrimaryTensor:
+                                              [graph constantWithScalar:1
+                                                               dataType:args[1].dataType]
+                                                    secondaryTensor:gate
+                                                               name:nil];
+        if (gate == nil || residual == nil) {
+          return nil;
+        }
+        MPSGraphTensor* curve = [graph additionWithPrimaryTensor:
+                                        [graph constantWithScalar:1
+                                                         dataType:args[1].dataType]
+                                                secondaryTensor:
+                                        [graph multiplicationWithPrimaryTensor:args[1]
+                                                              secondaryTensor:residual
+                                                                         name:nil]
+                                                           name:nil];
+        if (curve == nil) {
+          return nil;
+        }
+        return [graph multiplicationWithPrimaryTensor:
+                        [graph multiplicationWithPrimaryTensor:args[0]
+                                              secondaryTensor:gate
+                                                         name:nil]
+                                      secondaryTensor:curve
+                                                 name:nil];
+      });
+  if (!ran) {
+    return at::silu_backward(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kMps, SiluBackwardKernelMps)
+
+at::Tensor SigmoidKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsSigmoidDtype(self.scalar_type())) {
+    return at::sigmoid(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sigmoid"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph sigmoidWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::sigmoid(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMps, SigmoidKernelMps)
+
+at::Tensor ExpKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::exp(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("exp"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph exponentWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::exp(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kMps, ExpKernelMps)
+
+at::Tensor LogKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsLogDtype(self.scalar_type())) {
+    return at::log(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("log"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph logarithmWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::log(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kMps, LogKernelMps)
+
+at::Tensor RsqrtKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRsqrtDtype(self.scalar_type())) {
+    return at::rsqrt(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("rsqrt"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* root = [graph squareRootWithTensor:args[0] name:nil];
+        if (root == nil) {
+          return nil;
+        }
+        return [graph reciprocalWithTensor:root name:nil];
+      });
+  if (!ran) {
+    return at::rsqrt(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMps, RsqrtKernelMps)
+
+at::Tensor SqrtKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsSqrtDtype(self.scalar_type())) {
+    return at::sqrt(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sqrt"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph squareRootWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::sqrt(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMps, SqrtKernelMps)
+
+at::Tensor TanhKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTanhDtype(self.scalar_type())) {
+    return at::tanh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tanh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* tanh = [graph tanhWithTensor:args[0] name:nil];
+        if (tanh == nil) {
+          return nil;
+        }
+        // The node saturates a NaN operand to +-1 rather than propagating it --
+        // measured, `tanh(nan)` is 1.0 at all three widths where the reference
+        // answers nan -- so a NaN input is selected back to NaN rather than
+        // left to the node's own answer. This is the one deviation here that is
+        // a wrong *answer* rather than a rounding, and it is the check that
+        // makes the body a tanh rather than a saturating approximation.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:[graph constantWithScalar:NAN
+                                                                 dataType:args[0].dataType]
+                           falsePredicateTensor:tanh
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::tanh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMps, TanhKernelMps)
+
+at::Tensor ErfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsErfDtype(self.scalar_type())) {
+    return at::erf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("erf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph erfWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::erf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kMps, ErfKernelMps)
 
 at::Tensor EmbeddingKernelMps(
     const at::Tensor& weight,
@@ -1276,5 +1566,536 @@ at::Tensor ReciprocalKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, ReciprocalKernelMps)
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelMps(
+    const at::Tensor& input,
+    at::IntArrayRef normalized_shape,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    double eps) {
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  // The CPU round-trip every decline below takes, in one place. Every other
+  // body in this file ends its round trip with `.to(self.device())`; here all
+  // three results have to be moved, and a body that returned the host tuple
+  // would hand the caller values that are right on a device that is not -- the
+  // `mean`/`rstd` shapes and the flagos device both belong to the contract.
+  const auto round_trip = [&]() {
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    auto host = at::native_layer_norm(
+        input.cpu(), normalized_shape, host_weight, host_bias, eps);
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  };
+  if (!mps::MpsSupportsReduceDtype(input.scalar_type(), std::nullopt)) {
+    return round_trip();
+  }
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): a weight or bias the caller left on the host --
+  // `F.layer_norm(x, shape, w, b)` with `w`/`b` built on the host is the common
+  // spelling -- is moved to the input's device rather than handed to the graph,
+  // which would resolve no Metal buffer for it and silently produce a CPU
+  // result. `input` is already on the device, so it is only the affine pair.
+  const at::Tensor weight_d =
+      has_weight && weight->device() != input.device()
+      ? weight->to(input.device())
+      : (has_weight ? *weight : at::Tensor());
+  const at::Tensor bias_d =
+      has_bias && bias->device() != input.device()
+      ? bias->to(input.device())
+      : (has_bias ? *bias : at::Tensor());
+  const int64_t rank = input.dim();
+  const int64_t normalized = static_cast<int64_t>(normalized_shape.size());
+  // The suffix check, in the reference's own terms: the normalised shape has to
+  // be the input's trailing axes, and a rank-0 input or a normalised shape
+  // longer than the input is declined rather than described to the graph.
+  if (normalized <= 0 || normalized > rank) {
+    return round_trip();
+  }
+  for (int64_t i = 0; i < normalized; ++i) {
+    if (normalized_shape[normalized - 1 - i] != input.size(rank - 1 - i)) {
+      return round_trip();
+    }
+  }
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {
+    return round_trip();
+  }
+  // The keepdim shape over the trailing run, which is what the reference
+  // answers for mean and rstd and what the named reductions produce.
+  std::vector<int64_t> stat_shape(input_c.sizes().vec());
+  std::vector<int64_t> axes;
+  for (int64_t axis = rank - normalized; axis < rank; ++axis) {
+    axes.push_back(axis);
+    stat_shape[axis] = 1;
+  }
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  at::Tensor mean = at::empty(stat_shape, input_c.options());
+  at::Tensor rstd = at::empty(stat_shape, input_c.options());
+  if (out.numel() == 0) {
+    return {out, mean, rstd};
+  }
+  at::Tensor weight_c;
+  at::Tensor bias_c;
+  std::vector<at::Tensor> operands{input_c};
+  if (has_weight) {
+    weight_c = weight_d.contiguous();
+    operands.push_back(weight_c);
+  }
+  if (has_bias) {
+    bias_c = bias_d.contiguous();
+    operands.push_back(bias_c);
+  }
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> outs{out, mean, rstd};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("native_layer_norm", normalized_shape, has_weight, has_bias, eps),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* avg =
+            [graph meanOfTensor:x axes:mps::MpsAxesArray(axes) name:nil];
+        if (avg == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // The two-argument variance, which takes the mean the node above
+        // produced and is the spelling MPSGraph's own documentation pairs with
+        // the normalisation node's `variance` parameter.
+        MPSGraphTensor* var = [graph varianceOfTensor:x
+                                           meanTensor:avg
+                                                 axes:mps::MpsAxesArray(axes)
+                                                 name:nil];
+        if (var == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // rstd is 1 / sqrt(var + eps), built from `squareRootWithTensor:` and
+        // `reciprocalWithTensor:` rather than the single fused
+        // `reciprocalSquareRootWithTensor:` the composition suggests.
+        //
+        // The fused selector is `MPS_AVAILABLE_STARTING(macos(15.0))`, and the
+        // earlier hosted `macos-14` runner was the one lane that was *not* on
+        // 15 or later. There the selector is absent from the runtime even
+        // though it is absent from the SDK header too, so it compiles with
+        // only an `-Wobjc-method-access` warning ("instance method not found,
+        // return type defaults to 'id'") and then dies at the call rather than
+        // at the build: the first case to reach the node terminates the process
+        // with `NSInvalidArgumentException: -[MPSGraph
+        // reciprocalSquareRootWithTensor: name:]: unrecognized selector`, which
+        // is the SIGABRT the MPS lane reported as an operator-suite failure
+        // with no assertion in front of it. The two nodes below are the macOS
+        // 11 spelling with no availability
+        // gate, and `reciprocalWithTensor:` is the one the `reciprocal` kernel
+        // in this same file already runs on.
+        //
+        // This is a portability constraint rather than a numerics choice: both
+        // spellings compute 1/sqrt(x), and the composed form is what the older
+        // MPSGraph that runner carried can actually execute.
+        MPSGraphTensor* shifted =
+            [graph additionWithPrimaryTensor:var
+                             secondaryTensor:[graph constantWithScalar:epsilon
+                                                              dataType:var.dataType]
+                                        name:nil];
+        if (shifted == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* rooted = [graph squareRootWithTensor:shifted name:nil];
+        if (rooted == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* rstd_t = [graph reciprocalWithTensor:rooted name:nil];
+        if (rstd_t == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        MPSGraphTensor* gamma = has_weight ? args[1] : nil;
+        MPSGraphTensor* beta = has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil);
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:avg
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        return std::vector<MPSGraphTensor*>{y, avg, rstd_t};
+      });
+  if (!ran) {
+    return round_trip();
+  }
+  return {out, mean, rstd};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kMps, NativeLayerNormKernelMps)
+
+at::Tensor WhereSelfKernelMps(
+    const at::Tensor& condition,
+    const at::Tensor& self,
+    const at::Tensor& other) {
+  if (!mps::MpsSupportsWhereDtype(self.scalar_type(), other.scalar_type(), condition.scalar_type())) {
+    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor condition_c = condition.contiguous();
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(
+        at::infer_size(condition_c.sizes(), self_c.sizes()), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  // The graph's predicate is bool, so a uint8 condition -- the one other width
+  // the reference still accepts, with a deprecation warning -- is compared to
+  // zero. `condition.dataType` is read inside the block because the node is
+  // built once per plan and the comparison is a function of the dtype, which is
+  // already in the cache key through the operand.
+  const bool wide_condition = condition_c.scalar_type() == at::kByte;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("where.self"),
+      {condition_c, self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* predicate = args[0];
+        if (wide_condition) {
+          predicate = [graph notEqualWithPrimaryTensor:predicate
+                                       secondaryTensor:[graph constantWithScalar:0.0
+                                                                        dataType:predicate.dataType]
+                                                  name:nil];
+        }
+        if (predicate == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:predicate
+                            truePredicateTensor:args[1]
+                           falsePredicateTensor:args[2]
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::where(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMps, WhereSelfKernelMps)
+
+at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
+  // Materialise the list once: the reference and every check below read it more
+  // than once, and `ITensorListRef` is a view whose lifetime is the caller's.
+  const std::vector<at::Tensor> ops(tensors.begin(), tensors.end());
+  // The reference is called on host copies, exactly as every other body here
+  // does, because the operands are flagos tensors and `at::cat(ops, dim)` would
+  // re-enter this same kernel. That is not a theoretical hazard: the fallback
+  // spelling was written with the original list first and a bool `cat` -- which
+  // this body declines, because bool has no MPSGraph element type -- recursed
+  // until the stack ran out and the process died with SIGSEGV. Built once,
+  // before any early return, so no decline path can be written against the live
+  // list by mistake.
+  std::vector<at::Tensor> host_ops;
+  host_ops.reserve(ops.size());
+  for (const at::Tensor& t : ops) {
+    host_ops.push_back(t.cpu());
+  }
+  // An empty list is the reference's own error, and it is raised here rather
+  // than returned as an empty tensor. `ops[0]` below would also be out of
+  // range, so the check has to come first for the shape of the body as much as
+  // for the message.
+  if (ops.empty()) {
+    return at::cat(host_ops, dim);
+  }
+  // One dtype for the whole list, and one the graph can carry. A mixed list is
+  // declined so the reference promotes it.
+  const at::ScalarType dtype = ops[0].scalar_type();
+  for (const at::Tensor& t : ops) {
+    if (t.scalar_type() != dtype ||
+        !mps::MpsSupportsCatDtype(dtype, dtype)) {
+      return at::cat(host_ops, dim).to(ops[0].device());
+    }
+  }
+  const int64_t rank = ops[0].dim();
+  if (rank == 0) {
+    return at::cat(host_ops, dim).to(ops[0].device());
+  }
+  int64_t axis = dim;
+  if (axis < 0) {
+    axis += rank;
+  }
+  if (axis < 0 || axis >= rank) {
+    return at::cat(host_ops, dim).to(ops[0].device());
+  }
+  // The result shape: every operand's shape with `axis` summed. A rank or a
+  // non-`axis` extent that disagrees is the reference's error, not the node's
+  // broadcast, so the body checks rather than describes it.
+  std::vector<int64_t> out_shape(ops[0].sizes().vec());
+  out_shape[axis] = 0;
+  for (const at::Tensor& t : ops) {
+    if (t.dim() != rank) {
+      return at::cat(host_ops, dim).to(ops[0].device());
+    }
+    for (int64_t d = 0; d < rank; ++d) {
+      if (d == axis) {
+        continue;
+      }
+      if (t.size(d) != out_shape[d]) {
+        return at::cat(host_ops, dim).to(ops[0].device());
+      }
+    }
+    out_shape[axis] += t.size(axis);
+  }
+  std::vector<at::Tensor> operands;
+  operands.reserve(ops.size());
+  for (const at::Tensor& t : ops) {
+    operands.push_back(t.contiguous());
+  }
+  at::Tensor out = at::empty(out_shape, ops[0].options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  // Each operand reaches the node as a two-dimensional `(outer, inner)` view,
+  // with the concatenation over the *inner* axis rather than over `axis`
+  // directly.
+  //
+  // Concatenating along `axis` is exactly concatenating the inner axis of the
+  // `(prod(shape[:axis]), prod(shape[axis:]))` view: there are `outer` blocks,
+  // each block is `inner` elements wide, and the operands join end to end inside
+  // every block. The result is `(outer, sum(inner))`, which reshapes back to the
+  // aten shape.
+  //
+  // This indirection is not cosmetic, and the direct spelling is what found it.
+  // Measured through this backend, `cat([tensor([0., 1.]), tensor([2., 3.])],
+  // dim=0)` -- two rank-1 operands handed to `concatTensors:` as their ranked
+  // selves -- returned all zeros, and an int32 form returned
+  // `[0, 0, 1, 0, 2, 0]`: the eight-byte row pitch of a four-byte element, the
+  // same symptom the row-pitch note in mps_common.h records. A (2, 3) pair on
+  // dim=0 was correct, which is what makes the rank-1 case the interesting one:
+  // MPSGraph reads a rank-1 input to `concatTensors:` as one row and pays the
+  // pitch, and the two-dimensional view above sidesteps that by never handing
+  // the node a rank below two. `inner` is at least 1 because `axis < rank`.
+  //
+  // `outer` is the same on every operand -- the shape check above rejected any
+  // list where a non-`axis` extent disagreed -- but `inner` is not: it is each
+  // operand's own extent along `axis` times the extents after it, and the whole
+  // point of the concatenation is that those differ. Read per operand, from the
+  // same `(prod(shape[:axis]), prod(shape[axis:]))` split, so a (2,) operand
+  // beside a (1,) one reshapes to (1, 2) and (1, 1) rather than both to the
+  // first operand's width. Sharing one `inner` across the list is not a
+  // cosmetic error: a three-operand rank-1 `cat` of (2,), (2,) and (1,) built
+  // `mps.reshape` to a shape the third operand's element count cannot fill and
+  // MPSGraph aborted the process ("the result shape is not compatible with the
+  // input shape", then "original module failed verification") rather than
+  // declining.
+  int64_t outer = 1;
+  for (int64_t d = 0; d < axis; ++d) {
+    outer *= ops[0].size(d);
+  }
+  std::vector<int64_t> inner;
+  inner.reserve(ops.size());
+  for (const at::Tensor& t : ops) {
+    inner.push_back(t.numel() / (outer > 0 ? outer : 1));
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("cat", axis),
+      operands,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        NSMutableArray<MPSGraphTensor*>* rows =
+            [NSMutableArray arrayWithCapacity:[args count]];
+        for (NSUInteger i = 0; i < [args count]; ++i) {
+          [rows addObject:mps::MpsReshape(graph, args[i],
+                                          at::IntArrayRef({outer, inner[i]}))];
+        }
+        MPSGraphTensor* joined = [graph concatTensors:rows
+                                            dimension:1
+                                                 name:nil];
+        if (joined == nil) {
+          return nil;
+        }
+        // `outer` is the operand side; the concatenation's own outer extent is
+        // the sum the result shape already carries along `axis`, which is what
+        // the reshape back to the aten shape reads.
+        return mps::MpsReshape(graph, joined, out_shape);
+      });
+  if (!ran) {
+    return at::cat(host_ops, dim).to(ops[0].device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMps, CatKernelMps)
+
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeBatchNormKernelMps(
+    const at::Tensor& input,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& running_mean,
+    const std::optional<at::Tensor>& running_var,
+    bool training,
+    double momentum,
+    double eps) {
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  const bool has_running_mean = running_mean.has_value() && running_mean->defined();
+  const bool has_running_var = running_var.has_value() && running_var->defined();
+  // The CPU round-trip every decline below takes, in one place. The running
+  // buffers are passed through as *host* copies for the same reason the input
+  // is: the reference updates them in place, and handing it the device tensors
+  // would write the update into Metal buffers the graph path does not own.
+  const auto round_trip = [&]() {
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    const at::Tensor host_mean = has_running_mean ? running_mean->cpu() : at::Tensor();
+    const at::Tensor host_var = has_running_var ? running_var->cpu() : at::Tensor();
+    auto host = at::native_batch_norm(
+        input.cpu(), host_weight, host_bias, host_mean, host_var, training,
+        momentum, eps);
+    // The in-place running update belongs to the caller's device tensors, so it
+    // is copied back rather than left on the host copy the reference wrote.
+    if (training && has_running_mean) {
+      running_mean->copy_(host_mean);
+    }
+    if (training && has_running_var) {
+      running_var->copy_(host_var);
+    }
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  };
+  // Training updates the running statistics in place and weights the update by
+  // the *unbiased* batch variance, neither of which the inference node does --
+  // see the block comment above. Declined rather than approximated.
+  if (training || !has_running_mean || !has_running_var) {
+    return round_trip();
+  }
+  if (!mps::MpsSupportsReduceDtype(input.scalar_type(), std::nullopt)) {
+    return round_trip();
+  }
+  // The channel axis is 1 for every rank the reference accepts; a rank below 2
+  // has no channel axis to normalise over and is the reference's own error.
+  const int64_t rank = input.dim();
+  if (rank < 2) {
+    return round_trip();
+  }
+  const int64_t channels = input.size(1);
+  if (has_weight && weight->numel() != channels) {
+    return round_trip();
+  }
+  if (has_bias && bias->numel() != channels) {
+    return round_trip();
+  }
+  if (running_mean->numel() != channels || running_var->numel() != channels) {
+    return round_trip();
+  }
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {
+    return round_trip();
+  }
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): the running statistics and the affine pair are
+  // moved to the input's device rather than described to the graph on the host,
+  // which would resolve no Metal buffer for them.
+  const auto to_device = [&](const at::Tensor& t) {
+    return t.device() == input.device() ? t.contiguous()
+                                        : t.to(input.device()).contiguous();
+  };
+  // The gamma the node broadcasts along the channel: the caller's weight when it
+  // has one, and an all-ones [C] when it does not -- because the node has no
+  // "no gamma" spelling here the way layer_norm's `nil` gamma is one. The
+  // substitute is what keeps the operand *list* fixed across a weight-less and a
+  // weighted call, so the plan cache key (which records dtypes and shapes and
+  // not values) cannot hand the first compiled graph to the second call. `beta`
+  // is the same with an all-zeros [C] for a missing bias.
+  at::Tensor weight_d = has_weight ? to_device(*weight)
+                                   : at::ones({channels}, input_c.options());
+  at::Tensor bias_d = has_bias ? to_device(*bias)
+                               : at::zeros({channels}, input_c.options());
+  at::Tensor mean_d = to_device(*running_mean);
+  at::Tensor var_d = to_device(*running_var);
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  // The reference's inference statistics are empty -- see the block comment
+  // above -- so there is nothing for the graph to write into these two. They are
+  // allocated (zero elements, on the input's device and dtype, which is the
+  // reference's own shape and placement) and returned untouched, and they are
+  // *not* listed among the graph's results: an MPSGraph result is described
+  // against an N-element buffer and MpsFlatten over zero elements is a reshape
+  // the graph rejects, so a result list carrying them would fail to build. The
+  // graph covers `out` alone.
+  at::Tensor stat_mean = at::empty({0}, input_c.options());
+  at::Tensor stat_var = at::empty({0}, input_c.options());
+  if (out.numel() == 0) {
+    return {out, stat_mean, stat_var};
+  }
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> operands{input_c, mean_d, var_d, weight_d, bias_d};
+  // The shape the mean, variance, gamma and beta operands reach the node as: one
+  // element per channel with every other axis a 1. The node's type inference
+  // requires its four statistics operands to be *broadcast compatible* with the
+  // input, and a `[C]` operand is not -- measured, the node rejects a `[2, 3, 4,
+  // 5]` input against `[3]` statistics with "output type 'tensor<2x3x4x5xf32>'
+  // and mean type 'tensor<3xf32>' are not broadcast compatible" and that abort is
+  // a process exit, not a declined node. So each of the four is reshaped in the
+  // graph, which is a metadata operation over the same buffer.
+  std::vector<int64_t> channel_shape(static_cast<size_t>(rank), 1);
+  channel_shape[1] = channels;
+  std::vector<at::Tensor> outs{out};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("native_batch_norm", eps),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {
+        // The operands arrive at their aten shapes: MpsRunGraph describes each
+        // one to the graph as the 1-D `numel` buffer the row-pitch note in
+        // mps_common.h requires and reapplies the aten shape over it before
+        // `build` is called, so `args[0]` is already the ranked input. The four
+        // statistics operands are `[C]` and are reshaped to the channel view
+        // above -- MPSGraph documents gamma and beta as broadcast along the axes
+        // they do not name ("shapes for gamma and beta must match the input data
+        // along at least one dimension and will be broadcast along the rest"),
+        // but its type inference wants a broadcast *compatible* rank rather than
+        // a trailing one, and a `[C]` operand is not that.
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* mean =
+            mps::MpsReshape(graph, args[1], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* var =
+            mps::MpsReshape(graph, args[2], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* gamma =
+            mps::MpsReshape(graph, args[3], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* beta =
+            mps::MpsReshape(graph, args[4], at::IntArrayRef(channel_shape));
+        if (mean == nil || var == nil || gamma == nil || beta == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        // The inference normalisation: `(x - mean) / sqrt(var + eps) * gamma +
+        // beta` over the channel, which is exactly what the running statistics
+        // and this node express.
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:mean
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {
+          return std::vector<MPSGraphTensor*>();
+        }
+        return std::vector<MPSGraphTensor*>{y};
+      });
+  if (!ran) {
+    return round_trip();
+  }
+  return {out, stat_mean, stat_var};
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kMps, NativeBatchNormKernelMps)
 
 } // namespace at::native::flagos

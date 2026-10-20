@@ -31,6 +31,23 @@ CORE = ("libc10.so", "libtorch_cpu.so")
 
 
 @pytest.fixture
+def preimport_state(monkeypatch):
+    """This module runs before torch is imported in real vendor startup."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        if importlib.util.find_spec("torch") is None:
+            pytest.skip(
+                "This check needs PyTorch to restore it after the pre-import state"
+            )
+        import torch
+
+    for name in ("torch", "torch_fl"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    yield
+    sys.modules["torch"] = torch
+
+
+@pytest.fixture
 def fake_runtime(tmp_path):
     installed = tmp_path / "site-packages" / "torch"
     stock = installed / "lib"
@@ -63,7 +80,7 @@ def _digest_tree(path):
 
 
 def test_activation_keeps_read_only_install_unchanged(
-    fake_runtime, tmp_path, monkeypatch
+    fake_runtime, tmp_path, monkeypatch, preimport_state
 ):
     stock, vendor = fake_runtime
     module = _load_module()
@@ -85,6 +102,7 @@ def test_activation_keeps_read_only_install_unchanged(
         )
         overlay = Path(sys.path[0])
         facade = overlay / "torch"
+        assert (facade / "lib").stat().st_mode & 0o777 == 0o700
         assert (facade / "lib" / "libc10.so").resolve() == vendor / "libc10.so"
         assert (facade / "lib" / "libshm.so").resolve() == stock / "libshm.so"
         assert (facade / "version.py").resolve() == stock.parent / "version.py"
@@ -110,10 +128,11 @@ def test_imported_stock_torch_is_rejected_without_writes(fake_runtime, monkeypat
     monkeypatch.setattr(
         module, "discover_vendor_torch_lib", lambda *a, **k: str(vendor)
     )
-    monkeypatch.setitem(sys.modules, "torch", object())
     before = _digest_tree(stock)
-    with pytest.raises(RuntimeError, match="import torch_fl before torch"):
-        module.ensure_vendor_libtorch_links("vendor", CORE, vendor="Test")
+    with monkeypatch.context() as imported:
+        imported.setitem(sys.modules, "torch", object())
+        with pytest.raises(RuntimeError, match="import torch_fl before torch"):
+            module.ensure_vendor_libtorch_links("vendor", CORE, vendor="Test")
     assert _digest_tree(stock) == before
 
 
@@ -150,7 +169,7 @@ def test_undeclared_vendor_abi_fails_before_preload(fake_runtime, monkeypatch):
 
 
 def test_equal_core_still_selects_missing_vendor_device_lib(
-    fake_runtime, tmp_path, monkeypatch
+    fake_runtime, tmp_path, monkeypatch, preimport_state
 ):
     stock, vendor = fake_runtime
     for name in CORE:
@@ -164,6 +183,7 @@ def test_equal_core_still_selects_missing_vendor_device_lib(
         module, "discover_vendor_torch_lib", lambda *a, **k: str(vendor)
     )
     monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    overlay = None
     try:
         assert module.ensure_vendor_libtorch_links(
             "vendor", CORE, extra_so=("libtorch_cuda.so",)
@@ -173,7 +193,8 @@ def test_equal_core_still_selects_missing_vendor_device_lib(
             vendor / "libtorch_cuda.so"
         )
     finally:
-        sys.path.remove(str(overlay))
+        if overlay is not None:
+            sys.path.remove(str(overlay))
 
 
 def test_inherited_facade_imports_in_child(fake_runtime, tmp_path):

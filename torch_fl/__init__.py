@@ -68,6 +68,18 @@ _BACKEND_CONFIG_PATH = ""
 _STARTUP_PROFILE = "full"
 
 
+def _mps_shutdown_allocator() -> None:
+    """Drain Metal and free its cached blocks before interpreter teardown."""
+    try:
+        if "torch_fl._C" in sys.modules:
+            torch_fl._C._synchronize()
+            torch_fl._C._shutdown_allocator()
+    except (NameError, AttributeError):
+        # Python may clear this module before atexit runs. The runtime's own
+        # final-buffer hook still releases the cache.
+        pass
+
+
 def _select_backend_config() -> None:
     """Pick the op-routing config file for this build.
 
@@ -2337,6 +2349,14 @@ def _phase_claim() -> None:
         torch_fl._C._set_backend_config_path(_BACKEND_CONFIG_PATH)
 
     from . import flagos  # noqa: E402
+
+    if _build_accelerator() == "mps":
+        # Finish the allocator before torch's module teardown clears Storage
+        # objects. A DataPtr can then be deleted without the caching allocator
+        # reinitialising during static destruction.
+        import atexit
+
+        atexit.register(_mps_shutdown_allocator)
 
     torch.utils.rename_privateuse1_backend("flagos")
     torch._register_device_module("flagos", flagos)

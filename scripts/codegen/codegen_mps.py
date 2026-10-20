@@ -16,7 +16,10 @@
 # (`mm` and `bmm`), the `softmax` category (`_softmax`), the elementwise `neg`
 # and `pow.Tensor_Scalar`, and the `conv` category (`convolution_overrideable`),
 # each matching the CPU reference within tolerance.
-#
+# and the `reduce` family -- plus three stage-3 increments: the `gemm` category
+# (`mm` and `bmm`), the `softmax` category (`_softmax`) and the elementwise
+# `neg` and `pow.Tensor_Scalar`, each matching the CPU reference within tolerance.
+# The rest of stage 3 (conv) is still open.#
 # Two consequences worth stating up front, mirroring codegen_kunlunxin.py:
 #
 #   * There is no conf writer. torch_fl/configs/backends_mps.conf is generated
@@ -141,11 +144,171 @@ OPS = {
     # `sigmoidWithTensor:`, and `x * sigmoid(x)` is the definition, so this is
     # the first body here whose graph is two nodes rather than one.
     #
-    # Only `silu` is registered. `silu.out` and `silu_` write into a tensor the
-    # caller owns, like every other `.out`/inplace spelling on this backend, and
-    # `silu_backward` is a separate op with a separate selector question that
-    # this increment does not answer.
+    # `silu.out` and `silu_` write into a tensor the caller owns, like every
+    # other `.out`/inplace spelling on this backend, so they stay unregistered.
+    # `silu_backward` is a separate body below: it uses the derivative
+    # `sigmoid(x) * (1 + x * (1 - sigmoid(x)))` and has its own dtype gate.
     "silu": "silu",
+    # The first backward body on this backend, and the one a SwiGLU projection
+    # needs before it can train: the forward `silu` is already served, so every
+    # autograd step that reaches its gradient would otherwise leave the device.
+    #
+    # The derivative is built from `sigmoid` directly rather than by symbolic
+    # differentiation through an exponential. `exp(x)` overflows before the host
+    # reference's cancellation settles the same derivative at a large positive
+    # x, so a graph written that way has the wrong answer at the edge where the
+    # gradient is closest to 1. The direct expression keeps that cancellation
+    # in the same order the reference uses. See T_SILU_BACKWARD.
+    #
+    # float32 and float16 are served. bfloat16 is declined because its graph
+    # differs from the reference by up to 3.1e-02 around x=3, while float32 and
+    # float16 stay within their measured tolerances.
+    #
+    # The schema's `.grad_input` spelling writes into a tensor the caller owns
+    # and stays on the fallback, like every other in-place spelling here. Only
+    # the functional op, which autograd names for the derivative, is registered.
+    "silu_backward": "silu_backward",
+    # The activation `silu` is built from, and an op a model reaches for on its
+    # own -- a hand-written attention mask, a gating projection, a `sigmoid` in a
+    # loss. MPSGraph has a real selector (`sigmoidWithTensor:`) and it is the very
+    # same one the `silu` composition above builds, so this increment is small,
+    # and the interesting part is not the node but the width list: it is
+    # *narrower* than `silu`'s even though the two bodies share the node. See
+    # MpsSupportsSigmoidDtype for the measurement.
+    #
+    # Only `sigmoid` is registered. `sigmoid.out` and `sigmoid_` write into a
+    # tensor the caller owns, like every other `.out`/inplace spelling on this
+    # backend, and `sigmoid_backward` is a separate op with its own selector
+    # question.
+    "sigmoid": "sigmoid",
+    # The largest elementwise unary left on a small model's fallback profile, and
+    # the one the three ops after it are written in terms of: `log`, `rsqrt` and a
+    # hand-written `tanh` are all built over an exponential, so serving this node
+    # is the increment the rest of the cohort is measured against. Measured on an
+    # M5 on a (3, 512, 3072) float32 operand, the `cpu_fallback` round-trip cost
+    # 3.51 ms against a 1.03 ms device-to-host copy floor for the same shape --
+    # the cheapest large win of the six unaries profiled, and the reason it is the
+    # one this increment takes.
+    #
+    # MPSGraph has a real selector (`exponentWithTensor:`), so the body is the
+    # plain unary template rather than a composition, and the interesting part is
+    # the width list rather than the node -- see MpsSupportsExpDtype for the
+    # measurement.
+    #
+    # Only `exp` is registered. `exp.out` and `exp_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `exp2`'s and `expm1`'s selectors are separate nodes with their own width
+    # questions that this increment does not answer.
+    "exp": "exp",
+    # The inverse of the node above and the second-largest elementwise unary left
+    # on a small model's fallback profile: measured on an M5 on a (3, 512, 3072)
+    # float32 operand, the `cpu_fallback` round-trip cost 4.51 ms. A model reaches
+    # it through a log-sum-exp, a KL divergence, a log-probability or a
+    # normalising flow, and it is the op the design doc's stage-4 cohort pairs
+    # with `exp`.
+    #
+    # MPSGraph names it directly (`logarithmWithTensor:`), so like `exp` the body
+    # is the plain unary template and the increment is the width list. See
+    # MpsSupportsLogDtype for the measurement -- the finding here is the *domain*
+    # rather than the flush: a logarithm on a non-positive operand is `-inf`,
+    # `0`/`-inf` or `nan` rather than a rounded magnitude, and the graph has to
+    # reproduce each of those edges rather than a value near them.
+    #
+    # Only `log` is registered. `log.out` and `log_` write into a tensor the caller
+    # owns, and `log2`, `log10` and `log1p` are separate ops with their own
+    # selectors and their own edge behaviour.
+    "log": "log",
+    # The reciprocated square root, and the op a normalisation is written in
+    # terms of: `x * rsqrt(v + eps)` is the tail of a layer norm, an RMS norm and
+    # a batch norm, and the `1 / sqrt(d)` attention scale is the same shape.
+    # Measured on an M5 on a (3, 512, 3072) float32 operand, the `cpu_fallback`
+    # round-trip cost 3.703 ms against a 1.03 ms device-to-host copy floor for the
+    # same shape.
+    #
+    # The node is the increment's constraint rather than its body: MPSGraph names
+    # the fused `reciprocalSquareRootWithTensor:`, but that selector is macOS 15+
+    # and the hosted `macos-14` MPS lane is on the other side of that line --
+    # measured on the runner, the fused selector raises
+    # `NSInvalidArgumentException: -[MPSGraph reciprocalSquareRootWithTensor:
+    # name:]: unrecognized selector` and aborts the process. So the body is the
+    # two-node composition `reciprocal(sqrt(x))`, built from the two selectors the
+    # `reciprocal` kernel and the `layer_norm` rstd already use, which is the same
+    # arithmetic at one extra node. See T_RSQRT.
+    #
+    # The gate is `MpsSupportsRsqrtDtype`, and the note there is the measurement:
+    # this is a composition rather than one node, so both halves' subnormal
+    # policy applies -- the sqrt of a subnormal, and the reciprocal of a subnormal
+    # result -- and the increment's finding is which of those the platform gets
+    # right at which width.
+    #
+    # Only `rsqrt` is registered. `rsqrt.out` and `rsqrt_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `_foreach_rsqrt` is the batched spelling with its own list contract.
+    "rsqrt": "rsqrt",
+    # The square root on its own, and the node the `rsqrt` composition above
+    # already builds: `squareRootWithTensor:` is the inner half of
+    # `reciprocal(sqrt(x))`, so serving it standalone adds no new arithmetic and
+    # no selector this tree has not already measured. What it adds is a caller
+    # who wants the root rather than its reciprocal -- a distance, a standard
+    # deviation, a magnitude, or the `1 / sqrt(d)` a model writes out in two
+    # steps -- and every one of those takes the `cpu_fallback` today because
+    # `sqrt` is routed to `none` in the conf.
+    #
+    # The gate is `MpsSupportsSqrtDtype`, and the interest is that the node is
+    # *not* the composition: the `rsqrt` finding split between a sqrt input half
+    # and a reciprocal result half, and this body is the input half alone, so
+    # whether a width is served here is a question the sibling's gate answered
+    # only as part of a product. See the note there for the per-width numbers.
+    #
+    # Only `sqrt` is registered, exactly as `rsqrt` is: `sqrt.out` and `sqrt_`
+    # write into a tensor the caller owns, like every other `.out`/inplace
+    # spelling on this backend, and `_foreach_sqrt` is the batched spelling with
+    # its own list contract.
+    "sqrt": "sqrt",
+    # The activation a transformer block reaches for at both ends -- the tanh
+    # approximation inside a GELU and the one inside a recurrent or attention
+    # gate -- and the reason it is the next increment after the unaries rather
+    # than one of them.
+    #
+    # MPSGraph names `tanhWithTensor:` directly, so the body is the plain
+    # one-node unary template plus one guard, and the increment is the *gate*:
+    # measured at all three widths the node saturates a NaN operand to +-1
+    # rather than propagating it, so `isNaNWithTensor:` selects a NaN back over
+    # the node's answer -- see T_TANH. With that guard in place the gate is a
+    # node-fidelity question, and it is the first one here to decline the
+    # *widest* float: the node is the reference's own function at float16 and
+    # bfloat16 but a coarser approximation of a tanh at float32, so the float32
+    # caller keeps the round-trip. See MpsSupportsTanhDtype for the measurement.
+    #
+    # Only `tanh` is registered. `tanh.out` and `tanh_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `atanh` is a different op with its own domain -- `|x| < 1` is where it
+    # answers a finite value, with its own edges at `+-1` and beyond -- so it is
+    # not this increment.
+    "tanh": "tanh",
+    # The error function, which the explicit GELU form writes out by hand:
+    # `0.5 * x * (1 + erf(x / sqrt(2)))`. `F.gelu`'s default path does not
+    # dispatch `erf` on this host, so a `gelu` kernel is a separate gate. It is
+    # also the kernel a diffusion sampler and an attention kernel built over erf
+    # reach directly.
+    #
+    # MPSGraph names it directly (`erfWithTensor:`), so the body is the plain
+    # one-node unary template and the increment is the *gate*: on an M5 the node
+    # is closer to the exact float32 curve than `at::erf` on 63.3% of the probe
+    # points where their roundings differ, and its error is at most 1.64 steps
+    # at 1.0 against the reference's 4.14. It can be farther by up to 0.98 of a
+    # step where the reference error is material on that host. The CI runner
+    # orders the closer points differently and its absolute error is larger, so
+    # the test holds both hosts to five steps from the reference and checks that
+    # float32 dispatches to MPS. See MpsSupportsErfDtype for the measurement and
+    # for why the two serve different width lists.
+    #
+    # Only `erf` is registered. `erf.out` and `erf_` write into a tensor the
+    # caller owns, like every other `.out`/inplace spelling on this backend, and
+    # `erfc` is a different op with its own domain and its own tail behaviour --
+    # `erfc(x)` is `1 - erf(x)` only to the precision `1 - erf(x)` can carry at a
+    # large `x`, which is a separate measurement -- so it is not this increment.
+    "erf": "erf",
     # The largest single item left on a small model's fallback profile, and the
     # first op here whose cost is a *read* of its operand rather than a
     # computation over it: measured on an M5 (one Qwen3-0.6B layer, hidden 1024,
@@ -270,6 +433,30 @@ OPS = {
     "div.Tensor": "div",
     "div.Scalar": "div_scalar",
     "reciprocal": "reciprocal",
+    # Stage 4 opens with the normalisation every transformer block calls once,
+    # and it is the first op here that answers with more than one tensor. It is
+    # one MPSGraph node rather than the `native_batch_norm` + `addcmul`
+    # decomposition the CPU fallback performs -- see T_LAYER_NORM.
+    "native_layer_norm": "layer_norm",
+    # Two ops the runtime-conformance suite lists as `RUNTIME_OPS`, which is the
+    # contract that every one of them reaches an accelerator backend on every
+    # platform -- MPS was the one platform handing these two to cpu_fallback.
+    #
+    # `where.self` is the ternary select and MPSGraph has the node
+    # (`selectWithPredicateTensor:`), so it is a native body rather than a
+    # round-trip: see T_WHERE for the three reference checks the node does not
+    # make.
+    "where.self": "where",
+    # `cat` is the variadic concatenation, and the node is
+    # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
+    # node would otherwise answer with a broadcasted wrong answer.
+    "cat": "cat",
+    # The normalisation a convolutional block calls. Its inference path is one
+    # `normalizationWithTensor:...` node fed by the *running* statistics; its
+    # training path is declined, because it updates the running buffers in place
+    # with the unbiased batch variance and no graph node writes a caller's
+    # buffer. See T_BATCH_NORM.
+    "native_batch_norm": "batch_norm",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -301,6 +488,55 @@ AT_OP = {
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    # The CPU reference behind a declined `silu_backward`. The op has its own
+    # derivative kernel -- it is not a prompted composition -- so this is where
+    # the reference's promotion rule and gradient values live.
+    "silu_backward": "silu_backward",
+    # The CPU reference the `sigmoid` body round-trips to on the width it
+    # declines. `sigmoid` is its own aten kernel rather than a composition, so
+    # the round-trip lands on the reference's own implementation and reports its
+    # own values rather than a re-entrant composite.
+    "sigmoid": "sigmoid",
+    # The CPU reference the `exp` body round-trips to on the widths it declines.
+    # `exp` is its own aten kernel rather than a composition, so the round-trip
+    # lands on the reference's own implementation -- which is where the
+    # reference's own promotion rule for an integral or bool operand lives, and
+    # why the gate sends those widths here rather than evaluating them in the
+    # graph.
+    "exp": "exp",
+    # The CPU reference the `log` body round-trips to on the widths it declines.
+    # `log` is its own aten kernel rather than a composition, so the round-trip
+    # lands on the reference's own implementation -- which is where its domain
+    # edges and its integral/bool promotion rule live, and why the gate sends
+    # those widths here rather than evaluating them in the graph.
+    "log": "log",
+    # The CPU reference the `rsqrt` body round-trips to on the widths it
+    # declines. `rsqrt` is its own aten kernel rather than a composition on the
+    # reference side, so the round-trip lands on the reference's own
+    # implementation -- which is where its domain edges (`rsqrt(0) = inf`,
+    # `rsqrt(-0.0) = -inf`, `rsqrt(-1) = nan`) and its integral/bool promotion
+    # rule live, and why the gate sends those widths here rather than evaluating
+    # them in the composition.
+    "rsqrt": "rsqrt",
+    # The CPU reference the `sqrt` body round-trips to on the widths it declines.
+    # `sqrt` is its own aten kernel rather than a composition on the reference
+    # side, so the round-trip lands on the reference's own implementation --
+    # which is where its domain edges (`sqrt(-1) = nan`,
+    # `sqrt(-0.0) = -0.0`) and its integral/bool promotion rule live, and why
+    # the gate sends those widths here rather than evaluating them in the graph.
+    "sqrt": "sqrt",
+    # The CPU reference the `tanh` body round-trips to on the widths it declines.
+    # `tanh` is its own aten kernel rather than a composition on the reference
+    # build, which is where its saturation contract (`tanh(+-inf) = +-1`) and its
+    # integral/bool promotion rule live, and why the gate sends those widths here
+    # rather than evaluating them in the graph.
+    "tanh": "tanh",
+    # The CPU reference the `erf` body round-trips to on the widths it declines.
+    # `erf` is its own aten kernel rather than a composition, which is where its
+    # bounded range (`erf(+-inf) = +-1`), its signed zero and its integral/bool
+    # promotion rule live, and why the gate sends those widths here rather than
+    # evaluating them in the graph.
+    "erf": "erf",
     # The CPU reference the `embedding` body round-trips to on anything it
     # declines. `embedding` is the op `F.embedding`, `nn.Embedding` and
     # `nn.EmbeddingBag`'s non-bagged path all reach, and it is the reference
@@ -340,6 +576,23 @@ AT_OP = {
     # reference's own `1 / x` rather than a composite that would re-enter the
     # dispatcher.
     "reciprocal": "reciprocal",
+    # The reference op, so the round-trip lands on the kernel that computes
+    # `(x - mean) / sqrt(var + eps) * gamma + beta` and answers the same
+    # (out, mean, rstd) triple this body does.
+    "native_layer_norm": "native_layer_norm",
+    # `where.self` is a real aten kernel rather than a decomposition, so the
+    # round-trip lands on the reference's own `select` and reports its own
+    # `where expected condition to be a boolean tensor` message for a condition
+    # width this body declines.
+    "where.self": "where",
+    # `cat` is likewise its own kernel, and the round-trip is where the
+    # reference's shape message (`Sizes of tensors must match except in dimension
+    # {dim}`) and its empty-list error live.
+    "cat": "cat",
+    # `native_batch_norm` is its own aten kernel, so the round-trip lands on the
+    # implementation that owns the in-place running update, the unbiased
+    # correction and the inference statistics the body has to reproduce.
+    "native_batch_norm": "native_batch_norm",
 }
 
 # The per-category dtype predicate each kernel gates on (mps_common.h).
@@ -353,6 +606,52 @@ SUPPORTS = {
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    # Two equal float widths, float32 and float16. The reference promotes a
+    # mixed pair to a common width, while MpsRunGraph requires every operand and
+    # its result to share an element type, so a mixed pair takes the round-trip.
+    # See MpsSupportsSiluBackwardDtype for why bfloat16 is declined.
+    "silu_backward": "MpsSupportsSiluBackwardDtype",
+    # Deliberately *not* the sibling's predicate, even though the two bodies
+    # build the same node. A width list belongs to the op and not to the node:
+    # see MpsSupportsSigmoidDtype for the measurement that separates them.
+    "sigmoid": "MpsSupportsSigmoidDtype",
+    # Its own predicate rather than the sibling `silu`/`sigmoid` one, and the
+    # measurement behind it is the increment's finding: an exponential is a
+    # magnitude op, not a saturated one, so the subnormal band that cost the bare
+    # `sigmoid` its float16 width is not where an `exp` lives. See
+    # MpsSupportsExpDtype for the per-width numbers -- float32 and bfloat16 are
+    # served and float16 is declined, which is *not* the sibling's list.
+    "exp": "MpsSupportsExpDtype",
+    # Its own predicate, and the measurement is about the domain rather than a
+    # flush: a logarithm's edges (a zero operand, a negative operand, a subnormal
+    # operand the platform might flush) are not the magnitudes the sibling
+    # exponentials were gated on. See MpsSupportsLogDtype.
+    "log": "MpsSupportsLogDtype",
+    # Its own predicate, and the measurement is about a *composition* rather than
+    # a node: `rsqrt` is `reciprocal(sqrt(x))` here, so two subnormal policies
+    # apply where the siblings above had one -- the sqrt of a subnormal input, and
+    # the reciprocal of a subnormal result -- and the increment's finding is that
+    # the two halves fail at different widths. See MpsSupportsRsqrtDtype.
+    "rsqrt": "MpsSupportsRsqrtDtype",
+    # Its own predicate rather than a share with `rsqrt`'s, and the measurement
+    # is what separates them: `rsqrt` is `reciprocal(sqrt(x))` here, so its gate
+    # had to be right about two nodes, while this body is the sqrt alone -- the
+    # *input* half of that composition with no reciprocal after it. A width that
+    # the composition serves is not automatically served here (a float32 input
+    # the platform flushes to zero cost the sibling its non-zero answer, and this
+    # body answers zero for it rather than inf), and the widening is the
+    # increment's finding. See MpsSupportsSqrtDtype.
+    "sqrt": "MpsSupportsSqrtDtype",
+    # Its own predicate, and the measurement is a *node fidelity* question rather
+    # than a flush or a domain: `tanhWithTensor:`. See MpsSupportsTanhDtype for
+    # the per-width numbers.
+    "tanh": "MpsSupportsTanhDtype",
+    # Its own predicate, and the measurement lands on the *opposite* width list
+    # to the sibling `tanh`'s even though the two are the same kind of op: the
+    # node is the reference's own function at all three widths here, so the
+    # increment's finding is a last-ulp question rather than an accuracy one.
+    # See MpsSupportsErfDtype.
+    "erf": "MpsSupportsErfDtype",
     "embedding": "MpsSupportsEmbeddingDtype",
     # The same predicate over the same pair, and shared rather than copied
     # because the two ops accept the same thing: one float operand (the table
@@ -393,6 +692,30 @@ SUPPORTS = {
     # must agree on the dtypes that are served, or `x / 2` and `1 / x` would
     # answer in different widths.
     "reciprocal": "MpsSupportsDivDtype",
+    # The reduction family's wall, not a gate of its own: `layer_norm` reduces
+    # over the trailing axes exactly as `mean` and `sum` do, so it serves the
+    # float widths and declines an integer input the reference computes in
+    # float -- one rule, named once.
+    "layer_norm": "MpsSupportsReduceDtype",
+    # `where`'s select takes both branches in one datatype and promotes nothing,
+    # while the reference promotes `self`/`other` to a common dtype -- so the gate
+    # is over the two branch widths, and the condition width is checked with
+    # them: bool is the reference's modern condition, uint8 the deprecated one
+    # the body widens by comparing to zero, and any other width is the
+    # reference's own error. See T_WHERE.
+    "where": "MpsSupportsWhereDtype",
+    # `cat`'s node requires one datatype across the whole list, where the
+    # reference promotes a mixed list. The body checks the list is uniform and
+    # this gate checks the one width is carryable, so a promoted or uncarryable
+    # list takes the round-trip. See T_CAT.
+    "cat": "MpsSupportsCatDtype",
+    # The reduction family's wall again, and for the same reason `layer_norm`'s
+    # is: `native_batch_norm` normalises over the per-channel axes exactly as
+    # `mean` and `sum` reduce, and the reference computes an integral input in
+    # float. A graph at the operand's own width cannot express that, so an
+    # integral input takes the round-trip rather than a wrong answer. See
+    # T_BATCH_NORM.
+    "batch_norm": "MpsSupportsReduceDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -425,6 +748,43 @@ CALLS = {
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # Unused: T_SILU_BACKWARD writes the sigmoid, the residual `1 - sigmoid`
+    # and both multiplies in full, because the second operand appears only in
+    # the final multiply. The entry exists because `render` reads `CALLS[op]`
+    # for every op in OPS.
+    "silu_backward": "",
+    # The same selector the `silu` body above names as its first node, here as the
+    # whole body -- `sigmoid` *is* that node. Named separately because the two
+    # categories carry different dtype gates and different fallbacks.
+    "sigmoid": "sigmoidWithTensor:",
+    # Its own selector rather than a composition, and the reason `exp` is one
+    # node where a hand-written `tanh` would be two: MPSGraph names the
+    # exponential directly. The node is the whole body, so the width list is the
+    # only thing the increment decides.
+    "exp": "exponentWithTensor:",
+    # Its own selector, named directly like the exponential's, and the reason `log`
+    # is one node rather than the `log2`/`loge` composition a hand-written body
+    # would need.
+    "log": "logarithmWithTensor:",
+    # The *second* node of the two-node composition, and the reason the
+    # first is named separately in T_RSQRT: `squareRootWithTensor:` builds the
+    # inner node and this selector reciprocates it. The body writes both out in
+    # full, so this entry is a record of the outer half rather than a `{call}`
+    # prefix -- see the note there for why the fused
+    # `reciprocalSquareRootWithTensor:` is not used.
+    "rsqrt": "reciprocalWithTensor:",
+    # The selector the `rsqrt` composition above already names as its inner node,
+    # here as the whole body -- `sqrt` *is* that node. Named separately because
+    # the two categories carry different dtype gates, which is the increment.
+    "sqrt": "squareRootWithTensor:",
+    # Named directly by the eval path, so the body is the plain unary template.
+    # See MpsSupportsTanhDtype for whether the node rounds like a true tanh at a
+    # width.
+    "tanh": "tanhWithTensor:",
+    # Named directly, exactly as the sibling `tanh` is. The node is the whole
+    # body -- it is the reference's own function at every width -- so the width
+    # list is the only thing the increment decides. See MpsSupportsErfDtype.
+    "erf": "erfWithTensor:",
     # A table read is a gather with `axis = 0` and no batch dimensions, and this
     # is that selector. See T_EMBEDDING for why the *other* gather spelling
     # (`gatherAlongAxis:`) is not usable here, and for the two things the
@@ -470,6 +830,21 @@ CALLS = {
     # and `{call}` names the one-argument selector. Sized by the same gate as
     # the div bodies above.
     "reciprocal": "reciprocalWithTensor:",
+    # Unused: the layer_norm body builds its own node (`normalizationWithTensor:`)
+    # and its two reductions, so it names none here. The entry exists because
+    # `render` reads `CALLS[op]` for every op in OPS.
+    "native_layer_norm": "",
+    # Both bodies write the selector out in full -- `where` builds the predicate
+    # comparison as well as the select, and `cat` passes the whole operand array
+    # to a variadic selector -- so neither names a prefix here. The entries exist
+    # because `render` reads `CALLS[op]` for every op in OPS.
+    "where.self": "",
+    "cat": "",
+    # Unused: the batch_norm body builds its own node
+    # (`normalizationWithTensor:...`) and its own `save_invstd` subgraph, so it
+    # names no prefix here. The entry exists because `render` reads `CALLS[op]`
+    # for every op in OPS.
+    "native_batch_norm": "",
 }
 
 # The rank each op's aten contract is written for: `mm` takes two matrices, `bmm`
@@ -545,6 +920,41 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # Empty for the same reason: the graph is a function of both operands'
+    # dtypes and shapes, which MpsRunGraph folds into the key itself, and the
+    # body bakes no host value into it.
+    "silu_backward": "",
+    # Empty for the same reason `silu`'s is: the graph is a function of the
+    # operand's dtype and shape, which MpsRunGraph folds into the key itself, and
+    # the body reads no other host value.
+    "sigmoid": "",
+    # Empty for the same reason `silu`'s and `sigmoid`'s are: the graph is one
+    # selector over one operand, so it is a function of the operand's dtype and
+    # shape -- which MpsRunGraph folds into the cache key itself -- and the body
+    # reads no other host value. A body that bakes nothing into the graph has no
+    # way to be handed a plan it did not build.
+    "exp": "",
+    # Empty, for the same reason `exp`'s is: one selector over one operand, so the
+    # graph is a function of the operand's dtype and shape alone -- which
+    # MpsRunGraph folds into the cache key itself -- and the body bakes no host
+    # value into the graph.
+    "log": "",
+    # Empty for the same reason the three above are: the two nodes are a function
+    # of the operand's dtype and shape, which MpsRunGraph folds into the cache key
+    # itself, and the body bakes no host value into the graph.
+    "rsqrt": "",
+    # Empty for the same reason the four above are: the body is one selector over
+    # one operand, so the graph is a function of the operand's dtype and shape --
+    # which MpsRunGraph folds into the cache key itself -- and no host value is
+    # baked into it.
+    "sqrt": "",
+    # Empty, for the same reason as `sqrt` above: one operand and one node.
+    "tanh": "",
+    # Empty, for the same reason as the six above it: the body is one selector
+    # over one operand, so the graph is a function of the operand's dtype and
+    # shape -- which MpsRunGraph folds into the cache key itself -- and no host
+    # value is baked into it.
+    "erf": "",
     # Empty: the body reads no host value that the operands cannot say. The three
     # non-tensor arguments are backward-pass arguments whose value the forward
     # output does not depend on -- measured, see the note above T_EMBEDDING -- so
@@ -584,6 +994,51 @@ KEY_PARTS = {
     "div.Tensor": "",
     "div.Scalar": ", other",
     "reciprocal": "",
+    # Every host value the body bakes into the graph, and the row a reviewer has
+    # to check against it: `normalized_shape` names the trailing run the
+    # reductions cover (and so the mean/rstd result shapes, whose own signatures
+    # are folded in below -- but the *axes* are not in any tensor), `eps` is the
+    # constant added to the variance, and `has_weight` / `has_bias` say whether
+    # the node is given a gamma and a beta at all. A body that read any of these
+    # and left it out of the key would hand the first compiled plan to a call
+    # that needed a different one.
+    "native_layer_norm": ", normalized_shape, has_weight, has_bias, eps",
+    # Empty: the graph is a select over three operands, and everything the body
+    # decides is already in their signatures. The condition's width decides the
+    # bool comparison, and MpsRunGraph folds every operand's dtype into the key,
+    # so a bool and a uint8 condition already sit under different keys.
+    "where.self": "",
+    # The normalised axis, and the row a reviewer has to check against the body:
+    # a (2, 3) list read at dim=0 and at dim=1 has one dtype and one set of
+    # operand shapes and two different answers, and `concatTensors:dimension:`
+    # bakes the axis into the compiled graph. A body that normalised the axis and
+    # left it out of the key would hand the first plan to the second call.
+    "cat": ", axis",
+    # The one host value the batch_norm body bakes into the graph, and the row a
+    # reviewer has to check against it: `eps` is the constant the node adds to
+    # the running variance and the same constant the `save_invstd` subgraph
+    # shifts by. The fixed `eps` it shadows is a non-issue -- a `fixed_eps` call
+    # bakes its own value into the same key slot -- so two calls that differ only
+    # in `eps` need two graphs.
+    #
+    # `rank` and `channels` are *not* named: they are the operands' own shapes,
+    # which MpsRunGraph folds into the cache key, and the gamma/beta reshape is a
+    # function of them.
+    #
+    # `has_weight` and `has_bias` are not named either, and that is the row worth
+    # the reviewer's attention. The body always hands the node five operands --
+    # an absent affine operand becomes an all-ones (gamma) or all-zeros (beta)
+    # `[C]` tensor -- so a weight-less call and a weighted one differ in the
+    # *values* of an operand and not in the operand list the key records. A plan
+    # is compiled against the operands' dtypes and shapes and reads their
+    # contents at run time, which is what makes substituting a constant tensor
+    # for a missing one sound here and is also why the two calls can share a
+    # graph.
+    #
+    # `momentum` is not read on this path at all: the graph covers inference
+    # only, and `momentum` weights the running update that only the training path
+    # performs. See T_BATCH_NORM.
+    "native_batch_norm": ", eps",
 }
 
 # The tail a reduce body runs once the reduction node exists, for the ops whose
@@ -923,6 +1378,16 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # The empty input is declined rather than handed to the graph: MPSGraph has no
 # empty tensor, and the reference's answer (an empty result) is free to produce
 # on the host.
+#
+# Every decline widens on the host when `half_to_float` is set rather than
+# forwarding the flag to `at::_softmax`. The flag is only a CUDA spelling: the
+# CPU kernel rejects it outright ("softmax with half to float conversion is not
+# supported on CPU"), so handing it along turns a declined width into a raise
+# instead of the reference's float answer. Widening the operand first and
+# asking for the flag-clear result is the same thing the flag means -- compute
+# in float, hand back float -- and it is what the graph path does by widening
+# to `out_dtype`. The dtype gate above decides the widened result, so the two
+# paths agree on the answer for every width that reaches them.
 T_SOFTMAX_BODY = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -932,7 +1397,7 @@ at::Tensor {kernel}(
   int64_t axis = 0;
   if (!mps::MpsSoftmaxDim(self, dim, &axis) ||
       !mps::MpsSupportsSoftmaxDtype(self.scalar_type(), half_to_float, &out_dtype)) {{
-    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }}
   at::Tensor self_c = self.to(out_dtype).contiguous();
   if (self_c.numel() == 0) {{
@@ -947,7 +1412,7 @@ at::Tensor {kernel}(
         return [graph {call}args[0] axis:axis name:nil];
       }});
   if (!ran) {{
-    return at::{at_op}(self.cpu(), dim, half_to_float).to(self.device());
+    return mps::MpsSoftmaxOnHost(self, dim, half_to_float);
   }}
   return out;
 }}
@@ -1003,14 +1468,13 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # into `aten.convolution_overrideable` (see the OPS comment).
 #
 # MPSGraph has one convolution pair of selectors -- `convolution2D...` and
-# `convolution3D...` -- and no 1-D one, so the body resolves the spatial rank
-# first and every other rank takes the CPU round-trip. What the descriptor
-# carries is the whole geometry: NCHW data and OIHW weights, per-axis stride and
-# dilation, `groups`, and an explicit padding style whose per-axis
-# `paddingFront`/`paddingBack` are aten's own padding list -- aten's `padding` is
-# [front_0, front_1, ..., back_0, back_1, ...], which is the order
-# `MpsConvDescriptor` fills, and a list that is not two entries per axis is
-# declined so the reference reports its own error.
+# `convolution3D...` -- and no 1-D one. A 1-D convolution is served by the 2-D
+# selector over a unit-high view of its input and kernel, with a reshape on each
+# side of the node. Its padding list is `[front]` or `[front, back]` for the one
+# axis, which `MpsConvResolve` folds into the `[0, front, 0, back]` list the
+# descriptor reads; ranks above three take the CPU round-trip. What the
+# descriptor carries is the whole geometry: NCHW data and OIHW weights,
+# per-axis stride and dilation, `groups`, and an explicit padding style.
 #
 # The checks before the graph are the reference's contract rather than the
 # graph's, and each would otherwise be a wrong answer instead of an error:
@@ -1068,17 +1532,33 @@ at::Tensor {kernel}(
                        transposed, output_padding, groups)
         .to(input.device());
   }}
-  // The spatial rank: 1-D has no MPSGraph selector, and a rank above 3 has no
-  // graph either, so both take the round-trip and the reference reports what it
-  // reports.
+  // The spatial rank. A 1-D convolution is folded into the 2-D selector; a rank
+  // above 3 has no graph and takes the round-trip.
   const int64_t dim = input.dim() - 2;
   const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
-  if (dim < 2 || dim > 3 || weight.dim() != input.dim() ||
-      stride.size() != ndim || padding.size() != 2 * ndim ||
-      dilation.size() != ndim || groups < 1) {{
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  if (dim < 1 || dim > 3 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1) {{
     return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding, dilation,
                        transposed, output_padding, groups)
         .to(input.device());
+  }}
+  for (const int64_t entry : stride) {{
+    if (entry <= 0) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
+  }}
+  for (const int64_t entry : dilation) {{
+    if (entry <= 0) {{
+      return at::{at_op}(input.cpu(), weight.cpu(), bias, stride, padding,
+                         dilation, transposed, output_padding, groups)
+          .to(input.device());
+    }}
   }}
   if (input.size(1) / groups != weight.size(1) ||
       weight.size(0) % groups != 0) {{
@@ -1130,7 +1610,15 @@ at::Tensor {kernel}(
   if (has_bias) {{
     operands.push_back(bias_c);
   }}
-  const int64_t spatial = out.dim() - 2;
+  const int64_t spatial = dim < 2 ? 2 : dim;
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> result_shape(out.sizes().vec());
+  if (dim == 1) {{
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    result_shape.insert(result_shape.end() - 1, 1);
+  }}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       operands,
@@ -1141,14 +1629,24 @@ at::Tensor {kernel}(
         if (descriptor == nil) {{
           return nil;
         }}
+        MPSGraphTensor* source = args[0];
+        MPSGraphTensor* kernel = args[1];
+        if (dim == 1) {{
+          source = mps::MpsReshape(graph, source, source_shape);
+          kernel = mps::MpsReshape(graph, kernel, weight_shape);
+          if (source == nil || kernel == nil) {{
+            mps::MpsRelease(descriptor);
+            return nil;
+          }}
+        }}
         MPSGraphTensor* y =
             (spatial == 2)
-                ? [graph {call2d}args[0]
-                              weightsTensor:args[1]
+                ? [graph {call2d}source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution2DOpDescriptor*)descriptor
                                  name:nil]
-                : [graph {call3d}args[0]
-                              weightsTensor:args[1]
+                : [graph {call3d}source
+                              weightsTensor:kernel
                                 descriptor:(MPSGraphConvolution3DOpDescriptor*)descriptor
                                  name:nil];
 
@@ -1165,6 +1663,9 @@ at::Tensor {kernel}(
           y = [graph additionWithPrimaryTensor:y
                                secondaryTensor:bias_t
                                           name:nil];
+        }}
+        if (y != nil && dim == 1) {{
+          y = mps::MpsReshape(graph, y, result_shape);
         }}
         mps::MpsRelease(descriptor);
         return y;
@@ -1243,6 +1744,78 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# The SiLU derivative, shared by autograd's `silu_backward` and a call to
+# `torch.ops.aten.silu_backward`. Its operand is the upstream gradient rather
+# than `silu`'s own output, so the body is a function of both tensors:
+#
+#     g * sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+#
+# The graph keeps `sigmoid` as a node instead of differentiating through
+# `exp(x)`: `exp` overflows before the cancellation in the derivative settles
+# for a large positive x, while this expression remains finite. Both operands
+# are checked for a supported common width, device and broadcastable shape. The
+# node then broadcasts the operands to the result shape exactly as aten does,
+# and an invalid pair takes the round-trip so the reference raises its own
+# error.
+T_SILU_BACKWARD = """\
+at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& self) {{
+  if (!mps::{supports}(grad_output.scalar_type(), self.scalar_type()) ||
+      grad_output.device() != self.device()) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }}
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(grad_output_c.sizes(), self_c.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }}
+  at::Tensor out = at::empty(out_shape, grad_output_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{grad_output_c, self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* gate = [graph sigmoidWithTensor:args[1] name:nil];
+        MPSGraphTensor* residual = [graph subtractionWithPrimaryTensor:
+                                              [graph constantWithScalar:1
+                                                               dataType:args[1].dataType]
+                                                    secondaryTensor:gate
+                                                               name:nil];
+        if (gate == nil || residual == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* curve = [graph additionWithPrimaryTensor:
+                                        [graph constantWithScalar:1
+                                                         dataType:args[1].dataType]
+                                                secondaryTensor:
+                                        [graph multiplicationWithPrimaryTensor:args[1]
+                                                              secondaryTensor:residual
+                                                                         name:nil]
+                                                           name:nil];
+        if (curve == nil) {{
+          return nil;
+        }}
+        return [graph multiplicationWithPrimaryTensor:
+                        [graph multiplicationWithPrimaryTensor:args[0]
+                                              secondaryTensor:gate
+                                                         name:nil]
+                                      secondaryTensor:curve
+                                                 name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(grad_output.cpu(), self.cpu()).to(grad_output.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # `embedding` is the first body here that has to decide whether the *graph* can
 # answer the call at all, rather than only whether it can be built. A table read
 # is one gather node -- `gatherWithUpdatesTensor:indicesTensor:axis:0
@@ -1286,6 +1859,135 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 # Only the int and long index widths are accepted, which is what the reference
 # accepts: a float index is a `RuntimeError` naming the two integer types, and a
 # bool index is not one either, so both take the round-trip and get that error.
+# `sigmoid` -- the one node the `silu` composition above already builds, and the
+# increment is the width list rather than the body. See MpsSupportsSigmoidDtype
+# for the measurement: two ops can share a graph node and still not share a dtype
+# gate, because what the node's rounding *means* depends on what the surrounding
+# graph does with it. A `silu` tail is multiplied by its own subnormal x, so the
+# platform's subnormal flush is what the reference does too; a bare sigmoid's
+# tail has no such partner, so the same flush is a visible 3.1e-02 error and the
+# width is declined.
+T_SIGMOID = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The one-node unary template for an op MPSGraph names directly -- `exp` today,
+# with `log` sharing it because the two differ only in the selector and the width
+# list. There is no composition to compose and no node to build by hand: the
+# operand goes through `contiguous()` for the same reason every other body here
+# does (the graph reads one flat row of `numel` elements and a strided operand
+# would be read as the wrong bytes), and the whole increment is the gate the body
+# opens with. Kept separate from T_UNARY rather than folded into it because the
+# two carry different gates, which is the point of both increments; a future op
+# that shares this body adds a CATEGORIES row pointing here.
+T_EXP = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `rsqrt` -- `1 / sqrt(x)`, the tail of every normalisation, and the second body
+# here (after `silu`) built from two nodes rather than one.
+#
+# MPSGraph names the fused `reciprocalSquareRootWithTensor:`, and on a modern SDK
+# that would be the whole body -- one node, one selector, exactly the arithmetic
+# the reference performs. It is not usable here, and the reason is the *hosted
+# runner* rather than the graph: the selector is macOS 15+, while the MPS lane
+# this backend is verified on is a `macos-14` image (SDK 14.5, Xcode 15.4). The
+# failure is not subtle, and it is why this was measured rather than assumed:
+# built against the older SDK the fused selector is absent, and the first call
+# that builds the node raises `NSInvalidArgumentException: -[MPSGraph
+# reciprocalSquareRootWithTensor:name:]: unrecognized selector` -- an Objective-C
+# exception from inside a `^` block with no handler, so the process aborts rather
+# than the op declining. See the same note above T_LAYER_NORM's rstd node, which
+# takes the identical decision for `1 / sqrt(var + eps)` for the identical
+# reason.
+#
+# So the body composes the two selectors that *are* on both SDKs and are already
+# in this tree: `squareRootWithTensor:` (the `sqrt` node) and
+# `reciprocalWithTensor:` (the `reciprocal` kernel's node, and
+# `layer_norm`'s rstd). Measured on an M5, the composition is the same answer as
+# the fused node would have given -- the two are one rounding of the same
+# arithmetic -- at one extra node in the graph, which a compiled plan amortises
+# over every call that shares the cache key.
+#
+# The two halves are why the gate is its own predicate rather than a reuse: the
+# subnormal policy that matters at the input is the *sqrt's*, and the one that
+# matters at the result is the *reciprocal's*, so a width can be right on one
+# half and wrong on the other. See MpsSupportsRsqrtDtype for the per-width
+# measurement.
+T_RSQRT = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* root = [graph squareRootWithTensor:args[0] name:nil];
+        if (root == nil) {{
+          return nil;
+        }}
+        return [graph reciprocalWithTensor:root name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 T_EMBEDDING = """\
 at::Tensor {kernel}(
     const at::Tensor& weight,
@@ -2096,6 +2798,790 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `F.layer_norm` -- the normalisation a transformer calls once per block, right
+# after the residual add -- and the first body here that answers with more than
+# one tensor: `native_layer_norm(input, normalized_shape, weight, bias, eps)`
+# returns `(out, mean, rstd)`.
+#
+# **It is one node, not the `native_batch_norm` + `addcmul` decomposition the
+# design doc predicted.** That prediction came from reading the CPU fallback,
+# and the fallback is what this op was taking: `F.layer_norm` on a device tensor
+# round-tripped through the CPU, so the two ops the CPU build decomposes it into
+# (`native_batch_norm` in inference mode, then `addcmul`) were what the fallback
+# log showed. MPSGraph has the whole operation behind one selector,
+# `normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:
+# epsilon:name:`, whose documented semantics are exactly aten's:
+# `(x - mean) / sqrt(var + eps) * gamma + beta` over the trailing axes. The mean
+# comes from `meanOfTensor:axes:` and the variance from
+# `varianceOfTensor:axes:`, the two reduction selectors the header documents as
+# the ones that feed the normalisation node.
+#
+# Three things decide whether the graph can answer a call, and each is the
+# reference's contract rather than the graph's:
+#
+#   * **`normalized_shape` must be a trailing run of the input's axes.** aten
+#     requires it (`normalized_shape` of `(8,)` on a `(2, 3, 8)` input is over
+#     the last axis; `(3, 8)` over the last two; `(2, 3, 8)` over all three), and
+#     a shape that is not the input's own trailing dimensions is a `RuntimeError`
+#     naming the two. The body checks the suffix and declines otherwise, so the
+#     reference raises in its own words.
+#   * **The reduced axes are `[-len(normalized_shape), 0)`.** That is what the
+#     "trailing run" sentence means, and it is the same axis list the reference
+#     reduces over.
+#   * **`mean` and `rstd` are the *keepdim* shape over those axes** -- `(2, 3,
+#     1)` for the `(8,)` case -- not the reduced shape. Measured against the
+#     reference: `native_layer_norm((2, 3, 8), [8], ...)` answers `mean` and
+#     `rstd` both `(2, 3, 1)`. So the body allocates those two results with the
+#     reduced axes already set to 1, which is also the shape MPSGraph's own
+#     `meanOfTensor:axes:` returns (the named reduction keeps the rank and leaves
+#     each reduced axis at size 1), so no reshape is needed to match it.
+#
+# `weight` and `bias` are the gamma and beta and are optional. When absent the
+# node is handed `nil` for both, which is what its `_Nullable` annotations
+# document, so a weight-less call is the same node with two feeds missing rather
+# than a second graph shape -- hence the two `has_weight`/`has_bias` entries in
+# the key (a bias-less call hands the graph one operand fewer, which the operand
+# signature alone cannot say).
+#
+# The variance the node wants is the **population** variance (divided by N), not
+# the sample one: measured on an M5, `varianceOfTensor:axes:` matches the
+# reference's `unbiased=False` answer to the last digit and the reference's
+# `layer_norm` uses `unbiased=False`. This is checked rather than assumed, in the
+# integration suite, on a case whose sample and population variances differ.
+#
+# The dtype gate is the float-only one the reduction family uses: the reference
+# accepts an integer input and computes in float, which a graph at the operand's
+# own width cannot express, so an integral input takes the round-trip.
+T_LAYER_NORM = """\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& input,
+    at::IntArrayRef normalized_shape,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    double eps) {{
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  // The CPU round-trip every decline below takes, in one place. Every other
+  // body in this file ends its round trip with `.to(self.device())`; here all
+  // three results have to be moved, and a body that returned the host tuple
+  // would hand the caller values that are right on a device that is not -- the
+  // `mean`/`rstd` shapes and the flagos device both belong to the contract.
+  const auto round_trip = [&]() {{
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    auto host = at::{at_op}(
+        input.cpu(), normalized_shape, host_weight, host_bias, eps);
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  }};
+  if (!mps::{supports}(input.scalar_type(), std::nullopt)) {{
+    return round_trip();
+  }}
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): a weight or bias the caller left on the host --
+  // `F.layer_norm(x, shape, w, b)` with `w`/`b` built on the host is the common
+  // spelling -- is moved to the input's device rather than handed to the graph,
+  // which would resolve no Metal buffer for it and silently produce a CPU
+  // result. `input` is already on the device, so it is only the affine pair.
+  const at::Tensor weight_d =
+      has_weight && weight->device() != input.device()
+      ? weight->to(input.device())
+      : (has_weight ? *weight : at::Tensor());
+  const at::Tensor bias_d =
+      has_bias && bias->device() != input.device()
+      ? bias->to(input.device())
+      : (has_bias ? *bias : at::Tensor());
+  const int64_t rank = input.dim();
+  const int64_t normalized = static_cast<int64_t>(normalized_shape.size());
+  // The suffix check, in the reference's own terms: the normalised shape has to
+  // be the input's trailing axes, and a rank-0 input or a normalised shape
+  // longer than the input is declined rather than described to the graph.
+  if (normalized <= 0 || normalized > rank) {{
+    return round_trip();
+  }}
+  for (int64_t i = 0; i < normalized; ++i) {{
+    if (normalized_shape[normalized - 1 - i] != input.size(rank - 1 - i)) {{
+      return round_trip();
+    }}
+  }}
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {{
+    return round_trip();
+  }}
+  // The keepdim shape over the trailing run, which is what the reference
+  // answers for mean and rstd and what the named reductions produce.
+  std::vector<int64_t> stat_shape(input_c.sizes().vec());
+  std::vector<int64_t> axes;
+  for (int64_t axis = rank - normalized; axis < rank; ++axis) {{
+    axes.push_back(axis);
+    stat_shape[axis] = 1;
+  }}
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  at::Tensor mean = at::empty(stat_shape, input_c.options());
+  at::Tensor rstd = at::empty(stat_shape, input_c.options());
+  if (out.numel() == 0) {{
+    return {{out, mean, rstd}};
+  }}
+  at::Tensor weight_c;
+  at::Tensor bias_c;
+  std::vector<at::Tensor> operands{{input_c}};
+  if (has_weight) {{
+    weight_c = weight_d.contiguous();
+    operands.push_back(weight_c);
+  }}
+  if (has_bias) {{
+    bias_c = bias_d.contiguous();
+    operands.push_back(bias_c);
+  }}
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> outs{{out, mean, rstd}};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* avg =
+            [graph meanOfTensor:x axes:mps::MpsAxesArray(axes) name:nil];
+        if (avg == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // The two-argument variance, which takes the mean the node above
+        // produced and is the spelling MPSGraph's own documentation pairs with
+        // the normalisation node's `variance` parameter.
+        MPSGraphTensor* var = [graph varianceOfTensor:x
+                                           meanTensor:avg
+                                                 axes:mps::MpsAxesArray(axes)
+                                                 name:nil];
+        if (var == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // rstd is 1 / sqrt(var + eps), built from `squareRootWithTensor:` and
+        // `reciprocalWithTensor:` rather than the single fused
+        // `reciprocalSquareRootWithTensor:` the composition suggests.
+        //
+        // The fused selector is `MPS_AVAILABLE_STARTING(macos(15.0))`, and the
+        // earlier hosted `macos-14` runner was the one lane that was *not* on
+        // 15 or later. There the selector is absent from the runtime even
+        // though it is absent from the SDK header too, so it compiles with
+        // only an `-Wobjc-method-access` warning ("instance method not found,
+        // return type defaults to 'id'") and then dies at the call rather than
+        // at the build: the first case to reach the node terminates the process
+        // with `NSInvalidArgumentException: -[MPSGraph
+        // reciprocalSquareRootWithTensor: name:]: unrecognized selector`, which
+        // is the SIGABRT the MPS lane reported as an operator-suite failure
+        // with no assertion in front of it. The two nodes below are the macOS
+        // 11 spelling with no availability
+        // gate, and `reciprocalWithTensor:` is the one the `reciprocal` kernel
+        // in this same file already runs on.
+        //
+        // This is a portability constraint rather than a numerics choice: both
+        // spellings compute 1/sqrt(x), and the composed form is what the older
+        // MPSGraph that runner carried can actually execute.
+        MPSGraphTensor* shifted =
+            [graph additionWithPrimaryTensor:var
+                             secondaryTensor:[graph constantWithScalar:epsilon
+                                                              dataType:var.dataType]
+                                        name:nil];
+        if (shifted == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        MPSGraphTensor* rooted = [graph squareRootWithTensor:shifted name:nil];
+        if (rooted == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        MPSGraphTensor* rstd_t = [graph reciprocalWithTensor:rooted name:nil];
+        if (rstd_t == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        MPSGraphTensor* gamma = {gamma};
+        MPSGraphTensor* beta = {beta};
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:avg
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        return std::vector<MPSGraphTensor*>{{y, avg, rstd_t}};
+      }});
+  if (!ran) {{
+    return round_trip();
+  }}
+  return {{out, mean, rstd}};
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `where.self(condition, self, other)` is MPSGraph's own ternary select node,
+# `selectWithPredicateTensor:truePredicateTensor:falsePredicateTensor:name:`, and
+# the node broadcasts, which is the contract the reference has as well.
+#
+# Three things about the reference decide what this body has to check before the
+# node is built, and each of them was measured against `at::where.self`:
+#
+#   * The condition is bool-only in the modern reference. `where` accepts a
+#     uint8 condition still -- emitting a deprecation warning -- and rejects
+#     everything else itself (`where expected condition to be a boolean tensor,
+#     but got a tensor with dtype Int`) for int8/int32/int64/float. The graph's
+#     predicate is a bool tensor, so a uint8 condition is compared against zero
+#     and the rest is declined so the reference raises its own message.
+#
+#   * `self` and `other` are *promoted* to a common dtype, which is the one thing
+#     the graph cannot do: MPSGraph's select takes both branches in one type and
+#     promotes nothing (int32 against int64 is int64 in aten, and half against
+#     float is float). `MpsSupportsWhereDtype` admits the same pair
+#     `MpsSupportsBinaryDtype` does and for the same reason -- equal dtypes only
+#     -- and a promoted pair takes the round-trip, which keeps the reference's
+#     result dtype.
+#
+#   * The three operands broadcast to the result shape the reference computes
+#     with `at::infer_size`. That shape is not the condition's alone: `where` of
+#     a (4, 1) condition against (4, 5) branches answers (4, 5). The body infers
+#     it over all three and lets the node broadcast, and a triple that cannot
+#     broadcast takes the round-trip so the reference raises.
+#
+# `native_batch_norm` is the normalisation a convolutional block calls, and the
+# second body here that answers with more than one tensor:
+# `native_batch_norm(input, weight?, bias?, running_mean?, running_var?,
+# training, momentum, eps)` returns `(out, save_mean, save_invstd)`.
+#
+# **It is two different computations behind one schema, and the body has to
+# branch on `training` because the difference is not a keyword argument but a
+# different set of sources for the mean and variance.**
+#
+#   * **Inference** (`training == false`): the statistics are the *running*
+#     ones the caller passes, so the graph is one `normalizationWithTensor:...`
+#     node whose mean and variance operands are the running buffers. Nothing is
+#     reduced, and `save_mean`/`save_invstd` are the running statistics the
+#     reference returns (see below).
+#   * **Training** (`training == true`): the statistics are the *batch* ones --
+#     `mean` and the biased (`unbiased=False`) variance over the per-channel
+#     axes -- and the reference also **updates `running_mean`/`running_var`
+#     in place** with an exponential moving average. That update is the reason
+#     this body is not simply "the same node with different feeds": the graph
+#     cannot write the caller's buffers, so a training call is *declined* and
+#     takes the round-trip, which is where the in-place update, the unbiased
+#     running-variance correction (`momentum` weights the *unbiased* variance,
+#     `count/(count-1)` -- a correction neither the node nor any single
+#     reduction here applies) and the exact `save_mean`/`save_invstd` semantics
+#     all live. Serving training while dropping the update would leave a model's
+#     running statistics frozen at their initial values, which is a wrong answer
+#     that a forward-output comparison cannot see.
+#
+# So the graph covers the inference path, which is what `model.eval()` presents
+# and what an inference server runs; training stays on the reference.
+#
+# Three contract details the inference path has to get right, each measured
+# against the reference rather than read off the header:
+#
+#   * **`save_mean` and `save_invstd` in inference are *empty* tensors**, shape
+#     `(0,)` on the input's device and dtype -- not the running statistics and
+#     not the batch ones. Measured: `native_batch_norm(x, w, b, rm, rv,
+#     training=False, ...)` on the reference answers `(out, tensor([]),
+#     tensor([]))`, while the same call with `training=True` answers two `[C]`
+#     tensors. The reason is that the two results are the *batch* statistics the
+#     backward pass consumes, and an inference call has none; a body that filled
+#     them with the running statistics -- the intuitive reading, and what this
+#     body originally did -- hands back a `[C]` tensor where the reference hands
+#     back an empty one, which a shape check sees and a forward comparison does
+#     not. The reference's empties are freshly allocated, so the graph path can
+#     allocate its own empties here; there is nothing to write into them.
+#   * **The channel axis is 1** for every rank the reference accepts (NCHW and
+#     NCDHW alike), so `weight` and `bias` reach the node as their own `[C]`
+#     selves and the node broadcasts them along the rest. MPSGraph documents
+#     exactly this ("Shapes for gamma and beta must match the input data along
+#     at least one dimension and will be broadcast along the rest"), and the
+#     body checks the length is `channels` rather than describing a reshaped
+#     operand -- a length that disagrees is the reference's error, not a
+#     broadcast to be guessed at.
+#   * **`momentum` is not an operand in inference.** It only weights the running
+#     update, which is the part this body declines, so the inference graph is a
+#     function of `eps` alone among the host scalars.
+#
+# The dtype gate is the reduction family's: an integral input is declined like
+# every other reduction here, because the reference computes it in float and a
+# graph at the operand's own width cannot express that.
+T_BATCH_NORM = """\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& input,
+    const std::optional<at::Tensor>& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& running_mean,
+    const std::optional<at::Tensor>& running_var,
+    bool training,
+    double momentum,
+    double eps) {{
+  const bool has_weight = weight.has_value() && weight->defined();
+  const bool has_bias = bias.has_value() && bias->defined();
+  const bool has_running_mean = running_mean.has_value() && running_mean->defined();
+  const bool has_running_var = running_var.has_value() && running_var->defined();
+  // The CPU round-trip every decline below takes, in one place. The running
+  // buffers are passed through as *host* copies for the same reason the input
+  // is: the reference updates them in place, and handing it the device tensors
+  // would write the update into Metal buffers the graph path does not own.
+  const auto round_trip = [&]() {{
+    const at::Tensor host_weight = has_weight ? weight->cpu() : at::Tensor();
+    const at::Tensor host_bias = has_bias ? bias->cpu() : at::Tensor();
+    const at::Tensor host_mean = has_running_mean ? running_mean->cpu() : at::Tensor();
+    const at::Tensor host_var = has_running_var ? running_var->cpu() : at::Tensor();
+    auto host = at::{at_op}(
+        input.cpu(), host_weight, host_bias, host_mean, host_var, training,
+        momentum, eps);
+    // The in-place running update belongs to the caller's device tensors, so it
+    // is copied back rather than left on the host copy the reference wrote.
+    if (training && has_running_mean) {{
+      running_mean->copy_(host_mean);
+    }}
+    if (training && has_running_var) {{
+      running_var->copy_(host_var);
+    }}
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        std::get<0>(host).to(input.device()),
+        std::get<1>(host).to(input.device()),
+        std::get<2>(host).to(input.device()));
+  }};
+  // Training updates the running statistics in place and weights the update by
+  // the *unbiased* batch variance, neither of which the inference node does --
+  // see the block comment above. Declined rather than approximated.
+  if (training || !has_running_mean || !has_running_var) {{
+    return round_trip();
+  }}
+  if (!mps::{supports}(input.scalar_type(), std::nullopt)) {{
+    return round_trip();
+  }}
+  // The channel axis is 1 for every rank the reference accepts; a rank below 2
+  // has no channel axis to normalise over and is the reference's own error.
+  const int64_t rank = input.dim();
+  if (rank < 2) {{
+    return round_trip();
+  }}
+  const int64_t channels = input.size(1);
+  if (has_weight && weight->numel() != channels) {{
+    return round_trip();
+  }}
+  if (has_bias && bias->numel() != channels) {{
+    return round_trip();
+  }}
+  if (running_mean->numel() != channels || running_var->numel() != channels) {{
+    return round_trip();
+  }}
+  at::Tensor input_c = input.contiguous();
+  if (input_c.numel() == 0) {{
+    return round_trip();
+  }}
+  // Every operand reaches the graph as a device buffer (see the operand
+  // contract in mps_common.h): the running statistics and the affine pair are
+  // moved to the input's device rather than described to the graph on the host,
+  // which would resolve no Metal buffer for them.
+  const auto to_device = [&](const at::Tensor& t) {{
+    return t.device() == input.device() ? t.contiguous()
+                                        : t.to(input.device()).contiguous();
+  }};
+  // The gamma the node broadcasts along the channel: the caller's weight when it
+  // has one, and an all-ones [C] when it does not -- because the node has no
+  // "no gamma" spelling here the way layer_norm's `nil` gamma is one. The
+  // substitute is what keeps the operand *list* fixed across a weight-less and a
+  // weighted call, so the plan cache key (which records dtypes and shapes and
+  // not values) cannot hand the first compiled graph to the second call. `beta`
+  // is the same with an all-zeros [C] for a missing bias.
+  at::Tensor weight_d = has_weight ? to_device(*weight)
+                                   : at::ones({{channels}}, input_c.options());
+  at::Tensor bias_d = has_bias ? to_device(*bias)
+                               : at::zeros({{channels}}, input_c.options());
+  at::Tensor mean_d = to_device(*running_mean);
+  at::Tensor var_d = to_device(*running_var);
+  at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+  // The reference's inference statistics are empty -- see the block comment
+  // above -- so there is nothing for the graph to write into these two. They are
+  // allocated (zero elements, on the input's device and dtype, which is the
+  // reference's own shape and placement) and returned untouched, and they are
+  // *not* listed among the graph's results: an MPSGraph result is described
+  // against an N-element buffer and MpsFlatten over zero elements is a reshape
+  // the graph rejects, so a result list carrying them would fail to build. The
+  // graph covers `out` alone.
+  at::Tensor stat_mean = at::empty({{0}}, input_c.options());
+  at::Tensor stat_var = at::empty({{0}}, input_c.options());
+  if (out.numel() == 0) {{
+    return {{out, stat_mean, stat_var}};
+  }}
+  const float epsilon = static_cast<float>(eps);
+  std::vector<at::Tensor> operands{{input_c, mean_d, var_d, weight_d, bias_d}};
+  // The shape the mean, variance, gamma and beta operands reach the node as: one
+  // element per channel with every other axis a 1. The node's type inference
+  // requires its four statistics operands to be *broadcast compatible* with the
+  // input, and a `[C]` operand is not -- measured, the node rejects a `[2, 3, 4,
+  // 5]` input against `[3]` statistics with "output type 'tensor<2x3x4x5xf32>'
+  // and mean type 'tensor<3xf32>' are not broadcast compatible" and that abort is
+  // a process exit, not a declined node. So each of the four is reshaped in the
+  // graph, which is a metadata operation over the same buffer.
+  std::vector<int64_t> channel_shape(static_cast<size_t>(rank), 1);
+  channel_shape[1] = channels;
+  std::vector<at::Tensor> outs{{out}};
+  const bool ran = mps::MpsRunGraphMulti(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      outs,
+      ^std::vector<MPSGraphTensor*>(MPSGraph* graph,
+                                    NSArray<MPSGraphTensor*>* args) {{
+        // The operands arrive at their aten shapes: MpsRunGraph describes each
+        // one to the graph as the 1-D `numel` buffer the row-pitch note in
+        // mps_common.h requires and reapplies the aten shape over it before
+        // `build` is called, so `args[0]` is already the ranked input. The four
+        // statistics operands are `[C]` and are reshaped to the channel view
+        // above -- MPSGraph documents gamma and beta as broadcast along the axes
+        // they do not name ("shapes for gamma and beta must match the input data
+        // along at least one dimension and will be broadcast along the rest"),
+        // but its type inference wants a broadcast *compatible* rank rather than
+        // a trailing one, and a `[C]` operand is not that.
+        MPSGraphTensor* x = args[0];
+        MPSGraphTensor* mean =
+            mps::MpsReshape(graph, args[1], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* var =
+            mps::MpsReshape(graph, args[2], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* gamma =
+            mps::MpsReshape(graph, args[3], at::IntArrayRef(channel_shape));
+        MPSGraphTensor* beta =
+            mps::MpsReshape(graph, args[4], at::IntArrayRef(channel_shape));
+        if (mean == nil || var == nil || gamma == nil || beta == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        // The inference normalisation: `(x - mean) / sqrt(var + eps) * gamma +
+        // beta` over the channel, which is exactly what the running statistics
+        // and this node express.
+        MPSGraphTensor* y = [graph normalizationWithTensor:x
+                                               meanTensor:mean
+                                           varianceTensor:var
+                                              gammaTensor:gamma
+                                               betaTensor:beta
+                                                  epsilon:epsilon
+                                                     name:nil];
+        if (y == nil) {{
+          return std::vector<MPSGraphTensor*>();
+        }}
+        return std::vector<MPSGraphTensor*>{{y}};
+      }});
+  if (!ran) {{
+    return round_trip();
+  }}
+  return {{out, stat_mean, stat_var}};
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+T_WHERE = """\
+at::Tensor {kernel}(
+    const at::Tensor& condition,
+    const at::Tensor& self,
+    const at::Tensor& other) {{
+  if (!mps::{supports}(self.scalar_type(), other.scalar_type(), condition.scalar_type())) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor condition_c = condition.contiguous();
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(
+        at::infer_size(condition_c.sizes(), self_c.sizes()), other_c.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // The graph's predicate is bool, so a uint8 condition -- the one other width
+  // the reference still accepts, with a deprecation warning -- is compared to
+  // zero. `condition.dataType` is read inside the block because the node is
+  // built once per plan and the comparison is a function of the dtype, which is
+  // already in the cache key through the operand.
+  const bool wide_condition = condition_c.scalar_type() == at::kByte;
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{condition_c, self_c, other_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* predicate = args[0];
+        if (wide_condition) {{
+          predicate = [graph notEqualWithPrimaryTensor:predicate
+                                       secondaryTensor:[graph constantWithScalar:0.0
+                                                                        dataType:predicate.dataType]
+                                                  name:nil];
+        }}
+        if (predicate == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:predicate
+                            truePredicateTensor:args[1]
+                           falsePredicateTensor:args[2]
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(condition.cpu(), self.cpu(), other.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# `cat(tensors, dim)` is MPSGraph's variadic `concatTensors:dimension:name:`, and
+# the interesting part of this body is everything the node does *not* check.
+#
+# The node concatenates along `dim` and requires the inputs broadcast-compatible
+# along every other dimension, which is close to the reference's contract but not
+# the same one, and the differences are what the body resolves on the host:
+#
+#   * `dim` is normalised against the operands' rank. aten accepts a negative
+#     `dim` and normalises it (measured: `dim=-1` over a rank-2 pair is `dim=1`);
+#     the node's `dimensionIndex` is `-rank <= dim < rank` in the same terms, so
+#     the body normalises to a non-negative axis and a `dim` outside the rank is
+#     left to the reference.
+#
+#   * Every operand must carry the same dtype. The reference promotes a mixed
+#     list to a common dtype; the node requires one datatype and does not promote,
+#     so a mixed list takes the round-trip and keeps the reference's result dtype.
+#
+#   * The non-`dim` dimensions must match exactly. The reference requires it
+#     (`Sizes of tensors must match except in dimension {dim}`) where the node
+#     would *broadcast* a (4, 1) against a (4, 5) along the mismatched axis,
+#     which is a plausible-looking wrong answer rather than an error. The body
+#     checks every other axis on the host and declines the mismatch.
+#
+# A single-operand `cat` is the operand itself, and `torch.cat([])` is a reference
+# error; the body declines an empty list rather than building a node with nothing
+# to concatenate, so both reach the reference.
+#
+# The result shape is the reference's own: every operand's shape with `dim`
+# replaced by the sum of the operands' extents along it.
+T_CAT = """\
+at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
+  // Materialise the list once: the reference and every check below read it more
+  // than once, and `ITensorListRef` is a view whose lifetime is the caller's.
+  const std::vector<at::Tensor> ops(tensors.begin(), tensors.end());
+  // The reference is called on host copies, exactly as every other body here
+  // does, because the operands are flagos tensors and `at::cat(ops, dim)` would
+  // re-enter this same kernel. That is not a theoretical hazard: the fallback
+  // spelling was written with the original list first and a bool `cat` -- which
+  // this body declines, because bool has no MPSGraph element type -- recursed
+  // until the stack ran out and the process died with SIGSEGV. Built once,
+  // before any early return, so no decline path can be written against the live
+  // list by mistake.
+  std::vector<at::Tensor> host_ops;
+  host_ops.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    host_ops.push_back(t.cpu());
+  }}
+  // An empty list is the reference's own error, and it is raised here rather
+  // than returned as an empty tensor. `ops[0]` below would also be out of
+  // range, so the check has to come first for the shape of the body as much as
+  // for the message.
+  if (ops.empty()) {{
+    return at::{at_op}(host_ops, dim);
+  }}
+  // One dtype for the whole list, and one the graph can carry. A mixed list is
+  // declined so the reference promotes it.
+  const at::ScalarType dtype = ops[0].scalar_type();
+  for (const at::Tensor& t : ops) {{
+    if (t.scalar_type() != dtype ||
+        !mps::{supports}(dtype, dtype)) {{
+      return at::{at_op}(host_ops, dim).to(ops[0].device());
+    }}
+  }}
+  const int64_t rank = ops[0].dim();
+  if (rank == 0) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  int64_t axis = dim;
+  if (axis < 0) {{
+    axis += rank;
+  }}
+  if (axis < 0 || axis >= rank) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  // The result shape: every operand's shape with `axis` summed. A rank or a
+  // non-`axis` extent that disagrees is the reference's error, not the node's
+  // broadcast, so the body checks rather than describes it.
+  std::vector<int64_t> out_shape(ops[0].sizes().vec());
+  out_shape[axis] = 0;
+  for (const at::Tensor& t : ops) {{
+    if (t.dim() != rank) {{
+      return at::{at_op}(host_ops, dim).to(ops[0].device());
+    }}
+    for (int64_t d = 0; d < rank; ++d) {{
+      if (d == axis) {{
+        continue;
+      }}
+      if (t.size(d) != out_shape[d]) {{
+        return at::{at_op}(host_ops, dim).to(ops[0].device());
+      }}
+    }}
+    out_shape[axis] += t.size(axis);
+  }}
+  std::vector<at::Tensor> operands;
+  operands.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    operands.push_back(t.contiguous());
+  }}
+  at::Tensor out = at::empty(out_shape, ops[0].options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  // Each operand reaches the node as a two-dimensional `(outer, inner)` view,
+  // with the concatenation over the *inner* axis rather than over `axis`
+  // directly.
+  //
+  // Concatenating along `axis` is exactly concatenating the inner axis of the
+  // `(prod(shape[:axis]), prod(shape[axis:]))` view: there are `outer` blocks,
+  // each block is `inner` elements wide, and the operands join end to end inside
+  // every block. The result is `(outer, sum(inner))`, which reshapes back to the
+  // aten shape.
+  //
+  // This indirection is not cosmetic, and the direct spelling is what found it.
+  // Measured through this backend, `cat([tensor([0., 1.]), tensor([2., 3.])],
+  // dim=0)` -- two rank-1 operands handed to `concatTensors:` as their ranked
+  // selves -- returned all zeros, and an int32 form returned
+  // `[0, 0, 1, 0, 2, 0]`: the eight-byte row pitch of a four-byte element, the
+  // same symptom the row-pitch note in mps_common.h records. A (2, 3) pair on
+  // dim=0 was correct, which is what makes the rank-1 case the interesting one:
+  // MPSGraph reads a rank-1 input to `concatTensors:` as one row and pays the
+  // pitch, and the two-dimensional view above sidesteps that by never handing
+  // the node a rank below two. `inner` is at least 1 because `axis < rank`.
+  //
+  // `outer` is the same on every operand -- the shape check above rejected any
+  // list where a non-`axis` extent disagreed -- but `inner` is not: it is each
+  // operand's own extent along `axis` times the extents after it, and the whole
+  // point of the concatenation is that those differ. Read per operand, from the
+  // same `(prod(shape[:axis]), prod(shape[axis:]))` split, so a (2,) operand
+  // beside a (1,) one reshapes to (1, 2) and (1, 1) rather than both to the
+  // first operand's width. Sharing one `inner` across the list is not a
+  // cosmetic error: a three-operand rank-1 `cat` of (2,), (2,) and (1,) built
+  // `mps.reshape` to a shape the third operand's element count cannot fill and
+  // MPSGraph aborted the process ("the result shape is not compatible with the
+  // input shape", then "original module failed verification") rather than
+  // declining.
+  int64_t outer = 1;
+  for (int64_t d = 0; d < axis; ++d) {{
+    outer *= ops[0].size(d);
+  }}
+  std::vector<int64_t> inner;
+  inner.reserve(ops.size());
+  for (const at::Tensor& t : ops) {{
+    inner.push_back(t.numel() / (outer > 0 ? outer : 1));
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        NSMutableArray<MPSGraphTensor*>* rows =
+            [NSMutableArray arrayWithCapacity:[args count]];
+        for (NSUInteger i = 0; i < [args count]; ++i) {{
+          [rows addObject:mps::MpsReshape(graph, args[i],
+                                          at::IntArrayRef({{outer, inner[i]}}))];
+        }}
+        MPSGraphTensor* joined = [graph concatTensors:rows
+                                            dimension:1
+                                                 name:nil];
+        if (joined == nil) {{
+          return nil;
+        }}
+        // `outer` is the operand side; the concatenation's own outer extent is
+        // the sum the result shape already carries along `axis`, which is what
+        // the reshape back to the aten shape reads.
+        return mps::MpsReshape(graph, joined, out_shape);
+      }});
+  if (!ran) {{
+    return at::{at_op}(host_ops, dim).to(ops[0].device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+# `tanh` is the activation a transformer block reaches for at both ends -- the
+# tanh approximation inside a GELU and the one inside a recurrent or attention
+# gate -- and the body is the shared one-node unary shape with exactly one
+# addition.
+#
+# The addition is a NaN guard, and it is the node's doing rather than a
+# defensive check: measured at all three widths, `tanhWithTensor:` *saturates* a
+# NaN operand to +-1 instead of propagating it -- `tanh(nan)` is 1.0 on the graph
+# where the reference answers nan -- so the body builds `isNaNWithTensor:` over
+# the operand and selects a NaN back over the node's answer. `isNaNWithTensor:`
+# is on both the SDK this backend is verified against and the one after it (no
+# availability annotation in `MPSGraphArithmeticOps.h`), unlike the fused
+# `reciprocalSquareRootWithTensor:` T_RSQRT had to avoid, so the guard is
+# available where the lane runs. The library helper is a second `nil` to check,
+# and a `nil` from it round-trips like any other declined build.
+#
+# Everything else this body does is the shared unary contract, and the increment
+# is the gate rather than the graph. See MpsSupportsTanhDtype: the node is the
+# reference's own function at float16 and bfloat16 -- bfloat16 bit-identical
+# with exact odd symmetry, float16 within two last-ulp roundings of 400001 -- and
+# a coarser approximation of a tanh at float32, where it breaks odd symmetry by
+# 1.788e-07 and sits ~100x further from the exact answer at every scale. That
+# width keeps the round-trip.
+#
+# Only `tanh` is registered. `tanh.out` and `tanh_` write into a tensor the
+# caller owns, like every other `.out`/inplace spelling on this backend, and
+# `tanh_backward`, `atanh` and `_foreach_tanh` are separate ops with their own
+# selectors and contracts -- `atanh`'s domain is `|x| < 1`, which is not this
+# node's domain at all.
+
+T_TANH = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* tanh = [graph {call}args[0] name:nil];
+        if (tanh == nil) {{
+          return nil;
+        }}
+        // The node saturates a NaN operand to +-1 rather than propagating it --
+        // measured, `tanh(nan)` is 1.0 at all three widths where the reference
+        // answers nan -- so a NaN input is selected back to NaN rather than
+        // left to the node's own answer. This is the one deviation here that is
+        // a wrong *answer* rather than a rounding, and it is the check that
+        // makes the body a tanh rather than a saturating approximation.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:[graph constantWithScalar:NAN
+                                                                 dataType:args[0].dataType]
+                           falsePredicateTensor:tanh
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -2106,6 +3592,31 @@ CATEGORIES = {
     "pow_scalar": T_POW,
     "conv": T_CONV,
     "silu": T_SILU,
+    "silu_backward": T_SILU_BACKWARD,
+    "sigmoid": T_SIGMOID,
+    "exp": T_EXP,
+    "log": T_EXP,
+    "rsqrt": T_RSQRT,
+    # The shared one-node unary template, and the increment is which node and
+    # which gate rather than a body: the graph is `squareRootWithTensor:` over
+    # one operand, exactly the inner node the `rsqrt` composition builds, so
+    # there is nothing to compose and the whole of this body is
+    # `MpsSupportsSqrtDtype`. See the note there for the per-width measurement.
+    "sqrt": T_EXP,
+    # The shared one-node unary template again, and the increment is the gate
+    # rather than a body: `erfWithTensor:` is a real selector and needs no guard
+    # -- measured, it propagates a NaN and answers the `+-1` bound at `+-inf`
+    # without help -- so `MpsSupportsErfDtype` is the whole of the finding. See
+    # the note there for what separates its width list from the sibling
+    # `tanh`'s.
+    "erf": T_EXP,
+    # Its own template rather than the shared unary one, because the node needs
+    # a guard the siblings do not: MPSGraph's `tanhWithTensor:` saturates a NaN
+    # operand to +-1 at every width, so the body selects the input's NaN back
+    # over the node's answer. Everything else is the one-node unary shape, and
+    # the gate is where the increment is -- MpsSupportsTanhDtype serves the two
+    # narrow widths and declines float32.
+    "tanh": T_TANH,
     "embedding": T_EMBEDDING,
     "index_select": T_INDEX_SELECT,
     "take": T_TAKE,
@@ -2113,6 +3624,10 @@ CATEGORIES = {
     "div": T_DIV,
     "div_scalar": T_DIV_SCALAR,
     "reciprocal": T_RECIPROCAL,
+    "layer_norm": T_LAYER_NORM,
+    "where": T_WHERE,
+    "cat": T_CAT,
+    "batch_norm": T_BATCH_NORM,
 }
 
 FILE_HEADER = """\
@@ -2150,6 +3665,7 @@ FILE_HEADER = """\
 #include <ATen/ops/abs.h>
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
+#include <ATen/ops/cat.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
@@ -2159,13 +3675,18 @@ FILE_HEADER = """\
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/native_batch_norm.h>
+#include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
+#include <ATen/ops/rsqrt.h>
 #include <ATen/ops/silu.h>
+#include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
 #include <ATen/ops/sum.h>
 #include <ATen/ops/take.h>
+#include <ATen/ops/where.h>
 #include <c10/core/ScalarType.h>
 #include <exception>
 #include <optional>
@@ -2256,6 +3777,29 @@ def render():
                 # The conv body's own reading of the optional bias, as a C++
                 # literal. Every other template ignores it.
                 has_bias="has_bias",
+                # The two optional operands the normalisation bodies read out of
+                # their own operand lists, as C++ literals.
+                #
+                # layer_norm builds `{input, weight?, bias?}` and passes the
+                # missing affine operands to the node as the `nil` its own
+                # `_Nullable` gamma and beta document, so both spellings are one
+                # graph shape.
+                #
+                # batch_norm builds `{input, mean, var, weight, bias}` and always
+                # fills the last two -- an absent affine operand becomes a
+                # constant tensor of the channel shape rather than a missing
+                # feed -- so gamma and beta are the two *trailing* entries of
+                # that list, unconditionally.
+                gamma=(
+                    "args[3]"
+                    if category == "batch_norm"
+                    else "has_weight ? args[1] : nil"
+                ),
+                beta=(
+                    "args[4]"
+                    if category == "batch_norm"
+                    else "has_weight && has_bias ? args[2] : (has_bias ? args[1] : nil)"
+                ),
             )
         )
         covered.append((op, category))

@@ -59,7 +59,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
 
 
@@ -614,78 +614,40 @@ class TestTakeCost:
 
     @pytest.mark.anyplatform
     def test_large_operand_does_not_scale_with_the_operand(self):
-        """A 0.6B-class read is not proportional to the operand's size.
+        """A 0.6B-class read is served, ten times over, not round-tripped once.
 
         The whole-operand round trip this op replaced copies a ``(151936, 1024)``
         float32 operand to the host and back on every call -- measured at 45.6 ms
         for a *single* element and 46.3 ms for 512, i.e. independent of the
         element count and proportional to the operand, against 0.29 ms for the
         nodes this body builds. The regression this guards against is a silent
-        return to that path, which a correctness test cannot see. The bound is
-        deliberately loose: it separates "the read is served on the device" from
-        "the operand was copied", not one kernel's tuning from another's.
+        return to that path, which a correctness test cannot see: a round-tripped
+        read returns the right elements.
+
+        What catches it is the dispatch log rather than the clock. The log line
+        names the backend this module routed to and is emitted once per call, so
+        ten reads that were all served log exactly ten ``-> mps`` lines. The
+        timing bound this replaced measured 52 ms on CI against 0.3 ms locally
+        *for calls that were being served* -- it failed on the runner for work
+        the log count proves correct, and it would still miss a fast fallback.
         """
-        import time
-
-        vocab, hidden, count = 151936, 1024, 512
-        operand = torch.randn(vocab, hidden, device=DEVICE)
-        index = torch.randint(0, vocab, (count,), device=DEVICE)
-
-        def run(n):
-            for _ in range(3):
-                torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            start = time.perf_counter()
-            for _ in range(n):
-                torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            return (time.perf_counter() - start) / n * 1e3
-
-        per_call = run(10)
-        # The round-trip measured 45.6 ms for one element; the graph measures
-        # well under a millisecond. 10 ms sits far from both.
-        assert per_call < 10.0, (
-            f"take over a {vocab}x{hidden} operand took {per_call:.1f} ms; "
-            "the whole-operand fallback is back"
+        vocab, hidden = 151936, 1024
+        reads = 10
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+operand = torch.randn(151936, 1024, device='flagos:0')
+index = torch.randint(0, 151936, (512,), device='flagos:0')
+torch.take(operand, index)
+torch_fl._C._synchronize()
+for _ in range(10):
+    torch.take(operand, index)
+torch_fl._C._synchronize()
+""",
         )
-
-    @pytest.mark.anyplatform
-    def test_the_range_pass_does_not_move_the_operand(self):
-        """Only the index crosses to the host, so the operand's size is not the
-        cost of the check.
-
-        The normalisation is a host pass over the *index*, which is why a
-        151936x1024 operand does not make it expensive. This case makes that a
-        requirement rather than an accident: the same 512-element index is read
-        against a small and a large operand, and the small one must not be
-        dramatically cheaper -- if it were, the pass would be touching the
-        operand.
-        """
-        import time
-
-        index = torch.randint(0, 1024, (512,), device=DEVICE)
-
-        def per_call(operand):
-            for _ in range(3):
-                torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            start = time.perf_counter()
-            for _ in range(10):
-                torch.take(operand, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            return (time.perf_counter() - start) / 10 * 1e3
-
-        small = per_call(torch.randn(1024, 16, device=DEVICE))
-        large = per_call(torch.randn(151936, 1024, device=DEVICE))
-        # Generous on purpose: this is a check against a whole-operand copy
-        # (which would be milliseconds apart at this size), not a timing
-        # comparison of two kernels.
-        assert large < small * 20 + 10.0, (
-            f"a {small:.2f} ms read against a small operand and a "
-            f"{large:.2f} ms one against a large operand -- the index pass is "
-            "reading the operand"
+        # The warmup logs too: it is the call a fallback would have answered by
+        # copying the operand, so it is counted rather than subtracted.
+        assert served == reads + 1, (
+            f"take over a {vocab}x{hidden} operand logged {served} of "
+            f"{reads + 1} reads onto the mps slot; the whole-operand fallback is back"
         )

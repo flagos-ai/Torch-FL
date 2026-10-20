@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_PATH = REPO_ROOT / ".github/scripts/lib/set_env_common.sh"
 COMMON = COMMON_PATH.read_text()
 SCRIPT = (REPO_ROOT / ".github/scripts/hooks/set_env_musa.sh").read_text()
+VENDORED_BUILD_VERSION = "1.4.0"
 
 
 def shell_function(name, script=SCRIPT):
@@ -35,8 +36,15 @@ def shell_function(name, script=SCRIPT):
 
 
 def run_shell(body, *, cwd=None, **environment):
-    env = os.environ.copy()
-    env.update(PYTHONPATH="", PYTHONNOUSERSITE="1")
+    # Keep the build frontend and the host's Python modules out of process
+    # launchers that the shell script only emulates.
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LC_ALL": "C",
+        "PYTHONPATH": "",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+    }
     env.update(environment)
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + body],
@@ -67,9 +75,18 @@ def fake_build_tools(site, *, editable=True, frontend=True):
     [(True, True, True), (False, True, False), (True, False, False)],
 )
 @pytest.mark.parametrize("built_checkout", [False, True])
+@pytest.mark.parametrize("ambient_build", [False, True])
 def test_build_tools_require_real_imports(
-    tmp_path, monkeypatch, editable, frontend, usable, built_checkout
+    tmp_path, monkeypatch, editable, frontend, usable, built_checkout, ambient_build
 ):
+    if ambient_build:
+        ambient = tmp_path / "ambient-python"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(ambient)], check=True
+        )
+        ambient_site = next((ambient / "lib").glob("python*/site-packages"))
+        (ambient_site / "build.py").write_text("__version__ = '9.9.9'\n")
+        monkeypatch.setattr(sys, "executable", str(ambient / "bin/python"))
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     if built_checkout:
@@ -92,6 +109,7 @@ def test_build_tools_require_real_imports(
     assert (result.returncode == 0) == usable, result.stdout + result.stderr
     if usable:
         assert "editable_wheel available" in result.stdout
+        assert f"Build frontend: {VENDORED_BUILD_VERSION}" in result.stdout
         assert "AUTOLOAD=1" in result.stdout
     else:
         assert "ModuleNotFoundError" in result.stderr
@@ -241,6 +259,11 @@ def test_flaggems_reuse_requires_published_version(
         ambient_dist = ambient_site / "flag_gems-5.3.0.dist-info"
         ambient_dist.mkdir()
         (ambient_dist / "METADATA").write_text("Name: flag_gems\nVersion: 5.3.0\n")
+        # A module of the requested version still has to be importable from the
+        # selected environment; the host copy must not make the probe pass.
+        ambient_dist = ambient_site / "flag_gems-5.4.0.dist-info"
+        ambient_dist.mkdir()
+        (ambient_dist / "METADATA").write_text("Name: flag_gems\nVersion: 5.4.0\n")
         monkeypatch.setattr(sys, "executable", str(ambient / "bin/python"))
     # Missing-module cases must not discover the runner's installed FlagGems.
     root = tmp_path / "venv"

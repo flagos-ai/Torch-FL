@@ -31,6 +31,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 
 namespace torch_fl_mps {
 
@@ -43,6 +44,28 @@ id<MTLDevice> MetalDevice();
 // answers MTLCreateSystemDefaultDevice() too but does not back MPS, so unified
 // memory is the discriminator rather than a non-nil device.
 bool MetalAvailable();
+
+// Whether this host's Metal device is one MPSGraph can actually encode on.
+//
+// MetalAvailable answers "is there an Apple GPU with unified memory", which is
+// the right question for allocation and memcpy -- those go straight to MTLDevice
+// and a paravirtualized device serves them fine. It is the wrong question for
+// the graph path: MPSGraph compiles through MLIR and re-specializes at encode
+// time, and on a paravirtualized device (`AppleParavirtGPUMetalIOGPUFamily`,
+// what the hosted macOS runners expose) that encode faults inside MPSGraph's own
+// `runAsyncWithMTLCommandQueue:` with a SIGSEGV at a small address -- past every
+// point the operator layer can decline at, because the graph is built and the
+// handler is committed before the dying call is reached.
+//
+// A fatal signal cannot be caught and unwound from, so there is nothing to
+// recover with at the call site: the only place the answer can be honoured is
+// before the graph is built at all. Hence a capability query the operator layer
+// consults, and a device-name test for the one family known to fault.
+//
+// False whenever no device is present, so a caller can treat
+// `MetalAvailable() && MetalGraphUsable()` as the single "the native graph path
+// is open" predicate.
+bool MetalGraphUsable();
 
 // One command queue plus the last command buffer committed to it. Tracking the
 // latest buffer is enough to drain the queue: Metal executes a queue in order,
@@ -94,6 +117,10 @@ void DrainAll();
 // Live-queue registry, used by DrainAll(). StreamDestroy removes its entry.
 void RegisterStream(StreamState* stream);
 void UnregisterStream(StreamState* stream);
+
+// Install the allocator's process-exit cache release. It runs from the Metal
+// runtime's own atexit hook, after Python has let go of its tensors.
+void SetShutdownReleaseCache(std::function<void()> release_cache);
 
 // EventState cast helpers.
 EventState* AsEvent(Event_t event);

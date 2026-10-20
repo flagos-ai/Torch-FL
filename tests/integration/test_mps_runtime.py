@@ -26,11 +26,16 @@ and the skipif keeps a broad ``pytest tests/integration`` collection from
 attempting Metal on a machine that has none.
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
-
 from platform_support import detect_platform
 from torch_fl import flagos
+from torch_fl.accelerator._vendor_libtorch import active_torch_lib
 
 pytestmark = [
     pytest.mark.mps,
@@ -114,8 +119,10 @@ def test_empty_cache_keeps_allocated_accounting():
 def test_coexists_with_torch_backends_mps():
     """Both the flagos device and torch's own MPS backend stay usable.
 
-    They own separate command queues and allocations, so a tensor raised on one
-    must round-trip without disturbing the other.
+    They own separate command queues and allocations, so forward tensors raised
+    on one must round-trip without disturbing the other. MPS autograd still
+    stops at a PyTorch engine assertion once check_mps_autograd is enabled;
+    see that test and design doc section 10.
     """
     flagos_value = torch.ones(4, 4, dtype=torch.float32).to(DEVICE)
     assert torch.equal(flagos_value.cpu(), torch.ones(4, 4))
@@ -126,3 +133,209 @@ def test_coexists_with_torch_backends_mps():
     assert torch.equal(mps_value.cpu(), torch.ones(4, 4))
     # The flagos device is untouched by the MPS round-trip above.
     assert flagos_value.device.type == "flagos"
+
+
+def _require_mps():
+    if not torch.backends.mps.is_available():
+        pytest.skip("torch.backends.mps is unavailable in this torch build")
+
+
+def test_mps_to_flagos_and_back():
+    _require_mps()
+    host = torch.arange(24, dtype=torch.float32).reshape(4, 6).t()
+    source = host.to("mps")
+    assert not source.is_contiguous()
+
+    on_flagos = source.to(DEVICE)
+    assert on_flagos.device.type == "flagos"
+    assert on_flagos.shape == source.shape
+    assert torch.equal(on_flagos.cpu(), host)
+
+    back = on_flagos.to("mps")
+    assert back.device.type == "mps"
+    assert torch.equal(back.cpu(), host)
+
+
+def test_copy_between_mps_and_flagos():
+    _require_mps()
+    host = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    source = host.to("mps")
+
+    on_flagos = torch.empty(3, 4, device=DEVICE)
+    on_flagos.copy_(source)
+    assert torch.equal(on_flagos.cpu(), host)
+
+    on_mps = on_flagos.to("mps")
+    assert torch.equal(on_mps.cpu(), host)
+
+
+def test_copy_mps_to_noncontiguous_flagos():
+    _require_mps()
+    host = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    on_flagos_storage = torch.empty(4, 3, device=DEVICE)
+    on_flagos = on_flagos_storage.t()
+    assert not on_flagos.is_contiguous()
+    on_flagos.copy_(host.to("mps"))
+    assert torch.equal(on_flagos.cpu(), host)
+
+
+def test_mps_to_flagos_converts_dtype_and_empty_tensor():
+    _require_mps()
+    host = torch.arange(6, dtype=torch.float32)
+    on_flagos = host.to("mps").to(DEVICE, dtype=torch.float64)
+    assert on_flagos.dtype == torch.float64
+    assert torch.equal(on_flagos.cpu(), host.to(torch.float64))
+
+    empty = torch.empty(0, 3, device="mps")
+    copied = empty.to(DEVICE)
+    assert copied.shape == empty.shape
+    on_flagos_empty = torch.empty(0, 3, device=DEVICE)
+    on_flagos_empty.copy_(empty)
+    assert torch.equal(on_flagos_empty.cpu(), empty.cpu())
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_module_mps_flagos_round_trip_preserves_parameters(swap):
+    _require_mps()
+    model = torch.nn.Linear(4, 3)
+    expected = {
+        name: value.detach().clone() for name, value in model.named_parameters()
+    }
+    previous = torch.__future__.get_swap_module_params_on_conversion()
+    torch.__future__.set_swap_module_params_on_conversion(swap)
+    try:
+        model.to("mps")
+        model.to(DEVICE)
+        assert all(
+            parameter.device.type == "flagos" for parameter in model.parameters()
+        )
+        for name, value in model.named_parameters():
+            assert torch.equal(value.cpu(), expected[name])
+
+        model.to("mps")
+        assert all(parameter.device.type == "mps" for parameter in model.parameters())
+        for name, value in model.named_parameters():
+            assert torch.equal(value.cpu(), expected[name])
+    finally:
+        torch.__future__.set_swap_module_params_on_conversion(previous)
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        pytest.param(
+            """
+import sys
+import torch
+
+mps_built = torch.backends.mps.is_built()
+mps_available = torch.backends.mps.is_available()
+mps_backward = False
+if mps_available:
+    x = torch.ones(3, device="mps", requires_grad=True)
+    (x * x).sum().backward()
+    mps_backward = torch.equal(x.grad.cpu(), torch.full((3,), 2.0))
+print("torch_fl" in sys.modules, torch.accelerator.current_accelerator(False),
+      mps_built, mps_available, mps_backward)
+""",
+            "False mps",
+            id="bare-torch-mps-baseline",
+        ),
+        pytest.param(
+            """
+import sys
+import torch
+import torch_fl
+
+mps_built = torch.backends.mps.is_built()
+mps_available = torch.backends.mps.is_available()
+forward = False
+round_trip = False
+if mps_available:
+    x = torch.ones(3, device="mps")
+    (x * x).sum()
+    round_trip = torch.equal(x.cpu(), torch.ones(3))
+    forward = True
+    value = x.detach().requires_grad_(True)
+    try:
+        (value * value).sum().backward()
+    except RuntimeError as error:
+        message = str(error)
+        if "opt_ready_stream && opt_parent_stream" not in message:
+            raise
+    else:
+        raise AssertionError("MPS autograd unexpectedly accepted flagos")
+print("torch_fl" in sys.modules, torch._C._get_privateuse1_backend_name(),
+      mps_built, mps_available, forward, round_trip)
+""",
+            "True flagos",
+            id="explicit-torch-fl-torch",
+        ),
+    ],
+)
+def test_mps_process_boundaries(code, expected, tmp_path):
+    """A fresh process proves both the MPS baseline and explicit coexistence."""
+    # The suite has already run flagos and torch op tests against the one
+    # process-wide MPS budget. Let go of their tensors and caches before a
+    # child process allocates on the same device.
+    import gc
+
+    flagos.synchronize()
+    gc.collect()
+    flagos.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
+    env = _child_env(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith(expected), result.stdout
+
+
+def _child_env(tmp_path):
+    """Remove import paths from this test process without hiding the installation.
+
+    The integration harness imports torch_fl in conftest, so a baseline in this
+    process would already carry the PrivateUse1 registration. A wheel run
+    reaches its installed torch_fl from site-packages; an editable install keeps
+    its import hook for the explicit-import scenario.
+    """
+    lib = active_torch_lib()
+    if lib is None:
+        pytest.skip("PyTorch is unavailable")
+
+    version = Path(lib).parent / "version.py"
+    if not version.is_file() or "_pytest" in version.read_text(encoding="utf-8"):
+        pytest.skip("This test requires a real PyTorch installation")
+    env = os.environ.copy()
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "1"
+    inherited = env.get("PYTHONPATH", "").split(os.pathsep)
+    removed = {
+        os.path.abspath(item)
+        for item in (
+            tmp_path,
+            Path(__file__).resolve().parents[1],
+            Path(__file__).resolve().parents[2],
+        )
+    }
+    env["PYTHONPATH"] = os.pathsep.join(
+        item for item in inherited if item and os.path.abspath(item) not in removed
+    )
+    return env
+
+
+def test_mps_backward_with_flagos_meets_upstream_stream_precondition():
+    """Track the upstream fix this backend needs before MPS training can work."""
+    if not torch.backends.mps.is_available():
+        pytest.skip("torch.backends.mps is unavailable in this torch build")
+    x = torch.ones(3, device="mps", requires_grad=True)
+    with pytest.raises(RuntimeError, match="opt_ready_stream && opt_parent_stream"):
+        (x * x).sum().backward()

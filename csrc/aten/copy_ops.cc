@@ -29,6 +29,9 @@
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
+#if defined(USE_MPS)
+#include "backends/mps/mps_copy.h"
+#endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
@@ -83,6 +86,17 @@
 namespace at::native::flagos {
 
 namespace {
+
+#if defined(USE_MPS)
+// An MPS tensor's data_ptr() is not guaranteed to expose host-readable bytes,
+// so this runtime cannot copy it with a host memcpy. PyTorch's MPS copy kernel
+// can move it to host memory; the flagos H2D copy follows that copy.
+at::Tensor mps_source_to_cpu(const at::Tensor& self) {
+  at::Tensor src_contig =
+      self.is_contiguous() ? self : self.contiguous();
+  return src_contig.to(c10::kCPU);
+}
+#endif
 
 // Every `Memcpy` in this file is the *synchronous* one, and a synchronous
 // memcpy is a blocking call with two preconditions, both about which device is
@@ -472,7 +486,9 @@ at::Tensor _copy_from(
       // Kunlunxin via the XPU op library's own strided copy; all honor the src
       // and dst strides and storage offset. Avoids the CPU round-trip below,
       // which on GCU also D2H's the entire destination storage.
-#if defined(USE_GCU)
+#if defined(USE_MPS)
+      const bool copied_on_device = mps::CopyStridedToDense(self, dst);
+#elif defined(USE_GCU)
       const bool copied_on_device = gcu::StridedCopy(dst, self);
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
@@ -621,6 +637,21 @@ at::Tensor _copy_from(
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
       at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
     }
+#if defined(USE_MPS)
+  } else if (self.is_mps() && dst.is_privateuseone()) {
+    at::Tensor cpu_src =
+        at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+    at::native::copy_(cpu_src, self_contig, false);
+    if (dst.is_contiguous()) {
+      BlockingCopyGuard barrier(dst);
+      Memcpy(dst.data_ptr(), cpu_src.data_ptr(), nbytes, MemcpyHostToDevice);
+    } else {
+      at::Tensor tmp = at::empty(self_contig.sizes(), dst.options());
+      BlockingCopyGuard barrier(dst);
+      Memcpy(tmp.data_ptr(), cpu_src.data_ptr(), nbytes, MemcpyHostToDevice);
+      at::native::flagos::_copy_from(tmp, dst, false);
+    }
+#endif
   } else if (self.is_cuda() && dst.is_privateuseone()) {
     if (dst.is_contiguous()) {
       Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
@@ -900,8 +931,13 @@ at::Tensor _to_copy(
     result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
   } else if (!src_is_flagos && dst_is_flagos) {
     int device_index = device.index() >= 0 ? device.index() : 0;
-    at::Tensor src_contig = self.contiguous();
-    if (dtype != self.scalar_type()) {
+#if defined(USE_MPS)
+    const at::Tensor& src = self.is_mps() ? mps_source_to_cpu(self) : self;
+#else
+    const at::Tensor& src = self;
+#endif
+    at::Tensor src_contig = src.contiguous();
+    if (dtype != src.scalar_type()) {
       src_contig = src_contig.to(dtype);
     }
     result = at::empty(
@@ -910,9 +946,9 @@ at::Tensor _to_copy(
     size_t nbytes = src_contig.numel() * src_contig.element_size();
     if (nbytes > 0) {
       BlockingCopyGuard barrier(result);
-      if (self.is_cpu()) {
+      if (src.is_cpu()) {
         Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyHostToDevice);
-      } else if (self.is_cuda()) {
+      } else if (src.is_cuda()) {
         Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
       } else {
         TORCH_CHECK(false, "_to_copy: unsupported source device ", self.device());

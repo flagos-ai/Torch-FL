@@ -57,7 +57,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
 
 
@@ -543,39 +543,40 @@ class TestIndexSelectCost:
 
     @pytest.mark.anyplatform
     def test_large_operand_does_not_scale_with_the_operand(self):
-        """A 0.6B-class read is not proportional to the operand's size.
+        """A 0.6B-class read is served, ten times over, not round-tripped once.
 
         The fallback this op replaced copied the whole ``(151936, 1024)``
         operand to the host and back on every call -- 40.4 ms for a *single*
         row, profiled as ``aten::_to_copy`` over the 622 MB tensor, against
         0.29 ms for the one gather node the body builds. The regression this
         guards against is a silent return to that path, which a correctness test
-        cannot see. The bound is deliberately loose: it separates "the read is
-        served on the device" from "the operand was copied", not one kernel's
-        tuning from another's.
+        cannot see: a round-tripped read returns the right rows.
+
+        What catches it is the dispatch log rather than the clock. The log line
+        names the backend this module routed to and is emitted once per call, so
+        ten reads that were all served log exactly ten ``-> mps`` lines. A
+        timing bound was tried first and is the wrong instrument: it measured
+        53 ms on CI against 0.3 ms locally *for calls that were being served*,
+        so it fails on a paravirtualized runner for work the log count proves
+        correct, and it would still miss a fallback that was merely fast.
         """
-        import time
-
-        vocab, hidden, count = 151936, 1024, 512
-        table = torch.randn(vocab, hidden, device=DEVICE)
-        index = torch.randint(0, vocab, (count,), device=DEVICE)
-
-        def run(n):
-            for _ in range(3):
-                torch.index_select(table, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            start = time.perf_counter()
-            for _ in range(n):
-                torch.index_select(table, 0, index)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            return (time.perf_counter() - start) / n * 1e3
-
-        per_call = run(10)
-        # The round-trip measured 40.4 ms for one row; the gather measures well
-        # under a millisecond. 10 ms sits far from both.
-        assert per_call < 10.0, (
-            f"index_select over a {vocab}x{hidden} operand took {per_call:.1f} ms; "
-            "the whole-operand fallback is back"
+        vocab, hidden = 151936, 1024
+        reads = 10
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+table = torch.randn(151936, 1024, device='flagos:0')
+index = torch.randint(0, 151936, (512,), device='flagos:0')
+torch.index_select(table, 0, index)
+torch_fl._C._synchronize()
+for _ in range(10):
+    torch.index_select(table, 0, index)
+torch_fl._C._synchronize()
+""",
+        )
+        # The warmup logs too: it is the call a fallback would have answered by
+        # copying the operand, so it is counted rather than subtracted.
+        assert served == reads + 1, (
+            f"index_select over a {vocab}x{hidden} operand logged {served} of "
+            f"{reads + 1} reads onto the mps slot; the whole-operand fallback is back"
         )

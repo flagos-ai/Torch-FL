@@ -103,6 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest \
+            tests/unit/test_ai_reviewer.py \
             tests/unit/test_backend_autoload_contract.py \
             tests/unit/test_ci_pip_cache.py \
             tests/unit/test_ci_platform_routing.py \
@@ -124,6 +125,7 @@ jobs:
             tests/unit/test_iluvatar_cpu_runtime.py \
             tests/unit/test_integration_manifest.py \
             tests/unit/test_integration_workdir.py \
+            tests/unit/test_mps_collection_without_numpy.py \
             tests/unit/test_musa_ci_manifest.py \
             tests/unit/test_musa_env_script.py \
             tests/unit/test_ops_conftest_platform.py \

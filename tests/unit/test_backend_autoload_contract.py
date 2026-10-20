@@ -15,13 +15,31 @@
 """The autoload contract that can be checked without a built accelerator wheel."""
 
 import ast
+import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import setuptools
 
 ROOT = Path(__file__).resolve().parents[2]
 INIT = ROOT / "torch_fl" / "__init__.py"
+
+
+@pytest.fixture
+def load_setup(monkeypatch):
+    monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
+
+    def load(accelerator):
+        monkeypatch.setenv("FLAGOS_ACCELERATOR", accelerator)
+        kwargs = {}
+        monkeypatch.setattr(setuptools, "setup", lambda **values: kwargs.update(values))
+        namespace = runpy.run_path(str(ROOT / "setup.py"))
+        monkeypatch.setitem(sys.modules, "setuptools", setuptools)
+        return namespace, kwargs
+
+    return load
 
 
 def _pyproject_table(table: str) -> dict:
@@ -65,10 +83,52 @@ def _function(name):
     return namespace[name]
 
 
-def test_installed_entry_point_targets_the_device_bootstrap():
-    assert _pyproject_table('project.entry-points."torch.backends"') == {
-        "torch_fl": "torch_fl._autoload:init"
+def test_entry_points_are_resolved_by_the_build(load_setup):
+    """Build selection is where MPS can differ from the device plugins."""
+    assert "entry-points" in _dynamic_fields()
+    _, kwargs = load_setup("cuda")
+    assert kwargs["entry_points"] == {
+        "torch.backends": ["torch_fl = torch_fl._autoload:init"]
     }
+
+
+def _dynamic_fields() -> set[str]:
+    lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key.strip() == "dynamic":
+            return {item.strip().strip('"') for item in value.strip(" []").split(",")}
+    raise AssertionError("pyproject.toml has no project.dynamic list")
+
+
+@pytest.mark.parametrize("accelerator", ["cuda", "dcu", "musa"])
+def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
+    _, kwargs = load_setup(accelerator)
+    assert kwargs["entry_points"] == {
+        "torch.backends": ["torch_fl = torch_fl._autoload:init"]
+    }
+
+
+def test_mps_wheel_leaves_bare_torch_on_the_mps_backend(load_setup):
+    """Only an explicit import may claim PrivateUse1 in an MPS installation."""
+    _, kwargs = load_setup("mps")
+    assert kwargs["entry_points"] == {}
+
+
+def test_mps_editable_install_rejects_another_accelerators_egg_info(
+    load_setup, monkeypatch, tmp_path
+):
+    """A stale vendor entry point must not leak into the MPS installation."""
+    (tmp_path / "torch_fl.egg-info").mkdir()
+    namespace, kwargs = load_setup("mps")
+    wheel = SimpleNamespace(
+        distribution=SimpleNamespace(get_name=lambda: "torch_fl"),
+        _find_egg_info_dir=lambda: "vendor-entry-points",
+    )
+    command_globals = kwargs["cmdclass"]["editable_wheel"].run.__globals__
+    monkeypatch.setitem(command_globals, "BASE_DIR", str(tmp_path))
+    with pytest.raises(RuntimeError, match="torch.backends entry point"):
+        kwargs["cmdclass"]["editable_wheel"]._find_egg_info_dir(wheel)
 
 
 def test_vendor_core_and_cuda_assets_are_selected_before_torch_import():

@@ -187,6 +187,28 @@ _KNOWN_GAPS = {
         "musa",
         "ppu",
     ),
+    "backend_ops": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "musa",
+        "ppu",
+    ),
+    "mps_runtime": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "musa",
+        "ppu",
+    ),
 }
 
 

@@ -26,17 +26,28 @@
 //     offset either, so it is not used.
 //
 //     That initializer is macOS 15 API, and it is *not* declared by the
-//     MetalPerformanceShaders framework in the Xcode 15.4 SDK that the hosted
-//     macos-14 image pins -- measured on the first CI run of the MPS lane, where
+//     MetalPerformanceShaders framework in the Xcode 15.4 SDK that the earlier
+//     macos-14 image pinned -- measured on the first CI run of the MPS lane, where
 //     the compiler resolved the same selector to the MPSMatrix initializer and
 //     rejected the argument ("cannot initialize a parameter of type
 //     'MPSMatrixDescriptor *' with an lvalue of type 'MPSNDArrayDescriptor *'").
 //     MpsTensorData compiles the offset path only when the SDK in force can
-//     express it and the runtime reports macOS 15; under an older SDK it returns
-//     nil, and that nil is a *decline*, so an op whose operand is an interior
-//     pointer takes the CPU round-trip instead of reading from offset 0. The
-//     consequence is a correct but not-native op on an older toolchain, and it is
-//     why the initializer is not simply called unconditionally.
+//     express it and the runtime reports macOS 15.
+//
+//     Under an older toolchain an interior pointer cannot be *described*, but it
+//     is still served natively: RunGraphImpl stages the operand into a dedicated
+//     buffer at offset 0 and copies results back out, so an op whose operands the
+//     caching allocator split off a larger MTLBuffer keeps the whole computation
+//     on the GPU. It has to, because the alternative is not neutral. Declining
+//     sends the op to cpu_fallback, which copies the operand to the host, runs a
+//     torch kernel in torch's own threading, and copies the result back -- and
+//     for the table reads this backend exists for (a 151936x1024 float32
+//     embedding table is 622 MB) that is what turned a 0.7 ms node into the
+//     69-149 ms the MPS cost classes measured on the hosted runner. One memcpy
+//     between two shared allocations is the smaller cost by two orders of
+//     magnitude, and on unified memory it is the same device's copy. The staging
+//     buffers are pooled by size rather than allocated per call; see the
+//     StagingPool comment in mps_common.mm for the reuse argument.
 //
 //   * An MPSNDArray is not a dense view of a buffer once it has more than one
 //     dimension: it rounds the stride between rows up to a 16-byte boundary. A
@@ -99,6 +110,25 @@ bool MpsSupportsUnaryDtype(at::ScalarType dtype);
 // whereas aten promotes (int32 + int64 -> int64, half + float -> float), so a
 // mixed pair takes the CPU round-trip and keeps the reference's result dtype.
 bool MpsSupportsBinaryDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
+
+// Whether a `where.self` computes exactly on the MPSGraph path. The two branch
+// widths take MpsSupportsBinaryDtype's rule for that predicate's reason -- the
+// select builds one node in one element type and promotes nothing, while the
+// reference promotes the branches to a common dtype -- and the condition width
+// is checked against the reference's own narrowing rather than the graph's:
+// bool and the deprecated uint8 are accepted, anything else is a decline so the
+// reference raises its own message.
+bool MpsSupportsWhereDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType other_dtype,
+    at::ScalarType condition_dtype);
+
+// Whether a `cat` over a list of `dtype` computes exactly on the MPSGraph path.
+// Both parameters are that one datatype: the concat node requires a single
+// datatype across the list where the reference promotes a mixed list, which the
+// body checks separately, so this only decides whether the uniform width is one
+// the graph can carry.
+bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype);
 
 // Whether an elementwise op over a tensor and a host scalar computes exactly on
 // the MPSGraph path. The scalar becomes an MPSGraph constant of the tensor's
@@ -168,6 +198,20 @@ bool MpsSupportsPowDtype(at::ScalarType self_dtype, const at::Scalar& exponent);
 // error to report: the wrappers decline that case without touching the input.
 bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
 
+// The answer `_softmax(self, dim, half_to_float)` has when the graph is not the
+// one producing it, computed on the host and moved back to `self`'s device.
+//
+// The flag cannot be handed to the CPU kernel: it is a CUDA spelling the host
+// build rejects outright, so a declined width would raise instead of answering.
+// This widens the operand and asks for the flag-clear result instead, which is
+// the same "compute in float, hand back float" the flag stands for -- the rule
+// the graph path follows by widening to its own `out_dtype`. Every decline in
+// the softmax bodies routes through here so the two paths cannot drift apart.
+at::Tensor MpsSoftmaxOnHost(
+    const at::Tensor& self,
+    int64_t dim,
+    bool half_to_float);
+
 // Whether `silu` computes exactly on the MPSGraph path, composed as
 // `x * sigmoid(x)`.
 //
@@ -202,6 +246,405 @@ bool MpsSoftmaxDim(const at::Tensor& self, int64_t dim, int64_t* out);
 // `silu(int)` raises rather than promoting -- and both take the CPU round-trip
 // and get exactly that.
 bool MpsSupportsSiluDtype(at::ScalarType dtype);
+
+// Whether the SiLU derivative computes on the MPSGraph path. The reference
+// promotes a mixed pair to the wider width. MpsRunGraph requires the inputs and
+// result to share an element type, so this predicate serves only equal-width
+// float32 and float16 pairs; the body also checks the operands' device and
+// broadcastable shape, and declines a mixed, float64, bfloat16 or invalid pair
+// to the round-trip.
+//
+// The derivative is a separate formula: an exp-based reading can overflow while
+// the sigmoid-based one remains finite for a large positive operand. Its
+// correctness is therefore held by the backward cases in
+// tests/integration/ops/test_mps_silu.py rather than inferred from the forward
+// gate. bfloat16 is declined because its graph rounds differently from the
+// reference by up to 3.1e-02 around x=3; float32 and float16 stay within their
+// measured tolerances.
+//
+// float64 has no MPSGraph element type. Integral or bool operands are the
+// reference's error. All of them take the round-trip.
+bool MpsSupportsSiluBackwardDtype(
+    at::ScalarType grad_output_dtype,
+    at::ScalarType self_dtype);
+
+// Whether `sigmoid` computes exactly on the MPSGraph path, and the increment
+// that declined a width the sibling above serves -- which is the point of it.
+//
+// `sigmoid` is the activation `silu` is composed from, and it is the op a model
+// reaches for on its own as well: a hand-written attention mask, a gating
+// projection, a `torch.sigmoid` in a loss. MPSGraph has a real selector for it
+// (`sigmoidWithTensor:`), so the body is one node -- but the selector is the
+// same one the `silu` composition already builds, and measuring *it* through
+// `silu` shows that the exactness `silu` measured is a property of the
+// composition's tail rather than of the node.
+//
+// Measured on an M5 with the graph's sigmoid read out of the routed `silu`
+// (silu(x)/x, which is the node the composition builds) against `at::sigmoid`
+// evaluated in the operand's own dtype over [-40, 40] with the saturated tails,
+// the denormals and the exact 0 included:
+//
+//   float32   1.788e-07 max abs, 3.091e-07 relative at x = 1.33 over the
+//             sampled range. Serving it is therefore a rounding decision and not
+//             an exactness claim, and it carries one more measured caveat: the
+//             same subnormal flush that costs float16 its place also reaches
+//             float32, but only where the *result* falls below the smallest
+//             normal float. Measured, `sigmoid(-87.0)` is 1.6458e-38 on both
+//             sides and `sigmoid(-88.0)` is 6.0546e-39 on the reference and
+//             exactly 0 on the graph; below about -88.5 the reference is
+//             subnormal too and the two agree on 0 again. So the divergence is
+//             confined to the single-input band where the reference's answer is
+//             subnormal-but-nonzero, and it is the same platform policy the
+//             `div` body already records for a subnormal *result*. It is
+//             recorded here rather than gated away because a sigmoid is never
+//             evaluated there by a model and the round-trip at these extremes
+//             would be a per-call host decision on a value the graph cannot
+//             express; the float16 decline below is what the same policy costs
+//             when the band is a wide one rather than a point.
+//   float16   3.088e-02 max abs against the float16 reference, which is 6.2e-02
+//             relative -- a wrong answer rather than a rounding difference, and
+//             it is the *platform's* subnormal policy rather than the node's
+//             arithmetic. 151465 of 400001 samples come back below float16's
+//             smallest normal while the reference keeps them: this SDK flushes
+//             a subnormal float16 *result* to zero, exactly as the `div` body
+//             recorded, and the left tail of a sigmoid is almost entirely
+//             subnormal at that width. So float16 is **declined** here, where
+//             `silu` serves it -- because a silu's tail is multiplied by its
+//             own x, which is likewise subnormal and flushes to the same zero
+//             the reference produces, while a bare sigmoid's tail has no such
+//             partner and the flush is visible.
+//   bfloat16  1.061e-02 relative, largest at x = 4.58. bfloat16's exponent
+//            range is float32's, so nothing here is subnormal and the
+//            difference is rounding at a width that holds about three decimal
+//            digits -- 8.289e-03 absolute against a reference whose own values
+//            are of order 1e-2 to 1. The graph's sigmoid is not bit-identical
+//            to aten's at this width, so it is declined by the same rule that
+//            keeps `softmax` off bfloat16: a measured difference that is a
+//            rounding rather than a bug is still a difference this backend
+//            declines to claim.
+//
+// float64 has no MPSGraph element type, so it takes the round-trip.
+//
+// An integral or bool operand is *promoted* rather than rejected, and that was
+// measured rather than assumed -- the first version of this note claimed aten's
+// `sigmoid` has no integral kernel, and `at::sigmoid(torch.arange(-2, 3))`
+// returns the float32 `[0.1192, 0.2689, 0.5, 0.7311, 0.8808]` on the CPU. The
+// graph path produces the same promoted float32 result, because MpsRunGraph's
+// `out` is allocated from the operand's options and the ceiling the flush above
+// is about does not arise for a small integral input; the gate declines them
+// anyway, since the round-trip is where the *promotion rule* lives and a gate
+// that is right for the wrong reason is the failure this file keeps recording.
+//
+// The gate is deliberately the narrowest one in this file, and the contrast
+// with `MpsSupportsSiluDtype` is the increment's finding: two ops that build the
+// *same node* do not share a width list, because what the node's error means
+// depends on what the surrounding graph does with it.
+bool MpsSupportsSigmoidDtype(at::ScalarType dtype);
+
+// Whether `exp` computes exactly on the MPSGraph path, and the increment that
+// *widened* the served list past the sibling activations' -- which is the point
+// of it.
+//
+// `exp` is the largest elementwise unary left on a small model's fallback
+// profile and the node the rest of the cohort (`log`, `rsqrt`, a hand-written
+// `tanh`) is written over, so it is served with a real selector
+// (`exponentWithTensor:`) rather than a composition. Measured on an M5 against
+// at::exp in the operand's own dtype, over each width's whole representable
+// curve and over the saturated tails:
+//
+//   float32   1.897e-07 max relative, which is two ulp at the top of the range
+//             (the largest argues are ~1e+38, so the ulp there is ~1e+31 and the
+//             absolute difference is large while the relative one is tiny). Not
+//             bit-identical, and the right reading is the same one `silu`'s
+//             float32 recorded: measured against an exact float64 evaluation at
+//             x = 20.0, the graph sits 2.06e+01 above it and the CPU reference
+//             1.14e+01 below -- both are one ulp from exact, on opposite sides, so
+//             the two round differently rather than one being wrong. 39.6% of a
+//             linspace over [-87, 88] lands on a different ulp for the same
+//             reason, and no sample is farther than two ulps apart.
+//   float16   bit-identical, and this is the increment's finding: the entire
+//             representable curve agrees, *including every subnormal*. Measured
+//             over 400001 points spanning [-30, 11] -- which reaches the lowest
+//             subnormal an `exp` can produce -- there are zero mismatches, so the
+//             subnormal flush the `sigmoid` body recorded for this width is a
+//             property of *that node* rather than of the platform: the same
+//             exponential keeps subnormal results that the sigmoid node flushed.
+//             Served, where the sibling activation is declined.
+//   bfloat16  bit-identical over the normal range, measured over [-30, 88] with
+//             zero mismatches. The subnormal band behaves like float32's below
+//             (the graph flushes an `exp` whose reference answer is subnormal,
+//             and the flush never reaches a normal answer), which is the platform
+//             policy the `div` body records rather than a rounding difference.
+//             Served, where the sibling `sigmoid` declined this width for a
+//             rounding difference that an `exp` does not have: measured, the two
+//             agree bit for bit here.
+//
+// The subnormal flush that does appear -- at float32 and bfloat16, on an input
+// below about -87.3 where the reference's own `exp` is subnormal while the graph
+// answers 0 -- is a *wrong answer* at those points, and it is accepted on the
+// same policy the `sigmoid`, `div` and `silu` bodies accepted it: the flush is
+// confined to the input band where the reference answer is itself subnormal, and
+// measured, it never reaches one that is normal (the smallest normal float32 is
+// 1.1755e-38, and the graph answers exactly down to -87.336, the largest input
+// whose reference answer is normal). A model's `exp` operates on the logits of a
+// softmax or the exponent of a power, where this band is not reached; the
+// round trip at these extremes would be a per-call host decision on a value the
+// graph cannot express.
+//
+// float64 has no MPSGraph element type and takes the round-trip. An integral or
+// bool operand is *promoted* by the reference to float32 -- measured,
+// `at::exp(torch.arange(-2, 3))` returns a float32 tensor, and the graph path
+// reproduces it for a small input because MpsRunGraph allocates `out` from the
+// operand's options and the width is widened by the promotion before the graph
+// sees it -- but the gate declines them anyway, because the promotion rule is the
+// reference's and a gate that is right for the wrong reason is the failure this
+// file keeps recording. They keep the round-trip, which is where the rule lives.
+//
+// The gate is deliberately *wider* than `MpsSupportsSigmoidDtype`'s, and the
+// contrast is the increment's finding read the other way round: two ops that
+// share a node -- or here, two nodes of the same family -- do not share a width
+// list, because what a flush or a rounding means depends on what the op computes
+// rather than on the platform alone.
+bool MpsSupportsExpDtype(at::ScalarType dtype);
+
+// Whether `log` computes exactly on the MPSGraph path, and the increment whose
+// honest divergence is a property of the *input* domain rather than of the
+// magnitude -- which is the point of it.
+//
+// `log` is the inverse of the sibling `exp` above and the other half of every
+// logit-space composition a model writes by hand (a log-softmax, a
+// temperature-scaled score, a KL term), so it is served with a real selector
+// (`logarithmWithTensor:`) rather than a composition. Measured on an M5 against
+// at::log in the operand's own dtype, over 400001 samples per width and over
+// the domain's edges:
+//
+//   float32   129358 of 400001 samples land on a different ulp, max relative
+//             1.291e-07 and max absolute 7.629e-06 -- one ulp. Not
+//             bit-identical, and the reading is the one `silu`'s and `exp`'s
+//             float32 recorded: both roundings are correct and they simply
+//             differ.
+//   float16   3 of 400001 samples differ, max relative 6.184e-04 and max
+//             absolute 3.906e-03 -- one float16 ulp at 6.3. The three are a
+//             last-ulp rounding in which the *graph* is marginally closer to the
+//             exact answer than the CPU reference is (measured at x = 552.5:
+//             |graph - exact| = 1.953433e-03 against
+//             |cpu - exact| = 1.952817e-03), so this is the same "both are
+//             correct" reading rather than a graph error. Served, and worth
+//             spelling out because `sigmoid` declined this width: the flush that
+//             cost the sibling its place does not reach this node's arithmetic.
+//   bfloat16  bit-identical, zero mismatches.
+//
+// The domain's edges are all reproduced exactly, which is what makes this
+// increment's finding an *input* one: measured, log(0) = -inf, log(-0.0) = -inf,
+// log(1) = 0.0, log(-1) = nan, log(-5) = nan, log(inf) = inf, log(-inf) = nan
+// and log(nan) = nan, all matching the reference bit for bit.
+//
+// What does diverge at float32 is where the platform's subnormal policy does
+// show: it flushes a subnormal *input* to zero before the node evaluates, and
+// log(0) is -inf, so a positive input below the smallest normal comes back -inf
+// where the reference answers a finite (and large) number. Measured, the
+// boundary sits exactly at that normal: `1.1754944e-38` (the smallest normal
+// float32) agrees with the reference while `1.17e-38` flushes to -inf. This is
+// accepted on the same policy the `sigmoid`, `div`, `silu` and `exp` bodies
+// accepted their subnormal divergences, and it has the same shape: the wrong
+// answer is confined to the band where the reference's *input* is subnormal, and
+// it never reaches a normal input -- measured, every input at or above the
+// smallest normal reproduces the reference. A model's `log` operates on a
+// probability or a logit, where that band is not reached; a per-call host
+// decision there would be a check on a value the graph cannot express.
+//
+// float16 is the contrast that keeps this from being a blanket rule: measured,
+// it does *not* flush subnormal inputs -- `log(5.96e-8) = -16.640625`, exact --
+// so the boundary above is a float32 property of the platform rather than one
+// this gate can generalise across widths.
+//
+// float64 has no MPSGraph element type and takes the round-trip. An integral or
+// bool operand is *promoted* by the reference to float32, the same answer `exp`
+// measured, and the gate declines them for the same reason: the promotion rule
+// is the reference's, and the round-trip is where it lives.
+//
+// The gate's shape is therefore `exp`'s list with `exp`'s reasoning turned
+// around: where the exponential's honest cost was a subnormal *result* it
+// declines to express, the logarithm's is a subnormal *input* it flushes to
+// zero -- and both stay inside the band where the reference's own answer is
+// outside the range the graph can represent.
+bool MpsSupportsLogDtype(at::ScalarType dtype);
+
+// Whether `rsqrt` computes exactly on the MPSGraph path -- and the first gate
+// here whose subject is a *composition* rather than a node.
+//
+// The body is `reciprocal(sqrt(x))`, two MPSGraph nodes rather than the fused
+// `reciprocalSquareRootWithTensor:` MPSGraph names, for the reason recorded
+// above the `T_RSQRT` template: the fused selector is macOS 15+, and building
+// it on the earlier hosted `macos-14` lane raised an
+// `NSInvalidArgumentException` that aborts the process rather than declining.
+// The composition is the same arithmetic on two nodes the SDK this backend is
+// verified against does have.
+//
+// That the subject is a composition is what makes an independent predicate
+// necessary rather than a reuse of a sibling's: two subnormal policies apply
+// where `exp` and `log` had one each. The input half is the *sqrt's* -- a
+// subnormal operand, if the platform flushes it, becomes zero before the node,
+// and `rsqrt` of a value approaching zero is large rather than small, so the
+// flush is a divergent magnitude and not a rounding. The result half is the
+// *reciprocal's*, the same flush `sigmoid` and `div` measured: a reciprocal
+// that is subnormal at the operand's width can come back zero where the
+// reference answers a denormal.
+//
+// The domain edges were measured first, against the reference on the CPU, and
+// every one of them has to be reproduced for the composition to be served at
+// that width: `rsqrt(0) = inf`, `rsqrt(-0.0) = -inf`, `rsqrt(1) = 1`,
+// `rsqrt(4) = 0.5`, `rsqrt(-1) = nan` (the sqrt of a negative is a nan and the
+// reciprocal of a nan is a nan), `rsqrt(inf) = 0` and `rsqrt(nan) = nan`.
+//
+// The gate is measured per width; see the note in mps_common.mm for the
+// numbers and for which half is the one that decides each width.
+bool MpsSupportsRsqrtDtype(at::ScalarType dtype);
+
+// Whether `sqrt` computes exactly on the MPSGraph path.
+//
+// A predicate of its own rather than `MpsSupportsRsqrtDtype` reused, and the
+// reason is the same one that gave the sibling its own predicate read the other
+// way: `rsqrt` here is the *composition* `reciprocal(sqrt(x))`, so its gate had
+// to be right about two nodes at once -- the sqrt's input half and the
+// reciprocal's result half -- while this body is the sqrt alone. A width the
+// composition serves is therefore not automatically served here, and a width it
+// declines is not automatically declined: the two gates ask about different
+// computations and their answers come out different at the edges.
+//
+// What the body inherits from the sibling is the node itself.
+// `squareRootWithTensor:` is the inner half of `T_RSQRT`, on both the SDK this
+// backend is verified against and the one after it, so the selector is the same
+// one the composition already builds rather than a new question. The domain
+// edges are the ones a square root has rather than a reciprocal's:
+// `sqrt(0) = 0` (and `sqrt(-0.0) = -0.0`, the signed zero the sibling's
+// reciprocal turns into `-inf`), `sqrt(1) = 1`, `sqrt(4) = 2`,
+// `sqrt(-1) = nan`, `sqrt(inf) = inf` and `sqrt(nan) = nan`.
+//
+// All three float widths are served, and the finding is *where* this differs
+// from the sibling that shares the node: the same subnormal *input* flush that
+// cost `log` and the `rsqrt` composition's input half shows up here at float32
+// and bfloat16, but it reads differently -- the flushed operand comes back 0,
+// a value inside the normal range, where the sibling's reciprocal turned the
+// same flush into `inf`. float16 does not flush at all, as `log` and `rsqrt`
+// both found.
+//
+// The gate is measured per width; see the note in mps_common.mm for the numbers,
+// for the flush that decides the low-precision widths, and for the one edge
+// whose failure is a wrong *kind* of answer rather than a wrong magnitude.
+bool MpsSupportsSqrtDtype(at::ScalarType dtype);
+
+// Whether `tanh` computes like the reference on the MPSGraph path.
+//
+// `tanh` is the activation a transformer block reaches for at both ends -- the
+// tanh approximation inside a GELU and the one inside a recurrent or attention
+// gate -- and MPSGraph names it directly as `tanhWithTensor:`. The body is
+// therefore the plain one-node unary template plus one guard, and the guard is
+// the first thing the node needs: measured at all three widths, the node
+// *saturates* a NaN operand to +-1 rather than propagating it, so
+// `isNaNWithTensor:` selects a NaN back over the node's answer and the body
+// answers the reference's `nan` rather than the node's `1.0`.
+//
+// With the NaN guard in place the predicate is a pure node-fidelity question,
+// and its answer is the first one on this backend that declines the *widest*
+// float:
+//
+//   * float16 and bfloat16 are served. The node is the reference's own function
+//     at these widths rather than an approximation of it -- measured, both have
+//     the *reference's* max error against the exact tanh to the digit, and both
+//     are *exactly* odd (max |g(x) + g(-x)| is 0.0 where the float32 node breaks
+//     the same measurement by 1.788e-07). Two edges at these widths are the
+//     host's rather than the body's -- the sign of a zero, and the bfloat16
+//     subnormal band -- and both were measured both ways rather than pinned as
+//     an invariant. See the note in mps_common.mm.
+//   * float32 is *declined*. The node is a coarser approximation of a tanh at
+//     this width, not a differently-rounded exact one, and the measurement says
+//     so three ways: it breaks odd symmetry by 1.788e-07 where the reference is
+//     exactly symmetric; its error against the exact answer is ~100x the
+//     reference's at every scale of the curve (4.321e-08 against 4.328e-10 over
+//     [0.001, 0.01), 1.069e-07 against 2.981e-08 over [0.5, 1)); and 165340 of
+//     400001 samples over [-10, 10] come back a different float32 value, up to a
+//     visibly different number inside the saturation band rather than a
+//     neighbouring ulp. On a `torch.randn(1000000)` operand 545055 samples
+//     differ and the graph is the less accurate of the two on 544303 of them.
+//
+// Serving that would replace the reference's answer with a coarser one on a
+// majority of the values the most-called activation in a transformer block is
+// handed, so the float32 caller keeps the `cpu_fallback` round-trip and only the
+// two narrow widths -- where the node *is* the reference's function -- take the
+// graph. This is the first gate here whose narrowness is about accuracy rather
+// than a subnormal flush or a domain edge, and it is stated per width for that
+// reason.
+//
+// float64 has no MPSGraph element type and an integral or bool operand is
+// promoted by the reference to float32, so both keep the round-trip.
+//
+// The gate is measured per width; see the note in mps_common.mm for the numbers
+// and for the round-trip cost the float32 decline leaves on the table.
+bool MpsSupportsTanhDtype(at::ScalarType dtype);
+
+// Whether `erf` computes like the reference on the MPSGraph path.
+//
+// `erf` is the kernel in the explicit GELU form
+// `0.5 * x * (1 + erf(x / sqrt(2)))` rather than the sibling `tanh`'s tanh
+// approximation, and MPSGraph names it directly as `erfWithTensor:`, so the
+// body is the plain one-node unary template.
+//
+// The width decision here differs from the sibling `tanh`'s, and that is the
+// increment: where the tanh node was a coarser approximation of the reference
+// at float32 and had to be declined there, the erf node's error stays close to
+// the reference's. Measured on an M5 against `at::erf` in the operand's own
+// dtype, on a 498299-point probe grid (the 400001-sample dense sweep plus points
+// between grid points over [-9, 9], and their negatives):
+//
+//   * at float16 and bfloat16 the node agrees bit for bit on 498160 and 498290
+//     points respectively, and its largest gap is half a step at 1.0 and
+//     0.0039 of one.
+//   * at float32 it agrees bit for bit on 249310 points, or half of them, and
+//     its largest gap is 4.19 steps at 1.0. The dense sweep alone agrees on
+//     186130 of 400001 with a largest gap of 4.19 steps, so the full probe grid
+//     adds the samples between regular grid points.
+//   * against the exact (float64) curve, on an M5 the node's float32 error
+//     reaches 1.64 steps at 1.0 where the reference's reaches 4.14, and the
+//     node is closer on 63.3% of the points where the two differ. Where the
+//     reference error is above half a step, the node's error can be larger,
+//     but by at most 0.98 of a step on that host. The earlier hosted macos-14
+//     runner ordered the closer points differently and its node's error from
+//     exact reached 4.14 steps; both hosts stay within five steps of at::erf.
+//
+// A "distance of a few float32 steps at 1.0" is larger than "last ulp", but it
+// is a bounded error against a reference that has an error of its own. The
+// node's gap from the reference is bounded on both measured hosts; both are
+// valid erf implementations. A tanh that is ~100x off the exact answer at every
+// scale is the different, coarser failure that declined the sibling. The test
+// pins the host-stable gap and the float32 dispatch rather than either host's
+// share of closer points.
+//
+// The domain's edges are reproduced exactly at all three widths, and unlike
+// `tanh` there is no guard to add: measured, the bare node propagates a NaN at
+// every width where `tanhWithTensor:` saturated it, answers `+-1` at `+-inf`
+// (the bound the body's `1 - 2/(exp(2x)+1)` cousins get wrong), and keeps the
+// sign of a zero -- `erf(-0.0)` is `-0.0` on both the node and the reference, at
+// every width, on this host *and* the earlier `macos-14` CI runner, so it is
+// an invariant rather than the host-dependent reading `tanh`'s signed zero was.
+//
+// One band is host-dependent rather than deleted outright, and it is the same
+// band the siblings recorded: the float16 and bfloat16 *subnormal operand*. The
+// bfloat16 band is the tanh flush read at this node -- all 127 subnormal
+// bfloat16 operands come back a zero like the reference's own rounding does --
+// while float16 differs on 877 of its 1023 positive subnormals, and the
+// reference itself answers zero for 3 of them. The band is worth recording
+// because it is where a *step count* is meaningless, but it is not worth a
+// test: the values involved are all below the width's smallest normal and a
+// model's `erf` operand is a pre-activation, not a denormal. It is measured,
+// and recorded here and in the test module. The result side differs between
+// hosts: the earlier macos-14 CI runner flushed two of the M5's subnormal
+// results.
+//
+// float64 has no MPSGraph element type and an integral or bool operand is
+// promoted by the reference to float32, so both keep the round-trip; measured,
+// `at::erf(torch.arange(1, 4))` returns a float32 tensor.
+bool MpsSupportsErfDtype(at::ScalarType dtype);
 
 // Whether a table read computes exactly on the MPSGraph path: one float width
 // for the table, and an int or long index tensor.
@@ -419,6 +862,12 @@ struct MpsConvParams {
 // list -- every case where the reference's own error message is the right answer
 // and a graph would be the wrong one.
 //
+// A one-dimensional convolution is resolved as the two-dimensional one with a
+// unit height that `convolution2DWithSourceTensor:` serves. aten lists its
+// length-axis padding as `[front]` or `[front, back]`, where every spatial rank
+// above one lists all the fronts and then all the backs; the returned padding
+// is the `[0, front, 0, back]` form the descriptor uses.
+//
 // The output shape is the dilation-aware forward formula; a kernel larger than
 // the padded input falls out of it as a non-positive extent, which is a decline
 // here and the reference's own "Kernel size can't be greater than actual input
@@ -541,6 +990,11 @@ MPSGraphTensor* MpsPowByScalar(
 void MpsKeyAppend(std::string& key, const at::Scalar& value);
 void MpsKeyAppend(std::string& key, at::IntArrayRef value);
 void MpsKeyAppend(std::string& key, int64_t value);
+// A bare host float, for the ops whose schema carries one directly rather than
+// through a Scalar -- `native_layer_norm`'s `eps`. Its own overload rather than a
+// Scalar: `MpsKeyAppend(key, eps)` with a `double` is ambiguous between the
+// int64_t and Scalar overloads, and a `double` is what the schema hands over.
+void MpsKeyAppend(std::string& key, double value);
 void MpsKeyAppend(std::string& key, bool value);
 void MpsKeyAppend(std::string& key, const char* value);
 
@@ -595,6 +1049,37 @@ bool MpsRunGraph(
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
 
+// The multi-result form of MpsRunGraph, for the ops that answer with more than
+// one tensor -- `native_layer_norm` returns (out, mean, rstd) and
+// `native_batch_norm` (out, save_mean, save_var). `outs` is every result in the
+// order the aten schema returns them, and `build` returns that many tensors in
+// the same order; each is flattened to its own `outs[i]` buffer.
+//
+// This is a second entry point rather than a widening of MpsRunGraph because the
+// single-result contract is what almost every body here rests on: `build` has to
+// answer one tensor and the caching allocator's block-reuse reasoning reads one
+// `out`. Keeping that signature untouched means the 23 single-result kernels
+// cannot be handed a plan that writes somewhere they did not describe.
+//
+// The result order is positional, and it is the caller's to get right: MPSGraph
+// does not name the results, so the `i`th tensor `build` returns is flattened to
+// the `i`th entry of `outs` and nothing reconciles the two. Every result must be
+// a non-empty flagos tensor with the operands' dtype, and every result's numel is
+// folded into the key.
+//
+// False on the same conditions as MpsRunGraph -- a nil `build`, a result the
+// runtime does not own, a `build` that declines (nil or a short vector), or a
+// graph that does not compile -- and the caller takes the CPU round-trip. An
+// empty `outs` is false rather than a no-op, because there would be nothing to
+// schedule and no way to tell that from a decline.
+bool MpsRunGraphMulti(
+    const std::string& key,
+    at::TensorList inputs,
+    at::TensorList outs,
+    std::vector<MPSGraphTensor*> (^build)(
+        MPSGraph* graph,
+        NSArray<MPSGraphTensor*>* args));
+
 // `sizes` as an MPSShape. Autoreleased; consume it inside the caller's
 // autorelease pool.
 MPSShape* MpsShapeOf(at::IntArrayRef sizes);
@@ -613,6 +1098,12 @@ MPSGraphTensorData* MpsTensorData(
     size_t byteOffset,
     int64_t count,
     MPSDataType dtype);
+
+// Whether this build and host can describe an MTLBuffer at a nonzero byte
+// offset. False under an SDK older than Xcode 16 or a macOS runtime older than
+// 15; a caller that cannot stage its own asynchronous operands should then take
+// its host fallback.
+bool MpsOffsetTensorDataAvailable();
 
 // The 1-D placeholder matching a MpsTensorData over `count` elements. This is
 // the only shape a buffer-backed tensor is given; `MpsReshape` turns it into the

@@ -14,14 +14,18 @@
 
 # Apple Silicon (MPS) environment for the common build/integration workflow.
 #
-# This platform has no vendor SDK to source, no container to enter, and no vendor
-# index to install from. What remains is a stock macOS runner, a PyPI torch, and
-# the system Metal toolchain, which is exactly what this hook asserts before
-# either stage runs.
+# MPS is the platform this abstraction was not written for, and the differences
+# are all in one direction: there is no vendor SDK to source, no container to
+# enter, and no vendor index to install from. What remains is a stock macOS
+# runner, a PyPI torch, and the system Metal toolchain, which is exactly what
+# this hook asserts before either stage runs.
 #
-# This hook installs no FlagTree or FlagGems build: there is no Metal FlagTree
-# line, and the platform table (cmake/flagos_platforms.json) turns both off for
-# MPS. The native runtime and operator kernels link to Metal directly.
+# There is no FlagTree/FlagGems cohort here and none is installed: PyPI
+# publishes no `triton` wheel for macOS, and there is no Metal FlagTree line, so
+# torch_fl's MPS backend is native PrivateUse1 kernels with no operator-source
+# dependency (see NO_OPERATOR_COHORT in tests/unit/test_ci_version_pins.py and
+# the mps arm of setup.py). The absence is the platform's design, not an
+# omission, so this hook installs none and does not check for any.
 
 # --- Runner, toolchain, and the device ---------------------------------------
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -51,8 +55,9 @@ echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-path)"
 
 # --- Backend selection -------------------------------------------------------
 # Chip selection is FLAGOS_ACCELERATOR's job alone. FLAGOS_BUILD_VENDOR selects
-# this platform's native kernels and defaults ON to match setup.py. MPS has no
-# libtorch_cuda.so to preload.
+# this platform's native kernels and defaults ON to match setup.py; boxing stays
+# off, which is pinned in cmake/flagos_platforms.json for mps rather than left
+# to the environment. MPS has no libtorch_cuda.so to preload.
 export FLAGOS_ACCELERATOR=mps
 export FLAGOS_BUILD_VENDOR="${FLAGOS_BUILD_VENDOR:-1}"
 export FLAGOS_DISABLE_CUDA_ASSETS=1
@@ -81,9 +86,11 @@ export ARCHFLAGS="-arch arm64"
 export _PYTHON_HOST_PLATFORM="macosx-$(sw_vers -productVersion | cut -d. -f1,2)-arm64"
 export CMAKE_OSX_ARCHITECTURES=arm64
 
-# --- Python and build requirements -------------------------------------------
-# The workflow-dispatch test runs on a developer runner too, so this hook is the
-# only place that provisions the macOS toolchain from scratch.
+# --- Isolated Python ---------------------------------------------------------
+# The runner image Python is fine to use directly: unlike the vendor images
+# there is no conflicting vendor torch to keep out, and isolating would only add
+# a venv whose interpreter has to match the one the macOS runner provisions.
+# VENV_ROOT is still honoured so a developer can point this at a local venv.
 BOOTSTRAP_PYTHON="${TORCH_FL_BOOTSTRAP_PYTHON:-}"
 if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
   for candidate in python3.12 python3 python; do
@@ -107,8 +114,13 @@ if ! venv_is_usable; then
   exit 1
 fi
 
-# torch on macOS comes from PyPI without a local version suffix, and the default
-# build includes MPS. Repoint the helper at PyPI, which serves the arm64 wheel.
+# torch on macOS comes from PyPI un-suffixed: there is no `2.10.0+cpu` macosx
+# wheel, and the MPS backend lives in the default build. The Linux index the
+# other hooks point at serves no arm64 macOS wheel at all -- and the shared
+# helper measures that index by default -- so both are repointed at PyPI, whose
+# resolver picks the right macosx arm64 wheel for the local tag. numpy<2 for the
+# same reason the other hooks pin it: 2.x breaks the stock torch C extensions at
+# import.
 CPU_TORCH_INDEX_URL="https://pypi.org/simple"
 CPU_TORCH_MIRROR_INDEX_URL_DEFAULT=""
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
@@ -131,7 +143,11 @@ CPU_TORCH_INDEX_URL="${CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${CPU_TORCH_VERSION_DEFAULT}"
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Test dependencies, including the shared conftest imports.
+  # Test dependencies. transformers is pinned to [4.51, 5) exactly as the other
+  # hooks pin it: 4.51 is where Qwen3 model_type support landed and 5.x has the
+  # TokenizersBackend regression. The MPS lane runs the operator suite and the
+  # runtime traversal rather than the model groups, but the ops conftest imports
+  # the same shared fixtures.
   pip_retry pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
 fi
 
@@ -141,11 +157,12 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 
 # --- Metal buffer wrapper ----------------------------------------------------
+# Select the MetalTools wrapper on systems that provide it. An explicit caller
+# value wins, so the environment check and later steps use the same wrapper.
 METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0
 if [[ -n "${METAL_DEVICE_WRAPPER_TYPE:-}" ]]; then
   METAL_DEVICE_WRAPPER_TYPE_WAS_SET=1
 elif [[ "$(sw_vers -productVersion | cut -d. -f1)" -ge 14 ]]; then
-  # Select the MetalTools wrapper on systems that provide it.
   METAL_DEVICE_WRAPPER_TYPE=1
 else
   METAL_DEVICE_WRAPPER_TYPE=0
@@ -156,6 +173,10 @@ fi
 echo "Metal buffer wrapper: $METAL_DEVICE_WRAPPER_TYPE"
 
 # --- MPS allocator limits ----------------------------------------------------
+# Remove the allocator's optional upper limit so MPS tools can use the host's
+# unified memory. With no upper limit, PyTorch's default low ratio is invalid;
+# keep a finite soft limit below it. The probe below still verifies a real
+# allocation and reports the host's Metal working-set size.
 TORCH_FL_MPS_HIGH_WATERMARK_RATIO=0.0
 TORCH_FL_MPS_LOW_WATERMARK_RATIO=0.5
 
@@ -191,6 +212,8 @@ print(f"MPS low watermark: {low_ratio}")
 print(f"METAL_DEVICE_WRAPPER_TYPE: {os.environ.get('METAL_DEVICE_WRAPPER_TYPE')}")
 
 # Report allocator state in the same process as a failed allocation.
+# torch.mps.synchronize() would start another MPS allocation and can hide the
+# failure that the probe exists to diagnose.
 try:
     tensor = torch.arange(12, dtype=torch.float32, device="mps")
     tensor_cpu = tensor.cpu()
@@ -217,12 +240,13 @@ if command -v system_profiler >/dev/null 2>&1; then
   system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
 fi
 
-if [[ "$CI_STAGE" == "build" ]]; then
-  # Prebuild before the integration job stages the wheel, as the CUDA lane does.
-  build_flagos_inplace
-fi
-
 # --- Export to later workflow steps ------------------------------------------
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   export_ci_env VIRTUAL_ENV PATH PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_DISABLE_CUDA_ASSETS METAL_DEVICE_WRAPPER_TYPE TORCH_FL_MPS_HIGH_WATERMARK_RATIO TORCH_FL_MPS_LOW_WATERMARK_RATIO ARCHFLAGS _PYTHON_HOST_PLATFORM CMAKE_OSX_ARCHITECTURES
+fi
+
+cd "$REPO_ROOT"
+if [[ "$CI_STAGE" == "build" ]]; then
+  # Prebuild before the integration job stages the wheel, as the CUDA lane does.
+  build_flagos_inplace
 fi

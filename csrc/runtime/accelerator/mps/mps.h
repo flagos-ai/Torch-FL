@@ -54,6 +54,9 @@ FLAGOS_EXPORT void* FlagosMPSBufferForPointer(const void* ptr, size_t* byteOffse
 // Returns NULL when no Metal device is present. Borrowed like the buffer above.
 FLAGOS_EXPORT void* FlagosMPSCommandQueue(Stream_t stream);
 
+// The runtime-owned queue behind the default stream, without creating it.
+FLAGOS_EXPORT void* FlagosMPSDefaultCommandQueue(void);
+
 // Records a completion sentinel for a producer that schedules work on the
 // stream's queue without handing back the MTLCommandBuffer it used, which is
 // what MPSGraph's asynchronous runs do.
@@ -70,6 +73,14 @@ FLAGOS_EXPORT void* FlagosMPSCommandQueue(Stream_t stream);
 //
 // A no-op when `stream` has no queue (no Metal device), like the accessor above.
 FLAGOS_EXPORT void FlagosMPSStreamSentinel(Stream_t stream);
+
+// Drain queued work and invoke the caching allocator's exit hook. Called both
+// by the Python atexit path and as the final safety net for a process that
+// imported torch_fl but never drained a queue itself. Idempotent.
+FLAGOS_EXPORT void FlagosMPSDrainAtExit(void);
+
+// Drop the allocator's exit callback before the owning allocator is destroyed.
+FLAGOS_EXPORT void FlagosMPSClearAllocatorShutdown(void);
 
 #ifdef __cplusplus
 } // extern "C"

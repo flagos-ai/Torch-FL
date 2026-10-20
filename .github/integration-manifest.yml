@@ -79,7 +79,8 @@ steps:
   #   require_imports                             modules that must import
   #   torch_musa_shim_only                        the vendor package must not leak
   #   flagtree                                    the FlagTree build, as a nested map
-  #   model_dir                                   MODEL_PATH must be a mount
+  #   model_dir                                   MODEL_PATH must be a mount carrying
+  #                                               a valid config.json model_type
   #
   # The vocabulary is documented on the script, not repeated per platform: what
   # a platform states is a value, and why it states it is in that platform's
@@ -565,9 +566,9 @@ steps:
   # than a vendor image, and the one platform with no operator cohort to route
   # (see NO_OPERATOR_COHORT in tests/unit/test_ci_version_pins.py). It picks up
   # every group above that names no platform -- environment, the shared
-  # contracts and the flaggems pair included -- and adds exactly one of its own.
+  # contracts and the flaggems pair included -- and adds two of its own.
   #
-  # The addition is the backend operator suite, the only place the native
+  # The first addition is the backend operator suite, the only place the native
   # PrivateUse1 MPS kernels are executed at all. It is a new id rather than a
   # `vendor_ops` variant because the vendor groups are file lists composed from
   # a platform's operator cohort and MPS has none; the whole directory is
@@ -579,3 +580,12 @@ steps:
     name: Run {{display_name}} backend operator tests
     platforms: [mps]
     command: python -m pytest tests/integration/ops -m mps -v --tb=short
+
+  # The second addition is the MPS runtime contract: device and stream lookup,
+  # strided copies, events, and the documented limits of backward under the
+  # upstream stream precondition. Running it on an M-series runner exercises
+  # Metal and PyTorch's MPS stream code that an operator-only sweep cannot.
+  - id: mps_runtime
+    name: Run {{display_name}} runtime tests
+    platforms: [mps]
+    command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short

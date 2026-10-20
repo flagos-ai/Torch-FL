@@ -6,13 +6,33 @@
 
 #include <cstdio>
 
-// The non-contract memory-info helper lives with the Metal runtime. Both the
-// runtime sources and this header build into the same wheel, and the helper is
-// an extern "C" symbol in libflagos.so, which torch_fl links; the relative path
-// avoids depending on the include-directory order of the two CMake targets.
+// The Metal runtime's C entry points. The C++ allocator translation unit is not
+// Objective-C++, so the internal header is available only to this small
+// Objective-C++ bridge; its two functions expose the allocator's exit release.
 #include "../../accelerator/mps/mps.h"
 
+extern "C" void FlagosMPSRegisterAllocatorShutdown(
+    void (*release_cache)(void*),
+    void* context);
+
 namespace c10::flagos {
+
+class CachingDeviceAllocator;
+
+class MpsShutdownRegistration final {
+ public:
+  MpsShutdownRegistration() {
+    FlagosMPSRegisterAllocatorShutdown(
+        [](void* allocator) {
+          static_cast<CachingDeviceAllocator*>(allocator)->shutdown();
+        },
+        this);
+  }
+
+  ~MpsShutdownRegistration() {
+    FlagosMPSClearAllocatorShutdown();
+  }
+};
 
 // Apple Silicon (M-series) Metal implementation of DeviceMemoryInterface.
 //
@@ -82,6 +102,9 @@ class MpsDeviceMemory final : public DeviceMemoryInterface {
       override {
     return Memcpy(dst, src, count, kind);
   }
+
+ private:
+  MpsShutdownRegistration shutdown_registration_;
 };
 
 } // namespace c10::flagos

@@ -57,7 +57,7 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
 
 
@@ -406,38 +406,74 @@ class TestEmbeddingCost:
 
     @pytest.mark.anyplatform
     def test_large_table_does_not_scale_with_the_table(self):
-        """A 0.6B-class read is not proportional to the table's size.
+        """A 0.6B-class read is served, ten times over, not round-tripped once.
 
         The fallback this op replaced copied the whole ``(151936, 1024)`` table
         to the host on every call -- 55.8 ms of a 55.3 ms measurement, against
         0.697 ms for the same read performed on the CPU -- so the regression this
         guards against is a *silent* return to that path, which a correctness
-        test cannot see. The bound is deliberately loose: it separates "the read
-        is served on the device" from "the table was copied", not one kernel's
-        tuning from another's.
+        test cannot see: a round-tripped embedding returns the right rows.
+
+        What catches it is the dispatch log rather than the clock. The log line
+        this model's ``--log`` census already relies on (see the dispatch tests
+        above) names the backend this module routed to, and it is emitted once
+        per call, so ten reads that were all served log exactly ten ``-> mps``
+        lines. A timing bound was tried first and is the wrong instrument: it
+        measured 62 ms on CI against 0.7 ms locally *for calls that were being
+        served*, so it fails on a paravirtualized runner for work the log count
+        proves correct, and it would still miss a fallback that was merely fast.
         """
-        import time
+        vocab, hidden = 151936, 1024
+        reads = 10
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+import torch.nn.functional as F
+weight = torch.randn(151936, 1024, device='flagos:0')
+indices = torch.randint(0, 151936, (1, 512), device='flagos:0')
+F.embedding(indices, weight)
+torch_fl._C._synchronize()
+for _ in range(10):
+    F.embedding(indices, weight)
+torch_fl._C._synchronize()
+""",
+        )
+        # The warmup logs too: it is the call a fallback would have answered by
+        # copying the table, so it is counted rather than subtracted.
+        assert served == reads + 1, (
+            f"F.embedding over a {vocab}x{hidden} table logged {served} of "
+            f"{reads + 1} reads onto the mps slot; the whole-table fallback is back"
+        )
 
-        vocab, hidden, seq = 151936, 1024, 512
-        weight = torch.randn(vocab, hidden, device=DEVICE)
-        indices = torch.randint(0, vocab, (1, seq), device=DEVICE)
+    @pytest.mark.anyplatform
+    def test_a_declined_width_stays_inside_the_body(self):
+        """A declined dtype is the body's round trip, not the dispatcher's.
 
-        def run(n):
-            for _ in range(3):
-                F.embedding(indices, weight)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            start = time.perf_counter()
-            for _ in range(n):
-                F.embedding(indices, weight)
-            if hasattr(torch_fl, "synchronize"):
-                torch_fl.synchronize()
-            return (time.perf_counter() - start) / n * 1e3
+        The two are different answers to "why is this read slow". The body's
+        round trip is a temporary the body owns and is the same code path for
+        every platform; a dispatch that never reached the body is the conf or
+        the registration having changed underneath it. Only the second is a
+        regression, and the dispatch log is what tells them apart: the whole-table
+        case above pins the route, and this one pins that a width the gate
+        declines still reaches the body and logs the same single line the served
+        width does.
 
-        per_call = run(10)
-        # The round-trip measured 55-99 ms depending on how the read was driven;
-        # the gather measures well under a millisecond. 10 ms sits far from both.
-        assert per_call < 10.0, (
-            f"F.embedding over a {vocab}x{hidden} table took {per_call:.1f} ms; "
-            "the whole-table fallback is back"
+        float64 is the width to use because the gate declines it for the reason
+        the graph cannot answer at all, so the assertion is independent of any
+        tuning decision about which widths are worth serving.
+        """
+        served = dispatched_to_mps(
+            """
+import torch, torch_fl
+import torch.nn.functional as F
+weight = torch.randn(4096, 128, dtype=torch.float64, device='flagos:0')
+indices = torch.randint(0, 4096, (1, 512), device='flagos:0')
+F.embedding(indices, weight)
+torch_fl._C._synchronize()
+""",
+        )
+        assert served == 1, (
+            "F.embedding over a float64 table logged "
+            f"{served} lines; the body should have been entered once and done "
+            "its own round trip, not been handed elsewhere"
         )

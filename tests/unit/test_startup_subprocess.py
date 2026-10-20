@@ -45,17 +45,27 @@ def _require_torch():
         pytest.skip("PyTorch and a built torch_fl are needed for subprocess tests")
 
 
-def _require_torch_first_supported():
+def _build_accelerator():
     _require_torch()
     spec = importlib.util.find_spec("torch_fl")
     assert spec is not None and spec.origin, "torch_fl package is not installed"
     detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
-    if detector["build_accelerator"]() != "cuda":
+    return detector["build_accelerator"]()
+
+
+def _require_torch_first_supported():
+    if _build_accelerator() != "cuda":
         pytest.skip("Vendor libtorch overlays require torch_fl before torch")
+
+
+def _require_autoload():
+    if _build_accelerator() == "mps":
+        pytest.skip("MPS deliberately leaves bare import torch on the MPS backend")
 
 
 def test_minimal_import_and_explicit_repeated_activation():
     _require_torch()
+    _require_autoload()
     _run(
         """
 import torch_fl
@@ -86,6 +96,7 @@ assert first_status == 'active' or first_status.startswith('failed:'), first_sta
 
 def test_full_profile_activates_framework_hooks_during_import():
     _require_torch()
+    _require_autoload()
     _run(
         """
 import torch_fl
@@ -163,3 +174,63 @@ else:
         "minimal",
         autoload="0",
     )
+
+
+def _require_mps():
+    if _build_accelerator() != "mps":
+        pytest.skip("This check needs an MPS build")
+
+
+def test_mps_minimal_add_runs_clean():
+    """The smallest native MPS op there is: one add, no compiled matmul.
+
+    A fresh process has to reach the device, build a queue and encode one graph
+    without dying. That is the ground the whole backend stands on, and it is
+    the one part of this file that is a contract rather than a probe: it runs
+    on every MPS lane so a bring-up regression fails here, next to the device
+    and queue code, instead of inside an operator suite.
+    """
+    _require_mps()
+    env = os.environ.copy()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch, torch_fl\n"
+            "torch_fl.flagos.init()\n"
+            "dev = torch.device('flagos', 0)\n"
+            "a = torch.randn(4, device=dev)\n"
+            "b = torch.randn(4, device=dev)\n"
+            "assert (a + b).shape == (4,)\n"
+            "torch_fl._C._synchronize()\n",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_mps_allocator_shutdown_survives_persistent_test_tensors():
+    """Leaving test tensors alive must not turn a clean suite into exit 134."""
+    _require_mps()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch, torch_fl\n"
+            "a = torch.arange(12, dtype=torch.float32, device='mps')\n"
+            "b = torch.empty(3, 4, device='flagos')\n"
+            "b.copy_(a.reshape(3, 4))\n"
+            "assert torch.equal(b.cpu(), a.reshape(3, 4).cpu())\n"
+            "raise SystemExit(0)\n",
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -12,6 +12,7 @@
 #include "device_memory_interface.h"
 
 #include <deque>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -42,6 +43,11 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
 
   // Release all unoccupied cached memory back to the device.
   void empty_cache();
+
+  // Finish using the device before Python's atexit handlers begin. Releases
+  // cached blocks while the device runtime is still alive and prevents a late
+  // tensor deleter from allocating a fresh block.
+  void shutdown();
 
   // Record that a block's memory is used on the given stream.
   // This ensures the block won't be reused until the stream completes.
@@ -114,6 +120,7 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
   std::unique_ptr<DeviceMemoryInterface> backend_;
   std::vector<std::unique_ptr<DeviceState>> device_states_;
   std::recursive_mutex device_states_mutex_;
+  std::atomic<bool> shut_down_{false};
 
   // Global pointer to the singleton, used by the static deleter.
   static CachingDeviceAllocator* instance_;

@@ -228,9 +228,18 @@ jobs:
         env:
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+          METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
+          TORCH_FL_MPS_HIGH_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_HIGH_WATERMARK_RATIO }}
+          TORCH_FL_MPS_LOW_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_LOW_WATERMARK_RATIO }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
           export PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+          # Only the MPS hook supplies these. An empty value is invalid, and a
+          # non-MPS platform must retain whatever its upstream image chose.
+          if [[ -n "$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" ]]; then
+            export PYTORCH_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
+            export PYTORCH_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO"
+          fi
           python .github/scripts/run_integration_tests.py
 
       # Preserve failed sessions too; reporting never changes the test verdict.

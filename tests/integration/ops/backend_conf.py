@@ -33,6 +33,10 @@ the test files do not each restate it.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import torch_fl  # noqa: F401  -- importing resolves the conf torch_fl routes by
 
 
@@ -107,6 +111,45 @@ def routed_backend_or_none(op: str) -> str | None:
     """
     backend = _conf_route(op)
     return None if backend == "none" else _LOG_NAME.get(backend, backend)
+
+
+def dispatched_to_mps(source: str) -> int:
+    """How many times ``source`` logged ``-> mps``, run in a fresh interpreter.
+
+    A cost test wants to know that a call was *served* rather than round-tripped,
+    and the dispatch log already answers exactly that: ``LogDispatch`` writes one
+    ``[flagos dispatch] <op> -> <backend>`` line per call, and the backend it
+    names is this platform's conf route for the op. Counting those lines over a
+    loop of calls is a census of where the work went, which no wall clock on a
+    shared or paravirtualized runner can give -- there, a served call can be
+    slower than a fallback is on a laptop, so a timing bound loose enough to
+    pass is too loose to catch the regression it was written for.
+
+    ``source`` runs as a whole program, not an expression, because
+    ``LogEnabled`` latches its environment on first use: the log has to be
+    switched on before ``torch_fl`` is first imported, so it cannot be set from
+    inside the calling process. The program should ``torch_fl._C._synchronize()``
+    after its warmup and again at the end, so a call the fallback answered
+    asynchronously still logs before the count is taken.
+
+    Returns the count; the caller compares it against the number of calls it
+    wrote, because the useful failure is "9 of 10 reads were served", not "the
+    log was empty".
+    """
+    env = os.environ.copy()
+    env["FLAGOS_LOG"] = "dispatch"
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return sum(
+        1
+        for line in result.stderr.splitlines()
+        if line.startswith("[flagos dispatch] ") and line.endswith(" -> mps")
+    )
 
 
 #: conf backend value -> the build-record kernel set whose kernels serve it.
