@@ -59,6 +59,7 @@ paths_watch:
   - tests/integration/test_mps_runtime.py
   - tests/integration/runtime/
   - tests/unit/test_runtime_conformance_report.py
+  - tests/integration/flaggems/flaggems_caps.py
   # These enter through shared PrivateUse1 code rather than an MPS directory.
   - csrc/aten/set_ops.cc
   - tests/integration/test_factory_ops.py

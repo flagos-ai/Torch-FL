@@ -196,6 +196,7 @@ def test_shared_mps_runtime_changes_select_the_mps_lane():
     """The MPS lane runs the shared runtime suite, so its edits reach the lane."""
     for path in (
         "tests/integration/runtime/test_runtime_dispatch_route.py",
+        "tests/integration/flaggems/flaggems_caps.py",
         "tests/unit/test_runtime_conformance_report.py",
     ):
         result, selected = _run(files=path)
