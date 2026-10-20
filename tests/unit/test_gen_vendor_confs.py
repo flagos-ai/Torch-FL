@@ -587,6 +587,12 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     and NATIVE_KERNEL_PREFERRED is what keeps the route on that slot instead
     of subtracting it back to `none`. `_conj_copy.out` is a copy, not a view,
     so `none` serves it on the fallback.
+
+    `view_as_real` is the same view contract one step downstream: FlagGems'
+    complex arithmetic decomposes both operands with `torch.view_as_real`, and
+    with no flagos impl for it the calls warn and return zero-filled storage,
+    which is why `complex128 + 0` read `[0j, 0j]` on u180 while `complex128 * 1`
+    was correct. It moves to the native slot exactly as `_conj` does.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
 
@@ -609,6 +615,7 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "mm",
         "mm.out",
         "slice_backward",
+        "view_as_real",
         "where.self_out",
     )
     for op in gaps:
@@ -622,6 +629,9 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     assert "_conj" in g.EXTRA_NATIVE["iluvatar"]
     assert "iluvatar" in g.NATIVE_KERNEL_PREFERRED
     assert route("_conj") == "iluvatar"
+    # Same contract: a view, answered from register.cc's USE_ILUVATAR arm.
+    assert "view_as_real" in g.EXTRA_NATIVE["iluvatar"]
+    assert route("view_as_real") == "iluvatar"
     for op in (
         "_conj_copy.out",
         "addmm.dtype",

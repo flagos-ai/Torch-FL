@@ -19,6 +19,7 @@
 #include <ATen/core/grad_mode.h>
 #include <ATen/ops/matmul_native.h>
 #include <ATen/ops/_conj_native.h>
+#include <ATen/ops/view_as_real_native.h>
 #include <ATen/SDPBackend.h>
 #include <torch/library.h>
 #include <c10/core/ScalarType.h>
@@ -432,6 +433,17 @@ at::Tensor& FlagosWrapperPrivConjCopyOut(
   out.copy_(at::conj_physical(self));
   return out;
 }
+
+// view_as_real is the other view FlagGems cannot supply here, and it is what
+// flag_gems' complex arithmetic decomposes both operands through. Its route is
+// `none`, and a view cannot take that route: the ViewOp key refuses every view,
+// so the call warned and returned zero-filled storage -- measured on u180,
+// `complex128 + 0` read `[0j, 0j]` while `complex128 * 1` was correct. Answering
+// it from ATen's metadata kernel is what makes that arithmetic exact again, and
+// it is the same contract as _conj above: no kernel, dtype or device.
+at::Tensor FlagosWrapperPrivViewAsReal(const at::Tensor& self) {
+  return at::native::view_as_real(self);
+}
 #endif
 
 bool HasCompatibleShallowCopyType(
@@ -590,6 +602,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // op names carry no CPU fallback to reach instead.
     m.impl("_conj", FlagosWrapperPrivConj);
     m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
+    m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator

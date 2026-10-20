@@ -189,7 +189,16 @@ VENDORS = {
 # while the FlagGems slot would be subtracted as "also a native kernel" and the
 # op would land on `none` again. Both entries are one decision and neither is
 # correct alone.
-EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}, "iluvatar": {"_conj"}}
+#
+# `view_as_real` is the same pair of reasons one step downstream: it is the view
+# FlagGems' complex arithmetic decomposes into (`ops/add.py`), a `none` route
+# refuses it at the ViewOp key like `_conj`, and FlagGems' own route for it is
+# the kernel that is missing (see its entry in NATIVE_TRITON_GAPS). register.cc
+# publishes ATen's metadata kernel for it under the same guard.
+EXTRA_NATIVE = {
+    "ascend": {"matmul", "matmul_backward"},
+    "iluvatar": {"_conj", "view_as_real"},
+}
 
 # Ops a hand-written wrapper claims for every platform, so they appear in no
 # .inc at all. Same cause as EXTRA_NATIVE, different owner:
@@ -1955,20 +1964,36 @@ NATIVE_TRITON_GAPS = {
         # and its values read `(-0.672+0.0085j, ...)`. The test's
         # materialization predicate sees no exception and admits the complex
         # cases, which then fail with nothing to blame the route for.
-        # `_conj_copy.out` has no flagos impl either, so a gap leaves it on
-        # cpu_fallback (an out= copy is not a view, so the fallback serves it).
         #
-        # `_conj` itself left cpu_fallback on 2026-10-21 for a second reason:
-        # cpu_fallback cannot serve a view operator, so on this backend the
-        # `_conj` call raised outright, so every path that resolves a math bit
-        # (`copy_`, `clone`, `contiguous`, `resolve_conj`, arithmetic on a
-        # conjugated tensor) fails rather than returning a wrong value. The gap
-        # still holds the op off the FlagGems kernel above; register.cc's
-        # USE_ILUVATAR arm republishes ATen's metadata-only implementation (the
-        # `alias`/`view` shape) as an unconditional CatchAll wrapper, so the op
-        # never stops at the ViewOp key, where a fallback is refused outright. Because
-        # the op is routed native, it is not a gap and does not appear here: see
-        # EXTRA_NATIVE and NATIVE_KERNEL_PREFERRED, which are that same fix.
+        # `_conj` itself is not a gap: it is a view, and a `none` route reaches
+        # the ViewOp key, which refuses every view ("View operators don't
+        # support falling back to run on the CPU") -- measured on u180 as a raise
+        # that took down every path resolving a Conjugate bit (copy_, clone,
+        # contiguous, resolve_conj, arithmetic). register.cc's USE_ILUVATAR arm
+        # answers it from ATen's metadata kernel instead, so it is routed to the
+        # native slot through EXTRA_NATIVE and NATIVE_KERNEL_PREFERRED -- the
+        # same fix `view_as_real` below gets.
+        #
+        # `_conj_copy.out` stays here because an out= copy is not a view, so the
+        # fallback serves it.
+        "_conj_copy.out",
+        # view_as_real, for the complex arithmetic FlagGems sends through it.
+        # flag_gems' elementwise complex path (`ops/add.py`, and everything that
+        # guards on `is_complex()`) decomposes both operands with
+        # `torch.view_as_real`. Here the op has no flagos impl -- it is a view
+        # and `none` reaches the ViewOp key -- so each call is a UserWarning and
+        # then zero-filled storage at the ill-defined offset C++ chose:
+        # measured on u180, `complex128 + 0` and `complex128 + complex128`
+        # return `[0j, 0j]` while `complex64 + complex64` and `complex128 * 1`
+        # are correct, so the defect is in the view, not in `add`. (A slice of a
+        # complex128 tensor raises "slice: unsupported dtype torch.complex128"
+        # for the same reason: its copy path goes through view_as_real.)
+        # `view_as_real` is a view like the two above, so `none` is not a
+        # fallback either -- it is registered in register.cc's USE_ILUVATAR arm
+        # from ATen's metadata kernel and routed to the native slot, exactly as
+        # `_conj` is. The gap keeps it off the FlagGems route (which is what it
+        # is today) and records why.
+        "view_as_real",
         "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a
         # *tuning* defect rather than a wrong kernel: the fp64 failure is
