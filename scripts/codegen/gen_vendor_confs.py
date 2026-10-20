@@ -1980,19 +1980,22 @@ NATIVE_TRITON_GAPS = {
         # view_as_real, for the complex arithmetic FlagGems sends through it.
         # flag_gems' elementwise complex path (`ops/add.py`, and everything that
         # guards on `is_complex()`) decomposes both operands with
-        # `torch.view_as_real`. Here the op has no flagos impl -- it is a view
-        # and `none` reaches the ViewOp key -- so each call is a UserWarning and
-        # then zero-filled storage at the ill-defined offset C++ chose:
-        # measured on u180, `complex128 + 0` and `complex128 + complex128`
-        # return `[0j, 0j]` while `complex64 + complex64` and `complex128 * 1`
-        # are correct, so the defect is in the view, not in `add`. (A slice of a
-        # complex128 tensor raises "slice: unsupported dtype torch.complex128"
-        # for the same reason: its copy path goes through view_as_real.)
-        # `view_as_real` is a view like the two above, so `none` is not a
-        # fallback either -- it is registered in register.cc's USE_ILUVATAR arm
-        # from ATen's metadata kernel and routed to the native slot, exactly as
-        # `_conj` is. The gap keeps it off the FlagGems route (which is what it
-        # is today) and records why.
+        # `torch.view_as_real`. Here the op had no flagos impl -- it is a view,
+        # and `none` reaches the ViewOp key -- so each call was a UserWarning and
+        # then zero-filled storage. Answering it from ATen's metadata kernel in
+        # register.cc's USE_ILUVATAR arm removes the warning and makes
+        # `view_as_real` itself correct (measured on u180: the real/imag pairs
+        # read back exactly, for f64, f32, complex64 and complex128 sources).
+        #
+        # It does NOT make FlagGems' complex `add` correct. After the view is
+        # fixed, `complex128 + 0`, `complex128 + complex128` and
+        # `complex128 + 1` still return `[0j, ...]` at every size tried (n = 1,
+        # 2, 4, 8) while `complex128 * 1` and every complex64 spelling are
+        # exact; the same `add_func` on a complex64 operand is exact in-process,
+        # so the remaining defect is inside flag_gems' complex add path for
+        # complex128, not in this view. `view_as_real` stays listed here because
+        # that is also the op FlagGems would have to lower to serve a
+        # `flaggems` route, and this platform has no kernel for it.
         "view_as_real",
         "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a

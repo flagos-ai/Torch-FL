@@ -434,13 +434,15 @@ at::Tensor& FlagosWrapperPrivConjCopyOut(
   return out;
 }
 
-// view_as_real is the other view FlagGems cannot supply here, and it is what
-// flag_gems' complex arithmetic decomposes both operands through. Its route is
-// `none`, and a view cannot take that route: the ViewOp key refuses every view,
-// so the call warned and returned zero-filled storage -- measured on u180,
-// `complex128 + 0` read `[0j, 0j]` while `complex128 * 1` was correct. Answering
-// it from ATen's metadata kernel is what makes that arithmetic exact again, and
-// it is the same contract as _conj above: no kernel, dtype or device.
+// view_as_real is the other view FlagGems cannot supply here, and it is the
+// op flag_gems' complex elementwise path decomposes both operands with
+// (flag_gems/ops/add.py). Its route was `none`, which a view cannot take: the
+// ViewOp key refuses every view, so the call warned and returned zero-filled
+// storage. Measured on u180, `torch.view_as_real` read back exactly once
+// answered from ATen here, for f64, f32, complex64 and complex128 sources --
+// while `complex128 + 0` still returned zeros, which is flag_gems' complex add
+// path and not this view (see the view_as_real entry in NATIVE_TRITON_GAPS).
+// Same contract as _conj above: metadata only, no kernel, dtype or device.
 at::Tensor FlagosWrapperPrivViewAsReal(const at::Tensor& self) {
   return at::native::view_as_real(self);
 }
