@@ -246,7 +246,8 @@ pip_retry() {
     # networks: the FlagTree wheel is hundreds of MB, and pip's default timeout
     # (15s) and retries (5) are not enough when the mirror link drops
     # mid-download.
-    if "$python_exe" -m pip install --retries 10 --timeout "$timeout" "${extra[@]}" "$@" 2>&1 | tee "$log_file"; then
+    if "$python_exe" -m pip install --retries 10 --timeout "$timeout" \
+      ${extra[@]+"${extra[@]}"} "$@" 2>&1 | tee "$log_file"; then
       break
     fi
     if pip_error_is_permanent "$log_file"; then

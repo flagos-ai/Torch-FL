@@ -34,15 +34,6 @@ def shell_function(name, script=SCRIPT):
     return script[start:end]
 
 
-def _bash_major():
-    out = subprocess.run(
-        ["bash", "-c", "echo ${BASH_VERSINFO[0]}"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return int(out) if out.isdigit() else 0
-
-
 def run_shell(body, *, cwd=None, **environment):
     env = os.environ.copy()
     env.update(PYTHONPATH="", PYTHONNOUSERSITE="1")
@@ -355,15 +346,8 @@ def test_cpu_torch_probe_requires_the_pinned_cpu_build(tmp_path, version, cuda, 
 
 @pytest.mark.parametrize("cache", ["0", "1"])
 def test_shared_pip_retry_honors_musa_cache_setting(tmp_path, cache):
-    # With caching on, the no-cache flag is absent and `extra` is empty; bash
-    # 3.2 (macOS `/bin/bash`) reports `"${extra[@]}"` on an empty array as an
-    # unbound variable under `set -u`, which makes the retry loop spin. The
-    # runners use bash 5, where an empty array expands to nothing -- this guards
-    # the developer laptop, not CI, and only the empty-array case needs it.
-    if cache == "0" and _bash_major() < 4:
-        pytest.skip(
-            "bash 3 expands an empty array under set -u; the runner runs bash 5"
-        )
+    # With caching on, the no-cache flag is absent and `extra` is empty. macOS
+    # `/bin/bash` 3.2 needs the alternate expansion so that `set -u` accepts it.
     recorder = tmp_path / "python"
     recorder.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
     recorder.chmod(0o755)
