@@ -395,27 +395,35 @@ static std::tuple<at::Tensor, at::Tensor> WrapperMatmulBackward(
 
 #if defined(USE_ILUVATAR)
 // _conj is the lazy-view half of aten::conj: an alias of self carrying the
-// Conjugate bit, storage untouched. csrc/aten/strided_ops.cc registers ATen's
-// metadata implementation through the FlagGems dispatcher, which only helps
-// the vendors whose conf routes it to `flaggems`; iluvatar's conf routes it to
-// `none` (FlagGems' `_conj` is an eager kernel), and a `none` view op is served
-// by the ViewOp fallback -- which ATen refuses for every view, since storage
-// cannot be shared across devices: "aten::_conj ... appears to be a view
-// operator, but it has no implementation ... View operators don't support
-// falling back to run on the CPU". The raised call then takes down every path
-// that resolves a math bit
-// (copy_, clone, contiguous, resolve_conj, arithmetic on a conjugated tensor),
-// which is what tests/integration/test_math_bits_contract.py measures.
+// Conjugate bit, storage untouched. csrc/aten/strided_ops.cc implements it
+// through the GENERATED FlagGems dispatcher, which only answers a `flaggems`
+// route; iluvatar's conf routes `_conj` to `iluvatar` (FlagGems' `_conj` is an
+// eager kernel), so that slot is unpopulated and the call raised "backend not
+// registered". Answer it here, the way the conf says it runs.
 //
-// The CatchAll key receives the call before ViewOp does, so answering it here
-// with the same metadata kernel is enough, and needs no kernel, no dtype and no
-// device: it is unconditional on the build, like the conv fallbacks above. The
-// op stays out of backends_iluvatar.conf's FlagGems routes (NATIVE_TRITON_GAPS)
-// because FlagGems' `_conj` is an eager kernel, and out of the native .inc
-// because that subset is compiled only under FLAGOS_ILUVATAR_KERNEL, while a
-// FlagGems-only build needs this answer too.
+// `_conj` is metadata only -- no kernel, dtype or device -- so it is a CatchAll
+// `m.impl`: that key receives the call before the ViewOp fallback does, which
+// ATen refuses for every view because storage cannot be shared with the CPU
+// ("aten::_conj appears to be a view operator, but it has no implementation").
+// Without it every path that resolves a Conjugate bit (copy_, clone,
+// contiguous, resolve_conj, arithmetic) fails, which is what
+// tests/integration/test_math_bits_contract.py measures.
+//
+// `_conj_copy.out` is the materializing half of the same pair and keeps the
+// `none` route with the other out= copies: `at::conj_physical` writes the same
+// bytes with the bit cleared. It is registered here rather than left to the
+// shared cpu_fallback so that the view and its materialization are answered by
+// one platform, so a fallback contract change cannot split them. Both stay out
+// of the FLAGOS_ILUVATAR_KERNEL-gated native .inc because a FlagGems-only
+// build needs this answer too.
 at::Tensor FlagosWrapperPrivConj(const at::Tensor& self) {
   return at::native::_conj(self);
+}
+
+at::Tensor& FlagosWrapperPrivConjCopyOut(
+    const at::Tensor& self, at::Tensor& out) {
+  out.copy_(at::conj_physical(self));
+  return out;
 }
 #endif
 
@@ -571,9 +579,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("convolution_backward_overrideable",
         FlagosWrapperConvolutionBackwardOverrideable);
     #if defined(USE_ILUVATAR)
-    // See FlagosWrapperPrivConj: cpu_fallback refuses view operators, and the
-    // conf routes this one to `none`.
+    // See FlagosWrapperPrivConj above.
     m.impl("_conj", FlagosWrapperPrivConj);
+    m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
     #endif
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
