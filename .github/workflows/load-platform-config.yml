@@ -242,8 +242,12 @@ jobs:
             echo "::error::setup_stage in $CONFIG_FILE must be 'build' or 'integration', found: $SETUP_STAGE"
             exit 1
           fi
-          if [[ -z "$CI_IMAGE" || "$CI_IMAGE" == "null" ]]; then
-            echo "::error::ci_image is required in $CONFIG_FILE"
+          # Required to be stated and to be a string. An empty string tells
+          # consuming workflows to run directly on the runner, as MPS must on
+          # macOS. A null value means a missing image, while a non-string value
+          # cannot be passed to the container expression.
+          if [[ "$CI_IMAGE" == "null" || "$(yq -r '.ci_image | type' "$CONFIG_FILE")" != '!!str' ]]; then
+            echo "::error::ci_image must be a string in $CONFIG_FILE (empty means no container)"
             exit 1
           fi
           if [[ ! "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]]; then

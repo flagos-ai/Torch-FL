@@ -77,10 +77,9 @@ jobs:
     name: Build wheel (${{ inputs.display_name }})
     runs-on: ${{ fromJson(inputs.runs_on) }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
-    container:
-      image: ${{ inputs.image }}
-      volumes: ${{ fromJson(inputs.container_volumes) }}
-      options: ${{ inputs.container_options }}
+    # A platform without a `ci_image` builds directly on its runner. MPS needs
+    # a macOS host with its Metal GPU, and macOS jobs cannot use containers.
+    container: ${{ inputs.image && fromJson(format('{{"image":"{0}","volumes":{1},"options":"{2}"}}', inputs.image, inputs.container_volumes, inputs.container_options)) || null }}
     defaults:
       run:
         shell: bash

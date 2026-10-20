@@ -164,3 +164,108 @@ def test_required_gate_rejects_skipped_shared_checks(name):
     )
     assert process.returncode == 1
     assert f"{name}: skipped" in process.stdout
+
+
+def _container_expression(name):
+    job = next(j for j in _workflow(name)["jobs"].values() if "steps" in j)
+    return job["container"]
+
+
+@pytest.mark.parametrize("name", ["build-wheel-common.yml", "integration-tests.yml"])
+def test_the_container_is_empty_when_the_config_names_no_image(name):
+    """A platform that uses the runner's own accelerator needs no container.
+
+    `container:` is a job field, not a step, and it cannot use `if:`. The
+    expression supplies the vendor image when the config has one and `null`
+    otherwise, which omits the field on a macOS runner.
+    """
+    expression = _container_expression(name)
+    assert isinstance(expression, str), expression
+    assert expression.startswith("${{")
+    assert "fromJson(format(" in expression
+    assert " && " in expression and " || null }}" in expression
+    assert expression.count("container_volumes") == 1
+    assert expression.count("container_options") == 1
+
+
+def test_the_one_platform_without_a_container_is_mps():
+    """An empty image is allowed only for MPS.
+
+    A vendor config that lost its image would otherwise run outside its prepared
+    container and fail on missing runtime dependencies.
+    """
+    empty = []
+    for platform in PLATFORMS:
+        config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
+        assert "ci_image" in config, platform
+        assert isinstance(config["ci_image"], str), platform
+        if config["ci_image"] == "":
+            empty.append(platform)
+    assert empty == ["mps"]
+
+
+def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(tmp_path):
+    """The empty string passes through; null and non-strings do not."""
+    text = (WORKFLOWS / "load-platform-config.yml").read_text(encoding="utf-8")
+    assert '-z "$CI_IMAGE"' not in text
+    assert ".ci_image | type" in text and "!!str" in text
+    condition = next(
+        line.strip()
+        for line in text.splitlines()
+        if line.lstrip().startswith('if [[ "$CI_IMAGE" == "null"')
+    )
+    script = "\n".join(
+        [
+            "CI_IMAGE=$(yq -r '.ci_image' \"$CONFIG_FILE\")",
+            f"{condition}",
+            "  exit 1",
+            "fi",
+        ]
+    )
+    script_directory = tmp_path / "stub-bin"
+    script_directory.mkdir()
+    stub_yq = script_directory / "yq"
+    stub_yq.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, yaml\n"
+        "expression = sys.argv[-2]\n"
+        "key = expression.split()[0].removeprefix('.')\n"
+        "path = os.environ['CONFIG_FILE']\n"
+        "value = yaml.safe_load(open(path))[key]\n"
+        "if expression.endswith('| type'):\n"
+        "    print({str: '!!str', int: '!!int'}.get(type(value), '!!null' if value is None else '!!other'))\n"
+        "elif expression == '.ci_image':\n"
+        "    print('null' if value is None else value)\n"
+        "else:\n"
+        "    raise SystemExit(f'unsupported expression: {expression}')\n",
+        encoding="utf-8",
+    )
+    stub_yq.chmod(0o755)
+    for image, accepted in (
+        ('""', True),
+        ('"vendor/image"', True),
+        ("null", False),
+        ("42", False),
+    ):
+        config = tmp_path / "platform.yml"
+        config.write_text(f"ci_image: {image}\n", encoding="utf-8")
+        env = dict(
+            os.environ,
+            CONFIG_FILE=str(config),
+            PATH=f"{script_directory}:{os.environ['PATH']}",
+        )
+        run = subprocess.run(
+            ["bash", "-e", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert (run.returncode == 0) is accepted, (image, run.stdout, run.stderr)
+
+
+def test_mps_is_locked_to_the_standard_hosted_apple_silicon_runner():
+    """Pin the label with an Apple Silicon host without a paid larger runner."""
+    config = yaml.safe_load((CONFIGS / "mps.yml").read_text(encoding="utf-8"))
+    assert config["runner_labels"] == ["macos-15"]
+    assert config["ci_image"] == ""
+    assert config["environment_check"]["flagos_devices"] == {"at_least": 1}

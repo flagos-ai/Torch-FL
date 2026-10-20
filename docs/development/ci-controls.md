@@ -18,7 +18,7 @@ controls.
 
 Routing labels take precedence over file filtering. Adding or removing labels
 reruns PR CI. Supported platform names are `ascend`, `cuda`, `dcu`, `gcu`,
-`kunlunxin`, `metax`, `musa` and `ppu`.
+`kunlunxin`, `metax`, `mps`, `musa` and `ppu`.
 
 Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,
 directory prefixes ending in `/`, or shell-style globs. Its own configuration
