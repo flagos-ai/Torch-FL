@@ -39,6 +39,7 @@ PLATFORMS = [
     "ascend",
     "dcu",
     "gcu",
+    "iluvatar",
     "kunlunxin",
     "metax",
     "mps",

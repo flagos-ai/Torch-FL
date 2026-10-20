@@ -22,7 +22,7 @@ on:
   schedule:
     - cron: '0 18 * * *'   # 02:00 CST daily
   push:
-    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa]
+    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa, iluvatar_build_and_test]
   pull_request:
     branches: [main, dev, devops, dev-hygon]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]

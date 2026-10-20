@@ -219,8 +219,8 @@
         "all disabled. vendor_torch_libraries is false accordingly: nothing in",
         "the build sources a vendor libtorch.",
         "The wheel carries a local version segment (corex4.5.0) but no pypi_lane:",
-        "there is no self-hosted iluvatar CI runner yet, so the platform builds",
-        "and installs locally without being published."
+        "the self-hosted CI lane builds and tests the wheel without publishing",
+        "it to a package index."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "iluvatar",

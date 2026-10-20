@@ -120,6 +120,8 @@ jobs:
             tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_import_phase_order.py \
+            tests/unit/test_iluvatar_env_script.py \
+            tests/unit/test_iluvatar_cpu_runtime.py \
             tests/unit/test_integration_manifest.py \
             tests/unit/test_integration_workdir.py \
             tests/unit/test_musa_ci_manifest.py \

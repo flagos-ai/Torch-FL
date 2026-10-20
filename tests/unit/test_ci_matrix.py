@@ -129,6 +129,17 @@ def test_shared_cuda_runtime_selects_all_consumers():
     ]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "csrc/runtime/accelerator/iluvatar/device.cc",
+        "csrc/runtime/allocator/backends/iluvatar_memory.h",
+    ],
+)
+def test_independent_iluvatar_runtime_selects_only_iluvatar(path):
+    assert _run(files=path)[1] == ["iluvatar"]
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_runtime_watch_paths_cover_the_build_tables_actual_source_directory(platform):
     table = json.loads((ROOT / "cmake/flagos_platforms.json").read_text())

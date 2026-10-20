@@ -37,7 +37,7 @@ SCRIPTS_DIR = REPO_ROOT / ".github" / "scripts"
 PINS = REPO_ROOT / ".github" / "version-pins.env"
 PLATFORM_TABLE = REPO_ROOT / "cmake" / "flagos_platforms.json"
 
-PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "metax", "musa", "ppu"]
+PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "iluvatar", "metax", "musa", "ppu"]
 RUNNER = SCRIPTS_DIR / "set_env.sh"
 HOOKS_DIR = SCRIPTS_DIR / "hooks"
 

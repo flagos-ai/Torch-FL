@@ -44,6 +44,53 @@ def _load_setup(monkeypatch):
     return namespace, kwargs
 
 
+def test_iluvatar_native_build_uses_active_cpu_torch(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
+    # A legacy image variable must not redirect the native build to vendor torch.
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(tmp_path / "vendor/lib"))
+    cpu_root = tmp_path / "venv/torch"
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            __file__=str(cpu_root / "__init__.py"),
+            _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+        ),
+    )
+    namespace, _ = _load_setup(monkeypatch)
+    assert namespace["get_pytorch_dir"]() == str(cpu_root)
+    assert namespace["_torch_cxx11_abi"]() == "1"
+
+
+def test_iluvatar_manifest_records_official_cpu_runtime(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    """Describe Iluvatar defaults without inheriting another runner's switches."""
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
+    namespace, _ = _load_setup(monkeypatch)
+    root = tmp_path / "src"
+    (root / "torch_fl").mkdir(parents=True)
+    monkeypatch.setitem(
+        namespace["_write_compatibility_manifest"].__globals__, "BASE_DIR", str(root)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True)),
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "2.10.0+cpu" if name == "torch" else None,
+    )
+    namespace["_write_compatibility_manifest"]("2.10.0+corex4.5.0")
+    manifest = json.loads((root / "torch_fl/compatibility.json").read_text())
+    assert manifest["build"]["distributions"]["torch"] == "2.10.0+cpu"
+    assert manifest["build"]["torch_cxx11_abi"] is True
+    assert manifest["build"]["bundle_libdir"] == "lib"
+    assert manifest["build"]["vendor_torch_libraries"] is False
+
+
 @pytest.fixture
 def clean_kernel_env(monkeypatch):
     """No build switch inherited from the ambient environment."""
