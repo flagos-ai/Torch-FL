@@ -170,6 +170,7 @@ def test_mps_hook_selects_the_host_macos_toolchain():
     assert "export FLAGOS_ACCELERATOR=mps" in hook
     assert "export FLAGOS_DISABLE_CUDA_ASSETS=1" in hook
     assert 'CPU_TORCH_INDEX_URL="https://pypi.org/simple"' in hook
+    assert 'export PYTHONNOUSERSITE=1\nexport PYTHONPATH=""' in hook
 
 
 def test_mps_hook_installs_the_wheel_build_dependencies():

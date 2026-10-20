@@ -137,10 +137,8 @@ fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
-if ! persist_python_import_isolation; then
-  echo "::error::Failed to persist the isolated MPS Python environment" >&2
-  exit 1
-fi
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
 
 # --- Metal buffer wrapper ----------------------------------------------------
 METAL_DEVICE_WRAPPER_TYPE_WAS_SET=0
