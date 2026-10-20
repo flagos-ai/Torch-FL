@@ -36,7 +36,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import route_is_served, routed_backend
+from backend_conf import route_is_served, routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -156,7 +156,7 @@ class TestMulTensorDispatch:
         if not route_is_served("mul.Tensor"):
             pytest.skip(
                 f"the conf routes mul.Tensor to "
-                f"{routed_backend('mul.Tensor')}, a backend this wheel did not "
+                f"{routed_backend_or_none('mul.Tensor')}, a backend this wheel did not "
                 "compile (see KERNELS in torch_fl/_build_config.py): the op is "
                 "not claimed on PrivateUse1, so no override can reach it and no "
                 "dispatch is logged"
@@ -185,11 +185,17 @@ class TestMulTensorDispatch:
         ``cuda`` route is never claimed on PrivateUse1, reaches cpu_fallback and
         logs nothing -- the assertion has nothing to hold on. Same build-driven
         skip as ``sum.dim_IntList`` and ``cat`` in this directory.
+
+        A conf that lists ``mul.Tensor`` as ``none`` (iluvatar: no vendor kernel
+        for this overload and FlagGems has none either) takes the same skip:
+        nothing logs, so nothing is asserted. The skip message is built from
+        ``routed_backend_or_none`` for that reason -- ``routed_backend`` refuses
+        a ``none`` route by design and would turn the skip into a failure.
         """
         if not route_is_served("mul.Tensor"):
             pytest.skip(
                 f"the conf routes mul.Tensor to "
-                f"{routed_backend('mul.Tensor')}, a backend this wheel did not "
+                f"{routed_backend_or_none('mul.Tensor')}, a backend this wheel did not "
                 "compile (see KERNELS in torch_fl/_build_config.py): the call "
                 "reaches cpu_fallback and logs no dispatch"
             )
