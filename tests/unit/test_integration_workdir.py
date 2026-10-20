@@ -623,12 +623,6 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "exclusion on the same terms (it would also self-skip: no job builds "
         "the TileOPs kernel set)"
     ),
-    "tests/integration/test_mps_runtime.py": (
-        "carries the `mps` marker, while the MPS CI lane runs the shared "
-        "hardware-agnostic runtime suite that covers the same device, stream, "
-        "event and memory contracts. Accepted exclusion from the marker sweeps "
-        "so the hosted macOS runner does not duplicate them"
-    ),
 }
 
 
