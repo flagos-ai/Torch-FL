@@ -1,0 +1,100 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Automated AI review, serving as one of the two required approvals on main.
+#
+# This runs on pull_request_target on purpose: the job needs a write token to
+# submit a review, and pull_request_target grants it without ever checking out
+# or executing the pull request's code. Only the base revision of this script is
+# checked out, and the diff is read back through the API, so a malicious PR
+# cannot reach the shell.
+#
+# The review is submitted with a machine user's token, not github.token.
+# GitHub refuses to count an approval made with the Actions token towards
+# required approvals, so the workflow token could comment but never satisfy the
+# merge requirement. See .github/scripts/ci/ai_reviewer.py for the reasoning.
+#
+# Required configuration (repository secrets and variables):
+#   secret  AI_REVIEW_API_KEY     provider API key
+#   secret  AI_REVIEWER_TOKEN     a fine-grained PAT of the reviewer account,
+#                                 with "Pull requests: write" on this repository
+#   var     AI_REVIEW_PROVIDER    anthropic (default) or openai
+#   var     AI_REVIEW_MODEL       model id
+#   var     AI_REVIEW_API_BASE    optional API base URL override
+#   var     AI_REVIEWER_LOGIN     the reviewer account's login
+
+name: AI review
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request number to review'
+        required: true
+        type: string
+
+# contents: read is all the Actions token needs: the review is submitted with
+# the machine user's token (GH_TOKEN), never github.token. Keep this minimal so
+# the workflow token cannot write even if the script misbehaved.
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: AI reviewer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.pull_request.draft != true
+    steps:
+      # The trusted control script only: this revision is the base branch, not
+      # the pull request, even though the event is pull_request_target.
+      - name: Checkout review tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/ci
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # GH_TOKEN is deliberately the machine user's token with no fallback to
+      # github.token. An approval made with the Actions token does not count
+      # towards required approvals, so falling back would let the job post a
+      # review that looks like an approval and silently fails to satisfy branch
+      # protection. Empty is better: the script warns and skips.
+      - name: Run the AI reviewer
+        env:
+          GH_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
+          AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_REVIEW_API_BASE: ${{ vars.AI_REVIEW_API_BASE }}
+          AI_REVIEWER_LOGIN: ${{ vars.AI_REVIEWER_LOGIN }}
+          AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+        run: |
+          python .github/scripts/ci/ai_reviewer.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --pr "${{ github.event.pull_request.number || inputs.pr_number }}"
