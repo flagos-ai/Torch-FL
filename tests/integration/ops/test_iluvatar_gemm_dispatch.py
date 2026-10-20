@@ -48,12 +48,14 @@ SHAPES = [
 
 
 def _assert_matches_cpu(op, actual, reference):
+    # Both tensors in the message: a wrong element is the only evidence the CI
+    # artifact carries, and assert_close's own report goes to the summary.
     torch.testing.assert_close(
         actual.float().cpu(),
         reference.float(),
         rtol=1e-2,
         atol=1e-2,
-        msg=f"{op} on {DEVICE} differs from the CPU result",
+        msg=f"{op} on {DEVICE}: actual={actual} reference={reference}",
     )
 
 
