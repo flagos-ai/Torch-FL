@@ -29,6 +29,17 @@ import torch
 from torch_fl._build_config import ACCELERATOR
 
 
+# Compiled-vs-eager tolerance for this device. TsingMicro's FlagGems matmul
+# accumulates at reduced precision (TF32-like): a compiled `nn.Linear`
+# schedules `mm` + a bias add, while eager hits `addmm`, which is exact here.
+# Comparing the two at CUDA's 1e-4 reports that ~1e-3 relative difference as a
+# failure on the one platform that runs this file natively. The measurement is
+# recorded in the TsingMicro section below; use the same device tolerance for
+# the shared tests rather than narrowing what they assert.
+COMPILE_RTOL = 1e-3 if ACCELERATOR == "tsingmicro" else 1e-4
+COMPILE_ATOL = 1e-2 if ACCELERATOR == "tsingmicro" else 1e-4
+
+
 # Skip all tests if torch.compile not available (torch < 2.0)
 try:
     import torch._dynamo
@@ -132,7 +143,9 @@ def test_basic_compile(device):
 
     # Compare with eager mode
     eager_output = model(x)
-    torch.testing.assert_close(output, eager_output, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        output, eager_output, rtol=COMPILE_RTOL, atol=COMPILE_ATOL
+    )
 
 
 def test_compile_vs_eager_correctness(device):
@@ -172,7 +185,9 @@ def test_compile_with_max_autotune(device):
     eager_output = model(x)
 
     assert_on_flagos(output)
-    torch.testing.assert_close(output, eager_output, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        output, eager_output, rtol=COMPILE_RTOL, atol=COMPILE_ATOL
+    )
 
 
 @pytest.mark.skipif(
@@ -377,8 +392,11 @@ def test_compile_dtypes(device, dtype):
 
     eager_output = model(x)
     # Float16 has lower precision
-    rtol = 1e-2 if dtype == torch.float16 else 1e-4
-    torch.testing.assert_close(output, eager_output, rtol=rtol, atol=rtol)
+    if dtype == torch.float16:
+        rtol = atol = 1e-2
+    else:
+        rtol, atol = COMPILE_RTOL, COMPILE_ATOL
+    torch.testing.assert_close(output, eager_output, rtol=rtol, atol=atol)
 
 
 def test_compile_recompile(device):
