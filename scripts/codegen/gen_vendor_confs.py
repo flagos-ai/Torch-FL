@@ -1873,6 +1873,26 @@ NATIVE_TRITON_GAPS = {
     # ordering is unspecified), `linalg_lstsq` (metadata shape), `_softmax_backward_data`
     # / `_log_softmax_backward_data` (device returns int8 -- needs one targeted
     # probe before gapping) and `unique_dim` (return-metadata).
+    #
+    # Added 2026-10-20: `mean` and `mean.dim` are gapped on a value defect the
+    # CI lane reproduces (issue #570). For a non-last-dim keepdim reduction the
+    # generic mean kernel returns wrong values -- `torch.mean(x, dim=0,
+    # keepdim=True)` on an (8, 12) fp32 tensor disagrees with the CPU reference
+    # far beyond 1e-4 -- and `mean_dim` (last dim) is served by the same kernel
+    # family, so both spellings leave the FlagGems path. `_iluvatar` ships no
+    # `mean` override, so this is the generic kernel, not a vendor one. The
+    # The generic mean kernel is wrong on this device, so until a BI-V150
+    # measurement says otherwise the op does not stay on the FlagGems path.
+    # Remove the two entries when a FlagGems mean is measured correct here.
+    #
+    # `mm.out`, not `mm`: the fp64 failure (issue #570) is `matmul_prob` ->
+    # `mm` -> the `_iluvatar` mm.py libtuner, whose `estimate_matmul_time`
+    # perf model raises "dtype not supported" for float64. It is a *tuning*
+    # defect, so it must not move the route: `mm` and the float64 4x4 GEMM it
+    # serves stay on FlagGems. What leaves the FlagGems route is `mm.out`,
+    # the single other spelling of the op, so the fp64 case reaches the native
+    # libtuner rather than the broken FlagGems one, and every non-out `mm`
+    # caller (including `matmul`) keeps its measured FlagGems route.
     "iluvatar": {
         # device-guard mismatch (cuda vs flagos)
         "i0",
@@ -1898,6 +1918,10 @@ NATIVE_TRITON_GAPS = {
         "special_chebyshev_polynomial_v",
         "special_hermite_polynomial_h",
         "special_shifted_chebyshev_polynomial_u",
+        "mean",
+        "mean.dim",
+        # fp64: the mm tuning perf model rejects float64 (issue #570)
+        "mm.out",
         # Triton compile / structural defects
         "norm.Scalar",
         "norm.ScalarOpt_dim",

@@ -24,6 +24,11 @@
 // the old FAILED count, and no op newly failed between the runs. The remaining 21
 // are survey synthesis limits and stay here.
 //
+// 2026-10-20: `mean`, `mean.dim` and `mm.out` joined the gap set from the CI
+// lane's own measurements rather than a survey run (issue #570) -- the keepdim
+// mean returns wrong values, and the mm tuning perf model rejects float64 -- so
+// the list is now 40 and this file registers 600.
+//
 // Re-measure and move entries in or out of that set only from BI-V150 results,
 // never by assumption -- and note the DCU precedent: most of the 37 are the
 // device-name mismatch that _ALIGNED_VENDORS
@@ -38,6 +43,9 @@
 //   - i0.out
 //   - linalg_matrix_exp.out
 //   - masked_scatter_backward
+//   - mean
+//   - mean.dim
+//   - mm.out
 //   - mse_loss_backward
 //   - nansum.out
 //   - native_batch_norm
@@ -68,7 +76,7 @@
 //   - unique_consecutive
 //   - upsample_bicubic2d
 //
-// Total: 603 ops registered here, 1 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 600 ops registered here, 1 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -467,8 +475,6 @@
   m.impl("max_pool3d_with_indices", WrapperMaxPool3dWithIndices);
   m.impl("max_pool3d_with_indices_backward", WrapperMaxPool3dWithIndicesBackward);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
-  m.impl("mean", WrapperMean);
-  m.impl("mean.dim", WrapperMeanDim);
   m.impl("median", WrapperMedian);
   m.impl("median.dim", WrapperMedianDim);
   m.impl("min", WrapperMin);
@@ -478,7 +484,6 @@
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
   m.impl("mm", WrapperMm);
-  m.impl("mm.out", WrapperMmOut);
   m.impl("mode", WrapperMode);
   m.impl("mse_loss", WrapperMseLoss);
   m.impl("multinomial", WrapperMultinomial);

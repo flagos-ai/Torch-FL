@@ -166,6 +166,11 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "cuda": 392,
     "dcu": 454,
     "gcu": 251,
+    # The iluvatar lane's first landing: the conf routes 600 ops to FlagGems,
+    # three to the native ixdnn/ixblas slot and the rest to `none`. Recorded
+    # because the lane runs this suite on the platform and the count is what
+    # the conf states -- it is not an on-device measurement yet.
+    "iluvatar": 600,
     "kunlunxin": 0,
     "metax": 594,
     "mps": 0,
@@ -186,6 +191,10 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "cuda": None,
     "dcu": "flaggems",
     "gcu": "none",
+    # The same `none` the other FlagGems-primary non-boxing platforms record:
+    # the composite reaches the privateuseone kernel on every platform, and on
+    # this conf it has no FlagGems route to branch to.
+    "iluvatar": "none",
     "kunlunxin": "none",
     "metax": "flaggems",
     "mps": "none",
