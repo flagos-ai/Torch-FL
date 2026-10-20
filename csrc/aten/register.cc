@@ -256,7 +256,16 @@ int64_t WrapperFusedSdpChoice(
 // list, which names no conv). The three had byte-identical copies of this; one
 // definition is the same code with one less place to drift. A vendor that later
 // gains a native conv should register that instead, not fork this.
-#if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO)
+//
+// Iluvatar joins for the backward only. Its `convolution_overrideable` is
+// FlagGems-claimed, its forward reaches ixdnn, and nothing claims
+// `convolution_backward_overrideable` -- no native backward exists in
+// codegen_iluvatar.py -- so the backward of every conv hit
+// "NotImplementedError" (measured 2026-10-20 on the CI lane,
+// test_conv1d_dispatch.py::TestConv1dBackward). The USE_ILUVATAR arm registers
+// the backward wrapper below and deliberately not the forward one.
+#if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO) || \
+    defined(USE_ILUVATAR)
 at::Tensor FlagosWrapperConvolutionOverrideable(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -326,7 +335,7 @@ FlagosWrapperConvolutionBackwardOverrideable(
       to_dev(::std::get<1>(out)),
       to_dev(::std::get<2>(out)));
 }
-#endif // USE_BPU || USE_KUNLUNXIN || USE_TSINGMICRO
+#endif // USE_BPU || USE_KUNLUNXIN || USE_TSINGMICRO || USE_ILUVATAR
 
 // ============================================================
 // Generated wrappers for 71 CUDA operators
@@ -527,6 +536,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
     #include "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
     #endif
+    // No convolution backward exists on this platform and the boxed fallback
+    // cannot reach one (see the shared wrapper above), so every conv backward
+    // takes the CPU crossing. Unconditional: the wrapper needs no vendor or
+    // FlagGems kernel. Only the backward -- the forward keeps its FlagGems /
+    // ixdnn routes.
+    m.impl("convolution_backward_overrideable",
+        FlagosWrapperConvolutionBackwardOverrideable);
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator

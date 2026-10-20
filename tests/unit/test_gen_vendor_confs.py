@@ -561,10 +561,13 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     supported" during config pruning, and the first landing of this fix left
     `mm` routed, which only moved the failure from `matmul_prob` to `matmul` on
     the next CI run. The runtime repair lives in `_patch_flaggems_mm_tune_space`;
-    this pins the conf so the CI lane can reach a float64 GEMM at all.
+    this pins the conf so the CI lane can reach a float64 GEMM at all. The other
+    two are the lane's next-reported failures: `slice_backward` assumes a
+    contiguous grad_output, and `where.self_out` does not grow an `out` the way
+    ATen does.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
-    for op in ("mean", "mean.dim", "mm", "mm.out"):
+    for op in ("mean", "mean.dim", "mm", "mm.out", "slice_backward", "where.self_out"):
         assert op in g.NATIVE_TRITON_GAPS["iluvatar"]
         assert routes[op].split("#", 1)[0].strip() != "flaggems", op
 

@@ -92,7 +92,10 @@ INC_HEADER = """\
 // 2026-10-20: `mean`, `mean.dim`, `mm` and `mm.out` joined the gap set from the
 // CI lane's own measurements rather than a survey run (issue #570) -- the
 // keepdim mean returns wrong values, and the mm tuning perf model rejects
-// float64 -- so the list is now 41 and this file registers 599.
+// float64 -- so the list is now 41 and this file registers 599. Two more
+// joined later the same day from the lane's "vendor backend, main ops" group
+// (`slice_backward`, whose FlagGems kernel assumes a contiguous grad_output,
+// and `where.self_out`, the out= contract): 43 gapped, 597 registered.
 //
 // `mm` left the gap-exclusion path and moved to the native `.inc` on this same
 // date, for the duplicate-registration reason below: it is gapped *and* the

@@ -27,7 +27,10 @@
 // 2026-10-20: `mean`, `mean.dim`, `mm` and `mm.out` joined the gap set from the
 // CI lane's own measurements rather than a survey run (issue #570) -- the
 // keepdim mean returns wrong values, and the mm tuning perf model rejects
-// float64 -- so the list is now 41 and this file registers 599.
+// float64 -- so the list is now 41 and this file registers 599. Two more
+// joined later the same day from the lane's "vendor backend, main ops" group
+// (`slice_backward`, whose FlagGems kernel assumes a contiguous grad_output,
+// and `where.self_out`, the out= contract): 43 gapped, 597 registered.
 //
 // `mm` left the gap-exclusion path and moved to the native `.inc` on this same
 // date, for the duplicate-registration reason below: it is gapped *and* the
@@ -61,6 +64,7 @@
 //   - randint_like
 //   - randperm
 //   - range
+//   - slice_backward
 //   - soft_margin_loss
 //   - special_chebyshev_polynomial_u
 //   - special_chebyshev_polynomial_v
@@ -81,8 +85,9 @@
 //   - sum.out
 //   - unique_consecutive
 //   - upsample_bicubic2d
+//   - where.self_out
 //
-// Total: 599 ops registered here, 2 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 597 ops registered here, 2 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -610,7 +615,6 @@
   m.impl("sinh", WrapperSinh);
   m.impl("sinh_", WrapperSinhInplace);
   m.impl("slice.Tensor", WrapperSliceTensor);
-  m.impl("slice_backward", WrapperSliceBackward);
   m.impl("soft_margin_loss_backward", WrapperSoftMarginLossBackward);
   m.impl("softplus", WrapperSoftplus);
   m.impl("softplus_backward", WrapperSoftplusBackward);
@@ -671,7 +675,6 @@
   m.impl("vdot", WrapperVdot);
   m.impl("view_as_complex", WrapperViewAsComplex);
   m.impl("where.self", WrapperWhereSelf);
-  m.impl("where.self_out", WrapperWhereSelfOut);
   m.impl("xlogy.OutScalar_Other", WrapperXlogyOutscalarOther);
   m.impl("xlogy.OutScalar_Self", WrapperXlogyOutscalarSelf);
   m.impl("xlogy.OutTensor", WrapperXlogyOuttensor);

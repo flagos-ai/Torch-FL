@@ -1894,6 +1894,20 @@ NATIVE_TRITON_GAPS = {
     # leave; `torch_fl`'s runtime patch repairs the tuner itself (see
     # `_patch_flaggems_mm_tune_space`), and a FlagGems mm measured correct here
     # on fp64 can move back.
+    #
+    # Added 2026-10-20 from the same lane's "vendor backend, main ops" group:
+    #   * `slice_backward` -- FlagGems' kernel assumes a contiguous
+    #     `grad_output`; on a non-contiguous one (`narrow` on a transposed
+    #     input, `test_narrow_backward_non_contiguous`) it returns wrong grads
+    #     (56% of elements, max |diff| 5.9).
+    #   * `where.self_out` -- the same ATen out= contract defect the MUSA entry
+    #     above records, measured here through
+    #     `test_where_dispatch.py::TestWhereOutCorrectness::test_out_grows_from_empty`
+    #     (`pointwise_dynamic.prepare_args: out tensor at index 0 shape is
+    #     invalid, should be (2, 4) but is torch.Size([0])`). `where.self` is
+    #     unaffected and stays on FlagGems.
+    # Both are FlagGems-claimed, so `none` sends them to cpu_fallback, which is
+    # the reference for each.
     "iluvatar": {
         # device-guard mismatch (cuda vs flagos)
         "i0",
@@ -1924,6 +1938,10 @@ NATIVE_TRITON_GAPS = {
         # fp64: the mm tuning perf model rejects float64 (issue #570)
         "mm",
         "mm.out",
+        # wrong values: assumes a contiguous grad_output
+        "slice_backward",
+        # the out= contract (see the MUSA entry for where.self_out)
+        "where.self_out",
         # Triton compile / structural defects
         "norm.Scalar",
         "norm.ScalarOpt_dim",
