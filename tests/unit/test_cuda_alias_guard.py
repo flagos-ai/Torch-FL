@@ -22,19 +22,21 @@ that is not what `torch.cuda.is_available()` answers once torch_fl is imported:
 attribute at the flagos device count so Inductor's CUDA-shaped FakeTensor probe
 finds the accelerator on a build without a CUDA runtime.
 
-`torch_fl.compile` is imported eagerly during `_phase_claim`, which runs before
-`_phase_ecosystem` calls `_alias_cuda_to_flagos`, so the redirect is always in
-place by the time the guard reads it. On MUSA that made the guard answer "yes,
-there is CUDA", the alias never installed, and every hardcoded `"cuda"` in the
-ecosystem kept dying in `torch.cuda._lazy_init` -- including the
-`torch.cuda.current_device()` call dynamo's `cuda_extra_check` makes while
-building compilation metrics, so `torch.compile(model, fullgraph=True)` could not
-compile at all.
+Reading that redirect made the guard answer "yes, there is CUDA" on MUSA, the
+alias never installed, and every hardcoded `"cuda"` in the ecosystem kept dying
+in `torch.cuda._lazy_init` -- including the `torch.cuda.current_device()` call
+dynamo's `cuda_extra_check` makes while building compilation metrics, so
+`torch.compile(model, fullgraph=True)` could not compile at all.
 
-The guard now reads `_real_cuda_is_available`, which answers from the copy
-`_patch_native_cuda_probe` saved before overwriting the attribute. The first
-test here pins that structure; the rest pin the behaviour, each in a fresh
-interpreter because the alias is decided once, at import.
+The guard now reads `_real_cuda_is_available`, which answers from the probe
+captured in `_phase_ecosystem` immediately before the alias runs. That point is
+load-bearing in both directions: late enough for the CUDA-ABI compat layers to
+have installed their constant-True probe (a CPU torch wheel paired with an
+external `libtorch_cuda.so` really does have CUDA), and early enough that
+torch_fl has not yet replaced the attribute with a probe that answers True on
+every build with a flagos device. The first two tests pin that structure; the
+rest pin the behaviour, each in a fresh interpreter because the alias is decided
+once, at import.
 """
 
 from __future__ import annotations
@@ -65,14 +67,13 @@ def test_the_guard_asks_the_helper_not_the_probe_it_wrote():
     assert "torch.cuda.is_available()" not in guard_tests, guard_tests
 
 
-def test_the_helper_reports_what_torch_said_before_the_redirect(monkeypatch):
-    """The helper answers from the probe captured before any redirect.
+def test_the_helper_answers_from_the_captured_probe(monkeypatch):
+    """The helper answers from the probe captured before the alias runs.
 
-    Both the live attribute and the ``_flagos_original_is_available`` stash carry
-    a torch_fl lambda once it has run -- the stash is written from the *already
-    redirected* attribute, so it is torch_fl's value too. The helper must ignore
-    both and report what torch itself said, which is what
-    ``_TORCH_CUDA_PROBE`` preserves.
+    After the alias, both the live attribute and the
+    ``_flagos_original_is_available`` stash carry a torch_fl lambda -- the stash
+    is written from the *already redirected* attribute, so it is torch_fl's
+    value too. The helper must ignore both and report the captured answer.
     """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(
@@ -87,18 +88,25 @@ def test_the_helper_reports_what_torch_said_before_the_redirect(monkeypatch):
     assert torch_fl._real_cuda_is_available() is True
 
 
-def test_the_captured_probe_is_the_one_torch_shipped():
-    """The capture must happen before torch_fl replaces the attribute.
+def test_the_probe_is_captured_after_vendor_compat_and_before_the_alias():
+    """The capture point is what makes the answer mean "CUDA is reachable".
 
-    torch's probe is the function ``torch.cuda`` defines; torch_fl's redirect is
-    a ``lambda`` defined in ``torch_fl``. A capture that ran too late holds the
-    lambda, which this catches without needing a particular device present.
+    Captured at ``_phase_claim`` it sees the pristine CPU wheel's ``False``, even
+    on the CUDA boxing lane where the vendor compat layer has paired that wheel
+    with an external ``libtorch_cuda.so`` and CUDA genuinely works; the alias
+    then installs and the nvidia Triton backend is stood down, so every
+    ``torch.compile`` dies with "Could not find an active GPU backend".
+    Captured after the alias, it sees torch_fl's own lambda, which is True on
+    every build with a flagos device.
     """
-    probe = torch_fl._TORCH_CUDA_PROBE
-    assert probe is not None, "never captured"
-    assert getattr(probe, "__module__", "") != "torch_fl", (
-        f"captured torch_fl's own redirect ({probe!r}) instead of torch's probe"
+    claim = inspect.getsource(torch_fl._phase_claim)
+    ecosystem = inspect.getsource(torch_fl._phase_ecosystem)
+    assert "_TORCH_CUDA_PROBE =" not in claim, (
+        "captured before the vendor compat layers"
     )
+    assert ecosystem.index("_TORCH_CUDA_PROBE =") < ecosystem.index(
+        "_alias_cuda_to_flagos()"
+    ), "captured after the alias replaced the attribute"
 
 
 def test_vendor_device_aliases_cover_every_native_vendor():
