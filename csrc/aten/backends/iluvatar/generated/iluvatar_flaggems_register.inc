@@ -29,6 +29,11 @@
 // keepdim mean returns wrong values, and the mm tuning perf model rejects
 // float64 -- so the list is now 41 and this file registers 599.
 //
+// `mm` left the gap-exclusion path and moved to the native `.inc` on this same
+// date, for the duplicate-registration reason below: it is gapped *and* the
+// native `.inc` now claims it. Its `flaggems` conf route went to `none` in the
+// same step, so nothing dispatches to a FlagGems `mm` slot that is not here.
+//
 // Re-measure and move entries in or out of that set only from BI-V150 results,
 // never by assumption -- and note the DCU precedent: most of the 37 are the
 // device-name mismatch that _ALIGNED_VENDORS
@@ -77,7 +82,7 @@
 //   - unique_consecutive
 //   - upsample_bicubic2d
 //
-// Total: 599 ops registered here, 1 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 599 ops registered here, 2 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
