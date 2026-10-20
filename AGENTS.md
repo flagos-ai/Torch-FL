@@ -1,10 +1,16 @@
 # Project conventions for AI coding agents
 
 This file is the single source of guidance for AI agents working in this
-repository. `CLAUDE.md`, `GEMINI.md` and `.github/copilot-instructions.md` are
-symlinks to it, so there is one document to keep current rather than four that
-drift apart. Agents that read `AGENTS.md` natively — Codex, Cursor, Opencode,
-and Copilot code review — need nothing else.
+repository. Most agents read `AGENTS.md` natively: Claude Code (v2.1.277 and
+later), Codex, Cursor, Opencode, Zed, Copilot code review, Copilot cloud agent,
+and VS Code Copilot Chat. `.github/copilot-instructions.md` is the one symlink
+left, for the github.com Copilot Chat surface, which reads only that filename.
+
+There is deliberately no `CLAUDE.md` and no `GEMINI.md`. Claude Code reads
+`AGENTS.md` directly when no `CLAUDE.md` exists, so a symlink there would add a
+second name for the same bytes and behave worse on a Windows checkout, where Git
+turns a committed symlink into a plain text file unless `core.symlinks` is on.
+Gemini CLI defaults to `GEMINI.md` and is not used in this repository.
 
 ## Language
 

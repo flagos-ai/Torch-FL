@@ -7,7 +7,7 @@ This document provides specific instructions for using Claude Code (CLI, desktop
 ### Before Any Work
 ```bash
 # Read these in order:
-1. cat AGENTS.md                   # Project conventions (CLAUDE.md is a symlink to it)
+1. cat AGENTS.md                   # Project conventions
 2. cat .github/AI_AGENT_GUIDE.md   # AI-specific guidelines
 3. cat CONTRIBUTING.md              # Development workflow
 ```
@@ -363,7 +363,7 @@ If you're unsure whether Claude is doing things correctly:
 
 ## Related Documentation
 
-- **AGENTS.md** - Project conventions (MUST READ; CLAUDE.md is a symlink)
+- **AGENTS.md** - Project conventions (MUST READ)
 - **AI_AGENT_GUIDE.md** - Detailed AI guidelines
 - **CONTRIBUTING.md** - Development workflow
 - **README.md** - Build and usage instructions
