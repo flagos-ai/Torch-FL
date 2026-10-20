@@ -45,6 +45,11 @@
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update
 //   - _native_batch_norm_legit.no_stats
+//   - addmm
+//   - addmm.dtype
+//   - addmm.dtype_out
+//   - addmm.out
+//   - addmm_
 //   - bmm
 //   - bmm.dtype
 //   - bmm.dtype_out
@@ -91,7 +96,7 @@
 //   - upsample_bicubic2d
 //   - where.self_out
 //
-// Total: 595 ops registered here, 3 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 590 ops registered here, 4 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -165,11 +170,6 @@
   m.impl("addcdiv_", WrapperAddcdivInplace);
   m.impl("addcmul", WrapperAddcmul);
   m.impl("addcmul_", WrapperAddcmulInplace);
-  m.impl("addmm", WrapperAddmm);
-  m.impl("addmm.dtype", WrapperAddmmDtype);
-  m.impl("addmm.dtype_out", WrapperAddmmDtypeOut);
-  m.impl("addmm.out", WrapperAddmmOut);
-  m.impl("addmm_", WrapperAddmmInplace);
   m.impl("addmv", WrapperAddmv);
   m.impl("addmv.out", WrapperAddmvOut);
   m.impl("addmv_", WrapperAddmvInplace);

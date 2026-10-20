@@ -255,11 +255,6 @@ def _lazy_init():
     # repaired rather than retried. See the function for the measurement.
     _patch_flaggems_tune_space()
 
-    # And once more for the tuner, on Iluvatar: its mm perf model rejects
-    # float64 outright, so the fp64 GEMM has to reach the kernel without a
-    # pruning pass. See the function for the measurement and the replacement.
-    _patch_flaggems_mm_tune_space()
-
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from
     # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
@@ -2635,102 +2630,6 @@ def _patch_flaggems_tune_space():
         run.__wrapped__ = original_run
         libtuner.run = run
         setattr(libtuner, _TUNE_SPACE_PATCHED, True)
-    except Exception:
-        pass
-
-
-# Attribute marking an ``mm`` tuner whose ``prune_configs_by`` this module has
-# already repaired.
-_MM_TUNE_SPACE_PATCHED = "_torch_fl_mm_tune_space_patched"
-
-# The gemm bindings the patch above rewrites. ``addmm`` is included because it
-# prunes with the same perf model: a dtype that model cannot score would fail
-# ``nn.Linear``'s route on small K exactly as it does ``mm``.
-_MM_TUNE_SPACE_OPS = ("mm", "mm_out", "mm_comm", "addmm", "addmm_out", "addmm_")
-
-
-def _prune_without_perf_model(prune_configs_by):
-    """``prune_configs_by`` with its ``perf_model`` entry removed, or ``None``.
-
-    What a repaired tuner keeps: the same pruning pass the space declares, minus
-    the model that cannot score the dtype. ``None`` when there is nothing to
-    remove, so the caller can tell "already dtype-agnostic" from "repaired".
-    """
-    if not prune_configs_by or "perf_model" not in prune_configs_by:
-        return None
-    return {k: v for k, v in prune_configs_by.items() if k != "perf_model"}
-
-
-def _patch_flaggems_mm_tune_space():
-    """Let the Iluvatar ``mm`` tuner skip a perf model that cannot score float64.
-
-    ``flag_gems/runtime/backend/_iluvatar/ops/mm.py`` compiles its kernel with a
-    ``LibTuner`` whose ``prune_configs_by`` carries
-    ``{"perf_model": estimate_matmul_time}``. That model resolves the device's
-    tensor-core throughput through
-    ``triton/spec/iluvatar/triton/testing.py:get_max_tensorcore_tflops``, which
-    knows only 16- and 32-bit floats and raises ``RuntimeError: dtype not
-    supported`` for everything else. The raise happens in the pruning pass,
-    before a single config is compiled or launched, so *every* float64 matmul
-    fails here -- ``torch.matmul`` on 4x4 float64, which
-    ``tests/integration/test_dtype_coverage.py`` asserts against a 1e-12
-    tolerance, and the float64 dtype case beside it. Measured on the CI lane,
-    2026-10-20 (issue #570).
-
-    The perf model is an optimisation -- it ranks configurations before the
-    benchmark pass does the real ranking -- so dropping it loses starting order,
-    not correctness. Nothing else in ``prune_configs_by`` is touched, and the
-    kernel is the same one every float32 call already runs.
-
-    The tuners are module-level objects on functions that were bound into
-    ``flag_gems`` at import, and libentry treats a function object as its own
-    cache key, so the object attributes are rewritten where that function sits
-    rather than the functions re-wrapped; every binding keeps pointing at the
-    same kernel. The rewrite only touches the ``prune_configs_by`` value that
-    actually carries a ``perf_model``, so float16/float32 see no change.
-
-    Scoped to Iluvatar -- the only vendor whose model rejects the dtype -- and
-    gated on the conf routing to FlagGems, as the patches above are.
-    Best-effort: an unrepaired tuner is the status quo (float64 raises exactly
-    as it did), not a new failure.
-
-    ``_MM_TUNE_SPACE_OPS`` also covers ``addmm``, which prunes with the same
-    model; the rewrite is a no-op for any tuner that does not carry it.
-    """
-    try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "iluvatar" or not _conf_routes_to_flaggems():
-            return
-        import sys
-
-        for mod in list(sys.modules.values()):
-            try:
-                mod_dict = mod.__dict__
-            except Exception:
-                continue
-            for name in _MM_TUNE_SPACE_OPS:
-                func = mod_dict.get(name)
-                if not callable(func) or not getattr(func, "__module__", "").startswith(
-                    "flag_gems.runtime.backend._iluvatar"
-                ):
-                    continue
-                for attr in ("fn", "jit_fn"):
-                    kernel = getattr(func, attr, None)
-                    tuner = getattr(kernel, "tuner", None)
-                    if tuner is None:
-                        continue
-                    if getattr(tuner, _MM_TUNE_SPACE_PATCHED, False):
-                        continue
-                    # Read first, assign after: two bindings name the same
-                    # function, and the flag is what keeps the second pass off.
-                    pruned = _prune_without_perf_model(
-                        getattr(tuner, "prune_configs_by", None)
-                    )
-                    if pruned is None:
-                        continue
-                    tuner.prune_configs_by = pruned
-                    setattr(tuner, _MM_TUNE_SPACE_PATCHED, True)
     except Exception:
         pass
 

@@ -81,14 +81,16 @@ FLAGGEMS_INC = (
 # override -- FLAGOS_FORCE_BACKEND=vendor, or a per-op FLAGOS_OP_<name>=iluvatar.
 # But only the ops FlagGems does *not* already claim get an m.impl line in
 # iluvatar_register.inc: the FlagGems .inc is included into the same library
-# body, and torch rejects a duplicate m.impl at load. Today that is `addmm` and
-# the two `_native_batch_norm_legit*` variants: still claimed there
-# (route=flaggems), so they keep their FlagGems registration and their kernel
-# here is reached only by an override. That the conf cannot move them is
-# intended -- FlagGems is the primary path and `route()` gives it priority.
-# `mm` and `bmm` were in that group and left it on 2026-10-20 (issue #570: the
-# mm perf model rejects float64 and FlagGems' generic bmm cannot compile K < 16),
-# so their kernels now carry the .inc line the conf routes to.
+# body, and torch rejects a duplicate m.impl at load. Today that is the two
+# `_native_batch_norm_legit*` variants: still claimed there (route=flaggems), so
+# they keep their FlagGems registration and their kernel here is reached only by
+# an override. That the conf cannot move them is intended -- FlagGems is the
+# primary path and `route()` gives it priority.
+# `mm` and `bmm` left that group on 2026-10-20 and `addmm` on 2026-10-21
+# (issue #570: the mm perf model rejects float64, FlagGems' generic bmm cannot
+# compile K < 16, and the `_iluvatar` addmm/linear kernels are wrong at small
+# shapes with a transposed weight -- every `nn.Linear` route), so all three
+# kernels now carry the .inc line the conf routes to.
 #
 # The runtime dtype escape is a THIRD mechanism and it does NOT reach them:
 # ResolveFn substitutes the vendor slot only when FlagGemsRejectsArgs() fires,

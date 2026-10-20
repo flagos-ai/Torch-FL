@@ -483,10 +483,12 @@ def test_conf_route_counts_are_stable():
         # pinned: the native cohort is a moving measurement -- the first landing
         # is _convolution, convolution, native_batch_norm, the ops that route
         # `none` today and have an ixdnn/ixblas kernel, and it grows as coverage
-        # is measured. Ops FlagGems already registers (mm/bmm/addmm, the
+        # is measured. Ops FlagGems already registers (the
         # _native_batch_norm_legit* variants) stay `flaggems` and are kept out of
         # the native .inc, since a second m.impl in the same PrivateUse1 body is a
-        # duplicate-registration error. See _derived_iluvatar_counts().
+        # duplicate-registration error; mm/bmm/addmm left that group with the
+        # issue-#570 gaps and are native routes now. See
+        # _derived_iluvatar_counts().
         "iluvatar": _derived_iluvatar_counts(),
         # MPS is a native vendor backend at stage 4: the codegen'd
         # mps_register.inc claims the MPSGraph kernels registered for the

@@ -552,7 +552,7 @@ def test_metax_conf_keeps_mm_boxed():
 
 
 def test_iluvatar_570_gaps_leave_the_flaggems_path():
-    """The two op families the Iluvatar CI lane fails on (issue #570) are not
+    """The op families the Iluvatar CI lane fails on (issue #570) are not
     routed to FlagGems, and the fix is a gap rather than a route change.
 
     `mean`/`mean.dim` return wrong values through the generic FlagGems kernel,
@@ -560,19 +560,33 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     the float64 failure is the `_iluvatar` tuning perf model raising "dtype not
     supported" during config pruning, and the first landing of this fix left
     `mm` routed, which only moved the failure from `matmul_prob` to `matmul` on
-    the next CI run. The runtime repair lives in `_patch_flaggems_mm_tune_space`;
-    this pins the conf so the CI lane can reach a float64 GEMM at all. The other
-    two are the lane's next-reported failures: `slice_backward` assumes a
-    contiguous grad_output, and `where.self_out` does not grow an `out` the way
-    ATen does. `bmm` and its out=/dtype= spellings leave next: FlagGems 5.4.0's
-    generic bmm compiles with a BLOCK_SIZE_K that FlagTree refuses in `tl.dot`
-    ("M >= 1, N >= 1 and K >= 16") before any kernel runs, which was the last
-    main-op failure of the lane. `bmm` itself takes the native ixblas kernel
-    that the gap moves into `iluvatar_register.inc`; `addmm` stays on FlagGems
-    (no native kernel) and is repaired by the same runtime tuner patch.
+    the next CI run. The other two are the lane's next-reported failures:
+    `slice_backward` assumes a contiguous grad_output, and `where.self_out`
+    does not grow an `out` the way ATen does. `bmm` and its out=/dtype=
+    spellings leave next: FlagGems 5.4.0's generic bmm compiles with a
+    BLOCK_SIZE_K that FlagTree refuses in `tl.dot` ("M >= 1, N >= 1 and K >= 16")
+    before any kernel runs, which was the last main-op failure of the lane.
+
+    The `addmm` family leaves last, for a wrong-value defect with the same root
+    as the one under `linear`: every small-shape `nn.Linear` is
+    `addmm(x, W.t())`, and the `_iluvatar` kernels are wrong when the operand is
+    a transposed view (measured on u180 at (1,4,2), (4,4,8) and (8,8,8)).
+
+    `bmm`, `mm` and `addmm` themselves take the native ixblas kernel that the
+    gap moves into `iluvatar_register.inc`; their out=/dtype= spellings have no
+    native kernel and reach `cpu_fallback`.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
+
+    def route(op):
+        return routes[op].split("#", 1)[0].strip()
+
     gaps = (
+        "addmm",
+        "addmm.dtype",
+        "addmm.dtype_out",
+        "addmm.out",
+        "addmm_",
         "bmm",
         "bmm.dtype",
         "bmm.dtype_out",
@@ -586,8 +600,11 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     )
     for op in gaps:
         assert op in g.NATIVE_TRITON_GAPS["iluvatar"]
-        assert routes[op].split("#", 1)[0].strip() != "flaggems", op
-    assert routes["bmm"].split("#", 1)[0].strip() == "iluvatar"
+        assert route(op) != "flaggems", op
+    for op in ("addmm", "bmm", "mm"):
+        assert route(op) == "iluvatar", op
+    for op in ("addmm.dtype", "addmm.dtype_out", "addmm.out", "addmm_"):
+        assert route(op) == "none", op
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))

@@ -214,9 +214,9 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 #
 # Deliberately folded into NEITHER vendoring function. `vendor_native_ops()` is
 # what the per-vendor generators subtract from their own registration set, so
-# adding these there would make codegen_iluvatar_flaggems.py drop mm/bmm/addmm
-# and the two _native_batch_norm_legit* variants from the FlagGems `.inc` -- and
-# because codegen_iluvatar.py omits exactly those ops from the native `.inc`
+# adding these there would make codegen_iluvatar_flaggems.py drop the two
+# _native_batch_norm_legit* variants from the FlagGems `.inc` -- and because
+# codegen_iluvatar.py omits exactly those ops from the native `.inc`
 # (that is what keeps the two files disjoint), the ops would end up registered
 # nowhere and every call would raise "backend not registered".
 # `vendor_registered_ops()` is the registration closure the conf's `none` gate
@@ -225,11 +225,12 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # iluvatar's `mm` and `bmm` started here (measured, FlagGems-primary) and left
 # on 2026-10-20: gapping them for issue #570 removes them from the FlagGems
 # `.inc`, so codegen_iluvatar.py's read-back now claims them natively and the
-# .inc scan sees their route. `addmm` has no native kernel, so it stays.
-# XLA/musa/gcu/ascend/kunlunxin have no escape-only kernels.
+# .inc scan sees their route. `addmm` left with the rest of the gemm family on
+# 2026-10-21 for the same reason: codegen_iluvatar.py has carried an `addmm`
+# kernel all along and the FlagGems claim was what kept its `m.impl` out of the
+# native .inc. XLA/musa/gcu/ascend/kunlunxin have no escape-only kernels.
 ESCAPE_NATIVE = {
     "iluvatar": {
-        "addmm",
         "_native_batch_norm_legit",
         "_native_batch_norm_legit_no_training",
     }
@@ -1887,16 +1888,6 @@ NATIVE_TRITON_GAPS = {
     # measurement says otherwise the op does not stay on the FlagGems path.
     # Remove the two entries when a FlagGems mean is measured correct here.
     #
-    # `mm` and `mm.out` are both here, for issue #570, and the reason is a
-    # *tuning* defect rather than a wrong kernel: the fp64 failure is
-    # `torch.matmul` -> `mm` -> the `_iluvatar` mm.py libtuner, whose
-    # `estimate_matmul_time` perf model raises "dtype not supported" for
-    # float64 before any kernel is compiled. gapping one spelling only moved
-    # the failure to `matmul` (which lands on the non-out spelling), so both
-    # leave; `torch_fl`'s runtime patch repairs the tuner itself (see
-    # `_patch_flaggems_mm_tune_space`), and a FlagGems mm measured correct here
-    # on fp64 can move back.
-    #
     # Added 2026-10-20 from the same lane's "vendor backend, main ops" group:
     #   * `slice_backward` -- FlagGems' kernel assumes a contiguous
     #     `grad_output`; on a non-contiguous one (`narrow` on a transposed
@@ -1937,7 +1928,29 @@ NATIVE_TRITON_GAPS = {
         "special_shifted_chebyshev_polynomial_u",
         "mean",
         "mean.dim",
-        # fp64: the mm tuning perf model rejects float64 (issue #570)
+        # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a
+        # *tuning* defect rather than a wrong kernel: the fp64 failure is
+        # `torch.matmul` -> `mm` -> the `_iluvatar` mm.py libtuner, whose
+        # `estimate_matmul_time` perf model raises "dtype not supported" for
+        # float64 before any kernel is compiled. Gapping one spelling only moved
+        # the failure to `matmul` (which lands on the non-out spelling).
+        #
+        # `addmm` and its spellings followed on 2026-10-21 for a *wrong value*
+        # defect with the same root as the non-contiguous `mm` below: every
+        # small-shape `nn.Linear` on this device is `addmm(x, W.t())`, a weight
+        # whose second operand is a transposed view (stride (1, K)), and the
+        # `_iluvatar` kernels read that operand without resolving or masking
+        # its layout. Measured on u180 (BI-V150, FlagGems 5.4.0) at
+        # M, K, N = (1,4,2), (4,4,8), (8,8,8): `F.linear` disagrees with the CPU
+        # reference by 3.2 / 1.7 / 9.8, the same call with a contiguous weight
+        # matches to 3e-8, and (32,64,16) and (64,128,32) are clean -- so the
+        # defect is shape- and layout-dependent, not a dtype question, and a
+        # FlagGems `linear`/`mm` measured correct here can move back.
+        "addmm",
+        "addmm.out",
+        "addmm.dtype",
+        "addmm.dtype_out",
+        "addmm_",
         "mm",
         "mm.out",
         # K < 16: FlagGems' generic bmm compiles with a BLOCK_SIZE_K below
@@ -1949,9 +1962,8 @@ NATIVE_TRITON_GAPS = {
         # only landed in 5.6. `bmm` itself takes the native ixblas kernel (it
         # moved out of the FlagGems .inc with this change); the out=/dtype=/
         # dtype_out= spellings have no native kernel and reach cpu_fallback.
-        # `addmm` shares the autotune shape (see the PPU and GCU entries) and
-        # is kept on FlagGems with its tuner repaired by the same runtime patch
-        # that repairs mm; it has no native kernel to move to.
+        # (`addmm` used to be described here as kept on FlagGems; it moved with
+        # the rest of the gemm family on 2026-10-21 -- see its own entry.)
         "bmm",
         "bmm.out",
         "bmm.dtype",
