@@ -319,10 +319,7 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         is False
     )
     job = workflow["jobs"]["integration-tests"]
-    assert (
-        job["container"]["options"]
-        == "${{ needs.configuration.outputs.container_options }}"
-    )
+    assert "toJson(needs.configuration.outputs.container_options)" in job["container"]
     steps = {step.get("id", step.get("name")): step for step in job["steps"]}
     assert "!cancelled()" in steps["merge-report"]["if"]
     assert "steps.integration-tests.outcome" in steps["merge-report"]["if"]

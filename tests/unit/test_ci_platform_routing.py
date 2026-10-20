@@ -198,6 +198,19 @@ def test_the_container_expression_uses_empty_config_fields_as_placeholders():
         assert isinstance(values.get("ci_image"), str), config
 
 
+def test_the_container_expression_uses_json_values_for_yaml_fields():
+    """Keep the generated image and options as strings when they contain YAML syntax."""
+    for name, job in (
+        ("build-wheel-common.yml", "build"),
+        ("integration-tests.yml", "integration-tests"),
+    ):
+        expression = _workflow(name)["jobs"][job]["container"]
+        assert "toJson(" in expression
+        assert expression.count("toJson(") == 2
+        assert '"image":"{0}"' not in expression
+        assert '"options":"{2}"' not in expression
+
+
 def test_the_one_platform_without_a_container_is_mps():
     """An empty image is allowed only for MPS.
 

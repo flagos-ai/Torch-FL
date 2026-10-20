@@ -3,7 +3,7 @@
 The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers eight of the twelve — so this page is the
+is aten-only, and nine of the twelve have a CI lane — so this page is the
 authoritative answer.
 
 The directory inventory at the end is machine-checked by
@@ -25,7 +25,7 @@ when a platform gains or loses one.
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
-| `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: `abs`, the elementwise `add`/`sub`/`mul` forms, `sum`/`mean`) | `mps` (stream/event only) | 2037 | no |
+| `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: `abs`, the elementwise `add`/`sub`/`mul` forms, `sum`/`mean`) | `mps` (stream/event only) | 2037 | yes |
 
 Column notes:
 
@@ -105,9 +105,9 @@ build opts into boxing.
   kernels (`FLAGOS_BUILD_BOXING` is pinned off). It has a
   `torch_fl/accelerator/mps/` directory holding only `mps_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to), so the Python
-  compat column reads "stream/event only". There is no CI job: the pipeline is
-  container-based on self-hosted runners, and a macOS arm64 runner has not been
-  wired in.
+  compat column reads "stream/event only". Its CI lane builds and tests on the
+  standard `macos-15` GitHub-hosted Apple Silicon runner, outside a container
+  so the Metal device is visible.
 - **TsingMicro** has a sparse hand-written conf (67 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
@@ -149,7 +149,7 @@ build opts into boxing.
   `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
   ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
   BI-V150) but the full cohort has not been re-measured.
-- **CI covers 8 of 12**: TsingMicro, BPU, Iluvatar and MPS have no
+- **CI covers 9 of 12**: TsingMicro, BPU and Iluvatar have no
   `.github/configs/` entry.
 
 ## Directory inventory

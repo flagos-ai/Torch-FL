@@ -98,7 +98,7 @@ jobs:
     timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
     # A platform without a `ci_image` runs directly on its runner. MPS needs a
     # macOS host with its Metal GPU, and macOS jobs cannot use containers.
-    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":"{0}","volumes":{1},"options":"{2}"}}', needs.configuration.outputs.ci_image, needs.configuration.outputs.container_volumes, needs.configuration.outputs.container_options)) || null }}
+    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":{0},"volumes":{1},"options":{2}}}', toJson(needs.configuration.outputs.ci_image), needs.configuration.outputs.container_volumes, toJson(needs.configuration.outputs.container_options))) || null }}
     defaults:
       run:
         shell: bash
