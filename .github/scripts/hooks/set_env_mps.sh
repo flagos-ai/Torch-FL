@@ -21,8 +21,7 @@
 #
 # This hook installs no FlagTree or FlagGems build: there is no Metal FlagTree
 # line, and the platform table (cmake/flagos_platforms.json) turns both off for
-# MPS. The operator kernels themselves live under torch_fl/accelerator/mps and
-# link to Metal and MPSGraph directly.
+# MPS. The native runtime and operator kernels link to Metal directly.
 
 # --- Runner, toolchain, and the device ---------------------------------------
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -218,6 +217,11 @@ PY
 
 if command -v system_profiler >/dev/null 2>&1; then
   system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+fi
+
+if [[ "$CI_STAGE" == "build" ]]; then
+  # Prebuild before the integration job stages the wheel, as the CUDA lane does.
+  build_flagos_inplace
 fi
 
 # --- Export to later workflow steps ------------------------------------------

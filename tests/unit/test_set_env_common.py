@@ -104,21 +104,34 @@ def test_no_script_redefines_a_shared_phase():
 
 
 def test_every_script_calls_the_common_phases():
-    """The four phases every platform runs, called by name.
+    """The common phases every platform runs, called by name.
 
     install_flagcx is defined for the platforms whose hook installs a published
     FlagCX wheel, which is not every one of them, so it is not asserted here.
+    FlagTree is likewise absent on MPS, which has no Metal Triton build.
+    build_flagos_inplace runs only at the build stage, however, so only a hook
+    that calls it there can avoid compiling an extension during integration.
     """
     for script in _scripts():
         text = script.read_text(encoding="utf-8")
-        for phase in (
-            "install_cpu_torch",
-            "install_flagtree",
-            "build_flagos_inplace",
-            "export_ci_env",
-        ):
+        phases = ["install_cpu_torch", "export_ci_env"]
+        if script.name != "set_env_mps.sh":
+            phases.append("install_flagtree")
+        for phase in phases:
             assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
                 f"{script.name}: {phase}"
+            )
+        if script.name == "set_env_mps.sh":
+            assert re.search(
+                r'^if \[\[ "\$CI_STAGE" == "build" \]\]; then\n'
+                r"  # [^\n]+\n\s+"
+                r"build_flagos_inplace\nfi$",
+                text,
+                re.M,
+            ), "set_env_mps.sh: build_flagos_inplace must be gated on build"
+        else:
+            assert re.search(r"^[ \t]*build_flagos_inplace\b", text, re.M), (
+                f"{script.name}: build_flagos_inplace"
             )
 
 
