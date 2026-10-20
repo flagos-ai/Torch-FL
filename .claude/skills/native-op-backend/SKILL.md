@@ -223,7 +223,7 @@ kernels — attributing a failure across them costs more than the incremental ru
 - Every generated op has a conf line routing to it
 - Every claimed op has a passing CPU-comparison test at the tolerances above
 - `docs/vendors/<vendor>/` records the five Step-1 answers and the category table
-- `docs/reference/operator-support.md` updated from measured results per CLAUDE.md
+- `docs/reference/operator-support.md` updated from measured results per AGENTS.md
 
 ## Related
 

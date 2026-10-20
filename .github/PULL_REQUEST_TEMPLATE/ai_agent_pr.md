@@ -77,9 +77,9 @@ PRs missing required sections will be automatically closed.
 - [ ] **All tests pass** (unit + integration)
 - [ ] **Manual testing completed** (include reproduction of original issue)
 - [ ] **No debug/temporary code** (no print statements, commented code, TODOs)
-- [ ] **Documentation updated** (README, CLAUDE.md, docstrings as needed)
+- [ ] **Documentation updated** (README, AGENTS.md, docstrings as needed)
 - [ ] **Commit messages follow conventions** (type: description format)
-- [ ] **All text in English** (required per CLAUDE.md)
+- [ ] **All text in English** (required per AGENTS.md)
 
 ### Linting Results
 <!-- REQUIRED: Paste actual output -->

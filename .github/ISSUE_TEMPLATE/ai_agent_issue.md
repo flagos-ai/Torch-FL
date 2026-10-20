@@ -107,7 +107,7 @@ import torch_fl
 - [ ] I have identified affected code locations with line numbers
 - [ ] I have described how to verify the fix
 - [ ] I have checked for duplicate issues
-- [ ] All text is in **English** (required per CLAUDE.md)
+- [ ] All text is in **English** (required per AGENTS.md)
 - [ ] Code follows project conventions (checked existing code style)
 
 ---

@@ -17,7 +17,7 @@ This document provides specific guidelines for AI coding agents (Claude Code, Gi
 - Code comments
 - Documentation files
 
-This is **non-negotiable** per CLAUDE.md. PRs/issues in other languages will be closed.
+This is **non-negotiable** per AGENTS.md. PRs/issues in other languages will be closed.
 
 ### 2. Pre-Submission Checklist
 
@@ -322,7 +322,7 @@ Before submitting a PR, answer:
 2. **Did I check existing patterns?** (Am I reinventing something?)
 3. **Did I test edge cases?** (Empty tensors, large sizes, different dtypes)
 4. **Did I verify on all affected platforms?** (Or justify why not)
-5. **Did I update documentation?** (README, docstrings, CLAUDE.md)
+5. **Did I update documentation?** (README, docstrings, AGENTS.md)
 6. **Did I include actual test output?** (Not just "it passes")
 7. **Can a human reviewer understand my changes?** (Clear explanations)
 8. **Is everything in English?** (PR, commits, comments)

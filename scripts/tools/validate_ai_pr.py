@@ -234,7 +234,7 @@ def check_pr_body(pr_body_file: str = None) -> bool:
     if re.search(r"[一-鿿]", body):
         print_status("PR body contains non-English text (Chinese detected)", "FAIL")
         print(
-            f"{Color.RED}ALL GitHub text must be in English per CLAUDE.md{Color.RESET}"
+            f"{Color.RED}ALL GitHub text must be in English per AGENTS.md{Color.RESET}"
         )
         all_present = False
     else:

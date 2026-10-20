@@ -242,5 +242,5 @@ env CPU-only.
 
 **Treating a green suite on one chip as a green port.** This skill is
 hardware-independent, but its verification runs on whatever chip you have. Other
-platforms are re-validated by their own bringup, and per CLAUDE.md an unvalidated
+platforms are re-validated by their own bringup, and per AGENTS.md an unvalidated
 platform must be marked **not revalidated** rather than presented as measured.

@@ -44,7 +44,7 @@ gh pr create \
 ### Key Requirements for AI Agents
 
 ✅ **MUST DO:**
-- Write everything in **English** (CLAUDE.md requirement)
+- Write everything in **English** (AGENTS.md requirement)
 - Use the AI PR template (`.github/PULL_REQUEST_TEMPLATE/ai_agent_pr.md`)
 - Include actual test output (paste command results)
 - Provide root cause analysis (not just symptoms)
@@ -120,7 +120,7 @@ The script checks:
 
 ## Related Documentation
 
-- **Project conventions**: `/CLAUDE.md` (language requirements, workflows)
+- **Project conventions**: `/AGENTS.md` (language requirements, workflows)
 - **Contributing guide**: `/CONTRIBUTING.md` (development workflow)
 - **README**: `/README.md` (project overview, build instructions)
 - **AI agent guide**: `.github/AI_AGENT_GUIDE.md` (detailed AI guidelines)

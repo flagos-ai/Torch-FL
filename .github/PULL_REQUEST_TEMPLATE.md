@@ -71,10 +71,10 @@ FLAGOS_BACKEND_CONFIG=... pytest ...
 - [ ] All tests pass (see test results above)
 - [ ] Code follows project style (ran linters)
 - [ ] Documentation updated (if applicable)
-- [ ] CLAUDE.md updated (if adding new conventions)
+- [ ] AGENTS.md updated (if adding new conventions)
 - [ ] Commit messages follow conventions
 - [ ] No debug code or temporary changes
-- [ ] PR description is in **English** (required per CLAUDE.md)
+- [ ] PR description is in **English** (required per AGENTS.md)
 
 ### Linting
 <!-- REQUIRED: Proof that linting passes -->

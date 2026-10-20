@@ -7,7 +7,7 @@ This document provides specific instructions for using Claude Code (CLI, desktop
 ### Before Any Work
 ```bash
 # Read these in order:
-1. cat CLAUDE.md                    # Project conventions
+1. cat AGENTS.md                   # Project conventions (CLAUDE.md is a symlink to it)
 2. cat .github/AI_AGENT_GUIDE.md   # AI-specific guidelines
 3. cat CONTRIBUTING.md              # Development workflow
 ```
@@ -204,7 +204,7 @@ If using Claude Code IDE extension:
 ```json
 // .vscode/settings.json or similar
 {
-  "claude.prePrompt": "Remember: all GitHub text must be English per CLAUDE.md",
+  "claude.prePrompt": "Remember: all GitHub text must be English per AGENTS.md",
   "claude.postCodeReview": "Run: python scripts/tools/validate_ai_pr.py"
 }
 ```
@@ -258,7 +258,7 @@ Claude: [Creates PR with Chinese commit messages]
 **Solution:** Remind at start of session:
 ```
 User: "Before we start: remember that all GitHub text (PRs, commits,
-issues, code comments) must be in English per CLAUDE.md. This is
+issues, code comments) must be in English per AGENTS.md. This is
 non-negotiable."
 ```
 
@@ -343,7 +343,7 @@ If Claude is not following guidelines:
 
 Before asking Claude to create a PR, verify:
 
-- [ ] Claude has read CLAUDE.md, AI_AGENT_GUIDE.md, CONTRIBUTING.md
+- [ ] Claude has read AGENTS.md, AI_AGENT_GUIDE.md, CONTRIBUTING.md
 - [ ] Claude investigated the issue (not just pattern-matched)
 - [ ] Changes follow existing code patterns
 - [ ] Tests were run and output was shown
@@ -363,7 +363,7 @@ If you're unsure whether Claude is doing things correctly:
 
 ## Related Documentation
 
-- **CLAUDE.md** - Project conventions (MUST READ)
+- **AGENTS.md** - Project conventions (MUST READ; CLAUDE.md is a symlink)
 - **AI_AGENT_GUIDE.md** - Detailed AI guidelines
 - **CONTRIBUTING.md** - Development workflow
 - **README.md** - Build and usage instructions

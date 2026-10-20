@@ -211,7 +211,7 @@ scheme exists to avoid.
 - `torch.__version__` still ends in `+cpu`
 - `docs/vendors/<vendor>/installation.md` written, and
   `docs/reference/compatibility.md` plus `docs/reference/operator-support.md`
-  updated from **measured** results — per CLAUDE.md, unavailable hardware is
+  updated from **measured** results — per AGENTS.md, unavailable hardware is
   marked *not revalidated* rather than assumed
 
 ## Related

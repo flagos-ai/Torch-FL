@@ -398,7 +398,7 @@ have passed a CPU-comparison test on real hardware. Unrouted operators reach
 - no duplicate backend-slot registration
 - conf regeneration idempotent
 - `docs/reference/operator-support.md` updated from **measured** results, per
-  CLAUDE.md's operator-support rule — routing configuration is not evidence
+  AGENTS.md's operator-support rule — routing configuration is not evidence
 
 ---
 
@@ -440,7 +440,7 @@ reconnaissance phase is read-only over headers.
    capability gap. A stub returning `Success` for an operation that did not
    happen is worse than a link error.
 3. **Support claims come from measurement.** Every "supported" entry traces to a
-   test run on real hardware, per CLAUDE.md. Routing config is not evidence.
+   test run on real hardware, per AGENTS.md. Routing config is not evidence.
 4. **Idempotency is a gate, not a nicety.** Every generator's second run must
    produce no diff.
 5. **The agent stages, humans decide.** Redistributing a vendor `.so`, promoting

@@ -1,6 +1,6 @@
 # Fused SDPA on GCU: codegen limitation and kernel design
 
-Status: **implemented and measured.** CLAUDE.md allows a hand-written vendor
+Status: **implemented and measured.** AGENTS.md allows a hand-written vendor
 kernel only when the platform code generator cannot express the required runtime
 behaviour, and requires the concrete limitation to be documented and approved
 before the implementation is added. This file is that document, and the approval

@@ -812,7 +812,7 @@ the title alone identifies the measurement:
 Before any tracker write, read `.github/AI_AGENT_GUIDE.md`,
 `.github/CLAUDE_CODE_GUIDE.md`, and
 `.github/ISSUE_TEMPLATE/ai_agent_issue.md`. Include a self-contained reproducer
-and the environment block, and write everything in English per `CLAUDE.md`.
+and the environment block, and write everything in English per `AGENTS.md`.
 
 ## Step 8 — record the baseline, then authorize each tracker action
 

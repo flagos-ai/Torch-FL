@@ -50,7 +50,7 @@ ai_agent_issue.md          - AI-specific issue (strict requirements)
 
 ### Documentation
 ```
-CLAUDE.md                           - Project conventions (top-level)
+AGENTS.md                           - Project conventions (top-level)
 CONTRIBUTING.md                     - Complete contribution guide
 .github/AI_AGENT_GUIDE.md          - Detailed AI agent guidelines
 .github/CLAUDE_CODE_GUIDE.md       - Claude Code integration guide
@@ -97,7 +97,7 @@ scripts/tools/validate_ai_pr.py          - Pre-submission validation script
 1. **Before starting any work**:
    ```bash
    # Read guidelines (in order)
-   cat CLAUDE.md
+   cat AGENTS.md
    cat .github/AI_AGENT_GUIDE.md
    cat .github/CLAUDE_CODE_GUIDE.md  # if using Claude Code
    ```
@@ -204,7 +204,7 @@ gh pr create --title "feat: add new feature"
 ## 🔒 Enforcement Mechanisms
 
 ### Layer 1: Documentation
-- CLAUDE.md states top-level requirements
+- AGENTS.md states top-level requirements
 - AI_AGENT_GUIDE.md provides detailed workflow
 - Templates have rejection criteria
 
@@ -288,7 +288,7 @@ jobs:
 ## 📚 Documentation Hierarchy
 
 ```
-CLAUDE.md (top-level conventions)
+AGENTS.md (top-level conventions)
     ├── CONTRIBUTING.md (detailed workflow)
     │   ├── .github/TEMPLATES.md (template index)
     │   └── .github/QUICK_REFERENCE.txt (quick ref)

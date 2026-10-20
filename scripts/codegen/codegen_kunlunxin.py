@@ -115,7 +115,7 @@ SUPPORTS = {
 # touches -- the failure the RNG-dispatch suite reports.
 #
 # This is the documented exception to the codegen-only rule for non-CUDA
-# platforms (CLAUDE.md, "Operator integration on non-CUDA-compatible
+# platforms (AGENTS.md, "Operator integration on non-CUDA-compatible
 # platforms"): the concrete limitation is that the vendor op library has no RNG
 # entry point for a template to call, which the PR records and carries explicit
 # human approval for. GCU takes the same route (codegen_gcu.py HANDWRITTEN_OPS +

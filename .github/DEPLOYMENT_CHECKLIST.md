@@ -14,7 +14,7 @@
 - [x] `.github/PULL_REQUEST_TEMPLATE/ai_agent_pr.md` (AI)
 
 ### Documentation
-- [x] `CLAUDE.md` (project conventions)
+- [x] `AGENTS.md` (project conventions)
 - [x] `CONTRIBUTING.md` (contribution guide)
 - [x] `.github/AI_AGENT_GUIDE.md` (AI guidelines)
 - [x] `.github/CLAUDE_CODE_GUIDE.md` (Claude Code specific)
@@ -55,7 +55,7 @@ python scripts/tools/validate_ai_pr.py --pr-body /tmp/test_pr.md
 ### Immediate (Before Committing)
 1. [ ] Review all created files for accuracy
 2. [ ] Test validation script on current branch
-3. [ ] Verify CLAUDE.md references new templates
+3. [ ] Verify AGENTS.md references new templates
 4. [ ] Check all documentation links work
 
 ### After Committing
@@ -81,7 +81,7 @@ python scripts/tools/validate_ai_pr.py --pr-body /tmp/test_pr.md
 - [x] English-only requirement clearly stated
 - [x] Validation script detects Chinese text
 - [x] Templates remind about requirement
-- [x] CLAUDE.md has top-level rule
+- [x] AGENTS.md has top-level rule
 
 ### AI Agent Requirements
 - [x] Root cause analysis required
@@ -97,7 +97,7 @@ python scripts/tools/validate_ai_pr.py --pr-body /tmp/test_pr.md
 - [x] Error messages are helpful
 
 ### Documentation
-- [x] Clear hierarchy (CLAUDE.md → detailed guides)
+- [x] Clear hierarchy (AGENTS.md → detailed guides)
 - [x] Examples provided
 - [x] Common pitfalls documented
 - [x] Quick reference available
@@ -107,7 +107,7 @@ python scripts/tools/validate_ai_pr.py --pr-body /tmp/test_pr.md
 ### Recommended Approach
 ```bash
 # Single commit for the complete template system
-git add .github/ CLAUDE.md CONTRIBUTING.md scripts/tools/validate_ai_pr.py
+git add .github/ AGENTS.md CONTRIBUTING.md scripts/tools/validate_ai_pr.py
 git commit -m "docs: add comprehensive issue/PR templates and AI agent guidelines
 
 Introduces a complete template system for managing contributions with
@@ -119,7 +119,7 @@ Templates:
 - 2 PR templates (human, AI-specific)
 
 Documentation:
-- CLAUDE.md: Project conventions with template references
+- AGENTS.md: Project conventions with template references
 - CONTRIBUTING.md: Complete contribution workflow
 - AI_AGENT_GUIDE.md: Detailed AI agent guidelines
 - CLAUDE_CODE_GUIDE.md: Claude Code integration guide
@@ -160,7 +160,7 @@ git add scripts/tools/validate_ai_pr.py
 git commit -m "feat: add AI PR validation script"
 
 # Commit 4: Project docs
-git add CLAUDE.md CONTRIBUTING.md
+git add AGENTS.md CONTRIBUTING.md
 git commit -m "docs: update project conventions and contribution guide"
 ```
 
