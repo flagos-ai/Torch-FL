@@ -45,7 +45,10 @@ BACKENDS_DIR = ATEN_DIR / "backends"
 # Ops registered straight from register.cc rather than an ``.inc``, invisible
 # to the ``m.impl`` scan. Mirrors ``EXTRA_NATIVE`` / ``EXTRA_ROUTED`` in
 # ``scripts/codegen/gen_vendor_confs.py``.
-EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}}
+EXTRA_NATIVE = {
+    "ascend": {"matmul", "matmul_backward"},
+    "iluvatar": {"_conj"},
+}
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
 # Platform -> registration ``.inc`` set that ``csrc/aten/register.cc`` compiles
@@ -408,8 +411,9 @@ def _derived_iluvatar_counts() -> dict[str, int]:
     cohort changes, so the counts are derived from what the platform actually
     registers instead. The FlagGems ``.inc`` claims the ``flaggems`` routes; the
     native ``.inc`` claims the ``iluvatar`` routes, and because FlagGems wins any
-    overlap the native set is the native-minus-FlagGems difference; every other
-    op the conf lists is ``none``. A conf that disagrees with the registrations
+    overlap the native set is the native-minus-FlagGems difference; the ops
+    register.cc claims directly (EXTRA_NATIVE, e.g. ``_conj``) belong to that
+    same native slot; every other op the conf lists is ``none``. A conf that disagrees with the registrations
     is caught by test_vendor_routes_are_registered / _accelerated_routes_are_
     registered / test_registered_ops_are_never_left_at_none above.
     """
@@ -420,7 +424,7 @@ def _derived_iluvatar_counts() -> dict[str, int]:
     native = _registered_ops(
         ATEN_DIR / "backends/iluvatar/generated/iluvatar_register.inc"
     )
-    iluvatar = native - flaggems
+    iluvatar = (native | EXTRA_NATIVE["iluvatar"]) - flaggems
     return {
         "flaggems": len(flaggems),
         "iluvatar": len(iluvatar),

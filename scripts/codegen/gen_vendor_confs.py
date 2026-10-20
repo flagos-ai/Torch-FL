@@ -174,7 +174,21 @@ VENDORS = {
 # `#if defined(USE_ASCEND)` so the call hits the fused aclnnMatmul rather than
 # decomposing into mm/bmm/view; WrapperMatmul reads this conf to decide, so the
 # entry has to be here or the fused kernel is unreachable.
-EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}}
+#
+# Iluvatar claims aten::_conj the same way, for a different reason: it is a view
+# operator, so its `none` route cannot be served by cpu_fallback (ATen refuses a
+# fallback for views), and register.cc's USE_ILUVATAR arm answers it at the
+# CatchAll key with ATen's metadata kernel. The registration is unconditional
+# rather than part of the FLAGOS_ILUVATAR_KERNEL-gated .inc, which is why it is
+# listed here. It is not a kernel the conf can route to: FlagGems' `_conj` is
+# eager and breaks the lazy-view contract (see the entry in
+# NATIVE_TRITON_GAPS), so iluvatar also joins NATIVE_KERNEL_PREFERRED. That is
+# what keeps the route string `iluvatar` -- the native slot is Backend::kIluvatar
+# and Dispatcher::GetFn answers it for every backend, so it is the same metadata
+# kernel `flaggems` would have reached, while the FlagGems slot would be
+# subtracted as "also a native kernel" and the op would land on `none` again.
+# The two entries are one decision and neither is correct alone.
+EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}, "iluvatar": {"_conj"}}
 
 # Ops a hand-written wrapper claims for every platform, so they appear in no
 # .inc at all. Same cause as EXTRA_NATIVE, different owner:
@@ -1951,8 +1965,9 @@ NATIVE_TRITON_GAPS = {
         # still holds the op off the FlagGems kernel above; register.cc's
         # USE_ILUVATAR arm republishes ATen's metadata-only implementation (the
         # `alias`/`view` shape) as an unconditional CatchAll wrapper, so the op
-        # never stops at the ViewOp key, where a fallback is refused outright.
-        "_conj",
+        # never stops at the ViewOp key, where a fallback is refused outright. Because
+        # the op is routed native, it is not a gap and does not appear here: see
+        # EXTRA_NATIVE and NATIVE_KERNEL_PREFERRED, which are that same fix.
         "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a
         # *tuning* defect rather than a wrong kernel: the fp64 failure is
@@ -2027,7 +2042,16 @@ NATIVE_TRITON_GAPS = {
 # Move a vendor here if its Triton stack is immature and unverified routes cause
 # regressions. Failures for specific ops go in NATIVE_TRITON_GAPS above with their
 # diagnosis; this set is for blanket "prefer native until measured" policies.
-NATIVE_KERNEL_PREFERRED = set()
+#
+# Iluvatar joins for one op, `_conj`: register.cc's USE_ILUVATAR arm republishes
+# ATen's metadata implementation there (see EXTRA_NATIVE), and that registration
+# has to be named in exactly one place. Preferring native removes `_conj` from
+# py_here, which both stops the FlagGems slot from being subtracted as a rival
+# native kernel -- leaving the route `none`, which a view op cannot fall back
+# from -- and drops the gap entry from NATIVE_TRITON_GAPS["iluvatar"] as
+# redundant. FlagGems coverage is unaffected (the .inc is generated from the
+# FlagGems set, and only `none`/`iluvatar` ops are in it).
+NATIVE_KERNEL_PREFERRED = {"iluvatar"}
 
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and

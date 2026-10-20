@@ -579,8 +579,14 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     `_conj` and `_conj_copy.out` leave last, for a contract rather than a value
     defect: FlagGems' `_conj` is an eager kernel and ATen's is a lazy view, and
     on iluvatar the `_iluvatar` lowering of it returns the unconjugated storage.
-    Neither spelling has a native kernel, so both reach `cpu_fallback`, where
-    the positive Conjugate bit stays lazy.
+
+    `_conj` then moves on to `iluvatar` rather than staying at `none`, because
+    a view operator cannot take `cpu_fallback` at all (ATen refuses a fallback
+    for views, since storage is not shareable): register.cc's USE_ILUVATAR arm
+    publishes ATen's metadata implementation for it, listed in EXTRA_NATIVE,
+    and NATIVE_KERNEL_PREFERRED is what keeps the route on that slot instead
+    of subtracting it back to `none`. `_conj_copy.out` is a copy, not a view,
+    so `none` serves it on the fallback.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
 
@@ -593,7 +599,6 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "addmm.dtype_out",
         "addmm.out",
         "addmm_",
-        "_conj",
         "_conj_copy.out",
         "bmm",
         "bmm.dtype",
@@ -611,8 +616,13 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         assert route(op) != "flaggems", op
     for op in ("addmm", "bmm", "mm"):
         assert route(op) == "iluvatar", op
+    # Registered straight from register.cc, not by the FLAGOS_ILUVATAR_KERNEL
+    # .inc, so it reaches the native slot through EXTRA_NATIVE. FlagGems is
+    # not preferred for it: its `_conj` is the eager kernel the gap describes.
+    assert "_conj" in g.EXTRA_NATIVE["iluvatar"]
+    assert "iluvatar" in g.NATIVE_KERNEL_PREFERRED
+    assert route("_conj") == "iluvatar"
     for op in (
-        "_conj",
         "_conj_copy.out",
         "addmm.dtype",
         "addmm.dtype_out",
