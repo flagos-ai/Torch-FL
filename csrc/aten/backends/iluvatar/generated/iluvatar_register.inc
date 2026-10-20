@@ -13,16 +13,18 @@
 // cohort's kernel is still generated in iluvatar_kernels.cc. Which ops those
 // are is read back from the committed iluvatar_flaggems_register.inc, so the
 // cohort changes (mm moved here on 2026-10-20 when it left the FlagGems route
-// for issue #570), not this comment.
+// for issue #570, and bmm with it when FlagGems' generic bmm failed to compile
+// every K < 16 shape), not this comment.
 //
 // This file is also what scripts/codegen/gen_vendor_confs.py reads to decide
 // which ops backends_iluvatar.conf may route to `iluvatar`, and a `flaggems`
-// route competing with it takes precedence (the mm measurement below predates
-// the FlagGems route mm lost on 2026-10-20). An op that is FlagGems-claimed is
+// route competing with it takes precedence (the mm and bmm measurements below
+// predate the FlagGems routes they lost on 2026-10-20). An op that is FlagGems-claimed is
 // left out here on the FlagGems-primary build, where only one .inc is
 // included, for the duplicate-registration reason above.
 
   m.impl("_convolution", WrapperPrivConvolution);
+  m.impl("bmm", WrapperBmm);
   m.impl("convolution", WrapperConvolution);
   m.impl("mm", WrapperMm);
   m.impl("native_batch_norm", WrapperNativeBatchNorm);

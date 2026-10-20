@@ -222,11 +222,13 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # `vendor_registered_ops()` is the registration closure the conf's `none` gate
 # reads; these ops are registered by FlagGems, so widening that set would change
 # no route. They are used only by render(), to annotate the route line.
+# iluvatar's `mm` and `bmm` started here (measured, FlagGems-primary) and left
+# on 2026-10-20: gapping them for issue #570 removes them from the FlagGems
+# `.inc`, so codegen_iluvatar.py's read-back now claims them natively and the
+# .inc scan sees their route. `addmm` has no native kernel, so it stays.
 # XLA/musa/gcu/ascend/kunlunxin have no escape-only kernels.
 ESCAPE_NATIVE = {
     "iluvatar": {
-        "mm",
-        "bmm",
         "addmm",
         "_native_batch_norm_legit",
         "_native_batch_norm_legit_no_training",
@@ -1938,6 +1940,22 @@ NATIVE_TRITON_GAPS = {
         # fp64: the mm tuning perf model rejects float64 (issue #570)
         "mm",
         "mm.out",
+        # K < 16: FlagGems' generic bmm compiles with a BLOCK_SIZE_K below
+        # FlagTree's min_dot_size[2] and tl.dot raises "Input shapes should
+        # have M >= 1, N >= 1 and K >= 16" before any kernel runs -- measured
+        # on the CI lane 2026-10-20 as the last 15 main-op failures of #570
+        # (bmm 1-1-1-1 and every SDPA/matmul-backward case, which reaches bmm
+        # through FlagGems' own SDPA). FlagGems 5.4.0 does not pad K; K padding
+        # only landed in 5.6. `bmm` itself takes the native ixblas kernel (it
+        # moved out of the FlagGems .inc with this change); the out=/dtype=/
+        # dtype_out= spellings have no native kernel and reach cpu_fallback.
+        # `addmm` shares the autotune shape (see the PPU and GCU entries) and
+        # is kept on FlagGems with its tuner repaired by the same runtime patch
+        # that repairs mm; it has no native kernel to move to.
+        "bmm",
+        "bmm.out",
+        "bmm.dtype",
+        "bmm.dtype_out",
         # wrong values: assumes a contiguous grad_output
         "slice_backward",
         # the out= contract (see the MUSA entry for where.self_out)

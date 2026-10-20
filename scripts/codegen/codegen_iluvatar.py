@@ -81,11 +81,14 @@ FLAGGEMS_INC = (
 # override -- FLAGOS_FORCE_BACKEND=vendor, or a per-op FLAGOS_OP_<name>=iluvatar.
 # But only the ops FlagGems does *not* already claim get an m.impl line in
 # iluvatar_register.inc: the FlagGems .inc is included into the same library
-# body, and torch rejects a duplicate m.impl at load. The GEMM trio and the two
-# `_native_batch_norm_legit*` variants are already claimed there (route=flaggems
-# today), so they keep their FlagGems registration and their kernel here is
-# reached only by an override. That the conf cannot move them is intended --
-# FlagGems is the primary path and `route()` gives it priority.
+# body, and torch rejects a duplicate m.impl at load. Today that is `addmm` and
+# the two `_native_batch_norm_legit*` variants: still claimed there
+# (route=flaggems), so they keep their FlagGems registration and their kernel
+# here is reached only by an override. That the conf cannot move them is
+# intended -- FlagGems is the primary path and `route()` gives it priority.
+# `mm` and `bmm` were in that group and left it on 2026-10-20 (issue #570: the
+# mm perf model rejects float64 and FlagGems' generic bmm cannot compile K < 16),
+# so their kernels now carry the .inc line the conf routes to.
 #
 # The runtime dtype escape is a THIRD mechanism and it does NOT reach them:
 # ResolveFn substitutes the vendor slot only when FlagGemsRejectsArgs() fires,
@@ -1049,12 +1052,13 @@ INC_HEADER = """\
 // cohort's kernel is still generated in iluvatar_kernels.cc. Which ops those
 // are is read back from the committed iluvatar_flaggems_register.inc, so the
 // cohort changes (mm moved here on 2026-10-20 when it left the FlagGems route
-// for issue #570), not this comment.
+// for issue #570, and bmm with it when FlagGems' generic bmm failed to compile
+// every K < 16 shape), not this comment.
 //
 // This file is also what scripts/codegen/gen_vendor_confs.py reads to decide
 // which ops backends_iluvatar.conf may route to `iluvatar`, and a `flaggems`
-// route competing with it takes precedence (the mm measurement below predates
-// the FlagGems route mm lost on 2026-10-20). An op that is FlagGems-claimed is
+// route competing with it takes precedence (the mm and bmm measurements below
+// predate the FlagGems routes they lost on 2026-10-20). An op that is FlagGems-claimed is
 // left out here on the FlagGems-primary build, where only one .inc is
 // included, for the duplicate-registration reason above.
 

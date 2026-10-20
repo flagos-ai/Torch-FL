@@ -45,6 +45,10 @@
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update
 //   - _native_batch_norm_legit.no_stats
+//   - bmm
+//   - bmm.dtype
+//   - bmm.dtype_out
+//   - bmm.out
 //   - gcd_
 //   - histc
 //   - i0
@@ -87,7 +91,7 @@
 //   - upsample_bicubic2d
 //   - where.self_out
 //
-// Total: 597 ops registered here, 2 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 595 ops registered here, 3 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -231,8 +235,6 @@
   m.impl("bitwise_xor_.Tensor", WrapperBitwiseXorInplaceTensor);
   m.impl("blackman_window", WrapperBlackmanWindow);
   m.impl("blackman_window.periodic", WrapperBlackmanWindowPeriodic);
-  m.impl("bmm", WrapperBmm);
-  m.impl("bmm.out", WrapperBmmOut);
   m.impl("bucketize.Tensor", WrapperBucketizeTensor);
   m.impl("cat", WrapperCat);
   m.impl("ceil", WrapperCeil);

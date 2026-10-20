@@ -2643,6 +2643,11 @@ def _patch_flaggems_tune_space():
 # already repaired.
 _MM_TUNE_SPACE_PATCHED = "_torch_fl_mm_tune_space_patched"
 
+# The gemm bindings the patch above rewrites. ``addmm`` is included because it
+# prunes with the same perf model: a dtype that model cannot score would fail
+# ``nn.Linear``'s route on small K exactly as it does ``mm``.
+_MM_TUNE_SPACE_OPS = ("mm", "mm_out", "mm_comm", "addmm", "addmm_out", "addmm_")
+
 
 def _prune_without_perf_model(prune_configs_by):
     """``prune_configs_by`` with its ``perf_model`` entry removed, or ``None``.
@@ -2688,6 +2693,9 @@ def _patch_flaggems_mm_tune_space():
     gated on the conf routing to FlagGems, as the patches above are.
     Best-effort: an unrepaired tuner is the status quo (float64 raises exactly
     as it did), not a new failure.
+
+    ``_MM_TUNE_SPACE_OPS`` also covers ``addmm``, which prunes with the same
+    model; the rewrite is a no-op for any tuner that does not carry it.
     """
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
@@ -2701,7 +2709,7 @@ def _patch_flaggems_mm_tune_space():
                 mod_dict = mod.__dict__
             except Exception:
                 continue
-            for name in ("mm", "mm_out", "mm_comm"):
+            for name in _MM_TUNE_SPACE_OPS:
                 func = mod_dict.get(name)
                 if not callable(func) or not getattr(func, "__module__", "").startswith(
                     "flag_gems.runtime.backend._iluvatar"

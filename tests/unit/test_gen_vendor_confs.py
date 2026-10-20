@@ -564,12 +564,30 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     this pins the conf so the CI lane can reach a float64 GEMM at all. The other
     two are the lane's next-reported failures: `slice_backward` assumes a
     contiguous grad_output, and `where.self_out` does not grow an `out` the way
-    ATen does.
+    ATen does. `bmm` and its out=/dtype= spellings leave next: FlagGems 5.4.0's
+    generic bmm compiles with a BLOCK_SIZE_K that FlagTree refuses in `tl.dot`
+    ("M >= 1, N >= 1 and K >= 16") before any kernel runs, which was the last
+    main-op failure of the lane. `bmm` itself takes the native ixblas kernel
+    that the gap moves into `iluvatar_register.inc`; `addmm` stays on FlagGems
+    (no native kernel) and is repaired by the same runtime tuner patch.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
-    for op in ("mean", "mean.dim", "mm", "mm.out", "slice_backward", "where.self_out"):
+    gaps = (
+        "bmm",
+        "bmm.dtype",
+        "bmm.dtype_out",
+        "bmm.out",
+        "mean",
+        "mean.dim",
+        "mm",
+        "mm.out",
+        "slice_backward",
+        "where.self_out",
+    )
+    for op in gaps:
         assert op in g.NATIVE_TRITON_GAPS["iluvatar"]
         assert routes[op].split("#", 1)[0].strip() != "flaggems", op
+    assert routes["bmm"].split("#", 1)[0].strip() == "iluvatar"
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
