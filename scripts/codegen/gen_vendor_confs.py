@@ -1881,18 +1881,19 @@ NATIVE_TRITON_GAPS = {
     # far beyond 1e-4 -- and `mean_dim` (last dim) is served by the same kernel
     # family, so both spellings leave the FlagGems path. `_iluvatar` ships no
     # `mean` override, so this is the generic kernel, not a vendor one. The
-    # The generic mean kernel is wrong on this device, so until a BI-V150
+    # generic mean kernel is wrong on this device, so until a BI-V150
     # measurement says otherwise the op does not stay on the FlagGems path.
     # Remove the two entries when a FlagGems mean is measured correct here.
     #
-    # `mm.out`, not `mm`: the fp64 failure (issue #570) is `matmul_prob` ->
-    # `mm` -> the `_iluvatar` mm.py libtuner, whose `estimate_matmul_time`
-    # perf model raises "dtype not supported" for float64. It is a *tuning*
-    # defect, so it must not move the route: `mm` and the float64 4x4 GEMM it
-    # serves stay on FlagGems. What leaves the FlagGems route is `mm.out`,
-    # the single other spelling of the op, so the fp64 case reaches the native
-    # libtuner rather than the broken FlagGems one, and every non-out `mm`
-    # caller (including `matmul`) keeps its measured FlagGems route.
+    # `mm` and `mm.out` are both here, for issue #570, and the reason is a
+    # *tuning* defect rather than a wrong kernel: the fp64 failure is
+    # `torch.matmul` -> `mm` -> the `_iluvatar` mm.py libtuner, whose
+    # `estimate_matmul_time` perf model raises "dtype not supported" for
+    # float64 before any kernel is compiled. gapping one spelling only moved
+    # the failure to `matmul` (which lands on the non-out spelling), so both
+    # leave; `torch_fl`'s runtime patch repairs the tuner itself (see
+    # `_patch_flaggems_mm_tune_space`), and a FlagGems mm measured correct here
+    # on fp64 can move back.
     "iluvatar": {
         # device-guard mismatch (cuda vs flagos)
         "i0",
@@ -1921,6 +1922,7 @@ NATIVE_TRITON_GAPS = {
         "mean",
         "mean.dim",
         # fp64: the mm tuning perf model rejects float64 (issue #570)
+        "mm",
         "mm.out",
         # Triton compile / structural defects
         "norm.Scalar",

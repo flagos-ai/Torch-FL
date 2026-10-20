@@ -89,10 +89,10 @@ INC_HEADER = """\
 // the old FAILED count, and no op newly failed between the runs. The remaining 21
 // are survey synthesis limits and stay here.
 //
-// 2026-10-20: `mean`, `mean.dim` and `mm.out` joined the gap set from the CI
-// lane's own measurements rather than a survey run (issue #570) -- the keepdim
-// mean returns wrong values, and the mm tuning perf model rejects float64 -- so
-// the list is now 40 and this file registers 600.
+// 2026-10-20: `mean`, `mean.dim`, `mm` and `mm.out` joined the gap set from the
+// CI lane's own measurements rather than a survey run (issue #570) -- the
+// keepdim mean returns wrong values, and the mm tuning perf model rejects
+// float64 -- so the list is now 41 and this file registers 599.
 //
 // Re-measure and move entries in or out of that set only from BI-V150 results,
 // never by assumption -- and note the DCU precedent: most of the 37 are the

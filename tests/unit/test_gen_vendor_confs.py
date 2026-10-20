@@ -556,16 +556,15 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     routed to FlagGems, and the fix is a gap rather than a route change.
 
     `mean`/`mean.dim` return wrong values through the generic FlagGems kernel,
-    so neither spelling may stay on `flaggems`. `mm` must keep its route: the
-    float64 failure is the `_iluvatar` tuning perf model raising "dtype not
-    supported", a defect in the FlagGems path, not evidence the op cannot run
-    there -- moving its route would take every float32 `matmul` with it. The
-    `mm.out` spelling leaves instead, so it cannot silently come back through
-    the FlagGems tuner if a caller switches to the out= form.
+    so neither spelling may stay on `flaggems`. `mm` and `mm.out` both leave:
+    the float64 failure is the `_iluvatar` tuning perf model raising "dtype not
+    supported" during config pruning, and the first landing of this fix left
+    `mm` routed, which only moved the failure from `matmul_prob` to `matmul` on
+    the next CI run. The runtime repair lives in `_patch_flaggems_mm_tune_space`;
+    this pins the conf so the CI lane can reach a float64 GEMM at all.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
-    assert routes["mm"].split("#", 1)[0].strip() == "flaggems"
-    for op in ("mean", "mean.dim", "mm.out"):
+    for op in ("mean", "mean.dim", "mm", "mm.out"):
         assert op in g.NATIVE_TRITON_GAPS["iluvatar"]
         assert routes[op].split("#", 1)[0].strip() != "flaggems", op
 
