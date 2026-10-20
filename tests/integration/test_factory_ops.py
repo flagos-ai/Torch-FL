@@ -229,19 +229,25 @@ class TestCopyTransfer:
                 del actual_value
 
             inputs = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+            # Nothing is freed before the comparison: `reference` is owned by
+            # its own call here, but the earlier shape of this block released
+            # the input tensors first and could only mismatch on a backend that
+            # reads them after the fact. The names are unbound after the assert.
+            device_weight = weight.detach().clone()
+            device_bias = bias.detach().clone()
+            reference = torch.ops.aten.linear(
+                inputs, expected["weight"], expected["bias"]
+            )
             with torch.no_grad():
-                device_weight = weight.detach().clone()
-                device_bias = bias.detach().clone()
                 actual = torch.ops.aten.linear(
                     inputs.to(device),
                     device_weight,
                     device_bias,
                 ).cpu()
-            reference = torch.ops.aten.linear(
-                inputs, expected["weight"], expected["bias"]
+            assert torch.allclose(actual, reference), (
+                f"linear on {device} differs from CPU: {actual} vs {reference}"
             )
-            assert torch.allclose(actual, reference)
-            del inputs, device_weight, device_bias, actual, reference
+            del actual, reference, inputs, device_weight, device_bias
 
             model.cpu()
             assert model.weight is weight
