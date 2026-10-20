@@ -624,11 +624,10 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "the TileOPs kernel set)"
     ),
     "tests/integration/test_mps_runtime.py": (
-        "the MPS runtime floor (device, stream, event, memory) has no CI job: "
-        "the pipeline runs accelerator container images on self-hosted Linux "
-        "runners and no macOS arm64 runner is wired in, so the file is run by "
-        "hand on an M-series host. Accepted exclusion until such a runner and "
-        "an mps manifest exist"
+        "carries the `mps` marker, while the MPS CI lane runs the shared "
+        "hardware-agnostic runtime suite that covers the same device, stream, "
+        "event and memory contracts. Accepted exclusion from the marker sweeps "
+        "so the hosted macOS runner does not duplicate them"
     ),
 }
 

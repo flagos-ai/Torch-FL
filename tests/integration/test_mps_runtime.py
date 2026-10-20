@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The Apple Silicon (M-series) device-runtime floor, with zero operators.
+"""Focused Apple Silicon (M-series) device-runtime checks.
 
 This is the stage-0 gate from ``.claude/skills/runtime-bringup/SKILL.md``: the
-28-function C ABI plus the allocator, exercised without a single aten op claimed
-on PrivateUse1. It asserts the runtime works -- allocate, host/device copy,
-stream and event synchronization, allocator reuse -- not that any operator runs.
-An operator failure on top of a broken runtime is nearly impossible to
-attribute, which is why this file exists before the MPSGraph kernel layer.
+28-function C ABI plus the allocator, exercised under the same contracts as the
+shared runtime-conformance suite. The hosted macOS CI lane runs that shared
+suite for allocate, copy, stream, event and memory checks; this file adds the
+intentional coexistence check with torch's own MPS backend. It predates the
+MPSGraph operator layer, whose routing is covered by ``runtime/``.
 
 Every case self-skips off an MPS build: the marker keeps CI manifests explicit,
 and the skipif keeps a broad ``pytest tests/integration`` collection from
