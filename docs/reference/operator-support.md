@@ -132,8 +132,9 @@ FlagGems route, so the conf carries 603 `flaggems` routes, not 640. One of those
 `bmm` family and — on 2026-10-21 — the `addmm` family were added to that gap set
 from the CI lane's failures and a BI-V150 probe (issue #570), and — on
 2026-10-21 — `_conj` and `_conj_copy.out` moved off the route for a contract
-defect the CI lane exposed once the earlier groups went green; the conf is now
-**588 `flaggems` / 6 `iluvatar` / 1443 `none`**. The survey above measured the
+defect the CI lane exposed once the earlier groups went green, and `_conj` and
+`view_as_real` are since answered from ATen's metadata kernels; the conf is now
+**588 `flaggems` / 8 `iluvatar` / 1441 `none`**. The survey above measured the
 603-route conf and has not been re-run against this one; the 21 FAILED / 136
 UNTESTED figures are its result, not this conf's.
 
@@ -669,8 +670,8 @@ overrides able to move the op at all.
 [`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py)
 from `FLAGGEMS_PYTHON_PLATFORMS` minus `NATIVE_TRITON_GAPS["iluvatar"]`, in the
 same full-coverage shape as the other platforms: all 2037 ops listed exactly
-once, **588 `flaggems` / 6 `iluvatar` / 1443 `none`** (603/3/1431 before
-2026-10-20; see issue #570 below). The six `iluvatar` routes
+once, **588 `flaggems` / 8 `iluvatar` / 1441 `none`** (603/3/1431 before
+2026-10-20; see issue #570 below). The eight `iluvatar` routes
 are the first cohort's ops that route to `none` and have an ixdnn/ixblas kernel
 (`_convolution`, `convolution`, `native_batch_norm`, and — since 2026-10-20 —
 `mm` and `bmm`, plus `addmm` since 2026-10-21 — whose native kernels fall back
@@ -869,50 +870,61 @@ platform's conf is byte-identical. `iluvatar_flaggems_register.inc` drops to 588
 is a probe script on `u180`; the contract itself is verified by the CI lane (the
 group needs the device), and no other Iluvatar host was revalidated.
 
-**2026-10-21: `_conj` is answered from the CatchAll key (issue #570, fifth
-landing).** The gap above leaves `_conj` on `none`, and a `none` route is
-reached through the engine's `cpu_fallback(PrivateUse1)` -- which ATen refuses
-for a **view** operator, because a view's storage cannot be shared with the
-CPU: "aten::_conj appears to be a view operator, but it has no implementation
-for the backend flagos:0". So the call raised rather than degrading, and every
-path that resolves a Conjugate bit (`copy_`, `clone`, `contiguous`,
-`resolve_conj`, arithmetic on a conjugated tensor) raised with it. That is not
-visible from the conf, which a CPU-reachable op shares with its view sibling:
-`_conj_copy.out` is a copy, so the same `none` route serves it correctly, while
-`_conj` needs a kernel registration on PrivateUse1 to be answered at all.
+**2026-10-21: `_conj` and `view_as_real` are answered from ATen's metadata
+kernels (issue #570, fifth landing).** A `none` route is reached through the
+engine's `cpu_fallback(PrivateUse1)` -- which ATen refuses for a **view**
+operator, because a view's storage cannot be shared with the CPU: "View
+operators don't support falling back to run on the CPU". Measured on `u180`,
+`_conj` on a `none` route raised there, and every path that resolves a
+Conjugate bit (`copy_`, `clone`, `contiguous`, `resolve_conj`, arithmetic on a
+conjugated tensor) raised with it; `view_as_real` did not raise, but returned
+zero-filled storage, which flag_gems' complex elementwise path
+(`flag_gems/ops/add.py` decomposes both operands through it) turns into a
+zero-filled `complex128` result. The conf cannot show either defect: a
+CPU-reachable op shares a file with its view sibling, and `_conj_copy.out` is a
+copy that the same `none` route serves correctly.
 
-`csrc/aten/register.cc` registers ATen's metadata implementation
-(`at::native::_conj`, the `alias`/`view` shape already used for Ascend and
-TsingMicro through `csrc/aten/strided_ops.cc`) as a `CatchAll` `m.impl` in the
-`USE_ILUVATAR` arm. CatchAll receives the call before the ViewOp key does, so
-the op stays lazy (storage untouched, `is_conj()` True) and no vendor or
-FlagGems kernel is involved. It is registered unconditionally -- it needs no
-kernel, dtype or device -- rather than through `iluvatar_register.inc`, whose
-subset is compiled only under `FLAGOS_ILUVATAR_KERNEL`, because a FlagGems-only
-build needs the same answer.
+`csrc/aten/register.cc` registers ATen's metadata implementations
+(`at::native::_conj`, `at::native::view_as_real`) for the `USE_ILUVATAR` arm.
+They are ordinary PrivateUse1 kernels, not `CatchAll` ones: registering the op
+anywhere makes it a PrivateUse1 op, and an unclaimed one at that key gets the
+boxed `cpu_fallback` from the CatchAll arm, which is what produced the measured
+`"_conj: backend not registered"`. They are registered unconditionally -- they
+need no kernel, dtype or device -- rather than through `iluvatar_register.inc`,
+whose subset is compiled only under `FLAGOS_ILUVATAR_KERNEL`, because a
+FlagGems-only build needs the same answer.
 
 The registration has to be named in the generator as well, because a registered
-op may not sit at `none`: measured on `u180` with the wrapper built in,
-`torch.conj(c)` raised "_conj: routed to 'none' ... but the op is registered on
-PrivateUse1". So `_conj` joins `EXTRA_NATIVE["iluvatar"]` (the list of ops a
+op may not sit at `none` ("routed to 'none' ... but the op is registered on
+PrivateUse1"). Both ops join `EXTRA_NATIVE["iluvatar"]` (the list of ops a
 platform registers straight from `register.cc`, which Ascend's matmul already
 uses) and iluvatar joins `NATIVE_KERNEL_PREFERRED`, which keeps the route on the
 native slot instead of subtracting the registration back to `none`. The native
-slot answers with that same metadata kernel -- `Backend::kIluvatar` reaches every
-`GetFn` arm -- so the conf's `flaggems` count is untouched. `_conj_copy.out`
-stays `none`: it is a copy, and `cpu_fallback` serves those.
+slot answers with those same metadata kernels -- `Backend::kIluvatar` reaches
+every `GetFn` arm -- so the conf's `flaggems` count is untouched.
+`_conj_copy.out` stays `none`: it is a copy, and `cpu_fallback` serves those.
 
-Route delta: `iluvatar` 6 → **7**, `none` 1443 → **1442**, `flaggems` 588
-unchanged; every other platform's conf is byte-identical. FlagGems' eager
-`_conj` stays unreachable on this platform.
+Route delta: `iluvatar` 6 → **8** (`_conj`, `view_as_real`), `none` 1443 →
+**1441**, `flaggems` 588 unchanged; every other platform's conf is
+byte-identical. FlagGems' eager `_conj` stays unreachable on this platform.
 
-**Evidence gap:** the route fix and the wrapper are compiled and loaded on
-`u180` but the lazy bit has not yet been read back on hardware -- the device was
-rebuilding when this landing was pushed, so `test_math_bits_contract.py` on the
-CI lane is its first measurement, and the other Iluvatar hosts are **not
-revalidated**. If the lazy bit does not survive there, the next move is a
-byte-level copy with the Conjugate bit cleared (the `resolve_conj` shape), not a
-return to the FlagGems kernel.
+Measured on `u180` after the change (rebuilt extension, device `flagos:0`):
+`torch.conj(x)` is lazy (`is_conj()` True, storage is the operand),
+`resolve_conj` and `_conj_copy.out` return the conjugated values,
+`torch.view_as_real` reads back exactly for f64, f32, complex64 and complex128
+sources, and `tests/integration/test_math_bits_contract.py` is **11 passed / 1
+failed** (was 7 errors plus the materialization failure before the fix).
+
+**Evidence gap:** the one remaining failure is
+`test_consumer_op_sees_materialized_conjugate`, and it is not a route defect.
+`complex128 + 0`, `complex128 + complex128` and `complex128 + 1` still return
+`[0j, ...]` at n = 1, 2, 4 and 8, while `complex128 * 1` and every complex64
+spelling are exact through the same process -- so the defect is inside
+flag_gems 5.4.0's complex `add` path for complex128. Whether that test should
+carry the platform in the CI lane, or the gap should be widened to
+`add.Scalar`/`add.Tensor` until FlagGems fixes it, is a decision to take with
+the measured CI run, not from this report. The other Iluvatar hosts are **not
+revalidated**.
 
 **The device-name mismatch is the platform's known, remediated defect.** The
 `_iluvatar` backend declares `device_name="cuda"`
@@ -11113,7 +11125,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
-| 2026-10-21 | Iluvatar BI-V150 — **wrapper not yet measured on hardware**; CI lane is the first measurement | Iluvatar: `_conj` answered from the `CatchAll` key in `csrc/aten/register.cc` (issue #570) | **Registers ATen's metadata-only `_conj` for the `USE_ILUVATAR` arm.** The conf gaps `_conj` off FlagGems (eager kernel, breaks the lazy-view contract), which leaves it on `none` — and `cpu_fallback` refuses *view* operators, so the call raised and took every path that resolves a Conjugate bit with it. CatchAll receives the call before the ViewOp key, so the bit stays lazy with no kernel, dtype or device involved, and the registration is unconditional rather than part of the `FLAGOS_ILUVATAR_KERNEL`-gated native `.inc`. It is listed in `EXTRA_NATIVE["iluvatar"]` with `iluvatar` in `NATIVE_KERNEL_PREFERRED`, so the conf routes `_conj` to `iluvatar` rather than `none` (a registered op may not sit at `none`: measured, the dispatcher raised "routed to 'none' ... but the op is registered"). Route delta `iluvatar` 6 → 7, `none` 1443 → 1442, `flaggems` 588 unchanged; every other platform's conf is byte-identical. | Not measured on the device: `u180` was rebuilding when this landed, so `tests/integration/test_math_bits_contract.py` on the CI lane is the first run; other Iluvatar hosts **not revalidated**. |
+| 2026-10-21 | Iluvatar BI-V150 — **measured on hardware** (`u180`, BI-V150, corex 4.5.0, CPU torch 2.10, FlagGems 5.4.0) | Iluvatar: `_conj` and `view_as_real` answered from ATen's metadata kernels in `csrc/aten/register.cc` (issue #570) | **Registers `at::native::_conj` and `at::native::view_as_real` as ordinary PrivateUse1 kernels for the `USE_ILUVATAR` arm.** Both are views: `cpu_fallback` refuses a view, so `none` raised for `_conj` and returned zero-filled storage for `view_as_real`. A `CatchAll` wrapper does not work either — registering the op makes it a PrivateUse1 op, and the unclaimed-key call goes to the boxed `cpu_fallback` from the CatchAll arm (measured: `_conj: backend not registered`), so the pair is registered at the PrivateUse1 key itself. Both are listed in `EXTRA_NATIVE["iluvatar"]` with `iluvatar` in `NATIVE_KERNEL_PREFERRED`, so the conf routes them to `iluvatar` rather than `none` (a registered op may not sit at `none`). Route delta `iluvatar` 6 → 8, `none` 1443 → 1441, `flaggems` 588 unchanged; every other platform's conf is byte-identical. | Measured on `u180`: `torch.conj` stays lazy (`is_conj()` True, storage is the operand), `resolve_conj` and `_conj_copy.out` return the conjugated values, `view_as_real` reads back exactly for f64/f32/complex64/complex128 sources, and `tests/integration/test_math_bits_contract.py` is 11 passed / 1 failed (was 7 errors plus the materialization failure). Generator `--check` clean (run twice); `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py tests/unit/test_vendor_conf_single_writer.py` → 103 passed. **Evidence gap:** the remaining failure (`test_consumer_op_sees_materialized_conjugate`) is inside FlagGems 5.4.0's complex128 `add` path — `complex128 + 0` returns zeros at n = 1, 2, 4 and 8 while `complex128 * 1` and every complex64 spelling are exact — not a route defect; other Iluvatar hosts **not revalidated**. |
 | 2026-10-20 | Iluvatar BI-V150 — **routes not re-measured on hardware this round** (dev host aborting device ops, see below) | Iluvatar: `mean`, `mean.dim`, `mm`, `mm.out`, `slice_backward`, `where.self_out` and the bmm family leave the FlagGems route (issue #570), a runtime tuner repair, and a conv-backward CPU crossing | **Gaps the ops whose FlagGems path fails the CI lane's Portable top-level contracts group, and repairs the mm tuner.** `mean`/`mean.dim` return wrong values through the generic kernel (no `_iluvatar` override exists). `mm`/`mm.out` reach the `_iluvatar` mm libtuner, whose perf model raises `dtype not supported` for float64; the gap was first applied to `mm.out` only, and the lane's next run failed the same two cases through `torch.matmul` — which lands on `mm` — so both leave. `torch_fl.flagos._patch_flaggems_mm_tune_space` additionally removes that perf model from the tuner's `prune_configs_by`, so FlagGems `mm` keeps a correct float64 path for callers that switch back. The lane's next run passed every Portable-group case and then failed its "vendor backend, main ops" group; two of those are route defects fixed here: `slice_backward`'s FlagGems kernel assumes a contiguous `grad_output` (wrong grads, 56 % of elements) and `where.self_out` hits the same out= contract defect the MUSA entry records. `convolution_backward_overrideable` was not a route question at all -- no Iluvatar backward exists and the boxed fallback can only re-raise the stub -- so `csrc/aten/register.cc` registers the shared CPU-crossing wrapper for it in the USE_ILUVATAR arm. The native `mm` kernel serves float16/float32 on ixblas and falls back to `at::mm` on CPU for anything else, as every other native kernel here does for a dtype it does not cover. **Second landing, same day:** the lane's 15 remaining "vendor backend, main ops" cases all failed in FlagGems' generic `bmm` (`tl.dot` → `K >= 16` compile error; FlagGems 5.4.0 does not pad K), so `bmm`, `bmm.out`, `bmm.dtype` and `bmm.dtype_out` join the gap set; `bmm` moves into the native ixblas `GemmEx` kernel, the other three reach `cpu_fallback`, and `addmm` — same `min_dot_size` limit, no native kernel — stays on FlagGems with the tuner repair extended to it. Final route delta `flaggems` 603 → **595**, `none` 1431 → **1437**, `iluvatar` 3 → **5**. | Conf SHA-256 `698696307cd58bf7d9cc3e13b326c68e576a916daec4cc5db8bd4dae9e97b9a9`. Generator `--check` clean; `iluvatar_flaggems_register.inc` at 595 `m.impl` lines over a 47-entry gap set; `tests/unit/test_gen_vendor_confs.py::test_iluvatar_570_gaps_leave_the_flaggems_path` pins all ten ops off the FlagGems route (and `bmm` on the native one). Hardware: `ub22` (`lvyufeng-torch-fl`, corex 4.5.0) aborts (exit 139) on `torch.ones(4, device="flagos:0")` — with the host's original conf as well as the new one — so the CI cases are verified by the lane's Portable group, **not revalidated on hardware here**; the lane's first run measured 294 passed / 2 failed on this `mean`/`mm.out` gap set, both float64 matmul cases through `mm`, which is what the `mm` gap fixes; the run after that passed the whole Portable group (236 passed) and left only the 15 bmm cases above. The bmm gap's own verification is the CI lane's next run. |
 | 2026-10-21 | Iluvatar BI-V150 — **the `addmm` family leaves the FlagGems route, measured on hardware** (`u180`, BI-V150, corex 4.5.0, CPU torch 2.10, FlagGems 5.4.0) | The `addmm` family: `addmm`, `addmm.out`, `addmm.dtype`, `addmm.dtype_out` and `addmm_` (issue #570, third landing) | Every small-shape `nn.Linear` is `addmm(x, W.t())` — a transposed-view operand — and the `_iluvatar` `mm`/`addmm`/`linear` kernels are wrong for it at small shapes: at M,K,N = (1,4,2), (4,4,8) and (8,8,8) `F.linear` disagrees with the CPU reference by 3.207 / 1.663 / 9.8 while the same call with a contiguous weight matches to 2.98e-08, and (32,64,16) and (64,128,32) are clean; a second sweep over (4,8,4), (4,16,4), (4,32,4), (4,64,4) and (8,32,8) is wrong in every row (max \|diff\| 7.03, 8.11, 2.48e+17, 23.85, 18.49). The defect is layout-dependent, not dtype-dependent, and `transpose.int` itself round-trips bit-exactly against the CPU. `addmm` therefore leaves the FlagGems route and moves into `iluvatar_register.inc` (codegen_iluvatar.py has carried an ixblas `GemmEx` addmm kernel all along; the FlagGems claim was what kept its `m.impl` out of the native `.inc`), failing over to the CPU implementation outside float16/float32 like `mm` and `bmm`; the out=/dtype= spellings have no native kernel and take `cpu_fallback`, which is the CI lane's own reference. `addmm` also leaves `ESCAPE_NATIVE["iluvatar"]` because it now has an `m.impl` of its own, and the now-unreachable `torch_fl.flagos._patch_flaggems_mm_tune_space` (the `_iluvatar` mm tuner's float64 `perf_model` rejection) and its `_MM_TUNE_SPACE_OPS` list are removed rather than left as dead code; the MUSA `_patch_flaggems_tune_space` is a different mechanism and stays. Route delta `flaggems` 595 → **590**, `none` 1437 → **1441**, `iluvatar` 5 → **6**. | Conf SHA-256 `d4c254663984a52002f989cb324cae29d88cc7cd688c6f139b723ea6113cb338`; generator `--check` clean on all three generators (run twice); `iluvatar_flaggems_register.inc` at 590 `m.impl` lines over a 52-entry gap set; `iluvatar_register.inc` claims 6 ops; `tests/unit/test_gen_vendor_confs.py::test_iluvatar_570_gaps_leave_the_flaggems_path` pins all fifteen ops off the FlagGems route and `addmm`/`bmm`/`mm` onto the native one; `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py tests/unit/test_vendor_conf_single_writer.py` → 103 passed. Hardware: the probe above, run on `u180` inside `lvyufeng-torch-fl`; `ub22` still aborts (exit 139) on the first flagos op, so the second host was not revalidated. **Evidence gap:** the measurement is a probe script rather than a committed integration test, and the end-to-end verification is the CI lane's next run on this change. |
 | 2026-10-21 | Iluvatar BI-V150 — **`_conj` and `_conj_copy.out` leave the FlagGems route, for the lazy-view contract** (`u180`, BI-V150, corex 4.5.0, CPU torch 2.10, FlagGems 5.4.0) | `_conj`, `_conj_copy.out` (issue #570, fourth landing; CI run 39490715225) | ATen's `conj` is a metadata op — it sets the Conjugate bit and leaves storage untouched — while FlagGems' `_conj` materializes the conjugation, so `is_conj()` reads False on the FlagGems route, the defect DCU pins away and MUSA/GCU gate with the same gap. On iluvatar it is also wrong: the `_iluvatar` lowering goes through `view_as_real`, which has no flagos impl here, so the kernel warns and returns the unconjugated storage as a fresh tensor; measured on `u180`, `torch.conj([1+1j, -2+3j])` reports `is_conj False` and reads `(-0.672+0.0085j, ...)`. `tests/integration/test_math_bits_contract.py`'s materialization predicate only checks that resolution does not raise, so it admits the complex cases, which then fail on the `conj_tensor` fixture — the lane's only 7 errors once `vendor_ops` went green, previously masked because `.github/scripts/run_integration_tests.py` stops at the first failing group. Both spellings leave the FlagGems route and take `cpu_fallback`, where ATen keeps the positive bit lazy and materializes it through `_copy_from`; `_conj_physical` and `_conj_physical.out` were already `none`. Route delta `flaggems` 590 → **588**, `none` 1441 → **1443**. | Conf SHA-256 `48297e83668abaaac4c568b7a7854504e438b0c71d8bd52ba62ed19875b34ee0`; generator `--check` clean on all three generators (run twice); `iluvatar_flaggems_register.inc` at 588 `m.impl` lines over a 54-entry gap set; `test_iluvatar_570_gaps_leave_the_flaggems_path` pins both spellings to `none` and `tests/integration/flaggems/flaggems_caps.py` records 588; `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py tests/unit/test_vendor_conf_single_writer.py` → 103 passed. The contract itself needs the device, so its verification is the CI lane's next run. **Evidence gaps:** the value measurement is a probe script on `u180`, not a committed integration test; `ub22` still aborts on the first flagos op (exit 139) and was not revalidated. |

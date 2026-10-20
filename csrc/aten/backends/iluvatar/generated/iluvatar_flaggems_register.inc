@@ -44,7 +44,6 @@
 // adding iluvatar there is the way most of them come back.
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update
-//   - _conj
 //   - _conj_copy.out
 //   - _native_batch_norm_legit.no_stats
 //   - addmm
@@ -96,9 +95,10 @@
 //   - sum.out
 //   - unique_consecutive
 //   - upsample_bicubic2d
+//   - view_as_real
 //   - where.self_out
 //
-// Total: 588 ops registered here, 4 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 588 ops registered here, 5 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
