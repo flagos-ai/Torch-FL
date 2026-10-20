@@ -575,6 +575,12 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     `bmm`, `mm` and `addmm` themselves take the native ixblas kernel that the
     gap moves into `iluvatar_register.inc`; their out=/dtype= spellings have no
     native kernel and reach `cpu_fallback`.
+
+    `_conj` and `_conj_copy.out` leave last, for a contract rather than a value
+    defect: FlagGems' `_conj` is an eager kernel and ATen's is a lazy view, and
+    on iluvatar the `_iluvatar` lowering of it returns the unconjugated storage.
+    Neither spelling has a native kernel, so both reach `cpu_fallback`, where
+    the positive Conjugate bit stays lazy.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
 
@@ -587,6 +593,8 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "addmm.dtype_out",
         "addmm.out",
         "addmm_",
+        "_conj",
+        "_conj_copy.out",
         "bmm",
         "bmm.dtype",
         "bmm.dtype_out",
@@ -603,7 +611,14 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         assert route(op) != "flaggems", op
     for op in ("addmm", "bmm", "mm"):
         assert route(op) == "iluvatar", op
-    for op in ("addmm.dtype", "addmm.dtype_out", "addmm.out", "addmm_"):
+    for op in (
+        "_conj",
+        "_conj_copy.out",
+        "addmm.dtype",
+        "addmm.dtype_out",
+        "addmm.out",
+        "addmm_",
+    ):
         assert route(op) == "none", op
 
 

@@ -166,11 +166,11 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "cuda": 392,
     "dcu": 454,
     "gcu": 251,
-    # The iluvatar lane's landing: the conf routes 590 ops to FlagGems, six
+    # The iluvatar lane's landing: the conf routes 588 ops to FlagGems, six
     # to the native ixdnn/ixblas slot and the rest to `none`. Recorded because
     # the lane runs this suite on the platform and the count is what the conf
     # states -- it is not an on-device measurement yet.
-    "iluvatar": 590,
+    "iluvatar": 588,
     "kunlunxin": 0,
     "metax": 594,
     "mps": 0,

@@ -44,6 +44,8 @@
 // adding iluvatar there is the way most of them come back.
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update
+//   - _conj
+//   - _conj_copy.out
 //   - _native_batch_norm_legit.no_stats
 //   - addmm
 //   - addmm.dtype
@@ -96,7 +98,7 @@
 //   - upsample_bicubic2d
 //   - where.self_out
 //
-// Total: 590 ops registered here, 4 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 588 ops registered here, 4 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -106,8 +108,6 @@
   m.impl("_cholesky_solve_helper", WrapperPrivCholeskySolveHelper);
   m.impl("_compute_linear_combination", WrapperPrivComputeLinearCombination);
   m.impl("_compute_linear_combination.out", WrapperPrivComputeLinearCombinationOut);
-  m.impl("_conj", WrapperPrivConj);
-  m.impl("_conj_copy.out", WrapperPrivConjCopyOut);
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_convert_weight_to_int4pack", WrapperPrivConvertWeightToInt4pack);
   m.impl("_dirichlet_grad", WrapperPrivDirichletGrad);

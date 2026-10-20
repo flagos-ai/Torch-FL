@@ -1928,6 +1928,25 @@ NATIVE_TRITON_GAPS = {
         "special_shifted_chebyshev_polynomial_u",
         "mean",
         "mean.dim",
+        # `_conj`, for the contract test_math_bits_contract.py pins: ATen's conj
+        # is a lazy view (Conjugate bit set, storage untouched) and FlagGems'
+        # `_conj` is a real kernel that materializes it, so `is_conj()` comes
+        # back False -- the same defect DCU pins away and GCU/MUSA gate with this
+        # gap. On iluvatar it is worse than eager: the `_iluvatar` kernel lowers
+        # through `view_as_real`, which has no flagos impl here, so the kernel
+        # warns, returns the *unconjugated* storage as a fresh tensor, and
+        # `resolve_conj` then hands back those values. Measured on u180 at
+        # head cdf8a79f: `torch.conj([1+1j, -2+3j])` reports `is_conj False`
+        # and its values read `(-0.672+0.0085j, ...)`. The test's
+        # materialization predicate sees no exception and admits the complex
+        # cases, which then fail with nothing to blame the route for.
+        # `_conj_copy.out` has no flagos impl either; the gap leaves both on
+        # cpu_fallback, where the dispatcher keeps the positive bit lazy (see
+        # Note [CPU Fallback Does Not Handle View Operators]) and reads it back
+        # through `_copy_from`. CI run 39490715225 measured this as the
+        # math_bits group's 7 errors.
+        "_conj",
+        "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a
         # *tuning* defect rather than a wrong kernel: the fp64 failure is
         # `torch.matmul` -> `mm` -> the `_iluvatar` mm.py libtuner, whose
