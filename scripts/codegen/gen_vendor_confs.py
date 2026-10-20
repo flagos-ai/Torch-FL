@@ -177,17 +177,18 @@ VENDORS = {
 #
 # Iluvatar claims aten::_conj the same way, for a different reason: it is a view
 # operator, so its `none` route cannot be served by cpu_fallback (ATen refuses a
-# fallback for views), and register.cc's USE_ILUVATAR arm answers it at the
-# CatchAll key with ATen's metadata kernel. The registration is unconditional
-# rather than part of the FLAGOS_ILUVATAR_KERNEL-gated .inc, which is why it is
-# listed here. It is not a kernel the conf can route to: FlagGems' `_conj` is
-# eager and breaks the lazy-view contract (see the entry in
-# NATIVE_TRITON_GAPS), so iluvatar also joins NATIVE_KERNEL_PREFERRED. That is
-# what keeps the route string `iluvatar` -- the native slot is Backend::kIluvatar
-# and Dispatcher::GetFn answers it for every backend, so it is the same metadata
-# kernel `flaggems` would have reached, while the FlagGems slot would be
-# subtracted as "also a native kernel" and the op would land on `none` again.
-# The two entries are one decision and neither is correct alone.
+# fallback for views -- measured on u180 as a raise from the ViewOp key that took
+# down every path resolving a Conjugate bit). register.cc's USE_ILUVATAR arm
+# publishes ATen's metadata kernel, unconditionally rather than in the
+# FLAGOS_ILUVATAR_KERNEL-gated .inc, which is why it is listed here. It is not a
+# kernel the conf can route to: FlagGems' `_conj` is eager and breaks the
+# lazy-view contract (see the entry in NATIVE_TRITON_GAPS), so iluvatar also
+# joins NATIVE_KERNEL_PREFERRED. That is what keeps the route string `iluvatar`
+# -- the native slot is Backend::kIluvatar and Dispatcher::GetFn answers it for
+# every backend, so it is the same metadata kernel `flaggems` would have reached,
+# while the FlagGems slot would be subtracted as "also a native kernel" and the
+# op would land on `none` again. Both entries are one decision and neither is
+# correct alone.
 EXTRA_NATIVE = {"ascend": {"matmul", "matmul_backward"}, "iluvatar": {"_conj"}}
 
 # Ops a hand-written wrapper claims for every platform, so they appear in no

@@ -401,13 +401,13 @@ static std::tuple<at::Tensor, at::Tensor> WrapperMatmulBackward(
 // eager kernel), so that slot is unpopulated and the call raised "backend not
 // registered". Answer it here, the way the conf says it runs.
 //
-// `_conj` is metadata only -- no kernel, dtype or device -- so it is a CatchAll
-// `m.impl`: that key receives the call before the ViewOp fallback does, which
-// ATen refuses for every view because storage cannot be shared with the CPU
-// ("aten::_conj appears to be a view operator, but it has no implementation").
-// Without it every path that resolves a Conjugate bit (copy_, clone,
-// contiguous, resolve_conj, arithmetic) fails, which is what
-// tests/integration/test_math_bits_contract.py measures.
+// There is no cpu_fallback alternative: `_conj` is a view, and ATen's ViewOp
+// fallback refuses every view ("View operators don't support falling back to
+// run on the CPU, since the tensor's storage cannot be shared across devices").
+// Measured on u180, before these registrations existed: `torch.conj` on a
+// PrivateUse1 tensor raised, which took down every path that resolves a
+// Conjugate bit (copy_, clone, contiguous, resolve_conj, arithmetic) -- the
+// tests/integration/test_math_bits_contract.py group.
 //
 // `_conj_copy.out` is the materializing half of the same pair and keeps the
 // `none` route with the other out= copies: `at::conj_physical` writes the same
@@ -416,6 +416,13 @@ static std::tuple<at::Tensor, at::Tensor> WrapperMatmulBackward(
 // one platform, so a fallback contract change cannot split them. Both stay out
 // of the FLAGOS_ILUVATAR_KERNEL-gated native .inc because a FlagGems-only
 // build needs this answer too.
+//
+// Both are ordinary (non-CatchAll, non-Autograd) PrivateUse1 kernels. The
+// registration makes the op a genuine PrivateUse1 op, so a CatchAll entry would
+// simply never be reached: `torch.conj(z)` on PrivateUse1 resolves its autograd
+// group first, and the boxed `cpu_fallback` object -- which every unclaimed op
+// gets from the CatchAll arm near the bottom of this file -- would carry the
+// inner `_conj` to CPU with a device mismatch.
 at::Tensor FlagosWrapperPrivConj(const at::Tensor& self) {
   return at::native::_conj(self);
 }
@@ -578,11 +585,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // ixdnn routes.
     m.impl("convolution_backward_overrideable",
         FlagosWrapperConvolutionBackwardOverrideable);
-    #if defined(USE_ILUVATAR)
-    // See FlagosWrapperPrivConj above.
+    // See FlagosWrapperPrivConj above. Unconditional like the conv pair
+    // above: the metadata kernel needs neither a vendor nor a FlagGems slot, and both
+    // op names carry no CPU fallback to reach instead.
     m.impl("_conj", FlagosWrapperPrivConj);
     m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
-    #endif
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
