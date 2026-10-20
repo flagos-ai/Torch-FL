@@ -104,30 +104,50 @@ def test_no_script_redefines_a_shared_phase():
 
 
 def test_every_script_calls_the_common_phases():
-    """The phases every platform runs, called by name.
+    """Shared phases remain shared; MPS and Iluvatar have special provisioning.
 
     install_flagcx is defined for the platforms whose hook installs a published
     FlagCX wheel, which is not every one of them, so it is not asserted here.
-    install_flagtree is the other one: it exists for platforms whose operators
-    come from a FlagTree/FlagGems cohort, and Apple Silicon has none -- PyPI
-    publishes no `triton` wheel for macOS and there is no Metal FlagTree line --
-    so MPS is the one hook that installs no Triton build. The absence is
-    asserted directly rather than left implicit, so a hook that silently
-    dropped its FlagTree install would not pass by being here.
+    FlagTree is absent on MPS, which has no Metal Triton build. Iluvatar keeps
+    CPU torch in its image but can replace the compiler cohort through a helper
+    that delegates installation to the common phases. build_flagos_inplace runs
+    only at the build stage, however, so only a hook that calls it there can
+    avoid compiling an extension during integration.
     """
     for script in _scripts():
         text = script.read_text(encoding="utf-8")
-        phases = ["install_cpu_torch", "build_flagos_inplace", "export_ci_env"]
+        assert re.search(r"^[ \t]*export_ci_env\b", text, re.M), (
+            f"{script.name}: export_ci_env"
+        )
         if script.name == "set_env_mps.sh":
-            assert not re.search(r"^[ \t]*install_flagtree\b", text, re.M), (
-                f"{script.name}: install_flagtree is not available on macOS"
-            )
+            assert not re.search(r"^[ \t]*install_flagtree\b", text, re.M)
+            assert re.search(
+                r'^if \[\[ "\$CI_STAGE" == "build" \]\]; then\n'
+                r"  # [^\n]+\n\s+"
+                r"build_flagos_inplace\nfi$",
+                text,
+                re.M,
+            ), "set_env_mps.sh: build_flagos_inplace must be gated on build"
+        elif script.name == "set_env_iluvatar.sh":
+            assert not re.search(r"^[ \t]*install_cpu_torch\b", text, re.M)
+            for phase in ("install_flagtree", "build_flagos_inplace"):
+                phase_text = (
+                    (SCRIPTS_DIR / "lib/iluvatar_packages.sh").read_text()
+                    if phase == "install_flagtree"
+                    else text
+                )
+                assert re.search(rf"^[ \t]*{phase}\b", phase_text, re.M), (
+                    f"{script.name}: {phase}"
+                )
         else:
-            phases.append("install_flagtree")
-        for phase in phases:
-            assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
-                f"{script.name}: {phase}"
-            )
+            for phase in (
+                "install_cpu_torch",
+                "install_flagtree",
+                "build_flagos_inplace",
+            ):
+                assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
+                    f"{script.name}: {phase}"
+                )
 
 
 def test_every_local_in_the_library_is_initialized():

@@ -1,0 +1,215 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: FlagCICD Entry
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Optional open PR number; resolves the actual head and base SHAs
+        type: string
+        default: ''
+      checkout_ref:
+        description: Optional source ref in this repository; cannot be combined with pr_number
+        type: string
+        default: ''
+      base_ref:
+        description: Optional comparison ref; defaults to the repository default branch
+        type: string
+        default: ''
+      platforms:
+        description: all (change-aware) or comma-separated platform names
+        type: string
+        default: all
+      test_level:
+        description: Minimum level; changed files may raise it
+        type: choice
+        default: auto
+        options: [auto, L0, L1, L2]
+      task_id:
+        description: Optional external task identifier
+        type: string
+        default: ''
+      parent_run_id:
+        description: Optional parent run identifier
+        type: string
+        default: ''
+  repository_dispatch:
+    types: [flagcicd]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+# Key on the logical request, not the run: github.run_id is unique per run, so
+# it would never serialize anything. Two dispatches for the same PR write the
+# same artifact names and must queue instead of racing.
+concurrency:
+  group: >-
+    flagcicd-${{ github.event.inputs.pr_number
+    || github.event.client_payload.pr_number
+    || github.event.inputs.checkout_ref
+    || github.event.client_payload.checkout_ref
+    || github.event.inputs.task_id
+    || github.event.client_payload.task_id
+    || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    # Full-history source clone plus the comparison-commit fetch.
+    timeout-minutes: 20
+    outputs:
+      context: ${{ steps.plan.outputs.context }}
+      test_level: ${{ steps.plan.outputs.test_level }}
+      platforms: ${{ steps.plan.outputs.platforms }}
+      validated_platforms: ${{ steps.plan.outputs.validated_platforms }}
+      source_repository: ${{ steps.resolve.outputs.source_repository }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+      - name: Checkout trusted control code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install plan parser
+        run: python -m pip install "PyYAML==6.0.2"
+      - name: Resolve immutable source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python control/.github/scripts/flagcicd_resolve.py --output request.json
+      - name: Checkout source data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.source_repository }}
+          ref: ${{ steps.resolve.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      # The base commit lives upstream, so a fork's clone cannot reach it. Fetch
+      # it by SHA without --depth: a shallow base has no parents, and
+      # `git diff base...head` then fails with "no merge base" and silently
+      # degrades the plan to an unavailable diff.
+      - name: Fetch comparison commit
+        env:
+          BASE_SHA: ${{ steps.resolve.outputs.base_sha }}
+        run: >-
+          git -C source fetch --no-tags
+          "${{ github.server_url }}/${{ github.repository }}" "$BASE_SHA"
+      - name: Validate source configuration and create plan
+        id: plan
+        run: >-
+          python control/.github/scripts/flagcicd_plan.py
+          --request request.json --source source --output flagcicd-plan.json
+      - name: Retain plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: flagcicd-plan-${{ github.run_attempt }}
+          path: flagcicd-plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  lint:
+    needs: plan
+    uses: ./.github/workflows/lint.yml
+    with:
+      checkout_repository: ${{ needs.plan.outputs.source_repository }}
+      checkout_ref: ${{ needs.plan.outputs.source_sha }}
+
+  preflight:
+    name: Validate configuration (${{ matrix.platform }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.plan.outputs.validated_platforms) }}
+    uses: ./.github/workflows/load-platform-config.yml
+    with:
+      platform: ${{ matrix.platform }}
+      checkout_repository: ${{ needs.plan.outputs.source_repository }}
+      checkout_ref: ${{ needs.plan.outputs.source_sha }}
+
+  agnostic:
+    needs: [plan, lint, preflight]
+    if: needs.plan.outputs.test_level != 'L0'
+    uses: ./.github/workflows/agnostic-checks.yml
+    with:
+      checkout_repository: ${{ needs.plan.outputs.source_repository }}
+      checkout_ref: ${{ needs.plan.outputs.source_sha }}
+
+  codegen:
+    needs: [plan, lint, preflight]
+    if: needs.plan.outputs.test_level != 'L0'
+    uses: ./.github/workflows/codegen-checks.yml
+    with:
+      checkout_repository: ${{ needs.plan.outputs.source_repository }}
+      checkout_ref: ${{ needs.plan.outputs.source_sha }}
+
+  platforms:
+    needs: [plan, lint, preflight, agnostic, codegen]
+    if: needs.plan.outputs.test_level == 'L2'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
+    uses: ./.github/workflows/integration-tests.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
+    with:
+      platform: ${{ matrix.platform }}
+      checkout_repository: ${{ needs.plan.outputs.source_repository }}
+      checkout_ref: ${{ needs.plan.outputs.source_sha }}
+      flagcicd_plan: ${{ needs.plan.outputs.context }}
+
+  complete:
+    name: FlagCICD complete
+    if: always()
+    needs: [plan, lint, preflight, agnostic, codegen, platforms]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted report code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download platform outcomes
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: flagcicd-platform-*
+          path: platform-reports
+      - name: Aggregate and check planned execution
+        env:
+          FLAGCICD_PLAN: ${{ needs.plan.outputs.context }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: >-
+          python .github/scripts/flagcicd_report.py summary
+          --directory platform-reports --output flagcicd-run-summary.json
+      - name: Retain run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flagcicd-run-summary-${{ github.run_attempt }}
+          path: flagcicd-run-summary.json
+          if-no-files-found: error
+          retention-days: 14

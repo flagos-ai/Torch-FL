@@ -23,6 +23,26 @@ add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 if(FLAGOS_ACCELERATOR STREQUAL "metax")
   # maca torch headers are gated on USE_MACA (see csrc/CMakeLists.txt).
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MACA=1)
+elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  # The device-properties / current-stream / priority-range bindings in
+  # module.cc read corex directly: this build links the CPU torch wheel, so
+  # there is no torch.cuda to ask. The capability they report is load-bearing --
+  # a stand-in value makes Triton compile for the wrong ISA, and a kernel
+  # compiled for sm_80 does not merely fail on a sm_71 BI-V150, it wedges the
+  # device.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_ILUVATAR=1)
+  target_include_directories(${LIBRARY_NAME} PRIVATE "${COREX_PATH}/include")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE cuda_runtime_compat)
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # module.cc's device-properties binding queries xpu_device_get_attr from
+  # <xpu/runtime.h>. The SDK root and the runtime's library directory are both
+  # resolved for this accelerator by the top-level CMakeLists, and libxpurt is
+  # where those attributes come from; the rest of the native XPU surface stays in
+  # csrc/, so nothing else here needs the vendor headers.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_KUNLUNXIN=1)
+  target_include_directories(${LIBRARY_NAME} PRIVATE "${XPU_ROOT}/include")
+  target_link_directories(${LIBRARY_NAME} PRIVATE "${XPU_LIB_DIR}")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)
   if(NOT MUSA_HOME)

@@ -268,7 +268,17 @@ class Dispatcher {
 
   FnPtr GetFn(Backend device) const {
     switch (device) {
-      case Backend::kCuda:          return cuda_fn_;
+      // The boxing kernel set is the opt-in (FLAGOS_BUILD_BOXING=ON); the
+      // default CUDA wheel is FlagGems-primary and compiles none of it. A
+      // platform ships ONE conf, so -- exactly as for the three sets below --
+      // the same file has to stay correct for both builds. Degrade to the
+      // FlagGems Python path rather than hard-failing on the empty slot: an op
+      // whose boxing kernel is absent is otherwise reachable only through the
+      // registration FlagGems installs itself, and returning nullptr there
+      // turns "this build does not box" into a dispatch error for ops that ran
+      // before the route moved. Same shape as the kFlagGems arm below.
+      case Backend::kCuda:
+        return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
       // FlagGems C++ runtime is only compiled in for a FLAGOS_BUILD_FLAGGEMS_CPP=ON
       // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
       // liboperators.so built for the vendor. A platform ships ONE conf, so the

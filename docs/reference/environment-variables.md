@@ -114,6 +114,14 @@ Logging and tracing. None of these changes routing.
 | `FLAGOS_TRACE` | Runtime | `0` (off) | Verbose logging in the device profiler shim compiled into this build. One switch covers every accelerator: exactly one device tracer is compiled per build, so the name is never ambiguous |
 | `FLAGOS_TRACER_LIBRARY` | Runtime | Auto-discovered | Override the tracer library the profiler shim `dlopen`s, when the default path does not match the installed driver |
 
+### Vendor runtime libraries
+
+Where the platform's vendor operator library finds its own dependencies.
+
+| Variable | Scope | Default | Purpose |
+|----------|-------|---------|---------|
+| `FLAGOS_KUNLUNXIN_XDNN_LIB_DIR` | Runtime | No default | Colon-separated directories holding the component libraries `libxdnn_pytorch.so` names in `DT_NEEDED` (`libxpu_blas.so`, `libxpu_dnn.so`, `libxpu_flash_attention.so`). The vendor torch package ships them as `<site-packages>/torch_xmlir/*.so`; importing that Python package is not required. Set it and put the same directories on `LD_LIBRARY_PATH` before starting the interpreter — the loader resolves `DT_NEEDED` before any of the wheel's code runs, so the variable alone cannot rescue a first import that fails with `libxpu_blas.so: cannot open shared object file`. The wheel loads the XPU SDK's CUDA-compat runtime (`libxpucuda.so`, `libcudart.so.12`, `libxpurt.so.2`) before these components, because `libxpu_blas.so` resolves `cudaGetDriverEntryPoint` out of the global scope rather than through its own `DT_NEEDED` |
+
 ### Distributed
 
 How `torch.distributed` picks a backend for the flagos device. The `"flagos"`
@@ -279,7 +287,7 @@ project's own spelling.
 | `HB_DNN_USER_DEFINED_L2M_SIZES` | Horizon hbdk | Set if unset | The BPU runtime's L2 memspace sizing, set before first inference |
 | `FLAGGEMS_DIR` | FlagGems | Read | FlagGems CMake config directory (`FlagGemsConfig.cmake`); auto-detected from the installed `flag_gems` when unset |
 | `FLAGGEMS_SOURCE_DIR` | FlagGems | Read | Absolute path to the FlagGems source directory (Python Triton kernels); required when the FlagGems C++ runtime is active, and must match the revision `liboperators.so` was built against |
-| `TORCHINDUCTOR_COMPILE_THREADS` | PyTorch | Read | torch's own compile-thread count; torch_fl honors it and uses it as the compile pool size |
+| `TORCHINDUCTOR_COMPILE_THREADS` | PyTorch | Set if unset | Inductor's compile-thread pool size, and the long form of `config.compile_threads`. torch_fl sets it to `1` on the vendor compilers that must not compile in a forked worker (GCU, PPU, and MThreads FlagTree on MUSA), because a `torch.compile` that does not name the `flagos` backend otherwise spawns `compile_worker` subprocesses that never import torch_fl - see the compile-threads note below. An explicit export still wins |
 | `CUDA_HOME` | NVIDIA / conda | Read | CUDA toolkit root for `FLAGOS_ACCELERATOR=cuda` and `ppu`. Defaults to system CUDA, else `$CONDA_PREFIX/targets/x86_64-linux` |
 | `CONDA_PREFIX` | conda | Read | Conda environment prefix, the CUDA discovery fallback |
 | `ASCEND_HOME` | Huawei CANN | Read | CANN toolkit path for Ascend NPU builds (`/usr/local/Ascend/ascend-toolkit/latest`) |
@@ -326,6 +334,20 @@ attribute, rather than relying on either alone. It is not a preference: a build
 without the class has nothing to opt into, and an explicit export still wins, so
 `TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=1` remains available for a build that has
 the class and wants to be told so.
+
+**Compile threads.** The `flagos` compile backend scopes
+`compile_threads = 1` into its own compiles, but `backend="inductor"` — which is
+what `transformers`' `CompiledFlexAttention` uses — reaches Inductor's default and
+spawns `python -m torch._inductor.compile_worker` subprocesses instead. A worker
+imports `torch` and `triton` but never `torch_fl`, so a vendor driver that needs
+torch_fl's process state is not present there: on MThreads FlagTree the compile
+dies in `triton_helpers.set_driver_to_gpu()` with "Could not find an active GPU
+backend". torch_fl therefore reads the vendor backend once at import and, on GCU,
+PPU, and MThreads FlagTree on MUSA, sets `TORCHINDUCTOR_COMPILE_THREADS=1` and
+`config.compile_threads = 1`, the same export-plus-attribute pair the
+static-launcher pin writes. It steps aside when the variable is already exported,
+so a user can opt back into parallel compilation on a fixed toolchain, and it
+leaves CUDA-like builds to upstream's parallel default.
 
 ## Worker count
 

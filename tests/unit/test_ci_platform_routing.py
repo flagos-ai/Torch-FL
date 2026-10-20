@@ -166,73 +166,129 @@ def test_required_gate_rejects_skipped_shared_checks(name):
     assert f"{name}: skipped" in process.stdout
 
 
-# The two workflows that turn a platform config into a hardware job: the shared
-# wheel build, and the single integration pipeline. Both read `ci_image` for the
-# job's `container:` and both must keep doing it the same way, because the
-# alternative is a per-platform workflow file again.
 def _container_expression(name):
     job = next(j for j in _workflow(name)["jobs"].values() if "steps" in j)
     return job["container"]
 
 
 @pytest.mark.parametrize("name", ["build-wheel-common.yml", "integration-tests.yml"])
-def test_the_container_is_omitted_when_the_config_names_no_image(name):
-    """A platform whose accelerator is the runner itself runs no container.
+def test_the_container_is_empty_when_the_config_names_no_image(name):
+    """A platform that uses the runner's own accelerator needs no container.
 
-    `container:` is a schema field, not a step: it cannot be behind an `if:`,
-    and a workflow-level empty string is a schema error rather than an absent
-    key. The expression is therefore the only spelling that both names an image
-    for the vendor platforms and hands MPS (whose `ci_image` is `""`) a job with
-    no container at all. Assert the shape rather than the evaluated result: the
-    expression is what GitHub reads, and a re-hardcoded `image:` would still
-    parse here.
+    `container:` is a job field, not a step, and it cannot use `if:`. The
+    expression supplies the vendor image when the config has one and `null`
+    otherwise, which omits the field on a macOS runner.
     """
     expression = _container_expression(name)
     assert isinstance(expression, str), expression
-    assert "fromJson" in expression and "null" in expression
-    # The image, volumes and options all come from the config, so a second
-    # hardcoded image cannot creep back in beside the expression.
-    assert "format(" in expression
+    assert expression.startswith("${{")
+    assert "fromJson(format(" in expression
+    assert " && " in expression and " || null }}" in expression
     assert expression.count("container_volumes") == 1
     assert expression.count("container_options") == 1
 
 
-def test_the_one_platform_without_a_container_is_mps():
-    """The empty image is MPS's, and it is the only platform stating one.
+def test_the_container_expression_uses_empty_config_fields_as_placeholders():
+    """Every input still has a value even though its resulting object is null."""
+    for config in CONFIGS.glob("*.yml"):
+        if config.stem in {"template", "image_sources", "platforms"}:
+            continue
+        values = yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert isinstance(values.get("container_options"), str), config
+        assert isinstance(values.get("ci_image"), str), config
 
-    This is the config half of the check above: if a vendor config lost its
-    image the workflow would silently skip the container and run on the host,
-    where the vendor runtime is not installed. Pinning the exception to one
-    platform makes that mistake a test failure instead of a confusing red job.
+
+def test_the_container_expression_uses_json_values_for_yaml_fields():
+    """Keep the generated image and options as strings when they contain YAML syntax."""
+    for name, job in (
+        ("build-wheel-common.yml", "build"),
+        ("integration-tests.yml", "integration-tests"),
+    ):
+        expression = _workflow(name)["jobs"][job]["container"]
+        assert "toJson(" in expression
+        assert expression.count("toJson(") == 2
+        assert '"image":"{0}"' not in expression
+        assert '"options":"{2}"' not in expression
+
+
+def test_the_one_platform_without_a_container_is_mps():
+    """An empty image is allowed only for MPS.
+
+    A vendor config that lost its image would otherwise run outside its prepared
+    container and fail on missing runtime dependencies.
     """
     empty = []
     for platform in PLATFORMS:
         config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
         assert "ci_image" in config, platform
+        assert isinstance(config["ci_image"], str), platform
         if config["ci_image"] == "":
             empty.append(platform)
     assert empty == ["mps"]
 
 
-def test_the_loader_requires_ci_image_to_be_stated_but_allows_it_empty():
-    """The loader half of the no-container platform.
-
-    The consuming workflows can only omit `container:` if the value they read is
-    falsy, so the loader has to pass an empty string through rather than reject
-    it -- while still refusing a *missing* key, whose `yq -r` output is the
-    literal `null` and would silently become the string "null" on the runner.
-    Read the real check out of the workflow and exercise it against both configs,
-    so the two halves cannot drift apart.
-    """
+def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(tmp_path):
+    """The empty string passes through; null and non-strings do not."""
     text = (WORKFLOWS / "load-platform-config.yml").read_text(encoding="utf-8")
-    # The guard moved from `-z "$CI_IMAGE"` (which rejected MPS) to a null/type
-    # test; a future edit that reinstated the `-z` form would fail here.
     assert '-z "$CI_IMAGE"' not in text
     assert ".ci_image | type" in text and "!!str" in text
+    condition = next(
+        line.strip()
+        for line in text.splitlines()
+        if line.lstrip().startswith('if [[ "$CI_IMAGE" == "null"')
+    )
+    script = "\n".join(
+        [
+            "CI_IMAGE=$(yq -r '.ci_image' \"$CONFIG_FILE\")",
+            f"{condition}",
+            "  exit 1",
+            "fi",
+        ]
+    )
+    script_directory = tmp_path / "stub-bin"
+    script_directory.mkdir()
+    stub_yq = script_directory / "yq"
+    stub_yq.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, yaml\n"
+        "expression = sys.argv[-2]\n"
+        "key = expression.split()[0].removeprefix('.')\n"
+        "path = os.environ['CONFIG_FILE']\n"
+        "value = yaml.safe_load(open(path))[key]\n"
+        "if expression.endswith('| type'):\n"
+        "    print({str: '!!str', int: '!!int'}.get(type(value), '!!null' if value is None else '!!other'))\n"
+        "elif expression == '.ci_image':\n"
+        "    print('null' if value is None else value)\n"
+        "else:\n"
+        "    raise SystemExit(f'unsupported expression: {expression}')\n",
+        encoding="utf-8",
+    )
+    stub_yq.chmod(0o755)
+    for image, accepted in (
+        ('""', True),
+        ('"vendor/image"', True),
+        ("null", False),
+        ("42", False),
+    ):
+        config = tmp_path / "platform.yml"
+        config.write_text(f"ci_image: {image}\n", encoding="utf-8")
+        env = dict(
+            os.environ,
+            CONFIG_FILE=str(config),
+            PATH=f"{script_directory}:{os.environ['PATH']}",
+        )
+        run = subprocess.run(
+            ["bash", "-e", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert (run.returncode == 0) is accepted, (image, run.stdout, run.stderr)
 
-    empty = yaml.safe_load((CONFIGS / "mps.yml").read_text())
-    assert empty["ci_image"] == ""
-    for platform in PLATFORMS:
-        config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
-        # Every config must state the key; `null` is the value the guard refuses.
-        assert "ci_image" in config and config["ci_image"] is not None, platform
+
+def test_mps_is_locked_to_the_standard_hosted_apple_silicon_runner():
+    """Pin the label with an Apple Silicon host without a paid larger runner."""
+    config = yaml.safe_load((CONFIGS / "mps.yml").read_text(encoding="utf-8"))
+    assert config["runner_labels"] == ["macos-15"]
+    assert config["ci_image"] == ""
+    assert config["environment_check"]["flagos_devices"] == {"at_least": 1}

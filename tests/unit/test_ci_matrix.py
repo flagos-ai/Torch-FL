@@ -129,6 +129,17 @@ def test_shared_cuda_runtime_selects_all_consumers():
     ]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "csrc/runtime/accelerator/iluvatar/device.cc",
+        "csrc/runtime/allocator/backends/iluvatar_memory.h",
+    ],
+)
+def test_independent_iluvatar_runtime_selects_only_iluvatar(path):
+    assert _run(files=path)[1] == ["iluvatar"]
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_runtime_watch_paths_cover_the_build_tables_actual_source_directory(platform):
     table = json.loads((ROOT / "cmake/flagos_platforms.json").read_text())
@@ -179,6 +190,18 @@ def test_missing_watch_metadata_falls_back_to_all(tmp_path):
     (tmp_path / "cuda.yml").write_text("display_name: CUDA\n")
     assert MATRIX._platforms_from_files(["op.cc"], ["cuda"], tmp_path) == ["cuda"]
     assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == PLATFORMS
+
+
+def test_shared_mps_runtime_changes_select_the_mps_lane():
+    """The MPS lane runs the shared runtime suite, so its edits reach the lane."""
+    for path in (
+        "tests/integration/runtime/test_runtime_dispatch_route.py",
+        "tests/integration/flaggems/flaggems_caps.py",
+        "tests/unit/test_runtime_conformance_report.py",
+    ):
+        result, selected = _run(files=path)
+        assert result.returncode == 0, result.stderr
+        assert selected == ["mps"], path
 
 
 def test_git_diff_preserves_deleted_and_renamed_platform_paths(tmp_path, monkeypatch):

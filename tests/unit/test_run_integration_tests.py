@@ -97,7 +97,32 @@ def _run_main(monkeypatch, tmp_path, tests):
 
 
 CLEAN_SUMMARY_COMMAND = "printf '2 passed in 0.01s\\n'; kill -SEGV $$"
+BANNERED_CLEAN_SUMMARY_COMMAND = (
+    "printf '===== 2 passed, 1 skipped in 0.01s =====\\n'; kill -SEGV $$"
+)
 OPT_IN = {"INTEGRATION_ALLOW_TEARDOWN_CRASH": "1"}
+
+
+def test_summary_line_is_recognised_with_a_banner_and_without_one():
+    assert _RUNNER.clean_summary("2 passed in 0.01s") == "2 passed in 0.01s"
+    assert (
+        _RUNNER.clean_summary("===== 2 passed, 1 skipped in 0.01s =====")
+        == "2 passed, 1 skipped in 0.01s"
+    )
+    assert _RUNNER.clean_summary("2 passed, 1 xfailed in 0.01s") is None
+
+
+def test_missing_mpirun_is_caught_before_the_group_starts(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    tests = [
+        {"name": "mpi", "command": "mpirun -np 2 python -m pytest"},
+        {"name": "next", "command": "touch should_not_run"},
+    ]
+
+    with pytest.raises(SystemExit, match="mpirun is required"):
+        _run_main(monkeypatch, tmp_path, tests)
+
+    assert not (tmp_path / "should_not_run").exists()
 
 
 def test_teardown_crash_after_clean_summary_is_tolerated_when_opted_in(
@@ -118,9 +143,35 @@ def test_teardown_crash_after_clean_summary_is_tolerated_when_opted_in(
     assert _run_main(monkeypatch, tmp_path, tests) == 0
 
 
+def test_teardown_crash_after_a_bannered_summary_is_tolerated(monkeypatch, tmp_path):
+    tests = [
+        {
+            "name": "bannered-teardown-crash",
+            "command": BANNERED_CLEAN_SUMMARY_COMMAND,
+            "environment": dict(OPT_IN),
+        }
+    ]
+    assert _run_main(monkeypatch, tmp_path, tests) == 0
+
+
 def test_teardown_crash_without_opt_in_still_fails(monkeypatch, tmp_path):
     tests = [{"name": "teardown-crash", "command": CLEAN_SUMMARY_COMMAND}]
-    assert _run_main(monkeypatch, tmp_path, tests) == -signal.SIGSEGV
+    with pytest.raises(SystemExit) as error:
+        _run_main(monkeypatch, tmp_path, tests)
+    assert error.value.code == -signal.SIGSEGV
+
+
+def test_ordinary_failure_stops_the_run(monkeypatch, tmp_path):
+    tests = [
+        {"name": "first", "command": "exit 5"},
+        {"name": "second", "command": "touch should_not_run"},
+    ]
+
+    with pytest.raises(SystemExit) as error:
+        _run_main(monkeypatch, tmp_path, tests)
+
+    assert error.value.code == 5
+    assert not (tmp_path / "should_not_run").exists()
 
 
 def test_failure_summary_is_not_tolerated_even_when_opted_in(monkeypatch, tmp_path):
@@ -133,7 +184,9 @@ def test_failure_summary_is_not_tolerated_even_when_opted_in(monkeypatch, tmp_pa
             "environment": dict(OPT_IN),
         }
     ]
-    assert _run_main(monkeypatch, tmp_path, tests) == 1
+    with pytest.raises(SystemExit) as error:
+        _run_main(monkeypatch, tmp_path, tests)
+    assert error.value.code == 1
 
 
 @pytest.mark.parametrize(

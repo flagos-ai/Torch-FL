@@ -66,12 +66,13 @@ steps:
   # The environment the wheel landed in, asserted against the expectations the
   # platform config states in its `environment_check` block, which the composer
   # hands to this step as JSON in FLAGOS_ENVIRONMENT_CHECK. One step for all
-  # eight platforms, reading
+  # configured platforms, reading
   #
   #   torch_version_prefix / torch_version_base   the stock torch it links
   #   cuda_version                                torch.version.cuda, or null
   #   torch_path_prefix / torch_path_forbidden    where torch must (not) live
   #   require_package_files / forbid_package_files  vendor bundles in the wheel
+  #   require_build_kernels / forbid_build_kernels  kernel sets in the build record
   #   flagos_devices / cuda_devices               {at_least|more_than|exactly: N}
   #   cuda_available                              torch.cuda must see devices
   #   triton_backend / flaggems_vendor            the vendor the stack resolves
@@ -89,6 +90,14 @@ steps:
     environment_from_config:
       environment_check: FLAGOS_ENVIRONMENT_CHECK
 
+  # The independent Iluvatar runtime must keep the official CPU torch core.
+  # Audit mapped core libraries, ELF dependencies and the BI-V150 Triton target
+  # before the shared operator suites, then launch a Triton add probe.
+  - id: iluvatar_runtime
+    name: Check Iluvatar CPU core and runtime
+    platforms: [iluvatar]
+    command: cd "$GITHUB_WORKSPACE" && python .github/scripts/verify_iluvatar.py --runtime
+
   # Issue #391: the multi-device contract files sit at the top level of
   # tests/integration/, where no manifest sweeps by default -- a file added there
   # reached no CI job at all. Selected by marker rather than by filename so the
@@ -102,6 +111,26 @@ steps:
     command: >-
       python -m pytest tests/integration/ -m "multi_device" -v -s --tb=short
 
+  # The MUSA runtime preflight. It is deliberately a required check rather than
+  # a capability skip, and it runs before the suites it gates so a broken
+  # MThreads stack is reported as one missing runtime instead of as every hybrid
+  # and compile case failing for its own reason.
+  #
+  # It asserts what the other MUSA groups otherwise assume and turn into an
+  # optional-dependency skip: that this wheel was built with the FlagGems
+  # kernels, that the installed triton is the FlagTree build carrying the
+  # "mthreads" backend (matched against the flagtree distribution's own triton
+  # directory, so a stock triton shadowing it fails here), that flag_gems'
+  # vendor is mthreads, and that FlagTree binds to torch_fl at a musa compile
+  # target. Missing dependencies raise rather than skip, which is the point: a
+  # green run of this group is evidence the suites below measured something.
+  - id: musa_runtime
+    name: Check MUSA FlagTree and FlagGems runtime
+    platforms: [musa]
+    command: >-
+      python -m pytest tests/integration/test_musa_runtime.py
+      -v -s --tb=short
+
   # Issue #409: the remaining top-level files no manifest selected. They are
   # single-device suites, so the multi_device sweep above does not reach them,
   # and they are named here rather than selected by marker for the reason
@@ -114,7 +143,7 @@ steps:
       tests/integration/test_dtype_coverage.py tests/integration/test_ops.py
       -v -s --tb=short
 
-  # The vendor-backend group: seven selections for eight platforms today.
+  # The vendor-backend group: eight selections for nine platforms today.
   #
   # The marker expression is the platform's because the marker a test carries is
   # the backend it asserts a route to, and the conftest platform gate skips the
@@ -124,19 +153,21 @@ steps:
   # flaggems-marked cases are measured by the group below, not here (no switch
   # exists any more to skip them -- see tests/integration/ops/conftest.py).
 
-  # CUDA: issue #409. `cuda` is in the accepting half because the sweep required
-  # `main_ops`, so a test whose only selecting mark is `cuda` -- every
-  # `*_matches_cuda_ref` case, and the whole of ops/test_full_cuda_coverage.py --
-  # was collected by this job and then deselected. Collection is the check:
-  # `-m "(cuda or main_ops) ..." --collect-only -q` selects 400 of the 1446
-  # ops/ cases where the old expression selected 132, in 21 files the old one did
-  # not reach.
+  # CUDA: issue #409 put `cuda` in the accepting half, because a test whose only
+  # selecting mark was `cuda` -- every `*_matches_cuda_ref` case, and the whole
+  # of ops/test_full_cuda_coverage.py -- was collected by this job and then
+  # deselected. It is gone again because this lane builds the default wheel,
+  # which has no CUDA boxing kernels: ops/conftest.py skips exactly those cases
+  # here, so keeping the mark in the expression would select a set that reports
+  # as skipped instead of adding a measurement. The cases that assert `-> cuda`
+  # routing are the ones the boxing-off wheel cannot answer -- that gap is what
+  # the lane's follow-up re-wires to a vendor or FlagGems route.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [cuda]
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(cuda or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # DCU: issue #409. `dcu` is in the accepting half because the sweep required
@@ -225,6 +256,17 @@ steps:
       -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
+  # Iluvatar has native vendor and FlagGems routes, with CUDA boxing disabled.
+  # Select portable/native tests through markers; the conftest platform gate
+  # handles backend assertions. FlagGems has its own group below.
+  - id: vendor_ops
+    name: Run operator tests (vendor backend, main ops)
+    platforms: [iluvatar]
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      -v -s --tb=short
+
   # Ascend runs the suites authored for the pure ACLNN backend (marked
   # `ascend`), which carry no `main_ops` marker; the RNG dispatch suite has its
   # own step below.
@@ -255,6 +297,25 @@ steps:
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
       -v -s --tb=short
 
+  # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
+  # deselects `-m flaggems`, and ops/test_musa_flaggems.py is the MUSA hardware
+  # behaviour of that route rather than one more generically-selected case. It
+  # asserts the Python entry points the generated dispatch actually calls
+  # (patching the package-level `flag_gems.<fn>` name the codegen freezes), the
+  # native/FlagGems RNG reservations, and the float64 mm tune-space boundary.
+  #
+  # It deliberately does not call flag_gems.enable(): torch_fl already routes
+  # each overload through its generated C++ kernels, and global FlagGems
+  # registration both bypasses that dispatcher and registers lift_fresh, whose
+  # vendor-device check rejects flagos tensors. The file skips itself when the
+  # wheel carries no FlagGems kernels or the runtime has no mthreads backend.
+  - id: musa_flaggems_hybrid
+    name: Run MUSA FlagGems hybrid tests
+    platforms: [musa]
+    command: >-
+      python -m pytest tests/integration/ops/test_musa_flaggems.py
+      -m musa -v -s --tb=short
+
   # The whole RNG dispatch file, not a shrinking allowlist. Ascend is the
   # platform whose history this encodes: upstream #70 implemented the remaining
   # Ascend RNG overloads (normal_ / uniform_ / exponential_ / bernoulli_ /
@@ -267,7 +328,7 @@ steps:
   # already measures -- the multinomial case among them.
   - id: rng
     name: Run unified RNG tests
-    platforms: [ascend, cuda, dcu, gcu, kunlunxin, metax]
+    platforms: [ascend, cuda, dcu, gcu, iluvatar, kunlunxin, metax]
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
       -m "main_ops and not flaggems" -v -s --tb=short
@@ -318,7 +379,7 @@ steps:
   # docs/vendors/kunlunxin/installation.md.
   - id: amp_contract
     name: Unified AMP contract
-    platforms: [ascend, cuda, dcu, gcu, metax, musa]
+    platforms: [ascend, cuda, dcu, gcu, iluvatar, metax, musa]
     command: python -m pytest tests/integration/test_amp_contract.py -v -m amp --tb=short
 
   # Lazy Conjugate/Negative bits are a dispatcher-level property, so every
@@ -375,7 +436,7 @@ steps:
   # validates environment values as strings.
   - id: profiler_contract
     name: Unified profiler contract
-    platforms: [cuda, dcu, metax, musa, ppu]
+    platforms: [cuda, dcu, iluvatar, metax, musa, ppu]
     command: python -m pytest tests/integration/test_profiler_contract.py -v -m profiler --tb=short
   - id: profiler_contract
     name: Unified profiler contract
@@ -385,6 +446,10 @@ steps:
       LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
       INTEGRATION_ALLOW_TEARDOWN_CRASH: "1"
 
+  # Iluvatar builds the CUPTI-compatible tracer against CoreX's IXPTI facade.
+  # Initial CI runs measure the contract and parity without new exclusions;
+  # a supported tracer API alone is not evidence of passing device traces.
+  #
   # Structural comparison against tests/data/profiler_cuda_baseline.json, which
   # the shared contract does not cover: it asserts the public API surface, while
   # this checks tracer output against stock torch+cuda, so it is only meaningful
@@ -396,7 +461,7 @@ steps:
   # in the test, not another tracer fix.
   - id: profiler_parity
     name: Profiler parity test
-    platforms: [cuda, dcu]
+    platforms: [cuda, dcu, iluvatar]
     command: python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops --tb=short
 
   # torch.compile styles differ by platform, and the difference is the vendor
@@ -424,7 +489,7 @@ steps:
   # passed, 21 skipped, 1 failed on the same entry-point case.
   - id: torch_compile
     name: Run torch.compile tests
-    platforms: [cuda]
+    platforms: [cuda, iluvatar]
     command: >-
       FLAGOS_USE_FLAGTREE=1 python -m pytest tests/integration/test_compile.py
       -v -s --tb=short
@@ -434,9 +499,9 @@ steps:
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
 
   # The Qwen3 smoke groups need a mounted checkpoint, which is why they are the
-  # two steps whose platform set is a mount rather than a capability. Ascend, GCU,
-  # Kunlunxin and MUSA record the gap as a missing mount on their runner rather
-  # than a missing test; DCU's inference/training are deferred until its runner
+  # two steps whose platform set is a mount rather than a capability. Ascend,
+  # GCU, Kunlunxin, Iluvatar and MUSA record the gap as a missing model mount
+  # rather than a missing test; DCU's inference/training are deferred until its runner
   # has the mount and the first CI run confirms the card count.
   - id: inference
     name: Run inference tests

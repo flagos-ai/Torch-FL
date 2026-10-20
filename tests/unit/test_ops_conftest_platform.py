@@ -117,6 +117,7 @@ def _fake_torch_fl(
         ("musa", "musa"),
         ("dcu", "dcu"),
         ("ppu", "ppu"),
+        ("iluvatar", "iluvatar"),
     ],
 )
 def test_record_values_still_map(
@@ -212,6 +213,14 @@ def test_ppu_skip_set_matches_cuda():
         == ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
     )
     assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
+
+
+def test_iluvatar_skips_boxing_assertions_and_keeps_flaggems():
+    """A CUDA-shaped SDK does not imply a CUDA boxing dispatch route."""
+    markers = ops_conftest._PLATFORM_SKIP_MARKERS["iluvatar"]
+    assert "cuda" in markers
+    assert "flaggems" not in markers
+    assert "flaggems_python" not in markers
 
 
 def test_no_platform_skips_the_plain_flaggems_mark():

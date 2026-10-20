@@ -240,98 +240,24 @@ int64_t WrapperFusedSdpChoice(
   return static_cast<int64_t>(at::SDPBackend::efficient_attention);
 }
 
-#if defined(USE_BPU)
-// Convolution on a device with no per-op kernels.
+// Convolution on a device whose vendor SDK exposes no conv operator.
 //
 // aten::convolution dispatches PrivateUse1 to convolution_overrideable, and the
 // only other kernel registered for that op is a CompositeExplicitAutograd stub
 // that raises NotImplementedError. So the boxed cpu_fallback cannot help here:
-// it moves the arguments to CPU and redispatches the same op, which lands back
-// on the stub. These wrappers cross to CPU and then call at::convolution --
-// a different op, and the one that actually has a CPU kernel.
-at::Tensor BPUWrapperConvolutionOverrideable(
-    const at::Tensor& input,
-    const at::Tensor& weight,
-    const ::std::optional<at::Tensor>& bias,
-    c10::SymIntArrayRef stride,
-    c10::SymIntArrayRef padding,
-    c10::SymIntArrayRef dilation,
-    bool transposed,
-    c10::SymIntArrayRef output_padding,
-    c10::SymInt groups) {
-  auto out = at::convolution_symint(
-      input.cpu(),
-      weight.cpu(),
-      bias.has_value() && bias->defined()
-          ? ::std::optional<at::Tensor>(bias->cpu())
-          : ::std::nullopt,
-      stride,
-      padding,
-      dilation,
-      transposed,
-      output_padding,
-      groups);
-  return out.to(input.device());
-}
-
-::std::tuple<at::Tensor, at::Tensor, at::Tensor>
-BPUWrapperConvolutionBackwardOverrideable(
-    const at::Tensor& grad_output,
-    const at::Tensor& input,
-    const at::Tensor& weight,
-    c10::SymIntArrayRef stride,
-    c10::SymIntArrayRef padding,
-    c10::SymIntArrayRef dilation,
-    bool transposed,
-    c10::SymIntArrayRef output_padding,
-    c10::SymInt groups,
-    ::std::array<bool, 3> output_mask) {
-  // convolution_backward wants the forward bias *sizes*, not the bias, and only
-  // to shape grad_bias -- which is a plain sum over the non-channel dims, so the
-  // channel count is all it needs.
-  ::std::optional<c10::SymIntArrayRef> bias_sizes = ::std::nullopt;
-  c10::SymInt out_channels =
-      transposed ? weight.sym_size(1) * groups : weight.sym_size(0);
-  ::std::vector<c10::SymInt> bias_shape{out_channels};
-  if (output_mask[2]) {
-    bias_sizes = c10::SymIntArrayRef(bias_shape);
-  }
-
-  auto out = at::convolution_backward_symint(
-      grad_output.cpu(),
-      input.cpu(),
-      weight.cpu(),
-      bias_sizes,
-      stride,
-      padding,
-      dilation,
-      transposed,
-      output_padding,
-      groups,
-      output_mask);
-
-  auto to_dev = [&](const at::Tensor& t) {
-    return t.defined() ? t.to(input.device()) : t;
-  };
-  return ::std::make_tuple(
-      to_dev(::std::get<0>(out)),
-      to_dev(::std::get<1>(out)),
-      to_dev(::std::get<2>(out)));
-}
-#endif // USE_BPU
-
-#if defined(USE_KUNLUNXIN)
-// Convolution on a device whose vendor SDK exposes no conv operator.
+// it moves the arguments to CPU and redispatches the *same* op, which lands back
+// on the stub. These wrappers cross to CPU and then call at::convolution -- a
+// different op, and the one that actually has a CPU kernel -- and move the
+// result back.
 //
-// Same shape as the BPU block above: aten::convolution dispatches PrivateUse1
-// to convolution_overrideable, whose only other kernel is a
-// CompositeExplicitAutograd stub that raises NotImplementedError, so the boxed
-// cpu_fallback (which moves the arguments to CPU and redispatches the *same*
-// op) lands back on that stub. The xdnn op library covers only the
-// runtime-conformance op set, so there is no vendor kernel to generate here --
-// these wrappers cross to CPU and call at::convolution, a different op with a
-// real CPU kernel.
-at::Tensor KunlunxinWrapperConvolutionOverrideable(
+// Shared by every platform in that position: BPU (no per-op kernels at all),
+// Kunlunxin (the xdnn op library covers only the runtime-conformance set) and
+// TsingMicro (FlagGems-primary -- its registration is the conf-derived FlagGems
+// list, which names no conv). The three had byte-identical copies of this; one
+// definition is the same code with one less place to drift. A vendor that later
+// gains a native conv should register that instead, not fork this.
+#if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO)
+at::Tensor FlagosWrapperConvolutionOverrideable(
     const at::Tensor& input,
     const at::Tensor& weight,
     const ::std::optional<at::Tensor>& bias,
@@ -357,7 +283,7 @@ at::Tensor KunlunxinWrapperConvolutionOverrideable(
 }
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor>
-KunlunxinWrapperConvolutionBackwardOverrideable(
+FlagosWrapperConvolutionBackwardOverrideable(
     const at::Tensor& grad_output,
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -400,7 +326,7 @@ KunlunxinWrapperConvolutionBackwardOverrideable(
       to_dev(::std::get<1>(out)),
       to_dev(::std::get<2>(out)));
 }
-#endif // USE_KUNLUNXIN
+#endif // USE_BPU || USE_KUNLUNXIN || USE_TSINGMICRO
 
 // ============================================================
 // Generated wrappers for 71 CUDA operators
@@ -561,9 +487,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // The vendor SDK exposes no conv operator, so the *_overrideable ops cannot
     // be generated (see the wrapper block above) -- they are the one pair of
     // ops claimed here without an xdnn kernel, and they take the CPU route.
-    m.impl("convolution_overrideable", KunlunxinWrapperConvolutionOverrideable);
+    m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
     m.impl("convolution_backward_overrideable",
-        KunlunxinWrapperConvolutionBackwardOverrideable);
+        FlagosWrapperConvolutionBackwardOverrideable);
   #elif defined(USE_ASCEND)
     #include "backends/ascend/generated/ascend_register.inc"
   #elif defined(USE_MUSA)
@@ -610,16 +536,10 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // comes from the torch.compile backend in torch_fl/backends/bpu/.
     //
     // The *_overrideable ops are the exception, and the generic fallback cannot
-    // serve them. aten::convolution routes PrivateUse1 to
-    // convolution_overrideable, whose only other kernel is a
-    // CompositeExplicitAutograd stub that raises NotImplementedError -- so
-    // cpu_fallback, which moves the arguments to CPU and redispatches the *same*
-    // op, lands right back on that stub. These wrappers instead call
-    // at::convolution on the CPU tensors, which is the op that actually has a
-    // CPU kernel.
-    m.impl("convolution_overrideable", BPUWrapperConvolutionOverrideable);
+    // serve them (see the wrapper block above).
+    m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
     m.impl("convolution_backward_overrideable",
-        BPUWrapperConvolutionBackwardOverrideable);
+        FlagosWrapperConvolutionBackwardOverrideable);
   #elif defined(USE_MPS)
     // Apple Metal. Per the design doc
     // (docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md,
@@ -663,6 +583,17 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_flaggems_ppu.inc"
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_flaggems_tsingmicro.inc"
+  #endif
+  // TsingMicro is FlagGems-primary with no vendor op library, so the generated
+  // list above is its whole claim -- and it names no conv, because the conf it
+  // derives from routes none. That leaves convolution_overrideable on the
+  // raising CompositeExplicitAutograd stub, where cpu_fallback cannot reach it
+  // (it redispatches the same op). Same exception BPU and Kunlunxin make, and
+  // the same shared wrapper serves all three.
+  #if defined(FLAGOS_ACCEL_TSINGMICRO)
+  m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
+  m.impl("convolution_backward_overrideable",
+      FlagosWrapperConvolutionBackwardOverrideable);
   #endif
   // FLAGOS_BUILD_FLAGGEMS=OFF leaves the block empty: no accelerated route is
   // compiled in, so every op is meant to reach cpu_fallback.

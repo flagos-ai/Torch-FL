@@ -3,7 +3,7 @@
 The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro has no Python compat, `soft_lowp`
-is aten-only, and CI covers nine of the twelve — so this page is the
+is aten-only, and nine of the twelve have a CI lane — so this page is the
 authoritative answer.
 
 The directory inventory at the end is machine-checked by
@@ -24,7 +24,7 @@ when a platform gains or loses one.
 | `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `cuda` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
 | `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: `abs`, the elementwise `add`/`sub`/`mul` forms, `sum`/`mean`) | `mps` (stream/event only) | 2037 | yes |
 
 Column notes:
@@ -41,10 +41,13 @@ Column notes:
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
 toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   `kunlunxin` has its own `kunlunxin/` dir, built on the XPU SDK's native
-  `libxpurt` runtime rather than the CUDA-shaped surface. `iluvatar` reuses
-  `cuda` (the corex SDK presents a usable CUDA-shaped runtime, so the shared
-  `cuda` sources are built as-is and there is no
-  `csrc/runtime/accelerator/iluvatar/` directory).
+  `libxpurt` runtime rather than the CUDA-shaped surface. `iluvatar` has its
+  own `iluvatar/` dir too, and for the same reason: the corex SDK does present a
+  usable CUDA-shaped C runtime, but the wheel links the *CPU* torch, so the
+  stream half cannot come from `c10::cuda` the way the shared `cuda` sources
+  take it. `iluvatar/` builds the CUDA sources against corex's runtime and keeps
+  its own per-device stream registry, which is what keeps `libtorch_cuda.so` /
+  `libc10_cuda.so` out of the platform's NEEDED list.
 - **aten backend** is the `csrc/aten/backends/<dir>` vendor kernel tree, when one
   exists. `flagos/` (the Python op caller) and `soft_lowp/` (the software
   low-precision matmul path shared by DCU/MetaX) are shared, not per-platform.
@@ -61,10 +64,7 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   the ops FlagGems does not cover.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
-  is the by-design BPU file and 67 the hand-written TsingMicro one. MPS also
-  reads 2037, but only 20 of those routes reach its own kernels — the other 2017
-  resolve to `none` (`cpu_fallback`), which is what an incrementally grown
-  native backend looks like between operator stages.
+  and 67 are the by-design BPU/MPS and hand-written TsingMicro files.
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
   exist.
 
@@ -80,29 +80,34 @@ build opts into boxing.
 
 ## Known gaps
 
+- **CUDA** is where the gap between the conf and the default wheel is widest.
+  `backends_cuda.conf` routes 392 ops to `flaggems` and 1642 to `cuda`, and the
+  default wheel compiles the generated FlagGems register list only, so those
+  1642 ops are unregistered on PrivateUse1 and reach `cpu_fallback`. Of them,
+  258 are FlagGems-capable on at least one of `metax`/`dcu`/`ppu` (unchanged --
+  the same set -- when `tsingmicro` and `iluvatar` are counted) and are the
+  cheap re-wire candidates; the other 1384 have no FlagGems route on any
+  platform and need a native CUDA backend
+  (cuBLAS/cuDNN/ATen CUDA) or an opt-in boxing build. The CUDA lane builds and
+  tests the default wheel, so a case asserting a `-> cuda` route skips there.
 - **BPU** has no aten backend and an empty conf: its unit of execution is a whole
   compiled graph, so eager ops reach `cpu_fallback` and acceleration comes from
   the `torch.compile(backend="bpu")` path.
 - **MPS** (Apple Silicon) has the device runtime floor — allocate, copy,
-  synchronize and real Metal streams/events work — plus the MPSGraph operator
-  layer as it stands: 20 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
-  the elementwise `add`/`sub`/`mul`/`div` tensor and scalar forms (with aten's
-  `alpha` and the float-only dtype gate `div.Tensor` needs to keep PyTorch's
-  promotion), `reciprocal`, `silu`, the `pow.Tensor_Scalar` form, the
-  `sum`/`mean`/`_softmax` reductions, `convolution_overrideable`, `embedding`,
-  `mm` and `bmm` — and everything else reaches `cpu_fallback`. The operator layer
-  is MPSGraph-first
+  synchronize and real Metal streams/events work — plus the first two stages of
+  the MPSGraph operator layer: 9 ops run on the PrivateUse1 `mps` slot — `abs`,
+  the elementwise `add`/`sub`/`mul` tensor and scalar forms (with aten's `alpha`),
+  and the `sum`/`mean` reductions (with aten's axis and keepdim handling) — and
+  everything else reaches `cpu_fallback`. The operator layer is MPSGraph-first
   with a hand-written MSL fallback (see
   `docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`). It is
   native — no dispatch re-tag onto `DispatchKey::MPS`/`CUDA` and no CUDA boxing
   kernels (`FLAGOS_BUILD_BOXING` is pinned off). It has a
   `torch_fl/accelerator/mps/` directory holding only `mps_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to), so the Python
-  compat column reads "stream/event only". Its CI job runs on a GitHub-hosted
-  macOS arm64 runner (`macos-14`) rather than a vendor image, which is the one
-  place the pipeline's `container:` block is omitted; the lane runs the backend
-  operator suite (`pytest tests/integration/ops -m mps`) and picks up every
-  platform-agnostic group in the shared manifest.
+  compat column reads "stream/event only". Its CI lane builds and tests on the
+  standard `macos-15` GitHub-hosted Apple Silicon runner, outside a container
+  so the Metal device is visible.
 - **TsingMicro** has a sparse hand-written conf (67 routes) and no CI job; its
   Python compat module does not exist.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
@@ -145,17 +150,13 @@ build opts into boxing.
   ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
   BI-V150) but the full cohort has not been re-measured.
 - **CI covers 9 of 12**: TsingMicro, BPU and Iluvatar have no
-  `.github/configs/` entry. MPS gained one with its operator lane, the first
-  platform whose hardware job runs on a GitHub-hosted macOS runner rather than a
-  vendor image: its config leaves `ci_image` empty and the two consuming
-  workflows omit the `container:` key for that value, because a macOS runner
-  cannot start a container and the accelerator is the runner's own Metal GPU.
+  `.github/configs/` entry.
 
 ## Directory inventory
 
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, kunlunxin, metax, mps, musa, tsingmicro
+- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, kunlunxin, metax, mps, musa, tsingmicro
 - `csrc/aten/backends/`: ascend, flagos, gcu, iluvatar, kunlunxin, mps, musa, soft_lowp
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, metax, mps, musa, ppu
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu

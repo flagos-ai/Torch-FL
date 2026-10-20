@@ -17,8 +17,10 @@ import json
 import os
 import re
 import signal
+import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 
 # A group command can die with a fatal signal *after* pytest has finished:
@@ -38,7 +40,7 @@ import sys
 # stay observable, and a killed runner must leave its log behind) and
 # accumulated for the summary check.
 _SUMMARY_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
-_SUMMARY_FAILURE_RE = re.compile(r"\b(failed|error|errors|no tests ran)\b")
+_SUMMARY_FAILURE_RE = re.compile(r"\b(?:failed|errors?|xfailed|xpassed|no tests ran)\b")
 
 # Signals that mean the process died rather than exited: SIGSEGV from a bad
 # address in a teardown destructor is the observed case; the rest are the same
@@ -124,7 +126,7 @@ def clean_summary(output):
         if _SUMMARY_RE.search(line):
             if _SUMMARY_FAILURE_RE.search(line):
                 return None
-            return line.strip(" =")
+            return line.strip("= ")
     return None
 
 
@@ -163,6 +165,35 @@ def signal_number(returncode):
     return returncode - 128
 
 
+def required_mpirun(command, test_environment):
+    """Refuse a command whose MPI launcher is absent before bash starts it.
+
+    Without this check, the command starts, ``mpirun`` prints
+    ``command not found``, and the following pytest receives SIGPIPE while
+    writing its collection report. The runner then reports a crash, hiding
+    the missing launcher that actually stopped the group.
+    """
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return
+    mpirun = next((word for word in words if Path(word).name == "mpirun"), None)
+    if mpirun is None:
+        return
+    if Path(mpirun).is_absolute() or len(Path(mpirun).parts) > 1:
+        if Path(mpirun).is_file() and os.access(mpirun, os.X_OK):
+            return
+    else:
+        for directory in test_environment.get("PATH", os.defpath).split(os.pathsep):
+            if directory and (Path(directory) / "mpirun").is_file():
+                if os.access(Path(directory) / "mpirun", os.X_OK):
+                    return
+                break
+    raise SystemExit(
+        "mpirun is required by this integration group but is not installed or on PATH"
+    )
+
+
 def run_command(command, test_environment, workdir):
     """Run one group command, streaming its output live while capturing it.
 
@@ -170,6 +201,7 @@ def run_command(command, test_environment, workdir):
     leaves the log behind if the runner itself is killed; the captured copy
     feeds the teardown-crash check.
     """
+    required_mpirun(command, test_environment)
     process = subprocess.Popen(
         ["bash", "-c", f"set -euo pipefail\n{command}"],
         stdout=subprocess.PIPE,
@@ -179,12 +211,20 @@ def run_command(command, test_environment, workdir):
         cwd=workdir,
     )
     assert process.stdout is not None
-    lines = []
-    for line in process.stdout:
-        sys.stdout.write(line)
-        lines.append(line)
-    sys.stdout.flush()
-    return process.wait(), "".join(lines)
+    try:
+        lines = []
+        for line in process.stdout:
+            sys.stdout.write(line)
+            lines.append(line)
+        sys.stdout.flush()
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        # A cancelled runner must not leave a pytest process writing to the
+        # report directory or to a retry's workspace.
+        process.kill()
+        process.wait()
+        raise
+    return returncode, "".join(lines)
 
 
 def main():
@@ -207,6 +247,8 @@ def main():
         test_environment = command_environment.copy()
         for key, value in test.get("environment", {}).items():
             test_environment[key] = os.path.expandvars(value)
+        if test_environment.get("FLAGCICD_REPORT_DIR"):
+            test_environment["FLAGCICD_TEST_GROUP"] = test["name"]
         allow_crash = teardown_crash_allowed(test_environment)
         returncode, output = run_command(test["command"], test_environment, workdir)
         ok, tolerated = classify_command_result(returncode, output, allow_crash)
@@ -225,7 +267,7 @@ def main():
                 f"Integration test '{test['name']}' failed with exit code {returncode}",
                 flush=True,
             )
-            return returncode
+            raise SystemExit(returncode)
     return 0
 
 

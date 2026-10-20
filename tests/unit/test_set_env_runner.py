@@ -39,6 +39,7 @@ PLATFORMS = [
     "ascend",
     "dcu",
     "gcu",
+    "iluvatar",
     "kunlunxin",
     "metax",
     "mps",
@@ -153,3 +154,72 @@ def test_runner_applies_the_pip_constraints():
     )
     for pin in ("torch==", "numpy<2", "transformers>="):
         assert pin in constraints, pin
+
+
+def test_mps_hook_selects_the_host_macos_toolchain():
+    """The MPS hook fails before downloading torch when the runner is wrong.
+
+    A macOS build checks the host OS, Apple Silicon, and the Metal SDK before it
+    installs anything. Those checks are what stop an x86 runner or a missing Xcode
+    image from reaching a test suite that skips every MPS case.
+    """
+    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    assert '[[ "$(uname -s)" != "Darwin" ]]' in hook
+    assert '[[ "$(uname -m)" != "arm64" ]]' in hook
+    assert "xcode-select -p" in hook
+    assert "xcrun --sdk macosx --show-sdk-path" in hook
+    assert "export FLAGOS_ACCELERATOR=mps" in hook
+    assert "export FLAGOS_DISABLE_CUDA_ASSETS=1" in hook
+    assert 'CPU_TORCH_INDEX_URL="https://pypi.org/simple"' in hook
+    assert 'export PYTHONNOUSERSITE=1\nexport PYTHONPATH=""' in hook
+
+
+def test_mps_hook_installs_the_wheel_build_dependencies():
+    """The MPS hook provisions what `python -m build --no-isolation` reads.
+
+    The job builds the wheel with `--no-isolation`, which resolves the
+    `[build-system]` requirements against the venv instead of provisioning them
+    in a throwaway env. `pyproject.toml` asks for `setuptools`, `wheel` and
+    `cmake>=3.18`; the standard macOS runner image does not provide them inside
+    the hook's venv.
+
+    `cmake` needs the explicit guard rather than a plain `import cmake`: the repo
+    ships its own top-level `cmake/` directory, which Python resolves as a
+    namespace package from the repo root, so an import check passes in a venv
+    where the real distribution is absent and the build then dies later at
+    `running build_ext`.
+    """
+    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    installs = [
+        line.strip()
+        for line in hook.splitlines()
+        if line.strip().startswith("pip_retry ")
+    ]
+    assert installs, "the mps hook installs nothing"
+
+    # `torch` is exempt: the hook installs it through `install_cpu_torch`.
+    for requirement in ("setuptools", "cmake", "wheel"):
+        assert requirement in _pyproject_build_requirements(), (
+            f"{requirement} is no longer a [build-system] requirement; this "
+            "test pins the hook to the file's list and needs updating"
+        )
+        assert any(requirement in line for line in installs), (
+            f"{requirement} is a [build-system] requirement but the mps hook "
+            f"never installs it; installs found: {installs}"
+        )
+
+
+def _pyproject_build_requirements() -> list[str]:
+    """The requirement names in `[build-system].requires`, normalised."""
+    import tomllib
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        requires = tomllib.load(handle)["build-system"]["requires"]
+
+    names = []
+    for requirement in requires:
+        name = requirement
+        for separator in ("[", ">", "<", "=", "!", "~", " "):
+            name = name.split(separator, 1)[0]
+        names.append(name)
+    return names

@@ -429,10 +429,12 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 )
 
 # The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
-# c10/cuda/impl/cuda_cmake_macros.h. cuda_memory.h includes CUDACachingAllocator.h
-# to delegate flagos allocation to the CUDA caching allocator; this macro tells
-# CUDAMacros.h to skip that generated configure file. Not needed for Ascend
-# (which does not include c10/cuda headers) -- the flag is per platform in the table.
+# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's cuda_memory.h includes
+# CUDACachingAllocator.h to delegate flagos allocation to the CUDA caching
+# allocator; this macro tells CUDAMacros.h to skip that generated configure
+# file. Not needed for Ascend (which does not include c10/cuda headers), and
+# inert on the default FlagGems-primary wheel, where boxing is off and no
+# c10/cuda header is pulled in at all -- the flag is per platform in the table.
 if(FLAGOS_PLATFORM_C10_CUDA_CONFIGURE)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
 endif()
@@ -536,9 +538,11 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
-  # Iluvatar's vendor torch is a real CUDA build over the corex CUDA-shaped
-  # runtime, so the standard allocator and the c10/cuda stream path apply and the
-  # CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside ${_torch_fl_link_libs}.
+  # Iluvatar owns its runtime: backends/iluvatar_memory.h (no c10::cuda caching
+  # delegation) and runtime/accelerator/iluvatar/ (its own stream registry). The
+  # corex CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside
+  # ${_torch_fl_link_libs}; nothing on that line resolves to libtorch_cuda.so or
+  # libc10_cuda.so, so the wheel installs against a CPU torch.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_ILUVATAR_KERNEL gates the m.impl subset in register.cc, mirroring

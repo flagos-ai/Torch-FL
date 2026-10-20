@@ -5,6 +5,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "contiguous_ops.h"
+#include "copy_ops.h"
 
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
@@ -23,6 +24,26 @@
 
 #if defined(FLAGOS_MUSA_KERNEL)
 #include "backends/musa/mudnn_common.h"
+#endif
+
+// Whether the CUDA-platform arms of contiguous()/clone() below may hand the
+// strided gather to ATen's native CUDA copy kernel (DeviceBoxingGuard +
+// at::native::copy_). Those arms are a pure "do it on device" shortcut, and the
+// kernel they dispatch to -- plus the c10::cuda stream bookkeeping around it --
+// lives in libtorch_cuda.so. The default FlagGems-primary wheel does not ship
+// that library (it links the CPU-only pip torch), so on it the gather goes
+// through copy_strided_via_host instead, which is also what the de-boxed
+// backends (Ascend, GCU, Kunlunxin, MUSA, ...) always use. csrc/CMakeLists.txt
+// defines FLAGOS_BOXING_BUILD only for a wheel built with FLAGOS_BUILD_BOXING=ON
+// -- the same switch register.cc reads before claiming the generated CUDA
+// kernels -- and the USE_* exclusions match the ones on the arms.
+#if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
+    !defined(USE_TSINGMICRO) && !defined(USE_GCU) && !defined(USE_MUSA) && \
+    !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR) && \
+    !defined(USE_MPS)
+#define FLAGOS_CONTIGUOUS_CUDA_BOXING 1
+#else
+#define FLAGOS_CONTIGUOUS_CUDA_BOXING 0
 #endif
 
 namespace at::native::flagos {
@@ -71,6 +92,64 @@ at::Tensor materialize_math_bits_impl(
   return result;
 }
 
+// Copy the strided flagos tensor `self` into `result` -- an already-allocated
+// flagos tensor with `self`'s sizes, laid out as `memory_format` -- through host
+// memory: D2H the source's whole storage, rebuild its strides as a CPU view, let
+// the host copy kernel produce the contiguous result, then H2D it.
+//
+// This is the de-boxed strided gather: the only implementation the de-boxed
+// backends have, and what the CUDA platform uses when it has no native CUDA copy
+// kernel to dispatch to (see FLAGOS_CONTIGUOUS_CUDA_BOXING above, which is the
+// predicate for whether the DeviceBoxingGuard arms below exist).
+//
+// Both legs go through BlockingMemcpy, which binds the device of the tensor each
+// transfer touches and drains that device's queue first: a bare Memcpy is only
+// ordered against whichever device happens to be current when it is issued, so
+// gathering a flagos:1 source while flagos:0 is current would read what that
+// buffer held before its kernels ran (issue #281, MUSA -- the same hazard, and
+// the same two-precondition barrier, that copy_ops uses for every other copy).
+#if !FLAGOS_CONTIGUOUS_CUDA_BOXING
+void copy_strided_via_host(
+    const at::Tensor& self,
+    const at::Tensor& result,
+    c10::MemoryFormat memory_format) {
+  size_t storage_size = self.storage().nbytes();
+  at::Tensor storage_cpu = at::empty(
+      {static_cast<int64_t>(storage_size)},
+      at::TensorOptions().dtype(at::kByte).device(at::kCPU));
+  if (storage_size > 0) {
+    BlockingMemcpy(
+        storage_cpu.data_ptr(),
+        self.storage().data(),
+        storage_size,
+        MemcpyDeviceToHost,
+        self);
+  }
+
+  at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
+  cpu_view.set_(
+      storage_cpu.storage(),
+      self.storage_offset(),
+      self.sizes(),
+      self.strides());
+
+  auto cpu_contig = at::empty(
+      self.sizes(),
+      self.options().device(at::kCPU).memory_format(memory_format));
+  cpu_contig.copy_(cpu_view);
+
+  size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
+  if (nbytes > 0) {
+    BlockingMemcpy(
+        result.data_ptr(),
+        cpu_contig.data_ptr(),
+        nbytes,
+        MemcpyHostToDevice,
+        result);
+  }
+}
+#endif
+
 } // namespace
 
 at::Tensor materialize_math_bits(
@@ -103,10 +182,16 @@ at::Tensor contiguous(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
+#if FLAGOS_CONTIGUOUS_CUDA_BOXING
       // CUDA platform: use DeviceBoxingGuard to invoke native CUDA strided copy
       // kernel on-device, avoiding expensive CPU round-trip.
       DeviceBoxingGuard guard(self, result);
       at::native::copy_(result, self, false);
+#else
+      // CUDA platform without the boxing kernels: there is no native CUDA copy
+      // kernel in this wheel, so gather through host memory.
+      copy_strided_via_host(self, result, memory_format);
+#endif
 #else
       // Ascend copies the strided source into the contiguous result on-device
       // via aclnnInplaceCopy, GCU via topsatenCopy, Kunlunxin via the XPU
@@ -120,24 +205,7 @@ at::Tensor contiguous(
       const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif
       if (!copied_on_device) {
-        size_t storage_size = self.storage().nbytes();
-        at::Tensor storage_cpu = at::empty(
-            {static_cast<int64_t>(storage_size)},
-            at::TensorOptions().dtype(at::kByte).device(at::kCPU));
-        Memcpy(storage_cpu.data_ptr(), self.storage().data(), storage_size, MemcpyDeviceToHost);
-
-        at::Tensor cpu_view = at::empty({0}, self.options().device(at::kCPU));
-        cpu_view.set_(
-            storage_cpu.storage(),
-            self.storage_offset(),
-            self.sizes(),
-            self.strides());
-
-        auto cpu_contig = at::empty(self.sizes(), self.options().device(at::kCPU).memory_format(memory_format));
-        cpu_contig.copy_(cpu_view);
-
-        size_t nbytes = cpu_contig.numel() * cpu_contig.element_size();
-        Memcpy(result.data_ptr(), cpu_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+        copy_strided_via_host(self, result, memory_format);
       }
 #endif
     }
@@ -162,7 +230,17 @@ at::Tensor clone(
       auto result = at::empty_like(self);
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
-        Memcpy(result.data_ptr(), self.data_ptr(), nbytes, MemcpyDeviceToDevice);
+        // Blocking, and against `self`'s device rather than whichever device is
+        // ambient: a bare Memcpy only orders against the current device, so
+        // cloning a flagos:1 tensor while flagos:0 is current copies the buffer
+        // as it was before that device's kernels ran (issue #281, MUSA; the
+        // same read-after-write hazard copy_ops guards against).
+        BlockingMemcpy(
+            result.data_ptr(),
+            self.data_ptr(),
+            nbytes,
+            MemcpyDeviceToDevice,
+            self);
       } else if (nbytes > 0) {
         result.copy_(self);
       }
@@ -175,16 +253,23 @@ at::Tensor clone(
     memory_format = c10::MemoryFormat::Contiguous;
   }
 
-  // Non-contiguous clone: use DeviceBoxingGuard to leverage CUDA's native
-  // strided copy kernel instead of expensive CPU round-trip.
+  // Non-contiguous clone.
   if (self.is_privateuseone()) {
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
     auto result = at::empty(
         self.sizes(), self.options().memory_format(memory_format));
+#if FLAGOS_CONTIGUOUS_CUDA_BOXING
+    // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
+    // instead of an expensive CPU round-trip.
     DeviceBoxingGuard guard(self, result);
     at::native::copy_(result, self, false);
+#else
+    // Without the boxing kernels there is no native CUDA copy kernel to
+    // dispatch to; gather through host memory instead.
+    copy_strided_via_host(self, result, memory_format);
+#endif
     return result;
 #else
     // MUSA joins the non-boxing group: copy_ reaches _copy_from, which

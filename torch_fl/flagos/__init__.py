@@ -425,6 +425,12 @@ class Stream(torch.cuda.Stream):
                 from torch_fl.accelerator.mps.mps_stream import MpsStream
 
                 self._stream = MpsStream(device, priority)
+            elif vendor == "iluvatar":
+                # Corex is CUDA-shaped, so this really creates a stream like
+                # MPS rather than borrowing the one shared queue MUSA has.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+                self._stream = IluStream(device, priority)
             else:
                 # The accelerators with a stream class of their own are named
                 # above; everything else denotes its one queue with handle 0.
@@ -680,6 +686,14 @@ def _real_current_stream(device=None):
             from torch_fl.accelerator.mps.mps_stream import current_mps_stream
 
             return current_mps_stream(idx)
+        if _platform() == "iluvatar":
+            # A real stream from the platform's own registry, not a stand-in:
+            # corex has per-device queues and the registry tracks which one is
+            # current, so every caller below can wait, record and synchronize on
+            # it. It is the same handle the eager kernels submit to.
+            from torch_fl.accelerator.iluvatar.ilu_stream import current_ilu_stream
+
+            return current_ilu_stream(idx)
         # MUSA answers from the C++ runtime at the top of this function and never
         # arrives here; an accelerator with no stream class of its own has no
         # current stream to describe and gets this same handle-only stand-in,
@@ -789,6 +803,15 @@ class Event(torch.cuda.Event):
                 obj = object.__new__(cls)
                 obj._event = MpsEvent(**host_timed)
                 return obj
+            if _platform() == "iluvatar":
+                # Corex events carry a device timestamp, so timing is measured
+                # on the queue rather than read from the host clock -- the same
+                # reason the MPS arm above takes this path.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluEvent
+
+                obj = object.__new__(cls)
+                obj._event = IluEvent(**host_timed)
+                return obj
             # MUSA, whose vendor events live behind the shared C ABI: its timing
             # flags are not musa_runtime's, so there is nothing here to wrap and
             # the host clock is the clock that is left. Any other accelerator with
@@ -893,6 +916,12 @@ def stream(s):
             from torch_fl.accelerator.mps.mps_stream import MpsStream
 
             native_type = MpsStream
+        elif vendor == "iluvatar":
+            # Corex has real per-device streams and the runtime tracks which one
+            # is current (SetCurrentStreamForDevice), so this really switches.
+            from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+            native_type = IluStream
         else:
             # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
             # with no stream class of its own -- the TX runtime and the CUDA-ABI
@@ -976,6 +1005,54 @@ class _DeviceProperties:
             self.shared_memory_per_multiprocessor = props.get(
                 "shared_memory_per_multiprocessor", 0
             )
+            return
+
+        # Iluvatar corex ships a complete cuda_runtime.h, so the same fields come
+        # from cudaGetDeviceProperties. It is not the MUSA getter because that one
+        # is compiled only into a MUSA build; the dict shape is deliberately the
+        # same.
+        get_ilu_properties = getattr(_C, "_get_iluvatar_device_properties", None)
+        if get_ilu_properties is not None:
+            props = get_ilu_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = props["major"]
+            self.minor = props["minor"]
+            # Same reason as the MUSA arm above: Inductor's cache fingerprint
+            # reads gcnArchName whenever torch.version.cuda is None, which is
+            # every CPU-torch build.
+            self.gcnArchName = self.name
+            self.warp_size = props.get("warp_size", 32)
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.max_threads_per_multi_processor = props.get(
+                "max_threads_per_multi_processor", 1024
+            )
+            self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
+            self.shared_memory_per_multiprocessor = props.get(
+                "shared_memory_per_multiprocessor", 0
+            )
+            return
+
+        # Kunlunxin: the XPU runtime has no per-device property struct, only the
+        # individual xpu_device_get_attr queries the binding wraps. The XPU
+        # reports no compute-capability pair at all, and nothing downstream asks
+        # it for one -- FlagOSDeviceInterface reads the arch FlagTree's XPU
+        # backend compiles for (_kunlunxin_arch) instead -- so major/minor stay
+        # the CUDA-shaped sentinels torch.utils._triton's probes expect.
+        get_kunlunxin_properties = getattr(_C, "_get_kunlunxin_device_properties", None)
+        if get_kunlunxin_properties is not None:
+            props = get_kunlunxin_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = 8
+            self.minor = 0
+            # Inductor sizes its benchmarking L2 flush buffer from this field;
+            # a zero leaves it empty. The binding reports the on-die L3, the
+            # only cache capacity the XPU SDK exposes.
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.gcnArchName = self.name
             return
 
         # Ascend analogue: use the AICore count reported by the Ascend Triton
@@ -1528,20 +1605,26 @@ def _patch_flaggems_index_put():
     is byte-identical to the unpatched one (md5 6fc5c62c451ecf5772f11bb0e1652cfd,
     1875231 bytes, both).
 
+    Measured again on an H100, same op, same shape: the round-trip is 7.96 ms
+    against FlagGems' 0.22 ms -- 36x -- on ``(1, 4160, 3072)`` bf16 assigned
+    through a ``(4160,)`` bool mask, which is the shape the 2.1 forward issues
+    before its block stack. The H100 figure for the same assignment on the
+    vendor route is 0.10 ms, so this is the round-trip's 26 MB host copy each
+    way and not a kernel difference.
+
     Narrows to FlagGems rather than away from it: the op keeps Triton kernels
-    and never takes the CUDA-boxing route. Scoped to the configuration that was
-    measured -- DCU, on a conf that routes to FlagGems -- and installed through
-    ``torch.library`` rather than in C++ because the route cannot be stated in
-    the conf: the conf enumerates the generated registration list, which this
-    hand-registered op is deliberately not in. Upstream workaround rather than a
-    design; remove it once the wrapper stops round-tripping. Best-effort, like
+    and never takes the CUDA-boxing route. Scoped by the shared
+    ``_flagos_launch_patches_apply`` gate -- see
+    ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- and installed through ``torch.library``
+    rather than in C++ because the route cannot be stated in the conf: the conf
+    enumerates the generated registration list, which this hand-registered op is
+    deliberately not in. Upstream workaround rather than a design; remove it once
+    the wrapper stops round-tripping. Best-effort, like
     ``_align_flaggems_device_identity``: an unpatched ``index_put_`` is slow
     here, not broken, so this must not be able to take down device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
         import flag_gems
 
@@ -1584,7 +1667,44 @@ def _patch_flaggems_index_put():
 # device-bound and the FlagGems op is Python-bound. The patches below take
 # back the parts of that Python that are recomputed per launch without changing
 # anything a caller can observe; none of them moves an op off FlagGems.
+#
+# Measured again on an H100 in the Qwen-Image-2.1 denoise loop, where the same
+# reading holds and the kernels are not the difference either: the FlagGems
+# ``mul`` kernel launched directly on (1, 4160, 3072) bf16 runs at 28.2 us and
+# 2.72 TB/s, against the vendor's 28.7 us and 2.68 TB/s, while the *call*
+# through ``torch.mul`` on that shape takes 85.4 us -- the kernel is at the
+# memory roofline and 57 us of the call is Python around it. The patches below
+# are therefore not a DCU-specific workaround; they are the fix for the shape
+# of the FlagGems Python launch path, and every boxing build that routes to
+# FlagGems has it.
 # ---------------------------------------------------------------------------
+
+# The builds whose routed ops are FlagGems Python/Triton launches reached through
+# the generated bridge, which is the configuration these patches were written and
+# measured on. ``dcu`` was the first; ``cuda`` is the CUDA-boxing build, where the
+# same measurement was taken on an H100 (see the section header) -- an external
+# libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
+# not how FlagGems launches its own.
+_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
+
+
+def _flagos_launch_patches_apply():
+    """Whether the per-launch host patches below apply to this build and conf.
+
+    Both halves are load-bearing and are the two the individual functions used to
+    spell out separately: the build has to be one whose routed ops go through the
+    FlagGems Python launch path (a native or C++ vendor backend has its own, and
+    patching FlagGems' ``LibEntry`` there would be dead weight), and the conf has
+    to route to FlagGems at all -- a conf that does not has no launches to make
+    cheaper.
+    """
+    from .. import _build_accelerator, _conf_routes_to_flaggems
+
+    return (
+        _build_accelerator() in _FLAGGEMS_LAUNCH_PATCH_BUILDS
+        and _conf_routes_to_flaggems()
+    )
+
 
 # The keyword arguments Triton's ``KernelInterface.__getitem__`` passes down to
 # ``LibEntry.run``. A launch carrying anything else takes the stock path.
@@ -1762,6 +1882,41 @@ def _cached_libentry_key(entry, key_for_entry):
     if key_fn is None:
         key_fn = entry.__dict__["_torch_fl_key_fn"] = key_for_entry(entry)
     return key_fn
+
+
+def _memoized_type_promotion(original):
+    """``pointwise_dynamic.type_promotion`` for the dtype tuples it has seen.
+
+    Every FlagGems pointwise op asks its ``prepare_args`` for the result dtype on
+    every call, and that runs ``torch._prims_common.elementwise_dtypes`` -- a
+    pure table over the operands' *dtypes*. The answer cannot depend on values,
+    shapes or device, so a process recomputes the same handful of keys for its
+    whole life. Profiled on an H100 in the Qwen-Image-2.1 denoise loop, with the
+    other patches in this section already applied, it is the largest single entry
+    left inside ``prepare_args``.
+
+    Keyed on each operand's dtype (or the argument itself when it is not a
+    tensor, so a scalar or ``None`` keys its own entry) plus the promotion kind.
+    A key that will not hash falls through to the original rather than raising.
+    Verified bitwise neutral against the unmemoized function over 81 cases --
+    nine ops across three shapes and three dtypes, outputs and dtypes compared.
+    """
+    cache = {}
+
+    def type_promotion(*args, type_promotion):
+        key = []
+        for arg in args:
+            key.append(arg.dtype if isinstance(arg, torch.Tensor) else arg)
+        try:
+            lookup = (tuple(key), type_promotion)
+            hit = cache.get(lookup)
+            if hit is None:
+                hit = cache[lookup] = original(*args, type_promotion=type_promotion)
+        except TypeError:
+            return original(*args, type_promotion=type_promotion)
+        return hit
+
+    return type_promotion
 
 
 def _flaggems_fast_run(key_for_entry, torch_device_fn, original_run):
@@ -1987,16 +2142,15 @@ def _enable_flaggems_autotune_cache():
     the ``1`` it just wrote. The existing value is therefore parsed with the same
     ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
 
-    Scoped to the configuration it was measured on -- DCU, on a conf that routes
-    to FlagGems -- like the patches around it. No op changes route and no kernel
-    changes: the config selected is the one FlagGems' own tuner would have
-    picked. Best-effort, like its neighbours: an unset knob is slow here, not
-    broken, so this must not be able to take down device init.
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
+    changes route and no kernel changes: the config selected is the one
+    FlagGems' own tuner would have picked. Best-effort, like its neighbours: an
+    unset knob is slow here, not broken, so this must not be able to take down
+    device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
 
         triton_knobs = importlib.import_module("triton.knobs")
@@ -2108,19 +2262,18 @@ def _patch_flaggems_pointwise_dispatch():
     what bounds a launch-bound stretch of the run rather than one already
     hidden behind the device queue.
 
-    Scoped to the configuration it was measured on -- DCU, on a conf that routes
-    to FlagGems -- and installed the way the patches around it are: by rebinding
-    the functions in the FlagGems modules the C++ bridge and the generated
-    wrappers reach them through. No op changes route; the kernels, the grids and
-    the cache keys stay the ones FlagGems computes. Upstream workaround rather
-    than a design; remove it once FlagGems stops doing this work per launch.
-    Best-effort, like its neighbours: an unpatched dispatch is slow here, not
-    broken, so this must not be able to take down device init.
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS``; installed the way the patches
+    around it are: by rebinding the functions in the FlagGems modules the C++
+    bridge and the generated wrappers reach them through. No op changes route;
+    the kernels, the grids and the cache keys stay the ones FlagGems computes.
+    Upstream workaround rather than a design; remove it once FlagGems stops
+    doing this work per launch. Best-effort, like its neighbours: an unpatched
+    dispatch is slow here, not broken, so this must not be able to take down
+    device init.
     """
     try:
-        from .. import _build_accelerator, _conf_routes_to_flaggems
-
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if not _flagos_launch_patches_apply():
             return
 
         import importlib
@@ -2160,6 +2313,16 @@ def _patch_flaggems_pointwise_dispatch():
             key._torch_fl_fast = True
             key.__wrapped__ = original_key
             libentry.LibEntry.key = key
+
+        # The result dtype is a pure function of the operand dtypes and the
+        # promotion kind, and every pointwise launch asks for it; see the helper.
+        pointwise = importlib.import_module("flag_gems.utils.pointwise_dynamic")
+        original_promotion = pointwise.type_promotion
+        if not getattr(original_promotion, "_torch_fl_memo", False):
+            memoized = _memoized_type_promotion(original_promotion)
+            memoized._torch_fl_memo = True
+            memoized.__wrapped__ = original_promotion
+            pointwise.type_promotion = memoized
 
         original_run = libentry.LibEntry.run
         if not getattr(original_run, "_torch_fl_fast", False):

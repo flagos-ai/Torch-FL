@@ -17,10 +17,13 @@ namespace c10::flagos {
 class AscendDeviceMemory final : public DeviceMemoryInterface {
  public:
   Error_t device_malloc(void** ptr, size_t size) override {
-    // Ensure allocation lands on the current process device.
+    // The accelerator contract initializes ACL and selects device 0 on first
+    // use; a fresh ACL context has no current device to read directly.
     int device = 0;
-    aclrtGetDevice(&device);
-    aclrtSetDevice(device);
+    if (::GetDevice(&device) != Success || ::SetDevice(device) != Success) {
+      *ptr = nullptr;
+      return ErrorMemoryAllocation;
+    }
     aclError err = aclrtMalloc(ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
     if (err != ACL_SUCCESS || *ptr == nullptr) {
       *ptr = nullptr;
@@ -35,13 +38,25 @@ class AscendDeviceMemory final : public DeviceMemoryInterface {
   }
 
   Error_t get_device_index(int* device) override {
-    aclError err = aclrtGetDevice(device);
-    return (err == ACL_SUCCESS) ? Success : ErrorUnknown;
+    // The caching allocator relies on this probe to establish the initial
+    // device. GetDevice's default (0) and SetDevice's validation share the
+    // gCurrentDevice state, so a raw ACL lookup would fail before that state
+    // has been initialized.
+    int current = 0;
+    Error_t err = ::GetDevice(&current);
+    if (err != Success) {
+      return err;
+    }
+    err = ::SetDevice(current);
+    if (err != Success) {
+      return err;
+    }
+    *device = current;
+    return Success;
   }
 
   Error_t set_device(int device) override {
-    aclError err = aclrtSetDevice(device);
-    return (err == ACL_SUCCESS) ? Success : ErrorInvalidDevice;
+    return ::SetDevice(device);
   }
 
   Error_t get_memory_info(size_t* free, size_t* total) override {

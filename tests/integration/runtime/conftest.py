@@ -17,7 +17,7 @@
 Three jobs:
 
     * register the package's markers (``backend_route``, ``anyplatform``,
-      ``flaggems_cpp``, ``flaggems_python``);
+      ``flaggems_cpp``, ``flaggems_python``, ``boxing``);
     * skip a test that needs a kernel set this wheel did not compile -- the one
       build-driven skip the mandate allows, keyed off the build record, not a
       platform name;
@@ -67,9 +67,16 @@ def _is_runtime_item(item: pytest.Item) -> bool:
 
 
 #: capability marker -> the kernel set the build record must list for it to run.
+#:
+#: ``boxing`` is here for the ``cuda`` conf route: on this project's CPU-torch
+#: wheels that dispatch key is provided by the generated CUDA boxing kernels, so
+#: a ``= cuda`` route with no boxing in the build record has no kernel to reach
+#: and the op lands on cpu_fallback instead. Same build-driven skip, same source
+#: of truth as the two FlagGems entries.
 _CAPABILITY_KERNEL = {
     "flaggems_cpp": "flaggems_cpp",
     "flaggems_python": "flaggems",
+    "boxing": "boxing",
 }
 
 #: The JSON doc's directory. Overridable so a CI job can route it into its
@@ -103,6 +110,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers", "flaggems_python: requires the FlagGems Python kernel set"
+    )
+    config.addinivalue_line(
+        "markers",
+        "boxing: requires the generated CUDA boxing kernel set "
+        "(built with FLAGOS_BUILD_BOXING=ON)",
     )
     config.pluginmanager.register(_ConformanceReport(), "runtime-conformance-report")
 
@@ -174,7 +186,7 @@ class _ConformanceReport:
             # something else entirely. Printing a line here would file another
             # selection's numbers under this suite's name.
             return
-        accel, kernels, total, routed, none = _conformance_facts()
+        accel, kernels, total, routed, none, unimplemented = _conformance_facts()
         line = (
             f"RUNTIME-CONFORMANCE accel={accel} kernels={kernels} "
             f"ops_total={total} ops_routed={routed} ops_none={none} "
@@ -183,6 +195,8 @@ class _ConformanceReport:
         write_line = getattr(terminalreporter, "write_line", None)
         if write_line is not None:
             write_line(line)
+            if unimplemented:
+                write_line(f"RUNTIME-COVERAGE unimplemented={','.join(unimplemented)}")
         _write_doc(
             config,
             {
@@ -191,6 +205,7 @@ class _ConformanceReport:
                 "ops_total": total,
                 "ops_routed": routed,
                 "ops_none": none,
+                "unimplemented_ops": unimplemented,
                 "passed": passed,
                 "failed": failed,
                 "skipped": skipped,
@@ -223,21 +238,25 @@ def _accel_label() -> str:
         return "unknown"
 
 
-def _conformance_facts() -> tuple[str, str, int, int, int]:
-    """(accel, kernels, ops_total, ops_routed, ops_none) for the summary line."""
+def _conformance_facts() -> tuple[str, str, int, int, int, list[str]]:
+    """Summary counts plus the ops this platform has explicitly not implemented."""
     accel = _accel_label()
     try:
         from runtime_caps import RUNTIME_OPS, build_kernels, load_routes
+        from runtime_caps import effective_route
 
         kernels_set = build_kernels()
         routes = load_routes()
+        unimplemented = [
+            op for op in RUNTIME_OPS if effective_route(op)[1] == "unimplemented"
+        ]
     except Exception:  # noqa: BLE001 -- report the shape, not a crash
-        return accel, "none", len(_runtime_ops()), 0, 0
+        return accel, "none", len(_runtime_ops()), 0, 0, []
     total = len(RUNTIME_OPS)
-    none = sum(1 for op in RUNTIME_OPS if routes.get(op) == "none")
+    none = len(unimplemented)
     routed = sum(1 for op in RUNTIME_OPS if routes.get(op) not in (None, "none"))
     kernels = ",".join(sorted(kernels_set)) if kernels_set else "none"
-    return accel, kernels, total, routed, none
+    return accel, kernels, total, routed, none, unimplemented
 
 
 def _runtime_ops() -> list[str]:

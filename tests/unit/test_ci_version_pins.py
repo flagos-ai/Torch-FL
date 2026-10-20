@@ -37,7 +37,7 @@ SCRIPTS_DIR = REPO_ROOT / ".github" / "scripts"
 PINS = REPO_ROOT / ".github" / "version-pins.env"
 PLATFORM_TABLE = REPO_ROOT / "cmake" / "flagos_platforms.json"
 
-PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "metax", "musa", "ppu"]
+PLATFORMS = ["cuda", "ascend", "dcu", "gcu", "iluvatar", "metax", "musa", "ppu"]
 RUNNER = SCRIPTS_DIR / "set_env.sh"
 HOOKS_DIR = SCRIPTS_DIR / "hooks"
 
@@ -150,8 +150,10 @@ TRITON_AND_FLAGTREE = (
 # (zero macosx files across every release), so the rule enforced below --
 # FlagTree or Triton, plus FlagGems -- cannot be met without an unsatisfiable
 # requirement. setup.py's mps arm returns torch and packaging only, and
-# backends_mps.conf is empty; the absent operator source is the design of the
-# platform rather than the omission this check exists to catch.
+# backends_mps.conf names the native MPSGraph kernels in its full-coverage
+# table, but its MPSGraph kernels need no FlagTree/FlagGems/Triton operator
+# cohort; the native source is the design of the platform rather than the
+# omission this check exists to catch.
 NO_OPERATOR_COHORT = {"mps"}
 
 
@@ -286,14 +288,17 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
 
 
 def test_setup_kwargs_survive_a_boxing_lane_walking_the_table(monkeypatch):
-    """Every CUDA-ABI lane builds boxing, so its hook exports FLAGOS_BUILD_BOXING=1.
+    """A boxing lane's FLAGOS_BUILD_BOXING=1 must not leak onto another platform.
 
-    That value is inherited by the unit tests, including the loop above, which
-    points FLAGOS_ACCELERATOR at every accelerator in the table. One of them --
-    iluvatar -- pins boxing off, so resolving the switch while computing another
-    platform's requirements raises and fails the DCU lane. `_get_setup_kwargs()`
-    describes the wheel for the platform it is asked about, so it must not reject
-    an environment value that belongs to a different platform's build.
+    The DCU, MetaX and PPU lanes still export FLAGOS_BUILD_BOXING=1, because
+    their wheels keep the CUDA boxing path; the CUDA lane deliberately does not,
+    since it now tests the FlagGems-primary default. That value is inherited by
+    the unit tests, including the loop above, which points FLAGOS_ACCELERATOR at
+    every accelerator in the table. One of them -- iluvatar -- pins boxing off,
+    so resolving the switch while computing another platform's requirements
+    raises and fails the DCU lane. `_get_setup_kwargs()` describes the wheel for
+    the platform it is asked about, so it must not reject an environment value
+    that belongs to a different platform's build.
     """
     globals_ = _setup_globals()
     monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")

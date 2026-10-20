@@ -47,6 +47,8 @@
 # needs no torch to be read, only setuptools. It is listed explicitly rather
 # than assumed from the runner image.
 # PyYAML parses the workflows exercised by the pip-cache regression tests.
+# coverage.py exercises the hardware collector against a small installed test
+# package without importing torch or loading any accelerator libraries.
 
 name: Platform-agnostic checks
 
@@ -85,7 +87,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install platform-agnostic test dependencies
-        run: pip install pytest "transformers>=4.51" setuptools PyYAML
+        run: pip install pytest pytest-json-report==1.5.0 coverage==7.10.7 "transformers>=4.51" setuptools PyYAML
 
       - name: Check setup-script syntax
         run: |
@@ -107,6 +109,8 @@ jobs:
             tests/unit/test_ci_matrix.py \
             tests/unit/test_ci_commands.py \
             tests/unit/test_ci_resolution.py \
+            tests/unit/test_flagcicd_reports.py \
+            tests/unit/test_flagcicd_coverage.py \
             tests/unit/test_ci_version_pins.py \
             tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
@@ -116,8 +120,12 @@ jobs:
             tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_import_phase_order.py \
+            tests/unit/test_iluvatar_env_script.py \
+            tests/unit/test_iluvatar_cpu_runtime.py \
             tests/unit/test_integration_manifest.py \
             tests/unit/test_integration_workdir.py \
+            tests/unit/test_musa_ci_manifest.py \
+            tests/unit/test_musa_env_script.py \
             tests/unit/test_ops_conftest_platform.py \
             tests/unit/test_patch_triton_ascend.py \
             tests/unit/test_platform_capability_matrix.py \
@@ -137,3 +145,8 @@ jobs:
             tests/unit/test_release_publishing.py \
             tests/unit/test_wheel_preflight.py \
             -v --tb=short -p no:cacheprovider
+
+      # A trusted dispatch can test a source commit from before this entry existed.
+      - name: Run FlagCICD entry contract tests
+        if: hashFiles('tests/unit/test_flagcicd_entry.py') != ''
+        run: python -m pytest tests/unit/test_flagcicd_entry.py -v --tb=short -p no:cacheprovider

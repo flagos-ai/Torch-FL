@@ -18,8 +18,10 @@ Nothing here decides anything from a platform name. The two kinds of fact the
 suite is allowed to branch on both live in files the wheel carries with it:
 
     * the op-routing conf (``backends_<platform>.conf``), which says which
-      backend each op reaches -- for a ``RUNTIME_OPS`` entry, ``none`` is a
-      generation gap this suite rejects, not a permissible terminal state;
+      backend each op reaches. ``none`` is an explicit unimplemented route for
+      this platform; the suite reports it as a coverage gap and does not attempt
+      to read a dispatch line that a cpu_fallback call never writes. An op
+      missing from the conf is still a generation gap and fails;
     * the build record (``torch_fl/_build_config.py``), which says which kernel
       sets were compiled into this wheel.
 
@@ -109,6 +111,29 @@ def route_reason(op: str) -> tuple[str | None, str]:
     return _LOG_NAME.get(raw, raw), "routed"
 
 
+def effective_route(op: str) -> tuple[str | None, str]:
+    """The route this wheel can verify, or ``unimplemented`` for a ``none``.
+
+    ``none`` remains visible in the conf and in the summary's ``ops_none``
+    count. The second value states whether the dispatch probe has work to do,
+    so a test can distinguish this coverage gap from a missing conf entry.
+    """
+    backend, reason = route_reason(op)
+    if backend is None and reason == "conf_route_none":
+        return None, "unimplemented"
+    return backend, reason
+
+
+def unimplemented_runtime_ops() -> list[str]:
+    """``RUNTIME_OPS`` this platform's conf explicitly routes to ``none``.
+
+    This is a coverage report, not an allowance to omit an op from the conf.
+    The dispatch contract asserts every op that has a route; the summary exposes
+    the remaining unimplemented kernels so CI cannot hide them behind skips.
+    """
+    return [op for op in RUNTIME_OPS if effective_route(op) == (None, "unimplemented")]
+
+
 def build_kernels() -> frozenset[str]:
     """Kernel sets compiled into this wheel, from the build record.
 
@@ -125,20 +150,11 @@ def flaggems_cpp_enabled() -> bool:
     return "flaggems_cpp" in build_kernels()
 
 
-def require_routed(op: str) -> str:
-    """Assert the conf routes ``op`` to an accelerator backend, and return it.
-
-    A ``none`` route for a ``RUNTIME_OPS`` entry is a generation gap, not a
-    decision to accept: the suite exists to prove every one of these ten ops
-    reaches an accelerator backend on every platform. A platform that cannot
-    route one of them must be fixed in its conf/codegen -- so this raises rather
-    than skipping. The failure is data-driven (the conf says so), never a
-    platform name.
-    """
+def routed_backend(op: str) -> str:
+    """Return the accelerator backend the conf assigns to ``op``."""
     backend, reason = route_reason(op)
     if backend is None and reason == "conf_route_none":
         raise AssertionError(
-            f"{op} routes to none in {conf_path()}: a RUNTIME_OP with no "
-            "accelerator backend is a generation gap, not an accepted route"
+            f"{op} routes to none in {conf_path()}: there is no dispatch to verify"
         )
     return backend

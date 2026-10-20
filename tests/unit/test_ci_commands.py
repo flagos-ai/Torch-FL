@@ -39,7 +39,18 @@ API = _load("github_api")
 _load("generate_matrix")
 SLASH = _load("slash_command")
 FLAKY = _load("flaky_retry")
-PLATFORMS = ["ascend", "cuda", "dcu", "gcu", "kunlunxin", "metax", "musa", "ppu"]
+PLATFORMS = [
+    "ascend",
+    "cuda",
+    "dcu",
+    "gcu",
+    "iluvatar",
+    "kunlunxin",
+    "metax",
+    "mps",
+    "musa",
+    "ppu",
+]
 REPOSITORY = "flagos-ai/Torch-FL"
 SHA = "a" * 40
 COMMENT_EVENT = {
@@ -133,6 +144,7 @@ class FakeGitHub:
     [
         ("/ci run", PLATFORMS),
         ("/ci run all", PLATFORMS),
+        ("/ci run mps", ["mps"]),
         ("/ci run musa ascend musa", ["ascend", "musa"]),
         ("/ci run cuda,gcu", ["cuda", "gcu"]),
         ("/ci run ascend\n/ci run cuda", ["ascend"]),

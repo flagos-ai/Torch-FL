@@ -15,7 +15,7 @@
 
 # The one parameterized entrypoint for platform environment provisioning:
 #
-#   bash .github/scripts/set_env.sh --platform <cuda|ascend|dcu|gcu|kunlunxin|metax|mps|musa|ppu>
+#   bash .github/scripts/set_env.sh --platform <cuda|ascend|dcu|gcu|iluvatar|kunlunxin|metax|mps|musa|ppu>
 #
 # It owns the boilerplate every platform shares -- the CI_STAGE check, REPO_ROOT,
 # the version pins and the shared library -- then sources the platform hook at
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "usage: set_env.sh --platform <cuda|ascend|dcu|gcu|kunlunxin|metax|mps|musa|ppu>"
+      echo "usage: set_env.sh --platform <cuda|ascend|dcu|gcu|iluvatar|kunlunxin|metax|mps|musa|ppu>"
       exit 0
       ;;
     *)
@@ -94,7 +94,7 @@ export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"
 
 HOOK="${REPO_ROOT}/.github/scripts/hooks/set_env_${PLATFORM}.sh"
 if [[ ! -f "$HOOK" ]]; then
-  echo "::error::set_env.sh: unknown platform '${PLATFORM}'; expected one of: ascend cuda dcu gcu kunlunxin metax mps musa ppu" >&2
+  echo "::error::set_env.sh: unknown platform '${PLATFORM}'; expected one of: ascend cuda dcu gcu iluvatar kunlunxin metax mps musa ppu" >&2
   exit 2
 fi
 

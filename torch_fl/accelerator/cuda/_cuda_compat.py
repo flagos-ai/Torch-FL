@@ -61,6 +61,81 @@ _props_cache = {}
 # _get_cuda_generator / _CudaDefaultGenerators below.
 _cuda_generators = {}
 
+_UINT64_MASK = (1 << 64) - 1
+
+
+def _boxing_built():
+    """True when this wheel carries the CUDA boxing kernel set.
+
+    ``FLAGOS_BUILD_BOXING=ON`` is what makes ``torch.Generator(device="cuda")``
+    constructible: ATen's CUDA generator lives in the vendor
+    ``libtorch_cuda.so``. The default FlagGems-primary wheel links the CPU-only
+    pip torch instead (no ``libtorch_cuda.so``), so asking ATen for a CUDA
+    generator raises "Cannot get CUDA generator without ATen_cuda library" and
+    the RNG source has to be built in Python -- see ``_CudaPhiloxGenerator``.
+    """
+    try:
+        from torch_fl import _env
+    except Exception:
+        return False
+    return "boxing" in _env.build_kernels()
+
+
+def _as_int64_bits(value):
+    """Reinterpret a uint64 value as the signed one with the same bit pattern.
+
+    ``torch.initial_seed()`` routinely exceeds ``int64`` max (it is the full
+    unsigned 64-bit range), and ``torch.tensor(..., dtype=torch.int64)`` raises
+    "Overflow when unpacking long long" on those values.
+    """
+    value &= _UINT64_MASK
+    return value - (1 << 64) if value >= (1 << 63) else value
+
+
+class _CudaPhiloxGenerator:
+    """CUDA generator stand-in for wheels built without the boxing kernels.
+
+    FlagGems' ``philox_backend_seed_offset`` only ever calls ``get_state()``,
+    ``set_state()`` and (via ``torch.cuda.manual_seed*``) ``manual_seed()`` on a
+    default generator, and it only ever interprets the 16-byte state blob as two
+    int64 words ``(seed, offset)``. A Python object that speaks exactly that
+    protocol is therefore a complete substitute for ``torch.Generator`` on the
+    RNG path, and it is the only option when ATen has no CUDA library to build a
+    real generator from. Same shape as ``_GcuPhiloxGenerator``.
+    """
+
+    def __init__(self, seed):
+        self._seed = int(seed) & _UINT64_MASK
+        self._offset = 0
+
+    def get_state(self):
+        # 16 bytes of seed+offset, the layout a CUDA generator exposes.
+        return torch.tensor(
+            [_as_int64_bits(self._seed), _as_int64_bits(self._offset)],
+            dtype=torch.int64,
+            device="cpu",
+        ).view(torch.uint8)
+
+    def set_state(self, state):
+        values = state.reshape(-1)
+        if values.dtype != torch.int64:
+            values = values.view(torch.int64)
+        if values.numel() != 2:
+            raise ValueError("CUDA philox state must contain seed and offset")
+        # The state carries the unsigned bit pattern in a signed container.
+        self._seed, self._offset = (
+            int(values[0].item()) & _UINT64_MASK,
+            int(values[1].item()) & _UINT64_MASK,
+        )
+
+    def manual_seed(self, seed):
+        self._seed = int(seed) & _UINT64_MASK
+        self._offset = 0
+        return self
+
+    def initial_seed(self):
+        return self._seed
+
 
 def _get_cuda_generator(idx):
     """Lazily build one CUDA generator per device (the flaggems RNG source).
@@ -77,11 +152,19 @@ def _get_cuda_generator(idx):
     CUDA generator without ATen_cuda library". By the time any RNG op runs, cuda
     is live and construction succeeds. Seeded from ``torch.initial_seed()`` so a
     ``torch.manual_seed(...)`` issued before first use is honoured.
+
+    On a boxing wheel the real ATen generator is used (it is the object the CUDA
+    kernels and the C++ bridge share). On the default FlagGems-primary wheel
+    there is no ATen CUDA library to build one from, so the Python
+    ``_CudaPhiloxGenerator`` above stands in for it.
     """
     gen = _cuda_generators.get(idx)
     if gen is None:
-        gen = torch.Generator(device="cuda")
-        gen.manual_seed(torch.initial_seed())
+        if _boxing_built():
+            gen = torch.Generator(device="cuda")
+            gen.manual_seed(torch.initial_seed())
+        else:
+            gen = _CudaPhiloxGenerator(torch.initial_seed())
         _cuda_generators[idx] = gen
     return gen
 
@@ -131,6 +214,7 @@ _ATTR_MP_COUNT = 16
 _ATTR_L2_CACHE_SIZE = 38
 _ATTR_MAX_THREADS_PER_MP = 39
 _ATTR_WARP_SIZE = 10
+_ATTR_MAX_THREADS_PER_BLOCK = 1
 
 
 @dataclass
@@ -139,7 +223,16 @@ class _CudaDeviceProperties:
 
     Exposes the fields FlagGems reads: ``name``, ``major``, ``minor``,
     ``multi_processor_count``, ``L2_cache_size``, ``total_memory``,
-    ``warp_size``, ``max_threads_per_multi_processor``.
+    ``warp_size``, ``max_threads_per_multi_processor`` -- and
+    ``max_threads_per_block``, which Inductor reads.
+
+    The last one is not a FlagGems field. ``torch._inductor.utils.get_max_numwarps``
+    takes it off whatever ``torch.cuda.get_device_properties()`` returns, so on a
+    wheel whose ``torch.cuda`` is this shim the coordinate-descent tuner used by
+    ``mode="max-autotune"`` dies with ``AttributeError`` instead of compiling. A
+    CUDA-enabled torch answers it from ``cudaDeviceProp``; here it comes from the
+    same Driver API attribute, which reports 1024 on every device this shim
+    describes -- including the A100 CI lane.
     """
 
     name: str = ""
@@ -150,6 +243,9 @@ class _CudaDeviceProperties:
     L2_cache_size: int = 40 * 1024 * 1024
     warp_size: int = 32
     max_threads_per_multi_processor: int = 2048
+    # CUDA's documented ceiling for one block of threads. Every device this shim
+    # describes reports 1024, so the default and the queried value agree.
+    max_threads_per_block: int = 1024
     is_integrated: bool = False
     is_multi_gpu_board: bool = False
     gcnArchName: str = ""
@@ -275,6 +371,9 @@ def _query_device_properties(device_index: int) -> _CudaDeviceProperties:
     props.warp_size = attr(_ATTR_WARP_SIZE, props.warp_size)
     props.max_threads_per_multi_processor = attr(
         _ATTR_MAX_THREADS_PER_MP, props.max_threads_per_multi_processor
+    )
+    props.max_threads_per_block = attr(
+        _ATTR_MAX_THREADS_PER_BLOCK, props.max_threads_per_block
     )
 
     total = ctypes.c_size_t(0)

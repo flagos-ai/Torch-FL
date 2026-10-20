@@ -309,19 +309,32 @@ def run(args):
             results["views"][name] = {"aliases": bool(shared)}
         except Exception as exc:
             results["views"][name] = {"error": f"{type(exc).__name__}: {exc}"}
+            # The `.error` entries are *expected* to raise -- that is the
+            # contract they check -- so calling every one of these FAILED would
+            # report a correct backend as broken on a single-backend run. Their
+            # verdict is the error *type*, which only `--compare` can judge (it
+            # is the one holding a reference to compare against); here the run
+            # just reports what it saw.
+            expected_raise = name.endswith(".error")
             print(
-                f"view {name:<21}{'':>10}   FAILED {type(exc).__name__}: "
-                f"{str(exc)[:60]}"
+                f"view {name:<21}{'':>10}   "
+                f"{'raised' if expected_raise else 'FAILED'} "
+                f"{type(exc).__name__}: {str(exc)[:60]}"
+                + ("  (expected)" if expected_raise else "")
             )
 
     # Counted separately, and both halves printed: a view that raised is not an
     # aliasing check that ran, and reporting it as one overstates the coverage
     # on this backend. `--compare` is what judges the candidate's errors.
+    # The `.error` entries are excluded from the denominator for the same
+    # reason: they never produce an `aliases` result by construction, so
+    # counting them would make the coverage line unreadable on a correct run.
     ops_ran = sum(1 for entry in results["ops"].values() if "error" not in entry)
     views_ran = sum(1 for entry in results["views"].values() if "aliases" in entry)
+    views_total = sum(1 for name in results["views"] if not name.endswith(".error"))
     print(
         f"\n{ops_ran}/{len(results['ops'])} ops ran, "
-        f"{views_ran}/{len(results['views'])} aliasing checks ran"
+        f"{views_ran}/{views_total} aliasing checks ran"
     )
     if args.out:
         torch.save(results, args.out)

@@ -36,7 +36,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import route_is_served, routed_backend
 
 
 DEVICE = "flagos:0"
@@ -144,6 +144,23 @@ class TestMulTensorDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        """The env override routes mul.Tensor through the FlagGems Python path.
+
+        Skipped where this wheel did not compile the backend the conf names. The
+        override can only redirect an op that is *claimed* on PrivateUse1 at all,
+        and that claim comes from the generated ``register_flaggems_<platform>.inc``
+        -- which contains the ops the conf routes to ``flaggems``. A ``cuda``
+        route on a wheel with no CUDA boxing kernels is in no such file, so there
+        is no slot for the override to reach and no dispatch line can appear.
+        """
+        if not route_is_served("mul.Tensor"):
+            pytest.skip(
+                f"the conf routes mul.Tensor to "
+                f"{routed_backend('mul.Tensor')}, a backend this wheel did not "
+                "compile (see KERNELS in torch_fl/_build_config.py): the op is "
+                "not claimed on PrivateUse1, so no override can reach it and no "
+                "dispatch is logged"
+            )
         result = _run_mul_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",
@@ -158,11 +175,24 @@ class TestMulTensorDispatch:
     def test_dispatch_log_flaggems_runtime(self):
         """mul.Tensor dispatches to whatever backend this platform's conf lists.
 
-        ``flagos_python`` on CUDA/DCU/PPU and ``musa`` on MUSA: FlagGems has no
-        Triton kernel for the .Tensor overload, so each platform's generated conf
+        ``cuda`` on CUDA/DCU/PPU and ``musa`` on MUSA: FlagGems has no Triton
+        kernel for the .Tensor overload, so each platform's generated conf
         keeps it on its own vendor kernel. Reading the conf keeps the assertion
         true on all of them.
+
+        Skipped where this wheel did not compile the backend the conf names: the
+        default FlagGems-primary wheel links no CUDA boxing kernels, so a
+        ``cuda`` route is never claimed on PrivateUse1, reaches cpu_fallback and
+        logs nothing -- the assertion has nothing to hold on. Same build-driven
+        skip as ``sum.dim_IntList`` and ``cat`` in this directory.
         """
+        if not route_is_served("mul.Tensor"):
+            pytest.skip(
+                f"the conf routes mul.Tensor to "
+                f"{routed_backend('mul.Tensor')}, a backend this wheel did not "
+                "compile (see KERNELS in torch_fl/_build_config.py): the call "
+                "reaches cpu_fallback and logs no dispatch"
+            )
         result = _run_mul_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("mul.Tensor")

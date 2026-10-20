@@ -22,7 +22,7 @@ on:
   schedule:
     - cron: '0 18 * * *'   # 02:00 CST daily
   push:
-    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa]
+    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa, iluvatar_build_and_test]
   pull_request:
     branches: [main, dev, devops, dev-hygon]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -177,6 +177,8 @@ jobs:
       matrix:
         platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
     uses: ./.github/workflows/integration-tests.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ matrix.platform }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}

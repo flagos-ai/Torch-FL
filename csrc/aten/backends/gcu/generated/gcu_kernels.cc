@@ -2232,7 +2232,12 @@ REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tenso
     const ::std::optional<at::Tensor>& weight,
     const ::std::optional<at::Tensor>& bias,
     double eps) {
-  if (!gcu::TopsatenSupportsDtype(input.scalar_type())) {
+  if (!gcu::TopsatenSupportsDtype(input.scalar_type()) ||
+      !input.is_privateuseone() ||
+      (weight.has_value() && weight->defined() &&
+       weight->device() != input.device()) ||
+      (bias.has_value() && bias->defined() &&
+       bias->device() != input.device())) {
     auto r = at::native_layer_norm(
         input.cpu(),
         normalized_shape,
@@ -2256,11 +2261,13 @@ REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tenso
   auto mean = at::empty(stat_shape, input_c.options());
   auto rstd = at::empty(stat_shape, input_c.options());
 
+  // Moved onto input's device: an unmoved CPU weight would reach topsaten
+  // through the raw-pointer wrapper as device memory (#526).
   auto w = weight.has_value() && weight->defined()
-      ? weight->contiguous()
+      ? weight->to(input_c.device()).contiguous()
       : at::ones(normalized_shape, input_c.options());
   auto b = bias.has_value() && bias->defined()
-      ? bias->contiguous()
+      ? bias->to(input_c.device()).contiguous()
       : at::zeros(normalized_shape, input_c.options());
 
   gcu::TopsatenSizeWrapper t_shape(normalized_shape);
@@ -2476,7 +2483,10 @@ at::Tensor ConvolutionOverrideableKernelGcu(
     at::IntArrayRef output_padding,
     int64_t groups) {
   if (!gcu::TopsatenSupportsDtype(input.scalar_type()) ||
-      !gcu::TopsatenSupportsDtype(weight.scalar_type()) || transposed) {
+      !gcu::TopsatenSupportsDtype(weight.scalar_type()) || transposed ||
+      !input.is_privateuseone() || !weight.is_privateuseone() ||
+      (bias.has_value() && bias->defined() &&
+       bias->device() != input.device())) {
     auto r = at::convolution(
         input.cpu(), weight.cpu(),
         bias.has_value() && bias->defined()
@@ -2495,7 +2505,7 @@ at::Tensor ConvolutionOverrideableKernelGcu(
   // topsaten has no "absent bias" sentinel usable from here, so a zero bias
   // reproduces the unbiased result.
   at::Tensor bias_c = bias.has_value() && bias->defined()
-      ? bias->contiguous()
+      ? bias->to(input_c.device()).contiguous()
       : at::zeros({weight_c.size(0)}, weight_c.options());
 
   gcu::TopsatenTensorWrapper t_out(out);

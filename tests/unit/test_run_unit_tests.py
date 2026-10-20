@@ -30,6 +30,10 @@ _SPEC.loader.exec_module(_RUNNER)
 
 
 _CLEAN = "........................                                                 [100%]\n24 passed in 19.28s\n"
+_BANNERED_CLEAN = (
+    "........................                                                 [100%]\n"
+    "===== 24 passed, 1 skipped in 19.28s =====\n"
+)
 _WITH_FAILURE = "F.                                                                        [100%]\n1 failed, 1 passed in 3.10s\n"
 
 
@@ -92,6 +96,13 @@ def test_crash_after_a_clean_summary_is_tolerated_only_when_opted_in(
 
     monkeypatch.setattr(_RUNNER, "_ALLOW_TEARDOWN_CRASH", True)
     assert _RUNNER.classify(-signal.SIGSEGV, _CLEAN) == (
+        "PASS (crash after summary)",
+        True,
+    )
+
+
+def test_crash_after_a_bannered_clean_summary_is_tolerated(allow_teardown_crash):
+    assert _RUNNER.classify(-signal.SIGSEGV, _BANNERED_CLEAN) == (
         "PASS (crash after summary)",
         True,
     )

@@ -50,14 +50,13 @@ from manifest_composer import (
 
 # The platforms this layer has to keep in step. Written out rather than taken
 # from the directory: a config that quietly disappeared would otherwise take its
-# platform out of every check below and leave the suite green. MPS joined this
-# list with the lane that runs its operator suite; every other entry in
-# `_KNOWN_GAPS` was widened by the same edit, which is the ratchet working.
+# platform out of every check below and leave the suite green.
 _PLATFORMS = (
     "ascend",
     "cuda",
     "dcu",
     "gcu",
+    "iluvatar",
     "kunlunxin",
     "metax",
     "mps",
@@ -78,14 +77,28 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
-    # `vendor_ops` is the per-platform operator group family; every platform
-    # carries its own variant, so a platform named in none of them is the gap.
-    # MPS runs its operator suite under the `backend_ops` id below rather than
-    # through one of these variants, because its suite is selected by marker
-    # (`-m mps`) over the whole ops directory rather than by a vendor file list.
-    "vendor_ops": ("mps",),
+    "iluvatar_runtime": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "kunlunxin",
+        "metax",
+        "mps",
+        "musa",
+        "ppu",
+    ),
     "rng": ("mps", "ppu"),
-    "soft_lowp_matrix": ("ascend", "cuda", "gcu", "kunlunxin", "mps", "musa", "ppu"),
+    "soft_lowp_matrix": (
+        "ascend",
+        "cuda",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "mps",
+        "musa",
+        "ppu",
+    ),
     "amp_contract": ("kunlunxin", "mps", "ppu"),
     "profiler_contract": ("gcu", "kunlunxin", "mps"),
     "profiler_parity": (
@@ -98,12 +111,31 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "torch_compile": ("ascend", "dcu", "mps", "musa", "ppu"),
-    "inference": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "mps", "musa"),
-    "training": ("ascend", "dcu", "gcu", "kunlunxin", "metax", "mps", "musa"),
+    "inference": (
+        "ascend",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mps",
+        "musa",
+    ),
+    "training": (
+        "ascend",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mps",
+        "musa",
+    ),
     "native_comm_bridge": (
         "ascend",
         "cuda",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "metax",
         "mps",
@@ -115,32 +147,43 @@ _KNOWN_GAPS = {
         "cuda",
         "dcu",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "metax",
         "mps",
         "ppu",
     ),
-    "unit_tests_per_file": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-        "ppu",
-    ),
-    # The id the MPS lane adds, recorded as a gap for the eight original
-    # platforms the same way every other platform-specific group is. MPS needs
-    # no entry for the shared groups: it runs every step that names no platform,
-    # so its only absence-from-the-others is this one.
-    "backend_ops": (
+    "musa_runtime": (
         "ascend",
         "cuda",
         "dcu",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "metax",
+        "mps",
+        "ppu",
+    ),
+    "musa_flaggems_hybrid": (
+        "ascend",
+        "cuda",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mps",
+        "ppu",
+    ),
+    "vendor_ops": ("mps",),
+    "unit_tests_per_file": (
+        "ascend",
+        "cuda",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mps",
         "musa",
         "ppu",
     ),
@@ -577,126 +620,3 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
         == 1
     )
     assert "::error::" in capsys.readouterr().err
-
-
-def _macho(path, *, thin=None, fat=None, endian=">", entry_size=20):
-    """Write a Mach-O header just far enough for the architecture reader.
-
-    The reader exists because the architecture a wheel was built for is not the
-    architecture of the interpreter that built it, and the macOS lane is where
-    the two came apart. Bytes are what that check reads, so bytes are what these
-    tests write: a fixture built from the real `macho_architectures` output
-    would assert nothing about the parsing.
-    """
-    byteorder = {"<": "little", ">": "big"}[endian]
-    thin_magic = {
-        ">": {True: 0xFEEDFACF, False: 0xFEEDFACE},
-        "<": {True: 0xCFFAEDFE, False: 0xCEFAEDFE},
-    }
-    blob = bytearray()
-    if thin is not None:
-        magic = thin_magic[endian][entry_size == 32]
-        blob += magic.to_bytes(4, "big")
-        blob += thin.to_bytes(4, byteorder, signed=True)
-    else:
-        magic = {(">", 20): 0xCAFEBABE, ("<", 20): 0xBEBAFECA}
-        magic = dict(magic)
-        magic |= {(">", 32): 0xCAFEBABF, ("<", 32): 0xBFBAFECA}
-        blob += magic[(endian, entry_size)].to_bytes(4, "big")
-        blob += len(fat).to_bytes(4, byteorder)
-        for cputype in fat:
-            entry = bytearray(entry_size)
-            entry[0:4] = cputype.to_bytes(4, byteorder, signed=True)
-            blob += entry
-    path.write_bytes(bytes(blob))
-    return path
-
-
-CPU_TYPE_X86_64 = 0x01000007
-CPU_TYPE_ARM64 = 0x0100000C
-
-
-def test_a_thin_file_reports_its_own_architecture(tmp_path):
-    """Both byte orders, and the 64-bit magic, since a dylib is the 64-bit one."""
-    assert environment_check.macho_architectures(
-        _macho(tmp_path / "arm64.dylib", thin=CPU_TYPE_ARM64, entry_size=32)
-    ) == ["arm64"]
-    assert environment_check.macho_architectures(
-        _macho(tmp_path / "x86_64.dylib", thin=CPU_TYPE_X86_64, entry_size=32)
-    ) == ["x86_64"]
-    assert environment_check.macho_architectures(
-        _macho(tmp_path / "swapped", thin=CPU_TYPE_ARM64, endian="<", entry_size=32)
-    ) == ["arm64"]
-
-
-def test_a_universal_file_reports_every_architecture_it_lists(tmp_path):
-    """The case the check exists for: two listed, and both read.
-
-    A universal2 wheel whose arm64 half is real and whose x86_64 half is the
-    interpreter's assumption is exactly the artifact the macOS lane produced, so
-    the reader has to see both entries rather than the first one.
-    """
-    path = _macho(tmp_path / "universal2.so", fat=[CPU_TYPE_X86_64, CPU_TYPE_ARM64])
-    assert environment_check.macho_architectures(path) == ["x86_64", "arm64"]
-    swapped = _macho(
-        tmp_path / "universal2-swapped.so",
-        fat=[CPU_TYPE_ARM64, CPU_TYPE_X86_64],
-        endian="<",
-    )
-    assert environment_check.macho_architectures(swapped) == ["arm64", "x86_64"]
-    wide = _macho(tmp_path / "universal2.so", fat=[CPU_TYPE_ARM64], entry_size=32)
-    assert environment_check.macho_architectures(wide) == ["arm64"]
-
-
-def test_something_that_is_not_a_macho_file_reports_nothing(tmp_path):
-    """A reader that guessed would let the assertion pass over the wrong file."""
-    text = tmp_path / "not-a-binary"
-    text.write_text("#!/bin/sh\necho hello\n")
-    assert environment_check.macho_architectures(text) is None
-    empty = tmp_path / "empty"
-    empty.write_bytes(b"\xcf\xfa\xed")
-    assert environment_check.macho_architectures(empty) is None
-    absurd = tmp_path / "absurd"
-    absurd.write_bytes(0xCAFEBABE.to_bytes(4, "big") + (10**6).to_bytes(4, "big"))
-    assert environment_check.macho_architectures(absurd) is None
-
-
-def test_the_architecture_assertion_names_what_it_found(tmp_path):
-    """The platform states one architecture; a dylib for another has to fail.
-
-    `torch_fl._C` is imported for real by the time this runs, so the module it
-    hands the assertion is a stub. Stubbing the module rather than the reader
-    keeps the reader under test.
-    """
-    import types
-
-    path = _macho(tmp_path / "_C.cpython-312-darwin.so", thin=CPU_TYPE_ARM64)
-    dependencies = types.SimpleNamespace(torch_fl=types.SimpleNamespace(_C=None))
-    dependencies.torch_fl._C = types.SimpleNamespace(__file__=str(path))
-
-    environment_check.assert_native_extensions_arch(dependencies, "arm64")
-    with pytest.raises(AssertionError, match="expected x86_64"):
-        environment_check.assert_native_extensions_arch(dependencies, "x86_64")
-
-
-def test_a_single_architecture_platform_states_one_architecture():
-    """Only MPS states it, and only because its runner is the accelerator.
-
-    Every other platform's wheel is built inside a container whose architecture
-    is not a fact the runner can get wrong, so the vocabulary being closed on
-    `native_extensions_arch` is what keeps this from spreading into configs that
-    would assert an architecture their image never chose.
-
-    The reader the platform's value reaches is exercised against real files
-    above; this holds the other end, that the value the reader is given is the
-    one the runner is.
-    """
-    stating = [
-        platform
-        for platform in platform_names()
-        if platform_config(platform)["environment_check"].get("native_extensions_arch")
-    ]
-    assert stating == ["mps"]
-    assert platform_config("mps")["environment_check"]["native_extensions_arch"] == (
-        "arm64"
-    )

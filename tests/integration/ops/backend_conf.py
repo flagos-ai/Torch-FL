@@ -107,3 +107,57 @@ def routed_backend_or_none(op: str) -> str | None:
     """
     backend = _conf_route(op)
     return None if backend == "none" else _LOG_NAME.get(backend, backend)
+
+
+#: conf backend value -> the build-record kernel set whose kernels serve it.
+#: ``_LOG_NAME`` above translates a conf value into what the dispatch log prints;
+#: this translates the same value into what the build record (``KERNELS`` in
+#: ``torch_fl/_build_config.py``) calls the code that backs it, which is the
+#: other half of "can this wheel reach the route it was handed".
+_BACKEND_KERNEL_SET = {
+    "flaggems": "flaggems",
+    "flaggems_python": "flaggems",
+    "flagos_python": "flaggems",
+    "flaggems_cpp": "flaggems_cpp",
+    "cuda": "boxing",
+    "tileops": "tileops",
+}
+
+#: The keys a native-kernel vendor routes to. Each platform's conf names its own
+#: (``ascend`` on Ascend, ``musa`` on MUSA, ``gcu`` on GCU, ``kunlunxin`` on
+#: Kunlunxin, ``iluvatar`` on Iluvatar, ``tsingmicro`` on TsingMicro), and
+#: setup.py compiles every one of them from the single ``vendor`` kernel set
+#: rather than a per-vendor switch -- so one membership test answers "did this
+#: build compile the native kernels" for all of them.
+_VENDOR_BACKENDS = frozenset(
+    {"ascend", "musa", "gcu", "kunlunxin", "iluvatar", "tsingmicro"}
+)
+
+
+def route_is_served(op: str) -> bool:
+    """True when this wheel compiled the backend the conf routes ``op`` to.
+
+    A conf states per-op routing for a *platform*, not for one build of it: it
+    names the CUDA boxing kernels whether or not ``FLAGOS_BUILD_BOXING`` pulled
+    them in, and the FlagGems path whether or not ``FLAGOS_BUILD_FLAGGEMS`` did.
+    When the named backend is not compiled in, the op is not claimed on
+    PrivateUse1 at all, so the call reaches ATen's cpu_fallback and nothing logs
+    a dispatch -- a test asserting ``[flagos dispatch] <op> -> <backend>`` then
+    has nothing to hold on and has to skip rather than fail. That is exactly the
+    default (FlagGems-primary) wheel's shape for every op
+    ``backends_cuda.conf`` routes to ``cuda``: no boxing kernels, no dispatch.
+
+    Both facts are asked of the wheel (``torch_fl._env.build_kernels()``), never
+    of an environment variable, so the answer cannot disagree with the build it
+    describes. ``none`` and an op the conf does not list both answer False:
+    neither names a backend this wheel reaches, which is what a caller asking
+    this question wants to hear.
+    """
+    backend = _conf_route(op)
+    if backend == "none":
+        return False
+    kernels = torch_fl._env.build_kernels()
+    if backend in _VENDOR_BACKENDS:
+        return "vendor" in kernels
+    kernel_set = _BACKEND_KERNEL_SET.get(backend)
+    return kernel_set is not None and kernel_set in kernels

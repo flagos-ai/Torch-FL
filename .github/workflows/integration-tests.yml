@@ -61,6 +61,15 @@ on:
         required: false
         type: string
         default: ''
+      flagcicd_plan:
+        description: Optional compact plan context for structured execution reporting
+        required: false
+        type: string
+        default: ''
+    secrets:
+      FLAGCICD_API_TOKEN:
+        description: Optional token for publishing pytest results and Python coverage to FlagCICD
+        required: false
   # Kept from the per-platform pipelines: a single re-run of one platform, on
   # its own hardware, without dispatching the whole matrix in ci.yml. The
   # timeout and the test manifest come from the config either way.
@@ -82,14 +91,14 @@ jobs:
   integration-tests:
     name: Build and test (${{ needs.configuration.outputs.display_name }})
     needs: configuration
+    outputs:
+      stages: ${{ steps.execution.outputs.stages }}
+      run_attempt: ${{ steps.execution.outputs.run_attempt }}
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
-    # `container:` cannot be conditional, so it is omitted for a platform whose
-    # config leaves `ci_image` empty. MPS is that platform: its accelerator is
-    # the runner's own Metal GPU and a macOS runner cannot start a container at
-    # all. A workflow-level `container: ''` is a schema error, not an absent
-    # key, which is why the two platforms need two spellings of the job.
-    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":"{0}","volumes":{1},"options":"{2}"}}', needs.configuration.outputs.ci_image, needs.configuration.outputs.container_volumes, needs.configuration.outputs.container_options)) || null }}
+    # A platform without a `ci_image` runs directly on its runner. MPS needs a
+    # macOS host with its Metal GPU, and macOS jobs cannot use containers.
+    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":{0},"volumes":{1},"options":{2}}}', toJson(needs.configuration.outputs.ci_image), needs.configuration.outputs.container_volumes, toJson(needs.configuration.outputs.container_options))) || null }}
     defaults:
       run:
         shell: bash
@@ -157,6 +166,7 @@ jobs:
       # device-dependent pieces at `integration`, which is what a job named this
       # used to pass. See setup_stage in .github/configs/<p>.yml.
       - name: Prepare ${{ needs.configuration.outputs.display_name }} build environment
+        id: setup
         env:
           CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
         run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
@@ -169,12 +179,15 @@ jobs:
         run: ${{ needs.configuration.outputs.integration_build_tools }}
 
       - name: Build wheel
+        id: build
         run: python -m build --wheel --no-isolation
 
       - name: Validate wheel compatibility manifest
+        id: validate
         run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
 
       - name: Install wheel
+        id: install
         run: python -m pip install --force-reinstall --no-deps dist/*.whl
 
       # pytest, where the image does not already have it: GCU installs it here,
@@ -196,12 +209,163 @@ jobs:
           # that arrangement.
           cp -a tests pyproject.toml "$TEST_ROOT/"
           printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
+          REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
+          printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install pytest JSON reporting
+        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+
+      - name: Prepare Python line coverage
+        id: coverage-setup
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          COVERAGE_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-coverage.XXXXXX")
+          python .github/scripts/python_coverage.py prepare --report-dir "$COVERAGE_DIR" --env-file "$GITHUB_ENV"
 
       - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
+        id: integration-tests
         env:
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
-        run: python .github/scripts/run_integration_tests.py
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
+          export PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+          python .github/scripts/run_integration_tests.py
+
+      # Preserve failed sessions too; reporting never changes the test verdict.
+      - name: Merge pytest reports
+        id: merge-report
+        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          REPORT_PLATFORM: ${{ inputs.platform }}
+          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+        run: >-
+          python .github/scripts/merge_pytest_reports.py
+          --report-dir "$FLAGCICD_REPORT_DIR"
+          --output "$GITHUB_WORKSPACE/pytest-${REPORT_PLATFORM}.json"
+          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
+          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+
+      # Resolve report paths inside the job container; github.workspace may
+      # contain the runner host's checkout path instead of its container mount.
+      - name: Retain pytest reports
+        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: pytest-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: |
+            pytest-${{ inputs.platform }}.json
+            ${{ env.FLAGCICD_REPORT_DIR }}/
+          if-no-files-found: warn
+
+      - name: Merge Python line coverage
+        id: merge-coverage
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          REPORT_PLATFORM: ${{ inputs.platform }}
+          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+        run: >-
+          python .github/scripts/python_coverage.py merge
+          --report-dir "$FLAGCICD_COVERAGE_DIR"
+          --output "$GITHUB_WORKSPACE/coverage-${REPORT_PLATFORM}.json"
+          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
+          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+
+      - name: Retain Python coverage
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: coverage-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: |
+            coverage-${{ inputs.platform }}.json
+            ${{ env.FLAGCICD_COVERAGE_DIR }}/
+          if-no-files-found: warn
+
+      # A fork diagnostic run still retains reports, without giving its tested
+      # code an upload credential in the same job. Missing tokens are optional.
+      - name: Check FlagCICD upload availability
+        id: flagcicd-auth
+        if: ${{ !cancelled() && (steps.merge-report.outcome == 'success' || steps.merge-coverage.outcome == 'success') && (inputs.checkout_repository == '' || inputs.checkout_repository == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        env:
+          FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
+        run: |
+          if [[ -n "$FLAGCICD_API_TOKEN" ]]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::FLAGCICD_API_TOKEN is unavailable; report retained as an artifact.'
+          fi
+
+      # The current MetaX Ubuntu image has no curl. Prepare it inside the job
+      # container, only for credentialed uploads; do not alter the test verdict.
+      - name: Prepare MetaX upload tools
+        if: ${{ !cancelled() && inputs.platform == 'metax' && steps.flagcicd-auth.outputs.available == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          if ! command -v curl >/dev/null 2>&1; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+          fi
+          curl --version
+
+      - name: Upload pytest report to FlagCICD
+        if: ${{ !cancelled() && steps.merge-report.outcome == 'success' && steps.flagcicd-auth.outputs.available == 'true' }}
+        uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
+          api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
+          report_path: 'pytest-${{ inputs.platform }}.json'
+          file_type: pytest
+          job_name: integration-tests-${{ inputs.platform }}
+          fail_on_error: 'false'
+
+      - name: Upload Python coverage to FlagCICD
+        if: ${{ !cancelled() && steps.merge-coverage.outcome == 'success' && steps.flagcicd-auth.outputs.available == 'true' }}
+        uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
+          api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
+          report_path: 'coverage-${{ inputs.platform }}.json'
+          file_type: coverage
+          job_name: coverage-${{ inputs.platform }}
+          fail_on_error: 'false'
+
+      - name: Record execution outcomes
+        id: execution
+        if: always() && inputs.flagcicd_plan != ''
+        env:
+          SETUP_RESULT: ${{ steps.setup.outcome }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          VALIDATE_RESULT: ${{ steps.validate.outcome }}
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          TEST_RESULT: ${{ steps.integration-tests.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          stages = {key: os.environ[key.upper() + '_RESULT'] for key in ('setup', 'build', 'validate', 'install', 'test')}
+          stages['tests'] = stages.pop('test')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('stages=' + json.dumps(stages) + '\n')
+              output.write('run_attempt=' + os.environ['GITHUB_RUN_ATTEMPT'] + '\n')
+          PY
 
       # Save outside post-job cleanup so the upload has its own deadline.
       # Keep downloaded dependencies even if a later build/test step fails:
@@ -216,3 +380,46 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}
+
+  flagcicd-report:
+    name: FlagCICD outcome (${{ inputs.platform }})
+    if: always() && inputs.flagcicd_plan != ''
+    needs: [configuration, integration-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted report code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download pytest data
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pytest-${{ inputs.platform }}-${{ needs.integration-tests.outputs.run_attempt || github.run_attempt }}
+          path: raw/pytest
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-${{ inputs.platform }}-${{ needs.integration-tests.outputs.run_attempt || github.run_attempt }}
+          path: raw/coverage
+      - name: Describe platform execution
+        env:
+          FLAGCICD_PLAN: ${{ inputs.flagcicd_plan }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          REPORT_PLATFORM: ${{ inputs.platform }}
+        run: >-
+          python3 .github/scripts/flagcicd_report.py platform
+          --platform "$REPORT_PLATFORM" --directory raw
+          --output "flagcicd-platform-${REPORT_PLATFORM}.json"
+      - name: Retain platform outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flagcicd-platform-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: flagcicd-platform-${{ inputs.platform }}.json
+          if-no-files-found: error
+          retention-days: 14

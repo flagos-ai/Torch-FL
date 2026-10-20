@@ -605,12 +605,29 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
         "exclusion until one job opts into that build"
     ),
+    "tests/integration/ops/test_full_cuda_coverage.py": (
+        "exercises the CUDA boxing path: every case asserts that an op "
+        "backends_cuda.conf routes to `cuda` dispatches to the boxing kernel "
+        "rather than reaching cpu_fallback, and the file's own docstring says "
+        "its ops need the external libtorch_cuda.so. The CUDA lane was the only "
+        "manifest that selected the `cuda` marker, and it now builds the "
+        "default (FlagGems-primary) wheel, which has no boxing kernels for "
+        "these cases to assert on. Accepted exclusion until the vendor-SDK "
+        "native kernels that replace the boxing path land, or a boxing-on CUDA "
+        "job is added"
+    ),
+    "tests/integration/ops/test_tileops_generated.py": (
+        "carries `cuda` for the same reason -- its routes are bound on the CUDA "
+        "dispatch key -- and the same CUDA lane step was the only manifest "
+        "command that selected it; see test_full_cuda_coverage.py. Accepted "
+        "exclusion on the same terms (it would also self-skip: no job builds "
+        "the TileOPs kernel set)"
+    ),
     "tests/integration/test_mps_runtime.py": (
-        "the MPS runtime floor (device, stream, event, memory) has no CI job: "
-        "the pipeline runs accelerator container images on self-hosted Linux "
-        "runners and no macOS arm64 runner is wired in, so the file is run by "
-        "hand on an M-series host. Accepted exclusion until such a runner and "
-        "an mps manifest exist"
+        "carries the `mps` marker, while the MPS CI lane runs the shared "
+        "hardware-agnostic runtime suite that covers the same device, stream, "
+        "event and memory contracts. Accepted exclusion from the marker sweeps "
+        "so the hosted macOS runner does not duplicate them"
     ),
 }
 

@@ -27,6 +27,15 @@ This file also carries forward the checks proven in the one-shot verification
 gate ``tests/scratch/verify_correlation_foundation.py``, which was deleted once
 these tests existed -- this is now their only home.
 
+Assertions 1, 3 and 5a are skipped where the wheel carries no CUDA boxing
+kernels, which is the default for every CUDA-ABI platform since #520. Each of
+the three reads metadata only a cuBLAS/cuSOLVER trace produces -- the
+``gpu_memset`` category, ``External id`` among the kernel args, a
+``::``-qualified kernel name -- and on that wheel every op in the workload is a
+Triton kernel, so the trace has none of the three. The gate is on the build
+record rather than on the accelerator name because DCU runs this file with
+boxing on and must keep checking all five assertions.
+
 Run:
     PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh \
         python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops
@@ -42,6 +51,7 @@ import torch
 
 import torch_fl  # noqa: F401  (registers the flagos PrivateUse1 backend)
 
+from torch_fl import _env
 from profiler_support import append_boxing_path_probe
 
 _BASELINE_PATH = (
@@ -59,6 +69,28 @@ GENERIC_RUNTIME_NAMES = {"cudaRuntime", "cudaLaunchKernel"}
 # come back with status=-2 and are kept verbatim, so the check is "not mangled",
 # not "was transformed".
 MANGLED_PREFIX = "_ZN"
+
+
+def _boxing_built() -> bool:
+    """True when this wheel carries the generated CUDA boxing kernels.
+
+    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
+    rather than inferred from the accelerator name: boxing became an explicit
+    opt-in on every CUDA-ABI platform in #520, so a ``cuda`` wheel answers False
+    here unless it was deliberately built with ``FLAGOS_BUILD_BOXING=1``.
+    """
+    return "boxing" in _env.build_kernels()
+
+
+#: Skip for the three assertions whose subject is supplied by the boxing path.
+_NEEDS_BOXING = pytest.mark.skipif(
+    not _boxing_built(),
+    reason=(
+        "this wheel carries no CUDA boxing kernels, so the workload is all "
+        "Triton kernels and produces none of the cuBLAS/cuSOLVER metadata this "
+        "assertion reads (gpu_memset, kernel External id, ::-qualified names)"
+    ),
+)
 
 
 @pytest.fixture(scope="module")
@@ -114,7 +146,9 @@ def _run_traced_ops():
     workspace, reports no ``External id`` and carries no ``::``-qualified symbol
     -- so on that routing the trace has none of the three, and assertions 1, 3
     and 5a lose their subject. ``append_boxing_path_probe`` owns the details and
-    the reason it is gated per platform.
+    the reason it is gated per platform; on a wheel with no boxing kernels at
+    all it appends nothing, and those three assertions skip (``_NEEDS_BOXING``)
+    instead of failing on a trace they have nothing to read.
     """
     x = torch.randn(1024, 1024, device=DEVICE)
     y = torch.randn(1024, 1024, device=DEVICE)
@@ -189,6 +223,7 @@ def _op_name_by_external_id(trace):
 
 
 @pytest.mark.main_ops
+@_NEEDS_BOXING
 def test_category_coverage(profile_result, baseline):
     """Assertion 1: flagos emits every category torch-cuda does.
 
@@ -271,6 +306,7 @@ def test_flow_arrows_are_paired(profile_result):
 
 
 @pytest.mark.main_ops
+@_NEEDS_BOXING
 def test_arg_key_supersets(profile_result, baseline):
     """Assertion 3: every category's args cover the baseline's keys.
 
@@ -401,6 +437,7 @@ def test_device_time_attribution(profile_result):
 
 
 @pytest.mark.main_ops
+@_NEEDS_BOXING
 def test_kernel_names_are_demangled(profile_result):
     """Assertion 5a: kernel names are not raw C++ mangled symbols.
 

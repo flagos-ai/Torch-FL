@@ -200,6 +200,26 @@ def get_kunlunxin_current_raw_stream(device: Any = None) -> int:
     return flagos.current_stream(index).handle
 
 
+def get_iluvatar_current_raw_stream(device: Any = None) -> int:
+    """The ``cudaStream_t`` handle vendor and FlagGems kernels must share.
+
+    This is the same handle the eager iluvatar kernels submit to
+    (``IluvatarCurrentStream`` in ``aten/backends/iluvatar/iluvatar_common.h``),
+    which is what makes a compiled kernel ordered against eager work without an
+    explicit synchronize between them.
+
+    Read from ``torch_fl._C`` for the same reason MUSA's is: corex's runtime is
+    CUDA-shaped, so torch_fl's own registry creates an actual stream per device
+    (``runtime/accelerator/iluvatar/stream.cc``), but the build links the CPU
+    torch wheel -- there is no ``_cuda_getCurrentRawStream``, and no ``c10::cuda``
+    anywhere in the build -- so the registry has to be asked through a binding of
+    its own rather than through torch.
+    """
+    from torch_fl import _C
+
+    return _C._get_iluvatar_current_raw_stream(_musa_device_index(device))
+
+
 _musa_driver_bound = False
 
 

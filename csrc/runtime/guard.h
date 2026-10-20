@@ -18,7 +18,7 @@
 #endif
 
 // Real c10::cuda:: stream/event plumbing. Gated the same way as
-// runtime/allocator/caching_device_allocator.cc's delegation to
+// backends/cuda_memory.h's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
 // exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see
@@ -31,10 +31,25 @@
 // puts a tensor on the CUDA dispatch key; the XPU SDK does ship a CUDA-shaped
 // cuda_runtime.h, but c10::cuda:: (the C++ stream plumbing this branch needs)
 // is a hollow shell in this build, which is exactly why the backend was
-// de-boxed.
-#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
-    !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN) && !defined(USE_MPS)
+// de-boxed. Iluvatar is excluded because the platform links the CPU torch wheel:
+// its runtime has its own stream registry (runtime/accelerator/iluvatar/
+// stream.cc) rather than reading torch's, precisely so that no c10::cuda symbol
+// -- and therefore not libtorch_cuda.so / libc10_cuda.so, which a CPU wheel does
+// not ship -- enters the build.
+//
+// FLAGOS_BOXING_BUILD is required on top of that list, for the same reason
+// backends/cuda_memory.h gates its allocator delegation: c10::cuda lives in
+// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
+// links the CPU-only torch wheel), so the symbols this branch calls are absent
+// at load time even on a real NVIDIA box. Every CUDA-ABI platform that reaches
+// here -- cuda, ppu, metax -- builds with boxing on except the cuda lane the
+// default wheel is tested on, so this only ever flips the default
+// build. The #else arms below are the shape Ascend/Kunlunxin already use:
+// stream id 0 (the legacy default stream) and event/stream waits on nullptr.
+#if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
+    !defined(USE_TSINGMICRO) && !defined(USE_DCU) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_MPS) && !defined(USE_ILUVATAR)
 #define FLAGOS_GUARD_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #else
@@ -66,13 +81,36 @@ inline aclrtStream AscendStreamHandle(const c10::Stream& stream) {
 }
 #endif
 
-#ifdef USE_KUNLUNXIN
-// Kunlunxin needs no extra header here: the contract's GetDefaultStreamForDevice
-// / GetCurrentStreamForDevice / SetCurrentStreamForDevice already return and take
-// the `Stream_t` this interface traffics in, and those forward to the XPU
-// runtime's per-device streams (runtime/accelerator/kunlunxin/stream.cc). A
+#if defined(USE_KUNLUNXIN) || defined(USE_ILUVATAR)
+// Kunlunxin and Iluvatar need no extra header here: the contract's
+// GetDefaultStreamForDevice / GetCurrentStreamForDevice /
+// SetCurrentStreamForDevice already return and take the `Stream_t` this
+// interface traffics in, and each platform's stream.cc backs them with its own
+// per-device registry (runtime/accelerator/{kunlunxin,iluvatar}/stream.cc). A
 // `c10::Stream` is a device/index pair plus a StreamId, and StreamId is a
 // uint64, so the handle rides in the id exactly as the Ascend arm does it.
+inline int ResolvePlatformStreamDevice(c10::Device d) {
+  if (d.index() >= 0) {
+    return d.index();
+  }
+  int device = 0;
+  ::GetDevice(&device);
+  return device;
+}
+
+inline c10::Stream MakePlatformDeviceStream(int device, Stream_t stream) {
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::DeviceType::PrivateUse1, device),
+      static_cast<c10::StreamId>(reinterpret_cast<uintptr_t>(stream)));
+}
+
+inline Stream_t PlatformStreamHandle(const c10::Stream& stream) {
+  return reinterpret_cast<Stream_t>(static_cast<uintptr_t>(stream.id()));
+}
+#endif
+
+#ifdef USE_KUNLUNXIN
 inline int ResolveKunlunxinDevice(c10::Device d) {
   if (d.index() >= 0) {
     return d.index();
@@ -163,6 +201,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #elif defined(USE_KUNLUNXIN)
     auto device = ResolveKunlunxinDevice(d);
     return MakeKunlunxinStream(device, GetCurrentStreamForDevice(device));
+#elif defined(USE_ILUVATAR)
+    auto device = ResolvePlatformStreamDevice(d);
+    return MakePlatformDeviceStream(device, GetCurrentStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -183,6 +224,9 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #elif defined(USE_KUNLUNXIN)
     auto device = ResolveKunlunxinDevice(d);
     return MakeKunlunxinStream(device, GetDefaultStreamForDevice(device));
+#elif defined(USE_ILUVATAR)
+    auto device = ResolvePlatformStreamDevice(d);
+    return MakePlatformDeviceStream(device, GetDefaultStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -208,6 +252,24 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreate(&stream);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_ILUVATAR)
+    auto device = ResolvePlatformStreamDevice(d);
+    // As on Kunlunxin: the contract exposes no pool of its own, so "from the
+    // global pool" is a fresh stream. Unlike Kunlunxin, corex's runtime does
+    // take a priority (cudaStreamCreateWithPriority), and CUDA's convention is
+    // the one this must follow: the numerically LOWEST value is the highest
+    // priority, so ask the runtime for its range rather than guessing a number.
+    // If the range query fails there is no ordering to honour and the neutral
+    // default (0) is used.
+    int least = 0;
+    int greatest = 0;
+    int priority = 0;
+    if (::DeviceGetStreamPriorityRange(&least, &greatest) == Success) {
+      priority = isHighPriority ? greatest : least;
+    }
+    Stream_t stream = nullptr;
+    ::StreamCreateWithPriority(&stream, 0, priority);
+    return MakePlatformDeviceStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -244,6 +306,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     auto old = GetCurrentStreamForDevice(device);
     SetCurrentStreamForDevice(device, KunlunxinStreamHandle(s));
     return MakeKunlunxinStream(device, old);
+#elif defined(USE_ILUVATAR)
+    auto device = ResolvePlatformStreamDevice(s.device());
+    auto old = GetCurrentStreamForDevice(device);
+    SetCurrentStreamForDevice(device, PlatformStreamHandle(s));
+    return MakePlatformDeviceStream(device, old);
 #else
     return c10::Stream(c10::Stream::UNSAFE, s.device(), 0);
 #endif
@@ -266,6 +333,22 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreateWithPriority(&stream, 0, priority);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_ILUVATAR)
+    auto device = ResolvePlatformStreamDevice(d);
+    // `priority` is the c10 convention (a linear index, where 0 is the default
+    // band), while corex -- like CUDA -- orders by the numeric value with the
+    // lowest being highest priority. Map the index onto the runtime's range
+    // rather than passing it through, which would silently invert the request.
+    int least = 0;
+    int greatest = 0;
+    int corex_priority = 0;
+    if (::DeviceGetStreamPriorityRange(&least, &greatest) == Success &&
+        priority > 0) {
+      corex_priority = greatest;
+    }
+    Stream_t stream = nullptr;
+    ::StreamCreateWithPriority(&stream, 0, corex_priority);
+    return MakePlatformDeviceStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
@@ -286,6 +369,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     // interface can honestly report, and it is a stronger guarantee than the
     // answer requires -- never "not done" for work that is done.
     return ::StreamSynchronize(KunlunxinStreamHandle(stream)) == Success;
+#elif defined(USE_ILUVATAR)
+    // corex does ship a stream query, so unlike Kunlunxin this can answer
+    // without draining the stream. ErrorNotReady, and any other error, mean the
+    // stream has not provably finished -- reported as not done.
+    return ::StreamQuery(PlatformStreamHandle(stream)) == Success;
 #else
     ::DeviceSynchronize();
     return true;
@@ -297,6 +385,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     aclrtSynchronizeStream(AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
     ::StreamSynchronize(KunlunxinStreamHandle(stream));
+#elif defined(USE_ILUVATAR)
+    // corex has a real per-stream wait, so ask for the stream the caller named
+    // rather than falling through to the device-wide one: same answer, and it
+    // does not also drain unrelated work on other streams.
+    ::StreamSynchronize(PlatformStreamHandle(stream));
 #else
     ::DeviceSynchronize();
 #endif
@@ -389,6 +482,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     ::EventRecord(*(Event_t*)event, (Stream_t)AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
     ::EventRecord(*(Event_t*)event, KunlunxinStreamHandle(stream));
+#elif defined(USE_ILUVATAR)
+    ::EventRecord(*(Event_t*)event, PlatformStreamHandle(stream));
 #else
     ::EventRecord(*(Event_t*)event, nullptr);
 #endif
@@ -400,6 +495,12 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
         (Stream_t)AscendStreamHandle(stream), (Event_t)event, 0);
 #elif defined(USE_KUNLUNXIN)
     ::StreamWaitEvent(KunlunxinStreamHandle(stream), (Event_t)event, 0);
+#elif defined(USE_ILUVATAR)
+    // The stream has to be named here. On the CUDA platform the #else arm's
+    // nullptr means stream 0, which is where torch's work actually runs; on
+    // iluvatar the kernels run on the registry's own default stream, so a wait
+    // armed on stream 0 would order against nothing.
+    ::StreamWaitEvent(PlatformStreamHandle(stream), (Event_t)event, 0);
 #else
     ::StreamWaitEvent(nullptr, (Event_t)event, 0);
 #endif

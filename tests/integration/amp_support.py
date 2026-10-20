@@ -29,12 +29,30 @@ from platform_support import detect_platform
 #: Device used by every AMP contract test.
 AMP_DEVICE = "flagos:0"
 
-#: Backends with device AMP kernels behind the shared AutocastPrivateUse1
-#: policy lists, either natively or through CUDA boxing. A backend outside this
-#: set still runs the device-independent autocast API and policy-state cases.
-AMP_DEVICE_PLATFORMS = frozenset(
-    {"ascend", "cuda", "dcu", "gcu", "metax", "musa", "ppu"}
-)
+#: Backends whose device AMP kernels are their own: the autocast policy lists
+#: dispatch straight to vendor operator libraries (aclnn, topsaten, mudnn).
+AMP_NATIVE_DEVICE_PLATFORMS = frozenset({"ascend", "gcu", "musa"})
+
+#: CUDA-ABI backends whose device AMP kernels are the generated CUDA boxing
+#: kernels. Every op this contract exercises is routed `cuda` by their confs --
+#: `convolution`/`convolution_overrideable`, `_amp_foreach_non_finite_check_and_unscale`,
+#: `_amp_update_scale` and the `_foreach_mul`/`_foreach_div` family behind
+#: GradScaler all read `= cuda` in backends_cuda.conf. Boxing became an explicit
+#: opt-in in #520, so on a default (FlagGems-primary) wheel there is no kernel
+#: behind that route and the device cases belong on the skipping side.
+AMP_BOXING_DEVICE_PLATFORMS = frozenset({"cuda", "dcu", "metax", "ppu"})
+
+
+def _boxing_built() -> bool:
+    """True when this wheel carries the generated CUDA boxing kernels.
+
+    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
+    rather than inferred from the accelerator name: since #520 the two are not
+    interchangeable, because boxing is an opt-in even on a ``cuda`` wheel.
+    """
+    from torch_fl import _env
+
+    return "boxing" in _env.build_kernels()
 
 
 @dataclass(frozen=True)
@@ -56,8 +74,16 @@ def capabilities_for_platform(platform: str) -> AmpCapabilities:
     GCU needed `convolution_overrideable` added before the lower-precision
     convolution policy could run at all, while MUSA reaches the unscale and
     scale-update ops through the fallback rather than native routes.
+
+    The CUDA-ABI backends reach those routes through the generated CUDA boxing
+    kernels, so a wheel built without them -- the default since #520 -- answers
+    False for all three, and the cases that need a device kernel skip rather
+    than assert routing the wheel cannot perform. Reading the build record keeps
+    the answer tied to the wheel instead of to the accelerator name.
     """
-    device = platform in AMP_DEVICE_PLATFORMS
+    device = platform in AMP_NATIVE_DEVICE_PLATFORMS or (
+        platform in AMP_BOXING_DEVICE_PLATFORMS and _boxing_built()
+    )
     return AmpCapabilities(
         platform=platform,
         device=device,

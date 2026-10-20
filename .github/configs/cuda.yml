@@ -65,17 +65,28 @@ wheel_artifact_name: wheel-cuda
 # that script; the values are this platform's, and they assert the same things
 # the hand-written heredoc that used to sit here did.
 #
-# CUDA boxes onto the CUDA dispatch key, so the wheel ships libtorch_cuda.so,
-# and the Triton that compiles its routes is the flagtree build the setup script
-# installs. Failing here names an image with the wrong Triton once, instead of
-# ninety errors into the FlagGems group.
+# This lane tests the default wheel: FlagGems-primary, boxing off. Both halves
+# of that are asserted here from the build record rather than from an
+# environment variable, so the check describes the wheel that was built. A
+# bundled libtorch_cuda.so would mean the wheel still carries the
+# accelerator-side libtorch, which is the dependency this lane exists to prove
+# absent, and a `boxing` kernel set would mean it shipped the CUDA dispatch-key
+# routes instead of the FlagGems ones.
+#
+# The Triton that compiles those FlagGems routes is the flagtree build the setup
+# script installs. Failing here names an image with the wrong Triton once,
+# instead of ninety errors into the FlagGems group.
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
-  require_package_files:
+  forbid_package_files:
     - lib/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - boxing
   flagtree:
     version_env: FLAGTREE_VERSION
     version_default: 0.7.0rc2

@@ -1221,6 +1221,38 @@ NATIVE_TRITON_GAPS = {
         "eq.Scalar",
         "eq.Tensor",
         "exponential_",
+        # `flip` is an Ascend-backend kernel defect in the installed FlagGems,
+        # not a triton-lowering gap: its aclnn kernel is registered below
+        # (ascend_register.inc: WrapperFlip; ascend_kernels.cc:
+        # FlipKernelAscend -> aclnnFlip), and the conf therefore annotates the
+        # FlagGems route `# ascend` -- the kernel is reachable, it just must
+        # not be the one a run reaches first.
+        #
+        #   flip -- flag_gems/runtime/backend/_ascend/ops/flip.py:71
+        #     realizes the reversal as a strided `copy_func` pointwise kernel
+        #     (`overload = copy_func.instantiate(A.ndim)`), and the rank-2
+        #     instantiation that FlagTree 0.7.0's Ascend backend generates
+        #     from it fails to lower:
+        #
+        #       /root/.flaggems/code_cache/pointwise_dynamic_..._copy_func_
+        #       kernel_rank_2__t2048.py:59:0: error: Failures have been
+        #       detected while processing an MLIR pass pipeline
+        #       [ConvertTritonIRToLinalgIR] encounters error:
+        #       PassManager::run failed
+        #
+        #     The failure is in the FlagTree MLIR pipeline, not in the torch_fl
+        #     route, but the route is the lever: the aclnn kernel that serves
+        #     `flip` already exists and returns correct values. Measured on
+        #     Ascend 910C (`bm-jn-zs-zone1-910C-64G-10-108`, torch_fl
+        #     `c2ded4b`): a plain `torch.arange(24).reshape(4, 6).to("flagos")
+        #     .flip(1)` raises `MLIRCompilationError` with the FlagGems route
+        #     and returns the correct tensor with the aclnn route
+        #     (`[flagos dispatch] flip -> ascend`). On the transformers-5.19.0
+        #     bert suite this is worth three ids: the two
+        #     `*_padding_matches_padding_free_with_position_ids` tests
+        #     (`tests/generation/test_utils.py:2341` calls `attention_mask
+        #     .flip(1)`) and `test_generate_with_and_without_position_ids`.
+        "flip",
         "ge.Scalar",
         "ge.Tensor",
         "gelu",

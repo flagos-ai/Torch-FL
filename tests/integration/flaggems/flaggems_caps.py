@@ -162,12 +162,13 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
 #: narrow ones while every operator still reaches some backend -- the failure
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
-    "ascend": 222,
-    "cuda": 416,
+    "ascend": 221,
+    "cuda": 392,
     "dcu": 454,
     "gcu": 251,
     "kunlunxin": 0,
     "metax": 594,
+    "mps": 0,
     "musa": 466,
     "ppu": 592,
 }
@@ -187,6 +188,7 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "gcu": "none",
     "kunlunxin": "none",
     "metax": "flaggems",
+    "mps": "none",
     "musa": "none",
     "ppu": "cuda",
 }

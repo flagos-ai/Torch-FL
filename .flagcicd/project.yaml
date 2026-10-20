@@ -1,0 +1,60 @@
+schema_version: flagcicd.project/v1
+repository: Torch-FL
+entry_workflow: .github/workflows/flagcicd-entry.yml
+platform_config_glob: .github/configs/*.yml
+
+levels:
+  L0:
+    support: supported
+    scope: preflight
+    checks: [request, platform-config, integration-manifest, lint]
+  L1:
+    support: supported
+    scope: platform_agnostic
+    checks: [L0, agnostic-checks, codegen-checks]
+  L2:
+    support: supported
+    scope: installed_wheel_integration
+    checks: [L1, build, wheel-validation, install, integration-tests]
+  L3:
+    support: unsupported
+  L4:
+    support: unsupported
+
+risk_rules:
+  version: v1
+  no_diff_level: L2
+  rules:
+    - id: documentation
+      paths: [docs/**, '*.md', '*.rst']
+      minimum_level: L0
+      risk: R0
+    - id: agnostic-tests
+      paths: [tests/unit/test_ci_*.py, tests/unit/test_flagcicd_*.py]
+      minimum_level: L1
+      risk: R1
+    - id: native-runtime
+      paths: [csrc/**, cmake/**, CMakeLists.txt]
+      minimum_level: L2
+      risk: R3
+    - id: runtime-and-build
+      paths:
+        - torch_fl/**
+        - .github/**
+        - .flagcicd/**
+        - setup.py
+        - pyproject.toml
+        - requirements*.txt
+        - constraints*.txt
+        - '*.lock'
+      minimum_level: L2
+      risk: R2
+  unknown_level: L2
+  unknown_risk: R2
+
+report:
+  schema_version: flagcicd.report/v1
+  summary_artifact: flagcicd-run-summary-{run_attempt}
+  raw_formats: [pytest-json-report, coverage.py]
+  coverage_scope: installed torch_fl Python files; line coverage
+  coverage_regression: not_enabled

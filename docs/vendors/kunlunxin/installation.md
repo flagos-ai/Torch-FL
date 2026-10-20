@@ -115,16 +115,73 @@ For an in-place source checkout, use `setup.py build_ext --inplace` instead of
 
 The build embeds the runtime paths (the XPU SDK's `so/` directory, the xdnn
 directory, and the vendor torch package's nested dependency directory that
-`libxdnn_pytorch.so` itself needs) in the install RPATH, so `LD_LIBRARY_PATH` is
-normally not needed. `libxdnn_pytorch.so` is not self-contained: its `DT_NEEDED`
-names the vendor's CUDA-compat runtime and component libraries, which the vendor
-torch package keeps under `xhpc/*/dependency_so/` rather than next to the op
-library. `XCUDART_ROOT` does not cover that directory, because the XPU SDK ships
-only its own CUDA-11-shaped shim while the op library needs the CUDA-12-compat
-one. If you run from a staged install, put those directories on the loader path:
+`libxdnn_pytorch.so` itself needs) in the install RPATH. That is a **build-host**
+answer: a wheel installed into a different virtualenv has RPATH entries pointing
+at directories that may not exist, and the import then fails. `libxdnn_pytorch.so`
+is not self-contained — its `DT_NEEDED` names
+
+```
+libxpu_blas.so  libxpu_dnn.so  libxpu_flash_attention.so  libcudart.so.12
+```
+
+and the vendor torch package keeps those component libraries **inside its Python
+package directory**, as `<site-packages>/torch_xmlir/*.so`, together with the
+nested `xhpc/*/dependency_so/` the CUDA-compat runtime comes from. `libxpuml.so.1`
+is the exception: it ships with the XPU SDK, on the install RPATH. Importing the
+`torch_xmlir` Python package is *not* required and never happens on this path;
+its directories simply have to be on the loader's search path. `XCUDART_ROOT`
+does not cover them, because the XPU SDK ships only its own CUDA-11-shaped shim
+while the op library needs the CUDA-12-compat one.
+
+When the directories are missing, `import torch_fl` reports a bare
+
+```
+ImportError: libxpu_blas.so: cannot open shared object file: No such file or directory
+```
+
+that names neither the variable nor the directory. Put the vendor package's
+directory on the loader path — this is the one runtime environment variable
+kunlunxin needs, and it must be set **before** the interpreter starts, because
+`DT_NEEDED` is resolved before any of the wheel's code runs:
 
 ```bash
-export LD_LIBRARY_PATH=/usr/local/xpu/so:/usr/local/xpu/lib:$LD_LIBRARY_PATH
+export FLAGOS_KUNLUNXIN_XDNN_LIB_DIR=<venv>/lib/python3.10/site-packages/torch_xmlir
+export LD_LIBRARY_PATH="$FLAGOS_KUNLUNXIN_XDNN_LIB_DIR:/usr/local/xpu/so:/usr/local/xcudart/lib:$LD_LIBRARY_PATH"
+```
+
+`FLAGOS_KUNLUNXIN_XDNN_LIB_DIR` also lets the wheel load the components itself
+(colon-separated for more than one directory) and turns the
+`libxpu_blas.so: cannot open shared object file` message into one that names the
+missing libraries and where they live. It cannot replace `LD_LIBRARY_PATH` for
+the first import: by the time any code in `libtorch_fl.so` runs, the loader has
+already resolved — or failed to resolve — the `DT_NEEDED` list.
+
+The component libraries have to be loaded **after** the XPU SDK's CUDA-compat
+runtime, not before it. `libxpu_blas.so` carries an undefined, unversioned
+`cudaGetDriverEntryPoint` and declares no `DT_NEEDED` on any CUDA library, so
+that reference is satisfied only by what the process has already mapped
+`RTLD_GLOBAL`. Measured on a P800, `dlopen("libxpu_blas.so")` in a bare
+interpreter fails with
+
+```
+libxpu_blas.so: undefined symbol: cudaGetDriverEntryPoint
+```
+
+and succeeds as soon as `libxpucuda.so`, `libcudart.so.12` and `libxpurt.so.2`
+(from the XPU SDK, found by `SONAME`) are loaded. The wheel's pre-load honours
+that order. In the ordinary path it does not matter, because the vendor package
+is already mapped by the time `import torch_fl` runs; it matters for a
+diagnostic that would otherwise report `libxpu_blas.so` missing in a directory
+that contains it.
+
+Verify with the smoke below; a healthy stack reports the device count and an
+`mm` value, and the package is not needed in `sys.modules`:
+
+```bash
+python -c "import sys, torch, torch_fl; \
+  print('torch_xmlir imported?', 'torch_xmlir' in sys.modules); \
+  print('devices', torch_fl.flagos.device_count()); \
+  print('add', float((torch.ones(8,8,device='flagos')*2).sum().cpu()))"
 ```
 
 Kunlunxin is not in the CUPTI tracer arm of the selection in `csrc/CMakeLists.txt`,
@@ -141,6 +198,7 @@ Run the checked-in smoke harness on the P800:
 ```bash
 FLAGOS_ACCELERATOR=kunlunxin \
   XPU_ROOT=/usr/local/xpu \
+  FLAGOS_KUNLUNXIN_XDNN_LIB_DIR=/path/to/venv/lib/python3.10/site-packages/torch_xmlir \
   LD_LIBRARY_PATH=/usr/local/xpu/so:/usr/local/xpu/lib:$LD_LIBRARY_PATH \
   /path/to/vendor/python tests/manual/kunlunxin_runtime_smoke.py
 ```
@@ -222,6 +280,19 @@ for the pinned-pointer probe. Both live under `$XPU_ROOT/include`.
 the directory holding them (the vendor torch package root `torch_xmlir/` is one
 such directory), or `FLAGOS_VENDOR_TORCH_LIB` to a directory holding the `.so`.
 The configure step fails early instead of falling back to CPU for compute ops.
+
+### `ImportError: libxpu_blas.so: cannot open shared object file`
+
+This is the runtime analogue of the section above, and the library named is one of
+`libxdnn_pytorch.so`'s components, not a file you are expected to install. They
+ship inside the vendor torch package at
+`<venv>/lib/python*/site-packages/torch_xmlir/*.so`. Set
+`FLAGOS_KUNLUNXIN_XDNN_LIB_DIR` to that directory (it is not a Python import — do
+not add it to `PYTHONPATH` expecting an import) and put it first on
+`LD_LIBRARY_PATH` before starting the interpreter, as shown in
+[Runtime Environment](#runtime-environment). A path that happens to be baked into
+the wheel from the build host does not help: it refers to the build machine's
+virtualenv.
 
 ### `libcudart.so*` is missing
 

@@ -20,6 +20,21 @@ at::Tensor _copy_from_and_resize(
     const at::Tensor& self,
     const at::Tensor& dst);
 
+// A `Memcpy` that first binds the device the transfer touches and drains that
+// device's queue. A bare Memcpy is blocking only against whichever device is
+// current when it is issued, so a copy of a tensor living elsewhere can read
+// that buffer's pre-kernel contents (issue #281, MUSA).
+//
+// `on_device` is the accelerator-side operand the copy touches -- the source for
+// a D2H or D2D copy, the destination for an H2D one -- and must outlive the
+// copy itself.
+void BlockingMemcpy(
+    void* dst,
+    const void* src,
+    size_t nbytes,
+    MemcpyKind kind,
+    const at::Tensor& on_device);
+
 at::Scalar _local_scalar_dense(const at::Tensor& self);
 
 at::Tensor _to_copy(
