@@ -57,6 +57,8 @@ paths_watch:
   # routing them through "unknown code runs every platform".
   - tests/integration/ops/test_mps_*.py
   - tests/integration/test_mps_runtime.py
+  - tests/integration/runtime/
+  - tests/unit/test_runtime_conformance_report.py
   # These enter through shared PrivateUse1 code rather than an MPS directory.
   - csrc/aten/set_ops.cc
   - tests/integration/test_factory_ops.py

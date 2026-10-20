@@ -192,6 +192,17 @@ def test_missing_watch_metadata_falls_back_to_all(tmp_path):
     assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == PLATFORMS
 
 
+def test_shared_mps_runtime_changes_select_the_mps_lane():
+    """The MPS lane runs the shared runtime suite, so its edits reach the lane."""
+    for path in (
+        "tests/integration/runtime/test_runtime_dispatch_route.py",
+        "tests/unit/test_runtime_conformance_report.py",
+    ):
+        result, selected = _run(files=path)
+        assert result.returncode == 0, result.stderr
+        assert selected == ["mps"], path
+
+
 def test_git_diff_preserves_deleted_and_renamed_platform_paths(tmp_path, monkeypatch):
     def git(*args):
         return subprocess.check_output(
