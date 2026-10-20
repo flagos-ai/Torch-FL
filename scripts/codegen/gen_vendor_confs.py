@@ -1940,11 +1940,18 @@ NATIVE_TRITON_GAPS = {
         # and its values read `(-0.672+0.0085j, ...)`. The test's
         # materialization predicate sees no exception and admits the complex
         # cases, which then fail with nothing to blame the route for.
-        # `_conj_copy.out` has no flagos impl either; the gap leaves both on
-        # cpu_fallback, where the dispatcher keeps the positive bit lazy (see
-        # Note [CPU Fallback Does Not Handle View Operators]) and reads it back
-        # through `_copy_from`. CI run 39490715225 measured this as the
-        # math_bits group's 7 errors.
+        # `_conj_copy.out` has no flagos impl either, so a gap leaves it on
+        # cpu_fallback (an out= copy is not a view, so the fallback serves it).
+        #
+        # `_conj` itself left cpu_fallback on 2026-10-21 for a second reason:
+        # cpu_fallback cannot serve a view operator, so on this backend the
+        # `_conj` call raised outright, so every path that resolves a math bit
+        # (`copy_`, `clone`, `contiguous`, `resolve_conj`, arithmetic on a
+        # conjugated tensor) fails rather than returning a wrong value. The gap
+        # still holds the op off the FlagGems kernel above; register.cc's
+        # USE_ILUVATAR arm republishes ATen's metadata-only implementation (the
+        # `alias`/`view` shape) as an unconditional CatchAll wrapper, so the op
+        # never stops at the ViewOp key, where a fallback is refused outright.
         "_conj",
         "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a

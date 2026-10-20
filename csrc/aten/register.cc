@@ -18,6 +18,7 @@
 #include <ATen/core/LegacyTypeDispatch.h>
 #include <ATen/core/grad_mode.h>
 #include <ATen/ops/matmul_native.h>
+#include <ATen/ops/_conj_native.h>
 #include <ATen/SDPBackend.h>
 #include <torch/library.h>
 #include <c10/core/ScalarType.h>
@@ -392,6 +393,32 @@ static std::tuple<at::Tensor, at::Tensor> WrapperMatmulBackward(
 }
 #endif
 
+#if defined(USE_ILUVATAR)
+// _conj is the lazy-view half of aten::conj: an alias of self carrying the
+// Conjugate bit, storage untouched. csrc/aten/strided_ops.cc registers ATen's
+// metadata implementation through the FlagGems dispatcher, which only helps
+// the vendors whose conf routes it to `flaggems`; iluvatar's conf routes it to
+// `none` (FlagGems' `_conj` is an eager kernel), and a `none` view op is served
+// by the ViewOp fallback -- which ATen refuses for every view, since storage
+// cannot be shared across devices: "aten::_conj ... appears to be a view
+// operator, but it has no implementation ... View operators don't support
+// falling back to run on the CPU". The raised call then takes down every path
+// that resolves a math bit
+// (copy_, clone, contiguous, resolve_conj, arithmetic on a conjugated tensor),
+// which is what tests/integration/test_math_bits_contract.py measures.
+//
+// The CatchAll key receives the call before ViewOp does, so answering it here
+// with the same metadata kernel is enough, and needs no kernel, no dtype and no
+// device: it is unconditional on the build, like the conv fallbacks above. The
+// op stays out of backends_iluvatar.conf's FlagGems routes (NATIVE_TRITON_GAPS)
+// because FlagGems' `_conj` is an eager kernel, and out of the native .inc
+// because that subset is compiled only under FLAGOS_ILUVATAR_KERNEL, while a
+// FlagGems-only build needs this answer too.
+at::Tensor FlagosWrapperPrivConj(const at::Tensor& self) {
+  return at::native::_conj(self);
+}
+#endif
+
 bool HasCompatibleShallowCopyType(
     const at::Tensor& self, const at::Tensor& from) {
   const auto self_keys = self.key_set();
@@ -543,6 +570,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // ixdnn routes.
     m.impl("convolution_backward_overrideable",
         FlagosWrapperConvolutionBackwardOverrideable);
+    #if defined(USE_ILUVATAR)
+    // See FlagosWrapperPrivConj: cpu_fallback refuses view operators, and the
+    // conf routes this one to `none`.
+    m.impl("_conj", FlagosWrapperPrivConj);
+    #endif
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
