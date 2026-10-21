@@ -28,6 +28,8 @@
 // rather than left to the generated kernel file so the helper and its only
 // callers agree on `at::_softmax` resolving to the composite-free operator.
 #include <ATen/ops/_softmax.h>
+#include <ATen/ops/index.h>
+#include <ATen/ops/tensor.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
 #include <ATen/ops/linalg_solve_triangular.h>
@@ -58,8 +60,64 @@ at::Tensor MpsIndexOnHost(
             ? std::optional<at::Tensor>(entry->cpu())
             : std::nullopt);
   }
-  return at::index(
-      self.is_cpu() ? self : self.cpu(), host_indices).to(self.device());
+  return at::index(self.is_cpu() ? self : self.cpu(), host_indices)
+      .to(self.device(), self.scalar_type());
+}
+
+bool MpsGatherIndex(
+    const at::Tensor& out,
+    const at::Tensor& source,
+    const at::Tensor& addresses,
+    at::IntArrayRef source_storage_shape) {
+  MPSDataType source_dtype;
+  if (!MpsDataTypeOf(source.scalar_type(), &source_dtype) ||
+      source.layout() != at::kStrided ||
+      addresses.scalar_type() != at::kInt ||
+      source.numel() == 0 || addresses.numel() == 0 ||
+      addresses.numel() != out.numel() ||
+      source_storage_shape.size() < 2 ||
+      source_storage_shape[source_storage_shape.size() - 1] <= 0) {
+    return false;
+  }
+  const std::vector<int64_t> logical_source_shape = out.sizes().vec();
+  const std::vector<int64_t> address_sizes = addresses.sizes().vec();
+  std::vector<int64_t> storage_shape(
+      source_storage_shape.begin(), source_storage_shape.end());
+  int64_t leading = 1;
+  for (size_t d = 0; d + 2 < storage_shape.size(); ++d) {
+    leading *= storage_shape[d];
+  }
+  storage_shape[storage_shape.size() - 2] = source.numel() / leading;
+  return MpsRunGraphExtra(
+      "index.Tensor", {addresses.contiguous()}, source.contiguous(), at::Tensor(),
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        if (args.count != 2) {
+          return nil;
+        }
+        MPSGraphTensor* table =
+            MpsReshape(graph, args[1], storage_shape);
+        if (table == nil) {
+          return nil;
+        }
+        MPSGraphTensor* indices =
+            MpsReshape(graph, args[0], address_sizes);
+        if (indices == nil) {
+          return nil;
+        }
+        MPSGraphTensor* values =
+            [graph gatherWithUpdatesTensor:table
+                             indicesTensor:indices
+                                      axis:0
+                           batchDimensions:0
+                                      name:nil];
+        if (values == nil) {
+          return nil;
+        }
+        return [graph reshapeTensor:values
+                          withShape:MpsShapeOf(logical_source_shape)
+                               name:nil];
+      });
 }
 
 bool MpsDataTypeOf(at::ScalarType dtype, MPSDataType* out) {

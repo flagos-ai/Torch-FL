@@ -30,6 +30,7 @@
   m.impl("erf", WrapperErf);
   m.impl("exp", WrapperExp);
   m.impl("gather", WrapperGather);
+  m.impl("index.Tensor", WrapperIndexTensor);
   m.impl("index_select", WrapperIndexSelect);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("log", WrapperLog);

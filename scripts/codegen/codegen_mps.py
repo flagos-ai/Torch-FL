@@ -93,6 +93,11 @@ OPS = {
     # a time inside the graph, without reading coefficients on the host. See
     # T_SOLVE_TRIANGULAR.
     "linalg_solve_triangular": "SOLVE_TRIANGULAR",
+    # `index.Tensor` covers scalar, broadcasting and separated coordinates.
+    # The reference validates their metadata on the host and builds one source
+    # address per result element; the graph gathers the source values on Metal.
+    # See T_INDEX and MpsGatherIndex.
+    "index.Tensor": "index",
     # `softmax` is the third stage-3 lane and the op a small model calls between
     # the matmuls: one per attention block, over the (batch, heads, seq, seq)
     # scores. MPSGraph has the whole operation behind one selector,
@@ -490,7 +495,7 @@ AT_OP = {
     "triu": "triu",
     "argmax": "argmax",
     "linalg_solve_triangular": "linalg_solve_triangular",
-    "__disabled_index.Tensor": "index",
+    "index.Tensor": "index",
     "_softmax": "_softmax",
     "neg": "neg",
     "pow.Tensor_Scalar": "pow",
@@ -4215,428 +4220,181 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 
 # aten's `index.Tensor` receives a list in which every unindexed axis is a full
 # slice. Integer tensors broadcast together into the advanced-index block, and
-# reduced axes are then separated from the retained axes. The graph computes the
-# row-major result lane from two independent coordinates: the broadcast block
-# and the retained source axes.
+# reduced axes are then separated from the retained axes. The checkpoint's
+# coordinates are small, so their values and the result layout are checked by
+# the CPU reference before the graph runs. The host then builds one dense
+# row-major source address per result element. MpsGatherIndex reads the source
+# values at those addresses in an MPSGraph gather; source values are not read on
+# the host.
 #
-# ATen's TensorIndexing front end resolves Python slices, None and ellipsis
-# before the schema is called. Boolean masks are declined because they consume
-# several axes and have a different output-shape rule. A CPU index is declined
-# so ATen can report its device mismatch, and an unsupported element type is
-# declined so the reference reports the dtype error.
+# The addresses also handle negative coordinates. A boolean mask, scalar tensor
+# coordinate, unsupported source width, empty result or metadata failure
+# declines to the reference result. ATen resolves slices, None and ellipsis
+# before this schema is called.
 T_INDEX = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
     const c10::List<std::optional<at::Tensor>>& indices) {{
-  const at::Tensor host = mps::MpsIndexOnHost(self, indices);
-  const auto decline = [&]() {{ return host.to(self.device()); }};
-  // The list omits trailing full slices. Pad it to the source rank, as aten's
-  // index front end does, so an entry can be matched with its source axis.
-  // Bool masks are declined below because they consume several axes.
-  std::vector<std::optional<at::Tensor>> expanded_indices(
-      indices.begin(), indices.end());
-  expanded_indices.resize(static_cast<size_t>(self.dim()), std::nullopt);
-  // A Python slice, None, integer or ellipsis has already been applied by the
-  // indexing front end. Each remaining entry occupies one source axis. A null
-  // entry is an advanced-index dimension, while every other entry keeps its
-  // source axis unchanged.
-  //
-  // MPSGraph cannot represent a zero-length tensor. The graph is still useful
-  // for an empty *source* when its indexed result is non-empty, but an empty
-  // index gives an empty result whose shape can be formed without reading a
-  // source value. This keeps the MPS result exact without passing a zero-sized
-  // operand to the graph.
-  if (!mps::MpsSupportsUnaryDtype(self.scalar_type()) ||
-      self.is_nested()) {{
-    return decline();
+  c10::List<std::optional<at::Tensor>> host_indices;
+  host_indices.reserve(indices.size());
+  for (const std::optional<at::Tensor>& entry : indices) {{
+    host_indices.push_back(
+        entry.has_value() && entry->defined()
+            ? std::optional<at::Tensor>(entry->cpu())
+            : std::nullopt);
   }}
-  const int64_t source_rank = self.dim();
-  std::vector<at::Tensor> indices_c;
-  std::vector<int64_t> tensor_axes;
-  std::vector<int64_t> index_dtypes;
-  std::vector<int64_t> axis_sizes;
-  std::vector<int64_t> broadcast_shape;
-  std::vector<int64_t> advanced_index_shapes;
-  for (int64_t axis = 0; axis < source_rank; ++axis) {{
-    const std::optional<at::Tensor>& entry = expanded_indices[axis];
-    axis_sizes.push_back(self.size(axis));
-    if (!entry.has_value() || !entry->defined()) {{
-      continue;
-    }}
-    if (entry->scalar_type() == at::kBool ||
-        entry->scalar_type() == at::kByte) {{
-      // A bool mask consumes several source axes. ATen also rejects uint8
-      // integers ("tensors used as indices must be long, int, byte or bool"),
-      // so let the reference give both their documented rules.
-      return decline();
-    }}
-    const at::Tensor index = entry->to(at::kLong);
-    if (index.dim() == 0) {{
-      // A scalar integer tensor selects an axis. The host range check makes a
-      // bad index raise as `index.Tensor` does, before this call becomes a
-      // one-element advanced result.
-    }}
-    at::Tensor index_c = index.contiguous();
-    tensor_axes.push_back(axis);
-    index_dtypes.push_back(
-        static_cast<int64_t>(index_c.scalar_type()));
-    advanced_index_shapes.push_back(index_c.dim());
-    if (broadcast_shape.empty()) {{
-      broadcast_shape = index_c.sizes().vec();
-    }} else {{
-      try {{
-        broadcast_shape = at::infer_size(broadcast_shape, index_c.sizes());
-      }} catch (const std::exception&) {{
-        return decline();
+  const at::Tensor host_self = self.is_cpu() ? self : self.cpu();
+  const at::Tensor selected = at::index(host_self, host_indices);
+  if (selected.numel() == 0) {{
+    return selected.to(self.device());
+  }}
+  std::vector<at::Tensor> index_tensors;
+  for (const std::optional<at::Tensor>& entry : indices) {{
+    if (entry.has_value() && entry->defined()) {{
+      // Boolean masks and scalar coordinates have their own indexing rules;
+      // the checked reference above answers both.
+      if (entry->scalar_type() == at::kBool || entry->dim() == 0) {{
+        return selected.to(self.device());
       }}
-    }}
-    indices_c.push_back(index);
-  }}
-  if (indices_c.empty()) {{
-    return decline();
-  }}
-  // A scalar selects one element, as one non-scalar index of its own.
-  if (broadcast_shape.empty()) {{
-    broadcast_shape.push_back(1);
-  }}
-  int64_t index_count = 1;
-  bool empty_extent = false;
-  for (const int64_t extent : broadcast_shape) {{
-    if (extent == 0) {{
-      index_count = 0;
-      empty_extent = true;
-    }} else {{
-      if (!empty_extent) {{
-        index_count *= extent;
-      }}
+      index_tensors.push_back(entry->to(at::kLong).cpu().reshape(-1));
     }}
   }}
-  // Contiguous advanced indices replace one block in place. Separated ones
-  // move that block to the front.
-  const bool adjacent =
-      tensor_axes.back() - tensor_axes.front() + 1 ==
-      static_cast<int64_t>(tensor_axes.size());
-  std::vector<int64_t> out_shape;
-  if (!adjacent) {{
-    out_shape = broadcast_shape;
-  }}
-  bool block_placed = false;
-  for (int64_t axis = 0; axis < source_rank; ++axis) {{
-    const bool advanced =
-        std::find(tensor_axes.begin(), tensor_axes.end(), axis) !=
-        tensor_axes.end();
-    const bool retained = !advanced;
-    if (adjacent && advanced &&
-        axis == tensor_axes.front() && !block_placed) {{
-      out_shape.insert(
-          out_shape.end(), broadcast_shape.begin(), broadcast_shape.end());
-      block_placed = true;
-    }}
-    if (retained) {{
-      out_shape.push_back(self.size(axis));
+  std::vector<int64_t> block_shape;
+  for (const at::Tensor& index : index_tensors) {{
+    const std::vector<int64_t> sizes = index.sizes().vec();
+    try {{
+      block_shape = block_shape.empty()
+          ? sizes : at::infer_size(block_shape, sizes);
+    }} catch (const std::exception&) {{
+      return selected.to(self.device());
     }}
   }}
-  // MpsRunGraph writes the flattened graph target. Allocate the operand as a
-  // 1-D buffer and reshape its aten result only after the graph has run.
-  at::Tensor out = at::empty({{index_count}}, self.options());
-  if (index_count == 0) {{
-    return out;
+  int64_t block_count = 1;
+  for (const int64_t extent : block_shape) {{
+    block_count *= extent;
   }}
-  // ATen defines out-of-range values as an error for this op, while a dense
-  // address in the graph would silently wrap. The CPU call is the reference's
-  // own validation, including boolean masks and index dtypes. Only this
-  // validation result is needed; the graph below produces the output.
-  const int64_t result_rank = static_cast<int64_t>(out_shape.size());
-  int64_t advanced_rank = static_cast<int64_t>(broadcast_shape.size());
-  if (!adjacent) {{
-    advanced_rank += result_rank - source_rank;
+  if (block_count == 0) {{
+    return selected.to(self.device());
   }}
-  // A source-axis lattice has the result shape already when separated indices
-  // move the advanced block to the front. Neighbouring indices instead put the
-  // block where its first axis was, which can leave more lanes in the result
-  // than in the source. A zero-width leading axis lets the result describe a
-  // stack of source-shaped lanes.
-  std::vector<int64_t> gather_shape(out_shape);
-  if (result_rank > source_rank) {{
-    gather_shape.insert(gather_shape.begin(), 0);
-  }}
-  int64_t index_source_numel = 1;
-  for (const int64_t extent : axis_sizes) {{
-    index_source_numel *= extent;
-  }}
-  if (index_source_numel == 0 || self.numel() == 0) {{
-    return decline();
-  }}
-  std::vector<int64_t> index_extents;
-  for (const at::Tensor& index : indices_c) {{
-    index_extents.push_back(index.numel());
-  }}
-  at::Tensor self_c = self.contiguous();
-  std::vector<at::Tensor> operands{{self_c}};
-  operands.insert(operands.end(), indices_c.begin(), indices_c.end());
+  const std::vector<int64_t> out_shape = selected.sizes().vec();
+  const int64_t block_rank = static_cast<int64_t>(block_shape.size());
+  std::vector<int64_t> index_axes;
   std::vector<int64_t> retained_axes;
-  for (int64_t axis = 0; axis < source_rank; ++axis) {{
-    if (std::find(tensor_axes.begin(), tensor_axes.end(), axis) ==
-        tensor_axes.end()) {{
+  for (int64_t axis = 0; axis < self.dim(); ++axis) {{
+    if (axis < static_cast<int64_t>(indices.size()) &&
+        indices.get(axis).has_value() &&
+        indices.get(axis)->defined()) {{
+      index_axes.push_back(axis);
+    }} else {{
       retained_axes.push_back(axis);
     }}
   }}
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}", axis_sizes, index_extents,
-                       advanced_index_shapes, index_dtypes, broadcast_shape,
-                       gather_shape, out_shape),
-      operands,
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-        NSMutableArray<MPSGraphTensor*>* points =
-            [NSMutableArray arrayWithCapacity:indices_c.size()];
-        for (size_t column = 0; column < indices_c.size(); ++column) {{
-          std::vector<int64_t> expanded_shape(gather_shape.size(), 1);
-          const int64_t missing = static_cast<int64_t>(expanded_shape.size()) -
-              indices_c[column].dim();
-          for (int64_t d = 0; d < indices_c[column].dim(); ++d) {{
-            expanded_shape[static_cast<size_t>(missing + d)] =
-                indices_c[column].size(d);
-          }}
-          MPSGraphTensor* expanded =
-              mps::MpsReshape(graph, args[column + 1], expanded_shape);
-          MPSGraphTensor* broadcast =
-              [graph broadcastTensor:expanded
-                             toShape:mps::MpsShapeOf(broadcast_shape)
-                                name:nil];
-          if (expanded == nil || broadcast == nil) {{
-            return nil;
-          }}
-          [points addObject:
-              mps::MpsFlatten(graph, broadcast, index_count)];
-        }}
-        if ([points count] != indices_c.size()) {{
-          return nil;
-        }}
-        MPSGraphTensor* zero = mps::MpsIndexConstantForShape(
-            graph, 0, at::kLong, gather_shape);
-        MPSGraphTensor* block = zero;
-        for (size_t dimension = 0; dimension < broadcast_shape.size();
-             ++dimension) {{
-          int64_t stride = 1;
-          for (size_t next = dimension + 1;
-               next < broadcast_shape.size(); ++next) {{
-            stride *= broadcast_shape[next];
-          }}
-          MPSGraphTensor* coordinate = [graph broadcastTensor:
-              [graph coordinateAlongAxis:static_cast<NSInteger>(
-                  advanced_rank - broadcast_shape.size() + dimension)
-                               withShape:mps::MpsShapeOf(gather_shape)
-                                    name:nil]
-                                                toShape:
-              mps::MpsShapeOf(gather_shape)
-                                                   name:nil];
-          MPSGraphTensor* scale = mps::MpsIndexConstantForShape(
-              graph, stride, at::kLong, gather_shape);
-          if (coordinate == nil || scale == nil) {{
-            return nil;
-          }}
-          block = [graph additionWithPrimaryTensor:block
-            secondaryTensor:[graph multiplicationWithPrimaryTensor:
-                [graph castTensor:coordinate
-                           toType:MPSDataTypeInt64
-                             name:nil]
-                                                     secondaryTensor:scale
-                                                                name:nil]
-                                                   name:nil];
-        }}
-        MPSGraphTensor* retained = nil;
-        size_t retained_slot = 0;
-        for (int64_t axis = 0; axis < source_rank; ++axis) {{
-          if (std::find(tensor_axes.begin(), tensor_axes.end(), axis) !=
-              tensor_axes.end()) {{
-            continue;
-          }}
-          int64_t stride = 1;
-          for (int64_t next = axis + 1; next < source_rank; ++next) {{
-            stride *= axis_sizes[next];
-          }}
-          MPSGraphTensor* coordinate = [graph broadcastTensor:
-              [graph coordinateAlongAxis:static_cast<NSInteger>(
-                  advanced_rank + retained_slot)
-                               withShape:mps::MpsShapeOf(gather_shape)
-                                    name:nil]
-                                                toShape:
-              mps::MpsShapeOf(gather_shape)
-                                                   name:nil];
-          MPSGraphTensor* scale = mps::MpsIndexConstantForShape(
-              graph, stride, at::kLong, gather_shape);
-          if (coordinate == nil || scale == nil) {{
-            return nil;
-          }}
-          MPSGraphTensor* contribution =
-              [graph multiplicationWithPrimaryTensor:
-                  [graph castTensor:coordinate
-                             toType:MPSDataTypeInt64
-                               name:nil]
-                                   secondaryTensor:scale
-                                              name:nil];
-          retained = retained == nil
-              ? contribution
-              : [graph additionWithPrimaryTensor:retained
-                                secondaryTensor:contribution
-                                           name:nil];
-          ++retained_slot;
-        }}
-        int64_t source_stride = 1;
-        std::vector<int64_t> advanced_strides(tensor_axes.size(), 1);
-        int64_t retained_product = 1;
-        for (const int64_t axis : retained_axes) {{
-          retained_product *= axis_sizes[axis];
-        }}
-        for (int64_t axis = source_rank - 1; axis >= 0; --axis) {{
-          const auto column =
-              std::find(tensor_axes.begin(), tensor_axes.end(), axis);
-          if (column != tensor_axes.end()) {{
-            advanced_strides[static_cast<size_t>(std::distance(
-                tensor_axes.begin(), column))] = source_stride;
-            source_stride *= axis_sizes[axis];
-          }} else {{
-            source_stride *= axis_sizes[axis];
-          }}
-        }}
-        MPSGraphTensor* advanced = nil;
-        for (size_t column = 0; column < tensor_axes.size(); ++column) {{
-          const int64_t extent = axis_sizes[tensor_axes[column]];
-          MPSGraphTensor* bound = mps::MpsIndexConstantForShape(
-              graph, extent, at::kLong, {{index_count}});
-          MPSGraphTensor* normalized = [graph moduloWithPrimaryTensor:
-              [graph additionWithPrimaryTensor:points[column]
-                               secondaryTensor:bound
-                                          name:nil]
-                                     secondaryTensor:bound
-                                                name:nil];
-          MPSGraphTensor* scale = mps::MpsIndexConstantForShape(
-              graph, advanced_strides[column], at::kLong, {{index_count}});
-          if (bound == nil || normalized == nil || scale == nil) {{
-            return nil;
-          }}
-          MPSGraphTensor* contribution =
-              [graph multiplicationWithPrimaryTensor:normalized
-                                     secondaryTensor:scale
-                                                name:nil];
-          advanced = advanced == nil ? contribution
-              : [graph additionWithPrimaryTensor:advanced
-                                secondaryTensor:contribution
-                                           name:nil];
-        }}
-        if (advanced == nil) {{
-          return nil;
-        }}
-        MPSGraphTensor* position = [graph additionWithPrimaryTensor:
-            [graph broadcastTensor:advanced
-                           toShape:mps::MpsShapeOf(gather_shape)
-                              name:nil]
-                                                       secondaryTensor:
-            (retained == nil ? zero : retained)
-                                                                  name:nil];
-        MPSGraphTensor* flat = [graph flatten2DTensor:
-            [graph castTensor:position
-                       toType:MPSDataTypeInt32
-                         name:nil]
-                                              axis:0
-                                              name:nil];
-        const int64_t output_count = index_count;
-        // MPSGraph flattens the graph target into `out`, and a separated index
-        // places the retained coordinates before the advanced block. Reproduce
-        // that reorder over the row-major source images.
-        std::vector<int64_t> block_shape;
-        for (int64_t extent : broadcast_shape) {{
-          block_shape.push_back(extent);
-        }}
-        int64_t output_retained_product = 1;
-        for (int64_t axis : retained_axes) {{
-          output_retained_product *= axis_sizes[axis];
-        }}
-        block_shape.push_back(output_retained_product);
-        MPSGraphTensor* block_values_internal = [graph reshapeTensor:flat
-                                                      withShape:mps::MpsShapeOf(block_shape)
-                                                           name:nil];
-        // The advanced block sits in the result at `advanced_rank - m`, while
-        // `flatten2DTensor:` keeps it on axis 0 of the images. When those two
-        // places differ, reorder the images by retained-then-advanced coordinate;
-        // adjacent axes in ATen's block rule are already on axis 0.
-        std::vector<int64_t> image_shape(broadcast_shape.begin(), broadcast_shape.end());
-        image_shape.push_back(output_retained_product);
-        // In the images, the advanced block is axis 0, followed by retained.
-        // Only adjacent axes use that order; separated axes have retained first.
-        const bool reorder_images =
-            !adjacent && result_rank > source_rank;
-        MPSGraphTensor* output_image = nil;
-        if (reorder_images) {{
-          for (size_t dimension = 0; dimension < out_shape.size(); ++dimension) {{
-            int64_t divisor = 1;
-            for (size_t next = dimension + 1; next < out_shape.size(); ++next) {{
-              divisor *= out_shape[next];
-            }}
-            const bool advanced_dimension =
-                static_cast<int64_t>(dimension) >=
-                    advanced_rank -
-                        static_cast<int64_t>(broadcast_shape.size()) &&
-                static_cast<int64_t>(dimension) < advanced_rank;
-            const int64_t image_dimension = advanced_dimension
-                ? static_cast<int64_t>(dimension) - advanced_rank +
-                    static_cast<int64_t>(broadcast_shape.size())
-                : static_cast<int64_t>(dimension);
-            int64_t image_divisor = 1;
-            for (size_t next = static_cast<size_t>(image_dimension) + 1;
-                 next < image_shape.size(); ++next) {{
-              image_divisor *= image_shape[next];
-            }}
-            MPSGraphTensor* coordinate = [graph broadcastTensor:
-                [graph coordinateAlongAxis:static_cast<NSInteger>(dimension)
-                                 withShape:mps::MpsShapeOf(out_shape)
-                                      name:nil]
-                                                      toShape:
-                mps::MpsFlatShape(output_count)
-                                                         name:nil];
-            MPSGraphTensor* term = [graph multiplicationWithPrimaryTensor:
-                [graph castTensor:coordinate
-                           toType:MPSDataTypeInt64
-                             name:nil]
-                                                     secondaryTensor:
-                mps::MpsIndexConstantForShape(
-                    graph, image_divisor / divisor, at::kLong,
-                    {{output_count}})
-                                                                name:nil];
-            output_image = output_image == nil
-                ? term
-                : [graph additionWithPrimaryTensor:output_image
-                                  secondaryTensor:term
-                                             name:nil];
-          }}
-        }} else {{
-          MPSGraphTensor* image_shape_constant =
-              [graph constantWithScalar:0
-                                  shape:mps::MpsShapeOf(image_shape)
-                               dataType:MPSDataTypeInt32];
-          output_image = [graph multiplicationWithPrimaryTensor:
-              [graph broadcastTensor:image_shape_constant
-                             toShape:mps::MpsShapeOf(out_shape)
-                                name:nil]
-                                                       secondaryTensor:
-              mps::MpsIndexConstantForShape(
-                  graph, 0, at::kLong, {{output_count}})
-                                                                name:nil];
-        }}
-        if (output_image == nil) {{
-          return nil;
-        }}
-        return [graph gatherWithUpdatesTensor:block_values_internal
-                             indicesTensor:output_image
-                                      axis:0
-                           batchDimensions:0
-                                      name:nil];
-      }});
-  if (!ran) {{
-    return decline();
+  std::vector<int64_t> retained_shape;
+  for (const int64_t axis : retained_axes) {{
+    if (self.size(axis) == 0) {{
+      return selected.to(self.device());
+    }}
+    retained_shape.push_back(self.size(axis));
   }}
-  return out.reshape(out_shape);
+  int64_t retained_count = 1;
+  for (const int64_t extent : retained_shape) {{
+    retained_count *= extent;
+  }}
+  // Contiguous indices insert the block where its first axis was; a separated
+  // block moves to the front. The first block extent starts at that offset and
+  // advances through all block extents; every other result axis is retained.
+  const bool adjacent = index_axes.size() == 1 ||
+      index_axes.back() - index_axes.front() + 1 ==
+      static_cast<int64_t>(index_axes.size());
+  int64_t block_offset = 0;
+  if (adjacent) {{
+    for (const int64_t axis : retained_axes) {{
+      if (axis < index_axes.front()) {{
+        ++block_offset;
+      }}
+    }}
+  }}
+  const int64_t output_count = block_count * retained_count;
+  std::vector<int64_t> block_strides(static_cast<size_t>(block_rank), 1);
+  for (int64_t d = block_rank - 2; d >= 0; --d) {{
+    block_strides[static_cast<size_t>(d)] =
+        block_strides[static_cast<size_t>(d + 1)] *
+        block_shape[static_cast<size_t>(d + 1)];
+  }}
+  std::vector<int64_t> source_strides(
+      static_cast<size_t>(self.dim()), 1);
+  for (int64_t axis = self.dim() - 2; axis >= 0; --axis) {{
+    source_strides[static_cast<size_t>(axis)] =
+        source_strides[static_cast<size_t>(axis + 1)] *
+        self.size(axis + 1);
+  }}
+  std::vector<int64_t> address_data(
+      static_cast<size_t>(output_count), 0);
+  for (int64_t position = 0; position < output_count; ++position) {{
+    std::vector<int64_t> block_coordinates(static_cast<size_t>(block_rank), 0);
+    std::vector<int64_t> retained_coordinates(retained_axes.size(), 0);
+    int64_t remaining = position;
+    for (int64_t d = static_cast<int64_t>(out_shape.size()) - 1;
+         d >= 0; --d) {{
+      const int64_t digit = remaining % out_shape[static_cast<size_t>(d)];
+      remaining /= out_shape[static_cast<size_t>(d)];
+      if (adjacent && d >= block_offset &&
+          d < block_offset + block_rank) {{
+        block_coordinates[static_cast<size_t>(d - block_offset)] = digit;
+      }} else {{
+        const int64_t retained =
+            block_rank > 0 && d > block_offset + block_rank - 1
+                ? d - block_rank
+                : d;
+        retained_coordinates[static_cast<size_t>(retained)] = digit;
+      }}
+    }}
+    int64_t address = 0;
+    int64_t retained_slot = 0;
+    int64_t index_slot = 0;
+    for (int64_t axis = 0; axis < self.dim(); ++axis) {{
+      if (std::find(index_axes.begin(), index_axes.end(), axis) ==
+          index_axes.end()) {{
+        address += retained_coordinates[static_cast<size_t>(retained_slot++)] *
+            source_strides[static_cast<size_t>(axis)];
+        continue;
+      }}
+      int64_t flat = 0;
+      for (int64_t d = 0; d < block_rank; ++d) {{
+        flat += block_coordinates[static_cast<size_t>(d)] *
+            (d + 1 == block_rank
+                 ? 1
+                 : block_strides[static_cast<size_t>(d)]);
+      }}
+      const int64_t index_count =
+          index_tensors[static_cast<size_t>(index_slot)].numel();
+      int64_t value = index_tensors[static_cast<size_t>(index_slot)]
+          [block_count == index_count ? flat : flat % index_count]
+              .item<int64_t>();
+      if (value < 0) {{
+        value += self.size(axis);
+      }}
+      address += value * source_strides[static_cast<size_t>(axis)];
+      ++index_slot;
+    }}
+    address_data[static_cast<size_t>(position)] = address;
+  }}
+  at::Tensor out = at::empty(out_shape, self.options());
+  at::Tensor addresses =
+      at::tensor(address_data,
+                 at::TensorOptions().dtype(at::kInt).device(self.device()));
+  std::vector<int64_t> storage_shape = self.sizes().vec();
+  if (adjacent) {{
+    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
+  }} else {{
+    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
+    storage_shape.erase(storage_shape.begin() + index_axes.front() + 1,
+                        storage_shape.begin() + index_axes.back() + 1);
+  }}
+  if (!mps::MpsGatherIndex(out, self, addresses, storage_shape)) {{
+    return selected.to(self.device());
+  }}
+  return out;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})

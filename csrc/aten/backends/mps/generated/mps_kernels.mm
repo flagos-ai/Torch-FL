@@ -835,6 +835,174 @@ at::Tensor LinalgSolveTriangularKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(LinalgSolveTriangularFn, linalg_solve_triangular_dispatcher, Backend::kMps, LinalgSolveTriangularKernelMps)
 
 
+at::Tensor IndexTensorKernelMps(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices) {
+  c10::List<std::optional<at::Tensor>> host_indices;
+  host_indices.reserve(indices.size());
+  for (const std::optional<at::Tensor>& entry : indices) {
+    host_indices.push_back(
+        entry.has_value() && entry->defined()
+            ? std::optional<at::Tensor>(entry->cpu())
+            : std::nullopt);
+  }
+  const at::Tensor host_self = self.is_cpu() ? self : self.cpu();
+  const at::Tensor selected = at::index(host_self, host_indices);
+  if (selected.numel() == 0) {
+    return selected.to(self.device());
+  }
+  std::vector<at::Tensor> index_tensors;
+  for (const std::optional<at::Tensor>& entry : indices) {
+    if (entry.has_value() && entry->defined()) {
+      // Boolean masks and scalar coordinates have their own indexing rules;
+      // the checked reference above answers both.
+      if (entry->scalar_type() == at::kBool || entry->dim() == 0) {
+        return selected.to(self.device());
+      }
+      index_tensors.push_back(entry->to(at::kLong).cpu().reshape(-1));
+    }
+  }
+  std::vector<int64_t> block_shape;
+  for (const at::Tensor& index : index_tensors) {
+    const std::vector<int64_t> sizes = index.sizes().vec();
+    try {
+      block_shape = block_shape.empty()
+          ? sizes : at::infer_size(block_shape, sizes);
+    } catch (const std::exception&) {
+      return selected.to(self.device());
+    }
+  }
+  int64_t block_count = 1;
+  for (const int64_t extent : block_shape) {
+    block_count *= extent;
+  }
+  if (block_count == 0) {
+    return selected.to(self.device());
+  }
+  const std::vector<int64_t> out_shape = selected.sizes().vec();
+  const int64_t block_rank = static_cast<int64_t>(block_shape.size());
+  std::vector<int64_t> index_axes;
+  std::vector<int64_t> retained_axes;
+  for (int64_t axis = 0; axis < self.dim(); ++axis) {
+    if (axis < static_cast<int64_t>(indices.size()) &&
+        indices.get(axis).has_value() &&
+        indices.get(axis)->defined()) {
+      index_axes.push_back(axis);
+    } else {
+      retained_axes.push_back(axis);
+    }
+  }
+  std::vector<int64_t> retained_shape;
+  for (const int64_t axis : retained_axes) {
+    if (self.size(axis) == 0) {
+      return selected.to(self.device());
+    }
+    retained_shape.push_back(self.size(axis));
+  }
+  int64_t retained_count = 1;
+  for (const int64_t extent : retained_shape) {
+    retained_count *= extent;
+  }
+  // Contiguous indices insert the block where its first axis was; a separated
+  // block moves to the front. The first block extent starts at that offset and
+  // advances through all block extents; every other result axis is retained.
+  const bool adjacent = index_axes.size() == 1 ||
+      index_axes.back() - index_axes.front() + 1 ==
+      static_cast<int64_t>(index_axes.size());
+  int64_t block_offset = 0;
+  if (adjacent) {
+    for (const int64_t axis : retained_axes) {
+      if (axis < index_axes.front()) {
+        ++block_offset;
+      }
+    }
+  }
+  const int64_t output_count = block_count * retained_count;
+  std::vector<int64_t> block_strides(static_cast<size_t>(block_rank), 1);
+  for (int64_t d = block_rank - 2; d >= 0; --d) {
+    block_strides[static_cast<size_t>(d)] =
+        block_strides[static_cast<size_t>(d + 1)] *
+        block_shape[static_cast<size_t>(d + 1)];
+  }
+  std::vector<int64_t> source_strides(
+      static_cast<size_t>(self.dim()), 1);
+  for (int64_t axis = self.dim() - 2; axis >= 0; --axis) {
+    source_strides[static_cast<size_t>(axis)] =
+        source_strides[static_cast<size_t>(axis + 1)] *
+        self.size(axis + 1);
+  }
+  std::vector<int64_t> address_data(
+      static_cast<size_t>(output_count), 0);
+  for (int64_t position = 0; position < output_count; ++position) {
+    std::vector<int64_t> block_coordinates(static_cast<size_t>(block_rank), 0);
+    std::vector<int64_t> retained_coordinates(retained_axes.size(), 0);
+    int64_t remaining = position;
+    for (int64_t d = static_cast<int64_t>(out_shape.size()) - 1;
+         d >= 0; --d) {
+      const int64_t digit = remaining % out_shape[static_cast<size_t>(d)];
+      remaining /= out_shape[static_cast<size_t>(d)];
+      if (adjacent && d >= block_offset &&
+          d < block_offset + block_rank) {
+        block_coordinates[static_cast<size_t>(d - block_offset)] = digit;
+      } else {
+        const int64_t retained =
+            block_rank > 0 && d > block_offset + block_rank - 1
+                ? d - block_rank
+                : d;
+        retained_coordinates[static_cast<size_t>(retained)] = digit;
+      }
+    }
+    int64_t address = 0;
+    int64_t retained_slot = 0;
+    int64_t index_slot = 0;
+    for (int64_t axis = 0; axis < self.dim(); ++axis) {
+      if (std::find(index_axes.begin(), index_axes.end(), axis) ==
+          index_axes.end()) {
+        address += retained_coordinates[static_cast<size_t>(retained_slot++)] *
+            source_strides[static_cast<size_t>(axis)];
+        continue;
+      }
+      int64_t flat = 0;
+      for (int64_t d = 0; d < block_rank; ++d) {
+        flat += block_coordinates[static_cast<size_t>(d)] *
+            (d + 1 == block_rank
+                 ? 1
+                 : block_strides[static_cast<size_t>(d)]);
+      }
+      const int64_t index_count =
+          index_tensors[static_cast<size_t>(index_slot)].numel();
+      int64_t value = index_tensors[static_cast<size_t>(index_slot)]
+          [block_count == index_count ? flat : flat % index_count]
+              .item<int64_t>();
+      if (value < 0) {
+        value += self.size(axis);
+      }
+      address += value * source_strides[static_cast<size_t>(axis)];
+      ++index_slot;
+    }
+    address_data[static_cast<size_t>(position)] = address;
+  }
+  at::Tensor out = at::empty(out_shape, self.options());
+  at::Tensor addresses =
+      at::tensor(address_data,
+                 at::TensorOptions().dtype(at::kInt).device(self.device()));
+  std::vector<int64_t> storage_shape = self.sizes().vec();
+  if (adjacent) {
+    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
+  } else {
+    storage_shape[static_cast<size_t>(index_axes.front())] = block_count;
+    storage_shape.erase(storage_shape.begin() + index_axes.front() + 1,
+                        storage_shape.begin() + index_axes.back() + 1);
+  }
+  if (!mps::MpsGatherIndex(out, self, addresses, storage_shape)) {
+    return selected.to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kMps, IndexTensorKernelMps)
+
+
 at::Tensor PrivSoftmaxKernelMps(
     const at::Tensor& self,
     int64_t dim,

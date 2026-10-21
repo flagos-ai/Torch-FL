@@ -111,6 +111,15 @@ at::Tensor MpsIndexOnHost(
     const at::Tensor& self,
     const c10::List<std::optional<at::Tensor>>& indices);
 
+// Gather source values at dense row-major int32 addresses and reshape the
+// flat graph result to the aten result. False means MPSGraph declined the
+// graph, so the caller can use its checked reference.
+bool MpsGatherIndex(
+    const at::Tensor& out,
+    const at::Tensor& source,
+    const at::Tensor& addresses,
+    at::IntArrayRef source_storage_shape);
+
 // Whether MPSGraph can compare or reduce this width to a bool. Bool itself is
 // accepted by `all`; uint8 is compared only when this SDK maps it.
 bool MpsSupportsCompareDtype(at::ScalarType dtype);
