@@ -101,6 +101,8 @@ OPS = {
     # GatedDeltaNet accumulates its decay along the chunk axis. The graph uses
     # MPSGraph's cumulative-sum node with the operand's own dtype. See T_CUMSUM.
     "cumsum": "cumsum",
+    # Qwen3.5's linear-attention gate uses the linear branch of ATen's softplus.
+    "softplus": "softplus",
     # `softmax` is the third stage-3 lane and the op a small model calls between
     # the matmuls: one per attention block, over the (batch, heads, seq, seq)
     # scores. MPSGraph has the whole operation behind one selector,
@@ -500,6 +502,7 @@ AT_OP = {
     "linalg_solve_triangular": "linalg_solve_triangular",
     "index.Tensor": "index",
     "cumsum": "cumsum",
+    "softplus": "softplus",
     "_softmax": "_softmax",
     "neg": "neg",
     "pow.Tensor_Scalar": "pow",
@@ -640,6 +643,7 @@ SUPPORTS = {
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
     "cumsum": "MpsSupportsCumsumDtype",
+    "softplus": "MpsSupportsSoftplusDtype",
     "gemm": "MpsSupportsGemmDtype",
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
@@ -787,6 +791,9 @@ CALLS = {
     # T_CUMSUM writes the full selector because its axis binds to the first
     # argument, as MpsGatherIndex does for the gather family.
     "cumsum": "",
+    # T_SOFTPLUS builds the threshold comparison and both branches in the
+    # operand's dtype. See the template.
+    "softplus": "",
     # `index.Tensor` builds its gather and coordinate arithmetic in the body.
     "linalg_solve_triangular": "",
     "index.Tensor": "",
@@ -964,6 +971,7 @@ KEY_PARTS = {
     # shapes. The accumulator dtype is folded into the operand's dtype by the
     # body.
     "cumsum": ", axis",
+    "softplus": ", beta, threshold",
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
     "bmm": ", self_transposed, mat2_transposed",
@@ -4458,6 +4466,86 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# Softplus is `x / beta` when `beta * x > threshold`, and
+# `log1p(exp(beta * x)) / beta` otherwise. MPSGraph's `softPlusWithTensor:` uses
+# its own fixed parameters, so the body represents ATen's two scalar arguments
+# as (1,) constants. The comparison and select therefore run on Metal with the
+# caller's beta and threshold. Both scalars are part of the plan key.
+#
+# Non-positive beta is declined so the reference owns its parameter contract.
+# Positive beta is handled on the graph, including both threshold branches.
+T_SOFTPLUS = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Scalar& beta,
+    const at::Scalar& threshold) {{
+  if (!mps::{supports}(self.scalar_type(), beta, threshold)) {{
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }}
+  if (beta.toDouble() <= 0.0) {{
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSDataType data_type = MPSDataTypeFloat32;
+        if (!mps::MpsDataTypeOf(self_c.scalar_type(), &data_type)) {{
+          return nil;
+        }}
+        MPSGraphTensor* beta_value =
+            [graph constantWithScalar:beta.toDouble()
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* threshold_value =
+            [graph constantWithScalar:threshold.toDouble()
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* scaled = [graph multiplicationWithPrimaryTensor:args[0]
+                                                      secondaryTensor:beta_value
+                                                                 name:nil];
+        MPSGraphTensor* predicate = [graph greaterThanWithPrimaryTensor:scaled
+                                                       secondaryTensor:threshold_value
+                                                                  name:nil];
+        if (scaled == nil || predicate == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* exponent = [graph exponentWithTensor:scaled name:nil];
+        MPSGraphTensor* one_value =
+            [graph constantWithScalar:1.0
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* shifted = [graph additionWithPrimaryTensor:exponent
+                                                  secondaryTensor:one_value
+                                                             name:nil];
+        MPSGraphTensor* curved = [graph logarithmWithTensor:shifted name:nil];
+        curved = [graph divisionWithPrimaryTensor:curved
+                                  secondaryTensor:beta_value
+                                             name:nil];
+        MPSGraphTensor* linear = [graph divisionWithPrimaryTensor:args[0]
+                                                  secondaryTensor:beta_value
+                                                             name:nil];
+        return [graph selectWithPredicateTensor:predicate
+                            truePredicateTensor:linear
+                           falsePredicateTensor:curved
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
@@ -4471,6 +4559,7 @@ CATEGORIES = {
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,
     "cumsum": T_CUMSUM,
+    "softplus": T_SOFTPLUS,
     "gemm": T_GEMM,
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,

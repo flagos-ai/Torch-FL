@@ -1045,6 +1045,76 @@ at::Tensor CumsumKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kMps, CumsumKernelMps)
 
 
+at::Tensor SoftplusKernelMps(
+    const at::Tensor& self,
+    const at::Scalar& beta,
+    const at::Scalar& threshold) {
+  if (!mps::MpsSupportsSoftplusDtype(self.scalar_type(), beta, threshold)) {
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }
+  if (beta.toDouble() <= 0.0) {
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("softplus", beta, threshold),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSDataType data_type = MPSDataTypeFloat32;
+        if (!mps::MpsDataTypeOf(self_c.scalar_type(), &data_type)) {
+          return nil;
+        }
+        MPSGraphTensor* beta_value =
+            [graph constantWithScalar:beta.toDouble()
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* threshold_value =
+            [graph constantWithScalar:threshold.toDouble()
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* scaled = [graph multiplicationWithPrimaryTensor:args[0]
+                                                      secondaryTensor:beta_value
+                                                                 name:nil];
+        MPSGraphTensor* predicate = [graph greaterThanWithPrimaryTensor:scaled
+                                                       secondaryTensor:threshold_value
+                                                                  name:nil];
+        if (scaled == nil || predicate == nil) {
+          return nil;
+        }
+        MPSGraphTensor* exponent = [graph exponentWithTensor:scaled name:nil];
+        MPSGraphTensor* one_value =
+            [graph constantWithScalar:1.0
+                                shape:mps::MpsFlatShape(1)
+                             dataType:data_type];
+        MPSGraphTensor* shifted = [graph additionWithPrimaryTensor:exponent
+                                                  secondaryTensor:one_value
+                                                             name:nil];
+        MPSGraphTensor* curved = [graph logarithmWithTensor:shifted name:nil];
+        curved = [graph divisionWithPrimaryTensor:curved
+                                  secondaryTensor:beta_value
+                                             name:nil];
+        MPSGraphTensor* linear = [graph divisionWithPrimaryTensor:args[0]
+                                                  secondaryTensor:beta_value
+                                                             name:nil];
+        return [graph selectWithPredicateTensor:predicate
+                            truePredicateTensor:linear
+                           falsePredicateTensor:curved
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::softplus(self.cpu(), beta, threshold).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kMps, SoftplusKernelMps)
+
+
 at::Tensor PrivSoftmaxKernelMps(
     const at::Tensor& self,
     int64_t dim,

@@ -49,21 +49,6 @@
 
 namespace at::native::flagos::mps {
 
-at::Tensor MpsIndexOnHost(
-    const at::Tensor& self,
-    const c10::List<std::optional<at::Tensor>>& indices) {
-  c10::List<std::optional<at::Tensor>> host_indices;
-  host_indices.reserve(indices.size());
-  for (const std::optional<at::Tensor>& entry : indices) {
-    host_indices.push_back(
-        entry.has_value() && entry->defined()
-            ? std::optional<at::Tensor>(entry->cpu())
-            : std::nullopt);
-  }
-  return at::index(self.is_cpu() ? self : self.cpu(), host_indices)
-      .to(self.device(), self.scalar_type());
-}
-
 bool MpsGatherIndex(
     const at::Tensor& out,
     const at::Tensor& source,
@@ -179,6 +164,27 @@ bool MpsSupportsCumsumDtype(
   return !out_dtype.has_value() || *out_dtype == dtype ||
       *out_dtype == at::kFloat || *out_dtype == at::kHalf ||
       *out_dtype == at::kBFloat16;
+}
+
+at::Tensor MpsIndexOnHost(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices) {
+  c10::List<std::optional<at::Tensor>> host_indices;
+  host_indices.reserve(indices.size());
+  for (const std::optional<at::Tensor>& entry : indices) {
+    host_indices.push_back(
+        entry.has_value() ? std::optional<at::Tensor>(entry->cpu()) : std::nullopt);
+  }
+  return self.cpu().index(host_indices).to(self.device());
+}
+
+bool MpsSupportsSoftplusDtype(
+    at::ScalarType dtype,
+    const at::Scalar& beta,
+    const at::Scalar& threshold) {
+  return (dtype == at::kFloat || dtype == at::kHalf ||
+          dtype == at::kBFloat16) &&
+      MpsConstantExact(beta, dtype) && MpsConstantExact(threshold, dtype);
 }
 
 bool MpsCumsumAxis(const at::Tensor& self, int64_t dim, int64_t* out) {

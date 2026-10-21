@@ -252,6 +252,32 @@ reported all vendor confs up to date. This is an M5 measurement; MPS inference
 accuracy on other Apple Silicon generations and the other backend allocator
 paths are **not revalidated**.
 
+### Apple Silicon M5: Qwen3.5 softplus follows ATen's threshold on MPSGraph (2026-10-22, physical M5)
+
+**`softplus` now runs on the `mps` route.** The graph multiplies the operand by
+`beta`, compares the result with `threshold`, and selects the linear or curved
+branch. Float32, float16 and bfloat16 operands are served. Integral and float64
+operands, and non-positive `beta`, use the CPU reference; integral operands
+retain the reference's `NotImplementedError`. `beta` and `threshold` are part
+of the compiled graph key, and changing either value builds a different graph.
+
+The MPS conf moves from **45 `mps` / 1992 `none`**, after the independently
+measured `cumsum` route, to **46 `mps` / 1991 `none`**. The dedicated suite
+passed **13 cases** on the physical M5: all three float widths, both threshold
+branches, default and custom parameters, switching between parameter sets,
+non-contiguous storage, the Qwen3.5-shaped tensor, empty, integral and float64
+operands, and MPS dispatch. Both code generators report their outputs current.
+
+The five-token Qwen3.5 bfloat16 checkpoint forward logs two values. Its maximum
+absolute difference from CPU is **0.0048828125**, the same as the preceding
+index measurement. A dispatch trace recorded **18 `softplus -> mps` calls** and
+19 `cumsum -> mps` calls.
+The same trace still recorded host fallbacks for `zeros_like`, `_unsafe_view`,
+`transpose.int`, `unsqueeze`, `t`, `select.int`, `slice.Tensor`,
+`constant_pad_nd`, `convolution`, `cos`, `sin`, `eq.Scalar`, `le.Tensor` and
+`ne.Scalar`; this is not a fallback-free model claim. Training, generation,
+image inputs and other Apple Silicon generations are **not revalidated**.
+
 ### Apple Silicon M5: Qwen3.5 gains native reductions, triangular solve and triangle masking (2026-10-22, physical M5)
 
 **Four Qwen3.5 paths now use MPSGraph: `all` (three overloads), `argmax`,
