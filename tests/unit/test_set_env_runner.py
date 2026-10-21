@@ -23,6 +23,12 @@ parameterized entrypoint.
 
 The runner is exercised with `--help`/an unknown platform, which return before
 any provisioning runs.
+
+Nothing here may need more than the standard library of Python 3.10, because
+.github/scripts/run_unit_tests.py runs this whole directory file by file with
+whatever interpreter the platform's image provides -- and the Hygon DCU image's
+is 3.10.12. Standard-library entries newer than that (`tomllib` is 3.11) are
+not available there; see `_pyproject_build_requirements`.
 """
 
 import subprocess
@@ -210,16 +216,82 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
 
 
 def _pyproject_build_requirements() -> list[str]:
-    """The requirement names in `[build-system].requires`, normalised."""
-    import tomllib
+    """The requirement names in `[build-system].requires`, normalised.
 
-    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
-        requires = tomllib.load(handle)["build-system"]["requires"]
+    Parsed without a TOML library. `tomllib` is stdlib only from Python 3.11,
+    and .github/scripts/run_unit_tests.py runs this file in its own process on
+    whatever interpreter the platform's image provides -- the Hygon DCU image's
+    is 3.10.12, where `import tomllib` raises ModuleNotFoundError and took the
+    whole DCU unit-test group down. The backport (`tomli`) is not a declared
+    test dependency either, so it cannot be the fallback.
 
+    Only one key of one table is needed, so this reads that table and nothing
+    else: basic strings with TOML's escapes, single-line literal strings, and
+    the `\\` line continuation -- the three forms a dependency specifier is
+    written in -- and raises on anything else rather than guessing. It raises a
+    plain AssertionError because the file is a contract this test pins: a
+    `[build-system]` the parser cannot read means the wrong thing is being
+    checked, which is a failure here and not a skip.
+    """
+    import re
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    table = re.search(r"^\[build-system\]\s*$", text, re.MULTILINE)
+    assert table is not None, "pyproject.toml has no [build-system] table"
+
+    body = text[table.end() :]
+    next_table = re.search(r"^\[", body, re.MULTILINE)
+    if next_table is not None:
+        body = body[: next_table.start()]
+
+    match = re.search(r"^[ \t]*requires[ \t]*=[ \t]*\[", body, re.MULTILINE)
+    assert match is not None, "[build-system] has no requires list"
+
+    escapes = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
+    items: list[str] = []
+    index = match.end()
+    while index < len(body):
+        char = body[index]
+        if char in " \t\r\n,":
+            index += 1
+        elif char == "]":
+            return _requested_names(items)
+        elif char in "\"'":
+            quote = char
+            index += 1
+            value = ""
+            while True:
+                assert index < len(body), f"unterminated string in requires: {value}"
+                char = body[index]
+                if char == "\\" and quote == '"':
+                    following = body[index + 1]
+                    if following == "\n":  # line continuation
+                        index += 2
+                        continue
+                    assert following in escapes, f"unsupported escape \\{following}"
+                    value += escapes[following]
+                    index += 2
+                elif char == quote:
+                    index += 1
+                    break
+                elif char == "\n" and quote == "'":
+                    raise AssertionError(f"newline in literal string: {value}")
+                else:
+                    value += char
+                    index += 1
+            items.append(value)
+        else:
+            raise AssertionError(
+                f"unsupported [build-system].requires syntax at {body[index:][:20]!r}"
+            )
+    raise AssertionError("[build-system].requires list is not closed")
+
+
+def _requested_names(requirements: list[str]) -> list[str]:
     names = []
-    for requirement in requires:
+    for requirement in requirements:
         name = requirement
-        for separator in ("[", ">", "<", "=", "!", "~", " "):
+        for separator in ("[", ">", "<", "=", "!", "~", " ", ";"):
             name = name.split(separator, 1)[0]
         names.append(name)
     return names
