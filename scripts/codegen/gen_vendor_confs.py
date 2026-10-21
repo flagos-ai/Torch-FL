@@ -195,9 +195,27 @@ VENDORS = {
 # refuses it at the ViewOp key like `_conj`, and FlagGems' own route for it is
 # the kernel that is missing (see its entry in NATIVE_TRITON_GAPS). register.cc
 # publishes ATen's metadata kernel for it under the same guard.
+#
+# The three in-place add/div overloads are a different pair of reasons again:
+# they are not views, but FlagGems' complex path is wrong for `add` (complex128
+# returns zeros) and raises for `div` (complex64), and ATen's CPU fallback is
+# not an alternative -- the boxed fallback mutates a CPU copy, so
+# `self.add_(other)` and `self.div_(other)` measured here returned the input
+# unchanged. register.cc publishes add_/div_: add_ through ATen's own add_out,
+# div_ through a host round trip (ATen's complex div writes its destination
+# before it reads its sources, so it is wrong when the destination is the
+# operand). `add.Tensor` and `add.Scalar` are in NATIVE_TRITON_GAPS but
+# not here: they take the out-of-place -> in-place lowering to the same kernel,
+# and an out= m.impl cannot be registered under the add.Tensor schema.
 EXTRA_NATIVE = {
     "ascend": {"matmul", "matmul_backward"},
-    "iluvatar": {"_conj", "view_as_real"},
+    "iluvatar": {
+        "_conj",
+        "view_as_real",
+        "add_.Tensor",
+        "add_.Scalar",
+        "div_.Tensor",
+    },
 }
 
 # Ops a hand-written wrapper claims for every platform, so they appear in no
@@ -1997,6 +2015,35 @@ NATIVE_TRITON_GAPS = {
         # that is also the op FlagGems would have to lower to serve a
         # `flaggems` route, and this platform has no kernel for it.
         "view_as_real",
+        # The add/div family, for that same remaining defect. FlagGems' complex
+        # `add` returns zeros for complex128 (above), and its complex `div`
+        # raises `AssertionError: unsupported dtype in complex op` for
+        # complex64 -- measured on the CI lane 2026-10-21 as the one remaining
+        # failure of test_math_bits_contract.py once `_conj` and
+        # `view_as_real` were answered, and in-process against flag_gems 5.4.0.
+        # The conf routes these three to the native slot instead, where
+        # register.cc publishes ATen's own add_/div_ (see EXTRA_NATIVE).
+        #
+        # Only the in-place spellings are routed. `add.Tensor` and
+        # `add.Scalar` ride the out-of-place -> in-place lowering: with the
+        # in-place op on a PrivateUse1 kernel, ATen's `add` composite
+        # dispatches `z + t`, `z + 0` and `z + 1` to the in-place slot, so
+        # they leave FlagGems without a second registration (and cannot have
+        # one: an out= kernel does not match add.Tensor's C++ signature, and
+        # the register.cc comment records the abort that measured it).
+        # The in-place pair also fixes a defect of its own: a `none` route
+        # made `self.add_(other)` a boxed cpu_fallback that wrote to a CPU
+        # copy and left `self` unchanged (measured on u180 2026-10-21).
+        # `div_.Tensor` is routed for the same reason, and its kernel has to
+        # be the host round trip: ATen's complex div writes its destination
+        # before it reads its sources, so `x.div_(y)` -- which hands it the
+        # operand itself -- came back as the unchanged operand for complex128
+        # and as zeros for complex64 (measured on u180 2026-10-21).
+        "add.Tensor",
+        "add.Scalar",
+        "add_.Tensor",
+        "add_.Scalar",
+        "div_.Tensor",
         "_conj_copy.out",
         # The whole gemm family, for issue #570. `mm`/`mm.out` left first for a
         # *tuning* defect rather than a wrong kernel: the fp64 failure is

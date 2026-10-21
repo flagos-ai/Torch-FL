@@ -593,6 +593,13 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     with no flagos impl for it the calls warn and return zero-filled storage,
     which is why `complex128 + 0` read `[0j, 0j]` on u180 while `complex128 * 1`
     was correct. It moves to the native slot exactly as `_conj` does.
+
+    The add/div overloads move with it, for the residual defect the view fix
+    exposed rather than caused: FlagGems' complex `add` returns zeros for
+    complex128 and its complex `div` raises for complex64. They are not views,
+    but `none` is no answer either -- the boxed fallback mutates a CPU copy, so
+    `self.add_(other)` measured unchanged. register.cc publishes ATen's add_/
+    div_ for the five overloads, and the conf spells them all on that slot.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
 
@@ -605,11 +612,16 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "addmm.dtype_out",
         "addmm.out",
         "addmm_",
+        "add.Scalar",
+        "add.Tensor",
+        "add_.Scalar",
+        "add_.Tensor",
         "_conj_copy.out",
         "bmm",
         "bmm.dtype",
         "bmm.dtype_out",
         "bmm.out",
+        "div_.Tensor",
         "mean",
         "mean.dim",
         "mm",
@@ -632,6 +644,21 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     # Same contract: a view, answered from register.cc's USE_ILUVATAR arm.
     assert "view_as_real" in g.EXTRA_NATIVE["iluvatar"]
     assert route("view_as_real") == "iluvatar"
+    # The complex add/div family, answered from the same arm: not views, but a
+    # FlagGems kernel that is wrong or raises, and a fallback that cannot write.
+    for op in (
+        "add_.Scalar",
+        "add_.Tensor",
+        "div_.Tensor",
+    ):
+        assert op in g.EXTRA_NATIVE["iluvatar"], op
+        assert route(op) == "iluvatar", op
+    # The out-of-place spellings reach the same in-place kernel through ATen's
+    # lowering, so they must leave FlagGems without being claimed themselves.
+    for op in ("add.Scalar", "add.Tensor"):
+        assert op in g.NATIVE_TRITON_GAPS["iluvatar"], op
+        assert op not in g.EXTRA_NATIVE["iluvatar"], op
+        assert route(op) not in ("flaggems", "flaggems_cpp"), op
     for op in (
         "_conj_copy.out",
         "addmm.dtype",

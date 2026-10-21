@@ -47,7 +47,13 @@ BACKENDS_DIR = ATEN_DIR / "backends"
 # ``scripts/codegen/gen_vendor_confs.py``.
 EXTRA_NATIVE = {
     "ascend": {"matmul", "matmul_backward"},
-    "iluvatar": {"_conj", "view_as_real"},
+    "iluvatar": {
+        "_conj",
+        "view_as_real",
+        "add_.Tensor",
+        "add_.Scalar",
+        "div_.Tensor",
+    },
 }
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 

@@ -133,10 +133,12 @@ FlagGems route, so the conf carries 603 `flaggems` routes, not 640. One of those
 from the CI lane's failures and a BI-V150 probe (issue #570), and — on
 2026-10-21 — `_conj` and `_conj_copy.out` moved off the route for a contract
 defect the CI lane exposed once the earlier groups went green, and `_conj` and
-`view_as_real` are since answered from ATen's metadata kernels; the conf is now
-**588 `flaggems` / 8 `iluvatar` / 1441 `none`**. The survey above measured the
-603-route conf and has not been re-run against this one; the 21 FAILED / 136
-UNTESTED figures are its result, not this conf's.
+`view_as_real` are since answered from ATen's metadata kernels; and — on
+2026-10-21 — the `add`/`div` family left FlagGems, because flag_gems 5.4.0's
+complex `add` returns zeros for complex128 and its complex `div` raises for
+complex64. The conf is now **585 `flaggems` / 11 `iluvatar` / 1441 `none`**. The
+survey above measured the 603-route conf and has not been re-run against this
+one; the 21 FAILED / 136 UNTESTED figures are its result, not this conf's.
 
 ## Raw Case Evidence
 
@@ -670,8 +672,8 @@ overrides able to move the op at all.
 [`scripts/codegen/gen_vendor_confs.py`](../../scripts/codegen/gen_vendor_confs.py)
 from `FLAGGEMS_PYTHON_PLATFORMS` minus `NATIVE_TRITON_GAPS["iluvatar"]`, in the
 same full-coverage shape as the other platforms: all 2037 ops listed exactly
-once, **588 `flaggems` / 8 `iluvatar` / 1441 `none`** (603/3/1431 before
-2026-10-20; see issue #570 below). The eight `iluvatar` routes
+once, **585 `flaggems` / 11 `iluvatar` / 1441 `none`** (603/3/1431 before
+2026-10-20; see issue #570 below). Six of the eleven `iluvatar` routes
 are the first cohort's ops that route to `none` and have an ixdnn/ixblas kernel
 (`_convolution`, `convolution`, `native_batch_norm`, and — since 2026-10-20 —
 `mm` and `bmm`, plus `addmm` since 2026-10-21 — whose native kernels fall back
@@ -680,7 +682,10 @@ first-cohort ops with a kernel (`_native_batch_norm_legit`,
 `_native_batch_norm_legit_no_training`) stay `flaggems`, because FlagGems wins
 the static route and — being already registered in the FlagGems `.inc` — cannot
 appear in the native `.inc` without a duplicate `m.impl`. Those kernels exist
-for the force/override paths but are not conf routes.
+for the force/override paths but are not conf routes. The remaining five
+(`_conj`, `view_as_real`, `add_.Scalar`, `add_.Tensor`, `div_.Tensor`) are
+served from `csrc/aten/register.cc` rather than from the vendor library — see
+the landings below.
 
 **Coverage is measured on BI-V150, over the 603-op FlagGems-routed cohort.**
 
@@ -925,6 +930,47 @@ carry the platform in the CI lane, or the gap should be widened to
 `add.Scalar`/`add.Tensor` until FlagGems fixes it, is a decision to take with
 the measured CI run, not from this report. The other Iluvatar hosts are **not
 revalidated**.
+
+**2026-10-21: the `add`/`div` family leaves the FlagGems route (issue #570,
+sixth landing).** With `_conj` and `view_as_real` answered, the CI lane's
+`math_bits_contract` group reached `test_consumer_op_sees_materialized_conjugate`
+and failed on it. `complex128 + 0` still returned zeros after the fifth landing —
+flag_gems 5.4.0's complex `add` decomposes both operands through `view_as_real`
+and runs its own kernel, which returns zeros for complex128. In-process on
+`u180`, its complex `div` is worse than wrong values: it raises
+`AssertionError: unsupported dtype in complex op` for complex64.
+
+`add.Tensor`, `add.Scalar`, `add_.Tensor`, `add_.Scalar` and `div_.Tensor` join
+`NATIVE_TRITON_GAPS["iluvatar"]` and leave FlagGems. Only the three in-place
+overloads move onto the native slot (`EXTRA_NATIVE["iluvatar"]`); the
+out-of-place `add.Tensor`/`add.Scalar` ride ATen's out-of-place-to-in-place
+lowering onto `add_.Tensor` and need no registration of their own. They could
+not have one: an `m.impl` on PrivateUse1 belongs to the schema's own C++
+signature, and a four-argument out= kernel registered under `add.Tensor` aborts
+at load with "Mismatch in kernel C++ signatures" (measured on `u180`).
+
+`csrc/aten/register.cc` (`USE_ILUVATAR` arm) publishes the three kernels.
+`add_` returns `at::add_out(self, self, other, alpha)`. `div_` cannot use ATen's
+complex div kernel directly: it writes its destination before it reads its
+sources, so `x.div_(y)` — which hands it the operand itself — wrote back the
+unchanged operand for complex128 and zeros for complex64 (measured on `u180`).
+It divides host-side and copies the result back. That is the `cpu_fallback`
+shape, but the fallback writes its result to a host copy and never to `self`,
+which is the defect this route closes.
+
+Route delta: `flaggems` 588 → **585**, `iluvatar` 8 → **11**, `none` 1441
+**unchanged**; every other platform's conf is byte-identical.
+`iluvatar_flaggems_register.inc` drops to 585 `m.impl` lines over a 59-entry gap
+set, and `gen_vendor_confs.py --check` run twice is clean.
+
+Measured on `u180` (rebuilt extension, device `flagos:0`, CPU torch 2.10, corex
+4.5.0, FlagGems 5.4.0), both on a plain tensor and on a lazily-conjugated one:
+`+ 0`, `+ int`, `+ complex128 tensor`, `add_(complex)` are exact;
+`div_(complex128)` is exact for both; `tests/integration/test_math_bits_contract.py`
+is **12 passed, 0 failed** and the lane's `vendor_ops` group is **684 passed / 0
+failed / 1276 skipped / 3 xpassed**. **Evidence gap:** both measurements are on
+one host (`u180`); the CI lane is the confirming run, and the other Iluvatar
+hosts are **not revalidated**.
 
 **The device-name mismatch is the platform's known, remediated defect.** The
 `_iluvatar` backend declares `device_name="cuda"`

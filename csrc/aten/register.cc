@@ -20,6 +20,9 @@
 #include <ATen/ops/matmul_native.h>
 #include <ATen/ops/_conj_native.h>
 #include <ATen/ops/view_as_real_native.h>
+#include <ATen/Functions.h>
+#include <ATen/ops/add_native.h>
+#include <ATen/ops/div_native.h>
 #include <ATen/SDPBackend.h>
 #include <torch/library.h>
 #include <c10/core/ScalarType.h>
@@ -446,6 +449,61 @@ at::Tensor& FlagosWrapperPrivConjCopyOut(
 at::Tensor FlagosWrapperPrivViewAsReal(const at::Tensor& self) {
   return at::native::view_as_real(self);
 }
+
+// add/div are the consumer ops the Conjugate contract measures in
+// tests/integration/test_math_bits_contract.py. FlagGems' complex path
+// decomposes both operands with view_as_real and then runs its own kernel,
+// and on iluvatar that kernel returns zeros for complex128 in `add` and
+// raises for complex64 in `div`, so the conf routes these overloads here
+// instead (see the entries in NATIVE_TRITON_GAPS).
+//
+// The conf names these three in-place schemas, not add.Tensor, for a
+// registration reason: an m.impl on the PrivateUse1 key belongs to the schema's
+// own C++ signature, so a four-argument out= kernel under add.Tensor aborts at
+// load with "Mismatch in kernel C++ signatures" (measured on u180). ATen's
+// `add` lowers the out-of-place spelling to add_.Tensor, so `z + t`, `z + 1`
+// and the conjugated `z + 0` reach these kernels through that lowering.
+//
+// They return Tensor& because ATen's add_.Tensor family (CPU, meta) does, and
+// the registrar matches signatures exactly. add_ calls the operator
+// (at::add_out), not a lower-level kernel: ATen registers the complex out=
+// kernel through its structured meta/decomposition path, which only a call
+// through at:: picks up. `at::native::add_out` does not exist in this build
+// (measured: "not a member of at::native").
+at::Tensor& FlagosWrapperPrivAddTensorInplace(
+    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  return at::add_out(self, self, other, alpha);
+}
+
+at::Tensor& FlagosWrapperPrivAddScalarInplace(
+    at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  return at::add_out(self, self, other, alpha);
+}
+
+at::Tensor& FlagosWrapperPrivDivInplace(
+    at::Tensor& self, const at::Tensor& other) {
+  // ATen's complex div kernel writes its destination before it reads its
+  // sources, so the destination must not alias a source. `self` is a source,
+  // and the spelling `x.div_(y)` hands it the operand itself: measured on
+  // u180, the quotient of complex128 by a complex128 divisor came back as the
+  // unchanged operand, and complex64 came back as zeros. Divide on the host
+  // and copy the result back.
+  //
+  // The host round trip is the cpu_fallback shape, but the fallback writes to
+  // a host copy and never to `self` -- which is the defect this route exists
+  // to fix. `at::reciprocal` would sidestep the kernel, but FlagGems has no
+  // complex route for it, and computing the reciprocal in Triton for a
+  // 2-element divide is the worse trade.
+  at::Tensor source = self;
+  if (self.is_conj()) {
+    source = self.resolve_conj();
+  }
+  const auto cpu_self = source.to(c10::kCPU);
+  const auto cpu_other = other.to(c10::kCPU);
+  const auto cpu_out = at::div(cpu_self, cpu_other);
+  self.copy_(cpu_out);
+  return self;
+}
 #endif
 
 bool HasCompatibleShallowCopyType(
@@ -605,6 +663,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_conj", FlagosWrapperPrivConj);
     m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
     m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
+    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
+    // wrong for add (complex128) and raises for div (complex64) here, so these
+    // run ATen's kernels instead.
+    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
+    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
+    m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_BPU)
     // BPU registers no compute ops. The BPU's unit of execution is a whole
     // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
