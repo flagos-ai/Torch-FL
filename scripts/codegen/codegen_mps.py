@@ -447,6 +447,11 @@ OPS = {
     # round-trip: see T_WHERE for the three reference checks the node does not
     # make.
     "where.self": "where",
+    # GatedDeltaNet fills a causal decay with one scalar, then a Qwen3.5
+    # checkpoint also reaches the scalar-tensor spelling. Both are ternary
+    # selects on MPSGraph. See T_MASKED_FILL_SCALAR and T_MASKED_FILL_TENSOR.
+    "masked_fill.Scalar": "masked_fill_scalar",
+    "masked_fill.Tensor": "masked_fill_tensor",
     # `cat` is the variadic concatenation, and the node is
     # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
     # node would otherwise answer with a broadcasted wrong answer.
@@ -585,6 +590,9 @@ AT_OP = {
     # `where expected condition to be a boolean tensor` message for a condition
     # width this body declines.
     "where.self": "where",
+    # The round-trip owns the reference's mask, broadcast and value-cast errors.
+    "masked_fill.Scalar": "masked_fill",
+    "masked_fill.Tensor": "masked_fill",
     # `cat` is likewise its own kernel, and the round-trip is where the
     # reference's shape message (`Sizes of tensors must match except in dimension
     # {dim}`) and its empty-list error live.
@@ -704,6 +712,12 @@ SUPPORTS = {
     # the body widens by comparing to zero, and any other width is the
     # reference's own error. See T_WHERE.
     "where": "MpsSupportsWhereDtype",
+    # A bool mask is required, and the scalar must be exactly representable in
+    # the operand's dtype. See T_MASKED_FILL_SCALAR.
+    "masked_fill_scalar": "MpsSupportsMaskedFillDtype",
+    # The value-tensor cast contract is checked with the value itself in the
+    # body. See T_MASKED_FILL_TENSOR.
+    "masked_fill_tensor": "MpsSupportsMaskedFillTensorDtype",
     # `cat`'s node requires one datatype across the whole list, where the
     # reference promotes a mixed list. The body checks the list is uniform and
     # this gate checks the one width is carryable, so a promoted or uncarryable
@@ -839,6 +853,9 @@ CALLS = {
     # to a variadic selector -- so neither names a prefix here. The entries exist
     # because `render` reads `CALLS[op]` for every op in OPS.
     "where.self": "",
+    # Both masked_fill bodies build their own select.
+    "masked_fill.Scalar": "",
+    "masked_fill.Tensor": "",
     "cat": "",
     # Unused: the batch_norm body builds its own node
     # (`normalizationWithTensor:...`) and its own `save_invstd` subgraph, so it
@@ -1008,6 +1025,9 @@ KEY_PARTS = {
     # bool comparison, and MpsRunGraph folds every operand's dtype into the key,
     # so a bool and a uint8 condition already sit under different keys.
     "where.self": "",
+    # The scalar is baked into the graph. The tensor value is an operand.
+    "masked_fill.Scalar": ", value",
+    "masked_fill.Tensor": "",
     # The normalised axis, and the row a reviewer has to check against the body:
     # a (2, 3) list read at dim=0 and at dim=1 has one dtype and one set of
     # operand shapes and two different answers, and `concatTensors:dimension:`
@@ -3334,6 +3354,118 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# `masked_fill(self, mask, value)` selects a stored scalar where a stored bool
+# mask is true. MPSGraph's ternary select is the same node as `where.self`.
+#
+# A non-bool mask takes the round-trip so the reference reports its own error.
+# Both operand shapes are resolved with `infer_size`; a broadcast mismatch also
+# takes the round-trip. Ordinary inputs are expanded on the host before the
+# graph sees them, which keeps its result and `out` the same dense shape.
+#
+# `.out` and in-place spellings remain on the fallback.
+T_MASKED_FILL_SCALAR = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Tensor& mask,
+    const at::Scalar& value) {{
+  if (self.device() != mask.device() ||
+      !mps::{supports}(self.scalar_type(), mask.scalar_type(), value)) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor mask_c = mask.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self_c.sizes(), mask_c.sizes());
+  }} catch (const std::exception&) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value).to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  self_c = self_c.expand(out_shape).contiguous();
+  mask_c = mask_c.expand(out_shape).contiguous();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c, mask_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* constant =
+            mps::MpsConstant(graph, value, self_c.scalar_type());
+        if (constant == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:args[1]
+                            truePredicateTensor:constant
+                           falsePredicateTensor:args[0]
+                                           name:nil];
+      }});
+  if (!ran) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
+# The scalar-tensor spelling of the same select. The value must be a
+# zero-dimensional tensor on the result device and castable to `self`. That cast
+# follows the reference and is performed on the host, after which the one value
+# is expanded to the result shape.
+T_MASKED_FILL_TENSOR = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Tensor& mask,
+    const at::Tensor& value) {{
+  if (self.device() != mask.device() || self.device() != value.device() ||
+      value.dim() != 0 ||
+      !at::canCast(value.scalar_type(), self.scalar_type()) ||
+      !mps::{supports}(self.scalar_type(), mask.scalar_type())) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor mask_c = mask.contiguous();
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self_c.sizes(), mask_c.sizes());
+  }} catch (const std::exception&) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  self_c = self_c.expand(out_shape).contiguous();
+  mask_c = mask_c.expand(out_shape).contiguous();
+  at::Tensor value_c =
+      value.cpu().to(self_c.scalar_type()).expand(out_shape).contiguous();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c, mask_c, value_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph selectWithPredicateTensor:args[1]
+                            truePredicateTensor:args[2]
+                           falsePredicateTensor:args[0]
+                                           name:nil];
+      }});
+  if (!ran) {{
+    ::torch_fl_mps::DrainAll();
+    return at::{at_op}(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # `cat(tensors, dim)` is MPSGraph's variadic `concatTensors:dimension:name:`, and
 # the interesting part of this body is everything the node does *not* check.
 #
@@ -3626,6 +3758,8 @@ CATEGORIES = {
     "reciprocal": T_RECIPROCAL,
     "layer_norm": T_LAYER_NORM,
     "where": T_WHERE,
+    "masked_fill_scalar": T_MASKED_FILL_SCALAR,
+    "masked_fill_tensor": T_MASKED_FILL_TENSOR,
     "cat": T_CAT,
     "batch_norm": T_BATCH_NORM,
 }
@@ -3672,6 +3806,7 @@ FILE_HEADER = """\
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/gather.h>
 #include <ATen/ops/index_select.h>
+#include <ATen/ops/masked_fill.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
@@ -3692,6 +3827,7 @@ FILE_HEADER = """\
 #include <optional>
 #include <vector>
 #include "../mps_common.h"
+#include "runtime/accelerator/mps/mps_runtime.h"
 
 namespace at::native::flagos {
 // The helpers live in the nested at::native::flagos::mps namespace, so an

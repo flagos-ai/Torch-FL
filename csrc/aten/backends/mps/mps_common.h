@@ -123,6 +123,30 @@ bool MpsSupportsWhereDtype(
     at::ScalarType other_dtype,
     at::ScalarType condition_dtype);
 
+// Whether `masked_fill(self, mask, value)` computes exactly on the MPSGraph
+// path. The graph selects a constant where a stored bool mask is true, and has
+// no stored predicate tensor to perform a truthiness conversion when `mask` is
+// not a bool tensor.
+//
+// The mask must be bool. The reference raises for every other mask width, so a
+// non-bool mask takes the round-trip and gets that error. Mask validity is
+// resolved before the scalar so a bad mask reports its own error rather than
+// being declined for a reason involving `value`. The body checks broadcasting
+// against the reference's own `infer_size`, and MpsConstantExact checks the
+// scalar in the result's dtype.
+bool MpsSupportsMaskedFillDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType mask_dtype,
+    const at::Scalar& value);
+
+// The tensor-valued spelling has the same mask and operand contract. Its value
+// is checked separately by the body: it must be 0-dimensional, on the same
+// device, and castable to `self`. Its cast is checked in the body; this
+// predicate only gates the arithmetic width at which the graph selects.
+bool MpsSupportsMaskedFillTensorDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType mask_dtype);
+
 // Whether a `cat` over a list of `dtype` computes exactly on the MPSGraph path.
 // Both parameters are that one datatype: the concat node requires a single
 // datatype across the list where the reference promotes a mixed list, which the

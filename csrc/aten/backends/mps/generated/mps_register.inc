@@ -28,6 +28,8 @@
   m.impl("gather", WrapperGather);
   m.impl("index_select", WrapperIndexSelect);
   m.impl("log", WrapperLog);
+  m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
+  m.impl("masked_fill.Tensor", WrapperMaskedFillTensor);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);

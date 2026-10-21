@@ -39,6 +39,7 @@
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/gather.h>
 #include <ATen/ops/index_select.h>
+#include <ATen/ops/masked_fill.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/mul.h>
@@ -59,6 +60,7 @@
 #include <optional>
 #include <vector>
 #include "../mps_common.h"
+#include "runtime/accelerator/mps/mps_runtime.h"
 
 namespace at::native::flagos {
 // The helpers live in the nested at::native::flagos::mps namespace, so an
@@ -1787,6 +1789,101 @@ at::Tensor WhereSelfKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMps, WhereSelfKernelMps)
+
+at::Tensor MaskedFillScalarKernelMps(
+    const at::Tensor& self,
+    const at::Tensor& mask,
+    const at::Scalar& value) {
+  if (self.device() != mask.device() ||
+      !mps::MpsSupportsMaskedFillDtype(self.scalar_type(), mask.scalar_type(), value)) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor mask_c = mask.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), mask_c.sizes());
+  } catch (const std::exception&) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  self_c = self_c.expand(out_shape).contiguous();
+  mask_c = mask_c.expand(out_shape).contiguous();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("masked_fill.Scalar", value),
+      {self_c, mask_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* constant =
+            mps::MpsConstant(graph, value, self_c.scalar_type());
+        if (constant == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:args[1]
+                            truePredicateTensor:constant
+                           falsePredicateTensor:args[0]
+                                           name:nil];
+      });
+  if (!ran) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kMps, MaskedFillScalarKernelMps)
+
+at::Tensor MaskedFillTensorKernelMps(
+    const at::Tensor& self,
+    const at::Tensor& mask,
+    const at::Tensor& value) {
+  if (self.device() != mask.device() || self.device() != value.device() ||
+      value.dim() != 0 ||
+      !at::canCast(value.scalar_type(), self.scalar_type()) ||
+      !mps::MpsSupportsMaskedFillTensorDtype(self.scalar_type(), mask.scalar_type())) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor mask_c = mask.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), mask_c.sizes());
+  } catch (const std::exception&) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  self_c = self_c.expand(out_shape).contiguous();
+  mask_c = mask_c.expand(out_shape).contiguous();
+  at::Tensor value_c =
+      value.cpu().to(self_c.scalar_type()).expand(out_shape).contiguous();
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("masked_fill.Tensor"),
+      {self_c, mask_c, value_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph selectWithPredicateTensor:args[1]
+                            truePredicateTensor:args[2]
+                           falsePredicateTensor:args[0]
+                                           name:nil];
+      });
+  if (!ran) {
+    ::torch_fl_mps::DrainAll();
+    return at::masked_fill(self.cpu(), mask.cpu(), value.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillTensorFn, masked_fill_tensor_dispatcher, Backend::kMps, MaskedFillTensorKernelMps)
 
 at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
   // Materialise the list once: the reference and every check below read it more

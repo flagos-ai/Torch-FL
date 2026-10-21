@@ -417,7 +417,10 @@ bool CachingDeviceAllocator::release_cached_blocks(DeviceState& state) {
     std::vector<Block*> to_keep;
 
     for (auto* block : pool.blocks) {
-      if (!block->is_split()) {
+      // A block can be recorded after it has returned to the pool. Releasing it
+      // while that event is pending would free memory queued work still reads;
+      // process_events returns it to the pool once the event completes.
+      if (block->event_count == 0 && !block->is_split()) {
         to_release.push_back(block);
       } else {
         to_keep.push_back(block);
@@ -536,11 +539,6 @@ void CachingDeviceAllocator::record_stream(
 
   auto& state = get_device_state(block->device);
   std::lock_guard<std::recursive_mutex> lock(state.mutex);
-
-  // If the block is already on this stream, nothing to do.
-  if (block->stream == stream) {
-    return;
-  }
 
   // Record an event on the given stream. When the event completes,
   // we know the stream is done using this block.

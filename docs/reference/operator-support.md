@@ -199,6 +199,59 @@ record.
 
 ## Native Backend Route Changes
 
+### Apple Silicon M5: Qwen3.5 reaches native `masked_fill`, and queued MPSGraph work retains its memory (2026-10-21, physical M5)
+
+**Two `masked_fill` spellings gain a native MPSGraph route, and the shared
+block pool now retains blocks used by asynchronous work.** A real Qwen3.5 text
+classification checkpoint drove GatedDeltaNet through the `flagos` device 18
+times at each `masked_fill.Scalar`. That overload and
+`masked_fill.Tensor` now build MPSGraph's
+`selectWithPredicateTensor`: a scalar value becomes a graph constant, while a
+zero-dimensional Tensor value is checked and cast to `self` on the host before
+the graph selects between tensors. The bool mask and broadcast operands are
+expanded on the host to the reference result's shape. A non-bool mask, a
+broadcast mismatch or an unsupported dtype drains queued graph work and uses the
+host reference; the `.out` and in-place spellings remain there. The MPS conf
+changes from **35 `mps` / 2002 `none`** to **37 `mps` / 2000 `none`**, with no
+other overload's MPS route changed.
+
+**The error was in block reuse, not in the graph node.** MPSGraph schedules a
+graph on a Metal command queue and returns before that work must be complete.
+The shared allocator compared only stream pointers, so its `record_stream` did
+nothing when the allocator created a temporary on the same stream as the graph,
+and `empty_cache` could release any unsplit cached block whether or not an
+event was pending. A temporary freed by Python could therefore return to the
+pool and be overwritten by the next same-sized allocation while the graph still
+read it. `record_stream` now records an event on the supplied stream, and cache
+release retains every block with a nonzero event count. A block remains in
+`outstanding_events` until reuse, merging or release is safe. This changes a
+path shared by the platform allocators without delegated caching, so backends
+other than MPS are **not hardware-revalidated** here.
+
+**Measured model result.** The checkpoint's `bfloat16` weights and one
+five-token sequence were run with eager attention on CPU and forwarded to
+`mps:0` and `flagos:0` on a physical Apple M5. The model outputs two logits;
+their maximum absolute differences from CPU were `0.0068359375` for `mps:0`
+and `0.0048828125` for `flagos:0`. A dispatch trace recorded **3130 native /
+1492 fallback PrivateUse1 calls** for the `flagos` forward, including 18
+native `masked_fill.Scalar` calls. The major remaining fallback counts were
+325 `_unsafe_view`, 228 `transpose.int`, 217 `unsqueeze`, 187 `t`, 152
+`select.int`, 114 `slice.Tensor`, 90 `constant_pad_nd`, 36
+`linalg_solve_triangular`, 19 `cumsum` and 18 `convolution`. This establishes
+that the checkpoint's text classifier completes with the fallback CPU
+round-trips; it does not establish training, text generation, image inputs or
+fallback-free inference.
+
+**Measured test result.** The MPS `masked_fill` suite covers all routed dtypes,
+broadcasting, special values, mask and value errors, `.out` and in-place
+fallbacks, repeated same-sized inputs, `empty_cache` while a graph is queued,
+and both Tensor-value cast paths. The targeted MPS suites for `masked_fill`,
+`where`, binary operators and the runtime passed 248 cases in 11.52 s. The
+codegen `--check` reported 37 kernels up to date, and the conf generator
+reported all vendor confs up to date. This is an M5 measurement; MPS inference
+accuracy on other Apple Silicon generations and the other backend allocator
+paths are **not revalidated**.
+
 ### Enflame GCU S60: `rsub` gains a native kernel, and COMPILE_ARCH stops splitting the launch stream (2026-10-16)
 
 **Four failures, one route and one stream.** The BERT cohort on GCU ran **147 passed / 4 failed**
@@ -11171,6 +11224,7 @@ the recorded result is unchanged.
 
 | Date | Hardware | Cohort | Change | Evidence |
 |---|---|---|---|---|
+| 2026-10-21 | Apple M5 — **measured on a physical Apple Silicon host** (stock macOS arm64 torch 2.10, no FlagGems) | MPS native routes 35 -> 37, from a stored Qwen3.5/JeV text-classification checkpoint | Adds native `masked_fill.Scalar` and `masked_fill.Tensor` through MPSGraph `selectWithPredicateTensor`; fixes same-stream event recording and event-pending release in the shared caching allocator. No boxing. | Checkpoint forward in bfloat16: max absolute logit difference from CPU is 0.0068359375 on `mps:0` and 0.0048828125 on `flagos:0`; flagos trace has 18 native `masked_fill.Scalar` calls. Targeted MPS suites 248 passed in 11.52 s; generator checks clean. **Not revalidated:** other MPS hardware, training/generation, and other platform allocators. |
 | 2026-10-21 | Iluvatar BI-V150 — **measured on hardware** (`u180`, BI-V150, corex 4.5.0, CPU torch 2.10, FlagGems 5.4.0) | Iluvatar: `_conj` and `view_as_real` answered from ATen's metadata kernels in `csrc/aten/register.cc` (issue #570) | **Registers `at::native::_conj` and `at::native::view_as_real` as ordinary PrivateUse1 kernels for the `USE_ILUVATAR` arm.** Both are views: `cpu_fallback` refuses a view, so `none` raised for `_conj` and returned zero-filled storage for `view_as_real`. A `CatchAll` wrapper does not work either — registering the op makes it a PrivateUse1 op, and the unclaimed-key call goes to the boxed `cpu_fallback` from the CatchAll arm (measured: `_conj: backend not registered`), so the pair is registered at the PrivateUse1 key itself. Both are listed in `EXTRA_NATIVE["iluvatar"]` with `iluvatar` in `NATIVE_KERNEL_PREFERRED`, so the conf routes them to `iluvatar` rather than `none` (a registered op may not sit at `none`). Route delta `iluvatar` 6 → 8, `none` 1443 → 1441, `flaggems` 588 unchanged; every other platform's conf is byte-identical. | Measured on `u180`: `torch.conj` stays lazy (`is_conj()` True, storage is the operand), `resolve_conj` and `_conj_copy.out` return the conjugated values, `view_as_real` reads back exactly for f64/f32/complex64/complex128 sources, and `tests/integration/test_math_bits_contract.py` is 11 passed / 1 failed (was 7 errors plus the materialization failure). Generator `--check` clean (run twice); `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py tests/unit/test_vendor_conf_single_writer.py` → 103 passed. **Evidence gap:** the remaining failure (`test_consumer_op_sees_materialized_conjugate`) is inside FlagGems 5.4.0's complex128 `add` path — `complex128 + 0` returns zeros at n = 1, 2, 4 and 8 while `complex128 * 1` and every complex64 spelling are exact — not a route defect; other Iluvatar hosts **not revalidated**. |
 | 2026-10-20 | Iluvatar BI-V150 — **routes not re-measured on hardware this round** (dev host aborting device ops, see below) | Iluvatar: `mean`, `mean.dim`, `mm`, `mm.out`, `slice_backward`, `where.self_out` and the bmm family leave the FlagGems route (issue #570), a runtime tuner repair, and a conv-backward CPU crossing | **Gaps the ops whose FlagGems path fails the CI lane's Portable top-level contracts group, and repairs the mm tuner.** `mean`/`mean.dim` return wrong values through the generic kernel (no `_iluvatar` override exists). `mm`/`mm.out` reach the `_iluvatar` mm libtuner, whose perf model raises `dtype not supported` for float64; the gap was first applied to `mm.out` only, and the lane's next run failed the same two cases through `torch.matmul` — which lands on `mm` — so both leave. `torch_fl.flagos._patch_flaggems_mm_tune_space` additionally removes that perf model from the tuner's `prune_configs_by`, so FlagGems `mm` keeps a correct float64 path for callers that switch back. The lane's next run passed every Portable-group case and then failed its "vendor backend, main ops" group; two of those are route defects fixed here: `slice_backward`'s FlagGems kernel assumes a contiguous `grad_output` (wrong grads, 56 % of elements) and `where.self_out` hits the same out= contract defect the MUSA entry records. `convolution_backward_overrideable` was not a route question at all -- no Iluvatar backward exists and the boxed fallback can only re-raise the stub -- so `csrc/aten/register.cc` registers the shared CPU-crossing wrapper for it in the USE_ILUVATAR arm. The native `mm` kernel serves float16/float32 on ixblas and falls back to `at::mm` on CPU for anything else, as every other native kernel here does for a dtype it does not cover. **Second landing, same day:** the lane's 15 remaining "vendor backend, main ops" cases all failed in FlagGems' generic `bmm` (`tl.dot` → `K >= 16` compile error; FlagGems 5.4.0 does not pad K), so `bmm`, `bmm.out`, `bmm.dtype` and `bmm.dtype_out` join the gap set; `bmm` moves into the native ixblas `GemmEx` kernel, the other three reach `cpu_fallback`, and `addmm` — same `min_dot_size` limit, no native kernel — stays on FlagGems with the tuner repair extended to it. Final route delta `flaggems` 603 → **595**, `none` 1431 → **1437**, `iluvatar` 3 → **5**. | Conf SHA-256 `698696307cd58bf7d9cc3e13b326c68e576a916daec4cc5db8bd4dae9e97b9a9`. Generator `--check` clean; `iluvatar_flaggems_register.inc` at 595 `m.impl` lines over a 47-entry gap set; `tests/unit/test_gen_vendor_confs.py::test_iluvatar_570_gaps_leave_the_flaggems_path` pins all ten ops off the FlagGems route (and `bmm` on the native one). Hardware: `ub22` (`lvyufeng-torch-fl`, corex 4.5.0) aborts (exit 139) on `torch.ones(4, device="flagos:0")` — with the host's original conf as well as the new one — so the CI cases are verified by the lane's Portable group, **not revalidated on hardware here**; the lane's first run measured 294 passed / 2 failed on this `mean`/`mm.out` gap set, both float64 matmul cases through `mm`, which is what the `mm` gap fixes; the run after that passed the whole Portable group (236 passed) and left only the 15 bmm cases above. The bmm gap's own verification is the CI lane's next run. |
 | 2026-10-21 | Iluvatar BI-V150 — **the `addmm` family leaves the FlagGems route, measured on hardware** (`u180`, BI-V150, corex 4.5.0, CPU torch 2.10, FlagGems 5.4.0) | The `addmm` family: `addmm`, `addmm.out`, `addmm.dtype`, `addmm.dtype_out` and `addmm_` (issue #570, third landing) | Every small-shape `nn.Linear` is `addmm(x, W.t())` — a transposed-view operand — and the `_iluvatar` `mm`/`addmm`/`linear` kernels are wrong for it at small shapes: at M,K,N = (1,4,2), (4,4,8) and (8,8,8) `F.linear` disagrees with the CPU reference by 3.207 / 1.663 / 9.8 while the same call with a contiguous weight matches to 2.98e-08, and (32,64,16) and (64,128,32) are clean; a second sweep over (4,8,4), (4,16,4), (4,32,4), (4,64,4) and (8,32,8) is wrong in every row (max \|diff\| 7.03, 8.11, 2.48e+17, 23.85, 18.49). The defect is layout-dependent, not dtype-dependent, and `transpose.int` itself round-trips bit-exactly against the CPU. `addmm` therefore leaves the FlagGems route and moves into `iluvatar_register.inc` (codegen_iluvatar.py has carried an ixblas `GemmEx` addmm kernel all along; the FlagGems claim was what kept its `m.impl` out of the native `.inc`), failing over to the CPU implementation outside float16/float32 like `mm` and `bmm`; the out=/dtype= spellings have no native kernel and take `cpu_fallback`, which is the CI lane's own reference. `addmm` also leaves `ESCAPE_NATIVE["iluvatar"]` because it now has an `m.impl` of its own, and the now-unreachable `torch_fl.flagos._patch_flaggems_mm_tune_space` (the `_iluvatar` mm tuner's float64 `perf_model` rejection) and its `_MM_TUNE_SPACE_OPS` list are removed rather than left as dead code; the MUSA `_patch_flaggems_tune_space` is a different mechanism and stays. Route delta `flaggems` 595 → **590**, `none` 1437 → **1441**, `iluvatar` 5 → **6**. | Conf SHA-256 `d4c254663984a52002f989cb324cae29d88cc7cd688c6f139b723ea6113cb338`; generator `--check` clean on all three generators (run twice); `iluvatar_flaggems_register.inc` at 590 `m.impl` lines over a 52-entry gap set; `iluvatar_register.inc` claims 6 ops; `tests/unit/test_gen_vendor_confs.py::test_iluvatar_570_gaps_leave_the_flaggems_path` pins all fifteen ops off the FlagGems route and `addmm`/`bmm`/`mm` onto the native one; `pytest tests/unit/test_gen_vendor_confs.py tests/unit/test_conf_registration_consistency.py tests/unit/test_vendor_conf_single_writer.py` → 103 passed. Hardware: the probe above, run on `u180` inside `lvyufeng-torch-fl`; `ub22` still aborts (exit 139) on the first flagos op, so the second host was not revalidated. **Evidence gap:** the measurement is a probe script rather than a committed integration test, and the end-to-end verification is the CI lane's next run on this change. |

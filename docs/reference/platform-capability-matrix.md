@@ -25,7 +25,7 @@ when a platform gains or loses one.
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | — (FlagGems / boxing opt-in) | — (no dir) | 67 | no |
 | `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
-| `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: 35 native routes) | `mps` (stream/event only) | 2037 | yes |
+| `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: 37 native routes) | `mps` (stream/event only) | 2037 | yes |
 
 Column notes:
 
@@ -63,7 +63,7 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
 - **conf routes** is the number of `op = backend` entries in
   `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
   is the by-design BPU file and 67 the hand-written TsingMicro one. MPS reads
-  2037 routes: 35 reach its native kernels and the other 2002 resolve to `none`
+  2037 routes: 37 reach its native kernels and the other 2000 resolve to `none`
   (`cpu_fallback`).
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
   exist.
@@ -95,14 +95,15 @@ build opts into boxing.
   the `torch.compile(backend="bpu")` path.
 - **MPS** (Apple Silicon) has the device runtime floor — allocate, copy,
   synchronize and real Metal streams/events work — plus the MPSGraph operator
-  layer: 35 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
+  layer: 37 routes reach the PrivateUse1 `mps` slot — `abs`, `neg`,
   the elementwise `add`/`sub`/`mul`/`div` tensor and scalar forms (with aten's
   `alpha` and the float-only dtype gate `div.Tensor` needs to keep PyTorch's
   promotion), `reciprocal`, `silu` and `silu_backward`, `sigmoid`, `exp`, `log`,
   `rsqrt`, `sqrt`, `tanh`, `erf`, the `pow.Tensor_Scalar` form, the
   `sum`/`mean`/`_softmax` reductions, `native_layer_norm`, `native_batch_norm`,
   `convolution_overrideable`, `embedding`, `index_select`, `gather`, `take`,
-  `cat`, `where.self`, `mm` and `bmm` — and everything else reaches
+  `cat`, `where.self`, `masked_fill.Scalar`, `masked_fill.Tensor`, `mm` and
+  `bmm` — and everything else reaches
   `cpu_fallback`. The operator layer is MPSGraph-first
   with a hand-written MSL fallback (see
   `docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`). It is

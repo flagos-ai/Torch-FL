@@ -144,8 +144,10 @@ the `silu` and `embedding` categories and then the `div`/`div_scalar`/
 `reciprocal` ones, and the `layer_norm`, `where`, `cat` and `batch_norm`
 ones that the runtime-conformance traversal and the normalisation lanes
 named, and then the `exp`, `sigmoid`, `log`, `rsqrt`, `sqrt`, `tanh`, `erf`
-and `silu_backward` increments, for thirty-five in all.
-Those thirty-five are claimed on the `PrivateUse1` `mps` slot by
+and `silu_backward` increments. The Qwen3.5 GatedDeltaNet checkpoint run then
+identified the two out-of-place `masked_fill` spellings as MPSGraph selects,
+bringing the native set to thirty-seven.
+Those thirty-seven are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
@@ -154,7 +156,7 @@ conf cannot name an op the operator library does not register.
 `torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
-Results are correct on every op: the accelerated thirty-five are compared
+Results are correct on every op: the accelerated thirty-seven are compared
 against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_binary.py`, `test_mps_reduce.py`, `test_mps_gemm.py`,
 `test_mps_softmax.py`, `test_mps_pow.py`, `test_mps_conv.py`,
@@ -165,7 +167,8 @@ against the CPU reference in `tests/integration/ops/test_mps_unary.py`,
 `test_mps_embedding.py`, `test_mps_div.py`,
 `test_mps_index_select.py`, `test_mps_take.py`, `test_mps_gather.py`,
 `test_mps_layer_norm.py`, `test_mps_cat.py`, `test_mps_where.py` and
-`test_mps_batch_norm.py`, plus `test_mps_contiguous.py` for the native copy
+`test_mps_batch_norm.py`, and `test_mps_masked_fill.py` for both out-of-place
+`masked_fill` spellings, plus `test_mps_contiguous.py` for the native copy
 paths these operators use, and a case their
 kernels decline takes the CPU round-trip rather than a wrong answer. The
 `gemm` kernels serve `nn.Linear` by keeping `weight.t()` in the graph rather
@@ -207,11 +210,34 @@ measured difference from the reference is recorded in the kernel and pinned in
 the test: the graph flushes a subnormal *result* to zero (`1e-38 / 2` is `0`
 where the CPU says `5e-39`), which is the same boundary `mul` and `add` have had
 since stage 2 (design doc section 7).
+The `masked_fill.Scalar` and `masked_fill.Tensor` kernels both build
+MPSGraph's `selectWithPredicateTensor` node. The Scalar spelling supplies the
+fill as a graph constant; the Tensor spelling requires a zero-dimensional
+value, checks that it casts to `self`, and performs that cast on the host before
+the graph selects between two tensors. Both expand `self` and the stored bool
+mask on the host, so the result has the reference's broadcast shape. The
+`.out` and in-place spellings stay on the CPU round trip. The Tensor fallback
+had also returned zero for some false-mask elements; routing that spelling to
+MPSGraph fixes those values and is covered by the same test file.
+
+Queued MPSGraph work exposed a caching-allocator lifetime bug. A temporary that
+had just returned to the block pool could be handed to the next same-sized
+allocation while the earlier graph was still reading it. `record_stream` now
+records an event even when the block's creation stream is the current stream,
+and `empty_cache` keeps a pooled block while one of its events is pending. A
+real Qwen3.5 text classification checkpoint was then run in
+`bfloat16` on an M5 with eager attention, one five-token sequence and the same
+weights on CPU, `mps:0` and `flagos:0`. The logits had a maximum absolute
+difference from CPU of `0.0068359375` on `mps:0` and `0.0048828125` on
+`flagos:0`, both at the checkpoint's two `bfloat16` output values. The `flagos`
+forward dispatched 18 `masked_fill.Scalar` calls to its native kernel. This is a
+forward correctness check, not a training or generation result.
 A platform whose GPU
 never runs a kernel is a "Runtime only" row, not operator support;
-thirty-five ops
+thirty-seven ops
 is operator support for the unary, elementwise, reduction, matrix-product,
-softmax, convolution, activation, normalisation and table-read families and nothing more. Note that `softmax.int` is
+softmax, convolution, activation, normalisation, selection and table-read
+families and nothing more. Note that `softmax.int` is
 not among them and cannot be: it is `CompositeImplicitAutograd` on this PyTorch
 build, so the
 dispatcher decomposes it before any backend key is consulted. `_softmax` -- what

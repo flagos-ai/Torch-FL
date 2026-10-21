@@ -161,6 +161,26 @@ bool MpsSupportsWhereDtype(
   return condition_dtype == at::kBool || condition_dtype == at::kByte;
 }
 
+bool MpsSupportsMaskedFillDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType mask_dtype,
+    const at::Scalar& value) {
+  if (mask_dtype != at::kBool) {
+    return false;
+  }
+  return MpsSupportsUnaryDtype(self_dtype) && MpsConstantExact(value, self_dtype);
+}
+
+bool MpsSupportsMaskedFillTensorDtype(
+    at::ScalarType self_dtype,
+    at::ScalarType mask_dtype) {
+  // The value is cast to `self` before it reaches the graph. A widened or
+  // narrowed cast has the reference's range/tie rules rather than the graph's,
+  // so the body performs it on the host; this predicate checks only that the
+  // resulting arithmetic width is available.
+  return mask_dtype == at::kBool && MpsSupportsUnaryDtype(self_dtype);
+}
+
 bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype) {
   // Both arguments are the list's one datatype: the body checks the list is
   // uniform and this checks that width is carryable. `cat` promotes a mixed
