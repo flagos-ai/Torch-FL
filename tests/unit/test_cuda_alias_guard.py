@@ -147,6 +147,14 @@ _CHILD = textwrap.dedent(
         except Exception as exc:  # noqa: BLE001
             return f"{type(exc).__name__}: {exc}"
 
+    def describe(fn):
+        try:
+            return [type(v).__name__ for v in fn()]
+        except TypeError:
+            return [type(fn()).__name__]
+        except Exception as exc:  # noqa: BLE001
+            return f"{type(exc).__name__}: {exc}"
+
     state = {
         "autoload": os.environ.get("TORCH_DEVICE_BACKEND_AUTOLOAD"),
         "alias_env": os.environ.get("FLAGOS_ALIAS_CUDA"),
@@ -172,6 +180,15 @@ _CHILD = textwrap.dedent(
         ),
         "randn_cuda": probe(lambda: torch.randn(2, device="cuda")),
         "zeros_cuda": probe(lambda: torch.zeros(2).cuda()),
+        # torch's CUDA-shaped hardware probes, as the ecosystem asks them once
+        # is_available() says yes. The error text is kept whole because the one
+        # that matters names the call that failed.
+        "capability": describe(torch.cuda.get_device_capability),
+        "properties_major": describe(
+            lambda: torch.cuda.get_device_properties(
+                torch.cuda.current_device()
+            ).major
+        ),
     }
     print(json.dumps(state))
     """
@@ -227,6 +244,13 @@ def test_the_alias_installs_when_the_probe_was_redirected(alias_env):
     assert state["device_cuda_1"] == "flagos", state
     assert state["randn_cuda"] == "flagos", state
     assert state["zeros_cuda"] == "flagos", state
+    for key in ("capability", "properties_major"):
+        assert "Torch not compiled with CUDA enabled" not in str(state[key]), (
+            f"torch.cuda {key} still reaches torch's CUDA lazy init on this "
+            f"build: {state[key]}. Dynamo asks capability while tracing "
+            "(through torch.utils._triton.has_triton_experimental_host_tma), "
+            "so every compiled graph would fail here."
+        )
 
 
 def test_the_alias_stays_off_when_it_is_opted_out_of():

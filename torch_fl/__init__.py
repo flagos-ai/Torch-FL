@@ -1702,9 +1702,9 @@ def _alias_cuda_to_flagos():
     # probe, and gating on it is what sends code down the CPU path. Report the
     # flagos device count so that probe finds the accelerator that is there.
     #
-    # Left alone: is_bf16_supported, get_device_capability, and the rest of
-    # torch.cuda -- the vendor shim already owns those, and overriding them here
-    # would fight it.
+    # Left alone: is_bf16_supported and the rest of torch.cuda -- the vendor
+    # shim already owns those, and overriding them here would fight it.
+    # get_device_capability is the one exception; see below.
     torch.cuda.is_available = lambda: flagos.device_count() > 0
     torch.cuda.device_count = flagos.device_count
     torch.cuda.current_device = flagos.current_device
@@ -1715,6 +1715,27 @@ def _alias_cuda_to_flagos():
     # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
     # CUDA enabled". Point it at the flagos properties instead.
     torch.cuda.get_device_properties = flagos.get_device_properties
+
+    # `get_device_capability` has to go over too: the stock function calls
+    # `_lazy_init()` *before* it reads the `get_device_properties` above, so
+    # pointing that one at flagos does not save it. Dynamo asks it for every
+    # `nn.Module` attribute it wraps (`VariableBuilder._wrap` ->
+    # `torch.utils._triton.has_triton_experimental_host_tma`), which is to say
+    # for every `torch.compile` graph whose forward reads a module attribute:
+    # on Enflame GCU 15 of that lane's 35 compile cases die here with "Torch
+    # not compiled with CUDA enabled", from inside the trace, while the 20 that
+    # never take that path pass.
+    #
+    # A vendor that owns its own answer keeps it: `_phase_vendor_compat` runs
+    # before this and the cuda/MetaX/DCU compat shims install their capability
+    # function in the same phase only when their runtime probe says the vendor
+    # is present, so on those builds this line is the same value written
+    # afterwards by the shim or the shim's version of it.
+    def _flagos_device_capability(device=None):
+        properties = flagos.get_device_properties(device)
+        return properties.major, properties.minor
+
+    torch.cuda.get_device_capability = _flagos_device_capability
 
 
 def _register_flaggems_operators():
