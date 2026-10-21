@@ -76,7 +76,8 @@ a[0:2].sum().backward()
 
 Scope: the same implementation pattern appears in the kunlunxin, gcu300,
 gcu400, cambricon, and tsingmicro backends with no contiguity check either. This
-is a FlagGems-wide defect, not a 2080 Ti or CUDA one.
+is a FlagGems-wide defect, not a 2080 Ti or CUDA one. Reported upstream as
+flagos-ai/FlagGems#7396.
 
 Fix that took `test_narrow_dispatch.py` from failing to 17/17 passing:
 
