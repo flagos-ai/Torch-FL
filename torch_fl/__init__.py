@@ -1443,6 +1443,49 @@ def _patch_flaggems_codegen_config():
     patch_diffusers_qwenimage_rope()
 
 
+def _install_gcu_device_module_probes() -> None:
+    """Point torch.cuda's device queries at torch_fl on a GCU build.
+
+    The torch wheel here is CPU-only, but two things make torch believe a CUDA
+    device exists: torch_fl reports the flagos device through
+    `torch.cuda.is_available` (that is how FlagTree's enflame backend finds it)
+    and inductor imports `torch.cuda` to write kernels. The next CUDA call then
+    runs `_lazy_init()` and raises "Torch not compiled with CUDA enabled" -- from
+    dynamo's trace, from inductor's autotune cache, or from a Triton probe, each
+    of which the GCU lane has shown in turn.
+
+    `_alias_cuda_to_flagos` answers part of this, but only when it decides there
+    is no real CUDA, and on this lane it decides there is (a probe was flipped to
+    True by something else before the decision), so it stands down. This installs
+    the same answers unconditionally: the set a CUDA build's device module
+    provides, plus a no-op `_lazy_init` so nothing below can reach the CPU wheel's.
+
+    It deliberately leaves `torch.utils._triton` alone. Priming that module's
+    probes to False fixes the CUDA errors but hides the working FlagTree enflame
+    backend, and inductor then raises `TritonMissing` (`scheduler.create_backend`)
+    -- measured on this lane.
+
+    Called at the end of `_phase_claim`, after `torch._register_device_module
+    ("flagos", flagos)` and before `_phase_vendor_compat` and the first
+    `import flag_gems`, both of which can reach these queries. Remove once torch's
+    CUDA getters answer here without `_lazy_init` raising.
+    """
+    from torch_fl import flagos as _flagos
+
+    def device_capability(device=None):
+        properties = _flagos.get_device_properties(device)
+        return properties.major, properties.minor
+
+    torch.cuda.is_available = lambda: _flagos.device_count() > 0
+    torch.cuda.device_count = _flagos.device_count
+    torch.cuda.current_device = _flagos.current_device
+    torch.cuda.set_device = _flagos.set_device
+    torch.cuda.synchronize = _flagos.synchronize
+    torch.cuda.get_device_properties = _flagos.get_device_properties
+    torch.cuda.get_device_capability = device_capability
+    torch.cuda._lazy_init = lambda: None
+
+
 def _patch_cuda_device_context():
     """
     Monkey-patch torch.cuda.device to handle flagos devices.
@@ -2370,6 +2413,18 @@ def _phase_claim() -> None:
     torch.utils.rename_privateuse1_backend("flagos")
     torch._register_device_module("flagos", flagos)
     torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
+
+    if _build_accelerator() == "gcu":
+        _install_gcu_device_module_probes()
+        # `has_triton` has to answer for the FlagTree enflame backend before
+        # inductor's `create_backend` asks (it raises `TritonMissing` otherwise,
+        # measured on this lane). `_prime_has_triton` is the routine that makes
+        # it answer -- it borrows a table row and memoizes True -- and it is
+        # normally first reached from `register_flagos_device_interface`, which
+        # only runs when the compile backend starts, i.e. too late here.
+        from torch_fl.compile.device_interface import _prime_has_triton
+
+        _prime_has_triton()
 
 
 def _phase_vendor_compat() -> None:
