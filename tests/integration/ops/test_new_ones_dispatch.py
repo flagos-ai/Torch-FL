@@ -30,8 +30,7 @@ import pytest
 import subprocess
 import sys
 
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 
 DEVICE = "flagos:0"
@@ -60,7 +59,7 @@ def _run_child(code: str, extra_env: dict | None = None) -> subprocess.Completed
 
 def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.CompletedProcess:
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "x = torch.randn(4,4,device='flagos:0'); "
         "x.new_ones(3, 3)"
     )
@@ -154,7 +153,7 @@ class TestNewOnesGcuRoute:
     @pytest.mark.gcu
     def test_int64_route_is_gcu_and_not_flaggems(self):
         result = _run_child(
-            "import torch, torch_fl\n"
+            "from device_init import torch, torch_fl\n"
             "x = torch.zeros(2, 4, device='flagos:0', dtype=torch.int64)\n"
             "out = x.new_ones((2, 4))\n"
             "assert out.dtype == torch.int64, out.dtype\n"
@@ -170,7 +169,7 @@ class TestNewOnesGcuRoute:
     @pytest.mark.gcu
     def test_accepted_dtypes_skip_the_composite(self):
         result = _run_child(
-            "import torch, torch_fl\n"
+            "from device_init import torch, torch_fl\n"
             "x = torch.zeros(2, 4, device='flagos:0', dtype=torch.float32)\n"
             "for dtype in (torch.float32, torch.float16, torch.bfloat16):\n"
             "    out = x.new_ones((2, 4), dtype=dtype)\n"
@@ -187,7 +186,7 @@ class TestNewOnesGcuRoute:
     @pytest.mark.gcu
     def test_declined_dtypes_take_the_composite_on_the_device(self):
         result = _run_child(
-            "import torch, torch_fl\n"
+            "from device_init import torch, torch_fl\n"
             "x = torch.zeros(2, 4, device='flagos:0', dtype=torch.int64)\n"
             "for dtype in (torch.int64, torch.int32, torch.int8, torch.bool,\n"
             "              torch.float64):\n"
@@ -209,7 +208,7 @@ class TestNewOnesGcuRoute:
         # the process rather than propagating, so both shapes have to be kept
         # away from the vendor entry point.
         result = _run_child(
-            "import torch, torch_fl\n"
+            "from device_init import torch, torch_fl\n"
             "x = torch.zeros(2, 4, device='flagos:0', dtype=torch.int64)\n"
             "zero_rank = x.new_ones(())\n"
             "assert zero_rank.shape == (), zero_rank.shape\n"

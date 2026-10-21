@@ -148,6 +148,8 @@ jobs:
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      # On a transfer timeout, clear partial files so pip does not extract an
+      # incomplete wheel from the cache and fail later during an import.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
@@ -159,6 +161,13 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+
+      - name: Discard incomplete pip cache transfer
+        if: ${{ steps.pip-cache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
 
       # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
       # prebuild the native library in place only at `build`, and this job needs
@@ -197,6 +206,36 @@ jobs:
         if: needs.configuration.outputs.integration_test_dependencies != ''
         run: ${{ needs.configuration.outputs.integration_test_dependencies }}
 
+      # Shared source tests run on every hardware lane. Their optional
+      # dependencies are part of the common contract: a platform missing one
+      # would either skip shared cases or fail while importing a test file.
+      # Resolve the pins together so pip checks them before changing the
+      # environment. A newer image version can satisfy a dependency's exact
+      # pin without an upgrade, which leaves a mismatch to replace below.
+      # The script lists every runtime import explicitly and verifies the
+      # result in a fresh process. It replaces every mismatching pin.
+      - name: Install shared test dependencies
+        # The platform hook may export a PIP_CONSTRAINT that pip keeps through
+        # GITHUB_ENV. Its floors can leave image versions below exact cohort
+        # pins. Each command on its own line avoids a folded shell command.
+        run: |
+          unset PIP_CONSTRAINT
+          # The script prints its install commands. That operation log
+          # distinguishes the current install path from stale runner state.
+          python .github/scripts/verify_shared_dependencies.py \
+            --platform "${{ inputs.platform }}" \
+            --flag-gems "${{ needs.configuration.outputs.flag_gems_requirement }}"
+
+      - name: Verify shared test dependencies
+        env:
+          TORCH_FL_INSTALLED_PACKAGE_ROOT: ${{ needs.configuration.outputs.torch_fl_package_root }}
+        run: |
+          unset PIP_CONSTRAINT
+          python .github/scripts/verify_shared_dependencies.py \
+            --platform "${{ inputs.platform }}" \
+            --flag-gems "${{ needs.configuration.outputs.flag_gems_requirement }}" \
+            --check
+
       - name: Prepare wheel-only test workspace
         run: |
           TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-${{ inputs.platform }}.XXXXXX")
@@ -211,9 +250,62 @@ jobs:
           printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
           REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
+          VERDICT_FILE=$(mktemp "${RUNNER_TEMP:-/tmp}/torch-fl-verdict.XXXXXX")
+          printf '%s\n' '{"outcome":"failure"}' > "$VERDICT_FILE"
+          printf 'FLAGCICD_VERDICT_FILE=%s\n' "$VERDICT_FILE" >> "$GITHUB_ENV"
 
       - name: Install pytest JSON reporting
         run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+
+      - name: Materialize shared test inventories
+        env:
+          SHARED_TEST_INVENTORIES: ${{ needs.configuration.outputs.test_inventories }}
+          SHARED_TEST_INVENTORY_KINDS: ${{ needs.configuration.outputs.test_inventory_kinds }}
+        run: |
+          INVENTORY_ROOT="${RUNNER_TEMP:-/tmp}/torch-fl-inventories"
+          rm -rf "$INVENTORY_ROOT"
+          mkdir -p "$INVENTORY_ROOT"
+          python - "$INVENTORY_ROOT" "$SHARED_TEST_INVENTORIES" \
+            "$SHARED_TEST_INVENTORY_KINDS" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          inventories = json.loads(sys.argv[2])
+          # Only the kinds this plan runs are materialized: MPS forbids the
+          # FlagGems kernel set, so that group is absent from its plan.
+          required = set(sys.argv[3].split())
+          if (
+              not required
+              or not isinstance(inventories, dict)
+              or set(inventories) != required
+          ):
+              raise SystemExit(f"unexpected shared inventories: {inventories!r}")
+          for kind in sorted(required):
+              document = inventories[kind]
+              fields = {"cases", "aliases"}
+              if kind == "unit":
+                  fields.add("group")
+              if (
+                  not isinstance(document, dict)
+                  or set(document) != fields
+                  or not isinstance(document["cases"], list)
+                  or not document["cases"]
+                  or not isinstance(document["aliases"], dict)
+                  or (
+                      kind == "unit"
+                      and document["group"] != "unit_tests_per_file"
+                  )
+              ):
+                  raise SystemExit(f"the {kind} inventory is malformed")
+              cases = document["cases"]
+              path = root / kind / "google-test.json"
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+              print(f"{kind}: {len(cases)} cases -> {path}")
+          PY
+          printf 'INTEGRATION_INVENTORY_ROOT=%s\n' "$INVENTORY_ROOT" >> "$GITHUB_ENV"
 
       - name: Prepare Python line coverage
         id: coverage-setup
@@ -228,29 +320,70 @@ jobs:
         env:
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+          FLAGCICD_VERDICT_FILE: ${{ env.FLAGCICD_VERDICT_FILE }}
+          FLAGCICD_REPORT_DIR: ${{ env.FLAGCICD_REPORT_DIR }}
+          FLAGCICD_COVERAGE_DIR: ${{ env.FLAGCICD_COVERAGE_DIR }}
           METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
           TORCH_FL_MPS_HIGH_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_HIGH_WATERMARK_RATIO }}
           TORCH_FL_MPS_LOW_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_LOW_WATERMARK_RATIO }}
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
-          export PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+          # GITHUB_ENV values written by earlier steps are not necessarily
+          # visible to a container job's shell. Pass them explicitly and keep
+          # the native per-session pytest-json-report plugin unchanged.
+          command_environment=(
+            env
+            PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
+            PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+          )
+          for name in FLAGCICD_VERDICT_FILE FLAGCICD_REPORT_DIR FLAGCICD_COVERAGE_DIR; do
+            value="${!name}"
+            if [[ -n "$value" ]]; then
+              command_environment+=("$name=$value")
+            fi
+          done
           # Only the MPS hook supplies these. An empty value is invalid, and a
           # non-MPS platform must retain whatever its upstream image chose.
           if [[ -n "$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" ]]; then
             export PYTORCH_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
             export PYTORCH_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO"
           fi
-          python .github/scripts/run_integration_tests.py
+          # Group-to-kind bindings come from the composer's inventory plan,
+          # so the loader validated exactly what this runner will check.
+          INVENTORY_ARGUMENTS="${{ needs.configuration.outputs.integration_inventory_arguments }}"
+          read -r -a inventory_arguments <<< "$INVENTORY_ARGUMENTS"
+          "${command_environment[@]}" python .github/scripts/run_integration_tests.py \
+            "${inventory_arguments[@]}"
+
+      # A failed shell command still has to preserve the groups that ran
+      # before it. The runner owns this verdict, rather than deriving it from
+      # the final shell exit status or one pytest summary.
+      - name: Read integration test verdict
+        id: integration-verdict
+        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        run: |
+          python - "$FLAGCICD_VERDICT_FILE" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path, output = map(Path, sys.argv[1:])
+          verdict = json.loads(path.read_text(encoding="utf-8"))
+          outcome = verdict.get("outcome")
+          if outcome not in {"success", "failure"}:
+              raise SystemExit(f"invalid integration verdict in {path}: {verdict!r}")
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"outcome={outcome}\n")
+          PY
 
       # Preserve failed sessions too; reporting never changes the test verdict.
       - name: Merge pytest reports
         id: merge-report
-        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
           REPORT_PLATFORM: ${{ inputs.platform }}
-          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
         run: >-
@@ -263,7 +396,7 @@ jobs:
       # Resolve report paths inside the job container; github.workspace may
       # contain the runner host's checkout path instead of its container mount.
       - name: Retain pytest reports
-        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3
@@ -274,14 +407,24 @@ jobs:
             ${{ env.FLAGCICD_REPORT_DIR }}/
           if-no-files-found: warn
 
+      - name: Retain shared test inventories
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          name: inventories-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/torch-fl-inventories/
+          if-no-files-found: warn
+
       - name: Merge Python line coverage
         id: merge-coverage
-        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-verdict.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
           REPORT_PLATFORM: ${{ inputs.platform }}
-          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
         run: >-
@@ -292,7 +435,7 @@ jobs:
           --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
 
       - name: Retain Python coverage
-        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-verdict.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3

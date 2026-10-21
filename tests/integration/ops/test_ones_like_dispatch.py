@@ -28,8 +28,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 
 DEVICE = "flagos:0"
@@ -39,7 +38,7 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "a = torch.randn(4,4,device='flagos:0'); "
         "torch.ones_like(a)"
     )

@@ -30,8 +30,7 @@ everywhere.
 """
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 pytestmark = pytest.mark.math_bits
 

@@ -24,14 +24,14 @@ mul, cat and the comparisons compile -- so the conf has no way to state it. The
 exception lives at runtime instead: ``FlagGemsRejectsDtype`` in
 ``csrc/aten/common.cc``, consulted by ``Dispatcher::ResolveFn``.
 
-The same escape also covers the gaps that are neither per-op nor per-dtype but
-the intersection of the two: ``neg`` over bool. ``flag_gems/ops/neg.py`` is an
-unguarded pointwise ``-x``, so a bool operand is code-generated like any other
-element type and lowers to ``hivm.hir.vadd`` over ``i1``, which BiShengIR
-refuses to verify -- while FlagGems serves a bool operand fine for add, sub,
-abs and the comparisons, and ``neg`` fine for every other dtype. That case is
-``FlagGemsRejectsOpDtype``, consulted by the same ``ResolveFn``; the reference
-behaviour it restores is the ``RuntimeError`` the CPU raises.
+The ``TestFlagGemsOpDtypeFallback`` cases cover the separate, shared bool
+``neg`` contract. ``flag_gems/ops/neg.py`` is an unguarded pointwise ``-x``, so
+a bool operand is code-generated like any other element type and lowers to
+``hivm.hir.vadd`` over ``i1``, which BiShengIR refuses to verify, while FlagGems
+serves a bool operand for add, sub, abs and the comparisons. The generated
+vendor kernels do not provide the reference error on every platform either.
+The Dispatcher therefore rejects bool ``neg`` and ``neg.out`` before selecting
+any accelerated route.
 
 On GCU the dtype-wide predicate carries int64 instead, for a version-skew
 reason rather than a hardware one: flag_gems 5.3.2 has its gcu300 pointwise
@@ -77,7 +77,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 
 from backend_conf import routed_backend
 
@@ -90,8 +90,7 @@ DEVICE = "flagos:0"
 # good -- the route is re-derived from the arguments on every call.
 _PROBE = r"""
 import sys
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 for dtype in (torch.float32, torch.float64):
     print(f"### {dtype}", file=sys.stderr, flush=True)
@@ -114,24 +113,100 @@ _FALLBACK_OPS = ("add.Tensor", "reciprocal", "sum", "ones", "zeros_like")
 # control: the fallback must not disturb a route the conf made itself.
 _VENDOR_OPS = ("mul.Tensor",)
 
-# The (op, dtype) probe. One process for all three dtypes, which also re-proves
-# that the per-op backend cache (Dispatcher::cached_backend_) does not pin `neg`
-# to whatever the first call resolved to. The bool call is expected to raise, so
-# the probe catches it and reports the outcome rather than the process failing.
+# The bool operand probe. One process for all three dtypes, which also
+# re-proves that the per-op backend cache does not pin an op to the first call's
+# route. Every bool object-unary spelling is expected to raise, so the probe
+# catches each outcome. Full reductions report their dtype and value because
+# bool input is valid and has an int64 default result.
 _OP_DTYPE_PROBE = r"""
 import sys
-import torch
-import torch_fl
+from device_init import torch, torch_fl
+
+for op in ("sum", "prod"):
+    print(f"### cpu {op}.out", file=sys.stderr, flush=True)
+    try:
+        torch.ops.aten.__getattr__(op).out(
+            torch.tensor([True, False]),
+            None,
+            out=torch.empty((), dtype=torch.bool),
+        )
+        outcome = "ok"
+    except Exception as exc:
+        outcome = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+    print(f"### outcome {op}.out {outcome}", file=sys.stderr, flush=True)
+    print(f"### cpu {op}.dim_out_bool", file=sys.stderr, flush=True)
+    try:
+        out = getattr(torch, op)(
+            torch.tensor([True, False]),
+            0,
+            out=torch.empty((), dtype=torch.bool),
+        )
+        outcome = f"ok {out.dtype} {out.tolist()}"
+    except Exception as exc:
+        outcome = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+    print(f"### outcome {op}.dim_out_bool {outcome}", file=sys.stderr, flush=True)
 
 for dtype in (torch.float32, torch.int64, torch.bool):
     print(f"### {dtype}", file=sys.stderr, flush=True)
     a = torch.ones(8, device="flagos", dtype=dtype)
-    try:
-        torch.neg(a)
-        print("### outcome ok", file=sys.stderr, flush=True)
-    except RuntimeError as exc:
-        first = str(exc).splitlines()[0]
-        print(f"### outcome raised {first}", file=sys.stderr, flush=True)
+    calls = {
+        "neg": lambda: torch.neg(a),
+        "abs": lambda: torch.abs(a),
+        "sum": lambda: torch.sum(a),
+        "prod": lambda: torch.prod(a),
+    }
+    if dtype is torch.bool:
+        calls["neg.out"] = lambda: torch.neg(a, out=torch.empty_like(a, device="cpu"))
+        calls["neg_"] = lambda: torch.neg_(a.clone())
+        calls["abs.out"] = lambda: torch.abs(a, out=torch.empty_like(a))
+        calls["abs_"] = lambda: torch.abs_(a.clone())
+        calls["sum.dim_out_int"] = lambda: torch.sum(
+            a, -1, out=torch.empty(1, device="flagos", dtype=torch.int64)
+        )
+        calls["prod.int_out_int"] = lambda: torch.ops.aten.prod.int_out(
+            a, -1, False, None, out=torch.empty(1, device="flagos")
+        )
+        calls["sum.dtype_bool"] = lambda: torch.sum(a, dtype=torch.bool)
+        calls["prod.dtype_bool"] = lambda: torch.prod(a, dtype=torch.bool)
+        calls["sum.dim_dtype_bool"] = lambda: torch.sum(a, -1, dtype=torch.bool)
+        calls["prod.dim_dtype_bool"] = lambda: torch.prod(a, -1, dtype=torch.bool)
+        calls["sum.dim_out_bool"] = lambda: torch.sum(
+            a, -1, out=torch.empty(1, device="flagos", dtype=torch.bool)
+        )
+        calls["prod.dim_out_bool"] = lambda: torch.prod(
+            a, -1, out=torch.empty(1, device="flagos", dtype=torch.bool)
+        )
+        calls["sum.out"] = lambda: torch.ops.aten.sum.out(
+            a, None, out=torch.empty((), device="flagos", dtype=torch.int64)
+        )
+        calls["prod.out"] = lambda: torch.ops.aten.prod.out(
+            a, None, out=torch.empty((), device="flagos", dtype=torch.int64)
+        )
+        calls["logical_not"] = lambda: torch.logical_not(a)
+    for op, call in calls.items():
+        try:
+            result = call()
+            outcome = (
+                f"ok {result.dtype} {result.cpu().tolist()}"
+                if op
+                in {
+                    "sum",
+                    "prod",
+                    "sum.dim_out_int",
+                    "prod.int_out_int",
+                    "sum.dtype_bool",
+                    "prod.dtype_bool",
+                    "sum.dim_dtype_bool",
+                    "prod.dim_dtype_bool",
+                    "sum.out",
+                    "prod.out",
+                    "logical_not",
+                }
+                else "ok"
+            )
+        except Exception as exc:
+            outcome = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+        print(f"### outcome {op} {outcome}", file=sys.stderr, flush=True)
 """
 
 
@@ -147,8 +222,7 @@ for dtype in (torch.float32, torch.int64, torch.bool):
 # the outcome, is what this file asserts about it.
 _GCU_PROBE = r"""
 import sys
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 CALLS = {
     "clamp": lambda a, b: a.clamp(0, 4),
@@ -202,14 +276,15 @@ def _routes_by_dtype(stderr: str) -> dict[str, dict[str, str]]:
     return sections
 
 
-def _outcomes_by_dtype(stderr: str) -> dict[str, str]:
-    """``{dtype: outcome}`` from the (op, dtype) probe's ``###`` markers."""
-    outcomes: dict[str, str] = {}
+def _outcomes_by_dtype(stderr: str) -> dict[str, dict[str, str]]:
+    """``{dtype: {op: outcome}}`` from the bool-neg probe's markers."""
+    outcomes: dict[str, dict[str, str]] = {}
     current = None
     for line in stderr.splitlines():
         if line.startswith("### outcome "):
+            op, _, outcome = line[len("### outcome ") :].partition(" ")
             if current is not None:
-                outcomes[current] = line[len("### outcome ") :].strip()
+                outcomes.setdefault(current, {})[op] = outcome
         elif line.startswith("### "):
             current = line[4:].strip()
     return outcomes
@@ -295,56 +370,81 @@ class TestFlagGemsDtypeFallback:
 
 
 class TestFlagGemsOpDtypeFallback:
-    """bool `neg` leaves the FlagGems route; the other dtypes keep it.
+    """bool object unaries fail and bool reductions follow the reference.
 
-    Neither half decides this on its own, which is why it is not an entry in
-    the conf and not the dtype-wide predicate above: bool is a dtype FlagGems
-    serves for other ops, and `neg` is an op FlagGems serves for other dtypes.
-    The gap is the intersection, and it is stated as such in
-    ``FlagGemsRejectsOpDtype``.
+    Boxing can copy a bool operand before ATen checks it. These cases run on
+    every platform because both the FlagGems and vendor kernels leave these
+    operations for ATen to handle.
     """
 
-    @pytest.mark.ascend
-    def test_bool_neg_lands_on_the_vendor_kernel(self):
+    @pytest.mark.parametrize("op", ("neg", "neg.out", "neg_"))
+    def test_bool_neg_raises_the_reference_error(self, op):
         result = _run({}, code=_OP_DTYPE_PROBE)
         assert result.returncode == 0, f"probe failed:\n{result.stderr}"
-        routes = _routes_by_dtype(result.stderr)
-        assert routes["torch.bool"]["neg"] == "ascend", result.stderr
+        outcome = _outcomes_by_dtype(result.stderr)["torch.bool"][op]
+        assert outcome.startswith("RuntimeError: Negation, the `-` operator"), outcome
+        assert "FLAGOS_FORCE_BACKEND" not in outcome, outcome
+        assert "implementation" not in outcome, outcome
 
-    @pytest.mark.ascend
-    def test_bool_neg_raises_the_reference_error(self):
-        """The point of the escape: reach the CPU contract, not just a failure.
-
-        The FlagGems route fails inside the compiler, which is neither the
-        reference behaviour nor a message a caller can act on. Routed to the
-        native kernel the call reaches ``at::neg`` on the host copy, which is
-        where ``RuntimeError: Negation, the `-` operator, on a bool tensor is
-        not supported.`` is raised -- the contract
-        ``tests/integration/test_dtype_coverage.py`` pins.
-        """
+    @pytest.mark.parametrize("op", ("abs", "abs.out", "abs_"))
+    def test_bool_abs_raises_the_reference_error(self, op):
         result = _run({}, code=_OP_DTYPE_PROBE)
         assert result.returncode == 0, f"probe failed:\n{result.stderr}"
-        outcome = _outcomes_by_dtype(result.stderr)["torch.bool"]
-        assert outcome.startswith("raised"), outcome
-        assert "bool" in outcome, outcome
+        outcome = _outcomes_by_dtype(result.stderr)["torch.bool"][op]
+        assert outcome.startswith("NotImplementedError:"), outcome
+        assert "abs_cpu" in outcome and "Bool" in outcome, outcome
 
-    @pytest.mark.ascend
+    def test_bool_reductions_match_the_reference_output_contract(self):
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        outcomes = _outcomes_by_dtype(result.stderr)["torch.bool"]
+        assert outcomes["sum"] == "ok torch.int64 8", outcomes
+        assert outcomes["prod"] == "ok torch.int64 1", outcomes
+        assert outcomes["sum.out"] == "ok torch.int64 8", outcomes
+        assert outcomes["prod.out"] == "ok torch.int64 1", outcomes
+        assert outcomes["sum.dim_out_int"] == "ok torch.int64 [8]", outcomes
+        assert outcomes["prod.int_out_int"] == "ok torch.int64 [1]", outcomes
+        for op in (
+            "sum.dtype_bool",
+            "prod.dtype_bool",
+            "sum.dim_dtype_bool",
+            "prod.dim_dtype_bool",
+        ):
+            expected = "[True]" if "dim" in op else "True"
+            assert outcomes[op] == f"ok torch.bool {expected}", outcomes
+        assert (
+            outcomes["logical_not"]
+            == "ok torch.bool [False, False, False, False, False, False, False, False]"
+        ), outcomes
+
+    @pytest.mark.parametrize("op", ("sum.out", "prod.out"))
+    def test_bool_full_reduction_rejects_a_bool_out(self, op):
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        expected = _outcomes_by_dtype(result.stderr)[f"{op} cpu"][op]
+        outcome = _outcomes_by_dtype(result.stderr)["torch.bool"][op]
+        assert outcome == expected, f"{outcome} != {expected}"
+
+    @pytest.mark.parametrize("op", ("sum", "prod"))
+    def test_bool_dimension_reduction_rejects_an_int_output(self, op):
+        result = _run({}, code=_OP_DTYPE_PROBE)
+        assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+        outcomes = _outcomes_by_dtype(result.stderr)
+        outcome = outcomes["torch.bool"][f"{op}.dim_out_bool"]
+        expected = outcomes[f"cpu {op}.dim_out_bool"][f"{op}.dim_out_bool"]
+        assert outcome.startswith("RuntimeError:"), outcome
+        assert "cast from torch.int64" in outcome, outcome
+        assert outcome == expected, outcome
+
     def test_other_dtypes_keep_the_configured_route(self):
-        """The escape is per (op, dtype), so it does not leak into `neg` itself.
-
-        float32 and int64 are the two halves the conf entry could not have
-        separated: a per-op entry for `neg` would have moved these off FlagGems
-        as well (and onto the Ascend template's CPU round-trip for the
-        integral case), while the bool call above is the only one that needed
-        moving.
-        """
+        """A dtype check on one op does not change another dtype's route."""
         result = _run({}, code=_OP_DTYPE_PROBE)
         assert result.returncode == 0, f"probe failed:\n{result.stderr}"
         routes = _routes_by_dtype(result.stderr)
         outcomes = _outcomes_by_dtype(result.stderr)
         for dtype in ("torch.float32", "torch.int64"):
             assert routes[dtype]["neg"] == routed_backend("neg"), routes[dtype]
-            assert outcomes[dtype] == "ok", outcomes[dtype]
+            assert outcomes[dtype]["neg"] == "ok", outcomes[dtype]
 
 
 class TestFloat64ResultsAreCorrect:
@@ -353,7 +453,7 @@ class TestFloat64ResultsAreCorrect:
     @pytest.mark.ascend
     def test_float64_arithmetic_matches_cpu(self):
         code = (
-            "import torch, torch_fl; "
+            "from device_init import torch, torch_fl; "
             "a = torch.tensor([1.0, 2.0, 4.0], dtype=torch.float64).to('flagos'); "
             "b = torch.tensor([0.5, 0.25, 0.125], dtype=torch.float64).to('flagos'); "
             "print((a + b).cpu().tolist()); "
@@ -384,7 +484,7 @@ class TestFloat64ResultsAreCorrect:
     @pytest.mark.ascend
     def test_float64_factories_preserve_dtype_and_value(self):
         code = (
-            "import torch, torch_fl; "
+            "from device_init import torch, torch_fl; "
             "a = torch.ones(4, device='flagos', dtype=torch.float64); "
             "b = torch.zeros_like(a); "
             "print(a.dtype, b.dtype, float(a.sum().cpu()), float(b.sum().cpu()))"
@@ -410,7 +510,7 @@ class TestFloat64ResultsAreCorrect:
         checks.
         """
         code = (
-            "import torch, torch_fl; "
+            "from device_init import torch, torch_fl; "
             "a = torch.tensor([1.0, 2.0], dtype=torch.float32).to('flagos'); "
             "b = torch.tensor([0.5, 0.25], dtype=torch.float64).to('flagos'); "
             "out = torch.add(a, b); print(out.dtype, out.cpu().tolist())"

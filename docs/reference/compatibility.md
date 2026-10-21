@@ -177,7 +177,7 @@ recommends the FlagCX path (see
 204-208); the native HCCL fallback and the `flagos→npu` zero-copy view are architectural
 routing, not on-hardware-verified collectives (same file, lines 67-75).
 
-The FlagGems route runs on FlagTree (`0.6.2a1+ascend3.5`, Triton 3.5), and the
+The FlagGems route runs on FlagTree (`0.7.1a1+ascend3.5`, Triton 3.5), and the
 route table is generated FlagGems-first with ACLNN as the fallback for everything
 FlagGems cannot compile or run. Because a conf cannot express a per-dtype
 exception, float64 calls that the conf routes to FlagGems are redirected to

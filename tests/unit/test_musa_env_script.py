@@ -321,7 +321,7 @@ def test_flaggems_rejects_an_unusable_installed_wheel(tmp_path):
 
 
 @pytest.mark.parametrize("qwen", ["0", "1"])
-def test_integration_keeps_bert_and_gates_tokenizer_deps(qwen):
+def test_integration_leaves_the_test_cohort_to_the_pipeline(qwen):
     # Execute the dependency block with an offline recording pip helper.
     start = SCRIPT.index('if [[ "$CI_STAGE" == "integration" ]]; then')
     end = SCRIPT.index("\nexport VIRTUAL_ENV=", start)
@@ -332,10 +332,16 @@ def test_integration_keeps_bert_and_gates_tokenizer_deps(qwen):
         TORCH_FL_INSTALL_QWEN_DEPS=qwen,
     )
     assert result.returncode == 0, result.stderr
-    assert "transformers>=4.51,<5" in result.stdout
-    assert "PyYAML==6.0.1" in result.stdout
-    for package in ("sentencepiece", "tiktoken", "protobuf"):
-        assert (package in result.stdout) == (qwen == "1")
+    assert "pytest" in result.stdout
+    assert "numpy<2" in result.stdout
+    for package in (
+        "transformers",
+        "PyYAML",
+        "sentencepiece",
+        "tiktoken",
+        "protobuf",
+    ):
+        assert package not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -502,7 +508,7 @@ def test_isolated_setup_reconciles_existing_and_fresh_environments(
     assert "setuptools>=64" in result.stdout
     assert "editable_wheel available" in result.stdout
     assert f"MUSA pip cache: {tmp_path / 'job/pip-cache/musa'}" in result.stdout
-    assert ("transformers>=4.51,<5" in result.stdout) == (stage == "integration")
+    assert ("numpy<2" in result.stdout) == (stage == "integration")
     assert ("CPU_TORCH_INSTALL" in result.stdout) == (
         scenario in ("fresh", "invalid_local", "stale_prebuilt", "noncpu_prebuilt")
     )

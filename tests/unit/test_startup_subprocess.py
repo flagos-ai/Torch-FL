@@ -29,6 +29,7 @@ def _run(code, profile, *, autoload=None):
     env["FLAGOS_STARTUP_PROFILE"] = profile
     if autoload is not None:
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = autoload
+    env["PYTHONPATH"] = _selected_package_environment()
     result = subprocess.run(
         [sys.executable, "-c", code],
         env=env,
@@ -38,6 +39,25 @@ def _run(code, profile, *, autoload=None):
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _selected_package_environment():
+    """Keep inherited package entries while removing pytest's source override.
+
+    ``conftest.py`` puts the checkout first so these files can import from it,
+    but a fresh interpreter cannot load an extension built only in the wheel
+    from that checkout. Subprocesses inherit the installed parent supplied by
+    the test runner; that entry must stay ahead of the checkout for the same
+    reason as the parent process.
+    """
+    entries = [
+        entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry
+    ]
+    checkout = str(Path(__file__).resolve().parents[2])
+    checkout_path = Path(checkout)
+    return os.pathsep.join(
+        entry for entry in entries if Path(entry).resolve() != checkout_path
+    )
 
 
 def _require_torch():
@@ -192,6 +212,7 @@ def test_mps_minimal_add_runs_clean():
     """
     _require_mps()
     env = os.environ.copy()
+    env["PYTHONPATH"] = _selected_package_environment()
     result = subprocess.run(
         [
             sys.executable,
@@ -216,6 +237,8 @@ def test_mps_minimal_add_runs_clean():
 def test_mps_allocator_shutdown_survives_persistent_test_tensors():
     """Leaving test tensors alive must not turn a clean suite into exit 134."""
     _require_mps()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _selected_package_environment()
     result = subprocess.run(
         [
             sys.executable,
@@ -227,7 +250,7 @@ def test_mps_allocator_shutdown_survives_persistent_test_tensors():
             "assert torch.equal(b.cpu(), a.reshape(3, 4).cpu())\n"
             "raise SystemExit(0)\n",
         ],
-        env=os.environ.copy(),
+        env=env,
         capture_output=True,
         text=True,
         timeout=300,

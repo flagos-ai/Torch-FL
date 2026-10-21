@@ -29,8 +29,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 
 DEVICE = "flagos:0"
@@ -42,7 +41,7 @@ def _run_acos_subprocess(
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "a = torch.rand(4,4,device='flagos:0') * 2 - 1; "
         "torch.acos(a)"
     )

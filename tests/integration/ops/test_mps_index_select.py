@@ -54,8 +54,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -496,7 +495,7 @@ class TestIndexSelectDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(32, 8, device='flagos:0'); "
                 "i = torch.randint(0, 32, (4,), device='flagos:0'); "
                 "torch.index_select(t, 0, i); "
@@ -523,7 +522,7 @@ class TestIndexSelectDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(8, 4, device='flagos:0'); "
                 "i = torch.randint(0, 4, (2,), device='flagos:0'); "
                 "o = torch.index_select(t, 1, i); "
@@ -564,7 +563,7 @@ class TestIndexSelectCost:
         reads = 10
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 table = torch.randn(151936, 1024, device='flagos:0')
 index = torch.randint(0, 151936, (512,), device='flagos:0')
 torch.index_select(table, 0, index)

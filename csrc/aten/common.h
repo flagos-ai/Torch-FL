@@ -192,17 +192,12 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype);
 // that op rejects outright, or with one the platform's triton dot intrinsic
 // will not accept. Two shapes are in the table today: `neg` over bool, and
 // `mm` / `mm.out` over int64/int32/int16/uint8 -- integral matmul, where the
-// op must stay on FlagGems for float (see common.cc for both measurements).
+// op must stay on FlagGems for float. The first is shared by every platform;
+// the second is an Ascend measurement (see common.cc for both).
 //
 // Both of the other mechanisms were measured against this gap and neither can
-// state it. A conf entry routes a whole op: `neg` over
-// fp16/bf16/fp32/fp64/int8/int16/int32/int64/uint8 is correct on the FlagGems
-// route, so a NATIVE_TRITON_GAPS entry would move all of them off it and onto
-// the Ascend template's CPU round-trip -- which IsUnaryDtypeSupported sends
-// every integral through, costing 7-30x on integral `neg` to gain 10x on
-// fp32. The dtype-wide predicate above cannot state it either: bool is not a
-// dtype FlagGems fails for in general (add/sub/abs/... all take a bool operand
-// on this build), so a dtype-wide rule would take those down with it.
+// state it. A conf entry routes a whole op, and the dtype-wide predicate above
+// cannot distinguish matmul from the other integral operators.
 //
 // `op_name` is the routed name -- the conf key, so it carries a ".out" suffix
 // only for the calls dispatched under one -- not the ATen schema name.

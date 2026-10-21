@@ -30,9 +30,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend_or_none
 
@@ -46,7 +45,7 @@ def _run_subprocess_forward(
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch, torch.nn.functional as F; "
+        "from device_init import torch, torch_fl; "
         "inp = torch.randn(4,10,device='flagos:0').log_softmax(dim=1); "
         "target = torch.tensor([0,3,5,9], device='flagos:0'); "
         "F.nll_loss(inp, target)"
@@ -65,7 +64,7 @@ def _run_subprocess_backward(
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch, torch.nn.functional as F; "
+        "from device_init import torch, torch_fl; "
         "inp = torch.randn(4,10,device='flagos:0',requires_grad=True).log_softmax(dim=1); "
         "target = torch.tensor([0,3,5,9], device='flagos:0'); "
         "loss = F.nll_loss(inp, target); "

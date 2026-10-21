@@ -242,32 +242,13 @@ export PIP_DEFAULT_TIMEOUT=120
 "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" cmake patchelf build wheel
 install_cpu_torch
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # sentencepiece + tiktoken: the Qwen3 inference/training tests load the model
-  # tokenizer via AutoTokenizer; the bundled model dir has no tokenizer.json, so
-  # transformers converts the slow tokenizer to a fast one, which needs one of
-  # these two. protobuf is what the sentencepiece branch of that conversion uses
-  # to parse the spm model proto. The isolated venv cannot see the vendor image's
-  # copies. These belong here rather than in a workflow step: pip must be given
-  # an explicit --index-url to bypass the image pip.conf internal mirror (503).
-  # transformers is pinned to [4.51, 5): the lower bound is where Qwen3
-  # model_type support landed (older releases raise "Unrecognized model" on
-  # AutoConfig.from_pretrained); the upper bound excludes 5.x, whose
-  # TokenizersBackend rewrite has an unresolved upstream bug where the Qwen3
-  # slow-to-fast tokenizer conversion still raises "Couldn't instantiate the
-  # backend tokenizer" even with sentencepiece/tiktoken installed (see
-  # https://huggingface.co/Qwen/Qwen3-8B/discussions/33). An unpinned install
-  # picks whichever of those two failure modes is currently latest on PyPI, so
-  # both ends must stay pinned. Revisit the upper bound once upstream ships a
-  # fix for the 5.x regression.
+  # The pipeline installs the shared test cohort after this hook. Keep pytest
+  # here so the hook can validate its own interpreter before the wheel build.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
-    pytest "transformers>=4.51,<5" sentencepiece tiktoken protobuf
-  # FlagGems' pure Python deps. The CI image lacks them (sqlalchemy/PyYAML/
-  # packaging -- not in the image site-packages, verified by import failure).
-  # numpy ships with the stock +cpu torch wheel installed above, so it is not
-  # re-pinned here to avoid a numpy/torch version clash. Versions follow
-  # FlagGems' pyproject.toml dependencies.
+    pytest
+  # FlagGems' runtime dependency, not installed by the shared test cohort.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
-    "packaging>=26.0" "PyYAML==6.0.1" "sqlalchemy==2.0.48"
+    "sqlalchemy==2.0.48"
 fi
 
 # Keep the vendor FlagCX runtime available without copying the vendor torch
@@ -310,7 +291,7 @@ done
 # replacing the FlagTree build installed one line earlier, and it would also
 # re-resolve `torch`, replacing the pinned CPU wheel this whole setup depends on
 # (the PPU core libs are selected through a private facade at import time).
-# FlagGems' own runtime deps are installed explicitly above.
+# FlagGems' SQLAlchemy runtime dep is installed explicitly above.
 #
 # FlagTree first: it owns the `triton` package, and flag_gems' vendor detection
 # reads triton's registry at import time (FlagGems 5.4.0 picks its `thead`
@@ -329,8 +310,16 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   install_flagtree
   prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
   install_flag_gems
+  # The shared cohort is installed after this hook. FlagGems reads its backend
+  # configuration with PyYAML and obtains a SQLAlchemy session while imported,
+  # so provide the same pins used by that cohort before the probe.
+  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
+    "numpy==1.26.4" "pyyaml==6.0.1" "sqlalchemy==2.0.48"
 fi
 
+# Resolve the stock CPU wheel before installing torch_fl. The wheel's
+# torch.version.cuda remains None until torch_fl loads lib_ppu/libtorch_cuda.so;
+# that CUDA facade is checked after the build below.
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
 import torch
@@ -344,6 +333,10 @@ PY
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
+# pytest workers start through .github/scripts/sitecustomize.py, which imports
+# torch_fl first. A bare child must make the same startup call: inheriting a
+# facade directory alone loads the stock CPU torch and leaves torch.version.cuda
+# as None.
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
 # This lane stages the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_ppu
@@ -403,12 +396,13 @@ nvidia-smi
 python - <<'PY'
 from pathlib import Path
 import sys
+import torch_fl  # noqa: F401
 import torch
 
 torch_path = Path(torch.__file__).resolve()
 assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-assert torch.version.cuda is None, torch.version.cuda
+assert torch.version.cuda == "13.0", torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
 assert Path("torch_fl/lib_ppu/libtorch_cuda.so").is_file()
 print(f"Isolated Python: {sys.executable}")
@@ -431,7 +425,7 @@ PY
 # the `thead` vendor from PPU_SDK rather than falling back to nvidia, and it must
 # resolve to the venv rather than the image's editable-install path.
 if [[ "$CI_STAGE" == "integration" ]]; then
-  python - <<'PY'
+  "$VENV_PYTHON" - <<'PY'
 import hashlib
 import importlib.util
 import os
@@ -462,6 +456,36 @@ print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
 print(f"triton backends: {sorted(triton.backends.backends)}")
 print(f"flag_gems: {flag_gems.__version__} -> {flag_gems.__file__}")
 print(f"flag_gems vendor: {vendor}")
+PY
+
+  # A child gets the same vendor runtime only after importing torch_fl, which
+  # publishes and loads the PPU facade before torch.
+  "$VENV_PYTHON" - <<'PY'
+import os
+import subprocess
+import sys
+
+import torch_fl  # noqa: F401
+import torch
+
+result = subprocess.run(
+    [
+        sys.executable,
+        "-c",
+        (
+            "import os, torch_fl; import torch; "
+            "assert torch.version.cuda == '13.0', torch.version.cuda; "
+            "print(os.path.realpath(torch.__file__))"
+        ),
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+parent = os.path.realpath(torch.__file__)
+child = os.path.realpath(result.stdout.strip())
+assert parent == child, (parent, child)
+print(f"PPU child torch: {child} (CUDA {torch.version.cuda})")
 PY
 fi
 

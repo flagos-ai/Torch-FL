@@ -26,8 +26,7 @@ import time
 from collections import defaultdict
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "common"))
 from dummy_dataset import DummyTextDataset

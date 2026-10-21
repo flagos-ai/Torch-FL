@@ -21,9 +21,8 @@ engines or bandwidth.
 """
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401 -- importing claims the flagos device
 
 DEVICE = "flagos:0"
 

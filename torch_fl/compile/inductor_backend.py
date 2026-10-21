@@ -111,26 +111,40 @@ def _patch_native_cuda_probe() -> None:
 
     if not is_native_accelerator():
         return
-    if getattr(torch.cuda, "_flagos_native_patched", False):
-        return
     if not torch.flagos.is_available():
         return
+    if getattr(torch.cuda, "_flagos_native_probe_extended", False):
+        return
 
-    original = torch.cuda.is_available
-    torch.cuda.is_available = torch.flagos.is_available
-    # Read back by torch_fl._real_cuda_is_available, which has to tell this
-    # redirect from a real CUDA runtime; the alias's guard depends on it.
-    #
-    # An already-stashed copy wins: torch_fl's own earlier redirect (the
-    # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
-    # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this does,
-    # and storing *that* keeps a torch_fl lambda rather than torch's answer --
-    # which is the one value the copy exists to preserve, and reading it back as
-    # "there is real CUDA" would mislabel every native accelerator.
-    torch.cuda._flagos_original_is_available = getattr(
-        torch.cuda, "_flagos_original_is_available", original
-    )
-    torch.cuda._flagos_native_patched = True
+    if not getattr(torch.cuda, "_flagos_native_patched", False):
+        original = torch.cuda.is_available
+        torch.cuda.is_available = torch.flagos.is_available
+        # Read back by torch_fl._real_cuda_is_available, which has to tell this
+        # redirect from a real CUDA runtime; the alias's guard depends on it.
+        #
+        # An already-stashed copy wins: torch_fl's own earlier redirect (the
+        # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
+        # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this
+        # does, and storing *that* keeps a torch_fl lambda rather than torch's
+        # answer -- which is the one value the copy exists to preserve, and
+        # reading it back as "there is real CUDA" would mislabel every native
+        # accelerator.
+        torch.cuda._flagos_original_is_available = getattr(
+            torch.cuda, "_flagos_original_is_available", original
+        )
+        torch.cuda._flagos_native_patched = True
+
+    # Inductor's capability probe calls these directly, bypassing the
+    # is_available guard and entering CPU PyTorch's CUDA lazy initializer.
+    torch.cuda.current_device = torch.flagos.current_device
+    torch.cuda.get_device_properties = torch.flagos.get_device_properties
+
+    def get_device_capability(device=None):
+        properties = torch.flagos.get_device_properties(device)
+        return properties.major, properties.minor
+
+    torch.cuda.get_device_capability = get_device_capability
+    torch.cuda._flagos_native_probe_extended = True
 
 
 def _bind_musa_flagtree_runtime() -> None:

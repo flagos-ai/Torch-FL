@@ -27,9 +27,9 @@
 # tests/unit needs torch, a built torch_fl, or hardware, and stays on the
 # hardware runners -- today that means the DCU manifest's per-file group, which
 # keeps running the whole directory including these files. tests/unit/bpu/ is
-# excluded too: it imports torch and is collected nowhere today
-# (run_unit_tests.py globs non-recursively), so wiring it in needs a CPU-torch
-# install first.
+# collected on hardwares even though its tests require a BPU build, so its
+# conftest excludes those modules before import rather than requiring an
+# unrelated platform build to install the BPU test dependencies.
 #
 # transformers is a deliberate second dependency, not scope creep:
 # tests/manual/transformers_hf_tests.py resolves architecture keys through

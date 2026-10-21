@@ -69,12 +69,8 @@ def isolated_env(test_source_dir: Path, workdir: Path) -> dict[str, str]:
     # PYTHONPATH. Dropping it made every isolated run die of
     # ``ModuleNotFoundError: No module named 'torch_fl'`` before collecting a
     # test, which the verifier could only record as ``ERROR``.
-    entries = [
-        str(Path(entry).resolve())
-        for entry in env.get("PYTHONPATH", "").split(os.pathsep)
-        if entry
-    ]
-    repo_entries = [entry for entry in entries if entry == str(REPO_ROOT)]
+    entries = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    repo_entries = [entry for entry in entries if Path(entry).resolve() == REPO_ROOT]
     path_entries = [entry for entry in entries if entry != str(REPO_ROOT)]
     env["PYTHONPATH"] = os.pathsep.join(
         [

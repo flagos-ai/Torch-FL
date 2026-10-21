@@ -133,6 +133,8 @@ jobs:
             ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      # On a transfer timeout, clear partial files so pip does not extract an
+      # incomplete wheel from the cache and fail later during an import.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
@@ -144,6 +146,13 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+
+      - name: Discard incomplete pip cache transfer
+        if: ${{ steps.pip-cache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
 
       - name: Prepare platform environment
         env:

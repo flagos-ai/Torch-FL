@@ -22,9 +22,8 @@ deliberately checks no value that would pin the test to one accelerator.
 """
 
 import pytest
-import torch
+from device_init import torch, torch_fl
 
-import torch_fl
 
 DEVICE = "flagos:0"
 

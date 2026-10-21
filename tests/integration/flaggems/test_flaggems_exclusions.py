@@ -39,14 +39,15 @@ from flaggems_caps import (
 )
 
 
-@pytest.mark.anyplatform
 def test_pinned_operators_are_not_routed_to_flaggems():
     accel = accel_label()
     if not accel:
-        pytest.skip("the active conf is not a named backends_<platform>.conf")
-    pinned = FLAGGEMS_PINNED_OFF.get(accel, ())
-    if not pinned:
-        pytest.skip(f"no FlagGems hold has been measured for {accel}")
+        pytest.fail("the active conf is not a named backends_<platform>.conf")
+    assert accel in FLAGGEMS_PINNED_OFF, (
+        f"{accel} has no FlagGems exclusion row; record its measured holds "
+        "or an explicit empty tuple"
+    )
+    pinned = FLAGGEMS_PINNED_OFF[accel]
 
     routes = load_routes()
     routed_back = []

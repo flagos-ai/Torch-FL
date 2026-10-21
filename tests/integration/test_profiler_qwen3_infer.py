@@ -26,8 +26,7 @@ import json
 import tempfile
 
 import pytest
-import torch
-import torch_fl  # noqa: F401  -- registers the "flagos" PrivateUse1 device
+from device_init import torch
 from torch.profiler import ProfilerActivity, profile
 
 

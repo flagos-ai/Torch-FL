@@ -31,7 +31,7 @@ produce, and no case is skipped on a platform that can run the op.
 """
 
 import pytest
-import torch
+from device_init import torch
 
 DEVICE = "flagos:0"
 

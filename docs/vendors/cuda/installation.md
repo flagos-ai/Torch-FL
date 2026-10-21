@@ -112,13 +112,12 @@ pytest tests/integration/ops/ \
 
 ### FlagGems Validation
 
-Test the FlagGems runtime path (FlagGems-first routing comes from
-`torch_fl/configs/backends_cuda.conf`; no opt-in variable needed):
+Run both passes of the shared FlagGems conformance suite. Routing comes from
+`torch_fl/configs/backends_cuda.conf`; no opt-in variable is needed:
 
 ```bash
-pytest tests/integration/ops/ \
-  -m "flaggems and main_ops" \
-  -v --tb=short
+python tests/integration/flaggems/run.py native
+python tests/integration/flaggems/run.py flaggems
 ```
 
 First run is slow — Triton compiles and autotunes every kernel. Subsequent runs reuse the cache.

@@ -65,23 +65,34 @@ that environment already carries PyYAML for ``test_ci_pip_cache.py`` and for
 FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
 """
 
-import itertools
+import io
 import re
 import shlex
+import textwrap
+import tokenize
 from pathlib import Path
 from typing import NamedTuple
+from unittest import mock
 
 import pytest
-from manifest_composer import composed_steps, platform_names
+import yaml
+from manifest_composer import composed_steps, load_module, platform_names
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_DIR = _REPO_ROOT / ".github/workflows"
 _INTEGRATION_DIR = _REPO_ROOT / "tests/integration"
+_PLATFORM_CONFIG_DIR = _REPO_ROOT / ".github/configs"
+_CONFTEST = load_module(_INTEGRATION_DIR / "conftest.py", "integration_conftest")
+_OPS_CONFTEST = load_module(_INTEGRATION_DIR / "ops/conftest.py", "ops_conftest")
 
 _PREPARE_STEP = "Prepare wheel-only test workspace"
 # A repository script named by a manifest command.
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
+# A repository script that owns a selection instead of naming every file.
+# The FlagGems runner lives beside its cases and chooses the native or kernel
+# pass through a required suite argument.
+_TEST_RUNNER_RE = re.compile(r"\btests/integration/[\w./-]+/run\.py\b")
 # A command that leaves the prepared workspace for the checkout.
 _CHECKOUT_CD_RE = re.compile(r"""\bcd\s+["']?\$GITHUB_WORKSPACE["']?""")
 
@@ -125,6 +136,22 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
 def _manifest_platforms() -> list[str]:
     """Every platform manifest, by the name its file carries."""
     return platform_names()
+
+
+def _workflow_selections() -> list[tuple[str, "_Selection"]]:
+    """Source-check pytest invocations outside the hardware manifests."""
+    selections = []
+    for workflow in _WORKFLOW_DIR.glob("*.yml"):
+        text = workflow.read_text(encoding="utf-8")
+        root = yaml.safe_load(text)
+        jobs = root.get("jobs") or root.get(True, {}).get("jobs", {})
+        for name, job in jobs.items():
+            for step in job.get("steps", []):
+                for command in _logical_lines(step.get("run", "")):
+                    selection = _selection_of(command)
+                    if selection is not None and selection.paths:
+                        selections.append((f"{workflow.name}:{name}", selection))
+    return selections
 
 
 def _prepare_steps() -> list[tuple[str, str, str]]:
@@ -311,31 +338,27 @@ def test_the_prepare_step_still_copies_the_tests_it_was_written_for():
 # known not to be.
 #
 # Reachability is modelled, not measured -- there is no pytest here. A command
-# selects a file when its paths cover it and the file carries a mark its `-m`
-# expression accepts. Both halves deliberately over-approximate: a false
-# "reachable" is a gap left for later, while a false "unreachable" is a red
-# build that says so. The failure mode this must never have is silence.
+# selects a file when its paths cover it and a case from its source carries the
+# marks its `-m` expression accepts. The ops conftest's platform and build gates
+# then apply to each actual case. The model over-approximates runtime skips: a
+# false "reachable" is a gap left for later, while a false "unreachable" is a red
+# build that says so.
 # ---------------------------------------------------------------------------
 
 # `pytest.mark.<name>` in source form: the only mark spelling that can be read
 # without importing the file.
 _MARK_RE = re.compile(r"pytest\.mark\.([A-Za-z_]\w*)")
-# Marks that configure a case rather than select it. `-m parametrize` would
-# match nothing on purpose, so seeing one says nothing about whether a sweep's
-# `-m` expression picks the file up.
-_NON_SELECTING_MARKS = frozenset(
-    {
-        "parametrize",
-        "skip",
-        "skipif",
-        "xfail",
-        "usefixtures",
-        "filterwarnings",
-        "timeout",
-        "tryfirst",
-        "trylast",
-    }
-)
+_NON_SELECTING_MARKS = {
+    "parametrize",
+    "skip",
+    "skipif",
+    "xfail",
+    "usefixtures",
+    "filterwarnings",
+    "timeout",
+    "tryfirst",
+    "trylast",
+}
 # A marker-expression token: a mark name, a parenthesis, or an operator.
 _MARKER_TOKEN_RE = re.compile(r"[A-Za-z_]\w*|[()]")
 # pytest options whose value is a separate token. Without this the token after
@@ -363,6 +386,7 @@ class _Selection(NamedTuple):
     paths: tuple[str, ...]
     marker: str | None
     ignored: tuple[str, ...]
+    uses_ops_conftest: bool = True
 
 
 def _pytest_arguments(command: str) -> list[str]:
@@ -383,7 +407,7 @@ def _pytest_arguments(command: str) -> list[str]:
         if (
             index >= 2
             and tokens[index - 1] == "-m"
-            and tokens[index - 2].endswith("python")
+            and re.fullmatch(r"(?:python|python\d+(?:\.\d+)*)", tokens[index - 2])
         ):
             return tokens[index + 1 :]
     return []
@@ -414,6 +438,7 @@ def _selection_of(command: str) -> _Selection | None:
     paths: list[str] = []
     ignored: list[str] = []
     marker: str | None = None
+    uses_conftest = True
     index = 0
     while index < len(arguments):
         token = arguments[index]
@@ -423,6 +448,10 @@ def _selection_of(command: str) -> _Selection | None:
             if token == "-m" and index + 1 < len(arguments):
                 marker = arguments[index + 1]
             index += 2
+            continue
+        if token == "--noconftest":
+            uses_conftest = False
+            index += 1
             continue
         if token.startswith("--ignore="):
             ignored.append(token.split("=", 1)[1])
@@ -435,31 +464,343 @@ def _selection_of(command: str) -> _Selection | None:
         if target is not None:
             paths.append(target)
         index += 1
-    return _Selection(tuple(paths), marker, tuple(ignored))
+    return _Selection(tuple(paths), marker, tuple(ignored), uses_conftest)
 
 
 def _manifest_selections(platform: str) -> list[_Selection]:
-    """What every pytest invocation in one platform's manifest runs."""
+    """What every test command in one platform's manifest runs."""
     selections = []
     for command in _manifest_commands(platform):
         selection = _selection_of(command)
         if selection is not None:
             selections.append(selection)
+            continue
+        # A shared runner states its case files beside itself. Its suite
+        # argument is required by its CLI, so the file path alone is enough
+        # to credit the files in that directory; it cannot run an unknown set.
+        for runner in _TEST_RUNNER_RE.findall(command):
+            suite = Path(runner).parent.as_posix()
+            if not (_REPO_ROOT / suite).is_dir():
+                continue
+            selections.append(_Selection((suite,), None, ()))
     return selections
 
 
-def _marks_of(test_file: Path) -> set[str]:
-    """The selecting marks a test file carries, read textually off the source.
+def _source_mark_sets(test_file: Path) -> list[set[str]]:
+    """The mark sets of test cases, read from source without importing them.
 
-    Over the whole file rather than per case: the question is whether *any*
-    case in the file is collected, and answering it exactly would mean
-    importing the file, which needs the device this check must not require.
+    Module, class and function marks form the set pytest applies to a case.
+    A module alias declared as ``pytest.mark.skipif`` carries the mark it
+    names; a file-level marker still over-approximates a gated top-level case,
+    which the operator conftest check applies to its actual build.
     """
-    return {
-        name
-        for name in _MARK_RE.findall(test_file.read_text(encoding="utf-8"))
-        if name not in _NON_SELECTING_MARKS
-    }
+    source = test_file.read_text(encoding="utf-8")
+    text = _mask_python(source)
+    tokens = _python_tokens(text)
+    module_skip = re.search(r"^pytest\.skip\s*\(", text, re.MULTILINE)
+    if module_skip:
+        module_call = _balanced_call(source, module_skip.start())
+        if re.search(
+            r"\ballow_module_level\s*=\s*True",
+            source[module_skip.start() : module_skip.start() + len(module_call)],
+        ):
+            return []
+    module_mark = next(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if token.type == tokenize.NAME
+            and token.string == "pytestmark"
+            and _top_level(tokens, index)
+        ),
+        None,
+    )
+    declaration = []
+    if module_mark is not None:
+        declaration = tokens[module_mark + 2 : _statement_end(tokens, module_mark + 3)]
+    if declaration and any(
+        "tileops_runtime.is_tileops_available("
+        in re.sub(r"\s+", "", _balanced_arguments(source, tokens, opening, closing))
+        for opening, closing in _skipif_calls(tokens, declaration)
+    ):
+        return []
+
+    declarations = _module_declared_marks(tokens)
+    module_marks = _declaration_marks(declaration) | declarations["pytestmark"]
+    aliases = declarations["aliases"]
+    classes: list[tuple[int, set[str]]] = []
+    cases: list[set[str]] = []
+    for kind, name, offset, marks, arguments in _function_scopes(text):
+        indent = len(_line_start(source, offset).expandtabs(8)) - len(
+            _line_start(source, offset).lstrip().expandtabs(8)
+        )
+        while classes and classes[-1][0] >= indent:
+            classes.pop()
+        if kind == "class":
+            classes.append((indent, set(marks) | aliases.get(name, set())))
+        elif name.startswith("test_"):
+            enclosing = set(module_marks)
+            parent = enclosing | aliases.get(name, set())
+            for _, class_marks in classes:
+                parent |= class_marks
+            enclosing = parent | marks
+            if "tileops_runtime.is_tileops_available(" in re.sub(
+                r"\s+", "", arguments.get("skipif", "")
+            ):
+                return []
+            if not enclosing.intersection({"skip", "skipif"}):
+                cases.append(enclosing)
+    if cases:
+        return cases
+    if module_marks:
+        return [module_marks]
+    if aliases or declarations["other"]:
+        return [set().union(*aliases.values(), declarations["other"])]
+    return [set()]
+
+
+def _module_declared_marks(tokens) -> dict[str, dict[str, set[str]]]:
+    """The marker aliases and file-level marks a module declares."""
+    declared = {"pytestmark": set(), "aliases": {}, "other": set()}
+    for index, token in enumerate(tokens):
+        if token.type != tokenize.NAME:
+            continue
+        if token.string == "pytestmark" and _top_level(tokens, index):
+            end = _statement_end(tokens, index + 3)
+            declared["pytestmark"] |= _declaration_marks(tokens[index + 2 : end])
+            continue
+        marks = _mark_names(tokens[index : index + 5])
+        start = index + 5
+        if (
+            token.string == "pytestmark"
+            or not marks
+            or start >= len(tokens)
+            or tokens[start].string != "="
+        ):
+            continue
+        end = _statement_end(tokens, start + 1)
+        value = tokens[start + 1 : end]
+        names = {value[position].string for position in _mark_names(value)}
+        names -= _NON_SELECTING_MARKS
+        if _top_level(tokens, index):
+            if names:
+                declared["aliases"][token.string] = names
+        else:
+            declared["other"] |= names
+    return declared
+
+
+def _line_start(text: str, offset: int) -> str:
+    """The text from the start of ``offset``'s line to ``offset``."""
+    return text[text.rfind("\n", 0, offset) + 1 : offset]
+
+
+def _function_scopes(
+    text: str,
+) -> list[tuple[str, str, int, set[str], dict[str, str]]]:
+    """Every class and function with its decorator marks and arguments."""
+    tokens = _python_tokens(text)
+    scopes: list[tuple[str, str, int, set[str], dict[str, str]]] = []
+    decorators: list[tuple[set[str], dict[str, str]]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.type == tokenize.OP and token.string == "@":
+            end = _statement_end(tokens, index + 1)
+            declaration = tokens[index + 1 : end]
+            marks = set()
+            arguments = {}
+            for position in _mark_names(declaration):
+                mark = declaration[position].string
+                marks.add(mark)
+                if (
+                    mark == "skipif"
+                    and position + 1 < len(declaration)
+                    and declaration[position + 1].string == "("
+                ):
+                    opening = index + position + 2
+                    arguments["skipif"] = _balanced_arguments(
+                        text, tokens, opening + 1, _matching_closing(tokens, opening)
+                    )
+            decorators.append((marks, arguments))
+            index = end
+            continue
+        if token.type != tokenize.NAME or token.string not in {"class", "def"}:
+            index += 1
+            continue
+        if index + 2 >= len(tokens):
+            break
+        name = tokens[index + 1]
+        if name.type != tokenize.NAME or tokens[index + 2].string != "(":
+            index += 1
+            continue
+        marks = set().union(*(marks for marks, _ in decorators))
+        arguments = {}
+        for _, decorator_arguments in decorators:
+            arguments.update(decorator_arguments)
+        scopes.append(
+            (
+                token.string,
+                name.string,
+                _offset(text, name.start),
+                marks,
+                arguments,
+            )
+        )
+        decorators.clear()
+        index += 3
+    return scopes
+
+
+def _balanced_arguments(text: str, tokens, position: int, end: int) -> str:
+    """The source text inside a call's parentheses, with whitespace preserved."""
+    if position == end:
+        return ""
+    return text[
+        _offset(text, tokens[position].start) : _offset(text, tokens[end].start)
+    ]
+
+
+def _python_tokens(text: str):
+    """Tokenize masked source into a complete module token sequence."""
+    return [
+        token
+        for token in tokenize.generate_tokens(io.StringIO(text).readline)
+        if token.string
+    ]
+
+
+def _top_level(tokens, index: int) -> bool:
+    """Whether a ``pytestmark`` statement starts at module indentation."""
+    while index >= 0 and tokens[index].type != tokenize.NEWLINE:
+        index -= 1
+    while index + 1 < len(tokens) and tokens[index + 1].type in {
+        tokenize.NL,
+        tokenize.COMMENT,
+    }:
+        index += 1
+    return (
+        index + 1 < len(tokens)
+        and tokens[index + 1].type == tokenize.NAME
+        and tokens[index + 1].string == "pytestmark"
+        and index + 2 < len(tokens)
+        and tokens[index + 2].string == "="
+    )
+
+
+def _statement_end(tokens, start: int) -> int:
+    """The end of a statement, including a bracketed multiline expression."""
+    depth = 0
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        depth += token.string in "([{"
+        depth -= token.string in ")]}"
+        if depth == 0 and token.type in {tokenize.NEWLINE, tokenize.ENDMARKER}:
+            return index
+        if (
+            depth == 0
+            and token.type == tokenize.NAME
+            and token.string
+            in {
+                "async",
+                "class",
+                "def",
+            }
+        ):
+            return index
+        if token.type in {tokenize.INDENT, tokenize.DEDENT}:
+            return index
+    raise AssertionError("statement has no terminator")
+
+
+def _skipif_calls(module_tokens, statement_tokens) -> list[tuple[int, int]]:
+    """The opening and closing token positions of module ``skipif`` calls."""
+    first = next(
+        index
+        for index, token in enumerate(module_tokens)
+        if token == statement_tokens[0]
+    )
+    stop = first + len(statement_tokens)
+    return [
+        (index + 1, _matching_closing(module_tokens, index + 1))
+        for index in range(first, stop)
+        if module_tokens[index].string == "skipif"
+        and index + 1 < stop
+        and module_tokens[index + 1].string == "("
+    ]
+
+
+def _declaration_marks(tokens) -> set[str]:
+    """Selecting marker names declared in a ``pytestmark`` assignment."""
+    names = {tokens[index].string for index in _mark_names(tokens)}
+    return names - _NON_SELECTING_MARKS
+
+
+def _mark_names(tokens) -> list[int]:
+    """The positions of mark names in a decorator or declaration."""
+    marks = []
+    for index, token in enumerate(tokens):
+        if token.type != tokenize.NAME or token.string != "pytest":
+            continue
+        if index + 4 < len(tokens) and (
+            tokens[index + 1].string == "."
+            and tokens[index + 2].string == "mark"
+            and tokens[index + 3].string == "."
+            and tokens[index + 4].type == tokenize.NAME
+        ):
+            marks.append(index + 4)
+    return marks
+
+
+def _matching_closing(tokens, opening: int) -> int:
+    """The closing token paired with ``opening``."""
+    depth = 0
+    for index in range(opening, len(tokens)):
+        depth += tokens[index].string in "([{"
+        depth -= tokens[index].string in ")]}"
+        if depth == 0:
+            return index
+    raise AssertionError("unmatched opening delimiter")
+
+
+def _balanced_call(text: str, opening: int) -> str:
+    """The text from ``opening`` through its matching closing parenthesis."""
+    depth = 0
+    for index, char in enumerate(text[opening:], opening):
+        depth += char == "("
+        depth -= char == ")"
+        if depth == 0:
+            return text[opening : index + 1]
+    raise AssertionError("unterminated call")
+
+
+def _mask_python(text: str) -> str:
+    """Blank comments and string contents without changing offsets."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    masked = list(text)
+    tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            start, stop = _offset(text, token.start), _offset(text, token.end)
+        elif token.type == tokenize.STRING:
+            literal = token.string
+            literal_offset = len(re.match(r"[A-Za-z]*", literal).group())
+            opening = literal[literal_offset : literal_offset + 3]
+            quote_length = 3 if opening in {chr(34) * 3, chr(39) * 3} else 1
+            start = _offset(text, token.start) + literal_offset + quote_length
+            stop = _offset(text, token.end) - quote_length
+        else:
+            continue
+        for index in range(max(0, start), min(len(text), stop)):
+            if masked[index] != "\n":
+                masked[index] = " "
+    return "".join(masked)
+
+
+def _offset(text: str, position: tuple[int, int]) -> int:
+    """The absolute offset of a tokenizer row and column."""
+    lines = text.splitlines(keepends=True)
+    return sum(map(len, lines[: position[0] - 1])) + position[1]
 
 
 def _evaluate(expression: str, marks: set[str]) -> bool:
@@ -518,29 +859,26 @@ def _evaluate(expression: str, marks: set[str]) -> bool:
 
 
 def _selects(expression: str, marks: set[str]) -> bool:
-    """Whether any case in a file carrying ``marks`` survives ``expression``.
+    """Whether a case carrying exactly ``marks`` survives ``-m expression``.
 
-    Asked of every subset of the file's marks rather than of their union, and
-    that is not a detail: the union is wrong in the direction that matters.
-    ``ops/test_acos_dispatch.py`` carries ``anyplatform`` on one class and
-    ``flaggems_python`` on another, so the union makes ``(anyplatform or
-    main_ops) and not flaggems_python`` false and the file reads as an orphan
-    -- while pytest collects 8 of its 11 cases under exactly that filter.
-    Every subset is a superset of the marks one case can carry, so this errs
-    towards "reachable": that can leave a gap, which is the status quo, where
-    the reversed error is a red build over a file that does run.
+    A case with no marks is still collected by a plain sweep. Pytest's default
+    marker expression is ``not skip and not skipif``, which filters such a case
+    when an inherited module skip is present.
     """
-    names = sorted(marks)
-    for size in range(len(names) + 1):
-        for subset in itertools.combinations(names, size):
-            if _evaluate(expression, set(subset)):
-                return True
-    return False
+    if "skip" in marks:
+        return False
+    if not expression:
+        return True
+    return _evaluate(expression, marks)
 
 
 def _names_target(relative: str, target: str) -> bool:
     """Whether a pytest target covers a file, by name or as a directory above it."""
-    return relative == target or relative.startswith(target.rstrip("/") + "/")
+    relative_parts = Path(relative).parts
+    target_parts = Path(target).parts
+    if target.startswith("/") and not relative.startswith("/"):
+        target_parts = Path(target).resolve().relative_to(_REPO_ROOT).parts
+    return relative_parts[: len(target_parts)] == target_parts
 
 
 def _test_file_paths() -> set[str]:
@@ -551,26 +889,195 @@ def _test_file_paths() -> set[str]:
     }
 
 
+def _test_path(relative: str) -> Path:
+    """Resolve a relative test name, allowing focused tests to supply a fixture."""
+    path = Path(relative)
+    return path if path.is_absolute() else _REPO_ROOT / path
+
+
+def _is_operator_case(relative: str, uses_conftest: bool) -> bool:
+    """Whether the operator conftest is loaded for this case."""
+    path = _test_path(relative)
+    return (
+        uses_conftest
+        and path.parent.name == "ops"
+        and path.parent.parent.name == "integration"
+    )
+
+
+class _ConftestItem:
+    """The part of a pytest item that ops/conftest.py's gates read."""
+
+    def __init__(self, mark_names: set[str]):
+        self.marks = {name: "mark" for name in mark_names}
+        self._skip_reason = None
+
+    def get_closest_marker(self, name: str):
+        return self.marks.get(name)
+
+    def add_marker(self, marker):
+        if isinstance(marker, str) and _MARK_RE.fullmatch(marker):
+            name = _MARK_RE.fullmatch(marker)["name"]
+        elif isinstance(marker, dict):
+            name = "skip"
+            reason = marker.get("reason", "")
+            match = re.search(r"requires @(\w+) backend", reason)
+            if match:
+                self._skip_reason = match.group(1)
+            elif "TileOPs kernels" in reason:
+                self._skip_reason = "tileops"
+            elif "software low-precision" in reason:
+                self._skip_reason = "soft_lowp"
+            elif "FlagGems C++ kernels" in reason:
+                self._skip_reason = "flaggems_cpp"
+            else:
+                self._skip_reason = "unconditional"
+        else:
+            reason = re.search(r'reason=(?:"([^"]*)"|\'([^\']*)\')', marker)
+            reason = next((group for group in reason.groups() if group), "")
+            match = re.search(r"requires @(\w+) backend", reason)
+            if match:
+                self._skip_reason = match.group(1)
+            elif "TileOPs kernels" in reason:
+                self._skip_reason = "tileops"
+            elif "software low-precision" in reason:
+                self._skip_reason = "soft_lowp"
+            elif "FlagGems C++ kernels" in reason:
+                self._skip_reason = "flaggems_cpp"
+            else:
+                self._skip_reason = "unconditional"
+        self.marks[name] = marker
+
+
+class _ConftestConfig:
+    """The collector hook reads no configuration in the modeled path."""
+
+    def addinivalue_line(self, name: str, value: str) -> None:
+        """Accept the marker registrations without building a pytest session."""
+
+
+def _conftest_outcome(relative: str, marks: set[str], platform: str) -> str | None:
+    """The skip the operator conftest applies, or None when the case survives."""
+    build = _lane_build(platform)
+    item = _ConftestItem(marks)
+    with mock.patch("pytest.mark.skip", side_effect=lambda **kwargs: kwargs):
+        _OPS_CONFTEST.pytest_configure(_ConftestConfig())
+        with mock.patch.object(
+            _OPS_CONFTEST._platform, "detect_platform", return_value=platform
+        ), mock.patch.object(
+            _OPS_CONFTEST,
+            "_flaggems_cpp_enabled",
+            return_value="flaggems_cpp" in build,
+        ), mock.patch.object(
+            _OPS_CONFTEST, "_tileops_enabled", return_value="tileops" in build
+        ), mock.patch.object(
+            _OPS_CONFTEST, "_boxing_enabled", return_value="boxing" in build
+        ):
+            _OPS_CONFTEST.pytest_collection_modifyitems(_ConftestConfig(), [item])
+    return item._skip_reason
+
+
+def _conftest_would_skip(relative: str, marks: set[str], platform: str) -> bool:
+    """Apply the operator conftest's build gates to one CI case."""
+    return bool(_conftest_outcome(relative, marks, platform))
+
+
+def _lane_build(platform: str) -> set[str]:
+    """The kernel set a platform's CI setup hook builds."""
+    config = yaml.safe_load(
+        (_PLATFORM_CONFIG_DIR / f"{platform}.yml").read_text(encoding="utf-8")
+    )["environment_check"]
+    required = set(config.get("require_build_kernels") or [])
+    forbidden = set(config.get("forbid_build_kernels") or [])
+    hook = (_REPO_ROOT / ".github/scripts/hooks" / f"set_env_{platform}.sh").read_text()
+    configured = set(required)
+    for name, pattern in (
+        ("boxing", r'^export FLAGOS_BUILD_BOXING=["\']?(?P<value>[01])["\']?\s*$'),
+        (
+            "flaggems_cpp",
+            r'^export FLAGOS_BUILD_FLAGGEMS_CPP=["\']?(?P<value>[01])["\']?\s*$',
+        ),
+    ):
+        match = re.search(pattern, hook, re.MULTILINE)
+        if match:
+            if match["value"] == "1" and name not in forbidden:
+                configured.add(name)
+            else:
+                configured.discard(name)
+    return configured - forbidden
+
+
 def _reachable_test_files() -> set[str]:
-    """Every integration test file at least one manifest command would run."""
-    files = {
-        relative: _marks_of(_REPO_ROOT / relative)
-        for relative in sorted(_test_file_paths())
+    """Every integration test file remaining after selection and conftest gates.
+
+    The operator conftest's actual hook applies the platform, boxing, FlagGems
+    C++ and TileOPs skips to the marks the source declares.
+    """
+    cases_by_file = _module_cases()
+    platform_selections = list(_platform_selections())
+    workflow_selections = _workflow_selections()
+    return {
+        relative
+        for relative, cases in cases_by_file.items()
+        if any(
+            _selection_can_run(relative, case_marks, selection, platform)
+            for platform, selection in platform_selections
+            if selection.paths
+            for case_marks in cases
+        )
+        or any(
+            _selection_can_run(relative, case_marks, selection, None)
+            for _, selection in workflow_selections
+            if selection.paths
+            for case_marks in cases
+        )
     }
-    reachable = set()
-    for platform in _manifest_platforms():
-        for selection in _manifest_selections(platform):
-            for relative, marks in files.items():
-                if any(_names_target(relative, skip) for skip in selection.ignored):
-                    continue
-                if not any(_names_target(relative, path) for path in selection.paths):
-                    continue
-                if selection.marker is not None and not _selects(
-                    selection.marker, marks
-                ):
-                    continue
-                reachable.add(relative)
-    return reachable
+
+
+def _platform_selections():
+    """Every pytest invocation and the platform whose wheel it uses."""
+    platform_selections = {
+        platform: _manifest_selections(platform) for platform in _manifest_platforms()
+    }
+    for platform, selections in platform_selections.items():
+        for selection in selections:
+            yield platform, selection
+
+
+def _module_cases() -> dict[str, list[set[str]]]:
+    """The real test-case mark sets in every integration test file."""
+    return {
+        relative: _source_mark_sets(_REPO_ROOT / relative)
+        for relative in _test_file_paths()
+    }
+
+
+def _selection_can_run(
+    relative: str,
+    case_marks: set[str],
+    selection: _Selection,
+    platform: str | None,
+) -> bool:
+    """Whether one source-declared case gets past pytest and the ops conftest.
+
+    An operator case with no marker at all is still selected by a plain sweep.
+    """
+    if any(_names_target(relative, skip) for skip in selection.ignored):
+        return False
+    if not any(_names_target(relative, path) for path in selection.paths):
+        return False
+    if selection.marker is not None and not _selects(selection.marker, case_marks):
+        return False
+    if not selection.uses_ops_conftest:
+        # A source-only job opts out of the integration conftests, including
+        # module-level skips that they would otherwise apply.
+        return selection.marker is None or _evaluate(selection.marker, case_marks)
+    if not _is_operator_case(relative, selection.uses_ops_conftest):
+        return True
+    if platform is None:
+        return False
+    reason = _conftest_outcome(relative, set(case_marks), platform)
+    return reason is None
 
 
 # Files no manifest selects, each with the reason it is left that way. This is
@@ -605,23 +1112,10 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
         "exclusion until one job opts into that build"
     ),
-    "tests/integration/ops/test_full_cuda_coverage.py": (
-        "exercises the CUDA boxing path: every case asserts that an op "
-        "backends_cuda.conf routes to `cuda` dispatches to the boxing kernel "
-        "rather than reaching cpu_fallback, and the file's own docstring says "
-        "its ops need the external libtorch_cuda.so. The CUDA lane was the only "
-        "manifest that selected the `cuda` marker, and it now builds the "
-        "default (FlagGems-primary) wheel, which has no boxing kernels for "
-        "these cases to assert on. Accepted exclusion until the vendor-SDK "
-        "native kernels that replace the boxing path land, or a boxing-on CUDA "
-        "job is added"
-    ),
     "tests/integration/ops/test_tileops_generated.py": (
-        "carries `cuda` for the same reason -- its routes are bound on the CUDA "
-        "dispatch key -- and the same CUDA lane step was the only manifest "
-        "command that selected it; see test_full_cuda_coverage.py. Accepted "
-        "exclusion on the same terms (it would also self-skip: no job builds "
-        "the TileOPs kernel set)"
+        "no platform config requires the TileOPs kernel set, so its "
+        "module-level gate skips every CI case; the file also requires SM90 "
+        "at runtime. Accepted exclusion until a TileOPs build job is added"
     ),
 }
 
@@ -649,6 +1143,16 @@ def test_the_reachability_reader_sees_what_the_manifests_actually_ask_for():
     assert selections, "the reader found no pytest invocation in the Ascend manifest"
     assert any(selection.paths and selection.marker for selection in selections), (
         "the reader saw no marker-filtered sweep, so nothing below is being tested"
+    )
+    shared = {
+        path
+        for path in _test_file_paths()
+        if path.startswith("tests/integration/flaggems/")
+    }
+    assert shared, "the shared FlagGems cases vanished"
+    assert shared <= _reachable_test_files(), (
+        "a shared FlagGems case is not credited to its common runner: "
+        f"{sorted(shared - _reachable_test_files())!r}"
     )
     assert _reachable_test_files(), "the reader found no reachable file at all"
 
@@ -694,3 +1198,91 @@ def test_the_known_unreachable_list_has_not_gone_stale():
     assert not vanished, (
         f"{vanished} are listed in _KNOWN_UNREACHABLE but do not exist any more"
     )
+
+
+def test_boxing_cases_reach_a_vendor_sweep_and_skip_a_default_cuda_wheel():
+    """The shared vendor sweep uses the CUDA route wherever a wheel builds it.
+
+    The CUDA lane builds a FlagGems-primary wheel without boxing, so its
+    conftest skips ``cuda``. DCU builds boxing and runs the same vendor sweep.
+    The same file must therefore not appear in the exclusion list.
+    """
+    relative = "tests/integration/ops/test_full_cuda_coverage.py"
+    marks = _source_mark_sets(_REPO_ROOT / relative)
+    selected = [
+        selection
+        for selection in _manifest_selections("dcu")
+        if any(_names_target(relative, path) for path in selection.paths)
+    ]
+    assert selected
+    assert any(
+        _selection_can_run(relative, case_marks, selection, "dcu")
+        for case_marks in marks
+        for selection in selected
+    )
+    assert _conftest_would_skip(relative, {"cuda"}, "cuda")
+    assert relative not in _KNOWN_UNREACHABLE
+
+
+def test_unmarked_operator_file_still_reaches_the_directory_sweep(tmp_path):
+    """A bare helper must not make every ordinary operator file disappear."""
+    relative = "tests/integration/ops/test_unmarked_example.py"
+    source = _REPO_ROOT / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "import pytest\n\ndef test_ordinary_operator():\n    assert True\n"
+    )
+    selection = _selection_of("python -m pytest tests/integration/ops/")
+    assert selection is not None
+    try:
+        marks = _source_mark_sets(source)
+        assert marks == [set()]
+        with mock.patch.object(
+            _OPS_CONFTEST._platform, "detect_platform", return_value="dcu"
+        ), mock.patch.object(
+            _OPS_CONFTEST, "_flaggems_cpp_enabled", return_value=False
+        ), mock.patch.object(
+            _OPS_CONFTEST, "_tileops_enabled", return_value=False
+        ), mock.patch.object(_OPS_CONFTEST, "_boxing_enabled", return_value=True):
+            item = _ConftestItem(marks[0])
+            with mock.patch("pytest.mark.skip", side_effect=lambda **kwargs: kwargs):
+                _OPS_CONFTEST.pytest_configure(_ConftestConfig())
+                _OPS_CONFTEST.pytest_collection_modifyitems(None, [item])
+        assert selection.marker is None
+        assert item._skip_reason is None
+    finally:
+        source.unlink()
+
+
+def test_source_check_needs_a_real_test_case_for_its_marker(tmp_path):
+    """A planted assertion must not credit the file's operator cases."""
+    source = tmp_path / "test_planted_marker.py"
+    source.write_text(
+        textwrap.dedent("""\
+            import pytest
+
+            def assert_this_mentions_cuda():
+                pass
+
+            assert_this_mentions_cuda()
+            pytest.mark.cuda
+
+            @pytest.mark.anyplatform
+            def test_operator():
+                pass
+        """)
+    )
+    relative = (tmp_path / source.name).as_posix()
+    selection = _Selection((relative,), "cuda", (), uses_ops_conftest=False)
+    assert not _selection_can_run(relative, set(), selection, "cuda")
+
+
+def test_source_check_is_reachable_without_the_operator_conftest():
+    """The text-only check runs in a job that has no flagos runtime."""
+    relative = "tests/integration/ops/test_flaggems_conf_consistency.py"
+    check, *_ = _source_mark_sets(_REPO_ROOT / relative)
+    assert "anyplatform" in check
+    source_check = _Selection((relative,), None, (), uses_ops_conftest=False)
+    assert _selection_can_run(relative, check, source_check, None)
+    operator_case = _Selection((relative,), "anyplatform", ())
+    assert not _selection_can_run(relative, set(), operator_case, "cuda")

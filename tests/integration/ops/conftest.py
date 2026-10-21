@@ -145,9 +145,17 @@ def _boxing_enabled() -> bool:
     return "boxing" in _env.build_kernels()
 
 
+def _tileops_enabled() -> bool:
+    """True when this wheel recorded the generated TileOPs kernel set."""
+    from torch_fl import _env
+
+    return "tileops" in _env.build_kernels()
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
+    """Apply build-record gates to every ops case before collection finishes."""
     platform = _platform.detect_platform()
     markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
     # MetaX builds are boxing-only: the hand-written mxcc backend is NOT
@@ -169,6 +177,16 @@ def pytest_collection_modifyitems(
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
     for item in items:
+        if item.get_closest_marker("tileops") and not _tileops_enabled():
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "TileOPs kernels are not compiled into this wheel "
+                        "(rebuild with the tileops kernel set)"
+                    )
+                )
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             item.add_marker(
                 pytest.mark.skip(
@@ -211,6 +229,9 @@ def pytest_collection_modifyitems(
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
+    config.addinivalue_line(
+        "markers", "tileops: requires the generated TileOPs kernels"
+    )
     config.addinivalue_line("markers", "metax: requires MetaX platform")
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")

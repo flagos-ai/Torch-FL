@@ -100,9 +100,15 @@ environment_check:
     - /opt/conda/
   require_package_files:
     - lib_ppu/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
   flagos_devices:
-    more_than: 0
+    at_least: 2
   cuda_available: true
   cuda_devices:
     more_than: 0
   model_dir: true
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0+ppu3.6
+    triton_prefix: "3.6."

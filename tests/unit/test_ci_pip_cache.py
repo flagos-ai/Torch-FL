@@ -261,7 +261,11 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
                     0 < segment_timeout <= min(segment_maximum, step["timeout-minutes"])
                 )
         elif "run" in step:
-            assert "pip-cache" not in step.get("if", "")
+            if "pip-cache" in step.get("if", ""):
+                # The cache transfer is optional, but its partial contents are
+                # not. Remove them before pip reads the managed directory.
+                assert step["name"] == "Discard incomplete pip cache transfer"
+                assert "steps.pip-cache.outcome == 'failure'" in step["if"]
 
 
 def test_every_routed_integration_workflow_is_covered():

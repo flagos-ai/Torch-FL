@@ -23,11 +23,11 @@ patched headers.
 """
 
 import importlib.util
+import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
-import textwrap
+
 
 import pytest
 
@@ -39,22 +39,18 @@ abi = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(abi)
 
 
-def _compile_so(path: Path, source: str) -> None:
-    """Build a tiny .so so the guard runs against real nm output, not a fake."""
-    cc = shutil.which("cc") or shutil.which("gcc")
-    if cc is None:
-        pytest.skip("no C compiler available")
-    src = path.with_suffix(".c")
-    src.write_text(textwrap.dedent(source), encoding="utf-8")
-    subprocess.run(
-        [cc, "-shared", "-fPIC", "-o", str(path), str(src)],
-        check=True,
-        capture_output=True,
-    )
+def _symbol_from_nm_line(line):
+    fields = line.split()
+    return fields[-1].split("@", 1)[0] if fields else None
+
+
+def _nm_table(names):
+    rows = ["                 T " + name for name in names]
+    return chr(10).join(rows) + chr(10)
 
 
 @pytest.fixture
-def abi_tree(tmp_path):
+def abi_tree(tmp_path, monkeypatch):
     """A miniature vendor/official/shim layout with one vendor-private symbol.
 
     ``vendor_only`` stands in for DTK's DTK-only ATen wrapper: exported by the
@@ -63,34 +59,64 @@ def abi_tree(tmp_path):
     """
     vendor = tmp_path / "vendor"
     official = tmp_path / "official"
-    vendor.mkdir()
-    official.mkdir()
+    shim = tmp_path / "shim.so"
+    plugin = tmp_path / "libtorch_fl.so"
+    for directory, names in (
+        (vendor, ("libc10.so", "libtorch_cpu.so", "libc10_hip.so", "libtorch_hip.so")),
+        (official, ("libc10.so", "libtorch_cpu.so")),
+    ):
+        directory.mkdir()
+        for name in names:
+            (directory / name).touch()
+    shim.touch()
+    plugin.touch()
 
-    _compile_so(
-        vendor / "libc10.so",
-        "int vendor_only(void) { return 1; } int shared(void) { return 2; }",
-    )
-    _compile_so(vendor / "libtorch_cpu.so", "int vendor_cpu_side(void) { return 3; }")
-    _compile_so(official / "libc10.so", "int shared(void) { return 2; }")
-    _compile_so(official / "libtorch_cpu.so", "int other(void) { return 4; }")
+    tables = {
+        vendor / "libc10.so": {
+            "defined": {"vendor_only", "shared"},
+            "undefined": set(),
+        },
+        vendor / "libtorch_cpu.so": {
+            "defined": {"vendor_cpu_side", "other"},
+            "undefined": set(),
+        },
+        official / "libc10.so": {"defined": {"shared"}, "undefined": set()},
+        official / "libtorch_cpu.so": {"defined": {"other"}, "undefined": set()},
+        vendor / "libc10_hip.so": {
+            "defined": {"use"},
+            "undefined": {"vendor_only", "shared"},
+        },
+        vendor / "libtorch_hip.so": {"defined": {"hip_noop"}, "undefined": set()},
+        shim: {"defined": {"vendor_only"}, "undefined": set()},
+        plugin: {"defined": set(), "undefined": {"vendor_cpu_side"}},
+    }
 
-    device = (
-        "extern int vendor_only(void); extern int shared(void);\n"
-        "int use(void) { return vendor_only() + shared(); }"
-    )
-    _compile_so(vendor / "libc10_hip.so", device)
-    _compile_so(vendor / "libtorch_hip.so", "int hip_noop(void) { return 0; }")
-    _compile_so(tmp_path / "shim.so", "int vendor_only(void) { return 1; }")
+    def nm(path, *, defined):
+        table = tables.get(path)
+        if table is None:
+            raise RuntimeError(f"unexpected nm input: {path}")
+        names = table["defined" if defined else "undefined"]
+        return {_symbol_from_nm_line(line) for line in _nm_table(names).splitlines()}
+
+    monkeypatch.setattr(abi, "_nm_symbols", nm)
 
     manifest = tmp_path / "manifest.txt"
     manifest.write_text("# comment line\nvendor_only\n\n", encoding="utf-8")
     return {
         "vendor": vendor,
         "official": official,
-        "shim": tmp_path / "shim.so",
+        "shim": shim,
+        "plugin": plugin,
+        "tables": tables,
         "manifest": manifest,
         "root": tmp_path,
     }
+
+
+def test_nm_output_without_an_address_keeps_whole_symbols(abi_tree):
+    table = abi_tree["tables"][abi_tree["vendor"] / "libc10.so"]
+    output = _nm_table(table["defined"])
+    assert len(_symbol_from_nm_line(output.splitlines()[0])) > 1
 
 
 def test_gap_is_exactly_the_vendor_private_import(abi_tree):
@@ -130,10 +156,7 @@ def test_known_manifest_superset_is_allowed(abi_tree):
     was compiled against DTK's patched headers. CI compiles against official headers,
     so requiring exact equality rejects that valid 16-symbol shape.
     """
-    _compile_so(
-        abi_tree["shim"],
-        "int vendor_only(void) { return 1; } int plugin_only(void) { return 2; }",
-    )
+    abi_tree["tables"][abi_tree["shim"]]["defined"].add("plugin_only")
     abi_tree["manifest"].write_text("vendor_only\nplugin_only\n", encoding="utf-8")
     gap = abi.verify_core_abi(
         abi_tree["vendor"],
@@ -145,7 +168,7 @@ def test_known_manifest_superset_is_allowed(abi_tree):
 
 
 def test_shim_missing_a_manifest_symbol_fails(abi_tree):
-    _compile_so(abi_tree["shim"], "int unrelated(void) { return 0; }")
+    abi_tree["tables"][abi_tree["shim"]]["defined"] = {"unrelated"}
     with pytest.raises(RuntimeError, match="does not export every manifest symbol"):
         abi.verify_core_abi(
             abi_tree["vendor"],
@@ -162,11 +185,7 @@ def test_plugin_imports_are_folded_into_the_same_gap(abi_tree):
     plugin compiles against DTK's patched ATen headers and so imports a second
     family of DTK-only wrappers that no device lib references.
     """
-    plugin = abi_tree["root"] / "libtorch_fl.so"
-    _compile_so(
-        plugin,
-        "extern int vendor_cpu_side(void);\nint plugin_use(void) { return vendor_cpu_side(); }",
-    )
+    plugin = abi_tree["plugin"]
 
     without = abi.vendor_core_gap(abi_tree["vendor"], abi_tree["official"])
     assert "vendor_cpu_side" not in without
@@ -196,11 +215,34 @@ def test_manifest_comments_and_blank_lines_are_ignored(tmp_path):
     assert abi.read_manifest(path) == {"_Z3foo", "_Z3bar"}
 
 
-def test_cli_reports_success(abi_tree):
-    proc = subprocess.run(
+def _run_cli(abi_tree, real_abi):
+    """Run the CLI through a synthetic ``nm`` while using the real parser."""
+    tables = {
+        str(path): {side: sorted(names) for side, names in table.items()}
+        for path, table in abi_tree["tables"].items()
+        if path != abi_tree["plugin"]
+    }
+    probe = (
+        "import importlib.util, json, pathlib, sys; "
+        "path, tables, *argv = sys.argv[1:]; "
+        "spec = importlib.util.spec_from_file_location('abi_probe', path); "
+        "module = importlib.util.module_from_spec(spec); "
+        "spec.loader.exec_module(module); "
+        "text = lambda names: chr(10).join(names) + chr(10); "
+        "module._nm_symbols = lambda path, *, defined: "
+        "{line.split()[-1] for line in text(json.loads(tables)[str(path)]["
+        "'defined' if defined else 'undefined']).splitlines() if line.split()}; "
+        "sys.argv = [path, *argv]; "
+        "raise SystemExit(module.main())"
+    )
+    return subprocess.run(
         [
             sys.executable,
-            str(SCRIPT),
+            "-P",
+            "-c",
+            probe,
+            str(Path(real_abi.__file__).resolve()),
+            json.dumps(tables),
             "--vendor-lib",
             str(abi_tree["vendor"]),
             "--official-lib",
@@ -212,29 +254,19 @@ def test_cli_reports_success(abi_tree):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
+
+
+def test_cli_reports_success(abi_tree):
+    proc = _run_cli(abi_tree, abi)
     assert proc.returncode == 0, proc.stderr
     assert "1 vendor-private imports are covered" in proc.stdout
 
 
 def test_cli_fails_with_nonzero_exit(abi_tree):
     abi_tree["manifest"].write_text("", encoding="utf-8")
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--vendor-lib",
-            str(abi_tree["vendor"]),
-            "--official-lib",
-            str(abi_tree["official"]),
-            "--shim",
-            str(abi_tree["shim"]),
-            "--manifest",
-            str(abi_tree["manifest"]),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    proc = _run_cli(abi_tree, abi)
     assert proc.returncode == 1
     assert "error:" in proc.stderr
 

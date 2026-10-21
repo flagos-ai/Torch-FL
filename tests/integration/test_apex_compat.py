@@ -15,9 +15,8 @@
 """Integration tests for optional Apex multi-tensor compatibility on real hardware."""
 
 import pytest
+from device_init import torch
 
-torch = pytest.importorskip("torch")
-torch_fl = pytest.importorskip("torch_fl")
 apex = pytest.importorskip("apex")
 amp_C = pytest.importorskip("amp_C")
 

@@ -18,9 +18,8 @@ come through this call untouched. Two of the arms are only reachable on one
 interpreter -- the plugin's pair exists only where `torch_fl` was imported, and
 it holds the `flagos` device type only -- and the run prints which one it found
 so a skipped check is never mistaken for a passing one. What the plugin installs
-is also covered, without an accelerator, by
-`tests/unit/test_ascend_qwenimage_rope.py` and `tests/unit/test_gcu_qwenimage_rope.py`
--- one per vendor, because the plugin's copy is per vendor too.
+is also covered, without an accelerator, by the shared
+`tests/unit/test_qwenimage_rope.py`.
 
 The numeric half -- that the wrapped method really returns rotation angles for
 the registered type and the complex frequencies for every other one -- calls
@@ -167,7 +166,7 @@ if enabled and numeric and by_plugin:
     print(
         "  numeric half skipped: torch_fl's plugin holds the running device type,\n"
         "  so this function's closure is not the one in place -- see\n"
-        "  tests/unit/test_ascend_qwenimage_rope.py for what the plugin installs"
+        "  tests/unit/test_qwenimage_rope.py for what the plugin installs"
     )
 
 if enabled and numeric and not by_plugin:

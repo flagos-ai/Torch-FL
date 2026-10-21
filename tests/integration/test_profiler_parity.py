@@ -47,9 +47,8 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401  (registers the flagos PrivateUse1 backend)
 
 from torch_fl import _env
 from profiler_support import append_boxing_path_probe
@@ -344,16 +343,6 @@ def test_arg_key_supersets(profile_result, baseline):
 
 
 @pytest.mark.main_ops
-# Unconditional (not platform- or env-gated): FlagGems mm/bmm implementations
-# do not report profiler device time wherever they run. Written as a plain
-# xfail rather than a condition because the previous form --
-# condition=lambda: os.environ.get("FLAGOS_USE_FLAGGEMS") == "1" -- never
-# evaluated the lambda (a function object is always truthy), so it was already
-# unconditional in effect; the retired variable is gone, the forgiveness stays.
-@pytest.mark.xfail(
-    reason="FlagGems mm/bmm implementations do not report profiler device time",
-    strict=False,
-)
 def test_device_time_attribution(profile_result):
     """Assertion 4: aten::mm's device time equals the device events it owns.
 

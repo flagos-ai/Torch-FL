@@ -82,25 +82,18 @@ Run only main operators (CI smoke subset):
 pytest tests/integration/ops/ -m main_ops -v
 ```
 
-Run FlagGems-routed operators:
+Run both passes of the shared FlagGems conformance suite. Every platform runs
+the same inventory in the native and FlagGems passes:
 
 ```bash
-pytest tests/integration/ops/ -m "flaggems and main_ops" -v
+python tests/integration/flaggems/run.py native
+python tests/integration/flaggems/run.py flaggems
 ```
 
-Run FlagGems C++ operators (requires a wheel built with
-`FLAGOS_BUILD_FLAGGEMS_CPP=ON`):
+The FlagGems pass requires a wheel built with
+`FLAGOS_BUILD_FLAGGEMS=ON`. A wheel without that kernel set fails when the
+pass is requested.
 
-```bash
-pytest tests/integration/ops/ -m "flaggems_cpp and main_ops" -v
-```
-
-Whether these tests are collected is decided by the build record, not by the
-environment: `conftest.py` reads `KERNELS` from `torch_fl/_build_config.py` and
-skips the mark when `flaggems_cpp` is not in it. A wheel with the C++ runtime
-compiled in therefore runs them, and a wheel without it skips them, with no
-variable to keep in step by hand. Actual routing still follows the conf's
-`flaggems_cpp` keys.
 
 ### Manual FlagGems Overload Survey
 
@@ -351,11 +344,12 @@ ruff check --fix .
 GitHub Actions CI runs a subset of tests based on pytest marks:
 
 - **Smoke tests**: `-m main_ops` (CUDA boxing kernels only)
-- **FlagGems tests**: `-m "flaggems and main_ops"` (no env gate; the conf decides the route)
+- **FlagGems tests**: the native and FlagGems passes run
+  `tests/integration/flaggems/run.py`; both require the same case inventory
 - **Platform tests**: Vendor-specific runners filter by platform marker (e.g., `-m "ascend and main_ops"`)
 - **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
 
-To replicate CI behavior locally, use the same mark expressions shown above.
+To replicate CI behavior locally, run the commands shown above.
 
 `.github/configs/<platform>.yml` is the only place that defines what a platform runs. Ascend,
 cuda, dcu, gcu, metax, musa, ppu, and kunlunxin all use one parameterized pipeline,

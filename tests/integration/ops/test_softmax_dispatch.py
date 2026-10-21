@@ -29,8 +29,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import routed_backend
 
@@ -44,7 +43,7 @@ def _run_softmax_subprocess(
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "x = torch.randn(4,8,device='flagos:0'); "
         "torch.softmax(x, dim=-1)"
     )

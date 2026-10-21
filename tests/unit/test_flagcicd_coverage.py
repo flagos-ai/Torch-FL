@@ -63,6 +63,8 @@ def _setup(tmp_path, initializer="INITIAL = 1\n"):
         "PYTEST_PLUGINS",
         "FLAGCICD_REPORT_DIR",
         "FLAGCICD_COVERAGE_DIR",
+        "FLAGCICD_LAUNCHER",
+        "FLAGCICD_TEST_GROUP",
     ):
         environment.pop(name, None)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -90,6 +92,8 @@ def _setup(tmp_path, initializer="INITIAL = 1\n"):
     environment.update(
         FLAGCICD_COVERAGE_DIR=str(reports),
         FLAGCICD_REPORT_DIR=str(tmp_path / "pytest sessions"),
+        FLAGCICD_PYTHON_EXECUTABLE=sys.executable,
+        FLAGCICD_LAUNCHER="group",
         PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage",
         INTEGRATION_WORKDIR=str(workdir),
         INTEGRATION_ENVIRONMENT="{}",
@@ -155,7 +159,7 @@ def test_groups_union_executed_lines_and_count_unimported_modules(tmp_path):
     assert report["totals"]["percent_covered"] == pytest.approx(100 * 6 / 9)
     assert _metadata(reports)["complete"]
     assert {s["group"] for s in _metadata(reports)["sessions"]} == {"first", "second"}
-    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).glob("*.json"))) == 2
+    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).rglob("*.json"))) == 2
 
 
 def test_collection_imports_and_failed_test_lines_are_measured(tmp_path):
@@ -204,7 +208,7 @@ def test_per_file_runner_does_not_collect_fixture_sample_subprocesses(tmp_path):
     report = _merge(reports)
     assert len(_metadata(reports)["sessions"]) == 2
     assert report["files"]["torch_fl/model.py"]["missing_lines"] == [4, 7]
-    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).glob("*.json"))) == 2
+    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).rglob("*.json"))) == 2
 
 
 @pytest.mark.parametrize("damage", ["crash", "corrupt"])

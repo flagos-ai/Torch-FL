@@ -23,8 +23,7 @@ import time
 from collections import defaultdict
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
 def _has_privateuse1_kernel(op_name: str) -> bool:

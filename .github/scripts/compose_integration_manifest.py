@@ -22,7 +22,7 @@ expectations, the environment its runner sets -- and this script folds those
 into the step so `run_integration_tests.py` receives the same
 `integration_tests` JSON it always has.
 
-That shape is the point. Eight per-platform step lists made a step that only
+That shape is the point. Per-platform step lists made a step that only
 one platform ran look like a step every platform ran; here the deviation is a
 `platforms:` key in one file, and how much is still per-platform is a number
 the loader prints on every run.
@@ -35,7 +35,9 @@ tests that hold the manifest's invariants.
 """
 
 import argparse
+import importlib.util
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -51,11 +53,35 @@ _ENTRY_KEYS = {
     "platforms",
     "environment",
     "environment_from_config",
+    "requires_build_kernels",
 }
 
 
 class ManifestError(Exception):
     """A manifest or platform config that cannot be composed."""
+
+
+def _integration_runner(name, filename):
+    """Load a standalone CI script without creating a package dependency."""
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ManifestError(f"cannot load the CI runner module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError) as error:
+        raise ManifestError(f"cannot load the CI runner module: {error}")
+    return module
+
+
+_RUNNER = _integration_runner("integration_runner", "run_integration_tests.py")
+
+# The hardware runner owns the group-to-inventory binding. The composer keeps
+# no second copy: it uses this table to label a plan, and the loader's own
+# validation loads the same runner table below.
+INVENTORY_GROUPS = _RUNNER.INVENTORY_GROUPS
+INVENTORY_SOURCES = _RUNNER.INVENTORY_SOURCES
 
 
 def known_platforms(config_dir) -> list[str]:
@@ -102,6 +128,43 @@ def _entry_platforms(entry, known):
     return list(platforms)
 
 
+def _applicable(entry, platform, config, known):
+    """Whether this entry runs; a missing declared kernel set is a failure.
+
+    ``requires_build_kernels`` reads the build the environment check already
+    enforces. A variant restricted to a platform that forbids the set would
+    otherwise schedule a step that can only fail.
+    """
+    if platform not in _entry_platforms(entry, known):
+        return False
+    required = entry.get("requires_build_kernels")
+    if required is None:
+        return True
+    check = config.get("environment_check")
+    if not isinstance(check, dict):
+        raise ManifestError(
+            f"step {entry['id']!r} requires built kernel set(s) "
+            f"{', '.join(required)}, but the {platform} config has no "
+            "environment_check block"
+        )
+    forbidden = check.get("forbid_build_kernels") or []
+    if all(name in forbidden for name in required):
+        return False
+    required_builds = check.get("require_build_kernels") or []
+    undeclared = [
+        name
+        for name in required
+        if name not in required_builds and name not in forbidden
+    ]
+    if undeclared:
+        raise ManifestError(
+            f"step {entry['id']!r} requires built kernel set(s) "
+            f"{', '.join(undeclared)}, but the {platform} config neither requires "
+            "nor forbids them"
+        )
+    return True
+
+
 def validate_manifest(manifest, known):
     """Check the manifest's shape and return its entries.
 
@@ -143,6 +206,18 @@ def validate_manifest(manifest, known):
                 _require_string(key, f"steps[{index}].environment_from_config key")
                 _require_string(
                     variable, f"steps[{index}].environment_from_config[{key}]"
+                )
+        required = entry.get("requires_build_kernels")
+        if required is not None:
+            if (
+                not isinstance(required, list)
+                or not required
+                or not all(isinstance(name, str) and name for name in required)
+                or len(set(required)) != len(required)
+            ):
+                raise ManifestError(
+                    f"steps[{index}].requires_build_kernels must be a non-empty "
+                    "list of distinct kernel set names"
                 )
 
         if step_id in assigned:
@@ -201,10 +276,9 @@ def compose(manifest, config, platform, known):
     declared_from_config = {
         key for entry in steps for key in (entry.get("environment_from_config") or {})
     }
-
     composed = []
     for entry in steps:
-        if platform not in _entry_platforms(entry, known):
+        if not _applicable(entry, platform, config, known):
             continue
         environment = _environment(entry, f"step {entry['id']}.environment")
         for key, variable in (entry.get("environment_from_config") or {}).items():
@@ -225,6 +299,7 @@ def compose(manifest, config, platform, known):
             )
             consumed_from_config.add(key)
         step = {
+            "id": entry["id"],
             "name": entry["name"].replace(DISPLAY_NAME_TOKEN, display_name),
             "command": entry["command"],
         }
@@ -249,6 +324,56 @@ def compose(manifest, config, platform, known):
     if not composed:
         raise ManifestError(f"no steps apply to {platform!r}")
     return composed
+
+
+def inventory_bindings(composed):
+    """The shared inventory groups this plan runs, in manifest order."""
+    identifiers = {step["id"] for step in composed}
+    return [
+        (group, kind)
+        for group, kind in INVENTORY_GROUPS.items()
+        if group in identifiers
+    ]
+
+
+def source_inventory_arguments(composed):
+    """``--inventory`` arguments for the loader's validation of source cases.
+
+    The runner refuses an inventory group absent from this platform's plan, so
+    the arguments are the plan's own bindings, each pointing at the source
+    tree that declares its cases.
+    """
+    return " ".join(
+        f"--inventory {shlex.quote(f'{group}={INVENTORY_SOURCES[group]}')}"
+        for group, _kind in inventory_bindings(composed)
+    )
+
+
+def inventory_plan(manifest_steps, composed):
+    """The shared inventories a composed plan runs, with their requirements.
+
+    Each platform's plan is composed from the same manifest, but a step can
+    apply to only some platforms (MPS forbids the FlagGems kernel set). The
+    loader derives what to hand the runner from this list, so the validation
+    arguments and the hardware arguments both come from one source.
+    """
+    requirements = {
+        entry["id"]: list(entry.get("requires_build_kernels") or [])
+        for entry in manifest_steps
+    }
+    plan = []
+    for step in composed:
+        kind = INVENTORY_GROUPS.get(step["id"])
+        if kind is None:
+            continue
+        plan.append(
+            {
+                "group": step["id"],
+                "kind": kind,
+                "requires_build_kernels": requirements[step["id"]],
+            }
+        )
+    return plan
 
 
 def coverage_report(assigned, known):
@@ -282,6 +407,20 @@ def main(argv=None):
         known = known_platforms(args.config_dir)
         steps, _ids, assigned = validate_manifest(manifest, known)
         composed = compose(manifest, config, args.platform, known)
+        excluded = {
+            entry["id"]
+            for entry in steps
+            if _applicable(entry, platform=args.platform, config=config, known=known)
+            is False
+        }
+        missing = sorted(
+            set(INVENTORY_GROUPS) - {step["id"] for step in composed} - excluded
+        )
+        if missing:
+            raise ManifestError(
+                "the composed plan lacks shared-inventory group(s): "
+                + ", ".join(missing)
+            )
     except ManifestError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
@@ -306,6 +445,23 @@ def main(argv=None):
         for line in report:
             print(line, file=sys.stderr)
 
+    plan_inventories = inventory_plan(steps, composed)
+    print(
+        f"loader-inventory-arguments={source_inventory_arguments(composed)}",
+        file=sys.stderr,
+    )
+    print(
+        "inventory-plan="
+        + json.dumps(
+            [
+                {**entry, "source": INVENTORY_SOURCES[entry["group"]]}
+                for entry in plan_inventories
+            ],
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
     print(json.dumps(composed, separators=(",", ":")))
     return 0
 

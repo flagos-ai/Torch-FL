@@ -169,11 +169,12 @@ multiplies by the complex exponential. `torch_fl` therefore registers the `flago
 device in both halves at import: angles for the operand, and a rotation that
 writes the same values as `diffusers`' `apply_rotary_emb_qwen_neuron` without the
 stride-0 `repeat_interleave` broadcast it uses. The GCU and Ascend branches each
-install their own copy — `torch_fl/accelerator/gcu/_gcu_compat.py` and
-`torch_fl/accelerator/ascend/_ascend_compat.py` — on GCU because the topsaten
-stack serves the complex exponential slowly enough for it to dominate a
-transformer forward, and on Ascend because the complex operands cannot be built
-at all (`RuntimeError: Unsupported dtype for ACL: ComplexFloat`).
+install the shared implementation in `torch_fl/accelerator/qwenimage_rope.py`:
+on GCU because the topsaten stack serves the complex exponential slowly enough
+for it to dominate a transformer forward, and on Ascend because the complex
+operands cannot be built at all (`RuntimeError: Unsupported dtype for ACL:
+ComplexFloat`). Shared unit coverage in `tests/unit/test_qwenimage_rope.py`
+replaces the previous vendor-specific test copies.
 `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` leaves the table as `diffusers` ships it, which
 is the off leg of the measurement in
 `tests/manual/qwen_image_2512/README.md`. The patch is confined to `diffusers`;

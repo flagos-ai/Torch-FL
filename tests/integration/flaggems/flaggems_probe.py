@@ -19,9 +19,11 @@ stderr (``[flagos dispatch] <op> -> <backend>``), and it has to be read from a
 *fresh* interpreter: ``PythonOpCache::GetFunc`` memoizes the resolved FlagGems
 callable per qualname and the conf is parsed once per process, so a call made
 after the one under test -- or a patch installed after it -- is not a clean
-observation. ``probe_routes`` therefore spawns one child with ``FLAGOS_LOG=
-dispatch`` in its environment, hands it the whole call table, and reads the
-result back as JSON.
+observation. ``probe_routes`` therefore spawns one child with
+``FLAGOS_LOG=dispatch,fallback`` in its environment, hands it the whole call
+table, and reads the result back as JSON. A conf value of ``none`` leaves the
+operator unregistered, so it reaches ``[flagos cpu_fallback] <op>`` instead of
+a dispatch line; both outcomes are attributed to the same marker block.
 
 One child runs every call rather than one child per call: importing torch_fl and
 torch is the expensive part and it is the same cost for all of them. Each call is
@@ -44,10 +46,17 @@ import subprocess
 import sys
 import textwrap
 
-from flaggems_caps import DEVICE, FLAGGEMS_ROUTING_CALLS, PRELUDE
+from flaggems_caps import (
+    DEVICE,
+    FLAGGEMS_EXECUTION_CALLS,
+    FLAGGEMS_ROUTING_CALLS,
+    PRELUDE,
+)
 
 _MARKER_PREFIX = "### op "
+_END_PREFIX = "### end "
 _DISPATCH_PREFIX = "[flagos dispatch]"
+_FALLBACK_PREFIX = "[flagos cpu_fallback]"
 
 # The child program. Self-contained on purpose: it runs under ``python -c``,
 # where nothing from this package is on sys.path. torch_fl is imported *before*
@@ -78,6 +87,8 @@ _CHILD_SRC = textwrap.dedent(
             exec(code, globals())  # noqa: S102 -- the table is this package's own
         except Exception as exc:
             entry["error"] = "%%s: %%s" %% (type(exc).__name__, exc)
+        sys.stderr.write("### end " + op + "\\n")
+        sys.stderr.flush()
         print(json.dumps(entry), flush=True)
     """
 )
@@ -85,15 +96,36 @@ _CHILD_SRC = textwrap.dedent(
 
 def _child_source() -> str:
     """The child program with this run's call table baked in."""
-    table = {
-        "order": list(FLAGGEMS_ROUTING_CALLS),
-        "calls": dict(FLAGGEMS_ROUTING_CALLS),
+    return _child_source_with_table(_call_table())
+
+
+def _call_table() -> dict:
+    """The call bodies and their stable execution order."""
+    calls = {**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS}
+    return {
+        "calls": calls,
+        "order": sorted(calls),
     }
+
+
+def _child_source_with_table(table: dict) -> str:
+    """Render the child program around a call table."""
     return _CHILD_SRC % {
         "device": DEVICE,
         "prelude": PRELUDE,
         "calls": json.dumps(table),
     }
+
+
+def _generated_table(source: str) -> dict:
+    """Read back the table from a rendered child, as its interpreter will."""
+    prefix, separator, suffix = source.partition("\nCALLS = ")
+    if not separator or '\n\nfor op in CALLS["order"]:' not in suffix:
+        raise ValueError("child source has no complete CALLS table and loop")
+    assignment, _, _ = suffix.partition('\n\nfor op in CALLS["order"]:')
+    namespace = {}
+    exec(prefix + "\nCALLS = " + assignment, namespace)
+    return namespace["CALLS"]
 
 
 def _tail(text: str, limit: int = 800) -> str:
@@ -118,13 +150,14 @@ def _parse_stdout(stdout: str) -> dict[str, dict]:
     return entries
 
 
-def attribute_dispatch(stderr: str, ops: list[str]) -> dict[str, str | None]:
-    """Backend each operator dispatched to, read from marker-bracketed stderr.
+def attribute_routes(stderr: str, ops: list[str]) -> dict[str, dict]:
+    """How each operator left the PrivateUse1 dispatcher, by marked stderr.
 
     A dispatch line counts only inside the marker block of the operator it names,
     so an operator that internally calls others is not attributed their routes.
-    An operator whose block holds no matching line maps to ``None``: it did not
-    reach a backend of its own (cpu_fallback, or an uncompiled kernel).
+    A fallback line is the explicit ``none`` route. The result for each operator
+    has ``dispatched_backend`` and ``cpu_fallback``; both being false means no
+    route of its own was observed.
     """
     blocks: dict[str, list[str]] = {}
     current: str | None = None
@@ -133,18 +166,30 @@ def attribute_dispatch(stderr: str, ops: list[str]) -> dict[str, str | None]:
             current = line[len(_MARKER_PREFIX) :].strip()
             blocks.setdefault(current, [])
             continue
-        if current is not None and line.startswith(_DISPATCH_PREFIX):
+        if line.startswith(_END_PREFIX):
+            current = None
+            continue
+        if current is not None and line.startswith(
+            (_DISPATCH_PREFIX, _FALLBACK_PREFIX)
+        ):
             blocks[current].append(line)
-    routed: dict[str, str | None] = {}
+    routes: dict[str, dict] = {}
     for op in ops:
         backend: str | None = None
+        cpu_fallback = False
         for line in blocks.get(op, ()):
+            if line.startswith(_FALLBACK_PREFIX):
+                cpu_fallback = line[len(_FALLBACK_PREFIX) :].strip() == op
+                continue
             body = line.split("]", 1)[1]
             opname, _, name = body.partition("->")
             if opname.strip() == op:
                 backend = name.strip()
-        routed[op] = backend
-    return routed
+        routes[op] = {
+            "dispatched_backend": backend,
+            "cpu_fallback": cpu_fallback,
+        }
+    return routes
 
 
 def probe_routes(
@@ -154,15 +199,17 @@ def probe_routes(
 ) -> dict[str, dict]:
     """Run the routing calls on device and report ``op -> outcome``.
 
-    Returns one entry per requested operator: ``{"dispatched_backend", "error"}``.
-    ``dispatched_backend`` is the backend named by the child's
-    ``[flagos dispatch]`` line, or ``None`` when the operator emitted none. A
-    child that exits non-zero yields one error entry per operator instead of
-    raising, so a caller can report every operator it asked for.
+    Returns one entry per requested operator:
+    ``{"dispatched_backend", "cpu_fallback", "error"}``. The backend is the one
+    named by the child's ``[flagos dispatch]`` line; ``cpu_fallback`` says the
+    child printed the matching fallback line. A child that exits non-zero yields
+    one error entry per operator instead of raising, so a caller can report
+    every operator it asked for.
     """
-    selected = list(FLAGGEMS_ROUTING_CALLS if ops is None else ops)
+    probe_table = {**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS}
+    selected = list(probe_table if ops is None else ops)
     env = os.environ.copy()
-    env["FLAGOS_LOG"] = "dispatch"
+    env["FLAGOS_LOG"] = "dispatch,fallback"
     if extra_env:
         env.update(extra_env)
     proc = subprocess.run(
@@ -174,14 +221,22 @@ def probe_routes(
     )
     if proc.returncode != 0:
         message = f"probe subprocess exited {proc.returncode}: {_tail(proc.stderr)}"
-        return {op: {"dispatched_backend": None, "error": message} for op in selected}
+        return {
+            op: {
+                "dispatched_backend": None,
+                "cpu_fallback": False,
+                "error": message,
+            }
+            for op in selected
+        }
     entries = _parse_stdout(proc.stdout)
-    dispatched = attribute_dispatch(proc.stderr, selected)
+    routes = attribute_routes(proc.stderr, selected)
     report: dict[str, dict] = {}
     for op in selected:
         entry = entries.get(op, {"error": "no result emitted"})
         report[op] = {
-            "dispatched_backend": dispatched.get(op),
+            "dispatched_backend": routes[op]["dispatched_backend"],
+            "cpu_fallback": routes[op]["cpu_fallback"],
             "error": entry.get("error"),
         }
     return report

@@ -295,12 +295,9 @@ Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`.
 ### FlagGems Verification
 
 ```bash
-pytest tests/integration/ops/ \
-  -m "flaggems and main_ops" \
-  -v --tb=short
+python tests/integration/flaggems/run.py native
+python tests/integration/flaggems/run.py flaggems
 ```
-
-No marker deselection needed — `tests/integration/ops/conftest.py` collects the `flaggems`-marked items unconditionally now, so leaving the mark out would silently deselect the whole group instead of failing it.
 
 ## Running the Unit Suite
 

@@ -118,12 +118,13 @@ fi
 # wheel, and the MPS backend lives in the default build. The Linux index the
 # other hooks point at serves no arm64 macOS wheel at all -- and the shared
 # helper measures that index by default -- so both are repointed at PyPI, whose
-# resolver picks the right macosx arm64 wheel for the local tag. numpy<2 for the
-# same reason the other hooks pin it: 2.x breaks the stock torch C extensions at
-# import.
+# resolver picks the right macosx arm64 wheel for the local tag.
 CPU_TORCH_INDEX_URL="https://pypi.org/simple"
 CPU_TORCH_MIRROR_INDEX_URL_DEFAULT=""
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+# torch reads NumPy during startup, and the shared test cohort is installed
+# after this hook. Keep the arrays dependency in the venv that imports torch.
+NUMERICAL_DEPENDENCIES=('numpy==1.26.4')
 pip_retry --upgrade pip
 # The wheel step runs `python -m build --wheel --no-isolation`, which reads the
 # build requirements from pyproject.toml instead of provisioning them in an
@@ -137,18 +138,18 @@ pip_retry --upgrade pip
 # `setuptools` is upgraded alongside because a macOS runner image can carry an
 # older one than the pyproject build requirements ask for, and `--upgrade` there
 # is what keeps this list matching what `python -m build` will demand.
-pip_retry --upgrade setuptools "cmake>=3.18" wheel
+# The pins mirror the common cohort, which replaces this package if needed.
+pip_retry --upgrade setuptools "cmake>=3.18" wheel "${NUMERICAL_DEPENDENCIES[@]}"
 install_cpu_torch
 CPU_TORCH_INDEX_URL="${CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${CPU_TORCH_VERSION_DEFAULT}"
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Test dependencies. transformers is pinned to [4.51, 5) exactly as the other
-  # hooks pin it: 4.51 is where Qwen3 model_type support landed and 5.x has the
-  # TokenizersBackend regression. The MPS lane runs the operator suite and the
-  # runtime traversal rather than the model groups, but the ops conftest imports
-  # the same shared fixtures.
-  pip_retry pytest "transformers>=4.51,<5" "numpy<2" safetensors sentencepiece tiktoken protobuf
+  # The pipeline installs the complete test cohort after this hook with
+  # --no-deps. Installing test packages here would add a second source of
+  # versions for the common cohort to reconcile. Keep only pytest in the
+  # platform environment; the cohort also preserves the torch build above.
+  pip_retry pytest
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"

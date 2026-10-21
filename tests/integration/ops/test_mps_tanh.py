@@ -83,8 +83,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -635,7 +634,7 @@ class TestTanhDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "a = torch.randn(4, 4, dtype=torch.bfloat16, device='flagos:0'); "
                 "torch.tanh(a)",
             ],
@@ -663,7 +662,7 @@ class TestTanhDispatch:
         while a ``none`` route would log it against a different backend.
         """
         source = (
-            "import torch, torch_fl; "
+            "from device_init import torch, torch_fl; "
             f"a = torch.randn(4, 4, dtype=torch.{dtype}).to('flagos:0'); "
             "torch.tanh(a); "
             "torch_fl._C._synchronize()"

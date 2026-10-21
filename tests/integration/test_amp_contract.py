@@ -21,7 +21,7 @@ through the capabilities in `amp_support`.
 """
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
 
 from amp_support import require

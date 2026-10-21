@@ -253,27 +253,10 @@ if ! musa_cpu_torch_is_usable 2>/dev/null; then
 fi
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Test dependencies. transformers pulls numpy 2.x, which breaks the stock
-  # +cpu torch C extensions at import, so numpy stays on 1.x.
-  #
-  # transformers is also used by the MUSA BERT dispatch regression; removing
-  # it would silently skip existing coverage even when Qwen3 is not enabled.
-  #
-  # transformers is pinned to [4.51, 5): 4.51 is where Qwen3 model_type support
-  # landed (older releases raise "Unrecognized model" on AutoConfig), and 5.x has
-  # an unresolved TokenizersBackend regression that breaks the Qwen3 slow-to-fast
-  # conversion even with sentencepiece installed. An unpinned install picks
-  # whichever of those two failure modes is latest on PyPI.
-  #
-  # Installed even into a prebuilt venv: a venv baked without them turns the
-  # inference and training groups into an environment failure that looks like a
-  # platform failure. pip is a no-op when they are already present.
+  # The pipeline installs the shared test cohort after this hook. Keep pytest
+  # and the platform's numpy<2 pin here because they belong to the environment.
   pip_retry --index-url "$PIP_INDEX_URL_ARG" \
-    pytest "transformers>=4.51,<5" "numpy<2" safetensors 'PyYAML==6.0.1'
-  # Enable when adding a Qwen3 model mount/test group, or for manual Qwen3 runs.
-  if [[ "${TORCH_FL_INSTALL_QWEN_DEPS:-0}" == "1" ]]; then
-    pip_retry --index-url "$PIP_INDEX_URL_ARG" sentencepiece tiktoken protobuf
-  fi
+    pytest "numpy<2"
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"

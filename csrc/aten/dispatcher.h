@@ -4,7 +4,9 @@
 
 #include "common.h"
 #include <c10/util/Exception.h>
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <flagos_env.h>
 #include <optional>
 #include <string>
@@ -107,6 +109,112 @@ inline bool FlagGemsRejectsArgs(const char* op_name, const Args&... args) {
   return (... || FlagGemsRejectsArg(op_name, args));
 }
 
+inline bool IsBoolAbsOrNeg(const char* op_name) {
+  return op_name != nullptr &&
+         (std::strcmp(op_name, "abs") == 0 ||
+          std::strcmp(op_name, "abs.out") == 0 ||
+          std::strcmp(op_name, "abs_") == 0 ||
+          std::strcmp(op_name, "neg") == 0 ||
+          std::strcmp(op_name, "neg.out") == 0 ||
+          std::strcmp(op_name, "neg_") == 0);
+}
+
+inline bool IsFullReduction(const char* op_name) {
+  return op_name != nullptr &&
+         (std::strcmp(op_name, "sum") == 0 ||
+          std::strcmp(op_name, "prod") == 0 ||
+          std::strcmp(op_name, "sum.out") == 0 ||
+          std::strcmp(op_name, "prod.out") == 0);
+}
+
+// Device boxing can copy an operand before the implementation checks its dtype.
+// For a bool input that turns a reference error into an allocation failure, or
+// accepts a full reduction whose output must be int64. These checks therefore
+// run in every entry point before backend resolution. A dimension reduction
+// explicitly permits a bool output for both sum and prod, while an in-place
+// object unary op may use its own tensor as out.
+inline void CheckTensor(const char* op_name, const at::Tensor& t) {
+  if (t.scalar_type() != at::kBool) {
+    return;
+  }
+  if (IsFullReduction(op_name)) {
+    return;
+  }
+  if (IsBoolAbsOrNeg(op_name)) {
+    if (std::strncmp(op_name, "abs", 3) == 0) {
+      TORCH_CHECK_NOT_IMPLEMENTED(false, "abs_cpu not implemented for 'Bool'");
+    }
+    TORCH_CHECK(
+        false,
+        "Negation, the `-` operator, on a bool tensor is not supported. If "
+        "you are trying to invert a mask, use the `~` or `logical_not()` "
+        "operator instead.");
+  }
+}
+
+inline void CheckArgument(const char* op_name,
+                          const at::Tensor& t,
+                          bool is_out = false) {
+  TORCH_CHECK(
+      !is_out || !IsFullReduction(op_name) || t.scalar_type() != at::kBool,
+      "Expected out tensor to have dtype long long, but got bool instead");
+  if (is_out) {
+    const bool is_reduction_output =
+        std::strcmp(op_name, "sum.dim_IntList") == 0 ||
+        std::strcmp(op_name, "sum.IntList_out") == 0 ||
+        std::strcmp(op_name, "prod.dim_int") == 0 ||
+        std::strcmp(op_name, "prod.int_out") == 0;
+    TORCH_CHECK(
+        !is_reduction_output || t.scalar_type() != at::kBool,
+        "Attempting to cast from torch.int64 to out tensor with dtype "
+        "torch.bool, but this can't be cast because it is not safe!");
+  }
+  if (!is_out) CheckTensor(op_name, t);
+}
+
+inline void CheckArgument(const char* op_name,
+                          const std::optional<at::Tensor>& t,
+                          bool is_out = false) {
+  if (t.has_value()) CheckArgument(op_name, *t, is_out);
+}
+
+inline void CheckArgument(const char* op_name,
+                          const at::ArrayRef<at::Tensor>& tensors,
+                          bool is_out = false) {
+  for (const auto& t : tensors) CheckArgument(op_name, t, is_out);
+}
+
+inline void CheckArgument(const char* op_name,
+                          const at::ITensorListRef& tensors,
+                          bool is_out = false) {
+  for (const auto& t : tensors) CheckArgument(op_name, t, is_out);
+}
+
+template <typename T>
+inline void CheckArgument(const char*, const T&, bool = false) {}
+
+template <typename... Args>
+inline void CheckReferenceDtype(const char* op_name, const Args&... args) {
+  (CheckArgument(op_name, args), ...);
+}
+
+template <typename... Args>
+inline void CheckReferenceDtypeWithExplicitOut(const char* op_name,
+                                               const Args&... args) {
+  constexpr size_t kArgumentCount = sizeof...(Args);
+  if constexpr (kArgumentCount == 0) {
+    return;
+  } else if constexpr (kArgumentCount <= 4) {
+    CheckReferenceDtype(op_name, args...);
+  } else {
+    detail::CheckArgument(op_name, std::get<0>(std::forward_as_tuple(args...)));
+    detail::CheckArgument(op_name,
+                          std::get<kArgumentCount - 1>(
+                              std::forward_as_tuple(args...)),
+                          true);
+  }
+}
+
 } // namespace detail
 
 template <typename FnPtr>
@@ -146,6 +254,11 @@ class Dispatcher {
 
   template <typename... Args>
   decltype(auto) operator()(Args&&... args) const {
+    if (detail::IsFullReduction(op_name_)) {
+      detail::CheckReferenceDtypeWithExplicitOut(op_name_, args...);
+    } else {
+      detail::CheckReferenceDtype(op_name_, args...);
+    }
     // Hot path: the op name is fixed (op_name_) and the backend routing is
     // immutable once the config is loaded, so resolve it once and cache. This
     // avoids constructing a std::string from op_name_ and hashing it in the
@@ -167,6 +280,11 @@ class Dispatcher {
 
   template <typename... Args>
   decltype(auto) DispatchBackend(Backend backend, Args&&... args) const {
+    if (detail::IsFullReduction(op_name_)) {
+      detail::CheckReferenceDtypeWithExplicitOut(op_name_, args...);
+    } else {
+      detail::CheckReferenceDtype(op_name_, args...);
+    }
     auto fn = GetFn(backend);
     TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
@@ -174,6 +292,11 @@ class Dispatcher {
 
   template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
+    if (detail::IsFullReduction(op_name.c_str())) {
+      detail::CheckReferenceDtypeWithExplicitOut(op_name.c_str(), args...);
+    } else {
+      detail::CheckReferenceDtype(op_name.c_str(), args...);
+    }
     auto backend = GetBackendForOp(op_name);
     auto fn = ResolveFn(op_name.c_str(), backend, args...);
     LogDispatch(op_name, backend);

@@ -66,8 +66,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 from backend_conf import routed_backend_or_none
 from platform_support import detect_platform
@@ -651,7 +650,7 @@ class TestBatchNormDeclines:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "x = torch.randn(2, 3, 4, 5, device='flagos:0'); "
                 "w = torch.randn(3, device='flagos:0'); "
                 "torch.ops.aten.native_batch_norm("
@@ -988,7 +987,7 @@ class TestBatchNormDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(2, 3, 4, 5, device='flagos:0'); "
                 "w = torch.randn(3, device='flagos:0'); "
                 "rm = torch.zeros(3, device='flagos:0'); "
@@ -1018,7 +1017,7 @@ class TestBatchNormDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(2, 3, 4, 5, device='flagos:0'); "
                 "w = torch.randn(3, device='flagos:0'); "
                 "rm = torch.zeros(3, device='flagos:0'); "
@@ -1048,7 +1047,7 @@ class TestBatchNormDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "t = torch.randn(2, 3, 4, 5, device='flagos:0')\n"
                 "w = torch.randn(3, device='flagos:0')\n"
                 "rm = torch.zeros(3, device='flagos:0')\n"

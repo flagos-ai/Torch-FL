@@ -14,7 +14,7 @@
 
 """Assert the wheel landed in the environment its platform config describes.
 
-This was eight hand-written heredocs, one per platform, each re-stating the
+This replaced the hand-written per-platform heredocs, each re-stating the
 same handful of facts about the environment and drifting from the others in
 which of them it stated. The facts are the platform's -- a stock +cpu torch,
 the vendor bundle in place of the CUDA one, so many devices -- so they live in
@@ -42,8 +42,10 @@ from types import SimpleNamespace
 
 
 ENVIRONMENT_VARIABLE = "FLAGOS_ENVIRONMENT_CHECK"
+FLAGGEMS_KERNEL_SET = "flaggems"
 
 _BOUNDS = ("at_least", "more_than", "exactly")
+_TLE_IMPORT_FAILURES = set()
 
 # Mach-O cputype -> the name distutils tags a wheel with. Only the two this
 # project can produce are named; anything else is reported by number, because a
@@ -58,7 +60,7 @@ FAT_ARCH_LIMIT = 64
 # Every key a platform may state. The list is closed on purpose: a misspelled
 # key reads as an expectation that was never checked, and the platform would
 # pass this step while asserting nothing about the fact it meant to assert.
-# tests/unit/test_integration_manifest.py holds the eight configs to this.
+# tests/unit/test_integration_manifest.py holds all configured platforms to this.
 SUPPORTED_KEYS = frozenset(
     {
         "torch_version_prefix",
@@ -75,6 +77,7 @@ SUPPORTED_KEYS = frozenset(
         "cuda_devices",
         "triton_backend",
         "flaggems_vendor",
+        "require_flaggems_tle_modules",
         "require_imports",
         "native_extensions_arch",
         "torch_musa_shim_only",
@@ -146,11 +149,19 @@ def import_dependencies(spec):
         flag_gems=None,
         flagtree_is_active=None,
     )
-    if spec.get("triton_backend") or spec.get("flagtree"):
+    if (
+        spec.get("triton_backend")
+        or spec.get("flagtree")
+        or FLAGGEMS_KERNEL_SET in (spec.get("require_build_kernels") or [])
+    ):
         import triton
 
         dependencies.triton = triton
-    if spec.get("flaggems_vendor") or spec.get("flagtree"):
+    if (
+        spec.get("flaggems_vendor")
+        or spec.get("flagtree")
+        or FLAGGEMS_KERNEL_SET in (spec.get("require_build_kernels") or [])
+    ):
         import flag_gems
 
         dependencies.flag_gems = flag_gems
@@ -205,7 +216,7 @@ def assert_torch_path(spec, torch_path):
         assert forbidden not in str(torch_path), f"{forbidden} in {torch_path}"
 
 
-def assert_build_kernels(spec, torch_fl):
+def assert_build_kernels(spec, torch_fl, dependencies):
     """The kernel sets the wheel was built with, from the build record.
 
     `require_package_files` says what the wheel ships, which is one step removed
@@ -226,6 +237,21 @@ def assert_build_kernels(spec, torch_fl):
     for name in required:
         assert name in kernels, (
             f"expected the {name!r} kernel set, found {sorted(kernels)}"
+        )
+    if FLAGGEMS_KERNEL_SET in required:
+        if dependencies.triton is None:
+            import triton
+
+            dependencies.triton = triton
+        if dependencies.flag_gems is None:
+            import flag_gems
+
+            dependencies.flag_gems = flag_gems
+        available = sorted(dependencies.triton.backends.backends)
+        assert available, "the installed Triton has no backend for FlagGems"
+        print(
+            f"FlagGems runtime: {dependencies.flag_gems.__file__}; "
+            f"Triton backends: {available}"
         )
     for name in forbidden:
         assert name not in kernels, (
@@ -291,7 +317,7 @@ def assert_flaggems_vendor(dependencies, vendor):
 
 
 def assert_flagtree(dependencies, flagtree):
-    """CUDA: the FlagTree build is the one the wheel's Triton routes need.
+    """The FlagTree build is the one the wheel's Triton routes need.
 
     The FlagTree wheel is source-free: it ships its own Triton, and the
     expected version comes from the setup script so the two stay in step.
@@ -311,20 +337,103 @@ def assert_flagtree(dependencies, flagtree):
     return expected
 
 
-def assert_model_dir():
-    model_path = os.environ.get("MODEL_PATH", "")
-    model_root = Path(model_path) if model_path else None
-    assert model_root and model_root.is_dir(), model_path
-    config_path = model_root / "config.json"
-    assert config_path.is_file(), config_path
+def _flagtree_version_from_pin_table(platform):
+    """Read the selected FlagTree build from the shared setup environment."""
+
+    pins = Path(__file__).resolve().parents[1] / "version-pins.env"
+    for line in pins.read_text(encoding="utf-8").splitlines():
+        if line.startswith("FLAGTREE_VERSION_"):
+            name, separator, value = line.partition("=")
+            if separator and name.removeprefix("FLAGTREE_VERSION_") == platform:
+                return value
+    return None
+
+
+def assert_flaggems_tle(module_name, dependencies):
+    """Require the TLE package FlagGems imports rather than only its namespace.
+
+    A FlagTree release can carry ``triton.experimental`` without a ``tle``
+    submodule. A release can also ship a partial TLE package, so the configured
+    modules are imported rather than inferred from the parent namespace.
+
+    TLE's Ascend communicator needs AscendSHMEM, absent from FlagTree images.
+    The scripts that prepare a build run before ``torch_fl._C`` exists. Loading
+    FlagGems' concrete operator there starts FlagGems' package initializer,
+    which probes the accelerator before torch_fl can register it.
+    """
+    if not isinstance(module_name, str) or not module_name:
+        raise SystemExit(
+            f"require_flaggems_tle_modules must name modules: {module_name!r}"
+        )
+    if dependencies.flag_gems is None:
+        raise SystemExit("a FlagGems TLE check requires importing flag_gems")
+    if module_name in _TLE_IMPORT_FAILURES:
+        raise SystemExit(
+            f"{module_name} already failed to import in this process; run the "
+            "prepared environment in a fresh Python process"
+        )
     try:
-        config = json.loads(config_path.read_text())
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SystemExit(f"{config_path} is not valid JSON: {error}") from error
-    assert isinstance(config, dict), config_path
-    assert isinstance(config.get("model_type"), str) and config["model_type"], (
-        f"{config_path} has no model_type"
-    )
+        if importlib.import_module(module_name) is None:
+            raise SystemExit(f"{module_name} did not import")
+    except (ImportError, ModuleNotFoundError) as error:
+        _TLE_IMPORT_FAILURES.add(module_name)
+        if error.name != "shmem":
+            raise
+        path = Path(__file__).resolve().parents[2] / "torch_fl" / "compile"
+        spec = importlib.util.spec_from_file_location(
+            "flagtree_ascend_tle", path / "flagtree_ascend_tle.py"
+        )
+        if spec is None or spec.loader is None:
+            raise SystemExit(f"cannot load the TLE compatibility helper: {path}")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+
+        # A failed import may leave a parent package in sys.modules. Retrying
+        # here could then skip the old stopgap tester and appear successful.
+        helper.ensure_tle_importable()
+        try:
+            importlib.import_module(module_name)
+        except (ImportError, ModuleNotFoundError) as retry_error:
+            raise SystemExit(
+                f"{module_name} failed to import after the Ascend shmem "
+                f"placeholder was registered: {retry_error}"
+            ) from retry_error
+    print(f"FlagGems TLE imports succeeded: {module_name}")
+
+
+def assert_model_dir():
+    """Check that the mount is a loadable Transformers checkpoint.
+
+    A directory can exist while its host mount is empty or carries an unrelated
+    image. Check the configuration before a model test starts, so the failure
+    names the checkpoint instead of appearing as an unrecognized model later.
+    """
+    model_path = os.environ.get("MODEL_PATH", "")
+    if not model_path:
+        raise AssertionError("MODEL_PATH is empty")
+    directory = Path(model_path)
+    if not directory.is_dir():
+        raise AssertionError(f"MODEL_PATH is not a directory: {model_path}")
+    config_path = directory / "config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise AssertionError(
+            f"MODEL_PATH has no Transformers config.json: {model_path}"
+        ) from error
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise AssertionError(
+            f"MODEL_PATH config.json cannot be read as JSON: {config_path}: {error}"
+        ) from error
+    if not isinstance(config, dict):
+        raise AssertionError(
+            f"MODEL_PATH config.json must be a JSON object: {config_path}"
+        )
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str) or not model_type.strip():
+        raise AssertionError(
+            f"MODEL_PATH config.json has no non-empty model_type: {config_path}"
+        )
 
 
 def macho_architectures(path):
@@ -419,7 +528,7 @@ def main():
     package_root = torch_fl_path.parent
     assert_torch_path(spec, torch_path)
     assert_package_files(spec, package_root)
-    build_kernels = assert_build_kernels(spec, torch_fl)
+    build_kernels = assert_build_kernels(spec, torch_fl, dependencies)
 
     if spec.get("torch_musa_shim_only"):
         assert_torch_musa_shim()
@@ -442,6 +551,16 @@ def main():
         assert_triton_backend(dependencies, spec["triton_backend"])
     if spec.get("flaggems_vendor"):
         assert_flaggems_vendor(dependencies, spec["flaggems_vendor"])
+    tle_modules = spec.get("require_flaggems_tle_modules") or []
+    if not isinstance(tle_modules, list) or any(
+        not isinstance(name, str) or not name for name in tle_modules
+    ):
+        raise SystemExit(
+            "require_flaggems_tle_modules must be a list of module names: "
+            f"{tle_modules!r}"
+        )
+    for module_name in tle_modules:
+        assert_flaggems_tle(module_name, dependencies)
     flagtree_version = None
     if spec.get("flagtree"):
         flagtree_version = assert_flagtree(dependencies, spec["flagtree"])

@@ -12,10 +12,102 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import ModuleType
+
 import pytest
 
 pytest_plugins = ("profiler_support", "amp_support")
 
+
+# PPU selects its vendor libtorch before Python loads torch. A test module or
+# string subprocess that imports torch first therefore fails before any test can
+# skip itself. Check both boundaries here so shared tests retain one import order.
+_TEST_ROOT = Path(__file__).resolve().parent
+_SOURCE_RULES: ModuleType | None = None
+
+
+def _tracked_runtime_imports(code) -> list[str]:
+    """Imports in source order, including both names in ``import torch_fl, torch``."""
+    import dis
+
+    imports: list[str] = []
+    for instruction in dis.get_instructions(code):
+        if instruction.opname == "IMPORT_NAME" and instruction.argval in (
+            "torch",
+            "torch_fl",
+        ):
+            imports.append(instruction.argval)
+        elif (
+            instruction.opname in ("IMPORT_FROM", "IMPORT_STAR")
+            and isinstance(instruction.argval, str)
+            and instruction.argval in ("torch", "torch_fl")
+        ):
+            imports.append(instruction.argval)
+    return imports
+
+
+def _imports_torch_before_torch_fl(imports: list[str]) -> bool:
+    return "torch" in imports and (
+        "torch_fl" not in imports or imports.index("torch") < imports.index("torch_fl")
+    )
+
+
+def _check_module_import_order(path: str) -> None:
+    target = Path(path).resolve()
+    try:
+        target.relative_to(_TEST_ROOT)
+    except ValueError:
+        return
+    if _SOURCE_RULES is not None:
+        _SOURCE_RULES.check_source(path)
+
+
+def _check_static_imports() -> None:
+    """Load the checker as a normal module so every test process can rerun it."""
+    global _SOURCE_RULES
+    existing = sys.modules.get("integration_rules")
+    if existing is not None:
+        _SOURCE_RULES = existing
+        existing.check_source_files()
+        return
+    spec = importlib.util.spec_from_file_location(
+        "integration_rules", _TEST_ROOT / "integration_rules.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.check_source_files()
+    _SOURCE_RULES = module
+
+
+def _check_child_import_order(code) -> None:
+    if not _imports_torch_before_torch_fl(_tracked_runtime_imports(code)):
+        return
+    try:
+        _SOURCE_RULES.checked_source(code)
+    except AssertionError:
+        return
+    raise AssertionError(
+        "a test subprocess imported torch before torch_fl; PPU selects its "
+        "vendor libtorch during that import"
+    )
+
+
+_original_module_from_spec = importlib.util.module_from_spec
+
+
+def _module_from_spec(spec):
+    module = _original_module_from_spec(spec)
+    if spec.origin and spec.origin.endswith(".py"):
+        _check_module_import_order(spec.origin)
+    return module
+
+
+importlib.util.module_from_spec = _module_from_spec
 
 # Backend config selection moved fully into torch_fl._select_backend_config(),
 # which reads the build record (the recorded accelerator + the lib/flagos_platform
@@ -45,6 +137,18 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    _check_static_imports()
+
+    # Fresh interpreters use the same initializer as the collecting process.
+    # Keep its directory on every integration path, including one hard-coded
+    # file, so ``python -c`` and new backend helper files share device selection.
+    from device_init import device_init_path, prepare_child_imports
+
+    prepare_child_imports()
+    current = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        [device_init_path(), current] if current else [device_init_path()]
+    )
     # `main_ops` is CI's selection hook (`-m main_ops`). It was registered only in
     # tests/integration/ops/conftest.py, so tests using it directly under
     # tests/integration/ raised PytestUnknownMarkWarning -- and would hard-error

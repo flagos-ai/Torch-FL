@@ -75,6 +75,12 @@ environment_check:
     - /opt/conda/
   forbid_package_files:
     - lib/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
   flagos_devices:
-    more_than: 0
+    at_least: 2
   torch_musa_shim_only: true
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0+mthreads3.6
+    triton_prefix: "3.6."

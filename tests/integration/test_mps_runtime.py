@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import torch
+from device_init import torch
 from platform_support import detect_platform
 from torch_fl import flagos
 from torch_fl.accelerator._vendor_libtorch import active_torch_lib
@@ -226,7 +226,7 @@ def test_module_mps_flagos_round_trip_preserves_parameters(swap):
         pytest.param(
             """
 import sys
-import torch
+from device_init import torch, torch_fl
 
 mps_built = torch.backends.mps.is_built()
 mps_available = torch.backends.mps.is_available()
@@ -244,8 +244,7 @@ print("torch_fl" in sys.modules, torch.accelerator.current_accelerator(False),
         pytest.param(
             """
 import sys
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 mps_built = torch.backends.mps.is_built()
 mps_available = torch.backends.mps.is_available()

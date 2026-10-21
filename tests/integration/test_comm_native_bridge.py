@@ -67,8 +67,7 @@ import pytest
 
 # torch_fl MUST be imported before torch: it preloads the device assets the
 # backend claims its device with.
-import torch_fl
-import torch
+from device_init import torch, torch_fl
 import torch.distributed as dist
 from torch_fl.comm import _nccl_ext
 

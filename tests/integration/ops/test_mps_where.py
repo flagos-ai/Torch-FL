@@ -55,8 +55,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -591,7 +590,7 @@ class TestWhereDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "c = torch.tensor([True, False], device='flagos:0'); "
                 "a = torch.tensor([1.0, 2.0], device='flagos:0'); "
                 "b = torch.tensor([3.0, 4.0], device='flagos:0'); "
@@ -621,7 +620,7 @@ class TestWhereDispatch:
                 "-c",
                 # A one-liner cannot carry this: the body is a compound
                 # statement, so it is written in newlines the `-c` preserves.
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "c = torch.tensor([1, 0], device='flagos:0')\n"
                 "a = torch.tensor([1.0, 2.0], device='flagos:0')\n"
                 "b = torch.tensor([3.0, 4.0], device='flagos:0')\n"
@@ -662,7 +661,7 @@ class TestWhereCost:
         calls = 10
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 condition = torch.rand(1024, 4096, device='flagos:0') > 0.5
 a = torch.randn(1024, 4096, device='flagos:0')
 b = torch.randn(1024, 4096, device='flagos:0')

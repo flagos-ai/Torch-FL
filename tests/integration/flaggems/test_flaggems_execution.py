@@ -24,19 +24,17 @@ building once per arm with ``torch.randn(..., device=...)`` compares two random
 draws and reports the difference as a numerics failure, which is how a set of
 correct operators was once recorded as wrong.
 
-An operator the conf does not route to FlagGems here is a skip, with the conf's
-own route as the reason -- the same statement the routing file makes, so the two
-halves of the suite agree about what this chip claims.
+Every case still runs on every configured platform. A case the conf routes away
+from FlagGems is asserted on that route, so per-platform coverage can differ
+without silently shrinking the execution set.
 """
 
 import pytest
-import torch
-import torch_fl  # noqa: F401  -- claiming the flagos device is the point
+from device_init import torch
 
 from flaggems_caps import (
     DEVICE,
     accel_label,
-    conf_route,
     flaggems_runtime_unavailable,
     routes_to_flaggems,
 )
@@ -87,23 +85,27 @@ _EXECUTION_CASES = {
 _LOOSE_TOLERANCE = {"sum.dim_IntList"}
 
 
-@pytest.mark.anyplatform
+def requires_grad_for_backward(tensor):
+    """Move an input and request gradients only where autograd permits them."""
+    return tensor.requires_grad_(tensor.is_floating_point())
+
+
 @pytest.mark.parametrize("tag", sorted(_EXECUTION_CASES))
+@pytest.mark.flaggems_python
 def test_operator_result_matches_the_cpu_reference(tag: str):
-    accel = accel_label() or "this conf"
-    if not routes_to_flaggems(tag):
-        pytest.skip(
-            f"{accel} routes {tag} to {conf_route(tag) or 'unlisted'}, not to a "
-            "FlagGems backend"
-        )
+    if not accel_label():
+        pytest.fail("the active conf is not a named backends_<platform>.conf")
     reason = flaggems_runtime_unavailable()
     if reason:
-        pytest.skip(reason)
+        pytest.fail(reason)
 
     build, run = _EXECUTION_CASES[tag]
     torch.manual_seed(0)
     host = build()
+    # Autograd records the route at allocation time. Enable it for the move so a
+    # result check also covers the backward route the generated kernel owns.
     on_device = [t.to(DEVICE) for t in host]
+    on_device = [requires_grad_for_backward(t) for t in on_device]
     expected = run(*host)
     actual = run(*on_device)
     assert actual.device.type == "flagos", f"{tag} returned a {actual.device} tensor"
@@ -111,3 +113,41 @@ def test_operator_result_matches_the_cpu_reference(tag: str):
     torch.testing.assert_close(
         actual.cpu(), expected, rtol=tol, atol=tol, msg=f"{tag} on {DEVICE}"
     )
+
+
+_FLOAT64_MM_SHAPES = (
+    (31, 32, 32),
+    (32, 32, 32),
+    (33, 32, 32),
+    (33, 33, 33),
+    (64, 64, 64),
+    (32, 64, 64),
+    (64, 64, 32),
+    (512, 512, 512),
+)
+
+
+def test_float64_mm_matches_cpu_across_tile_boundaries():
+    """A dtype-dependent shared-memory fit must hold on every mm platform.
+
+    MUSA's declared matrix-multiply tiles asked more static shared memory for
+    float64 than the device provides. Shapes on both sides of the 32-element
+    tile boundary catch a space that works only because a smaller shape narrows
+    before compilation. The CPU comparison also rejects a fit that chooses a
+    configuration that runs but computes the wrong answer.
+    """
+    assert routes_to_flaggems("mm"), "mm is not configured for FlagGems"
+    torch.manual_seed(0)
+    for m, k, n in _FLOAT64_MM_SHAPES:
+        a = torch.randn(m, k, dtype=torch.float64)
+        b = torch.randn(k, n, dtype=torch.float64)
+        expected = torch.mm(a, b)
+        actual = torch.mm(a.to(DEVICE), b.to(DEVICE))
+        torch.flagos.synchronize()
+        torch.testing.assert_close(
+            actual.cpu(),
+            expected,
+            rtol=1e-12,
+            atol=1e-12,
+            msg=f"float64 mm at {m}x{k}x{n}",
+        )

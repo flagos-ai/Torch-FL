@@ -51,9 +51,12 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
     if not package.is_dir():
         raise ValueError(f"Installed package disappeared: {package}")
     data_files, sessions, incomplete = [], [], []
-    for marker in sorted(directory.glob("coverage-*.pending")):
+    for marker in sorted(directory.rglob("coverage-*.pending")):
         data_file = marker.with_suffix(".data")
-        session = {"data_file": data_file.name}
+        session = {
+            "data_file": data_file.relative_to(directory).as_posix(),
+            "report": marker.with_suffix(".complete").relative_to(directory).as_posix(),
+        }
         try:
             session.update(json.loads(marker.read_text(encoding="utf-8")))
             if not data_file.is_file():
@@ -62,10 +65,10 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
             data.read()
             if data.has_arcs():
                 raise ValueError("Expected line coverage, found branch coverage")
-            data_files.append(str(data_file))
             session.update(
                 json.loads(marker.with_suffix(".complete").read_text(encoding="utf-8"))
             )
+            data_files.append(str(data_file))
         except (
             OSError,
             ValueError,
@@ -73,7 +76,7 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
             coverage.exceptions.CoverageException,
         ) as error:
             session["error"] = str(error)
-            incomplete.append(data_file.name)
+            incomplete.append(data_file.relative_to(directory).as_posix())
         sessions.append(session)
     if not data_files:
         raise ValueError("No pytest coverage data was saved; no report to upload")

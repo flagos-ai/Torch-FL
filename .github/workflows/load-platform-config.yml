@@ -92,6 +92,21 @@ on:
       integration_tests:
         description: The integration test manifest, as JSON
         value: ${{ jobs.configuration.outputs.integration_tests }}
+      test_inventories:
+        description: Exact shared test case inventories, as JSON
+        value: ${{ jobs.configuration.outputs.test_inventories }}
+      test_inventory_kinds:
+        description: Spaces-separated inventory kinds this plan materializes
+        value: ${{ jobs.configuration.outputs.test_inventory_kinds }}
+      integration_inventories:
+        description: The shared inventory groups this plan runs, as JSON
+        value: ${{ jobs.configuration.outputs.integration_inventories }}
+      loader_inventory_arguments:
+        description: Shell-safe --inventory arguments checking the source cases
+        value: ${{ jobs.configuration.outputs.loader_inventory_arguments }}
+      integration_inventory_arguments:
+        description: Shell-safe --inventory arguments for this plan, as one line
+        value: ${{ jobs.configuration.outputs.integration_inventory_arguments }}
       integration_environment:
         description: The manifest's shared environment, as JSON
         value: ${{ jobs.configuration.outputs.integration_environment }}
@@ -101,6 +116,12 @@ on:
       integration_test_dependencies:
         description: One shell command per line, run after the wheel install
         value: ${{ jobs.configuration.outputs.integration_test_dependencies }}
+      flag_gems_requirement:
+        description: Whether this platform's build requires or forbids FlagGems
+        value: ${{ jobs.configuration.outputs.flag_gems_requirement }}
+      torch_fl_package_root:
+        description: Installed torch_fl parent directory, for source-tree probes
+        value: ${{ jobs.configuration.outputs.torch_fl_package_root }}
 
 jobs:
   configuration:
@@ -123,9 +144,16 @@ jobs:
       integration_timeout_minutes: ${{ steps.config.outputs.integration_timeout_minutes }}
       wheel_artifact_name: ${{ steps.config.outputs.wheel_artifact_name }}
       integration_tests: ${{ steps.config.outputs.integration_tests }}
+      test_inventories: ${{ steps.config.outputs.test_inventories }}
+      test_inventory_kinds: ${{ steps.config.outputs.test_inventory_kinds }}
+      integration_inventories: ${{ steps.config.outputs.integration_inventories }}
+      loader_inventory_arguments: ${{ steps.config.outputs.loader_inventory_arguments }}
+      integration_inventory_arguments: ${{ steps.config.outputs.integration_inventory_arguments }}
       integration_environment: ${{ steps.config.outputs.integration_environment }}
       integration_build_tools: ${{ steps.config.outputs.integration_build_tools }}
       integration_test_dependencies: ${{ steps.config.outputs.integration_test_dependencies }}
+      flag_gems_requirement: ${{ steps.config.outputs.flag_gems_requirement }}
+      torch_fl_package_root: ${{ steps.config.outputs.torch_fl_package_root }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,6 +190,25 @@ jobs:
           CONFIG_JSON="${RUNNER_TEMP:-/tmp}/${PLATFORM}-config.json"
           yq -o=json -I=0 '.' "$MANIFEST_FILE" > "$MANIFEST_JSON"
           yq -o=json -I=0 '.' "$CONFIG_FILE" > "$CONFIG_JSON"
+          # mikefarah/yq has no general `if` expression; each scan below
+          # yields a count, which the shell turns into the scalar output.
+          FLAG_GEMS_REQUIRED=$(yq -r '
+            [(.environment_check.require_build_kernels // [])
+              [] | select(. == "flaggems")] | length' "$CONFIG_FILE")
+          FLAG_GEMS_FORBIDDEN=$(yq -r '
+            [(.environment_check.forbid_build_kernels // [])
+              [] | select(. == "flaggems")] | length' "$CONFIG_FILE")
+          if [[ "$FLAG_GEMS_REQUIRED" == 1 && "$FLAG_GEMS_FORBIDDEN" == 0 ]]; then
+            FLAG_GEMS_REQUIREMENT=required
+          elif [[ "$FLAG_GEMS_REQUIRED" == 0 && "$FLAG_GEMS_FORBIDDEN" == 1 ]]; then
+            FLAG_GEMS_REQUIREMENT=forbidden
+          else
+            FLAG_GEMS_REQUIREMENT=unspecified
+          fi
+          if [[ "$FLAG_GEMS_REQUIREMENT" != 'required' && "$FLAG_GEMS_REQUIREMENT" != 'forbidden' ]]; then
+            echo "::error::environment_check in $CONFIG_FILE must explicitly require or forbid FlagGems"
+            exit 1
+          fi
 
           # A config that still defines its own step list would be silently
           # ignored from here on -- the pipeline would run the shared manifest
@@ -184,11 +231,25 @@ jobs:
           INTEGRATION_TIMEOUT=$(yq -r '.integration_timeout_minutes // .timeout_minutes' "$CONFIG_FILE")
           ARTIFACT_NAME=$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")
           INTEGRATION_ENVIRONMENT=$(yq -o=json -I=0 '.integration_environment // {}' "$CONFIG_FILE")
-          INTEGRATION_TESTS=$(python .github/scripts/compose_integration_manifest.py \
+          COMPOSER_STDOUT="${RUNNER_TEMP:-/tmp}/composed-${PLATFORM}.json"
+          COMPOSER_NOTES="${RUNNER_TEMP:-/tmp}/composed-${PLATFORM}.notes"
+          python .github/scripts/compose_integration_manifest.py \
             --platform "$PLATFORM" \
             --manifest "$MANIFEST_JSON" \
             --platform-config "$CONFIG_JSON" \
-            --config-dir .github/configs)
+            --config-dir .github/configs \
+            > "$COMPOSER_STDOUT" 2> "$COMPOSER_NOTES"
+          INTEGRATION_TESTS=$(<"$COMPOSER_STDOUT")
+          cat "$COMPOSER_NOTES" >&2
+
+          # The composer's inventory plan is the one place that decides which
+          # shared inventory groups this platform runs. The helper turns it
+          # into both the validation arguments and the hardware arguments, so
+          # the two cannot name different groups.
+          INVENTORY_OUTPUTS="${RUNNER_TEMP:-/tmp}/inventory-outputs-${PLATFORM}"
+          python .github/scripts/integration_inventory_plan.py \
+            --composer-output "$COMPOSER_NOTES" \
+            > "$INVENTORY_OUTPUTS"
 
           # The two command lists reach the hardware job as one line per
           # command, so anything that is not a list of strings would be read as
@@ -203,6 +264,8 @@ jobs:
           done
           BUILD_TOOLS=$(yq -r '(.integration_build_tools // [])[]' "$CONFIG_FILE")
           TEST_DEPENDENCIES=$(yq -r '(.integration_test_dependencies // [])[]' "$CONFIG_FILE")
+          TORCH_FL_PACKAGE_ROOT=$(python -c \
+            'import sysconfig; print(sysconfig.get_path("purelib"))' | tail -n 1)
 
           # FromJson() on the consuming side turns these into `runs-on:` and
           # `volumes:`; a string, a null or a non-string element would become a
@@ -272,13 +335,22 @@ jobs:
           # survive as a command that no longer exists. The composer has
           # already read the manifest and the config; this is the consumer's
           # own reading of the same JSON.
+          VALIDATION_ARGUMENTS=$(awk '
+            /^loader_inventory_arguments<</ {inside = 1; next}
+            /^__loader_inventory_arguments__$/ {inside = 0; next}
+            inside {print}
+          ' "$INVENTORY_OUTPUTS")
+          if [[ -z "$VALIDATION_ARGUMENTS" ]]; then
+            echo "::error::the inventory plan produced no runner arguments"
+            exit 1
+          fi
+          read -r -a INVENTORY_ARGS <<< "$VALIDATION_ARGUMENTS"
           INTEGRATION_TESTS="$INTEGRATION_TESTS" \
           INTEGRATION_ENVIRONMENT="$INTEGRATION_ENVIRONMENT" \
-            python .github/scripts/run_integration_tests.py --validate-only
+          INTEGRATION_SOURCE_ROOT="$GITHUB_WORKSPACE" \
+            python .github/scripts/run_integration_tests.py --validate-only \
+              "${INVENTORY_ARGS[@]}"
 
-          emit() {
-            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
-          }
           # A multi-line value needs the heredoc form; the value is written
           # verbatim between the delimiters, and an empty list produces an empty
           # value so the consumer can skip its step with a plain `!= ''` test.
@@ -289,6 +361,17 @@ jobs:
               if [[ -n "$value" ]]; then printf '%s\n' "$value"; fi
               printf '__%s__\n' "$name"
             } >> "$GITHUB_OUTPUT"
+          }
+
+          # Scalar outputs use one line. Reject embedded newlines so they
+          # cannot be read as additional output assignments by GitHub Actions.
+          emit() {
+            local name="$1" value="$2"
+            if [[ "$value" == *$'\n'* ]]; then
+              echo "::error::${name} must be a single-line value"
+              exit 1
+            fi
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_OUTPUT"
           }
 
           emit display_name "$DISPLAY_NAME"
@@ -303,6 +386,9 @@ jobs:
           emit integration_timeout_minutes "$INTEGRATION_TIMEOUT"
           emit wheel_artifact_name "$ARTIFACT_NAME"
           emit integration_tests "$INTEGRATION_TESTS"
+          cat "$INVENTORY_OUTPUTS" >> "$GITHUB_OUTPUT"
           emit integration_environment "$INTEGRATION_ENVIRONMENT"
           emit_list integration_build_tools "$BUILD_TOOLS"
           emit_list integration_test_dependencies "$TEST_DEPENDENCIES"
+          emit flag_gems_requirement "$FLAG_GEMS_REQUIREMENT"
+          emit torch_fl_package_root "$TORCH_FL_PACKAGE_ROOT"

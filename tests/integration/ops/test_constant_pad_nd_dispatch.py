@@ -29,9 +29,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend_or_none
 
@@ -43,9 +42,9 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch, torch.nn.functional as F; "
+        "from device_init import torch, torch_fl; "
         "a = torch.randn(2,3,4,device='flagos:0'); "
-        "F.pad(a, (1,1), mode='constant', value=0.0)"
+        "torch.nn.functional.pad(a, (1,1), mode='constant', value=0.0)"
     )
     return subprocess.run(
         [sys.executable, "-c", code],

@@ -32,9 +32,8 @@ raise, it silently corrupts. They run on the default route, so no
 """
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401  -- registers the flagos backends
 
 DEVICE = torch.device("flagos:0")
 

@@ -51,8 +51,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -383,7 +382,7 @@ class TestSigmoidDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "a = torch.randn(4, 4, device='flagos:0'); torch.sigmoid(a)",
             ],
             env=env,
@@ -403,7 +402,7 @@ class TestSigmoidDispatch:
         been narrowed to the served width.
         """
         source = (
-            "import torch, torch_fl; "
+            "from device_init import torch, torch_fl; "
             "a = torch.randn(4, 4, device='flagos:0').half(); "
             "torch.sigmoid(a); "
             "torch_fl._C._synchronize()"

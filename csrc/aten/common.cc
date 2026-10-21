@@ -564,13 +564,6 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
 
 bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   if (FlagGemsRejectsDtype(dtype)) return true;
-#if defined(USE_ASCEND)
-  // The intersection this table exists for: a FlagGems kernel that does not
-  // guard the element type it code-generates, for a dtype the reference
-  // implementation of that op rejects outright. See the declaration in
-  // common.h for why neither a conf entry nor the dtype-wide predicate can
-  // state it.
-  //
   // `neg` over bool. flag_gems/ops/neg.py is a bare pointwise `-x`, so a bool
   // operand is code-generated like any other element type and lowers to
   // `hivm.hir.vadd` over `i1`, which BiShengIR refuses to verify:
@@ -591,12 +584,12 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   //
   // is raised. tests/integration/test_dtype_coverage.py pins that contract.
   //
-  // `neg_` is deliberately absent: its vendor template (T_INPLACE_UNARY) has
-  // no dtype guard at all, so routing bool there reaches aclnnInplaceNeg and
-  // fails with "aclnnInplaceNegGetWorkspaceSize failed, ret=161002" rather
-  // than with the reference message. That is a separate defect in the
-  // in-place codegen and is left visible rather than papered over here.
-  //
+  // The intersection this table exists for: a FlagGems kernel that does not
+  // guard the element type it code-generates, for a dtype the reference
+  // implementation of that op rejects outright. See the declaration in
+  // common.h for why neither a conf entry nor the dtype-wide predicate can
+  // state it.
+#if defined(USE_ASCEND)
   // `mm` and `mm.out` over the integral dtypes are the second entry, and the
   // only one where the op stays on the FlagGems route while part of its dtype
   // set leaves it. The FlagGems matmul kernel builds its tl.dot from the
@@ -622,12 +615,7 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   // scripts/codegen/gen_vendor_confs.py). Leaving mm on the vendor route keeps
   // the float failure; leaving every dtype of it on FlagGems turns working
   // integral matmul into a compile error.
-  struct OpDtypeGap {
-    at::ScalarType dtype;
-    const char* op_name;
-  };
   static constexpr OpDtypeGap kGaps[] = {
-      {at::kBool, "neg"},
       // Integral matmul: the four dtypes the Ascend dot intrinsic refuses.
       // "mm.out" is its own conf key, so it needs its own entries.
       {at::kLong, "mm"},

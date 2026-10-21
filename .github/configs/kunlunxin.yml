@@ -87,5 +87,11 @@ environment_check:
   torch_path_forbidden:
     - /usr/local/lib/python3.10/dist-packages
   flagos_devices:
-    at_least: 1
+    at_least: 2
+  require_build_kernels:
+    - flaggems
   triton_backend: xpu
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0+xpu3.6
+    triton_prefix: "3.6."

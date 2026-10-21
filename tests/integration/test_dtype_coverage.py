@@ -30,8 +30,7 @@ reference nor the precision the dtype names.
 import os
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 from platform_support import detect_platform
 
 
@@ -48,26 +47,6 @@ BOOL_DTYPE = [torch.bool]
 
 # All dtypes combined for exhaustive checks
 ALL_DTYPES = FLOAT_DTYPES + INT_DTYPES + BOOL_DTYPE
-
-# `neg` is the one op whose *reference* behaviour, rather than its dtype, the
-# suite pins, and matching that behaviour is a routing decision the backends do
-# not agree on.
-#
-# Ascend is the one that agrees. `FlagGemsRejectsOpDtype` in
-# `csrc/aten/common.cc` routes bool `neg` away from FlagGems -- whose
-# `flag_gems/ops/neg.py` is a bare pointwise `-x` that BiShengIR refuses to
-# verify over `i1` -- and into the vendor slot, whose aclnn kernel falls back to
-# `at::neg` on a CPU copy for the dtypes it does not cover. That fallback is the
-# reference call, so it raises the reference error.
-#
-# Elsewhere the operand reaches FlagGems' kernel and comes back as a bool tensor
-# (MetaX), or reaches a vendor kernel that rejects it in its own words (GCU's
-# `topsatenNeg failed: NOT_SUPPORT`, which does not name the dtype and so does
-# not match the reference message either). Both are backend gaps worth closing,
-# not contracts worth asserting here, so the reference-error case is xfailed off
-# Ascend instead of reddening the other platform jobs over a FlagGems
-# divergence rather than a torch-fl one.
-_REFERENCE_NEG_IS_ASCEND_ONLY = detect_platform() != "ascend"
 
 # The other divergence the suite found is float64, which no two backends serve
 # the same way. GCU's FlagGems mean kernel does not compile for it and MUSA's
@@ -191,13 +170,6 @@ class TestUnaryDtypeSupport:
         result = torch.neg(values.to(DEVICE)).cpu()
         torch.testing.assert_close(result, torch.neg(values))
 
-    @pytest.mark.xfail(
-        _REFERENCE_NEG_IS_ASCEND_ONLY,
-        reason="bool neg only raises the reference error on a backend that "
-        "declines the operand; elsewhere FlagGems' pointwise neg returns a bool "
-        "tensor, and topsatenNeg rejects it without naming the dtype",
-        strict=False,
-    )
     def test_neg_bool_matches_cpu_error(self):
         with pytest.raises(RuntimeError, match="bool"):
             torch.neg(torch.ones(8, device=DEVICE, dtype=torch.bool))

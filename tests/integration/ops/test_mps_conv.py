@@ -55,8 +55,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import routed_backend_or_none
 from platform_support import detect_platform
@@ -457,7 +456,7 @@ class TestConv1dCorrectness:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "x = torch.randn(1, 3, 8, device='flagos:0'); "
                 "w = torch.randn(4, 3, 3, device='flagos:0'); "
                 "torch.nn.functional.conv1d(x, w, padding=1)",
@@ -642,7 +641,8 @@ class TestConvDispatch:
             [
                 sys.executable,
                 "-c",
-                f"import torch, torch_fl, torch.nn.functional as F; {shape}; {call}",
+                f"from device_init import torch, torch_fl; "
+                f"import torch.nn.functional as F; {shape}; {call}",
             ],
             env=env,
             capture_output=True,

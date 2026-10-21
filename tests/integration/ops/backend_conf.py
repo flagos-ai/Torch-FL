@@ -38,7 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import torch_fl  # noqa: F401  -- importing resolves the conf torch_fl routes by
+from device_init import torch_fl
 
 
 # conf value -> the name LogDispatch prints for the same Backend enum value.

@@ -23,8 +23,7 @@ import os
 import sys
 
 import pytest
-import torch_fl
-import torch
+from device_init import torch, torch_fl
 
 from torch_fl._build_config import ACCELERATOR
 
@@ -113,8 +112,6 @@ class MatMulModel(torch.nn.Module):
 
 def test_compile_backend_registered():
     """Test that 'flagos' backend is registered with dynamo."""
-    import torch._dynamo
-
     # Check backend is in registry
     backends = torch._dynamo.list_backends()
     assert "flagos" in backends, (

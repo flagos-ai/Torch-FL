@@ -77,7 +77,13 @@ environment_check:
     - /usr/local/lib/python3.12/dist-packages
   forbid_package_files:
     - lib/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
   flagos_devices:
     at_least: 8
   triton_backend: enflame
   flaggems_vendor: enflame
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0+enflame3.6
+    triton_prefix: "3.6."

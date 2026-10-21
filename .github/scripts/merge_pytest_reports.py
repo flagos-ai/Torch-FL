@@ -25,8 +25,10 @@ def merge_reports(directory, platform, outcome, source_repository, source_ref):
     summary = Counter(total=0, collected=0)
     tests, collectors, warnings, sessions, incomplete = [], [], [], [], []
     duration = 0.0
-    for marker in sorted(Path(directory).glob("*.pending")):
-        session = {"report": marker.with_suffix(".json").name}
+    for marker in sorted(Path(directory).rglob("*.pending")):
+        session = {
+            "report": marker.with_suffix(".json").relative_to(directory).as_posix()
+        }
         try:
             session.update(json.loads(marker.read_text(encoding="utf-8")))
             report = json.loads(marker.with_suffix(".json").read_text(encoding="utf-8"))
@@ -64,12 +66,16 @@ def merge_reports(directory, platform, outcome, source_repository, source_ref):
     if not sessions:
         raise ValueError("No pytest sessions started; no test report to upload")
     complete = not incomplete
+    groups = {session.get("group") for session in sessions}
+    groups.discard(None)
+    groups.discard("")
+    grouped = bool(groups)
     # The integration runner owns the verdict, including its existing explicit
     # teardown-crash policy and failures in non-pytest environment checks.
     return {
         "created": time.time(),
         "duration": duration,
-        "exitcode": 0 if outcome == "success" and complete else 1,
+        "exitcode": 0 if outcome == "success" and complete and grouped else 1,
         "root": str(Path.cwd()),
         "environment": {"platform": platform},
         "summary": dict(summary),
@@ -81,8 +87,10 @@ def merge_reports(directory, platform, outcome, source_repository, source_ref):
             "outcome": outcome,
             "source_repository": source_repository,
             "source_ref": source_ref,
-            "complete": complete,
+            "complete": complete and grouped,
+            "grouped": grouped,
             "incomplete_sessions": incomplete,
+            "missing_group": not grouped,
             "sessions": sessions,
         },
     }
@@ -110,7 +118,12 @@ def main():
     print(
         f"Merged {len(report['flagcicd']['sessions'])} pytest sessions into {args.output}"
     )
-    if not report["flagcicd"]["complete"]:
+    if report["flagcicd"]["missing_group"]:
+        print(
+            "::warning::No pytest session belongs to an integration group; "
+            "the requested group did not run or its nested pytest omitted reporting."
+        )
+    elif not report["flagcicd"]["complete"]:
         print(
             "::warning::Some pytest sessions did not produce valid reports; see flagcicd metadata."
         )

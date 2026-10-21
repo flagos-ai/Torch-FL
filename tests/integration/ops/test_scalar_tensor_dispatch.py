@@ -29,8 +29,7 @@ import pytest
 import subprocess
 import sys
 
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 
 DEVICE = "flagos:0"
@@ -39,7 +38,7 @@ DEVICE = "flagos:0"
 def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(extra_env)
-    code = "import torch_fl, torch; torch.scalar_tensor(3.14, device='flagos:0')"
+    code = "from device_init import torch, torch_fl; torch.scalar_tensor(3.14, device='flagos:0')"
     return subprocess.run(
         [sys.executable, "-c", code],
         env=env,

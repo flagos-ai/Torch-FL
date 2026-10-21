@@ -65,12 +65,21 @@ def isolated_torch_fl_import():
     avoids re-triggering that import entirely.
     """
     real_torch_fl = sys.modules.pop("torch_fl", None)
+    cached = {
+        name: sys.modules.pop(name, None)
+        for name in ("torch_fl._build_config", "torch_fl._platform")
+    }
     try:
         yield
     finally:
         sys.modules.pop("torch_fl", None)
+        for name in cached:
+            sys.modules.pop(name, None)
         if real_torch_fl is not None:
             sys.modules["torch_fl"] = real_torch_fl
+        for name, module in cached.items():
+            if module is not None:
+                sys.modules[name] = module
 
 
 def _fake_torch_fl(
@@ -231,3 +240,19 @@ def test_no_platform_skips_the_plain_flaggems_mark():
     are unaffected by this invariant.)"""
     for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
         assert "flaggems" not in markers, platform
+
+
+def test_tileops_gate_reads_the_build_record(monkeypatch):
+    """The gate is metadata-only and does not try to import TileOPs itself."""
+    env = type("Env", (), {"build_kernels": staticmethod(lambda: frozenset())})()
+    real_torch_fl = sys.modules.get("torch_fl")
+    sys.modules["torch_fl"] = type("TorchFl", (), {"_env": env})()
+    try:
+        assert not ops_conftest._tileops_enabled()
+        env.build_kernels = staticmethod(lambda: frozenset({"tileops"}))
+        assert ops_conftest._tileops_enabled()
+    finally:
+        if real_torch_fl is None:
+            sys.modules.pop("torch_fl", None)
+        else:
+            sys.modules["torch_fl"] = real_torch_fl
