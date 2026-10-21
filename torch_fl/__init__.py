@@ -1623,6 +1623,67 @@ def _real_cuda_is_available() -> bool:
     return bool(_TORCH_CUDA_PROBE())
 
 
+# DIAGNOSTIC hook, temporary: see `_capability_diagnostic`. Set by the alias and
+# read once, so one process prints one stack.
+_CAPABILITY_DIAGNOSED = False
+
+
+def _capability_diagnostic(original):
+    """Wrap `torch.cuda.get_device_capability` so a raise explains itself.
+
+    Enflame GCU is the lane that fails here: `torch.compile` dies in
+    `torch.utils._triton._device_supports_tma` with "Torch not compiled with CUDA
+    enabled", and neither the traceback in the log nor a simulated `gcu` build on
+    this machine says which binding of the getter was reached. The wrapper adds
+    nothing to the answer; on the first raise it prints the call stack and the
+    state of the three probes that can produce this error, and then re-raises.
+
+    Remove once the GCU lane is green.
+    """
+
+    def capability_with_evidence(device=None):
+        global _CAPABILITY_DIAGNOSED
+        try:
+            return original(device)
+        except AssertionError as exc:
+            if not _CAPABILITY_DIAGNOSED:
+                _CAPABILITY_DIAGNOSED = True
+                import sys
+                import traceback
+
+                print("[gcu-diag] get_device_capability raised:", exc, file=sys.stderr)
+                traceback.print_stack(file=sys.stderr)
+                print(
+                    "[gcu-diag] alias=%s gcu_attr=%s lazy_init=%s props=%s "
+                    "cu_init=%s torch.module=%s torch.cuda.module=%s"
+                    % (
+                        _cuda_alias_active,
+                        hasattr(torch, "gcu"),
+                        getattr(torch.cuda._lazy_init, "__name__", "?"),
+                        getattr(torch.cuda.get_device_properties, "__name__", "?"),
+                        hasattr(torch, "cuda") and torch.cuda.is_available(),
+                        getattr(sys.modules.get("torch"), "__file__", None),
+                        getattr(sys.modules.get("torch.cuda"), "__file__", None),
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            raise
+
+    return capability_with_evidence
+
+
+def _install_capability_diagnostic():
+    global _CAPABILITY_DIAGNOSED
+    original = torch.cuda.get_device_capability
+    if getattr(original, "_flagos_diagnostic", False):
+        return
+    _CAPABILITY_DIAGNOSED = False
+    wrapper = _capability_diagnostic(original)
+    wrapper._flagos_diagnostic = True
+    torch.cuda.get_device_capability = wrapper
+
+
 def _alias_cuda_to_flagos():
     """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
 
@@ -1768,6 +1829,8 @@ def _alias_cuda_to_flagos():
     # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
     # CUDA enabled". Point it at the flagos properties instead.
     torch.cuda.get_device_properties = flagos.get_device_properties
+
+    _install_capability_diagnostic()
 
 
 def _register_flaggems_operators():
