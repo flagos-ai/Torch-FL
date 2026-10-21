@@ -11,6 +11,7 @@
 #include <acl/acl_rt.h>
 
 #include <macros.h>
+#include <string>
 
 namespace at::native::flagos::ascend {
 
@@ -50,6 +51,19 @@ FLAGOS_EXPORT aclrtStream GetCurrentAclStream();
 FLAGOS_EXPORT aclrtStream GetCurrentAclStreamForDevice(int device_index);
 FLAGOS_EXPORT void SetCurrentAclStream(aclrtStream stream);
 FLAGOS_EXPORT void SetCurrentAclStreamForDevice(int device_index, aclrtStream stream);
+
+// The SoC name of the current device, e.g. "Ascend910_9382" or "Ascend310B1",
+// or an empty std::string when ACL cannot report one.
+//
+// CANN's aclnn operator set is not uniform across SoCs, so a kernel that sends
+// every dtype upstream regardless of hardware fails at GetWorkspaceSize with an
+// opaque status instead of falling back. Callers use this to decide what the
+// installed CANN can actually run here.
+//
+// Exported for the same reason the stream accessors are: the aten kernels live
+// in a different shared object, and an `inline` function-local static would give
+// each object its own cache.
+FLAGOS_EXPORT std::string GetSocName();
 
 } // namespace at::native::flagos::ascend
 

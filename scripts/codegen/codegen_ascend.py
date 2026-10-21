@@ -1320,6 +1320,11 @@ T_GEMM_ADDMM = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat1, const at::Tensor& mat2, const at::Scalar& beta, const at::Scalar& alpha) {{
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
+  if (!ascend::IsMatmulDtypeSupported(mat1.scalar_type()) ||
+      mat1.scalar_type() != mat2.scalar_type()) {{
+    auto cpu_result = at::{cpu_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha);
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), mat1);
+  }}
   std::vector<int64_t> out_shape = {{mat1.size(0), mat2.size(1)}};
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
 
@@ -1343,6 +1348,11 @@ T_GEMM_BADDBMM = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& batch1, const at::Tensor& batch2, const at::Scalar& beta, const at::Scalar& alpha) {{
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
+  if (!ascend::IsMatmulDtypeSupported(batch1.scalar_type()) ||
+      batch1.scalar_type() != batch2.scalar_type()) {{
+    auto cpu_result = at::{cpu_op}(self.cpu(), batch1.cpu(), batch2.cpu(), beta, alpha);
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), batch1);
+  }}
   std::vector<int64_t> out_shape = {{batch1.size(0), batch1.size(1), batch2.size(2)}};
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
 
@@ -1395,6 +1405,11 @@ T_MATMUL_OUT = """\
 at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {{
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
+  if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
+      self.scalar_type() != mat2.scalar_type()) {{
+    out.copy_(at::{cpu_op}(self.cpu(), mat2.cpu()));
+    return out;
+  }}
 
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclTensorWrapper acl_mat2(mat2);
@@ -1412,6 +1427,11 @@ T_MV = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& vec) {{
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
+  if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
+      self.scalar_type() != vec.scalar_type()) {{
+    auto cpu_result = at::{cpu_op}(self.cpu(), vec.cpu());
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), self);
+  }}
   std::vector<int64_t> out_shape = {{self.size(0)}};
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
 
@@ -1430,6 +1450,11 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
 T_DOT = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& tensor) {{
   namespace ascend = at::native::flagos::ascend;
+  if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
+      self.scalar_type() != tensor.scalar_type()) {{
+    auto cpu_result = at::{cpu_op}(self.cpu(), tensor.cpu());
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), self);
+  }}
   std::vector<int64_t> out_shape;   // scalar
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
 
@@ -2261,6 +2286,11 @@ T_GEMM_ADDMV = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat, const at::Tensor& vec, const at::Scalar& beta, const at::Scalar& alpha) {{
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
+  if (!ascend::IsMatmulDtypeSupported(mat.scalar_type()) ||
+      mat.scalar_type() != vec.scalar_type()) {{
+    auto cpu_result = at::{cpu_op}(self.cpu(), mat.cpu(), vec.cpu(), beta, alpha);
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), mat);
+  }}
   std::vector<int64_t> out_shape = {{mat.size(0)}};
   auto out = ascend::OpPreparation::apply_tensor_without_format(out_shape, self.options());
 

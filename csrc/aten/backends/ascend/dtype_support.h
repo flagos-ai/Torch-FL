@@ -9,12 +9,44 @@
 #include <c10/core/ScalarType.h>
 #include <string_view>
 
+#include "runtime/accelerator/ascend/acl_stream.h"
+
 namespace at::native::flagos::ascend {
 
-// aclnn matmul accepts floating-point inputs up to float32 on the supported
-// CANN release. Storage and elementwise kernels can still support float64, so
-// matmul callers must use the CPU fallback to preserve PyTorch semantics.
+// True for the SoCs whose CANN build implements aclnn matmul in fp16 only.
+//
+// The 310B line (Orange Pi AIpro 20T and friends) is the one measured case: on
+// an Ascend310B1, fp32 aclnnMatmul / aclnnMm / aclnnBatchMatMul all fail at
+// GetWorkspaceSize, while the same shapes in fp16 succeed, so every fp32 matmul
+// has to fall back to the CPU. bf16 fails there too, which the same predicate
+// already excludes.
+//
+// Matched on the "310B" prefix rather than an exhaustive list of exact SoC
+// names, because CANN reports board-specific suffixes (Ascend310B1..) that
+// change with the product line. An empty name (ACL unavailable) is treated as
+// full-featured so a host we cannot classify keeps its existing behaviour.
+inline bool IsFp16OnlyMatmulSoc(std::string_view soc_name) {
+  // "Ascend310B1", "Ascend310B4", ... -> the "310B" family.
+  constexpr std::string_view kPrefix = "Ascend310B";
+  return soc_name.substr(0, kPrefix.size()) == kPrefix;
+}
+
+// aclnn matmul accepts floating-point inputs up to float32 -- but only on the
+// SoCs whose CANN build implements those instantiations. The 310B line is
+// fp16-only: aclnnMatmulGetWorkspaceSize rejects float32 outright (161002
+// ACLNN_ERR_PARAM_INVALID for cubeMathType 0/3, 561103 ACLNN_ERR_INNER_NULLPTR
+// for the HF32 variants), measured on an Ascend310B1 with CANN 9.1.1. Sending
+// float32 anyway fails the op instead of falling back, so the capability has to
+// be asked of the hardware rather than assumed from the CANN release.
+//
+// Storage and elementwise kernels can still support float64, so matmul callers
+// must use the CPU fallback to preserve PyTorch semantics.
 inline bool IsMatmulDtypeSupported(c10::ScalarType dtype) {
+  const bool fp16_only =
+      IsFp16OnlyMatmulSoc(::at::native::flagos::ascend::GetSocName());
+  if (fp16_only) {
+    return dtype == c10::kHalf;
+  }
   return dtype == c10::kHalf || dtype == c10::kBFloat16 || dtype == c10::kFloat;
 }
 

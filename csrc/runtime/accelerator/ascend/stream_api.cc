@@ -12,8 +12,11 @@
 
 #include <flagos.h>
 
+#include <acl/acl_base_rt.h>
+
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -147,6 +150,20 @@ FLAGOS_EXPORT void SetCurrentAclStream(aclrtStream stream) {
   int device_index = 0;
   ::GetDevice(&device_index);
   SetCurrentAclStreamForDevice(device_index, stream);
+}
+
+FLAGOS_EXPORT std::string GetSocName() {
+  // aclrtGetSocName initializes ACL and answers for whichever device is
+  // current, so one has to be selected first. The result is cached: this is
+  // queried on every matmul dispatch, and a host reports a single SoC for all
+  // of its devices.
+  static const std::string soc_name = []() {
+    int device_index = 0;
+    ::GetDevice(&device_index);
+    const char* name = aclrtGetSocName();
+    return name == nullptr ? std::string() : std::string(name);
+  }();
+  return soc_name;
 }
 
 } // namespace at::native::flagos::ascend
