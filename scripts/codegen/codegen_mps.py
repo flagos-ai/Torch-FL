@@ -98,6 +98,9 @@ OPS = {
     # address per result element; the graph gathers the source values on Metal.
     # See T_INDEX and MpsGatherIndex.
     "index.Tensor": "index",
+    # GatedDeltaNet accumulates its decay along the chunk axis. The graph uses
+    # MPSGraph's cumulative-sum node with the operand's own dtype. See T_CUMSUM.
+    "cumsum": "cumsum",
     # `softmax` is the third stage-3 lane and the op a small model calls between
     # the matmuls: one per attention block, over the (batch, heads, seq, seq)
     # scores. MPSGraph has the whole operation behind one selector,
@@ -496,6 +499,7 @@ AT_OP = {
     "argmax": "argmax",
     "linalg_solve_triangular": "linalg_solve_triangular",
     "index.Tensor": "index",
+    "cumsum": "cumsum",
     "_softmax": "_softmax",
     "neg": "neg",
     "pow.Tensor_Scalar": "pow",
@@ -635,6 +639,7 @@ SUPPORTS = {
     "argmax": "MpsSupportsArgmaxDtype",
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
+    "cumsum": "MpsSupportsCumsumDtype",
     "gemm": "MpsSupportsGemmDtype",
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
@@ -779,6 +784,9 @@ CALLS = {
     "all.dims": "",
     "triu": "",
     "argmax": "",
+    # T_CUMSUM writes the full selector because its axis binds to the first
+    # argument, as MpsGatherIndex does for the gather family.
+    "cumsum": "",
     # `index.Tensor` builds its gather and coordinate arithmetic in the body.
     "linalg_solve_triangular": "",
     "index.Tensor": "",
@@ -952,6 +960,10 @@ KEY_PARTS = {
     # the system B covers. They cannot be inferred from tensor signatures.
     "linalg_solve_triangular": ", upper, left, unitriangular",
     "index.Tensor": "",
+    # The axis is resolved on the host and is not represented by the operand
+    # shapes. The accumulator dtype is folded into the operand's dtype by the
+    # body.
+    "cumsum": ", axis",
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
     "bmm": ", self_transposed, mat2_transposed",
@@ -4218,6 +4230,52 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
+# The cumulative sum is one axis node. Aten resolves an accumulator dtype from
+# the operand before reaching this kernel; the kernel widens the operand when
+# that differs from the graph's input width and lets MpsRunGraph write the
+# result in its declared accumulator width.
+T_CUMSUM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    std::optional<at::ScalarType> dtype) {{
+  if (!mps::{supports}(self.scalar_type(), dtype)) {{
+    return at::cumsum(self.cpu(), dim, dtype).to(self.device());
+  }}
+  const at::ScalarType result_dtype = dtype.value_or(self.scalar_type());
+  int64_t axis = 0;
+  if (!mps::MpsCumsumAxis(self, dim, &axis)) {{
+    return at::cumsum(self.cpu(), dim, dtype).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::cumsum(self.cpu(), dim, dtype).to(self.device());
+  }}
+  if (result_dtype != self_c.scalar_type()) {{
+    self_c = self_c.to(result_dtype);
+  }}
+  at::Tensor out = at::empty(
+      self_c.sizes(), self_c.options().dtype(result_dtype));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph cumulativeSumWithTensor:args[0]
+                                          axis:axis
+                                     exclusive:NO
+                                       reverse:NO
+                                          name:nil];
+      }});
+  if (!ran) {{
+    return at::cumsum(self.cpu(), dim, dtype).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+"""
+
 # aten's `index.Tensor` receives a list in which every unindexed axis is a full
 # slice. Integer tensors broadcast together into the advanced-index block, and
 # reduced axes are then separated from the retained axes. The checkpoint's
@@ -4412,6 +4470,7 @@ CATEGORIES = {
     "argmax": T_ARGMAX,
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,
+    "cumsum": T_CUMSUM,
     "gemm": T_GEMM,
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,
@@ -4494,6 +4553,7 @@ FILE_HEADER = """\
 #include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/cat.h>
+#include <ATen/ops/cumsum.h>
 #include <ATen/ops/convolution.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>

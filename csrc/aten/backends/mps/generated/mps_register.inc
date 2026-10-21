@@ -24,6 +24,7 @@
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
+  m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("embedding", WrapperEmbedding);

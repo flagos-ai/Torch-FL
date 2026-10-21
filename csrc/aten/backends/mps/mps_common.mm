@@ -170,6 +170,29 @@ bool MpsSupportsUnaryDtype(at::ScalarType dtype) {
   return dtype != at::kBool && MpsDataTypeOf(dtype, &ignored);
 }
 
+bool MpsSupportsCumsumDtype(
+    at::ScalarType dtype,
+    const std::optional<at::ScalarType>& out_dtype) {
+  if (dtype != at::kFloat && dtype != at::kHalf && dtype != at::kBFloat16) {
+    return false;
+  }
+  return !out_dtype.has_value() || *out_dtype == dtype ||
+      *out_dtype == at::kFloat || *out_dtype == at::kHalf ||
+      *out_dtype == at::kBFloat16;
+}
+
+bool MpsCumsumAxis(const at::Tensor& self, int64_t dim, int64_t* out) {
+  if (out == nullptr || self.dim() == 0) {
+    return false;
+  }
+  const int64_t axis = dim < 0 ? dim + self.dim() : dim;
+  if (axis < 0 || axis >= self.dim()) {
+    return false;
+  }
+  *out = axis;
+  return true;
+}
+
 bool MpsSupportsCompareDtype(at::ScalarType dtype) {
   MPSDataType ignored;
   return dtype != at::kDouble && dtype != at::kComplexFloat &&
