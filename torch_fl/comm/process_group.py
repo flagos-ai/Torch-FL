@@ -899,11 +899,13 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
         if opts is None:
             opts = _c10d.AllgatherOptions()
-        return self._inner.allgather_into_tensor_coalesced(
-            _tl(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
-            opts,
-        )
+        out = _tl(output_tensors, self._view_fn)
+        inp = _tl(input_tensors, self._view_fn)
+        if hasattr(self._inner, "allgather_into_tensor_coalesced"):
+            return self._inner.allgather_into_tensor_coalesced(out, inp, opts)
+        # Some inner backends (flagcx) only expose _allgather_base; synthesise the
+        # coalesced alias over the single-tensor base calls, as _HostStagedGloo does.
+        return _allgather_into_tensor_coalesced(self._inner, out, inp, opts)
 
     @_gcu_device_guard
     def _allgather_base(self, output_tensor, input_tensor, opts=None):
@@ -947,11 +949,13 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def reduce_scatter_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
         if opts is None:
             opts = _c10d.ReduceScatterOptions()
-        return self._inner.reduce_scatter_tensor_coalesced(
-            _tl(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
-            opts,
-        )
+        out = _tl(output_tensors, self._view_fn)
+        inp = _tl(input_tensors, self._view_fn)
+        if hasattr(self._inner, "reduce_scatter_tensor_coalesced"):
+            return self._inner.reduce_scatter_tensor_coalesced(out, inp, opts)
+        # flagcx only exposes _reduce_scatter_base; synthesise the coalesced alias
+        # over the single-tensor base calls, as _HostStagedGloo does.
+        return _reduce_scatter_tensor_coalesced(self._inner, out, inp, opts)
 
     @_gcu_device_guard
     def _reduce_scatter_base(self, output_tensor, input_tensor, opts=None):
