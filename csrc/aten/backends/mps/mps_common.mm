@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,11 @@
 // rather than left to the generated kernel file so the helper and its only
 // callers agree on `at::_softmax` resolving to the composite-free operator.
 #include <ATen/ops/_softmax.h>
+#include <ATen/ops/empty.h>
+#include <ATen/ops/empty_strided.h>
+#include <ATen/ops/linalg_solve_triangular.h>
+#include <ATen/ops/slice.h>
+#include <ATen/ExpandUtils.h>
 
 // Pulls in the flagos C ABI (Stream_t, GetDevice, GetCurrentStreamForDevice)
 // plus the two Metal side-door helpers the operator layer needs, the same way
@@ -40,6 +46,21 @@
 #include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {
+
+at::Tensor MpsIndexOnHost(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices) {
+  c10::List<std::optional<at::Tensor>> host_indices;
+  host_indices.reserve(indices.size());
+  for (const std::optional<at::Tensor>& entry : indices) {
+    host_indices.push_back(
+        entry.has_value() && entry->defined()
+            ? std::optional<at::Tensor>(entry->cpu())
+            : std::nullopt);
+  }
+  return at::index(
+      self.is_cpu() ? self : self.cpu(), host_indices).to(self.device());
+}
 
 bool MpsDataTypeOf(at::ScalarType dtype, MPSDataType* out) {
   if (out == nullptr) {
@@ -71,9 +92,69 @@ MPSShape* MpsShapeOf(at::IntArrayRef sizes) {
   return dims;
 }
 
+MPSShape* MpsFlatShape(int64_t count) {
+  const int64_t dims[1] = {count};
+  return MpsShapeOf(at::IntArrayRef(dims, 1));
+}
+
+namespace {
+
+// MPSNDArray and MPSGraphTensorData describe an owned buffer by this shape. The
+// generated kernels use the same namespace-level helper for their outputs.
+MPSShape* FlatShape(int64_t count) {
+  return MpsFlatShape(count);
+}
+
+} // namespace
+
 bool MpsSupportsUnaryDtype(at::ScalarType dtype) {
   MPSDataType ignored;
   return dtype != at::kBool && MpsDataTypeOf(dtype, &ignored);
+}
+
+bool MpsSupportsCompareDtype(at::ScalarType dtype) {
+  MPSDataType ignored;
+  return dtype != at::kDouble && dtype != at::kComplexFloat &&
+      dtype != at::kComplexDouble && MpsDataTypeOf(dtype, &ignored);
+}
+
+bool MpsSupportsAllDtype(at::ScalarType dtype) {
+  return MpsSupportsCompareDtype(dtype);
+}
+
+bool MpsSupportsArgmaxDtype(at::ScalarType dtype) {
+  // MPSGraph's coordinateAlongAxis: returns int32. Both the finite maximum and
+  // the NaN positions therefore stay in int32; only the final index is widened.
+  return dtype == at::kFloat;
+}
+
+bool MpsPositiveInfinity(
+    MPSGraph* graph,
+    at::ScalarType dtype,
+    MPSGraphTensor** out) {
+  if (graph == nil || out == nullptr) {
+    return false;
+  }
+  MPSDataType mps_dtype;
+  if (!MpsDataTypeOf(dtype, &mps_dtype) ||
+      (dtype != at::kFloat && dtype != at::kHalf &&
+       dtype != at::kBFloat16 && !c10::isIntegralType(dtype, false))) {
+    return false;
+  }
+  const double value = c10::isIntegralType(dtype, false)
+      ? 0.0
+      : std::numeric_limits<double>::infinity();
+  *out = [graph constantWithScalar:value
+                             shape:MpsFlatShape(1)
+                          dataType:mps_dtype];
+  return *out != nil;
+}
+
+bool MpsSupportsTriuDtype(at::ScalarType dtype) {
+  // A scalar zero selects the lower triangle. It has an element type for all
+  // the arithmetic widths but not for uint8 on this SDK.
+  MPSDataType ignored;
+  return dtype != at::kByte && MpsDataTypeOf(dtype, &ignored);
 }
 
 bool MpsSupportsBinaryDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
@@ -137,6 +218,341 @@ bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype)
   }
   return self_dtype == at::kFloat || self_dtype == at::kHalf ||
       self_dtype == at::kBFloat16;
+}
+
+bool MpsSupportsTriangularSolveDtype(
+    at::ScalarType a_dtype,
+    at::ScalarType b_dtype) {
+  return a_dtype == b_dtype &&
+      (a_dtype == at::kFloat || a_dtype == at::kHalf ||
+       a_dtype == at::kBFloat16);
+}
+
+// The CPU MPS kernel promotes half and bfloat16 operands for the host solve.
+at::Tensor MpsTriangularSolveReference(
+    const at::Tensor& a,
+    const at::Tensor& b,
+    bool upper,
+    bool left,
+    bool unitriangular) {
+  const bool promoted =
+      a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16;
+  const auto host_dtype = promoted ? at::kFloat : a.scalar_type();
+  return at::linalg_solve_triangular(
+             a.cpu().to(host_dtype), b.cpu().to(host_dtype),
+             upper, left, unitriangular)
+      .to(a.scalar_type())
+      .to(a.device());
+}
+
+bool MpsTriangularSolveShapes(
+    at::IntArrayRef a_sizes,
+    at::IntArrayRef b_sizes,
+    bool left_arg,
+    std::vector<int64_t>* out_shape) {
+  if (out_shape == nullptr || a_sizes.size() < 2 || b_sizes.size() < 2) {
+    return false;
+  }
+  out_shape->clear();
+  const int64_t n = a_sizes[a_sizes.size() - 1];
+  const int64_t b_rows = b_sizes[b_sizes.size() - 2];
+  const int64_t b_columns = b_sizes[b_sizes.size() - 1];
+  if (a_sizes[a_sizes.size() - 2] != n) {
+    return false;
+  }
+  if (left_arg ? b_rows != n : b_columns != n) {
+    return false;
+  }
+
+  // ATen aligns B with A's trailing batch axes and keeps A's leading axes. A
+  // left solve has B at A's rank; a right solve may have a shorter B, whose
+  // missing leading axes are filled with ones.
+  const auto a_batch = a_sizes.slice(0, a_sizes.size() - 2);
+  const auto b_batch = b_sizes.slice(0, b_sizes.size() - 2);
+  try {
+    if (left_arg) {
+      if (a_batch.size() != b_batch.size()) {
+        return false;
+      }
+      *out_shape = at::infer_size(a_batch, b_batch);
+      out_shape->push_back(n);
+      out_shape->push_back(b_columns);
+    } else {
+      const size_t batch_rank = std::max(a_batch.size(), b_batch.size());
+      const size_t a_offset = batch_rank - a_batch.size();
+      out_shape->assign(batch_rank, 1);
+      std::copy(
+          a_batch.begin(),
+          a_batch.end(),
+          out_shape->begin() + static_cast<int64_t>(a_offset));
+      const auto trailing = at::infer_size(
+          a_batch.slice(batch_rank - b_batch.size()), b_batch);
+      std::copy(
+          trailing.begin(),
+          trailing.end(),
+          out_shape->begin() + static_cast<int64_t>(a_offset));
+      out_shape->push_back(b_rows);
+      out_shape->push_back(n);
+    }
+  } catch (const c10::Error&) {
+    return false;
+  }
+  return out_shape->size() >= 2;
+}
+
+std::vector<int64_t> MpsBroadcastShape(
+    at::IntArrayRef sizes,
+    at::IntArrayRef target) {
+  if (sizes.size() > target.size()) {
+    return {};
+  }
+  const int64_t missing =
+      static_cast<int64_t>(target.size() - sizes.size());
+  std::vector<int64_t> expanded;
+  expanded.reserve(target.size());
+  expanded.insert(expanded.end(), static_cast<size_t>(missing), 1);
+  expanded.insert(expanded.end(), sizes.begin(), sizes.end());
+  for (size_t axis = 0; axis < expanded.size(); ++axis) {
+    if (expanded[axis] == target[axis]) {
+      continue;
+    }
+    if (expanded[axis] != 1) {
+      return {};
+    }
+    expanded[axis] = target[axis];
+  }
+  return expanded;
+}
+
+MPSGraphTensor* MpsBroadcastOperand(
+    MPSGraph* graph,
+    MPSGraphTensor* storage,
+    at::IntArrayRef storage_shape,
+    at::IntArrayRef logical_shape,
+    at::IntArrayRef target) {
+  if (graph == nil || storage == nil ||
+      storage_shape.size() != logical_shape.size() ||
+      logical_shape.size() != target.size() ||
+      !std::equal(
+          logical_shape.begin(), logical_shape.end(), target.begin())) {
+    return nil;
+  }
+  const int64_t rank = static_cast<int64_t>(target.size());
+  if (rank < 2) {
+    return nil;
+  }
+  MPSGraphTensor* logical = storage;
+  if (storage_shape[rank - 2] != logical_shape[rank - 2] ||
+      storage_shape[rank - 1] != logical_shape[rank - 1]) {
+    logical = [graph transposeTensor:storage
+                         permutation:MpsAxesArray({rank - 2, rank - 1})
+                                name:nil];
+  }
+  std::vector<int64_t> inner = MpsBroadcastShape(logical_shape, target);
+  if (logical == nil || inner.empty()) {
+    return nil;
+  }
+  return [graph broadcastTensor:MpsReshape(graph, logical, inner)
+                        toShape:MpsShapeOf(target)
+                           name:nil];
+}
+
+MPSGraphTensor* MpsTriangularSolve(
+    MPSGraph* graph,
+    MPSGraphTensor* matrix_storage,
+    MPSGraphTensor* right_storage,
+    at::IntArrayRef result_shape,
+    at::IntArrayRef storage_matrix_shape,
+    at::IntArrayRef matrix_shape,
+    at::IntArrayRef storage_right_shape,
+    at::IntArrayRef right_shape,
+    bool upper,
+    bool unitriangular,
+    at::ScalarType dtype) {
+  if (graph == nil || matrix_storage == nil || right_storage == nil ||
+      result_shape.size() < 2 || matrix_shape.size() != result_shape.size() ||
+      right_shape.size() != result_shape.size()) {
+    return nil;
+  }
+  const int64_t rank = static_cast<int64_t>(result_shape.size());
+  const int64_t n = matrix_shape[rank - 2];
+  const int64_t rhs = result_shape[rank - 1];
+  if (n <= 0 || rhs <= 0 || n > kMpsTriangularSolveMaxRows ||
+      matrix_shape[rank - 1] != n ||
+      right_shape[rank - 2] != n || right_shape[rank - 1] != rhs ||
+      result_shape[rank - 2] != n ||
+      storage_matrix_shape.size() != matrix_shape.size() ||
+      storage_right_shape.size() != right_shape.size()) {
+    return nil;
+  }
+  std::vector<int64_t> rows_shape(result_shape.begin(), result_shape.end());
+  rows_shape[rank - 2] = 1;
+  std::vector<int64_t> matrix_rows_shape(
+      result_shape.begin(), result_shape.end());
+  matrix_rows_shape[rank - 1] = 1;
+  std::vector<int64_t> index_shape(rows_shape);
+  index_shape[rank - 2] = 1;
+  index_shape[rank - 1] = 1;
+  const std::vector<int64_t> expanded_matrix =
+      MpsBroadcastShape(matrix_shape, matrix_rows_shape);
+  MPSGraphTensor* matrix_rows = MpsBroadcastOperand(
+      graph,
+      matrix_storage,
+      storage_matrix_shape,
+      matrix_shape,
+      matrix_rows_shape);
+  MPSGraphTensor* right_cells = MpsBroadcastOperand(
+      graph, right_storage, storage_right_shape, right_shape, result_shape);
+  MPSGraphTensor* zero_value = MpsConstant(graph, 0, dtype);
+  MPSGraphTensor* one_value = MpsConstant(graph, 1, dtype);
+  if (matrix_rows == nil || right_cells == nil ||
+      expanded_matrix.empty() || zero_value == nil || one_value == nil) {
+    return nil;
+  }
+
+  MPSGraphTensor* zero_cell = [graph broadcastTensor:zero_value
+                                             toShape:MpsFlatShape(1)
+                                                name:nil];
+  MPSGraphTensor* zeros = [graph broadcastTensor:zero_cell
+                                          toShape:MpsShapeOf(result_shape)
+                                             name:nil];
+  std::vector<int64_t> working_index_shape(index_shape);
+  working_index_shape[rank - 1] = 1;
+  MPSGraphTensor* matrix_indices = [graph broadcastTensor:
+      [graph reshapeTensor:zero_cell
+                 withShape:MpsShapeOf(working_index_shape)
+                      name:nil]
+                                                toShape:MpsShapeOf(index_shape)
+                                                   name:nil];
+  MPSGraphTensor* row_axis = [graph coordinateAlongAxis:rank - 2
+                                               withShape:MpsShapeOf(rows_shape)
+                                                    name:nil];
+  MPSGraphTensor* matrix_columns = [graph coordinateAlongAxis:rank - 1
+                                                   withShape:MpsShapeOf(
+                                                       result_shape)
+                                                        name:nil];
+  if (zero_cell == nil || zeros == nil || matrix_indices == nil ||
+      row_axis == nil ||
+      matrix_columns == nil) {
+    return nil;
+  }
+
+  // Every row gather reads the complete matrix, but its index has the full
+  // result batch prefix and a singleton collected axis. That turns the gather
+  // constraint `indices.shape[0:B] == updates.shape[0:B]` into a request to
+  // broadcast the index across the rows, while each result row still consumes
+  // every coefficient column.
+  MPSGraphTensor* solved = right_cells;
+  for (int64_t step = 0; step < n; ++step) {
+    const int64_t row = upper ? n - 1 - step : step;
+    MPSGraphTensor* row_index = MpsIndexConstant(graph, row, at::kLong);
+    MPSGraphTensor* coefficients = nil;
+    MPSGraphTensor* row_values = nil;
+    MPSGraphTensor* row_selector = nil;
+    if (row_index != nil) {
+      coefficients = [graph gatherWithUpdatesTensor:matrix_rows
+                                     indicesTensor:
+                                         [graph additionWithPrimaryTensor:
+                                             matrix_indices
+                                            secondaryTensor:row_index
+                                                       name:nil]
+                                              axis:rank - 2
+                                   batchDimensions:rank - 1
+                                              name:nil];
+      row_values = [graph gatherWithUpdatesTensor:right_cells
+                                    indicesTensor:
+                                        [graph additionWithPrimaryTensor:
+                                            matrix_indices
+                                           secondaryTensor:row_index
+                                                      name:nil]
+                                             axis:rank - 2
+                                  batchDimensions:rank - 1
+                                             name:nil];
+      row_selector = [graph equalWithPrimaryTensor:row_axis
+                                   secondaryTensor:row_index
+                                              name:nil];
+    }
+    MPSGraphTensor* percenter = nil;
+    if (coefficients != nil) {
+      std::vector<int64_t> percenter_shape(expanded_matrix);
+      percenter_shape[rank - 2] = n;
+      percenter = [graph broadcastTensor:
+          [graph reshapeTensor:coefficients
+                     withShape:MpsShapeOf(percenter_shape)
+                          name:nil]
+                                        toShape:MpsShapeOf(expanded_matrix)
+                                           name:nil];
+    }
+    MPSGraphTensor* earlier = nil;
+    if (percenter != nil) {
+      earlier = upper
+          ? [graph greaterThanWithPrimaryTensor:matrix_columns
+                               secondaryTensor:row_index
+                                          name:nil]
+          : [graph lessThanWithPrimaryTensor:matrix_columns
+                            secondaryTensor:row_index
+                                       name:nil];
+    }
+    MPSGraphTensor* triangle = nil;
+    if (earlier != nil) {
+      triangle = [graph selectWithPredicateTensor:earlier
+                              truePredicateTensor:percenter
+                             falsePredicateTensor:zeros
+                                             name:nil];
+    }
+    MPSGraphTensor* contribution = nil;
+    if (triangle != nil) {
+      contribution = [graph reductionSumWithTensor:
+          [graph multiplicationWithPrimaryTensor:triangle
+                                secondaryTensor:solved
+                                           name:nil]
+                                              axis:rank - 1
+                                              name:nil];
+    }
+    MPSGraphTensor* diagonal_selector = nil;
+    if (percenter != nil) {
+      diagonal_selector = [graph equalWithPrimaryTensor:matrix_columns
+                                        secondaryTensor:row_index
+                                                   name:nil];
+    }
+    MPSGraphTensor* diagonal = nil;
+    if (diagonal_selector != nil) {
+      diagonal = [graph reductionSumWithTensor:
+          [graph selectWithPredicateTensor:diagonal_selector
+                       truePredicateTensor:percenter
+                      falsePredicateTensor:zeros
+                                      name:nil]
+                                          axis:rank - 1
+                                          name:nil];
+    }
+    MPSGraphTensor* divisor = unitriangular ? one_value : diagonal;
+    MPSGraphTensor* inverse =
+        divisor == nil ? nil : [graph reciprocalWithTensor:divisor name:nil];
+    MPSGraphTensor* numerator = nil;
+    if (row_values != nil && contribution != nil) {
+      numerator = [graph subtractionWithPrimaryTensor:row_values
+                                      secondaryTensor:contribution
+                                                 name:nil];
+    }
+    MPSGraphTensor* updated = nil;
+    if (numerator != nil && inverse != nil) {
+      updated = [graph multiplicationWithPrimaryTensor:numerator
+                                       secondaryTensor:inverse
+                                                  name:nil];
+    }
+    MPSGraphTensor* selected = nil;
+    if (updated != nil && row_selector != nil) {
+      selected = [graph selectWithPredicateTensor:row_selector
+                              truePredicateTensor:updated
+                             falsePredicateTensor:solved
+                                             name:nil];
+    }
+    if (selected == nil) {
+      return nil;
+    }
+    solved = selected;
+  }
+  return solved;
 }
 
 bool MpsSupportsWhereDtype(
@@ -876,6 +1292,63 @@ std::vector<int64_t> MpsReduceOutShape(
   return shape;
 }
 
+bool MpsAllAxes(
+    at::IntArrayRef sizes,
+    at::OptionalIntArrayRef dims,
+    std::vector<int64_t>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->clear();
+  const int64_t rank = static_cast<int64_t>(sizes.size());
+  if (!dims.has_value()) {
+    for (int64_t axis = 0; axis < rank; ++axis) {
+      out->push_back(axis);
+    }
+    return true;
+  }
+  for (const int64_t raw : *dims) {
+    const int64_t axis = raw < 0 ? raw + rank : raw;
+    if (axis < 0 || axis >= rank ||
+        std::find(out->begin(), out->end(), axis) != out->end()) {
+      return false;
+    }
+    out->push_back(axis);
+  }
+  std::sort(out->begin(), out->end());
+  return true;
+}
+
+bool MpsAllAxes(
+    at::IntArrayRef sizes,
+    int64_t dim,
+    std::vector<int64_t>* out) {
+  const int64_t one = dim;
+  return MpsAllAxes(sizes, at::OptionalIntArrayRef(at::IntArrayRef(&one, 1)), out);
+}
+
+std::vector<int64_t> MpsAllOutShape(
+    at::IntArrayRef sizes,
+    at::OptionalIntArrayRef dims,
+    at::IntArrayRef axes,
+    bool keepdim) {
+  std::vector<int64_t> shape;
+  if (!dims.has_value()) {
+    return {1};
+  }
+  for (int64_t axis = 0; axis < static_cast<int64_t>(sizes.size()); ++axis) {
+    const bool reduced =
+        std::find(axes.begin(), axes.end(), axis) != axes.end();
+    if (!reduced) {
+      shape.push_back(sizes[axis]);
+    } else if (keepdim) {
+      shape.push_back(1);
+    }
+  }
+  return shape;
+}
+
+
 NSArray<NSNumber*>* MpsAxesArray(at::IntArrayRef axes) {
   NSMutableArray<NSNumber*>* out = [NSMutableArray
       arrayWithCapacity:static_cast<NSUInteger>(axes.size())];
@@ -884,18 +1357,6 @@ NSArray<NSNumber*>* MpsAxesArray(at::IntArrayRef axes) {
   }
   return out;
 }
-
-namespace {
-
-// The one-dimensional shape a buffer-backed MPSNDArray is always given. See the
-// row-pitch note in mps_common.h: any other shape would make MPSNDArray read the
-// buffer with its own padded row stride.
-MPSShape* FlatShape(int64_t count) {
-  const int64_t dims[1] = {count};
-  return MpsShapeOf(at::IntArrayRef(dims, 1));
-}
-
-} // namespace
 
 namespace {
 
@@ -1196,6 +1657,26 @@ MPSGraphTensor* MpsFlatten(MPSGraph* graph, MPSGraphTensor* tensor, int64_t coun
   return [graph reshapeTensor:tensor withShape:FlatShape(count) name:nil];
 }
 
+MPSGraphTensor* MpsIndexConstant(
+    MPSGraph* graph,
+    int64_t value,
+    at::ScalarType dtype) {
+  return MpsConstant(graph, at::Scalar(value), dtype);
+}
+
+MPSGraphTensor* MpsIndexConstantForShape(
+    MPSGraph* graph,
+    int64_t value,
+    at::ScalarType dtype,
+    at::IntArrayRef shape) {
+  if (graph == nil || dtype != at::kLong || shape.empty()) {
+    return nil;
+  }
+  return [graph constantWithScalar:static_cast<double>(value)
+                             shape:FlatShape(1)
+                          dataType:MPSDataTypeInt64];
+}
+
 bool MpsConstantExact(const at::Scalar& value, at::ScalarType dtype) {
   MPSDataType ignored;
   if (!MpsDataTypeOf(dtype, &ignored)) {
@@ -1422,18 +1903,14 @@ MpsPlan* BuildPlan(
     const std::string& key,
     at::TensorList inputs,
     at::TensorList outs,
+    at::IntArrayRef extra_matrix_shape,
+    at::IntArrayRef extra_right_shape,
+    at::TensorList extra,
     MPSGraphDevice* device,
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
         NSArray<MPSGraphTensor*>* args)) {
   if (outs.empty()) {
-    return nullptr;
-  }
-  // Every result is flattened back to a 1-D buffer of its own numel. Only the
-  // first result's dtype is consulted: all results share the operands' dtype,
-  // which MpsRunGraphMulti's caller has already established.
-  MPSDataType out_dtype;
-  if (!MpsDataTypeOf(outs[0].scalar_type(), &out_dtype)) {
     return nullptr;
   }
   MPSGraph* graph = [[MPSGraph alloc] init];
@@ -1443,25 +1920,30 @@ MpsPlan* BuildPlan(
   std::vector<MPSGraphTensor*> results;
   MPSGraphExecutable* executable = nil;
   NSArray<MPSGraphTensor*>* placeholders = nil;
+  const size_t operand_count = inputs.size() + extra.size();
   @autoreleasepool {
     NSMutableArray<MPSGraphTensor*>* args =
-        [NSMutableArray arrayWithCapacity:inputs.size()];
+        [NSMutableArray arrayWithCapacity:operand_count];
     NSMutableArray<MPSGraphTensor*>* buffers =
-        [NSMutableArray arrayWithCapacity:inputs.size()];
+        [NSMutableArray arrayWithCapacity:operand_count];
     NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
-        [NSMutableDictionary dictionaryWithCapacity:inputs.size()];
+        [NSMutableDictionary dictionaryWithCapacity:operand_count];
     // The input types the graph is specialized for, in the order `buffers`
     // collects them. Specialization is what turns the compiled graph into the
     // GPU program `runAsyncWithMTLCommandQueue:` executes, and it is the reason
     // this list is kept: it is handed to `specializeWithDevice:` below.
     NSMutableArray<MPSGraphShapedType*>* input_types =
-        [NSMutableArray arrayWithCapacity:inputs.size()];
-    for (size_t i = 0; i < inputs.size(); ++i) {
+        [NSMutableArray arrayWithCapacity:operand_count];
+    std::vector<at::Tensor> operands;
+    operands.reserve(operand_count);
+    operands.insert(operands.end(), inputs.begin(), inputs.end());
+    operands.insert(operands.end(), extra.begin(), extra.end());
+    for (size_t i = 0; i < operands.size(); ++i) {
       MPSDataType dtype;
-      if (!MpsDataTypeOf(inputs[i].scalar_type(), &dtype)) {
+      if (!MpsDataTypeOf(operands[i].scalar_type(), &dtype)) {
         break;
       }
-      const int64_t count = inputs[i].numel();
+      const int64_t count = operands[i].numel();
       // The placeholder is the 1-D buffer view and the operand's aten shape is
       // reapplied over it, because an MPSNDArray over N-D memory reads with its
       // own row pitch (see the row-pitch note in mps_common.h).
@@ -1473,9 +1955,15 @@ MpsPlan* BuildPlan(
       [input_types addObject:type];
       MpsRelease(type);
       [buffers addObject:buffer];
-      [args addObject:MpsReshape(graph, buffer, inputs[i].sizes())];
+      std::vector<int64_t> logical_shape = operands[i].sizes().vec();
+      if (i == inputs.size() && !extra_matrix_shape.empty()) {
+        logical_shape.assign(extra_matrix_shape.begin(), extra_matrix_shape.end());
+      } else if (i == inputs.size() + 1 && !extra_right_shape.empty()) {
+        logical_shape.assign(extra_right_shape.begin(), extra_right_shape.end());
+      }
+      [args addObject:MpsReshape(graph, buffer, logical_shape)];
     }
-    if (static_cast<size_t>([buffers count]) == inputs.size()) {
+    if (static_cast<size_t>([buffers count]) == operand_count) {
       std::vector<MPSGraphTensor*> built = build == nil
           ? std::vector<MPSGraphTensor*>()
           : build(graph, args);
@@ -1536,13 +2024,13 @@ MpsPlan* BuildPlan(
   plan->descriptor = [[MPSGraphExecutableExecutionDescriptor alloc] init];
   plan->descriptor.waitUntilCompleted = NO;
   // Sentinel: a slot no operand has claimed yet.
-  plan->input_order.assign(inputs.size(), inputs.size());
+  plan->input_order.assign(operand_count, operand_count);
   NSArray<MPSGraphTensor*>* reported = executable.feedTensors;
-  bool resolved = (reported != nil && reported.count == inputs.size());
-  for (size_t i = 0; resolved && i < inputs.size(); ++i) {
+  bool resolved = (reported != nil && reported.count == operand_count);
+  for (size_t i = 0; resolved && i < operand_count; ++i) {
     const NSUInteger position = [reported indexOfObject:placeholders[i]];
-    if (position == NSNotFound || position >= inputs.size() ||
-        plan->input_order[position] != inputs.size()) {
+    if (position == NSNotFound || position >= operand_count ||
+        plan->input_order[position] != operand_count) {
       resolved = false;
       break;
     }
@@ -1555,7 +2043,7 @@ MpsPlan* BuildPlan(
     // lands on does not raise, it aborts the process, which is a far worse way
     // to learn that `feedTensors` went away than a rebuilt-on-every-call plan
     // would be.
-    for (size_t slot = 0; slot < inputs.size(); ++slot) {
+    for (size_t slot = 0; slot < operand_count; ++slot) {
       plan->input_order[slot] = slot;
     }
   }
@@ -1646,6 +2134,9 @@ bool RunGraphImpl(
     const std::string& key,
     at::TensorList inputs,
     at::TensorList outs,
+    at::IntArrayRef extra_matrix_shape,
+    at::IntArrayRef extra_right_shape,
+    at::TensorList extra,
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
         NSArray<MPSGraphTensor*>* args)) {
@@ -1681,9 +2172,10 @@ bool RunGraphImpl(
   }
   // Resolve every buffer before the graph is built, so a pointer the Metal
   // allocator does not own costs the caller a fallback rather than half a run.
-  std::vector<id<MTLBuffer>> buffers(inputs.size(), nil);
-  std::vector<size_t> offsets(inputs.size(), 0);
-  std::vector<MPSDataType> dtypes(inputs.size(), MPSDataTypeFloat32);
+  const size_t operand_count = inputs.size() + extra.size();
+  std::vector<id<MTLBuffer>> buffers(operand_count, nil);
+  std::vector<size_t> offsets(operand_count, 0);
+  std::vector<MPSDataType> dtypes(operand_count, MPSDataTypeFloat32);
   // The operands that had to be staged, and the buffer each one came from, so
   // the operand's own bytes are what the graph's inputs were copied *from* and
   // nothing has to be copied back for an input.
@@ -1692,14 +2184,18 @@ bool RunGraphImpl(
   // through both loops below so the result of one operand cannot be handed the
   // buffer a sibling operand's input was staged into.
   ClaimedStaging claimed;
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    if (!ResolveOperand(inputs[i], &buffers[i], &offsets[i], &claimed)) {
+  std::vector<at::Tensor> operands;
+  operands.reserve(operand_count);
+  operands.insert(operands.end(), inputs.begin(), inputs.end());
+  operands.insert(operands.end(), extra.begin(), extra.end());
+  for (size_t i = 0; i < operands.size(); ++i) {
+    if (!ResolveOperand(operands[i], &buffers[i], &offsets[i], &claimed)) {
       return false;
     }
     TORCH_CHECK(
-        MpsDataTypeOf(inputs[i].scalar_type(), &dtypes[i]),
+        MpsDataTypeOf(operands[i].scalar_type(), &dtypes[i]),
         "mps: no MPSGraph element type for ",
-        inputs[i].scalar_type());
+        operands[i].scalar_type());
   }
   std::vector<id<MTLBuffer>> out_buffers(outs.size(), nil);
   std::vector<size_t> out_offsets(outs.size(), 0);
@@ -1736,8 +2232,15 @@ bool RunGraphImpl(
   // about a tensor. It cannot keep a body from reading a host value the caller
   // never named -- see the key contract in mps_common.h.
   std::string full_key = key;
-  for (const at::Tensor& input : inputs) {
-    MpsKeyAppendTensor(full_key, input);
+  for (const at::Tensor& operand : inputs) {
+    MpsKeyAppendTensor(full_key, operand);
+  }
+  full_key += "|extra";
+  full_key += std::to_string(extra.size());
+  MpsKeyAppend(full_key, extra_matrix_shape);
+  MpsKeyAppend(full_key, extra_right_shape);
+  for (const at::Tensor& operand : extra) {
+    MpsKeyAppendTensor(full_key, operand);
   }
   // Every result's signature is folded in, not just the first: a multi-result
   // body can be called with the same operand shapes and a different (out, mean,
@@ -1759,7 +2262,9 @@ bool RunGraphImpl(
     @autoreleasepool {
       MPSGraphDevice* device =
           [MPSGraphDevice deviceWithMTLDevice:queue.device];
-      plan = BuildPlan(full_key, inputs, outs, device, build);
+      plan = BuildPlan(
+          full_key, inputs, outs, extra_matrix_shape, extra_right_shape,
+          extra, device, build);
     }
     if (plan == nullptr) {
       return false;
@@ -1767,17 +2272,17 @@ bool RunGraphImpl(
   }
   bool ran = false;
   @autoreleasepool {
-    std::vector<MPSGraphTensorData*> operands(inputs.size(), nil);
-    for (size_t i = 0; i < inputs.size(); ++i) {
-      operands[i] =
-          MpsTensorData(buffers[i], offsets[i], inputs[i].numel(), dtypes[i]);
+    std::vector<MPSGraphTensorData*> operand_data(operand_count, nil);
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operand_data[i] = MpsTensorData(
+          buffers[i], offsets[i], operands[i].numel(), dtypes[i]);
       // nil is either a zero-element tensor -- which the caller already
       // short-circuits for `out` and which a graph could not express anyway --
       // or an operand whose byte offset the SDK in force cannot describe. Both
       // are declines, not errors: the header contract is that a nil MPSGraph
       // description sends the op to the CPU round-trip, which is correct.
-      if (operands[i] == nil) {
-        for (MPSGraphTensorData* operand : operands) {
+      if (operand_data[i] == nil) {
+        for (MPSGraphTensorData* operand : operand_data) {
           MpsRelease(operand);
         }
         return false;
@@ -1793,7 +2298,7 @@ bool RunGraphImpl(
           MpsTensorData(out_buffers[i], out_offsets[i], outs[i].numel(),
                         out_dtypes[i]);
       if (data == nil) {
-        for (MPSGraphTensorData* operand : operands) {
+        for (MPSGraphTensorData* operand : operand_data) {
           MpsRelease(operand);
         }
         return false;
@@ -1804,9 +2309,9 @@ bool RunGraphImpl(
     // been scheduled: the executable reads them during that run, so they have to
     // outlive the call only as long as the call.
     NSMutableArray<MPSGraphTensorData*>* array =
-        [NSMutableArray arrayWithCapacity:inputs.size()];
+        [NSMutableArray arrayWithCapacity:operand_count];
     for (const NSUInteger operand : plan->input_order) {
-      [array addObject:operands[operand]];
+      [array addObject:operand_data[operand]];
     }
     // Asynchronous on purpose: see the contract in mps_common.h. Measured on an
     // M5, the same one-node executable costs ~18 us scheduled this way against
@@ -1820,7 +2325,7 @@ bool RunGraphImpl(
     for (MPSGraphTensorData* data : result_data) {
       MpsRelease(data);
     }
-    for (MPSGraphTensorData* operand : operands) {
+    for (MPSGraphTensorData* operand : operand_data) {
       MpsRelease(operand);
     }
   }
@@ -1855,8 +2360,8 @@ bool RunGraphImpl(
     // is the right answer -- nothing in the block pool can alias it.
     if (c10::flagos::CachingDeviceAllocator::is_enabled()) {
       if (auto* alloc = c10::flagos::GetCachingAllocator()) {
-        for (const at::Tensor& input : inputs) {
-          alloc->record_stream(input.storage().data_ptr(), stream);
+        for (const at::Tensor& operand : operands) {
+          alloc->record_stream(operand.storage().data_ptr(), stream);
         }
         for (const at::Tensor& out : outs) {
           alloc->record_stream(out.storage().data_ptr(), stream);
@@ -1926,7 +2431,36 @@ bool MpsRunGraph(
     return one;
   };
   return RunGraphImpl(
-      key, inputs, at::TensorList(&out, 1), multi);
+      key, inputs, at::TensorList(&out, 1), {}, {}, {}, multi);
+}
+
+bool MpsRunGraphExtra(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& matrix,
+    const at::Tensor& right,
+    const at::Tensor& out,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil) {
+    return false;
+  }
+  auto multi = ^std::vector<MPSGraphTensor*>(
+      MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+    std::vector<MPSGraphTensor*> one;
+    MPSGraphTensor* built = build(graph, args);
+    if (built != nil) {
+      one.push_back(built);
+    }
+    return one;
+  };
+  return RunGraphImpl(
+      key,
+      inputs,
+      at::TensorList(&out, 1),
+      {},
+      {},
+      at::TensorList({matrix, right}),
+      multi);
 }
 
 bool MpsRunGraphMulti(
@@ -1936,7 +2470,7 @@ bool MpsRunGraphMulti(
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
         NSArray<MPSGraphTensor*>* args)) {
-  return RunGraphImpl(key, inputs, outs, build);
+  return RunGraphImpl(key, inputs, outs, {}, {}, {}, build);
 }
 
 void MpsRelease(id object) {

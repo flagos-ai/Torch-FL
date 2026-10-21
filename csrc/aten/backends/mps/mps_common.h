@@ -104,6 +104,17 @@ bool MpsDataTypeOf(at::ScalarType dtype, MPSDataType* out);
 // quantised types) fail the same test and round-trip too.
 bool MpsSupportsUnaryDtype(at::ScalarType dtype);
 
+// A reference call for `index.Tensor` whose host copies are already built.
+// `indices` contains every entry, including the null entries ATen uses for
+// full slices, so the result keeps the reference's indexing semantics.
+at::Tensor MpsIndexOnHost(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices);
+
+// Whether MPSGraph can compare or reduce this width to a bool. Bool itself is
+// accepted by `all`; uint8 is compared only when this SDK maps it.
+bool MpsSupportsCompareDtype(at::ScalarType dtype);
+
 // Whether an elementwise op over two operands computes exactly on the MPSGraph
 // path. Both operands must carry the same dtype, and that dtype must be one
 // MpsDataTypeOf maps: MPSGraph's binary arithmetic has no implicit promotion,
@@ -160,6 +171,29 @@ bool MpsSupportsCatDtype(at::ScalarType dtype, at::ScalarType other_dtype);
 // promotes the result off the tensor's dtype, which the constant path cannot
 // express -- and a complex scalar is declined outright.
 bool MpsSupportsScalarDtype(at::ScalarType self_dtype, const at::Scalar& other);
+
+// All three `all` spellings answer bool. Every width the SDK maps can be
+// compared with zero; the graph reduces the comparison and selects an output
+// with the caller's bool dtype.
+bool MpsSupportsAllDtype(at::ScalarType dtype);
+
+// argmax is reduced through float32 coordinates, which exactly represent the
+// realistic axis lengths. The result is int64, as in the reference.
+bool MpsSupportsArgmaxDtype(at::ScalarType dtype);
+
+// MPSGraph constants of a float or integer type, including inf for the floats.
+// `out` receives a strong reference that the autorelease pool releases.
+bool MpsPositiveInfinity(
+    MPSGraph* graph, at::ScalarType dtype, MPSGraphTensor** out);
+
+// triu selects values without arithmetic, so it is available at every mapped
+// element type except uint8. A missing uint8 MPSGraph mapping is declined.
+bool MpsSupportsTriuDtype(at::ScalarType dtype);
+
+// Per-row substitution composes about n+4 nodes per solved row. Its compiled
+// graph is reused across calls with the same shape, while an unbounded n would
+// turn each first call into a graph of thousands of nodes.
+constexpr int64_t kMpsTriangularSolveMaxRows = 64;
 
 // Whether a reduction computes exactly on the MPSGraph path: the float widths
 // only, and only with no `dtype=` that moves the result off the operand's
@@ -796,6 +830,50 @@ bool MpsSupportsDivScalarDtype(at::ScalarType self_dtype, const at::Scalar& othe
 // would be a guess rather than a measurement.
 bool MpsSupportsGemmDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
 
+// Both operands must share the caller's float width. The graph substitutes
+// directly in that width; the promoted host reference is used on any decline.
+bool MpsSupportsTriangularSolveDtype(
+    at::ScalarType a_dtype, at::ScalarType b_dtype);
+
+// Keeps half and bfloat16 solves within the CPU MPS channel: those widths are
+// computed in float32 and rounded back to the caller's dtype.
+at::Tensor MpsTriangularSolveReference(
+    const at::Tensor& a,
+    const at::Tensor& b,
+    bool upper,
+    bool left,
+    bool unitriangular);
+
+// Resolves the shapes and broadcast batch dimensions of both equations:
+//
+//   AX = B:  A[..., n, n], B[..., n, k]  -> X[..., n, k]
+//   XA = B:  A[..., n, n], B[..., k, n]  -> X[..., k, n]
+//
+// The batch shape follows ATen's left and right broadcast rules. An empty
+// result is valid. False is the caller's signal to use the reference, which owns
+// the shape errors and dtype promotion.
+bool MpsTriangularSolveShapes(
+    at::IntArrayRef a_sizes,
+    at::IntArrayRef b_sizes,
+    bool left,
+    std::vector<int64_t>* out_shape);
+
+// MPSGraph has no triangular-solve selector on the hosted SDK. The graph solves
+// a left system, AX = B, one row at a time:
+//
+//   left, lower:   row forward substitution
+//   left, upper:   row backward substitution
+//
+// A right system, XA = B, is the same substitution over the transpose of A: its
+// batch axes are aligned with the caller's result and its coefficients form a
+// lower triangle for an upper A. The caller passes the matrix and right side in
+// that working order, with transposed storage when needed. The graph returns X
+// with `result_shape`, in that working order.
+//
+// Every row is selected from the complete matrix with one fixed gather index.
+// The batched gather broadcasts each index over the result's batch prefix. Its
+// strict triangle is multiplied by all rows' current solutions, reduced over
+// the coefficient axis, and the result is selected into the next row.
 // A gemm operand resolved into the layout the graph should read it in: the dense
 // buffer to describe, and whether the graph has to swap that buffer's last two
 // axes to recover the operand the caller passed.
@@ -933,6 +1011,22 @@ bool MpsReduceAxes(
     at::OptionalIntArrayRef dims,
     std::vector<int64_t>* out);
 
+// `all`'s absent dim means every axis; an explicit empty list is the identity.
+// Repeated or out-of-range axes are declined to the reference's error.
+bool MpsAllAxes(
+    at::IntArrayRef sizes,
+    at::OptionalIntArrayRef dims,
+    std::vector<int64_t>* out);
+
+bool MpsAllAxes(
+    at::IntArrayRef sizes, int64_t dim, std::vector<int64_t>* out);
+
+std::vector<int64_t> MpsAllOutShape(
+    at::IntArrayRef sizes,
+    at::OptionalIntArrayRef dims,
+    at::IntArrayRef axes,
+    bool keepdim);
+
 // The shape of `sizes` reduced over `dims`, following aten's keepdim rule: with
 // keepdim the rank is unchanged and every reduced axis becomes 1, without it
 // the reduced axes are dropped. `dims` is normalised the way MpsReduceAxes
@@ -977,6 +1071,24 @@ MPSGraphTensor* MpsScaledByScalar(
     MPSGraph* graph,
     MPSGraphTensor* tensor,
     const at::Scalar& factor,
+    at::ScalarType dtype);
+
+// The triangular solve for one matrix and right side, in working order. Every
+// row of the result is selected into the evolving solution in ATen's
+// substitution order. `storage_*_shape` is the dense or pairwise-transposed
+// storage actually passed as the operand; `*_shape` is the broadcast working
+// shape. The caller supplies the padded result shape.
+MPSGraphTensor* MpsTriangularSolve(
+    MPSGraph* graph,
+    MPSGraphTensor* matrix_storage,
+    MPSGraphTensor* right_storage,
+    at::IntArrayRef result_shape,
+    at::IntArrayRef storage_matrix_shape,
+    at::IntArrayRef matrix_shape,
+    at::IntArrayRef storage_right_shape,
+    at::IntArrayRef right_shape,
+    bool upper,
+    bool unitriangular,
     at::ScalarType dtype);
 
 // `tensor ** exponent` as an MPSGraph node, with `exponent` the host scalar an
@@ -1073,11 +1185,39 @@ bool MpsRunGraph(
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
 
+// The single-result graph entry point with two additional operands. The matrix
+// and right side are described and staged exactly as `inputs` are, and follow
+// them in `args`. Their storage shapes are the tensors' own sizes.
+//
+// `build` receives a transposed storage tensor where the caller's working form
+// is a pairwise transpose of it; MpsTriangularSolve swaps those axes in the
+// graph.
+//
+// This exists for triangular solve, whose matrix and right side may share the
+// result's batch prefix and need their own row or column axis. MpsRunGraph's
+// `inputs` list remains the stable, uniform operand list every other graph
+// body uses.
+bool MpsRunGraphExtra(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& matrix,
+    const at::Tensor& right,
+    const at::Tensor& out,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
+
+// Right-aligned expansion of a batch prefix, with a singleton on the left. This
+// is the reshape a graph applies to a broadcast batch operand before tile.
+std::vector<int64_t> MpsBroadcastShape(
+    at::IntArrayRef sizes,
+    at::IntArrayRef target);
+
 // The multi-result form of MpsRunGraph, for the ops that answer with more than
 // one tensor -- `native_layer_norm` returns (out, mean, rstd) and
 // `native_batch_norm` (out, save_mean, save_var). `outs` is every result in the
 // order the aten schema returns them, and `build` returns that many tensors in
-// the same order; each is flattened to its own `outs[i]` buffer.
+// the same order; each is flattened to its own `outs[i]` buffer and cast to the
+// result tensor's declared dtype. A result such as argmax may be int64 over a
+// floating-point operand.
 //
 // This is a second entry point rather than a widening of MpsRunGraph because the
 // single-result contract is what almost every body here rests on: `build` has to
@@ -1088,8 +1228,8 @@ bool MpsRunGraph(
 // The result order is positional, and it is the caller's to get right: MPSGraph
 // does not name the results, so the `i`th tensor `build` returns is flattened to
 // the `i`th entry of `outs` and nothing reconciles the two. Every result must be
-// a non-empty flagos tensor with the operands' dtype, and every result's numel is
-// folded into the key.
+// a non-empty flagos tensor with a mapped dtype, and every result's shape and
+// dtype are folded into the key.
 //
 // False on the same conditions as MpsRunGraph -- a nil `build`, a result the
 // runtime does not own, a `build` that declines (nil or a short vector), or a
@@ -1107,6 +1247,9 @@ bool MpsRunGraphMulti(
 // `sizes` as an MPSShape. Autoreleased; consume it inside the caller's
 // autorelease pool.
 MPSShape* MpsShapeOf(at::IntArrayRef sizes);
+
+// A one-dimensional MPSShape for buffer-backed coordinate arithmetic.
+MPSShape* MpsFlatShape(int64_t count);
 
 // MPSGraphTensorData describing the `count` elements of `dtype` that start at
 // `byteOffset` inside `buffer`, which must be host-gpu shared. Returns a +1
@@ -1142,6 +1285,20 @@ MPSGraphTensor* MpsReshape(MPSGraph* graph, MPSGraphTensor* tensor, at::IntArray
 // what a graph result is flattened back to before it is handed to
 // `runWithMTLCommandQueue:...resultsDictionary:`.
 MPSGraphTensor* MpsFlatten(MPSGraph* graph, MPSGraphTensor* tensor, int64_t count);
+
+// A scalar integer of the given width for coordinate arithmetic.
+MPSGraphTensor* MpsIndexConstant(
+    MPSGraph* graph,
+    int64_t value,
+    at::ScalarType dtype);
+
+// The single-element integer constant that coordinate arithmetic broadcasts
+// against a tensor of shape `shape`.
+MPSGraphTensor* MpsIndexConstantForShape(
+    MPSGraph* graph,
+    int64_t value,
+    at::ScalarType dtype,
+    at::IntArrayRef shape);
 
 // The MTLBuffer backing `t`'s storage and the byte offset of its first element
 // inside it. False when the pointer is not inside a Metal allocation the

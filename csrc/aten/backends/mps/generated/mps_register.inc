@@ -17,6 +17,10 @@
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("all", WrapperAll);
+  m.impl("all.dim", WrapperAllDim);
+  m.impl("all.dims", WrapperAllDims);
+  m.impl("argmax", WrapperArgmax);
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
@@ -27,6 +31,7 @@
   m.impl("exp", WrapperExp);
   m.impl("gather", WrapperGather);
   m.impl("index_select", WrapperIndexSelect);
+  m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("log", WrapperLog);
   m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
   m.impl("masked_fill.Tensor", WrapperMaskedFillTensor);
@@ -49,4 +54,5 @@
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
   m.impl("take", WrapperTake);
   m.impl("tanh", WrapperTanh);
+  m.impl("triu", WrapperTriu);
   m.impl("where.self", WrapperWhereSelf);

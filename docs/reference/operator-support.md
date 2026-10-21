@@ -252,6 +252,41 @@ reported all vendor confs up to date. This is an M5 measurement; MPS inference
 accuracy on other Apple Silicon generations and the other backend allocator
 paths are **not revalidated**.
 
+### Apple Silicon M5: Qwen3.5 gains native reductions, triangular solve and triangle masking (2026-10-22, physical M5)
+
+**Four Qwen3.5 paths now use MPSGraph: `all` (three overloads), `argmax`,
+`triu` and `linalg_solve_triangular`.** `all` compares every value to zero and
+reduces the predicate to bool; the bare form retains its scalar result shape,
+while the two `dim` forms retain aten's reduced or singleton axes. `triu`
+uses row and column coordinates with an int32 diagonal constant, so every
+diagonal offset selects the same elements as the CPU reference on square,
+non-square and batched inputs. The batched triangular solve builds forward or
+back substitution as a graph, including right-hand solves and unit diagonals,
+without reading coefficients on the host. `argmax` is enabled for its bare
+form and every float width; its `dim` form remains on the reference because
+the tested graph did not yet reproduce unique-tie and missing-NaN rules.
+
+The MPS conf moves from **37 `mps` / 2000 `none`** to **43 `mps` / 1994
+`none`**. Both code generators reported their outputs current. The targeted
+`test_mps_all.py` and `test_mps_argmax.py` suites passed **15 cases**; the
+Qwen3.5-shaped convolution and triangular-solve suite passed **28 cases**; and
+the standalone `triu` suite passed **61 cases** on the physical M5.
+
+**Measured checkpoint result.** A five-token, `bfloat16` Qwen3.5 text
+classification checkpoint was evaluated on CPU and `flagos:0` with eager
+attention. The two output logits differed by at most **0.005859375** and
+averaged **0.0029296875** absolute difference. The preceding full-model
+dispatch trace had **4621 native and one fallback PrivateUse1 call**, the
+fallback being `all`; `all` and the triangle routes are now native in the
+targeted checks. This is not a fallback-free model claim: views, padding and
+`cumsum` still take host round-trips, and native training, generation and
+multimodal inputs are **not measured**.
+
+`index.Tensor` is also registered and returns the correct shape for scalar,
+adjacent, separated and broadcast coordinates, but its current value gather
+still uses a checked host path. Its graph replacement remains a separate
+change, so it is **not counted among the 43 native MPSGraph routes**.
+
 ### Enflame GCU S60: `rsub` gains a native kernel, and COMPILE_ARCH stops splitting the launch stream (2026-10-16)
 
 **Four failures, one route and one stream.** The BERT cohort on GCU ran **147 passed / 4 failed**

@@ -507,14 +507,15 @@ def test_conf_route_counts_are_stable():
         # ``embedding``, ``index_select``, ``gather``, ``div``, ``div_scalar``,
         # ``reciprocal``, ``take``, ``layer_norm``, ``batch_norm``, ``sigmoid``,
         # ``exp``, ``log``, ``rsqrt``, ``sqrt``, ``tanh``, ``erf``, ``where``
-        # ``cat`` and ``masked_fill`` categories (37 ops so far), so the conf
+        # ``cat``, ``masked_fill``, ``all``, ``argmax``, ``triu`` and
+        # ``SOLVE_TRIANGULAR`` categories (43 ops so far), so the conf
         # routes those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "mps": {"mps": 37, "none": 2000},
+        "mps": {"mps": 43, "none": 1994},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then
