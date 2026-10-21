@@ -33,7 +33,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend
+from backend_conf import routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -130,10 +130,17 @@ class TestAddTensorDispatch:
         FlagGems-first is the generated default, but it is not unconditional:
         MUSA routes add.Tensor to its native ``musa`` kernel because FlagGems
         cannot compile the bf16 wrapped-number promotion on the mthreads Triton
-        stack (see NATIVE_TRITON_GAPS["musa"]). Asserting the conf's own value
-        keeps this test meaningful on every platform rather than pinning it to
-        the one it was written on.
+        stack (see NATIVE_TRITON_GAPS["musa"]), and Iluvatar routes it to
+        ``none`` because FlagGems returns zeros for complex128 -- that conf
+        leaves the op to cpu_fallback and registers no ``add.Tensor`` wrapper,
+        so the call logs no dispatch line and there is no route to assert.
+        Asserting the conf's own value keeps this test meaningful on every
+        platform rather than pinning it to the one it was written on; where the
+        conf deliberately leaves the op unaccelerated the case skips, the same
+        containment ``test_bmm_dispatch.py`` uses.
         """
+        if routed_backend_or_none("add.Tensor") is None:
+            pytest.skip("add.Tensor does not take an accelerated route here")
         result = _run_add_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("add.Tensor")
