@@ -2681,6 +2681,126 @@ def _stand_down_foreign_triton_drivers():
     backend.driver.is_active = staticmethod(lambda: False)
 
 
+def _bind_kunlunxin_triton_stream():
+    """Give Kunlunxin's Triton backend a stream source that exists here.
+
+    Triton's ``GPUDriver.__init__`` binds its host-runtime accessors to
+    ``torch.cuda`` unconditionally::
+
+        try:
+            from torch._C import _cuda_getCurrentRawStream
+            self.get_current_stream = _cuda_getCurrentRawStream
+        except ImportError:
+            self.get_current_stream = lambda idx: torch.cuda.current_stream(idx).cuda_stream
+
+    FlagTree's XPU backend subclasses it and overrides the *device* pair only
+    (``XPUDriver.__init__``, under its ``FLAGTREE XPU SYNC MARK``); nothing under
+    ``triton/backends/xpu/`` assigns ``get_current_stream``. On the CPU-torch
+    wheel this backend runs on there is no ``_cuda_getCurrentRawStream``, so the
+    fallback lambda is installed and the first kernel launch dies with
+    ``AssertionError: Torch not compiled with CUDA enabled`` raised from
+    ``torch.cuda._lazy_init``.
+
+    The handle kernels must submit to is the one torch_fl's own stream carries,
+    ``flagos.current_stream(index).handle`` -- the same value
+    ``get_kunlunxin_current_raw_stream`` in ``torch_fl.compile.flagtree_shim``
+    already reports to inductor. Binding it here is what lets FlagGems, which
+    launches eagerly and long before any ``torch.compile`` shim exists, reach
+    the device at all.
+
+    Measured on a P800 (torch 2.10.0+cpu, triton 3.6.0): with the lambda in
+    place a plain ``tl.load``/``tl.store`` kernel raises in ``_lazy_init``; with
+    this binding it launches, synchronizes, and reads back correct values.
+
+    Wrapped at ``DriverConfig.active`` rather than applied once at import,
+    because the driver is created lazily on that property's first read and
+    resolving it during ``_lazy_init`` imports the backend compiler, which asks
+    torch_fl questions device init has not finished answering. Wrapping the
+    property catches the driver however late it is built; ``set_active`` (a test
+    hook) is wrapped too so a substituted driver is bound the same way.
+
+    Only replaces the parent class's fallback lambda, so a backend that grows a
+    real implementation keeps it. No-op off Kunlunxin and when Triton is absent.
+    Idempotent.
+    """
+    if _platform() != "kunlunxin":
+        return
+    try:
+        import triton.runtime.driver as triton_driver
+    except ImportError:
+        return
+
+    # ``import triton.runtime.driver as triton_driver`` yields the DriverConfig
+    # *instance*, not the module: ``triton/runtime/__init__.py`` rebinds the name
+    # to ``driver.driver``. Accept either shape.
+    config = None
+    if hasattr(triton_driver, "set_active"):
+        config = triton_driver
+    else:
+        for attribute in ("driver", "_driver"):
+            candidate = getattr(triton_driver, attribute, None)
+            if hasattr(candidate, "set_active"):
+                config = candidate
+                break
+    if config is None:
+        return
+
+    cls = type(config)
+    if getattr(cls, "_flagos_stream_bound", False):
+        return
+
+    # ``getattr`` rather than ``cls.__dict__``: a subclass that only inherits the
+    # property still has to be intercepted, and a test that substitutes the
+    # class (``instance.__class__ = Sub``) would otherwise slip past.
+    original_active = getattr(cls, "active", None)
+    if not isinstance(original_active, property):
+        return
+    get_active = original_active.fget
+
+    def active(self):
+        return _bind_stream_on_driver(get_active(self))
+
+    original_set = getattr(cls, "set_active")
+
+    def set_active(self, driver):
+        original_set(self, _bind_stream_on_driver(driver))
+
+    cls.active = property(active)
+    cls.set_active = set_active
+    cls._flagos_stream_bound = True
+
+
+def _bind_stream_on_driver(driver):
+    """Point one Triton driver's stream accessor at torch_fl's stream handle.
+
+    Split out of :func:`_bind_kunlunxin_triton_stream` so the lazy wrapper can
+    apply it to whichever driver object finally gets built. Replaces the parent
+    class's fallback lambda and nothing else; idempotent because the replacement
+    no longer matches.
+    """
+    if driver is None:
+        return driver
+    current = getattr(driver, "get_current_stream", None)
+    owner = getattr(current, "__qualname__", "")
+    if "GPUDriver.__init__" not in owner:
+        return driver
+
+    # ``current_stream`` is looked up on the driver's enclosing module at call
+    # time rather than imported: ``from torch_fl import flagos`` re-enters
+    # ``torch_fl/__init__`` and re-runs its phase claim, which fails while device
+    # init is still in progress. Binding it through the module the binder itself
+    # lives in keeps the two in step without that import.
+    import sys as _sys
+
+    module = _sys.modules[__name__]
+
+    def _current_raw_stream(index=0):
+        return int(module.current_stream(index).handle)
+
+    driver.get_current_stream = _current_raw_stream
+    return driver
+
+
 def _install_flagtree_ascend_policy():
     """Point FlagTree's Ascend backend at torch_fl instead of at torch_npu.
 
@@ -2812,3 +2932,12 @@ __all__ = [
     "reset_peak_memory_stats",
     "get_device_properties",
 ]
+
+# Kunlunxin's Triton backend inherits GPUDriver's torch.cuda stream accessor,
+# which cannot exist on the CPU-torch wheel that backend runs on, so its first
+# kernel launch dies in torch.cuda._lazy_init. Bound here, at import, rather
+# than in _lazy_init: torch_fl's device init is itself lazy and nothing in the
+# eager FlagGems path is guaranteed to have triggered it before the first
+# kernel, while this only needs the module objects. See the function for the
+# mechanism and the measurement.
+_bind_kunlunxin_triton_stream()
