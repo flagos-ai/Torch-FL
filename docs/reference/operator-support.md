@@ -9231,10 +9231,10 @@ rather than duplicated).
 | the same call on a `flagos` tensor vs CPU | `max|d| = 8.3e-07` |
 | `infer --stage full` | clears the rope; no `complex64` in the run's log |
 
-**Still open, and outside this change:** the run continues but is very slow, because
-`repeat_interleave`, `index_select`, `nonzero` and several elementwise ops fall to
-`cpu_fallback` on flagos and are issued per denoise step. That is a performance path,
-not a root-cause blocker, and is not addressed here.
+**Still open at the time of this change:** the run continues but is very slow, because
+`repeat_interleave`, `index_select`, `nonzero` and several elementwise ops fell to
+`cpu_fallback` on flagos and are issued per denoise step. Most of that set is routed to
+FlagGems in the fallback-op entry below; `repeat_interleave` remains.
 
 **Evidence gaps.** One device, one host; no CI lane. The rotation is checked against
 the complex path it replaces at one-ulp tolerance, not bit-for-bit — the two form the
@@ -9243,6 +9243,167 @@ class being patched is a diffusers-internal API, so a future diffusers that rena
 `rope_params` or `self.freqs` silently turns this patch into a no-op (by design it
 returns `False` rather than corrupting a run); `tests/unit/test_tsingmicro_qwenimage21_rope.py`
 pins that no-op shape.
+
+## TsingMicro Qwen-Image-2.1: twelve fallback ops move to FlagGems (2026-10-21, TX8110)
+
+**One sentence.** Twelve ops that reached `cpu_fallback` in the Qwen-Image-2.1
+path are now explicit `flaggems` routes in `backends_tsingmicro.conf`; the
+regenerated list claims them, the rebuilt library routes every one to
+`flagos_python`, and the full seven-profile survey reports 12/12 `STRICT`.
+
+**Why they were falling back.** `backends_tsingmicro.conf` is hand-written and
+sparse, and `register_flaggems_tsingmicro.inc` claims only the ops that file names.
+An unlisted op is never claimed on PrivateUse1, so the call reaches the generic
+`cpu_fallback`: a device-to-host copy, a CPU kernel and a copy back, per call. The
+census of the 2026-10-19 40-step run (TX8110, torch 2.10.0+cpu, FlagGems 5.4.0)
+counted, over the whole run:
+
+| Op | fallback calls | Where they came from |
+| --- | --- | --- |
+| `native_batch_norm` | 2584 | phase-local (text encode / VAE), not the denoise step |
+| `tanh` | 2544 | the per-block gates (2 × 32) and/or the VAE |
+| `where` | 1340 | scalar overloads, ~33 per denoise step |
+| `isneginf` | 1340 | ~33 per denoise step |
+| `all` | 1340 | ~33 per denoise step (the `all.dim` overload) |
+| `zero_` | 123 | per denoise step |
+| `index` | 122 | per denoise step (`index.Tensor`) |
+| `repeat_interleave` | 120 | per denoise step |
+| `index_select` | 120 | per denoise step |
+| `tril` | 68 | per denoise step |
+
+The earlier reading of "250 fallbacks per step" was these total-run counts divided
+by the 40 steps; the batch-norm/tanh bulk is phase-local, and the per-step set is
+the `where`/`isneginf`/`all` trio plus the smaller rows. Either way a fallback is a
+host round trip per call, and this table is where the routes below came from.
+
+**Route change.** Twelve entries join the conf: `all.dim`, `clamp_min`,
+`div.Tensor`, `gelu`, `gt.Scalar`, `gt.Tensor`, `index_select`, `isneginf`,
+`nonzero`, `tanh`, `tril`, `zero_`. `codegen_boxing_flaggems_register.py`
+regenerates the list from 51 to 63 `m.impl` lines; a second run is byte-identical
+and `--check` passes. Conf SHA256 is `8f7b8dbd76d5c32a4775931cc94304aa06de27a6233638479fe21f02e70f577a`.
+
+**Measurement, and why it has two legs.** The survey cannot measure an op the
+build does not claim yet: `torch.<op>` then takes `cpu_fallback`, which returns a
+correct `flagos` tensor, so the case passes without touching FlagGems. Before the
+build, the exact function each generated wrapper calls
+(`flag_gems.tanh`, `flag_gems.gelu`, `flag_gems.true_divide`,
+`flag_gems.gt_scalar`, `flag_gems.all_dim`, ...) was called directly on a flagos
+tensor and compared with the same op on CPU: **26/26 cases exact, `max|d| = 0`**
+(thirteen ops × fp32 and bf16 × 4D and 32×32 operands). After rebuilding
+`libtorch_fl.so` with the new list and putting it first on `LD_LIBRARY_PATH`,
+`FLAGOS_LOG=dispatch` shows every one of the twelve as `-> flagos_python`, and the
+full seven-profile survey over the real conf reports:
+
+```
+all.dim clamp_min div.Tensor gelu gt.Scalar gt.Tensor index_select isneginf
+nonzero tanh tril zero_:   12/12 STRICT
+```
+
+with 82 `PASS` cases, 3 `INVALID_CASE` (`gelu` int/bool and `tril` 1D inputs are
+invalid on the CPU reference) and no `WRONG`, `ERROR`, `CRASH` or `TIMEOUT`. The
+survey ran on chip 1 through a `/tmp` copy whose only change is
+`to_device(v, "flagos:1")`; the committed harness still targets `flagos` (index 0).
+
+**Not routed, and why.** Each was checked against the generated sources and the
+installed FlagGems:
+
+* `native_batch_norm` — the internal FlagGems build exported no
+  `flag_gems.native_batch_norm` (`AttributeError` on a direct call), so the
+  generated wrapper would have raised. The official 5.4.0 build does export it;
+  the route and its measurement are in the math-SDPA entry below.
+* `where` scalar overloads (`where.Scalar*`) — the generated op set contains only
+  `where.self` / `where.self_out`; these decompose to `scalar_tensor` +
+  `where.self` above the backend key and never reach the fallback. The `where`
+  traffic actually observed was `where.self_out`, routed below.
+* `add.Scalar` — generated, but `flaggems_python_kernels.cc` registers no kFlagGems
+  dispatcher for it, so a conf entry would be listed as unregistered and still fall
+  back. It is the `aten::add` traffic in the text-encode phase.
+* `index.Tensor` — already routed in the conf but has no kFlagGems dispatcher; it is
+  one of the two ops the generator lists as unserved, and its 122 calls remain.
+* `repeat_interleave` — no generated wrapper at all.
+
+**Evidence gaps.** One TX8110 and one host; no CI lane. The per-op counts are from
+the 2026-10-19 run's log, which was not retained, and were not re-counted end to
+end today; the phase attribution is read from the per-block call sites and the run
+timeline, not from per-step log segments. The rebuilt library was exercised through
+`LD_LIBRARY_PATH`, not installed, and no `infer --stage full` was re-run here (a
+long-running infer held chip 0), so the end-to-end step-time improvement is **not
+measured**. The other platforms are untouched: the conf is tsingmicro's, and the
+generator rewrote the same five files with no change to the other four.
+
+## TsingMicro: the math-SDPA fallbacks move to FlagGems (2026-10-21, TX8110)
+
+**One sentence.** With the official FlagGems 5.4.0 installed, `native_batch_norm`
+and `where.self_out` -- the two ops the Qwen-Image-2.1 math SDPA actually sent to
+`cpu_fallback` -- are now `flaggems` routes; they reproduce the CPU results to one
+bf16 ulp and cut the measured denoise step by ~41 s.
+
+**Attribution, corrected.** The earlier census's "scalar `where`" reading came from
+the fallback log printing `op.schema().name()`, which drops the overload. Printing
+the overload name as well shows the calls are `aten::where.self_out` and
+`aten::add.out`:
+
+```
+[flagos cpu_fallback] aten::where.self_out
+[flagos cpu_fallback] aten::add.out
+```
+
+`where.self` and `add.Tensor` were already routed. The scalar overloads
+(`where.ScalarSelf`, ...) are CompositeImplicitAutograd and decompose to
+`scalar_tensor` + `where.self` above the backend key, so they never reach the
+fallback; the observed `where` target is the out variant the math SDPA uses for its
+`-inf` masking.
+
+**Where `native_batch_norm` comes from.** `nn.LayerNorm(elementwise_affine=False)`
+-- the per-block `img_norm1`/`img_norm2`, ~67 calls per step -- is
+CompositeImplicitAutograd. On a backend with no `native_layer_norm` kernel it
+decomposes through `at::math_native_layer_norm`, which normalises with
+`native_batch_norm` (the composite body calls
+`at::_ops::native_batch_norm::call`, visible in the symbol's call graph). That call
+arrived on PrivateUse1 with no route and fell to `cpu_fallback`.
+
+**Route change.** `native_batch_norm = flaggems` and `where.self_out = flaggems`
+join the conf; the regenerated list moves 63 -> 65 `m.impl` (`--check` passes, a
+second run is identical) and the conf-route count 79 -> 81. The internal FlagGems
+build used at the time of the previous entry exported no
+`flag_gems.native_batch_norm`; the official 5.4.0 build does, and the generated
+wrapper resolves against it without regeneration.
+
+**Measured** (official FlagGems 5.4.0, torch 2.10.0+cpu, TX8110):
+
+| Probe | Result |
+| --- | --- |
+| `nn.LayerNorm(4096, elementwise_affine=False)` on `(1, 4122, 4096)` bf16, flagos vs CPU | `max|d| = 0.015625` (one bf16 ulp), `mean|d| = 6.0e-08`, 368 of 16.9M elements differ; against an fp64 reference both paths read `max|d| ~ 7.8e-03` |
+| math SDPA with an additive block mask, flagos vs CPU | `max|d| = 0.0078125` (one bf16 ulp) |
+| `FLAGOS_LOG=dispatch` | `native_batch_norm -> flagos_python`, `where.self_out -> flagos_python` |
+
+**Denoise A/B, 2 steps, 1024x1024, batch 1, no `TXDA_LAUNCH_KERNEL_SYNC`, the same
+`FLAGOS_LOG=fallback` and the same official FlagGems in both legs:**
+
+| Leg | Steps | Per-step time |
+| --- | --- | --- |
+| before (old library) | 2 measured calls in `bench` | 614.1 / 614.4 s |
+| after (this change) | 2 steps in `infer --stage full --steps 2` | 573.2 / 573.8 s |
+
+That is **~41 s per step, 6.7%**, measured on the denoise loop only: the after run
+was stopped at `2/2` before its VAE decode, and the baseline's own VAE phase is
+not part of the bars above. The fallback census over the after run (through the
+text encoder and the two steps, before the VAE) contains no `native_batch_norm`
+and no `where`; what remains is `aten::add` 68 (`add.out`, no
+`flag_gems.add_out` in 5.4.0), `aten::index` 8, `aten::repeat_interleave` 6, and,
+once the VAE starts, its `linalg_vector_norm` / `_upsample_nearest_exact2d` calls.
+
+**Not routed.** `add.out` -- the official 5.4.0 exports no `flag_gems.add_out`, so
+the out variant of the mask add in the math SDPA stays on the host. `where.Scalar*`
+and `add.Scalar` as above; `index.Tensor` and `repeat_interleave` are unchanged.
+
+**Evidence gaps.** One TX8110 and one host; no CI lane. The baseline is the
+`bench` protocol's measured calls (2nd and 3rd call), the after leg is a single
+`infer` run with warm Triton/FlagGems caches from that bench -- a paired
+same-harness A/B with an identical call count was not run. The numerical
+agreement is one bf16 ulp, not bitwise. The absolute step time is not comparable
+with the 2026-10-19 infer log's ~236 s/step: that run used the internal FlagGems
+build, `TXDA_LAUNCH_KERNEL_SYNC=1`, and `dispatch` logging over 40 steps.
 
 ## `cat` route changes (2026-10-12)
 
