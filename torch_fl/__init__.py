@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ctypes
+import functools
 import os
 import re
 import sys
@@ -1623,8 +1624,8 @@ def _real_cuda_is_available() -> bool:
     return bool(_TORCH_CUDA_PROBE())
 
 
-# DIAGNOSTIC hook, temporary: see `_capability_diagnostic`. Set by the alias and
-# read once, so one process prints one stack.
+# DIAGNOSTIC hook, temporary: see `_capability_diagnostic`. Read once, so one
+# process prints one stack.
 _CAPABILITY_DIAGNOSED = False
 
 
@@ -1633,14 +1634,15 @@ def _capability_diagnostic(original):
 
     Enflame GCU is the lane that fails here: `torch.compile` dies in
     `torch.utils._triton._device_supports_tma` with "Torch not compiled with CUDA
-    enabled", and neither the traceback in the log nor a simulated `gcu` build on
-    this machine says which binding of the getter was reached. The wrapper adds
-    nothing to the answer; on the first raise it prints the call stack and the
-    state of the three probes that can produce this error, and then re-raises.
+    enabled", and neither the log nor a simulated `gcu` build on another machine
+    says which binding of the getter was reached. The wrapper answers exactly as
+    the original does; on the first raise it prints the call stack and the state
+    of the probes that can produce this error, then re-raises.
 
     Remove once the GCU lane is green.
     """
 
+    @functools.wraps(original)
     def capability_with_evidence(device=None):
         global _CAPABILITY_DIAGNOSED
         try:
@@ -1655,33 +1657,39 @@ def _capability_diagnostic(original):
                 traceback.print_stack(file=sys.stderr)
                 print(
                     "[gcu-diag] alias=%s gcu_attr=%s lazy_init=%s props=%s "
-                    "cu_init=%s torch.module=%s torch.cuda.module=%s"
+                    "is_available=%s torch.module=%s torch.cuda.module=%s "
+                    "torch_fl._C=%s"
                     % (
                         _cuda_alias_active,
                         hasattr(torch, "gcu"),
                         getattr(torch.cuda._lazy_init, "__name__", "?"),
                         getattr(torch.cuda.get_device_properties, "__name__", "?"),
-                        hasattr(torch, "cuda") and torch.cuda.is_available(),
+                        torch.cuda.is_available(),
                         getattr(sys.modules.get("torch"), "__file__", None),
                         getattr(sys.modules.get("torch.cuda"), "__file__", None),
+                        getattr(sys.modules.get("torch_fl._C"), "__name__", None),
                     ),
                     file=sys.stderr,
                     flush=True,
                 )
             raise
 
+    capability_with_evidence._flagos_diagnostic = True
     return capability_with_evidence
 
 
-def _install_capability_diagnostic():
-    global _CAPABILITY_DIAGNOSED
-    original = torch.cuda.get_device_capability
-    if getattr(original, "_flagos_diagnostic", False):
-        return
-    _CAPABILITY_DIAGNOSED = False
-    wrapper = _capability_diagnostic(original)
-    wrapper._flagos_diagnostic = True
-    torch.cuda.get_device_capability = wrapper
+def _install_capability_diagnostic() -> None:
+    """Install the wrapper once, before anything can call the stock getter.
+
+    Called at the end of `_phase_claim`, which is before `_phase_vendor_compat`
+    and before the first `import flag_gems`; the alias runs later and would be
+    too late if FlagGems were imported during the vendor phase. Independent of
+    the alias's own early returns, so `FLAGOS_ALIAS_CUDA=0` still diagnoses.
+    """
+    if torch.cuda.get_device_capability is _STOCK_DEVICE_CAPABILITY:
+        torch.cuda.get_device_capability = _capability_diagnostic(
+            _STOCK_DEVICE_CAPABILITY
+        )
 
 
 def _alias_cuda_to_flagos():
@@ -1829,8 +1837,6 @@ def _alias_cuda_to_flagos():
     # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
     # CUDA enabled". Point it at the flagos properties instead.
     torch.cuda.get_device_properties = flagos.get_device_properties
-
-    _install_capability_diagnostic()
 
 
 def _register_flaggems_operators():
@@ -2395,6 +2401,11 @@ def _phase_preload() -> None:
     _disable_vendor_backend_autoload()
 
 
+# The stock torch.cuda.get_device_capability, captured before anything wraps it;
+# the diagnostic in `_install_capability_diagnostic` keys on this identity.
+_STOCK_DEVICE_CAPABILITY = None
+
+
 def _phase_claim() -> None:
     """Import torch, claim PrivateUse1, load _C and install the device module.
 
@@ -2498,6 +2509,14 @@ def _phase_claim() -> None:
         from torch_fl.compile.device_interface import _prime_has_triton
 
         _prime_has_triton()
+
+    # DIAGNOSTIC, temporary: see `_capability_diagnostic`. Installed here rather
+    # than in the alias because `_phase_vendor_compat` and the first
+    # `import flag_gems` can both reach `torch.cuda.get_device_capability`
+    # before `_phase_ecosystem` runs the alias.
+    global _STOCK_DEVICE_CAPABILITY
+    _STOCK_DEVICE_CAPABILITY = torch.cuda.get_device_capability
+    _install_capability_diagnostic()
 
 
 def _phase_vendor_compat() -> None:
