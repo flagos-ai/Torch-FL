@@ -377,7 +377,9 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             "#!/bin/sh\n"
             'while [ "$#" -gt 0 ]; do\n'
             '  if [ "$1" = "--output" ]; then\n'
-            '    shift; cp "$SOURCE_ARCHIVE" "$1"; exit 0\n'
+            "    shift\n"
+            '    cp "$SOURCE_ARCHIVE" "$1" || exit 1\n'
+            "    exit 0\n"
             "  fi\n"
             "  shift\n"
             "done\n"
@@ -493,10 +495,15 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             executable = shutil.which(command)
             assert executable is not None
             (isolated_path / command).symlink_to(Path(executable).resolve())
-        (isolated_path / "curl").symlink_to(curl)
+        (isolated_path / "curl").symlink_to(Path(shutil.which("curl")).resolve())
         rewrite_archive(None)
         unavailable = run(
-            selected_environment={**cache_environment, "PATH": str(isolated_path)}
+            selected_script=f'curl() {{ "$FIXTURE_CURL" "$@"; }}\n{script}',
+            selected_environment={
+                **cache_environment,
+                "PATH": str(isolated_path),
+                "FIXTURE_CURL": str(curl),
+            },
         )
         assert unavailable.returncode != 0
         assert "cannot compare it with Git" in unavailable.stderr
