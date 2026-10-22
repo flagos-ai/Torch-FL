@@ -462,6 +462,18 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
         )
     )
     assert native["host_model_path"] == str(model_root / "Qwen3-0.6B")
+    native_profile = Path(native["state"], "profile.sh").read_text()
+    native_path = shlex.split(
+        next(line for line in native_profile.splitlines() if line.startswith("PATH="))
+    )[0].removeprefix("PATH=")
+    assert all(Path(entry).is_absolute() for entry in native_path.split(os.pathsep))
+    native_file = Path(native["environment"]).read_text().splitlines()
+    model_line = next(
+        line for line in native_file if line.startswith("INTEGRATION_MODEL=")
+    )
+    assert shlex.split(model_line)[0] == (
+        f"INTEGRATION_MODEL={model_root / 'Qwen3-0.6B'}"
+    )
     missing = tmp_path / "missing-model"
     missing.mkdir()
     with pytest.raises(workspace_script.WorkspaceError, match="prepared checkpoint"):

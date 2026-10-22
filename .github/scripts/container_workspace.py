@@ -248,8 +248,13 @@ def prepare(arguments):
         ignore=shutil.ignore_patterns(".git", "build", "dist", ".ci"),
     )
     profile = Path(settings["state"]) / "profile.sh"
+    # Hosted macOS prepends the current directory to PATH. A native lane must
+    # still find its own tools, but a relative entry would make the same
+    # command search the mounted workspace for an executable with its name.
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    native_path = os.pathsep.join(path for path in paths if Path(path).is_absolute())
     profile.write_text(
-        f"PATH={shlex.quote(os.environ.get('PATH', ''))}\n"
+        f"PATH={shlex.quote(native_path)}\n"
         'if [[ -s "$GITHUB_ENV" ]]; then\n'
         "  set -a\n"
         '  . "$GITHUB_ENV"\n'
