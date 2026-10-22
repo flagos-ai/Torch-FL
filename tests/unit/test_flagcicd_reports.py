@@ -564,6 +564,10 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
         value = value.replace(
             "${{ env.PYTEST_REPORT }}", str(container_workspace / "pytest-cuda.json")
         )
+        value = value.replace(
+            "${{ env.COVERAGE_REPORT }}",
+            str(container_workspace / "coverage-cuda.json"),
+        )
         value = value.replace("${{ inputs.platform }}", "cuda")
         return container_workspace / value
 

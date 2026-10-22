@@ -296,12 +296,18 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
         .replace("${{ env.PIP_CACHE_DIR }}", str(tmp_path / "pip"))
         .replace("${{ inputs.platform }}", "cuda")
     )
+    for name, value in upload["env"].items():
+        value = value.replace("${{ runner.temp }}", str(tmp_path))
+        value = value.replace("${{ inputs.platform }}", "cuda")
+        filename = filename.replace(f"${{{{ env.{name} }}}}", value)
     output = Path(filename).resolve()
     report = json.loads(output.read_text())
     assert _metadata(reports)["source_ref"] == "b" * 40
     assert report["totals"]["percent_covered"] > 0
+    retained = steps["Retain Python coverage"]
     assert (
-        upload["with"]["report_path"] in steps["Retain Python coverage"]["with"]["path"]
+        "${{ env.ARTIFACT_ROOT }}/coverage-${{ inputs.platform }}.json"
+        in retained["with"]["path"]
     )
 
 
