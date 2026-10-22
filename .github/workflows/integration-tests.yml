@@ -411,6 +411,54 @@ jobs:
           echo "config=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/config.json" >> "$GITHUB_OUTPUT"
           echo "INTEGRATION_PROFILE=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/profile.sh" >> "$GITHUB_ENV"
 
+      # Docker's local RepoDigests may retain a tag-aware name on the hosted
+      # runner, but harbor strips the tag from the same image on Ascend.
+      - name: Match the configured image to its local repository digest
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          image="${{ needs.configuration.outputs.ci_image }}"
+          if [[ -z "$image" ]]; then
+            exit 0
+          fi
+          python3 - "$CONTAINER_CONFIG" "$image" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          config_path = Path(sys.argv[1])
+          image = sys.argv[2]
+          config = json.loads(config_path.read_text())
+          configured_repository, _, tag = image.rpartition(":")
+          if "/" in tag or "@" in image:
+              configured_repository = image.partition("@")[0]
+          resolved_repository, separator, resolved_digest = config["digest"].partition("@sha256:")
+          if (
+              not configured_repository
+              or not separator
+              or len(resolved_digest) != 64
+              or any(char not in "0123456789abcdef" for char in resolved_digest)
+              or resolved_repository.rsplit(":", 1)[0] != configured_repository
+          ):
+              raise SystemExit(
+                  f"the image name does not match its resolved digest: {image!r} "
+                  f"and {config['digest']!r}"
+              )
+          config["digest"] = f"{resolved_repository}@sha256:{resolved_digest}"
+          config_path.write_text(json.dumps(config))
+          PY
+
+      - name: Validate container image identity
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ needs.configuration.outputs.ci_image }}" ]]; then
+            exit 0
+          fi
+          python3 .github/scripts/container_workspace.py verify --config "$CONTAINER_CONFIG"
+
       - name: Reset pip cache dir
         run: |
           set -euo pipefail

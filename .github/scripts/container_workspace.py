@@ -327,10 +327,7 @@ def start(settings):
     if "container" in settings:
         raise WorkspaceError("the integration container was already started")
     image, digest = settings["image"], settings["digest"]
-    if not image or not digest:
-        raise WorkspaceError("starting a container requires image and digest")
-    if image and digest.split("@", 1)[0] != image.split("@", 1)[0]:
-        raise WorkspaceError("the image name does not match its resolved digest")
+    _verify_image(image, digest, require_digest=True)
     name = (
         f"torch-fl-{os.environ['GITHUB_RUN_ID']}-"
         f"{os.environ['GITHUB_RUN_ATTEMPT']}-"
@@ -374,9 +371,35 @@ def start(settings):
     return name
 
 
+def _verify_image(image, digest, *, require_digest):
+    """Match a tagged image or repository against its local digest."""
+    if require_digest and not image:
+        raise WorkspaceError("starting a container requires image and digest")
+    if not image:
+        return
+    repository, separator, resolved = digest.partition("@sha256:")
+    if (
+        not separator
+        or len(resolved) != 64
+        or any(char not in "0123456789abcdef" for char in resolved)
+        or repository.rsplit(":", 1)[0] != image.partition("@")[0].rsplit(":", 1)[0]
+    ):
+        raise WorkspaceError("the image name does not match its resolved digest")
+
+
+def verify(config):
+    """Save a normalized image identity before starting its container."""
+    _verify_image(config["image"], config["digest"], require_digest=False)
+    Path(config["state"], "config.json").write_text(
+        json.dumps(config, indent=2), encoding="utf-8"
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", choices=("prepare", "start", "configure"))
+    parser.add_argument(
+        "command", nargs="?", choices=("prepare", "start", "configure", "verify")
+    )
     parser.add_argument("--config")
     parser.add_argument("--container", default="")
     parser.add_argument("--checkout")
@@ -389,10 +412,12 @@ def main(argv=None):
     parser.add_argument("--options", default="")
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command in ("start", "configure"):
+        if arguments.command in ("start", "configure", "verify"):
             settings = json.loads(Path(arguments.config).read_text(encoding="utf-8"))
             if arguments.command == "start":
                 print(start(settings))
+            elif arguments.command == "verify":
+                verify(settings)
             else:
                 configure(settings, arguments.container)
         else:

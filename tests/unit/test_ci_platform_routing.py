@@ -764,3 +764,51 @@ def test_unqualified_image_tags_resolve_to_their_repository_digest():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == f"{repository}@{digest}"
+    assert "Match the configured image to its local repository digest" in (
+        (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
+    )
+
+
+def test_tagged_image_can_use_a_tagless_repository_digest(tmp_path):
+    """Ascend reports a tagless repository digest for a tagged local image."""
+    workspace = _load_ci_script(
+        ".github/scripts/container_workspace.py", "ci_container_workspace"
+    )
+    environment = {
+        "INTEGRATION_PLATFORM": "ascend",
+        "GITHUB_ENV": str(tmp_path / "env"),
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
+        "GITHUB_PATH": str(tmp_path / "path"),
+        "CHECKOUT_REPOSITORY": "flagos-ai/Torch-FL",
+        "CHECKOUT_REF": "a" * 40,
+    }
+    for key, value in environment.items():
+        os.environ[key] = value
+    try:
+        for name in ("env", "output", "path"):
+            (tmp_path / name).touch()
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        model_root = tmp_path / "models"
+        (model_root / "Qwen3-0.6B").mkdir(parents=True)
+        image = "registry/vendor/image:tag"
+        digest = "registry/vendor/image@sha256:" + "a" * 64
+        settings = workspace.prepare(
+            argparse.Namespace(
+                checkout=str(checkout),
+                runner_temp=str(tmp_path / "runner"),
+                model_root=str(model_root),
+                model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+                image=image,
+                digest=digest,
+                volumes="[]",
+                options="",
+            )
+        )
+        workspace.verify(settings)
+    finally:
+        for key in environment:
+            os.environ.pop(key, None)
+    assert json.loads(Path(settings["state"], "config.json").read_text())["digest"] == (
+        digest
+    )
