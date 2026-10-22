@@ -1219,6 +1219,20 @@ bool MpsRunGraph(
     const at::Tensor& out,
     MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
 
+// The single-result runner with graph-only logical shapes. Each input is
+// still described by its dense flat buffer to the compiled executable; this
+// shape controls broadcasting inside the graph. Callers pass one shape per
+// input, and a one-element tensor can therefore take the shape aten broadcasts.
+// The runner includes these logical shapes in the plan key. MPSGraph rejects a
+// zero-dimensional reshape of a flat buffer and expands only aligned dimensions
+// with arithmetic selectors, so binary broadcasting resolves the RHS itself.
+bool MpsRunGraph(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& out,
+    const std::vector<std::vector<int64_t>>& argument_shapes,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args));
+
 // The single-result graph entry point with two additional operands. The matrix
 // and right side are described and staged exactly as `inputs` are, and follow
 // them in `args`. Their storage shapes are the tensors' own sizes.

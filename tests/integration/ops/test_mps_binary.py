@@ -26,11 +26,12 @@ assertion proves the ``mps`` kernel ran rather than ``cpu_fallback``.
 Two properties are specific to these categories and are what the cases below
 pin down.
 
-* Broadcasting is the graph's job. MPSGraph's arithmetic selectors broadcast
-  their two operands exactly as aten does, so the kernel describes each operand
-  in its own shape and sizes the output with the reference's own
-  ``at::infer_size``; a pair that cannot broadcast is declined to the CPU
-  round-trip, and the reference's own error is what surfaces.
+* Broadcasting follows ATen's shape inference. The output comes from
+  ``at::infer_size``. A one-element RHS is described in that output shape in
+  MPSGraph because a zero-dimensional reshape of its flat buffer is invalid and
+  arithmetic selectors only repeat aligned size-one axes. A pair that cannot
+  broadcast is declined to the CPU round-trip, and the reference's own error is
+  what surfaces.
 * The stage-1 marshalling rule still applies. Every buffer is described to
   MPSGraph as a 1-D array of ``numel`` elements and the aten shape is reapplied
   inside the graph, because MPSNDArray rounds the stride between the rows of an
@@ -114,7 +115,7 @@ class TestBinaryTensorCorrectness:
     )
     @pytest.mark.anyplatform
     def test_matches_cpu_for_broadcast_pairs(self, op_name, op, shape_a, shape_b):
-        """Operands are described in their own shapes; the graph broadcasts.
+        """Broadcast pairs match the reference at every supported rank.
 
         The pairs walk the broadcast cases aten distinguishes: a trailing
         dimension against a shorter operand, a size-1 axis on either side, a
@@ -241,6 +242,17 @@ class TestBinaryTensorCorrectness:
             out.cpu(), op(a.cpu(), b.cpu()), rtol=1e-5, atol=1e-5, msg=op_name
         )
 
+    @pytest.mark.anyplatform
+    def test_plan_cache_survives_a_later_larger_rank(self):
+        """A warm broadcast plan cannot answer a later operand rank."""
+        a = _to_device(torch.arange(4, dtype=torch.float32).reshape(1, 4))
+        b = torch.full((3, 1), 2.0, device=DEVICE)
+        torch.testing.assert_close(torch.add(a, b).cpu(), torch.add(a.cpu(), b.cpu()))
+
+        a = torch.full((2, 3, 4), 3.0, device=DEVICE)
+        b = torch.arange(6, dtype=torch.float32, device=DEVICE).reshape(2, 3, 1)
+        torch.testing.assert_close(torch.sub(a, b).cpu(), torch.sub(a.cpu(), b.cpu()))
+
     @pytest.mark.parametrize("op_name,op", BINARY_OPS)
     @pytest.mark.parametrize("shape_a,shape_b", [((0, 4), (0, 4)), ((0, 4), (4,))])
     @pytest.mark.anyplatform
@@ -336,6 +348,60 @@ class TestBinaryTensorCorrectness:
         b = _to_device(torch.tensor([1, 2]))
         with pytest.raises(RuntimeError, match="alpha must not be a floating point"):
             torch.add(a, b, alpha=0.5)
+
+    @pytest.mark.parametrize("op_name,op", BINARY_OPS)
+    @pytest.mark.parametrize("alpha", [1, 2])
+    @pytest.mark.parametrize(
+        "shape_a,shape_b",
+        [((4, 5), ()), ((4, 3), (3,)), ((1, 4), (4,)), ((4, 1), (4,))],
+    )
+    @pytest.mark.anyplatform
+    def test_one_element_rhs_uses_the_aten_broadcast_shape(
+        self, op_name, op, alpha, shape_a, shape_b
+    ):
+        """A one-element RHS is the operand shape aten broadcasts, not just a buffer.
+
+        Reshaping its flat input to ``()`` makes MPSGraph reject the graph, while
+        a RHS with one element and several dimensions cannot describe a scalar
+        result either. The body therefore compiles the RHS in the inferred
+        output shape. Every binary op and an alpha other than one cross the same
+        body, so either a per-op or a host-constant plan key would surface here.
+        """
+        a = _to_device(torch.arange(shape_a[0] * shape_a[-1]).reshape(shape_a))
+        b = torch.full(shape_b, 2.0, device=DEVICE)
+        alpha_kwargs = {} if op_name == "mul" else {"alpha": alpha}
+        actual = op(a, b, **alpha_kwargs)
+        expected = op(a.cpu(), b.cpu(), **alpha_kwargs)
+        torch.testing.assert_close(actual.cpu(), expected)
+
+    @pytest.mark.anyplatform
+    def test_output_shapes_do_not_reuse_each_others_plan(self):
+        """The same shapes still need separate plans for two different ops.
+
+        The generated key includes ``add`` versus ``sub`` and alpha, and the
+        runner adds argument shapes so a one-element RHS compiled for ``(4, 5)``
+        cannot be selected for a later ``(2, 3)`` call.
+        """
+        env = os.environ.copy()
+        env["FLAGOS_LOG"] = "dispatch"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch, torch_fl; "
+                "a = torch.arange(20, dtype=torch.float32, device='flagos:0').reshape(4, 5); "
+                "b = torch.tensor(2.0, device='flagos:0'); "
+                "torch.add(a, b, alpha=2).cpu(); "
+                "torch.sub(a, b).cpu(); "
+                "torch.add(torch.arange(6, dtype=torch.float32, device='flagos:0').reshape(2, 3), b, alpha=2).cpu()",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stderr.count("add.Tensor -> mps") == 2, result.stderr
+        assert "sub.Tensor -> mps" in result.stderr, result.stderr
 
 
 class TestBinaryScalarCorrectness:

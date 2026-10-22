@@ -1281,10 +1281,50 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
   if (out.numel() == 0) {{
     return out;
   }}
+  const bool scalar_rhs = other_c.numel() == 1;
+  const std::vector<std::vector<int64_t>> argument_shapes = {{
+      self_c.sizes().vec(),
+      scalar_rhs ? out_shape : other_c.sizes().vec()}};
+  if (self_c.sizes().equals(at::IntArrayRef(out_shape)) || scalar_rhs) {{
+    const std::vector<at::Tensor> inputs =
+        self_c.sizes().equals(at::IntArrayRef(out_shape))
+        ? std::vector<at::Tensor>{{self_c}}
+        : std::vector<at::Tensor>{{self_c, other_c}};
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}"{key_parts}),
+        inputs,
+        out,
+        argument_shapes,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphTensor* primary = args[0];
+          MPSGraphTensor* secondary = args.count == 2
+              ? args[1]
+              : mps::MpsConstant(graph, 1, self_c.scalar_type());
+          MPSGraphTensor* other_t = mps::MpsScaledByScalar(
+              graph, secondary, {alpha_operand}, self_c.scalar_type());
+          secondary = nil;
+          if (other_t != nil && !scalar_rhs) {{
+            secondary = [graph broadcastTensor:other_t
+                                       toShape:mps::MpsFlatShape(out.numel())
+                                          name:nil];
+          }} else if (other_t != nil) {{
+            secondary = other_t;
+          }}
+          if (secondary == nil) {{
+            return nil;
+          }}
+          return [graph {call}primary secondaryTensor:secondary name:nil];
+        }});
+    if (!ran) {{
+      return at::{at_op}(self.cpu(), other.cpu(){alpha_arg}).to(self.device());
+    }}
+    return out;
+  }}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c, other_c}},
       out,
+      argument_shapes,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
         MPSGraphTensor* other_t = mps::MpsScaledByScalar(
             graph, args[1], {alpha_operand}, self_c.scalar_type());

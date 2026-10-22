@@ -2000,6 +2000,7 @@ MpsPlan* BuildPlan(
     at::IntArrayRef extra_matrix_shape,
     at::IntArrayRef extra_right_shape,
     at::TensorList extra,
+    const std::vector<std::vector<int64_t>>& argument_shapes,
     MPSGraphDevice* device,
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
@@ -2042,6 +2043,17 @@ MpsPlan* BuildPlan(
       // reapplied over it, because an MPSNDArray over N-D memory reads with its
       // own row pitch (see the row-pitch note in mps_common.h).
       MPSGraphTensor* buffer = MpsFlatPlaceholder(graph, count, dtype);
+      std::vector<int64_t> logical_shape;
+      if (i < argument_shapes.size()) {
+        logical_shape = argument_shapes[i];
+      } else {
+        logical_shape = operands[i].sizes().vec();
+      }
+      if (i == inputs.size() && !extra_matrix_shape.empty()) {
+        logical_shape.assign(extra_matrix_shape.begin(), extra_matrix_shape.end());
+      } else if (i == inputs.size() + 1 && !extra_right_shape.empty()) {
+        logical_shape.assign(extra_right_shape.begin(), extra_right_shape.end());
+      }
       MPSGraphShapedType* type = [[MPSGraphShapedType alloc]
           initWithShape:FlatShape(count)
                dataType:dtype];
@@ -2049,12 +2061,6 @@ MpsPlan* BuildPlan(
       [input_types addObject:type];
       MpsRelease(type);
       [buffers addObject:buffer];
-      std::vector<int64_t> logical_shape = operands[i].sizes().vec();
-      if (i == inputs.size() && !extra_matrix_shape.empty()) {
-        logical_shape.assign(extra_matrix_shape.begin(), extra_matrix_shape.end());
-      } else if (i == inputs.size() + 1 && !extra_right_shape.empty()) {
-        logical_shape.assign(extra_right_shape.begin(), extra_right_shape.end());
-      }
       [args addObject:MpsReshape(graph, buffer, logical_shape)];
     }
     if (static_cast<size_t>([buffers count]) == operand_count) {
@@ -2231,6 +2237,7 @@ bool RunGraphImpl(
     at::IntArrayRef extra_matrix_shape,
     at::IntArrayRef extra_right_shape,
     at::TensorList extra,
+    const std::vector<std::vector<int64_t>>& argument_shapes,
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
         NSArray<MPSGraphTensor*>* args)) {
@@ -2269,6 +2276,8 @@ bool RunGraphImpl(
   const size_t operand_count = inputs.size() + extra.size();
   std::vector<id<MTLBuffer>> buffers(operand_count, nil);
   std::vector<size_t> offsets(operand_count, 0);
+  std::vector<std::vector<int64_t>> logical_shapes;
+  logical_shapes.reserve(operand_count);
   std::vector<MPSDataType> dtypes(operand_count, MPSDataTypeFloat32);
   // The operands that had to be staged, and the buffer each one came from, so
   // the operand's own bytes are what the graph's inputs were copied *from* and
@@ -2286,6 +2295,9 @@ bool RunGraphImpl(
     if (!ResolveOperand(operands[i], &buffers[i], &offsets[i], &claimed)) {
       return false;
     }
+    logical_shapes.push_back(
+        i < argument_shapes.size() ? argument_shapes[i]
+                                   : operands[i].sizes().vec());
     TORCH_CHECK(
         MpsDataTypeOf(operands[i].scalar_type(), &dtypes[i]),
         "mps: no MPSGraph element type for ",
@@ -2326,6 +2338,7 @@ bool RunGraphImpl(
   // about a tensor. It cannot keep a body from reading a host value the caller
   // never named -- see the key contract in mps_common.h.
   std::string full_key = key;
+  full_key += "|inputs";
   for (const at::Tensor& operand : inputs) {
     MpsKeyAppendTensor(full_key, operand);
   }
@@ -2335,6 +2348,14 @@ bool RunGraphImpl(
   MpsKeyAppend(full_key, extra_right_shape);
   for (const at::Tensor& operand : extra) {
     MpsKeyAppendTensor(full_key, operand);
+  }
+  // The physical operands can stay the same flat buffer while their logical
+  // shapes differ. Binary broadcasting is the current case: a one-element RHS
+  // is described in the output shape inside the graph, so a later call with a
+  // different `self` must not reuse the executable compiled for the first one.
+  full_key += "|logical";
+  for (const std::vector<int64_t>& shape : logical_shapes) {
+    MpsKeyAppend(full_key, shape);
   }
   // Every result's signature is folded in, not just the first: a multi-result
   // body can be called with the same operand shapes and a different (out, mean,
@@ -2358,7 +2379,7 @@ bool RunGraphImpl(
           [MPSGraphDevice deviceWithMTLDevice:queue.device];
       plan = BuildPlan(
           full_key, inputs, outs, extra_matrix_shape, extra_right_shape,
-          extra, device, build);
+          extra, logical_shapes, device, build);
     }
     if (plan == nullptr) {
       return false;
@@ -2525,7 +2546,30 @@ bool MpsRunGraph(
     return one;
   };
   return RunGraphImpl(
-      key, inputs, at::TensorList(&out, 1), {}, {}, {}, multi);
+      key, inputs, at::TensorList(&out, 1), {}, {}, {}, {}, multi);
+}
+
+bool MpsRunGraph(
+    const std::string& key,
+    at::TensorList inputs,
+    const at::Tensor& out,
+    const std::vector<std::vector<int64_t>>& argument_shapes,
+    MPSGraphTensor* (^build)(MPSGraph* graph, NSArray<MPSGraphTensor*>* args)) {
+  if (build == nil || argument_shapes.size() != inputs.size()) {
+    return false;
+  }
+  auto multi = ^std::vector<MPSGraphTensor*>(
+      MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+    std::vector<MPSGraphTensor*> one;
+    MPSGraphTensor* built = build(graph, args);
+    if (built != nil) {
+      one.push_back(built);
+    }
+    return one;
+  };
+  return RunGraphImpl(
+      key, inputs, at::TensorList(&out, 1), {}, {}, {}, argument_shapes,
+      multi);
 }
 
 bool MpsRunGraphExtra(
@@ -2554,6 +2598,7 @@ bool MpsRunGraphExtra(
       {},
       {},
       at::TensorList({matrix, right}),
+      {},
       multi);
 }
 
@@ -2564,7 +2609,7 @@ bool MpsRunGraphMulti(
     std::vector<MPSGraphTensor*> (^build)(
         MPSGraph* graph,
         NSArray<MPSGraphTensor*>* args)) {
-  return RunGraphImpl(key, inputs, outs, {}, {}, {}, build);
+  return RunGraphImpl(key, inputs, outs, {}, {}, {}, {}, build);
 }
 
 void MpsRelease(id object) {
