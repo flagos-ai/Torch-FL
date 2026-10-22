@@ -479,7 +479,7 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
 
         def run(selected_script=script, selected_environment=environment):
             return subprocess.run(
-                [bash, "-xc", selected_script],
+                [bash, "--noprofile", "--norc", "-xc", selected_script],
                 env=selected_environment,
                 capture_output=True,
                 text=True,
@@ -487,8 +487,17 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
 
         output = runner_temp / "source-output"
         stale_files = _snapshot(workspace)
+        isolated_path = root / "no-git-path"
+        isolated_path.mkdir()
+        for command in ("python3", "tar", "cp", "rm", "mv", "mkdir", "sleep"):
+            executable = shutil.which(command)
+            assert executable is not None
+            (isolated_path / command).symlink_to(Path(executable).resolve())
+        (isolated_path / "curl").symlink_to(commands / "curl")
         rewrite_archive(None)
-        unavailable = run()
+        unavailable = run(
+            selected_environment={**cache_environment, "PATH": str(isolated_path)}
+        )
         assert unavailable.returncode != 0
         assert "cannot compare it with Git" in unavailable.stderr
         assert _snapshot(workspace) == stale_files
