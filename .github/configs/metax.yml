@@ -95,6 +95,12 @@ environment_check:
   cuda_available: true
   cuda_devices:
     exactly: 8
+  require_build_kernels:
+    - flaggems
   triton_backend: metax
   require_imports:
     - flag_gems
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0.post2+metax3.6
+    triton_prefix: "3.6."

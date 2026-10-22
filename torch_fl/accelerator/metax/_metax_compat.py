@@ -790,6 +790,8 @@ def _patch_cuda_tensor_ops(metax_path):
         """zero_() using cudaMemsetAsync for MetaX-backed tensors."""
         if not _is_metax_device_tensor(self):
             return _orig_zero(self)
+        if self.layout != torch.strided:
+            return _orig_zero(self)
         if not self.is_contiguous():
             raise NotImplementedError(
                 "MetaX compat: zero_() on non-contiguous CUDA tensors is not supported. "
@@ -810,6 +812,8 @@ def _patch_cuda_tensor_ops(metax_path):
     def _metax_fill_(self, value):
         """fill_() for MetaX-backed tensors."""
         if not _is_metax_device_tensor(self):
+            return _orig_fill(self, value)
+        if self.layout != torch.strided:
             return _orig_fill(self, value)
         if value == 0 and self.is_contiguous():
             return _metax_zero_(self)

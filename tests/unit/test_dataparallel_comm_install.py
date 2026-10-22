@@ -131,10 +131,18 @@ def _run(body):
     """Run ``body`` in a fresh interpreter and return (stdout, stderr)."""
     script = _PREAMBLE + textwrap.dedent(body)
     env = dict(os.environ)
-    # The repository's torch_fl, not whatever an editable install points at.
-    # Subprocesses are the one place that is not already decided by sys.path.
+    # The checkout comes first in this pytest process so imported source modules
+    # match the edited files. The build pipeline publishes the extension in
+    # place, so the same checkout is the complete package for subprocesses.
+    # Keep the checkout first and preserve every other inherited entry.
+    checkout = str(REPO_ROOT)
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO_ROOT)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        [checkout]
+        + [
+            entry
+            for entry in env.get("PYTHONPATH", "").split(os.pathsep)
+            if entry and Path(entry).resolve() != Path(checkout)
+        ]
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],

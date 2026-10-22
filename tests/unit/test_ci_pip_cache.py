@@ -36,7 +36,11 @@ WORKFLOWS = [
 
 def _steps(workflow):
     document = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
-    return next(job["steps"] for job in document["jobs"].values() if "steps" in job)
+    return next(
+        job["steps"]
+        for job in document["jobs"].values()
+        if "pip-cache-lookup" in {step.get("id") for step in job.get("steps", [])}
+    )
 
 
 def _condition(expression, states, cancelled=False, success=True):
@@ -214,7 +218,12 @@ def test_cache_transfer_decisions(
     steps = _steps(workflow)
     lookup = next(step for step in steps if step.get("id") == "pip-cache-lookup")
     restore = next(step for step in steps if step.get("id") == "pip-cache")
-    upload = next(step for step in steps if step.get("uses") == "actions/cache/save@v4")
+    upload = next(
+        step
+        for step in steps
+        if step.get("uses") == "actions/cache/save@v4"
+        and step.get("id") != "model-save"
+    )
     states = {
         "pip-cache-lookup": {
             "outcome": lookup_outcome,
@@ -248,11 +257,23 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
     restore_maximum, segment_maximum = 3, 2
     save_maximum = 3
     for step in _steps(workflow):
-        if step.get("uses", "").startswith("actions/cache/"):
+        if workflow == "integration-tests.yml" and step.get("id") in {
+            "model-cache",
+            "model-save",
+        }:
+            # The checkpoint is required by model tests. Its cache action may
+            # fail throughout the remaining setup and test steps, and the
+            # bounded download below still has to run.
+            assert step.get("continue-on-error") is True
+            assert 0 < step["timeout-minutes"] <= 12
+            continue
+        elif step.get("uses", "").startswith("actions/cache/"):
             assert step["continue-on-error"] is True
             maximum = {
                 "pip-cache-lookup": 1,
                 "pip-cache": restore_maximum,
+                "model-cache-save": 8,
+                "model-save": 8,
             }.get(step.get("id"), save_maximum)
             assert 0 < step["timeout-minutes"] <= maximum
             if step.get("id") == "pip-cache":
@@ -261,7 +282,11 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
                     0 < segment_timeout <= min(segment_maximum, step["timeout-minutes"])
                 )
         elif "run" in step:
-            assert "pip-cache" not in step.get("if", "")
+            if "pip-cache" in step.get("if", ""):
+                # The cache transfer is optional, but its partial contents are
+                # not. Remove them before pip reads the managed directory.
+                assert step["name"] == "Discard incomplete pip cache transfer"
+                assert "steps.pip-cache.outcome == 'failure'" in step["if"]
 
 
 def test_every_routed_integration_workflow_is_covered():
@@ -279,9 +304,8 @@ def test_every_routed_integration_workflow_is_covered():
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_cache_key_tracks_the_effective_dependencies(workflow):
-    lookup = next(
-        step for step in _steps(workflow) if step.get("id") == "pip-cache-lookup"
-    )
+    steps = _steps(workflow)
+    lookup = next(step for step in steps if step.get("id") == "pip-cache-lookup")
     key = lookup["with"]["key"]
     for dependency in (
         "pyproject.toml",
@@ -313,7 +337,7 @@ def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
     lookup = next(
         step
         for step in _steps("integration-tests.yml")
-        if step.get("id") == "pip-cache-lookup"
+        if isinstance(step, dict) and step.get("id") == "pip-cache-lookup"
     )
     assert lookup["with"]["key"].startswith("${{ inputs.platform }}-pip-")
     for prefix in (
@@ -350,28 +374,51 @@ def test_cache_cleanup_actions_and_setup_share_one_directory(
     )
     if runner_temp:
         env["RUNNER_TEMP"] = str(tmp_path / "runner temp")
-    expected = (
-        Path(env["RUNNER_TEMP"]) / "pip-cache"
-        if runner_temp
-        else checkout / ".ci/pip-cache"
-    )
-    expected.mkdir(parents=True)
+    if runner_temp:
+        expected = Path(env["RUNNER_TEMP"]) / "torch-fl-pip"
+        temporary = expected
+    else:
+        temporary = Path("/tmp/torch-fl-pip")
+        binaries = tmp_path / "default-tmp/bin"
+        binaries.mkdir(parents=True)
+        for executable in ("bash", "python3", "mkdir", "echo", "dirname"):
+            path = shutil.which(executable)
+            if path:
+                (binaries / executable).symlink_to(path)
+        env["PATH"] = str(binaries)
+        env["TMPDIR"] = str(tmp_path / "default-tmp")
+        expected = temporary
+    expected.mkdir(parents=True, exist_ok=True)
+    expected = expected.resolve()
     (expected / "stale").write_text("leftover")
     steps = _steps(workflow)
     reset = next(step for step in steps if step.get("name") == "Reset pip cache dir")
     subprocess.run(["bash", "-e", "-c", reset["run"]], env=env, check=True)
     assert expected.is_dir()
     assert not (expected / "stale").exists()
-    assert github_env.read_text().splitlines() == [f"PIP_CACHE_DIR={expected}"]
+    assert github_env.read_text().splitlines() == [
+        f"PIP_CACHE_DIR={expected if runner_temp else '/tmp/torch-fl-pip'}"
+    ]
     env["PIP_CACHE_DIR"] = str(expected)
+    before_hook = github_env.read_text()
     subprocess.run(
         ["bash", str(scripts / "set_env.sh"), "--platform", "cache_test"],
         env=env,
         check=True,
     )
-    assert github_env.read_text().splitlines() == [f"PIP_CACHE_DIR={expected}"] * 2
+    # Either entrypoint may use the selected cache; both must not select a
+    # different directory.
+    entries = [
+        Path(line.split("=", 1)[1])
+        for line in github_env.read_text().splitlines()
+        if line.startswith("PIP_CACHE_DIR=")
+    ]
+    assert entries and all(entry.resolve() == expected for entry in entries)
+    assert github_env.read_text().startswith(before_hook)
     for step in steps:
-        if step.get("uses", "").startswith("actions/cache/"):
+        if step.get("uses", "").startswith("actions/cache/") and step.get(
+            "id", ""
+        ).startswith("pip-cache"):
             assert step["with"]["path"] == "${{ env.PIP_CACHE_DIR }}"
 
 

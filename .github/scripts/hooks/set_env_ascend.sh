@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -293,9 +293,83 @@ assert importlib.util.find_spec("torch_npu") is None, (
 print(f"CPU torch path: {torch_path}")
 PY
 
+# Before torch_fl is built, prove that the wheel provides the TLE modules and the
+# exact installed FlagGems operator source that uses them. A partial TLE wheel
+# must fail here rather than during the first FlagGems test. Importing FlagGems'
+# concrete operator starts its package initializer, which probes the accelerator
+# before torch_fl._C can register it. Resolve the package location without
+# running its initializer, inspect that source, then import the real TLE package.
+"$VENV_PYTHON" - <<'PY'
+import importlib.metadata
+import importlib.util
+import sys
+import sysconfig
+from pathlib import Path
+from types import SimpleNamespace
+
+# The checkout root carries a development copy of flag_gems. Resolve this probe
+# from the venv's installed package directories without removing the standard
+# library: importlib.invalidate_caches() itself imports csv.
+sites = {
+    Path(sysconfig.get_path(name)).resolve() for name in ("purelib", "platlib")
+}
+assert all(site.is_relative_to(Path(sys.prefix).resolve()) for site in sites), sites
+for site in sorted(sites, reverse=True):
+    sys.path.insert(0, str(site))
+importlib.invalidate_caches()
+
+# Resolve it without running its initializer. That initializer probes the
+# accelerator before torch_fl._C can register it.
+# Distribution.locate_file reads the installed package metadata and its path,
+# without importing flag_gems or accepting the workspace copy.
+package_init = Path(
+    importlib.metadata.distribution("flag-gems").locate_file("flag_gems")
+).resolve()
+assert any(package_init.is_relative_to(site) for site in sites), (
+    f"FlagGems resolved from {package_init}, outside {sorted(sites)}"
+)
+
+import triton  # noqa: E402
+from triton._flagtree_backend import FLAGTREE_BACKEND  # noqa: E402
+
+triton_init = Path(triton.__file__).resolve()
+assert any(triton_init.is_relative_to(site) for site in sites), (
+    f"Triton resolved from {triton_init}, outside {sorted(sites)}"
+)
+
+check_path = Path(".github/scripts/check_platform_environment.py").resolve()
+spec = importlib.util.spec_from_file_location("check_platform_environment", check_path)
+assert spec is not None and spec.loader is not None, check_path
+check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check)
+assert FLAGTREE_BACKEND == "ascend", FLAGTREE_BACKEND
+tle_module = "triton.experimental.tle"
+check.assert_flaggems_tle(
+    tle_module,
+    SimpleNamespace(
+        flag_gems=SimpleNamespace(__file__=str(package_init / "__init__.py"))
+    ),
+)
+language = sys.modules["triton.experimental.tle.language"]
+dsa = sys.modules["triton.experimental.tle.language.dsa"]
+
+# The checkout carries ``triton/`` as a source tree. Its ``experimental``
+# directory may expose a namespace package before FlagTree's parent has loaded
+# its own child, so read the imported module instead of its attribute.
+tle = sys.modules[tle_module]
+tle_root = Path(tle.__file__).resolve().parent
+assert Path(language.__file__).resolve().is_relative_to(tle_root), language.__file__
+assert Path(dsa.__file__).resolve().is_relative_to(tle_root), dsa.__file__
+print(
+    f"FlagGems TLE source and package available: "
+    f"{language.__file__}, {dsa.__file__}"
+)
+PY
+
 # --- Verify the FlagTree + FlagGems stack imports ----------------------------
 # Integration only: torch_fl._C does not exist until the wheel has been built,
-# and the import order below needs it. CI calls this script before building.
+# and the import order below needs it. CI calls this script before building;
+# the TLE check above rejects a missing or partial TLE wheel first.
 #
 # torch_fl must be imported before flag_gems. FlagTree's Ascend backend picks
 # its host-side implementation by importing torch_npu at discovery time (and

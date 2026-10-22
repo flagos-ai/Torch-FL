@@ -194,6 +194,11 @@ def _declared(platform: str) -> list:
 def test_the_wheel_declares_the_flagtree_pin_its_platform_script_installs():
     pins = _pins()
     for platform in PLATFORMS:
+        if platform == "kunlunxin":
+            # The XPU FlagTree build supports the kernel tests but is not a
+            # runtime dependency of the wheel's CPU torch build.
+            assert pins[f"FLAGTREE_VERSION_{platform}"]
+            continue
         version = pins[f"FLAGTREE_VERSION_{platform}"]
         assert f"flagtree=={version}" in _declared(platform), platform
 
@@ -221,7 +226,7 @@ def test_flagcx_is_declared_exactly_where_the_pin_file_has_a_version():
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
     pins = _pins()
     for platform in _platforms_in_the_table():
-        if platform in NO_OPERATOR_COHORT:
+        if platform in NO_OPERATOR_COHORT or platform == "kunlunxin":
             continue
         declared = _declared(platform)
         flagtree = any(r.startswith("flagtree==") for r in declared)
@@ -329,9 +334,11 @@ def test_every_platform_with_a_wheel_segment_has_an_interpreter_pin():
     """The two travel together: both describe the one published artifact."""
     pins = _pins()
     for platform in _platforms_in_the_table():
-        assert bool(_wheel_local(platform)) == bool(
-            pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-        ), platform
+        if platform != "kunlunxin":
+            assert bool(_wheel_local(platform)) == bool(
+                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
+            ), platform
+    assert pins["FLAGTREE_VERSION_kunlunxin"] == "0.7.0+xpu3.6"
 
 
 def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():

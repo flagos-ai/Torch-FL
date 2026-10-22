@@ -1,10 +1,12 @@
-"""Real MTT S5000 coverage for the MThreads FlagGems hybrid path."""
+"""MUSA-specific checks for the MThreads FlagGems hybrid path.
 
-import importlib
+The shared suite in ``tests/integration/flaggems/`` covers route selection,
+execution and float64 ``mm`` across every platform. This file retains MUSA's
+shared generator reservation and tune-space checks.
+"""
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
 pytestmark = pytest.mark.musa
@@ -36,75 +38,6 @@ def _require_flaggems_mthreads():
     # torch_fl already routes each overload through its generated C++ kernels.
     # Global FlagGems registration would bypass that dispatcher and register
     # lift_fresh, whose vendor-device check rejects flagos tensors.
-
-
-def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
-    _require_flaggems_mthreads()
-    calls = []
-
-    def track(qualname):
-        """Patch the entry point the generated kernel actually calls.
-
-        The codegen freezes the *package-level* name -- ``flag_gems.<fn>``, see
-        ``_normalize_flaggems_qualname`` in scripts/codegen_ops.py -- and
-        ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
-        the attribute. So the observable call site is ``flag_gems.<fn>``.
-        Patching ``flag_gems.ops.<module>.<fn>`` instead writes to a different
-        attribute slot that happens to hold the same object, and the wrapper is
-        never entered.
-        """
-        module_path, _, function_name = qualname.rpartition(".")
-        module = importlib.import_module(module_path)
-        original = getattr(module, function_name)
-
-        def wrapper(*args, **kwargs):
-            calls.append(function_name)
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(module, function_name, wrapper)
-
-    track("flag_gems.all")
-    track("flag_gems.all_dims")
-    track("flag_gems.any")
-    track("flag_gems.any_dims")
-    track("flag_gems.repeat_interleave_tensor")
-    track("flag_gems.index_add")
-    track("flag_gems.index_add_")
-
-    values = torch.tensor([[1, 0, 1], [1, 1, 1]], device=DEVICE)
-    assert torch.equal(torch.all(values).cpu(), torch.all(values.cpu()))
-    assert torch.equal(
-        torch.all(values, dim=(1,)).cpu(), torch.all(values.cpu(), dim=(1,))
-    )
-    assert torch.equal(torch.any(values).cpu(), torch.any(values.cpu()))
-    assert torch.equal(
-        torch.any(values, dim=(1,)).cpu(), torch.any(values.cpu(), dim=(1,))
-    )
-
-    repeats = torch.tensor([1, 2, 1], device=DEVICE)
-    assert torch.equal(
-        torch.repeat_interleave(repeats).cpu(),
-        torch.repeat_interleave(repeats.cpu()),
-    )
-
-    base = torch.zeros(4, 3, device=DEVICE)
-    index = torch.tensor([1, 1, 3], device=DEVICE)
-    source = torch.ones(3, 3, device=DEVICE)
-    expected = torch.index_add(base.cpu(), 0, index.cpu(), source.cpu())
-    assert torch.equal(torch.index_add(base, 0, index, source).cpu(), expected)
-
-    inplace = torch.zeros(4, 3, device=DEVICE)
-    inplace.index_add_(0, index, source)
-    assert torch.equal(inplace.cpu(), expected)
-    assert calls == [
-        "all",
-        "all_dims",
-        "any",
-        "any_dims",
-        "repeat_interleave_tensor",
-        "index_add",
-        "index_add_",
-    ]
 
 
 def test_flaggems_randn_shares_native_generator_reservations():
@@ -145,48 +78,6 @@ def test_flaggems_randn_shares_native_generator_reservations():
     torch_fl._C._reserve_rng_seed(0)
     expected_state = torch.flagos.get_rng_state()
     assert torch.equal(mixed_state, expected_state)
-
-
-def test_float64_mm_is_exact_across_the_tile_boundary():
-    """The MUSA tune-space regression: float64 ``mm`` on this hardware.
-
-    The mthreads ``mm`` entry declares two 64x64x64 tiles at ``num_stages`` 5 and
-    4, which at 8 bytes per element ask 262144 B and 196608 B against the
-    196608 B static shared-memory limit, so before the fit every float64 shape
-    whose M, K and N all exceed 32 failed -- the first configuration with
-    ``OutOfResources: Required: 262144, Hardware limit: 196608`` from inside the
-    benchmark, the second with ``Triton Error [MUSA]: invalid argument`` from the
-    final launch. The same space on float32 asks half as much and was never
-    affected, which is what makes the defect look shape- and dtype-dependent.
-
-    32 in every dimension is the boundary, and both sides of it are asserted:
-    FlagTree's AABS narrows the declared tile to the extent before the compiler
-    sizes it, so a small shape stayed inside the limit by accident. Exactness is
-    the assertion rather than "it runs", because the failure this guards against
-    is a configuration that is silently wrong, not only one that raises.
-    """
-    _require_flaggems_mthreads()
-
-    for m, k, n in [
-        (31, 32, 32),
-        (32, 32, 32),
-        (33, 32, 32),
-        (33, 33, 33),  # first shape the declared space cannot serve on float64
-        (64, 64, 64),  # both declared configurations out of limit on float64
-        (32, 64, 64),
-        (64, 64, 32),
-        (512, 512, 512),
-    ]:
-        a = torch.randn(m, k, dtype=torch.float64)
-        b = torch.randn(k, n, dtype=torch.float64)
-        got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
-        torch.testing.assert_close(
-            got,
-            torch.mm(a, b),
-            rtol=1e-12,
-            atol=1e-12,
-            msg=f"float64 mm at {m}x{k}x{n}",
-        )
 
 
 def test_the_space_the_tuner_is_given_fits_the_device():

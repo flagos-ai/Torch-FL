@@ -85,6 +85,10 @@ environment_check:
     exactly: 2
   flagos_devices:
     exactly: 2
+  require_build_kernels:
+    - flaggems
+  require_imports:
+    - flag_gems
   triton_backend: iluvatar
   flaggems_vendor: iluvatar
   flagtree:

@@ -31,8 +31,7 @@ import pytest
 import subprocess
 import sys
 
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import routed_backend_or_none
 
@@ -44,7 +43,7 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "cond = torch.tensor([True, False, True], device='flagos:0'); "
         "a = torch.tensor([1.0, 2.0, 3.0], device='flagos:0'); "
         "b = torch.tensor([4.0, 5.0, 6.0], device='flagos:0'); "

@@ -12,6 +12,7 @@
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/result_type.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/abs.h>
 #include <ATen/ops/acos.h>
@@ -2059,8 +2060,16 @@ at::Tensor EqScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnEqScalar, acl_self.get(), acl_other.get(), acl_out.get());
@@ -2078,8 +2087,16 @@ at::Tensor NeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnNeScalar, acl_self.get(), acl_other.get(), acl_out.get());
@@ -2097,8 +2114,16 @@ at::Tensor GtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnGtScalar, acl_self.get(), acl_other.get(), acl_out.get());
@@ -2116,8 +2141,16 @@ at::Tensor LtScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnLtScalar, acl_self.get(), acl_other.get(), acl_out.get());
@@ -2135,8 +2168,16 @@ at::Tensor GeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnGeScalar, acl_self.get(), acl_other.get(), acl_out.get());
@@ -2154,8 +2195,16 @@ at::Tensor LeScalarKernelAscend(const at::Tensor& self, const at::Scalar& other)
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD(aclnnLeScalar, acl_self.get(), acl_other.get(), acl_out.get());

@@ -14,41 +14,39 @@
 
 """The routing half of the contract: each operator dispatches where the conf says.
 
-For every operator in ``FLAGGEMS_ROUTING_CALLS`` this runs the call on the device
-in a fresh child with ``FLAGOS_LOG=dispatch`` and asserts the child's
+For every operator in the shared routing table, this runs the
+call on the device in a fresh child with ``FLAGOS_LOG=dispatch,fallback`` and
+asserts the child's
 ``[flagos dispatch] <op> -> <backend>`` line names exactly the backend the active
-conf routes the operator to.
+conf routes the operator to. A ``none`` route has to show the matching
+``[flagos cpu_fallback] <op>`` line instead, and an unlisted route has to reach
+FlagGems, the dispatcher's default.
 
-Two skips, both data-driven and neither a platform name:
+The public wrappers in the execution table run in the same child, but their
+dispatch logs can name a different operator. That execution, and a failure
+inside it, is checked separately from the route of the named dispatcher row.
 
-    * the conf does not route the operator to a FlagGems backend on this chip.
-      Per-operator coverage is allowed to differ, so this is a skip carrying the
-      conf's own route as the reason -- it is the statement that this chip does
-      not claim the operator;
-    * this wheel cannot run a FlagGems kernel at all (no kernel set in the build
-      record, no device, or the FlagGems/Triton packages do not import).
-
-An operator the conf *does* route to FlagGems and that then dispatches elsewhere
-or raises is a failure: that is a claimed route the runtime does not take, which
-is the one thing this suite refuses to accept.
+Per-operator coverage is allowed to differ, so the case is always driven and
+then checked against the conf: an op the conf routes to FlagGems must reach that
+backend, and another spelling must reach the backend the conf names. A platform
+with no FlagGems arm therefore validates its actual route, while every
+configured CI platform still runs the full case set. A missing runtime, device,
+conf row or dispatch line is a failure.
 """
 
 import pytest
 
 from flaggems_caps import (
+    FLAGGEMS_EXECUTION_CALLS,
     FLAGGEMS_ROUTING_CALLS,
     accel_label,
     conf_route,
-    flaggems_runtime_unavailable,
     route_reason,
-    routes_to_flaggems,
 )
 from flaggems_probe import probe_routes
 
 # The child runs every call in one interpreter, so the report is computed once
-# and shared by the parametrized cases. A case that skips on its route never
-# reaches this, which is what keeps a chip with no FlagGems routes from paying
-# for an import of torch.
+# and shared by the parametrized cases.
 _PROBE: dict[str, dict] | None = None
 
 
@@ -59,24 +57,45 @@ def _probe() -> dict[str, dict]:
     return _PROBE
 
 
-@pytest.mark.anyplatform
 @pytest.mark.parametrize("op", sorted(FLAGGEMS_ROUTING_CALLS))
 def test_operator_dispatches_where_the_conf_routes_it(op: str):
-    accel = accel_label() or "this conf"
-    if not routes_to_flaggems(op):
-        pytest.skip(
-            f"{accel} routes {op} to {conf_route(op) or 'unlisted'}, not to a "
-            "FlagGems backend"
-        )
-    reason = flaggems_runtime_unavailable()
-    if reason:
-        pytest.skip(reason)
+    accel = accel_label()
+    if not accel:
+        pytest.fail("the active conf is not a named backends_<platform>.conf")
 
-    backend, why = route_reason(op)
-    assert why == "routed", f"{op} unexpectedly resolved to {why}"
     entry = _probe()[op]
     assert entry["error"] is None, f"{op}: {entry['error']}"
-    assert entry["dispatched_backend"] == backend, (
-        f"{op} dispatched to {entry['dispatched_backend']!r}; the {accel} conf "
-        f"routes it to {backend!r}"
+    backend, why = route_reason(op)
+    if backend is None:
+        assert entry["dispatched_backend"] is None and entry["cpu_fallback"], (
+            f"{op} ({why}) in the {accel} conf, but the dispatcher returned "
+            f"backend={entry['dispatched_backend']!r}, "
+            f"cpu_fallback={entry['cpu_fallback']}"
+        )
+    else:
+        assert entry["dispatched_backend"] == backend, (
+            f"{op} ({why}) dispatched to {entry['dispatched_backend']!r}; the "
+            f"{accel} conf ({conf_route(op)!r}) resolves it to {backend!r}"
+        )
+        assert not entry["cpu_fallback"], (
+            f"{op} reached {entry['dispatched_backend']!r} and also the CPU "
+            f"fallback; the {accel} conf ({conf_route(op)!r}) resolves it to "
+            f"{backend!r}"
+        )
+
+
+def test_public_wrapper_calls_execute():
+    """Every platform runs the wrappers even when their logs name another op."""
+    accel = accel_label()
+    if not accel:
+        pytest.fail("the active conf is not a named backends_<platform>.conf")
+    entries = _probe()
+    assert FLAGGEMS_EXECUTION_CALLS, "the shared execution table is empty"
+    failures = [
+        f"{op}: {entries[op]['error']}"
+        for op in FLAGGEMS_EXECUTION_CALLS
+        if entries[op]["error"] is not None
+    ]
+    assert not failures, (
+        "the shared execution calls failed on " + accel + ":\n" + ("\n".join(failures))
     )

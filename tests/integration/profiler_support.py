@@ -31,6 +31,7 @@ class ProfilerCapabilities:
     platform: str
     device: bool
     kernel: bool
+    demangled: bool
     runtime: bool
     cbid: bool
     memcpy: bool
@@ -170,7 +171,7 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     ``test_profiler_device_time_linkage`` runs as an ordinary case on the Ascend
     job instead of reporting as an XFAIL.
     """
-    device = True
+    device = platform != "kunlunxin"
     runtime = device
     # Ascend memcpy interception is gated on process-start LD_PRELOAD rather
     # than on `device` above: measured on Ascend 910 with CANN 9.0, the shared
@@ -184,6 +185,7 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         platform=platform,
         device=device,
         kernel=device,
+        demangled=device and platform != "gcu",
         runtime=runtime,
         # The tracers that resolve a runtime record's identity through a vendor
         # callback-id table also stamp that id onto the event's args (cupti,
@@ -230,7 +232,7 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         # stopped being interchangeable when boxing became an opt-in.
         memset=device and platform in {"cuda", "metax"} and _boxing_built(),
         flow=device,
-        linkage=device,
+        linkage=device and platform != "gcu",
         metadata=device,
     )
 

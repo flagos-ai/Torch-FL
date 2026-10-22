@@ -61,8 +61,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 from backend_conf import routed_backend_or_none
 from platform_support import detect_platform
@@ -748,7 +747,7 @@ class TestLayerNormDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(2, 3, 8, device='flagos:0'); "
                 "torch.ops.aten.native_layer_norm(t, [8], None, None, 1e-5); "
                 "torch.nn.functional.layer_norm(t, [8])",
@@ -778,7 +777,7 @@ class TestLayerNormDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.randn(2, 3, 8, device='flagos:0'); "
                 "torch.nn.functional.layer_norm(t, [8]); "
                 "torch.ops.aten.native_layer_norm(t, [8], None, None, 1e-5)",
@@ -809,7 +808,7 @@ class TestLayerNormDispatch:
                 # A one-liner cannot carry this: `try` is a compound statement
                 # and a semicolon will not start one, so the body is written in
                 # newlines that the `-c` argument preserves.
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "t = torch.randn(2, 3, 8, device='flagos:0')\n"
                 "try:\n"
                 "    torch.ops.aten.native_layer_norm(t, [2], None, None, 1e-5)\n"

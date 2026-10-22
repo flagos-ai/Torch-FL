@@ -21,9 +21,8 @@ memory or reports zero at start is a vendor detail and is not asserted.
 """
 
 import pytest
-import torch
+from device_init import torch, torch_fl
 
-import torch_fl
 
 DEVICE = "flagos:0"
 

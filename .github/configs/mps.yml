@@ -110,10 +110,12 @@ wheel_artifact_name: wheel-mps
 # shipped a CUDA bundle here would mean the accelerator was selected wrong, so
 # it is forbidden rather than merely unnecessary.
 #
-# flagos_devices asserts the Metal device is visible through torch_fl's own
+# flagos_devices asserts that the Metal device is visible through torch_fl's own
 # device surface. This is the check that makes an arm64 runner or a missing
 # Metal SDK a failure instead of a suite that reports skips: every MPS test
-# self-skips when detect_platform() is not "mps".
+# self-skips when detect_platform() is not "mps". Cases that need a second
+# device belong in the shared marker-selected contract, which declares its own
+# hardware guard.
 environment_check:
   torch_version_base: "2.10.0"
   cuda_version: null
@@ -121,6 +123,8 @@ environment_check:
     - /opt/conda/
   forbid_package_files:
     - lib/libtorch_cuda.so
+  forbid_build_kernels:
+    - flaggems
   flagos_devices:
     at_least: 1
   # The wheel must be the architecture the runner is. A universal2

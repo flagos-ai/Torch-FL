@@ -14,10 +14,16 @@
 
 """Tests for the per-file unit test runner's result classification."""
 
+import hashlib
+import importlib
 import importlib.util
+import json
+import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,7 +142,9 @@ def test_tolerated_teardown_crash_does_not_fail_the_run(
     """
     (tmp_path / "test_one.py").write_text("")
     monkeypatch.setattr(
-        _RUNNER, "run_file", lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False)
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False, False),
     )
     monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
     assert _RUNNER.main() == 0
@@ -145,7 +153,621 @@ def test_tolerated_teardown_crash_does_not_fail_the_run(
 def test_a_real_failure_still_fails_the_run(monkeypatch, tmp_path):
     (tmp_path / "test_one.py").write_text("")
     monkeypatch.setattr(
-        _RUNNER, "run_file", lambda *args, **kwargs: (1, _WITH_FAILURE, False)
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (1, _WITH_FAILURE, False, False),
     )
     monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
     assert _RUNNER.main() == 1
+
+
+def test_each_file_writes_its_own_pytest_report(monkeypatch, tmp_path):
+    """The per-file runner owns complete reports for its child sessions."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text("def test_one():\n    assert True\n")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    assert _RUNNER.main() == 0
+    reports = list(report_dir.glob("unit-*.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text())
+    assert report["summary"]["passed"] == 1
+
+
+def test_the_inventory_group_reaches_every_child_report(monkeypatch, tmp_path):
+    """A group launch passes its identity to each child pytest session."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text("def test_one():\n    assert True\n")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "google-test.json").write_text(
+        json.dumps(
+            {
+                "cases": [],
+                "aliases": {},
+                "group": "unit_tests_per_file",
+            }
+        )
+    )
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.delenv("FLAGCICD_TEST_GROUP", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    assert _RUNNER.main() == 0
+    captured = []
+
+    def run_file(python, test_file, timeout, report_dir="", **_kwargs):
+        captured.append((os.environ.get("FLAGCICD_TEST_GROUP"), report_dir))
+        return 0, "1 passed in 0.01s\n", False, False
+
+    monkeypatch.setattr(_RUNNER, "run_file", run_file)
+    assert _RUNNER.main() == 0
+    assert captured == [("unit_tests_per_file", str(report_dir))]
+
+
+def test_pytest_child_inherits_the_facade_selected_during_startup(
+    monkeypatch, tmp_path
+):
+    """PPU selects a private torch facade, then starts pytest in a child."""
+    package = tmp_path / "installed" / "torch_fl"
+    facade = tmp_path / "facade"
+    root = tmp_path / "root"
+    checkout = root
+    package.mkdir(parents=True)
+    (package / _C_EXTENSION).write_text("")
+    facade.mkdir()
+    checkout.mkdir()
+    (package / "__init__.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "entry = str(Path(__file__).resolve().parent.parent)\n"
+        "facade = os.environ['SYNTHETIC_FACADE']\n"
+        "os.environ['PYTHONPATH'] = os.pathsep.join((facade, entry))\n"
+    )
+    test_file = checkout / "test_child.py"
+    test_file.write_text(
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "def test_facade_and_tests_are_selected():\n"
+        "    entries = os.environ['PYTHONPATH'].split(os.pathsep)\n"
+        "    facade = Path(os.environ['SYNTHETIC_FACADE'])\n"
+        "    assert Path(entries[0]) == facade\n"
+        "def test_the_site_owns_torch_fl():\n"
+        "    import torch_fl\n"
+        "    installed = Path(os.environ['SYNTHETIC_INSTALLED']).resolve()\n"
+        "    assert Path(torch_fl.__file__).resolve().is_relative_to(installed)\n"
+    )
+    (facade / "sitecustomize.py").write_text(
+        "import hashlib\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "checkout = Path(os.environ['SYNTHETIC_CHECKOUT'])\n"
+        "digest = hashlib.sha256(str(checkout).encode()).hexdigest()\n"
+        "os.environ['PYTHONPATH:' + digest] = 'stale'\n"
+    )
+    probe = root / "probe.py"
+    probe.write_text(f"""\
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+package_root = Path({str(tmp_path / "installed")!r})
+checkout = Path({str(checkout)!r})
+facade = Path({str(facade)!r})
+test_file = checkout / 'test_child.py'
+os.environ['SYNTHETIC_FACADE'] = str(facade)
+os.environ['SYNTHETIC_CHECKOUT'] = str(checkout)
+os.environ['SYNTHETIC_INSTALLED'] = str(package_root)
+os.environ['PYTHONPATH'] = str(checkout)
+spec = importlib.util.spec_from_file_location(
+    'torch_fl', package_root / 'torch_fl' / '__init__.py',
+    submodule_search_locations=[str(package_root / 'torch_fl')],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules['torch_fl'] = module
+spec.loader.exec_module(module)
+environment = {{}}
+environment['__file__'] = {str(Path(".github/scripts/run_unit_tests.py").resolve())!r}
+exec(compile(
+    Path({str(Path(".github/scripts/run_unit_tests.py").resolve())!r}).read_text(),
+    {str(Path(".github/scripts/run_unit_tests.py").resolve())!r}, 'exec',
+), environment)
+status, output, timed_out, exit_timed_out = environment['run_file'](
+    sys.executable, test_file, 30, wheel_package_root=package_root,
+)
+assert not timed_out
+assert not exit_timed_out
+print(output)
+assert status == 0, output
+""")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("SYNTHETIC_FACADE", str(facade))
+    monkeypatch.setenv("SYNTHETIC_CHECKOUT", str(checkout))
+    monkeypatch.setenv("SYNTHETIC_INSTALLED", str(package.parent))
+    completed = subprocess.run(
+        [sys.executable, str(probe)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=40,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+
+
+def test_failed_package_startup_fails_before_a_child_is_created(monkeypatch, tmp_path):
+    wheel_root = tmp_path / "installed"
+    package = wheel_root / "torch_fl"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("raise ImportError('broken extension')\n")
+    (package / _C_EXTENSION).write_text("")
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text("")
+    created = []
+    monkeypatch.setattr(
+        _RUNNER.subprocess,
+        "Popen",
+        lambda *args, **kwargs: created.append((args, kwargs)),
+    )
+
+    with pytest.raises(ImportError, match="broken extension"):
+        _RUNNER.run_file(sys.executable, test_file, 30, wheel_package_root=wheel_root)
+    assert created == []
+
+
+def test_main_only_preloads_a_package_with_a_native_extension(monkeypatch, tmp_path):
+    source = tmp_path / "checkout" / "torch_fl"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("")
+    (tmp_path / "checkout" / "test_one.py").write_text("")
+    selected = SimpleNamespace(origin=str(source / "__init__.py"))
+    roots = []
+    monkeypatch.setattr(_RUNNER.importlib.util, "find_spec", lambda _name: selected)
+    monkeypatch.setattr(_RUNNER, "child_environment", lambda root: {})
+    monkeypatch.setattr(
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (
+            roots.append(kwargs["wheel_package_root"]),
+            (0, "1 passed in 0.01s\n", False, False),
+        )[1],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_unit_tests.py",
+            "--test-dir",
+            str(tmp_path / "checkout"),
+        ],
+    )
+
+    assert _RUNNER.main() == 0
+    assert roots == [None]
+
+
+def test_a_standalone_run_uses_its_supplied_inventory_group(monkeypatch, tmp_path):
+    """A direct child run keeps the group supplied by its materialized inventory."""
+    (tmp_path / "test_one.py").write_text("")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "google-test.json").write_text(
+        json.dumps(
+            {
+                "cases": [],
+                "aliases": {},
+                "group": "unit_tests_per_file",
+            }
+        )
+    )
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.delenv("FLAGCICD_TEST_GROUP", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    captured = []
+
+    def run_file(python, test_file, timeout, report_dir="", **_kwargs):
+        captured.append(os.environ.get("FLAGCICD_TEST_GROUP"))
+        return 0, "1 passed in 0.01s\n", False, False
+
+    monkeypatch.setattr(_RUNNER, "run_file", run_file)
+    assert _RUNNER.main() == 0
+    assert captured == ["unit_tests_per_file"]
+
+
+def test_the_installed_package_precedes_the_checkout_without_hiding_its_scripts(
+    monkeypatch, tmp_path
+):
+    """The wheel owns ``torch_fl``; source tests still find checkout modules."""
+    wheel_root = tmp_path / "wheel"
+    (wheel_root / "torch_fl").mkdir(parents=True)
+    (wheel_root / "torch_fl" / "__init__.py").write_text("")
+    (wheel_root / "torch_fl" / _C_EXTENSION).write_text("")
+    checkout = tmp_path / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "checkout_only.py").write_text("")
+    monkeypatch.setenv("PYTHONPATH", str(checkout))
+
+    env = _RUNNER.child_environment(wheel_root)
+    startup = Path(_RUNNER.__file__).with_name("_torch_fl_test_site.py")
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib.util; import sys; "
+                "from pathlib import Path; "
+                f"spec = importlib.util.spec_from_file_location('site', {str(startup)!r}); "
+                "module = importlib.util.module_from_spec(spec); "
+                "spec.loader.exec_module(module); module.install(); "
+                "package = importlib.util.find_spec('torch_fl'); "
+                "checkout = importlib.util.find_spec('scripts.checkout_only'); "
+                "print(Path(package.origin).resolve()); "
+                "print(checkout is not None)"
+            ),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert probe.stdout.splitlines() == [
+        str((wheel_root / "torch_fl" / "__init__.py").resolve()),
+        "True",
+    ]
+
+
+def test_the_child_does_not_inherit_a_stale_macos_path_digest(monkeypatch, tmp_path):
+    """The child must use the selected wheel path, including on macOS."""
+    wheel_root = tmp_path / "installed-wheel"
+    (wheel_root / "torch_fl").mkdir(parents=True)
+    (wheel_root / "torch_fl" / "__init__.py").write_text("")
+    (wheel_root / "torch_fl" / _C_EXTENSION).write_text("")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "checkout"))
+    digest = hashlib.sha256(str(tmp_path / "checkout").encode()).hexdigest()
+    monkeypatch.setenv(f"PYTHONPATH:{digest}", "stale")
+    env = _RUNNER.child_environment(wheel_root)
+    assert all(not name.startswith("PYTHONPATH:") for name in env)
+
+
+_C_EXTENSION = f"_C{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+
+
+def test_pytest_conftest_and_child_keep_source_and_installed_modules(
+    monkeypatch, tmp_path
+):
+    """pytest's pythonpath entry cannot replace the selected native package."""
+    checkout = tmp_path / "checkout"
+    source = checkout / "torch_fl"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("raise ModuleNotFoundError('torch_fl._C')\n")
+    (checkout / "scripts").mkdir()
+    (checkout / "scripts" / "__init__.py").write_text("")
+    (checkout / "scripts" / "source_support.py").write_text("VALUE = 7\n")
+    tests = checkout / "tests" / "unit"
+    tests.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npythonpath = ["."]\n'
+    )
+    (tests / "conftest.py").write_text(
+        "import os\n"
+        "import torch_fl\n"
+        "assert torch_fl.ORIGIN == 'installed'\n"
+        "torch_fl.SELECTED_BY_CONFTEST = True\n"
+        "os.environ['TORCH_FL_CONFTEST_SELECTED'] = torch_fl.ORIGIN\n"
+    )
+    test_file = tests / "test_selected.py"
+    test_file.write_text(
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import torch_fl\n"
+        "from scripts import source_support\n"
+        "def test_parent():\n"
+        "    assert os.environ['TORCH_FL_SELECTED_TEST'] == 'installed'\n"
+        "    assert os.environ['TORCH_FL_CONFTEST_SELECTED'] == 'installed'\n"
+        "    assert torch_fl.SELECTED_BY_CONFTEST\n"
+        "    assert source_support.VALUE == 7\n"
+        "def test_child():\n"
+        "    probe = subprocess.run(\n"
+        "        [sys.executable, '-c', 'import torch_fl; "
+        "print(torch_fl.ORIGIN)'],\n"
+        "        cwd=os.environ['TORCH_FL_CURRENT'],\n"
+        "        env=os.environ, text=True, capture_output=True, check=True,\n"
+        "    )\n"
+        "    assert probe.stdout.strip() == 'installed', probe.stderr\n"
+    )
+    installed = tmp_path / "installed"
+    package = installed / "torch_fl"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "import os\n"
+        "ORIGIN = 'installed'\n"
+        "os.environ['TORCH_FL_SELECTED_TEST'] = ORIGIN\n"
+    )
+    (package / _C_EXTENSION).write_text("")
+    monkeypatch.chdir(checkout)
+    report_dir = tmp_path / "reports"
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.setenv("FLAGCICD_TEST_GROUP", "unit_tests_per_file")
+    monkeypatch.setenv("TORCH_FL_CURRENT", str(checkout))
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(_RUNNER_PATH),
+            "--test-dir",
+            str(tests),
+            "--wheel-package-root",
+            str(installed),
+        ],
+        cwd=checkout,
+        env=os.environ,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+
+
+def test_a_nested_unit_file_is_discovered_by_the_real_runner(monkeypatch, tmp_path):
+    """BPU tests live in a subpackage; leaving them out would hide them."""
+    nested = tmp_path / "bpu"
+    nested.mkdir()
+    (nested / "test_one.py").write_text("def test_nested():\n    assert True\n")
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    assert _RUNNER.main() == 0
+
+
+def test_a_unit_child_never_uses_the_python_p_switch(monkeypatch, tmp_path):
+    """The MUSA interpreter launcher rejects ``-P`` before starting Python."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text("")
+    created = []
+
+    class Finished:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "1 passed in 0.01s\n", None
+
+        def poll(self):
+            return 0
+
+        stdout = None
+
+    monkeypatch.setattr(
+        _RUNNER.subprocess,
+        "Popen",
+        lambda command, **_kwargs: (created.append(command), Finished())[1],
+    )
+    returncode, _output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 30
+    )
+    assert (returncode, timed_out, exit_timed_out) == (0, False, False)
+    assert created and "-P" not in created[0]
+
+
+def test_a_completed_session_does_not_wait_for_python_atexit(monkeypatch, tmp_path):
+    """Vendor destructors can keep the interpreter alive after pytest reports."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import atexit\n"
+        "import time\n"
+        "def pause_exit():\n"
+        "    time.sleep(30)\n"
+        "atexit.register(pause_exit)\n"
+        "def test_one():\n"
+        "    assert True\n"
+    )
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert (returncode, timed_out, exit_timed_out) == (0, False, True), output
+    assert output.startswith("."), output
+
+
+def test_a_completed_session_removes_processes_left_by_teardown(monkeypatch, tmp_path):
+    """A child process started after the session must not outlive the runner."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "child = None\n"
+        "def start_child():\n"
+        "    global child\n"
+        "    child = subprocess.Popen(\n"
+        "        [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        "    )\n"
+        "    Path(FLAGCICD_TEST_GROUP).write_text(str(child.pid))\n"
+        "    time.sleep(30)\n"
+        "def test_one():\n"
+        "    assert True\n"
+    )
+    pid_file = tmp_path / "child.pid"
+    source = test_file.read_text().replace(
+        "def test_one():\n    assert True\n",
+        "def test_one():\n"
+        "    import atexit\n"
+        "    atexit.register(start_child)\n"
+        "    assert True\n",
+    )
+    source = source.replace("Path(FLAGCICD_TEST_GROUP)", f"Path({str(pid_file)!r})")
+    test_file.write_text(source)
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert (returncode, timed_out) == (0, False), output
+    pid = int(pid_file.read_text())
+    try:
+        state = _process_state(pid)
+    except ProcessLookupError:
+        state = None
+    assert state in {None, "Z"}
+
+
+def _process_state(pid):
+    """Read a process state on macOS and Linux without reaping the child."""
+    completed = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProcessLookupError(pid)
+    return completed.stdout.strip()[:1]
+
+
+def test_a_crash_before_the_session_ends_keeps_its_failure_status(
+    monkeypatch, tmp_path
+):
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import os\n"
+        "import signal\n"
+        "def test_one():\n"
+        "    os.kill(os.getpid(), signal.SIGSEGV)\n"
+    )
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert returncode == -signal.SIGSEGV, output
+    assert (timed_out, exit_timed_out) == (False, False)
+    assert _RUNNER.classify(returncode, output)[0] == "CRASH"
+
+
+def test_a_unit_directory_outside_the_checkout_writes_a_report(monkeypatch, tmp_path):
+    """A probe may run pytest on a temp file; the report directory is writable."""
+    test_file = tmp_path / "test_outside.py"
+    test_file.write_text("def test_outside():\n    assert True\n")
+    report_dir = tmp_path / "reports"
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    assert _RUNNER.main() == 0
+    assert len(list(report_dir.glob("unit-*.json"))) == 1
+
+
+def test_a_failing_child_file_really_fails_the_run(monkeypatch, tmp_path):
+    (tmp_path / "test_one.py").write_text("def test_one():\n    assert False\n")
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    assert _RUNNER.main() == 1
+
+
+def test_a_failing_report_is_not_marked_complete_by_a_passing_runner_status(
+    monkeypatch, tmp_path
+):
+    """The runner's PASS must not override the child's recorded failure."""
+    root = tmp_path / "checkout"
+    test_file = root / "tests/unit/test_one.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    case = "tests/unit/test_one.py"
+    (report_dir / "google-test.json").write_text(
+        json.dumps({"cases": [case], "aliases": {}})
+    )
+    (report_dir / "unit-one.json").write_text(
+        json.dumps(
+            {
+                "args": [str(test_file)],
+                "tests": [{"nodeid": case + "::test_one", "outcome": "passed"}],
+                "summary": {"passed": 1, "failed": 1},
+            }
+        )
+    )
+    monkeypatch.setattr(
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False, False),
+    )
+    monkeypatch.setattr(_RUNNER, "_ALLOW_TEARDOWN_CRASH", True)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.setattr(
+        sys, "argv", ["run_unit_tests.py", "--test-dir", str(test_file.parent)]
+    )
+    assert _RUNNER.main() == 0
+    assert not (report_dir / "unit-one.pending").exists()
+
+
+def test_a_clean_report_is_marked_complete_after_a_tolerated_crash(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "checkout"
+    test_file = root / "tests/unit/test_one.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    case = "tests/unit/test_one.py"
+    inventory = {"cases": [case], "aliases": {}}
+    (report_dir / "google-test.json").write_text(json.dumps(inventory))
+    monkeypatch.setattr(
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (
+            (report_dir / "unit-one.json").write_text(
+                json.dumps(
+                    {
+                        "args": [str(test_file)],
+                        "tests": [
+                            {
+                                "nodeid": case + "::test_one",
+                                "outcome": "passed",
+                                "setup": {"outcome": "passed"},
+                                "call": {"outcome": "passed"},
+                                "teardown": {"outcome": "passed"},
+                            }
+                        ],
+                        "summary": {"passed": 1, "failed": 0, "error": 0},
+                    }
+                )
+            ),
+            (-signal.SIGSEGV, _CLEAN, False, False),
+        )[-1],
+    )
+    monkeypatch.setattr(_RUNNER, "_ALLOW_TEARDOWN_CRASH", True)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(report_dir))
+    monkeypatch.setattr(
+        sys, "argv", ["run_unit_tests.py", "--test-dir", str(test_file.parent)]
+    )
+    assert _RUNNER.main() == 0
+    assert not list(report_dir.glob("unit-*.pending"))
+    assert list(report_dir.glob("unit-*.unit"))
+    assert json.loads((report_dir / "google-test.json").read_text())["aliases"] == {
+        case: [case]
+    }

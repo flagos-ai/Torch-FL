@@ -15,8 +15,7 @@
 """The MPS graph's advanced index gather."""
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps
 from platform_support import detect_platform

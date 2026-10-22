@@ -29,8 +29,7 @@ import pytest
 import subprocess
 import sys
 
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 
 DEVICE = "flagos:0"
@@ -40,7 +39,7 @@ def _run_subprocess(extra_env: dict, check: bool = True) -> subprocess.Completed
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "x = torch.randn(4,8,device='flagos:0',requires_grad=True); "
         "y = x[:, 2:6]; "
         "y.sum().backward()"
@@ -60,9 +59,6 @@ class TestSliceBackwardCorrectness:
     """slice_backward correctness on flagos device."""
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_basic(self):
         torch.manual_seed(0)
         x = torch.randn(4, 8, device=DEVICE, requires_grad=True)
@@ -76,9 +72,6 @@ class TestSliceBackwardCorrectness:
         torch.testing.assert_close(x.grad.cpu(), ref_grad)
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_step(self):
         torch.manual_seed(1)
         x = torch.randn(16, device=DEVICE, requires_grad=True)
@@ -89,9 +82,6 @@ class TestSliceBackwardCorrectness:
         torch.testing.assert_close(x.grad.cpu(), ref_grad)
 
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        reason="FlagGems slice_backward kernel assumes contiguous grad_output"
-    )
     def test_slice_backward_matches_cpu(self):
         torch.manual_seed(2)
         x_cpu = torch.randn(8, 16, requires_grad=True)

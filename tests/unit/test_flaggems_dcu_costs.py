@@ -35,6 +35,8 @@ in ``torch_fl/flagos/__init__.py`` at each patch and summarised in
 """
 
 import contextlib
+import importlib
+from pathlib import Path
 import sys
 import types
 
@@ -167,6 +169,79 @@ class TestRebindFlagGemsName:
         )
 
         assert not hasattr(holder, "target")
+
+
+def test_bind_flag_gems_callable_keeps_a_submodule_importable(monkeypatch):
+    """``flag_gems.ops.slice_backward`` is both a function and a module name.
+
+    The installed package stores the Python file in ``sys.modules`` and exposes
+    the function through a package proxy. Importing the submodule therefore
+    resolves through the module already in ``sys.modules``, while the bridge
+    reads ``flag_gems.slice_backward`` directly. Write the new callable to the
+    dictionaries instead of assigning through the proxy, which would replace
+    the module with a function and make ``import flag_gems.ops.slice_backward``
+    raise.
+    """
+
+    class PackageProxy(types.ModuleType):
+        def __getattr__(self, name):
+            module = sys.modules.get(f"{self.__name__}.{name}")
+            if module is not None:
+                return getattr(module, name)
+            raise AttributeError(name)
+
+    def original(*args, **kwargs):
+        return "original"
+
+    def patched(*args, **kwargs):
+        return "patched"
+
+    gems = types.ModuleType("flag_gems")
+    ops = PackageProxy("flag_gems.ops")
+    ops.__path__ = []
+    defining = types.ModuleType("flag_gems.ops.slice_backward")
+    defining.slice_backward = original
+    sys.modules["flag_gems.ops"].__dict__.clear()
+    sys.modules["flag_gems.ops"].__dict__.update(
+        {
+            "__name__": "flag_gems.ops",
+            "__path__": [],
+            "__getattr__": PackageProxy.__getattr__,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "flag_gems", gems)
+    monkeypatch.setitem(sys.modules, "flag_gems.ops", ops)
+    monkeypatch.setitem(sys.modules, defining.__name__, defining)
+    gems.slice_backward = original
+    ops.slice_backward = original
+
+    flagos._bind_flag_gems_callable(gems, "slice_backward", patched, ops)
+
+    assert gems.slice_backward is patched
+    assert vars(ops)["slice_backward"] is patched
+    assert sys.modules["flag_gems.ops.slice_backward"] is defining
+    assert importlib.import_module("flag_gems.ops.slice_backward") is defining
+
+
+def test_ecosystem_initializes_the_device_before_flaggems_contract_patches():
+    """FlagGems' package exports are bound after importing its ops tree.
+
+    The repair helpers need those package-level callables, and they run in
+    ``_lazy_init``. Pin their position after device initialization so a later
+    startup-phase rearrangement cannot silently skip both repairs.
+    """
+
+    import torch_fl
+
+    package = Path(torch_fl.__file__).resolve().parent
+    source = (package.parent / "torch_fl" / "__init__.py").read_text()
+    ecosystem = source.split("def _phase_ecosystem() -> None:", 1)[1].split(
+        "\n\ndef ", 1
+    )[0]
+
+    assert ecosystem.index("flagos.init()") < ecosystem.index(
+        "_patch_flaggems_philox()"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -551,6 +551,17 @@ def test_metax_conf_keeps_mm_boxed():
     assert "mm" not in g.METAX_CPP_MEASURED
 
 
+def test_ppu_measured_gaps_leave_the_flaggems_path():
+    """Both shared contract tests select PPU's boxing fallback when FlagGems
+    fails, so a failure in this task's all-platform run is recorded here too.
+    """
+    routes = g.build_all(CONF_DIR)["ppu"][1]
+    for op in ("slice_backward", "where.self_out"):
+        assert op in g.BOXING_TRITON_GAPS["ppu"]
+        assert routes[op].split("#", 1)[0].strip() == g.BOXING_FALLBACK
+    assert routes["where.self"].split("#", 1)[0].strip() == "flaggems"
+
+
 def test_iluvatar_570_gaps_leave_the_flaggems_path():
     """The op families the Iluvatar CI lane fails on (issue #570) are not
     routed to FlagGems, and the fix is a gap rather than a route change.

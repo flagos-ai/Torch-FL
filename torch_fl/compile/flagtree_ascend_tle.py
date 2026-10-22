@@ -28,11 +28,10 @@ PyPI or on the FlagOS package index, and is not present in FlagTree's own
 ``triton.experimental.tle`` raises ``ModuleNotFoundError: No module named
 'shmem'``.
 
-That would be harmless -- neither torch_fl nor FlagGems uses TLE -- except that
 FlagGems' Ascend backend imports ``triton.experimental.tle.language`` at module
-scope (``flag_gems/runtime/backend/_ascend/ops/cholesky_solve.py``). The
-missing optional dependency therefore makes ``import flag_gems`` itself fail,
-which takes down every FlagGems kernel on Ascend, not just the TLE ones.
+scope and its ``cholesky_solve`` implementation uses ``tle.dsa``. The missing
+optional dependency therefore makes ``import flag_gems`` itself fail, which
+takes down every FlagGems kernel on Ascend, not just the TLE ones.
 
 Registering a placeholder ``shmem`` module restores importability. It is
 inert: ``triton.experimental.tle`` only needs the names to exist so its module

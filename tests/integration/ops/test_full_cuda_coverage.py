@@ -47,8 +47,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 
 DEVICE = "flagos:0"
@@ -326,7 +325,7 @@ class TestNewOpDispatchRouting:
         # Pin the generated CUDA conf so the subprocess uses the same route that
         # _configured_backend() reads, regardless of ambient opt-in variables.
         env["FLAGOS_BACKEND_CONFIG"] = str(_CUDA_CONF)
-        code = f"import torch_fl, torch; {snippet}"
+        code = f"from device_init import torch, torch_fl; {snippet}"
         result = subprocess.run(
             [sys.executable, "-c", code],
             env=env,

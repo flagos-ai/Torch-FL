@@ -15,8 +15,7 @@
 """Tests for the caching device allocator."""
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 # Selected by the manifests' shared `Multi-device contracts` step (issue #391).
 pytestmark = pytest.mark.multi_device

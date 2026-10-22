@@ -21,6 +21,39 @@ from types import SimpleNamespace
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "__init__.py"
+
+
+def test_vendor_compat_installs_the_shared_qwen_rotation_after_claim():
+    tree = _tree()
+    branch = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and "_build_accelerator() in ('gcu', 'iluvatar', 'ascend')"
+        in ast.unparse(node.test)
+    )
+    assert ast.unparse(branch.body[-1].value) == "patch_diffusers_qwenimage_rope()"
+    vendor_compat = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_phase_vendor_compat"
+    )
+    phase = ast.unparse(vendor_compat)
+    assert phase.index("_install_musa_flaggems_compat()") < phase.index(
+        "patch_diffusers_qwenimage_rope()"
+    )
+    assert phase.index("_install_tsingmicro_flaggems_compat()") < phase.index(
+        "patch_diffusers_qwenimage_rope()"
+    )
+    runner = [
+        (node.lineno, ast.unparse(node.value.func))
+        for node in tree.body
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+    ]
+    calls = [name for _, name in runner]
+    assert calls.index("_phase_claim") < calls.index("_phase_vendor_compat")
+
+
 HOOKS = (
     "apex",
     "ddp",

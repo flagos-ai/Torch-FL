@@ -61,8 +61,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -377,7 +376,7 @@ class TestCatDeclines:
                 "-c",
                 # A one-liner cannot carry this: the body is a compound
                 # statement, so it is written in newlines the `-c` preserves.
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "a = torch.tensor([True, False, True], device='flagos:0')\n"
                 "b = torch.tensor([False, False, True], device='flagos:0')\n"
                 "out = torch.cat([a, b], dim=0)\n"
@@ -590,7 +589,7 @@ class TestCatDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "a = torch.arange(4, dtype=torch.float32, device='flagos:0'); "
                 "b = torch.arange(4, 8, dtype=torch.float32, device='flagos:0'); "
                 "torch.cat([a, b], dim=0); "
@@ -618,7 +617,7 @@ class TestCatDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "a = torch.tensor([True, False], device='flagos:0')\n"
                 "b = torch.tensor([True, True], device='flagos:0')\n"
                 "print('bool', torch.cat([a, b], 0).cpu().tolist())\n",
@@ -655,7 +654,7 @@ class TestCatCost:
         calls = 10
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 left = torch.randn(256, 4096, device='flagos:0')
 right = torch.randn(256, 4096, device='flagos:0')
 torch.cat([left, right], dim=0)

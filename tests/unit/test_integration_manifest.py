@@ -15,33 +15,39 @@
 """Hold the shared integration manifest to the shape the loader relies on.
 
 The steps a platform runs used to be written in that platform's own config, so
-"which platforms run this group" was a question you answered by reading eight
+"which platforms run this group" was a question you answered by reading ten
 files and comparing them by hand -- and the answer drifted, because nothing
 made two platforms run the same step in the same order. The manifest is one
-ordered list that all eight read, and this module is the price of that: the
+ordered list that all ten read, and this module is the price of that: the
 composer is exercised through its real entry point, and every deviation that
 remains is a number in `_KNOWN_GAPS` rather than a difference nobody wrote
 down.
 
-The gaps are recorded rather than asserted away on purpose. This is the first
-of three changes; the platforms still differ in coverage, and a test that
-demanded uniformity today would fail until the last of them lands. What it
-demands *now* is that the difference is a written decision: adding a platform
-to a step's `platforms:` list has to be paired with editing `_KNOWN_GAPS`, and
-that edit is where a reviewer sees how much is still per-platform.
+The gaps are recorded rather than asserted away on purpose. Platform coverage
+still differs for groups whose backend capability does not exist yet, so adding
+a platform to a step's `platforms:` list has to be paired with editing
+`_KNOWN_GAPS`. Model groups have no such gap: all ten platforms run the same
+six Qwen3 groups through one path and checkpoint.
 """
 
 import copy
 import json
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from manifest_composer import (
     composed_steps,
     composer,
     environment_check,
+    load_module,
     manifest,
     platform_config,
     platform_names,
@@ -71,6 +77,13 @@ _TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG_DIR = _REPO / ".github/configs"
+_LOADER = _REPO / ".github/workflows/load-platform-config.yml"
+_HARDWARE = _REPO / ".github/workflows/integration-tests.yml"
+
+
+RUNNER_VALIDATION = "--validate-only"
+_HELPER = _REPO / ".github/scripts/integration_inventory_plan.py"
+
 
 # The steps that do not run on every platform yet, as `platforms` -> the
 # platforms missing from it. This is the ratchet: it has to match the
@@ -100,7 +113,7 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "amp_contract": ("kunlunxin", "mps", "ppu"),
-    "profiler_contract": ("gcu", "kunlunxin", "mps"),
+    "profiler_contract": ("mps",),
     "profiler_parity": (
         "ascend",
         "gcu",
@@ -111,26 +124,6 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "torch_compile": ("ascend", "dcu", "mps", "musa", "ppu"),
-    "inference": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
-    "training": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
     "native_comm_bridge": (
         "ascend",
         "cuda",
@@ -164,29 +157,7 @@ _KNOWN_GAPS = {
         "mps",
         "ppu",
     ),
-    "musa_flaggems_hybrid": (
-        "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "ppu",
-    ),
     "vendor_ops": ("mps",),
-    "unit_tests_per_file": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-        "ppu",
-    ),
     "backend_ops": (
         "ascend",
         "cuda",
@@ -223,8 +194,11 @@ def _assigned() -> dict[str, set[str]]:
 
 
 def _expected_entry(platform: str, entry: dict) -> bool:
-    """Whether one manifest entry applies to a platform."""
-    return platform in (entry.get("platforms") or _PLATFORMS)
+    """Whether one manifest entry runs, by the composer's requirement rule."""
+    if platform not in (entry.get("platforms") or _PLATFORMS):
+        return False
+    config = platform_config(platform)
+    return composer._applicable(entry, platform, config, platform_names())
 
 
 def _environment_entry() -> dict:
@@ -328,6 +302,53 @@ def test_the_only_substitution_is_the_display_name():
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_platform_has_the_same_model_groups_and_environment(platform):
+    """A model case runs everywhere and reads one published checkpoint."""
+    config = platform_config(platform)
+    groups = {step["id"]: step for step in composed_steps(platform)}
+    model_groups = (
+        "model",
+        "fallback_trace",
+        "inference",
+        "training",
+        "fallback_trace_train",
+        "qwen3_profiler",
+    )
+    assert set(model_groups) <= groups.keys()
+    for group in model_groups:
+        assert (
+            groups[group]["environment"]["MODEL_PATH"]
+            == "/var/lib/torch-fl-ci/models/Qwen3-0.6B"
+        )
+
+    assert not any(
+        mount.split(":", 2)[1].startswith("/var/lib/torch-fl-ci/models")
+        for mount in config["container_volumes"]
+    )
+
+
+def test_every_platform_runs_the_same_model_cases():
+    """The same model files and arguments run on every hardware platform."""
+    model_groups = {
+        "model",
+        "fallback_trace",
+        "inference",
+        "training",
+        "fallback_trace_train",
+        "qwen3_profiler",
+    }
+    expected = [
+        step for step in composed_steps(_PLATFORMS[0]) if step["id"] in model_groups
+    ]
+    assert len(expected) == len(model_groups)
+    for platform in _PLATFORMS[1:]:
+        actual = [
+            step for step in composed_steps(platform) if step["id"] in model_groups
+        ]
+        assert actual == expected, platform
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
 def test_the_environment_step_is_handed_this_platforms_expectations(platform):
     """One check per platform, and the data it asserts on is the config's.
 
@@ -374,11 +395,97 @@ def test_every_expectation_key_is_one_the_check_script_reads(platform):
         if bound is not None:
             assert set(bound) <= _BOUND_KEYS, (platform, key, bound)
             assert len(bound) == 1, (platform, key, bound)
+    bound = block["flagos_devices"]
+    count = bound.get("at_least", 0)
+    if "more_than" in bound:
+        count = bound["more_than"] + 1
+    if "exactly" in bound:
+        count = bound["exactly"]
+    assert count >= 1, f"{platform} must expose a flagos device, got {bound}"
     if block.get("flagtree"):
         assert set(block["flagtree"]) == _FLAGTREE_KEYS, (platform, block["flagtree"])
     for key in ("require_package_files", "forbid_package_files", "require_imports"):
         if key in block:
             assert isinstance(block[key], list) and block[key], (platform, key)
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_flaggems_build_asserts_the_native_compiler(platform):
+    """A FlagGems lane tests the Triton variant provisioned for its chip."""
+    config = platform_config(platform)
+    block = config["environment_check"]
+    flag_gems = "flaggems" in block.get("require_build_kernels", [])
+    if not flag_gems:
+        assert not block.get("flagtree"), platform
+        return
+    flagtree = block.get("flagtree")
+    assert flagtree, f"{platform} installs FlagTree without asserting it"
+    pin = environment_check._flagtree_version_from_pin_table(platform)
+    if pin is None:
+        hook = (_REPO / ".github/scripts/hooks" / f"set_env_{platform}.sh").read_text()
+        fallback = f"TORCH_FL_FLAGTREE_VERSION:-{flagtree['version_default']}"
+        assert fallback in hook, (platform, flagtree["version_default"])
+    else:
+        assert flagtree["version_default"] == pin, (platform, pin)
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_platform_runs_the_shared_flaggems_conformance_steps(platform):
+    """Chip support differs; the flow and its case sets do not.
+
+    Both passes are generated for every platform and contain the same cases.
+    The kernel pass is removed only when the platform's build forbids the
+    FlagGems set. Every platform that can build FlagGems must run it.
+    """
+    steps = composed_steps(platform)
+    matching = [
+        step
+        for step in steps
+        if step["id"] in {"flaggems_conformance", "flaggems_kernel_conformance"}
+    ]
+    expected = [
+        ("flaggems_conformance", "python tests/integration/flaggems/run.py native"),
+        (
+            "flaggems_kernel_conformance",
+            "python tests/integration/flaggems/run.py flaggems",
+        ),
+    ]
+    block = platform_config(platform)["environment_check"]
+    if "flaggems" in block.get("forbid_build_kernels", []):
+        assert "flaggems" not in block.get("require_build_kernels", []), platform
+        expected = expected[:1]
+    else:
+        assert block.get("require_build_kernels") == ["flaggems"], platform
+    assert [(step["id"], step["command"]) for step in matching] == expected, platform
+
+
+def test_mps_is_the_only_platform_that_forbids_flaggems_kernels():
+    """The MPS build has no FlagGems kernels; every other platform requires them."""
+    forbidden = {
+        platform
+        for platform in _PLATFORMS
+        if "flaggems"
+        in platform_config(platform)["environment_check"].get(
+            "forbid_build_kernels", []
+        )
+    }
+    assert forbidden == {"mps"}
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_platform_build_switches_agree_with_the_cmake_kernel_defaults(platform):
+    """The environment check and the build state the same kernel sets."""
+    defaults = json.loads((_REPO / "cmake/flagos_platforms.json").read_text())[
+        "accelerators"
+    ][platform]["kernel_defaults"]
+    expected = ["flaggems"]
+    block = platform_config(platform)["environment_check"]
+    if defaults["FLAGOS_BUILD_FLAGGEMS"]:
+        assert block.get("require_build_kernels") == expected, platform
+        assert "flaggems" not in block.get("forbid_build_kernels", []), platform
+    else:
+        assert block.get("forbid_build_kernels") == expected, platform
+        assert "flaggems" not in block.get("require_build_kernels", []), platform
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
@@ -394,11 +501,7 @@ def test_no_platform_config_carries_a_step_list_of_its_own(platform):
 
 
 def test_the_steps_that_do_not_run_everywhere_are_exactly_the_recorded_ones():
-    """The remaining per-platform coverage, held to the list above.
-
-    Read the failure as a to-do list: each entry is a step one platform runs
-    and another does not, which this layer's follow-ups close one at a time.
-    """
+    """Only the recorded backend gaps differ between platform plans."""
     assigned = _assigned()
     gaps = {
         step_id: tuple(p for p in _PLATFORMS if p not in platforms)
@@ -615,10 +718,450 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
         == 0
     )
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == composed_steps("cuda")
+    groups = json.loads(captured.out)
+    assert groups == composed_steps("cuda")
+    model = next(step for step in groups if step["id"] == "model")
+    assert (
+        f"model-path={model['environment']['MODEL_PATH']}" in captured.err.splitlines()
+    )
     # The loader prints how far the platforms still differ, once per platform.
     assert "cuda:" in captured.err
     assert "do not run on every platform yet" in captured.err
+
+
+def _expected_bindings(platform):
+    """The inventory bindings the composed plan implies for one platform."""
+    entries = {entry["id"]: entry for entry in _entries()}
+    return [
+        (group, kind)
+        for group, kind in composer.INVENTORY_GROUPS.items()
+        if group in {step["id"] for step in composed_steps(platform)}
+        and all(
+            name
+            not in platform_config(platform)["environment_check"].get(
+                "forbid_build_kernels", []
+            )
+            for name in entries[group].get("requires_build_kernels", [])
+        )
+    ]
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_composed_plan_uses_the_same_shared_inventories(platform):
+    """Every shared inventory a plan runs binds the one kind it was written for.
+
+    A restricted step (the FlagGems kernel pass) drops out of a plan whose
+    build forbids its kernel set; every other shared inventory must remain.
+    """
+    steps = composed_steps(platform)
+    identifiers = [step["id"] for step in steps]
+    expected = _expected_bindings(platform)
+    for group, kind in expected:
+        assert group in identifiers, platform
+    assert composer.inventory_bindings(steps) == expected, platform
+
+
+def test_the_loader_hands_the_runner_the_composers_inventory_plan(tmp_path):
+    """The loader's runner arguments come from the composer's plan.
+
+    Run the real composer and helper CLIs: the loader must not carry a second
+    copy of the group-to-kind table, and the arguments it emits must resolve
+    to the runner's own bindings.
+    """
+    notes = tmp_path / "composer.notes"
+    notes.write_text(_compose_notes(tmp_path, "cuda"))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO / ".github/scripts/integration_inventory_plan.py"),
+            "--composer-output",
+            str(notes),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = _read_github_outputs(result.stdout)
+    expected = _expected_bindings("cuda")
+    assert json.loads(outputs["integration_inventories"]) == [
+        group for group, _ in expected
+    ]
+    assert outputs["test_inventory_kinds"] == " ".join(kind for _, kind in expected)
+    assert set(json.loads(outputs["test_inventories"])) == {
+        kind for _, kind in expected
+    }
+    assert outputs["integration_inventory_arguments"] == " ".join(
+        f"--inventory {group}={kind}" for group, kind in expected
+    )
+    assert outputs["loader_inventory_arguments"] == " ".join(
+        f"--inventory {group}={composer.INVENTORY_SOURCES[group]}"
+        for group, _ in expected
+    )
+
+    folded = " ".join(_LOADER.read_text(encoding="utf-8").split())
+    assert "integration_inventory_plan.py" in folded
+    assert "integration_inventory_arguments" in folded
+    assert "run_integration_tests.py --validate-only" in folded
+    for group in composer.INVENTORY_GROUPS:
+        assert f'--inventory "{group}="' not in folded
+
+
+def test_the_composer_uses_the_hardware_runners_inventory_tables():
+    """A plan label and the report verifier have one source for each group."""
+    source = (_REPO / ".github/scripts/run_integration_tests.py").read_text()
+    harness = (_REPO / ".github/scripts/compose_integration_manifest.py").read_text()
+    assert "INVENTORY_GROUPS = {" in source
+    assert "INVENTORY_SOURCES = {" in source
+    assert source.count("INVENTORY_GROUPS = {") == 1
+    assert source.count("INVENTORY_SOURCES = {") == 1
+    assert "INVENTORY_GROUPS = _RUNNER.INVENTORY_GROUPS" in harness
+    assert "INVENTORY_SOURCES = _RUNNER.INVENTORY_SOURCES" in harness
+
+
+def _compose_notes(directory, platform):
+    """Run the composer CLI and return its machine-readable notes."""
+    manifest_json = directory / "manifest.json"
+    config_json = directory / "config.json"
+    manifest_json.write_text(json.dumps(manifest()))
+    config_json.write_text(json.dumps(platform_config(platform)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO / ".github/scripts/compose_integration_manifest.py"),
+            "--platform",
+            platform,
+            "--manifest",
+            str(manifest_json),
+            "--platform-config",
+            str(config_json),
+            "--config-dir",
+            str(_CONFIG_DIR),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stderr
+
+
+def test_the_inventory_helper_rejects_an_incomplete_or_inconsistent_plan(
+    tmp_path,
+):
+    """A plan must name each kind once and only the kinds the runner knows."""
+    notes = _compose_notes(tmp_path, "cuda").splitlines()
+    plan = next(line for line in notes if line.startswith("inventory-plan="))
+    other = "\n".join(line for line in notes if line != plan)
+    entries = json.loads(plan.split("=", 1)[1])
+    unknown = [*entries, {**entries[0], "kind": "unknown", "group": "unknown"}]
+    repeated = [entries[0], *entries]
+    for body, message in (
+        ("", "exactly one inventory-plan"),
+        (plan + "\n" + plan, "exactly one inventory-plan"),
+        ("inventory-plan=" + json.dumps(unknown), "expected"),
+        ("inventory-plan=" + json.dumps(repeated), "repeats group"),
+    ):
+        path = tmp_path / (message.replace(" ", "-") + ".notes")
+        path.write_text(other + "\n" + body + "\n")
+        result = subprocess.run(
+            [sys.executable, str(_HELPER), "--composer-output", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert message in result.stderr, result.stderr
+
+
+def _read_github_outputs(source):
+    """Parse GitHub heredoc outputs from one helper invocation."""
+    outputs = {}
+    current = None
+    lines = []
+    for line in source.splitlines():
+        if current is None and "=" in line:
+            key, value = line.split("=", 1)
+            outputs[key] = value
+            continue
+        if current is None and "<<" in line:
+            current = line.split("<<", 1)[0]
+            continue
+        if current is not None and line == f"__{current}__":
+            outputs[current] = "\n".join(lines)
+            current = None
+            lines = []
+        elif current is not None:
+            lines.append(line)
+    assert current is None, f"unterminated output {current}"
+    return outputs
+
+
+def test_the_configuration_step_writes_every_declared_output(tmp_path):
+    """Every declared output survives the loader's own output writers.
+
+    The scalar and heredoc writers are separate. A missing scalar writer used
+    to fail every configuration job with exit 127 only after all of the
+    inventories had been validated. With yq installed, execute the complete
+    step; otherwise execute its post-validation output block. The CI pin is
+    the version exercised here because yq operators vary across releases.
+    """
+    yq = shutil.which("yq")
+
+    document = yaml.safe_load(_LOADER.read_text(encoding="utf-8"))
+    job = document["jobs"]["configuration"]
+    step = next(entry for entry in job["steps"] if entry.get("id") == "config")
+    output = tmp_path / "github-output"
+    env = {
+        "PATH": os.environ["PATH"],
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(output),
+    }
+    if yq is None:
+        # Run the actual writer definitions and their calls against fixture
+        # values. The inventory block is produced by the same helper the step
+        # consumes, so every declared output must still be present.
+        tail = "emit_list() {" + step["run"].split("emit_list() {", 1)[1]
+        inputs = {
+            "DISPLAY_NAME": "CUDA",
+            "SETUP_SCRIPT": ".github/scripts/set_env.sh",
+            "SETUP_PLATFORM": "cuda",
+            "SETUP_STAGE": "integration",
+            "CI_IMAGE": "image",
+            "RUNS_ON": "[]",
+            "VOLUMES": "[]",
+            "OPTIONS": "options",
+            "TIMEOUT_MINUTES": "60",
+            "INTEGRATION_TIMEOUT": "90",
+            "ARTIFACT_NAME": "wheel-cuda",
+            "INTEGRATION_TESTS": "[]",
+            "MODEL_PATH": "/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+            "INTEGRATION_ENVIRONMENT": "{}",
+            "BUILD_TOOLS": "",
+            "TEST_DEPENDENCIES": "",
+            "FLAG_GEMS_REQUIREMENT": "required",
+            "TORCH_FL_PACKAGE_ROOT": str(tmp_path / "site-packages"),
+            "INVENTORY_OUTPUTS": str(tmp_path / "inventory-outputs"),
+        }
+        script = "\n".join(
+            f"{name}={shlex.quote(value)}" for name, value in inputs.items()
+        )
+        script += "\nset -euo pipefail\n" + tail
+        (tmp_path / "inventory-outputs").write_text(
+            "\n".join(
+                f"{name}<<__{name}__\n{value}\n__{name}__"
+                for name, value in (
+                    ("test_inventories", "{}"),
+                    ("test_inventory_kinds", ""),
+                    ("integration_inventories", "[]"),
+                    ("loader_inventory_arguments", ""),
+                    ("integration_inventory_arguments", ""),
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        # Use the local yq in place of the Linux download; the rest of the step
+        # still runs as written in CI.
+        script = step["run"].replace(
+            "sudo wget -qO /usr/local/bin/yq \\\n"
+            "  https://github.com/mikefarah/yq/releases/download/"
+            "v4.45.1/yq_linux_amd64\n"
+            "sudo chmod +x /usr/local/bin/yq",
+            f"export PATH={shlex.quote(str(Path(yq).parent))}:$PATH",
+        )
+        assert "yq_linux_amd64" not in script
+        python = tmp_path / "python"
+        python.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+            encoding="utf-8",
+        )
+        python.chmod(0o755)
+        env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+        env["GITHUB_WORKSPACE"] = str(_REPO)
+        env["PLATFORM"] = "cuda"
+
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+        cwd=_REPO,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr, script[-800:])
+    values = _read_github_outputs(output.read_text(encoding="utf-8"))
+    declared = {
+        match.group(1)
+        for value in job["outputs"].values()
+        if (match := re.fullmatch(r"\$\{\{ steps\.config\.outputs\.(.+) \}\}", value))
+    }
+    assert set(values) == declared
+    assert values["display_name"] == "CUDA"
+    assert values["setup_stage"] == "integration"
+    assert values["timeout_minutes"] == "60"
+    if yq is None:
+        assert values["integration_timeout_minutes"] == "90"
+    else:
+        assert json.loads(values["integration_tests"]) == composed_steps("cuda")
+        assert values["flag_gems_requirement"] == "required"
+
+        # yq 4.45.1 is installed by the loader in CI. It has no general `if`
+        # expression, so run the same complete step for each platform that
+        # explicitly forbids FlagGems and verify its derived output.
+        forbidden = [
+            platform
+            for platform in _PLATFORMS
+            if "flaggems"
+            in platform_config(platform)["environment_check"].get(
+                "forbid_build_kernels", []
+            )
+        ]
+        assert forbidden
+        for platform in forbidden:
+            output.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                cwd=_REPO,
+                env={**env, "PLATFORM": platform},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                platform,
+                result.stdout,
+                result.stderr,
+            )
+            platform_values = _read_github_outputs(output.read_text(encoding="utf-8"))
+            assert platform_values["flag_gems_requirement"] == "forbidden"
+
+
+def test_the_hardware_job_materializes_and_retains_each_inventory():
+    """The job writes the kinds its plan runs and retains their directory."""
+    source = _HARDWARE.read_text(encoding="utf-8")
+    materialize = source.split("- name: Materialize shared test inventories", 1)[1]
+    run = materialize.split("- name:", 1)[0]
+    assert "SHARED_TEST_INVENTORY_KINDS" in run
+    assert "set(inventories) != required" in run
+    assert 'root="$INTEGRATION_INVENTORY_ROOT"' in run
+    assert "tests/$kind/google-test.json" not in run.replace(" ", "")
+
+    folded = " ".join(source.split())
+    assert "integration_inventory_arguments" in folded
+    assert '"${inventory_arguments[@]}"' in folded
+    retained = source.split("- name: Retain shared test inventories", 1)
+    assert len(retained) == 2, "the hardware job does not retain the inventories"
+    assert "${{ env.INVENTORY_ROOT }}/" in retained[1]
+    assert "${{ runner.temp }}/torch-fl-inventories" in retained[1]
+    assert "shared-test-inventory-" not in source
+
+
+def test_checkout_per_file_reports_satisfy_one_shared_unit_inventory(
+    monkeypatch, tmp_path
+):
+    """A hardware report names a checkout file while the loader names its case."""
+    checkout = tmp_path / "checkout"
+    test_file = checkout / "tests/unit/test_one.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_one():\n    assert True\n")
+    reports = tmp_path / "reports"
+    case = "tests/unit/test_one.py"
+    inventory = {"cases": [case], "aliases": {}}
+    reports.mkdir()
+    (reports / "google-test.json").write_text(json.dumps(inventory))
+    (reports / "unit-one.json").write_text(
+        json.dumps(
+            {
+                "args": [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    str(test_file),
+                    "-q",
+                ],
+                "tests": [
+                    {
+                        "nodeid": case + "::test_one",
+                        "outcome": "passed",
+                        "setup": {"outcome": "passed"},
+                        "call": {"outcome": "passed"},
+                        "teardown": {"outcome": "passed"},
+                    }
+                ],
+                "summary": {"passed": 1, "failed": 0, "error": 0},
+            }
+        )
+    )
+    (reports / "unit-one.unit").write_text(json.dumps({"args": [str(test_file)]}))
+    (reports / "unit-one.pending").write_text(json.dumps({"group": "unit"}))
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(checkout))
+    runner = load_module(
+        _REPO / ".github/scripts/run_integration_tests.py",
+        "unit_inventory_runner",
+    )
+    runner.verify_inventory(
+        "unit_tests_per_file",
+        runner.report_cases(reports, allow_unit_files=True, expected=inventory),
+        inventory,
+    )
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_the_repository_loader_arguments_validate_the_source_cases(tmp_path, platform):
+    """The loader passes test trees; hardware passes report directories."""
+    manifest_json = tmp_path / "manifest.json"
+    config_json = tmp_path / "config.json"
+    manifest_json.write_text(json.dumps(manifest()))
+    config_json.write_text(json.dumps(platform_config(platform)))
+    composed = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO / ".github/scripts/compose_integration_manifest.py"),
+            "--platform",
+            platform,
+            "--manifest",
+            str(manifest_json),
+            "--platform-config",
+            str(config_json),
+            "--config-dir",
+            str(_CONFIG_DIR),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    helper = subprocess.run(
+        [sys.executable, str(_HELPER), "--composer-output", "/dev/stdin"],
+        input=composed.stderr,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    arguments = _read_github_outputs(helper.stdout)["loader_inventory_arguments"]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO / ".github/scripts/run_integration_tests.py"),
+            RUNNER_VALIDATION,
+            *shlex.split(arguments),
+        ],
+        env={
+            **os.environ,
+            "INTEGRATION_TESTS": composed.stdout,
+            "INTEGRATION_ENVIRONMENT": "{}",
+            "INTEGRATION_SOURCE_ROOT": str(_REPO),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        f"Validated {len(composed_steps(platform))} configured integration test"
+        in result.stdout
+    )
 
 
 def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
@@ -642,3 +1185,41 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
         == 1
     )
     assert "::error::" in capsys.readouterr().err
+
+
+def test_the_model_root_comes_from_the_model_mount_job():
+    """The container replacement uses the source prepared by its sibling job."""
+    for platform in _PLATFORMS:
+        groups = {step["id"]: step for step in composed_steps(platform)}
+        assert groups["model"]["environment"]["MODEL_PATH"] == (
+            "/var/lib/torch-fl-ci/models/Qwen3-0.6B"
+        )
+        config = platform_config(platform)
+        model_mounts = [
+            mount
+            for mount in config["container_volumes"]
+            if mount.split(":", 2)[1].startswith("/var/lib/torch-fl-ci/models")
+        ]
+        assert model_mounts == []
+
+
+def test_artifacts_use_runner_paths_without_parent_components():
+    workflow = yaml.safe_load(
+        (_REPO / ".github/workflows/integration-tests.yml").read_text()
+    )
+    steps = {
+        step.get("name"): step
+        for step in workflow["jobs"]["integration-tests"]["steps"]
+    }
+    for name in (
+        "Retain pytest reports",
+        "Retain shared test inventories",
+        "Retain Python coverage",
+    ):
+        step = steps[name]
+        values = "\n".join(step["with"]["path"].splitlines())
+        assert "/../" not in values
+        roots = {key: step["env"][key] for key in step["env"] if key.endswith("ROOT")}
+        assert roots
+        assert all(value.startswith("${{ runner.temp }}/") for value in roots.values())
+        assert all(f"${{{{ env.{key} }}}}" in values for key in roots)

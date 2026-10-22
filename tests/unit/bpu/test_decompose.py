@@ -19,7 +19,6 @@ from __future__ import annotations
 import operator
 from pathlib import Path
 
-import pytest
 import torch
 from torch._dynamo.backends.common import aot_autograd
 
@@ -96,7 +95,6 @@ def test_rewrite_preserves_numerics() -> None:
 
 def test_exports_to_onnx_after_rewrite(tmp_path: Path) -> None:
     """Without the rewrite this raises UnsupportedOperatorError."""
-    pytest.importorskip("onnx")
     mod = ConvBN().eval()
     x = torch.randn(1, 3, 8, 8)
     gm = _aten_graph(mod, x)
@@ -308,7 +306,6 @@ def test_attention_becomes_one_partition() -> None:
 
 def test_attention_exports_to_onnx(tmp_path: Path) -> None:
     """The failure this rewrite exists for: UnsupportedOperatorError on _softmax."""
-    pytest.importorskip("onnx")
     gm = _aten_graph(Attention().eval(), torch.randn(1, 8, 32))
 
     inputs = [

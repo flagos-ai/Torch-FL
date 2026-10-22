@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from flagcicd_launch import GROUP, SAMPLE, current, strip_child_activation
+
 
 class CoverageSession:
     def __init__(self, collector, marker):
@@ -53,21 +55,20 @@ class CoverageSession:
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_load_initial_conftests(early_config):
-    directory = os.environ.pop("FLAGCICD_COVERAGE_DIR", "")
+def pytest_load_initial_conftests(early_config, parser, args):
+    launch = current()
+    directory = launch.coverage_dir
     if not directory:
+        os.environ.pop("FLAGCICD_COVERAGE_DIR", None)
         return
-    # Only actual groups/per-file runs inherit activation from their runner.
-    # A pytest fixture's own sample subprocess must not add coverage sessions.
-    plugins = [
-        name
-        for name in os.environ.get("PYTEST_PLUGINS", "").split(",")
-        if name.strip() not in ("", "flagcicd_coverage")
-    ]
-    if plugins:
-        os.environ["PYTEST_PLUGINS"] = ",".join(plugins)
-    else:
-        os.environ.pop("PYTEST_PLUGINS", None)
+    if launch.launcher == SAMPLE:
+        return
+    if launch.launcher != GROUP or not launch.group:
+        raise pytest.UsageError(
+            "Python coverage requires a group with FLAGCICD_TEST_GROUP"
+        )
+    strip_child_activation()
+    _without_session_plugins()
     try:
         import coverage
 
@@ -75,7 +76,7 @@ def pytest_load_initial_conftests(early_config):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         marker = directory / f"coverage-{uuid.uuid4().hex}.pending"
         marker.write_text(
-            json.dumps({"group": os.environ.get("FLAGCICD_TEST_GROUP", "")}),
+            json.dumps({"group": launch.group}),
             encoding="utf-8",
         )
         collector = coverage.Coverage(
@@ -90,3 +91,16 @@ def pytest_load_initial_conftests(early_config):
         )
     except Exception as error:
         print(f"::warning::Cannot start Python coverage: {error}", file=sys.stderr)
+
+
+def _without_session_plugins():
+    """Keep a deliberate sample pytest process out of the parent session."""
+    plugins = [
+        name
+        for name in os.environ.get("PYTEST_PLUGINS", "").split(",")
+        if name.strip() not in ("", "flagcicd_report", "flagcicd_coverage")
+    ]
+    if plugins:
+        os.environ["PYTEST_PLUGINS"] = ",".join(plugins)
+    else:
+        os.environ.pop("PYTEST_PLUGINS", None)

@@ -56,8 +56,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -562,7 +561,7 @@ class TestTakeDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "t = torch.arange(32, dtype=torch.float32, device='flagos:0'); "
                 "i = torch.tensor([-1, 0, 31], device='flagos:0'); "
                 "torch.take(t, i); "
@@ -592,7 +591,7 @@ class TestTakeDispatch:
                 # A one-liner cannot carry this: `try` is a compound statement
                 # and a semicolon will not start one, so the body is written in
                 # newlines that the `-c` argument preserves.
-                "import torch, torch_fl\n"
+                "from device_init import torch, torch_fl\n"
                 "t = torch.arange(20, dtype=torch.float32, device='flagos:0')\n"
                 "i = torch.tensor([20], device='flagos:0')\n"
                 "try:\n"
@@ -635,7 +634,7 @@ class TestTakeCost:
         reads = 10
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 operand = torch.randn(151936, 1024, device='flagos:0')
 index = torch.randint(0, 151936, (512,), device='flagos:0')
 torch.take(operand, index)

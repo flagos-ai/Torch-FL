@@ -34,9 +34,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 _CPP_ENV = {"FLAGOS_LOG": "dispatch"}
@@ -78,7 +77,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_mm_routes_cpp(self):
         code = (
-            "import torch_fl, torch; "
+            "from device_init import torch, torch_fl; "
             "a=torch.randn(64,64,device='flagos:0'); "
             "b=torch.randn(64,64,device='flagos:0'); "
             "torch.mm(a,b)"
@@ -88,7 +87,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_bmm_routes_cpp(self):
         code = (
-            "import torch_fl, torch; "
+            "from device_init import torch, torch_fl; "
             "a=torch.randn(4,64,64,device='flagos:0'); "
             "b=torch.randn(4,64,64,device='flagos:0'); "
             "torch.bmm(a,b)"
@@ -98,7 +97,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_embedding_routes_cpp(self):
         code = (
-            "import torch_fl, torch, torch.nn.functional as F; "
+            "from device_init import torch, torch_fl; "
             "w=torch.randn(100,32,device='flagos:0'); "
             "idx=torch.randint(0,100,(8,),device='flagos:0'); "
             "F.embedding(idx,w)"
@@ -108,7 +107,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_softmax_routes_cpp(self):
         code = (
-            "import torch_fl, torch, torch.nn.functional as F; "
+            "from device_init import torch, torch_fl; "
             "x=torch.randn(32,128,device='flagos:0'); "
             "F.softmax(x,dim=-1)"
         )
@@ -117,7 +116,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_sum_routes_cpp(self):
         code = (
-            "import torch_fl, torch; "
+            "from device_init import torch, torch_fl; "
             "x=torch.randn(64,128,device='flagos:0'); "
             "torch.sum(x)"
         )
@@ -126,7 +125,7 @@ class TestFlaggemsCppDispatchLog:
     @pytest.mark.flaggems_cpp
     def test_sum_dim_routes_cpp(self):
         code = (
-            "import torch_fl, torch; "
+            "from device_init import torch, torch_fl; "
             "x=torch.randn(64,128,device='flagos:0'); "
             "torch.sum(x,dim=1)"
         )
@@ -134,7 +133,7 @@ class TestFlaggemsCppDispatchLog:
 
     @pytest.mark.flaggems_cpp
     def test_zeros_routes_cpp(self):
-        code = "import torch_fl, torch; torch.zeros(64,64,device='flagos:0')"
+        code = "from device_init import torch, torch_fl; torch.zeros(64,64,device='flagos:0')"
         _assert_routes_cpp(_run_subprocess(code), "zeros")
 
 

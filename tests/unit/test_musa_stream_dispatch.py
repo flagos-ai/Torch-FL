@@ -25,11 +25,14 @@ which ``sys.modules`` is what these tests check; a vendor with no stream class o
 its own must not reach that library, and gets the handle-only stand-in
 ``current_stream()`` returns instead of whichever class the old ``else`` meant.
 
-The vendor branches are reached by calling ``Stream.__init__`` on an
-``object.__new__(Stream)`` rather than ``Stream(...)``: ``Stream.__new__`` proxies
-``torch.cuda.Stream`` and only falls back to ``object.__new__`` where there is no
-CUDA runtime, so constructing the class directly would test the host rather than
-the dispatch. Nothing here needs a MUSA device or the extension's real bindings.
+The vendor branches are reached by calling ``Stream.__init__`` on
+``Stream.__new__(Stream)`` rather than ``Stream(...)``: ``Stream.__new__`` never
+enters the real ``torch.cuda.Stream`` initializer in these tests, so the host's
+CUDA support does not decide which branch runs. The allocation still has to go
+through ``Stream.__new__`` because a vendor torch may make ``Stream`` a subclass
+of a native extension type, which Python forbids allocating with
+``object.__new__``. Nothing here needs a MUSA device or the extension's real
+bindings.
 """
 
 import sys
@@ -70,8 +73,8 @@ def _ascend_was_imported() -> bool:
 
 
 def _build_stream(device=None, priority=0):
-    """Run ``Stream.__init__`` without ``Stream.__new__``'s CUDA inheritance."""
-    stream = object.__new__(flagos.Stream)
+    """Allocate a ``Stream`` without constructing the real CUDA initializer."""
+    stream = flagos.Stream.__new__(flagos.Stream, device, priority)
     flagos.Stream.__init__(stream, device, priority)
     return stream
 

@@ -437,12 +437,15 @@ if [[ "$FLAGCX_COPIED" == "0" ]]; then
 fi
 
 # Install the published FlagGems wheel after FlagTree. --no-deps keeps the
-# CPU-only torch ABI intact; install its non-torch dependencies explicitly.
-PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' numpy
+# CPU-only torch ABI intact; the pipeline installs the same runtime and test
+# dependencies from its shared cohort after the hook.
+PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'sqlalchemy==2.0.48'
 install_flag_gems
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers
+  # Test packages are installed by the pipeline's shared cohort. Keep pytest,
+  # which is the runner dependency needed before that step.
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'

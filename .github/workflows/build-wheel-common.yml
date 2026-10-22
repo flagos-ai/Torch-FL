@@ -111,10 +111,19 @@ jobs:
       - name: Reset pip cache dir
         shell: bash
         run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
-          rm -rf "$PIP_CACHE_DIR"
-          mkdir -p "$PIP_CACHE_DIR"
-          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+          cache="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
+          python3 - "$cache" <<'PY'
+          import shutil
+          import sys
+          from pathlib import Path
+
+          cache = Path(sys.argv[1]).resolve()
+          if cache.name != "torch-fl-pip":
+              raise SystemExit(f"refusing to reset an unexpected cache: {cache}")
+          shutil.rmtree(cache, ignore_errors=True)
+          PY
+          mkdir -p "$cache"
+          printf 'PIP_CACHE_DIR=%s\n' "$cache" >> "$GITHUB_ENV"
 
       # Look up first: a transfer timeout can return success with no matched key.
       # A cold miss may save later; a failed matched transfer must not upload.
@@ -133,6 +142,8 @@ jobs:
             ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      # On a transfer timeout, clear partial files so pip does not extract an
+      # incomplete wheel from the cache and fail later during an import.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
@@ -144,6 +155,13 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+
+      - name: Discard incomplete pip cache transfer
+        if: ${{ steps.pip-cache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
 
       - name: Prepare platform environment
         env:
@@ -273,6 +291,7 @@ jobs:
       # Skip exact hits, failed lookups/transfers and cancelled jobs.
       # Cache errors must not change the build/test result.
       - name: Save pip downloads
+        id: pip-cache-save
         if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
         continue-on-error: true

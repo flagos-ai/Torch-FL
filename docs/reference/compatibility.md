@@ -90,8 +90,8 @@ The default and most exercised platform. [`.github/configs/cuda.yml`](../../.git
 (lines 50-82) builds and tests the **default** wheel — FlagGems-primary, no CUDA boxing kernels and
 no bundled `libtorch_cuda.so`, both asserted from the build record rather than from an environment
 variable — and runs the pipeline `.github/integration-manifest.yml` composes for it: the
-FlagGems-runtime operator suite, general/factory tests, the profiler parity suite, and Qwen3-0.6B
-inference and training against a mounted model. Test cases that assert a `-> cuda` route skip on
+FlagGems-runtime operator suite, general/factory tests, the profiler parity suite, and the shared
+Qwen3-0.6B model groups against a checkpoint staged by CI. Test cases that assert a `-> cuda` route skip on
 this lane: the wheel compiles no kernel set for that route, so the marker is an answer the lane
 cannot produce rather than a measurement it declines to take.
 Distributed collectives and DDP gradient sync are live-verified on 2x/8x A100 through FlagCX
@@ -153,11 +153,11 @@ streams.
 [`.github/configs/ascend.yml`](../../.github/configs/ascend.yml) (lines 78-97) runs the
 Ascend-marked operator suite and the full RNG dispatch suite in CI. FlagGems-marked tests in
 `test_rng_dispatch.py` are selected via `-m "main_ops"` (lines 90-94) but the FlagGems runtime
-path is not enabled in CI, so those tests run against the native ACLNN backend. Model-level
-(Qwen3) validation exists as a point measurement outside CI — training at 0.82x `torch_npu` on
-real Ascend 910 hardware (`tests/perf/e2e_qwen3_train_ascend.py`) — but
-[`.github/configs/ascend.yml`](../../.github/configs/ascend.yml) (line 110) explicitly defers
-Qwen3 inference/training smoke pending a model mount on the CI runner. Profiler *parity* is
+path is not enabled in CI, so those tests run against the native ACLNN backend. The shared
+Qwen3 model groups run on Ascend in CI against the pinned checkpoint. A separate performance
+measurement recorded training at 0.82x `torch_npu` on real Ascend 910 hardware
+(`tests/perf/e2e_qwen3_train_ascend.py`).
+Profiler *parity* is
 still out of scope — `test_profiler_parity.py` is a diff against a torch-cuda baseline, and
 only the CUDA-boxing platforms can run one — and remains excluded from CI (same file, lines
 112-117). The shared profiler *contract* does run, and the device side of it is live: MSPTI
@@ -177,7 +177,7 @@ recommends the FlagCX path (see
 204-208); the native HCCL fallback and the `flagos→npu` zero-copy view are architectural
 routing, not on-hardware-verified collectives (same file, lines 67-75).
 
-The FlagGems route runs on FlagTree (`0.6.2a1+ascend3.5`, Triton 3.5), and the
+The FlagGems route runs on FlagTree (`0.7.1a1+ascend3.5`, Triton 3.5), and the
 route table is generated FlagGems-first with ACLNN as the fallback for everything
 FlagGems cannot compile or run. Because a conf cannot express a per-dtype
 exception, float64 calls that the conf routes to FlagGems are redirected to
@@ -232,10 +232,10 @@ this is not covered by CI.
 
 ### Hygon DCU
 
-[`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) (lines 84-99) runs vendor-backend
-and FlagGems-runtime operator suites, general tests, and the profiler parity suite in CI;
-inference and training smoke are explicitly deferred pending a model mount and card-count
-confirmation on the runner (same file, lines 57-61). DCU is a CUDA-boxing build over the
+[`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) runs vendor-backend
+and FlagGems-runtime operator suites, general tests, the profiler parity suite, and the shared
+Qwen3 inference and training groups in CI. The model groups use the same pinned checkpoint as
+every other platform. DCU is a CUDA-boxing build over the
 hipified DTK torch, so it reuses the generated CUDA boxing kernels with no hand-written kernels
 of its own (see [`setup.py`](../../setup.py), the `FLAGOS_ACCELERATOR=dcu` branch). FlagGems C++ dispatch is not built
 for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) and [`setup.py`](../../setup.py) force `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` with the comment "FLAGOS_BUILD_FLAGGEMS_CPP needs liboperators.so,

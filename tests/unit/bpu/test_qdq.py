@@ -22,11 +22,13 @@ without needing the compiler or the device.
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 import torch
 
-onnx = pytest.importorskip("onnx")
+onnx = importlib.import_module("onnx")
 
 from torch_fl.accelerator.bpu.calibrate import (  # noqa: E402
     Calibration,
@@ -121,7 +123,7 @@ def test_weights_become_int8_with_signed_zero_point(tmp_path):
 
 
 def test_quantized_graph_stays_numerically_close(tmp_path):
-    ort = pytest.importorskip("onnxruntime")
+    ort = importlib.import_module("onnxruntime")
 
     model = TwoConv().eval()
     x = torch.randn(1, 3, 16, 16)
@@ -196,7 +198,7 @@ def test_pool_gets_no_weight_dequantize(tmp_path):
 
 
 def test_pooling_stays_numerically_close(tmp_path):
-    ort = pytest.importorskip("onnxruntime")
+    ort = importlib.import_module("onnxruntime")
 
     model = ConvPool().eval()
     x = torch.randn(1, 3, 32, 32)
@@ -246,7 +248,7 @@ def test_calibrate_module_records_leaf_outputs():
 
 
 def test_calibrate_onnx_scales_the_conv_inputs(tmp_path):
-    pytest.importorskip("onnxruntime")
+    importlib.import_module("onnxruntime")
     from torch_fl.accelerator.bpu.calibrate import calibrate_onnx
 
     model = TwoConv().eval()
@@ -262,7 +264,7 @@ def test_calibrate_onnx_scales_the_conv_inputs(tmp_path):
 
 def test_calibrated_scales_beat_a_bad_default(tmp_path):
     """Calibration exists to avoid clipping; show that it does."""
-    ort = pytest.importorskip("onnxruntime")
+    ort = importlib.import_module("onnxruntime")
     from torch_fl.accelerator.bpu.calibrate import calibrate_onnx
 
     model = TwoConv().eval()

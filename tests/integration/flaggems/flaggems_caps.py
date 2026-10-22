@@ -18,23 +18,26 @@ This package is the FlagGems half of the same contract ``tests/integration/
 runtime`` states for the device runtime: one suite, run unchanged on every
 accelerator, deciding from what the wheel carries rather than from the name of
 the machine it happens to be running on. Two facts are read, both of them files
-inside the wheel:
+delivered with the wheel:
 
-    * the op-routing conf (``backends_<platform>.conf``). Unlike the runtime
-      contract, a ``none`` route is *not* an error here: FlagGems is an optional
-      layer whose per-operator coverage is expected to differ between chips, so
-      the suite measures the operators this conf routes to a FlagGems backend
-      and skips the rest. What it refuses to accept is a conf that claims a
-      route the dispatcher does not take.
+    * the op-routing conf (``backends_<platform>.conf``). Per-operator coverage
+      is expected to differ between chips, but every row of the shared routing
+      table is checked: a route asserted for a FlagGems backend must be taken,
+      and a platform without that route must agree with its conf. What the suite
+      refuses to accept is a conf that claims a route the dispatcher does not
+      take or a configured platform that has no row.
     * the build record (``torch_fl/_build_config.py``), which says whether the
       FlagGems kernel set was compiled into this wheel at all.
+
+A native route may also be conditional on the registration set compiled into
+the wheel. The source checkout that supplied those lists is named by
+``TORCH_FL_SOURCE_ROOT``; the shared runner runs from a wheel-only test tree.
 
 The operator lists, the pinned-off sets and the expected route counts below are
 measurements, keyed by the accelerator the conf names -- they are data, not
 branches. A new chip adds a row; it does not add a test file. That is the point
 of this suite: one chip that needs a FlagGems change makes every chip run the
-same cases, and an operator this chip cannot serve is a skip with the conf's own
-route as the reason, never a silent pass.
+same cases.
 
 Nothing here imports torch or torch_fl at module scope: the integration conftest
 loads this module before torch_fl has preloaded its device assets, so the
@@ -44,7 +47,9 @@ functions that need it.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import re
 
 #: ``[flagos dispatch]`` prints this device string for the flagos device.
 DEVICE = "flagos:0"
@@ -58,12 +63,15 @@ DEVICE = "flagos:0"
 PRELUDE = (
     "a = torch.randn(4, 4, device=DEVICE)\n"
     "b = torch.randn(4, 4, device=DEVICE)\n"
+    "x = torch.randn(4, 4, device=DEVICE)\n"
     "p = torch.rand(4, 4, device=DEVICE)\n"
     "q = torch.rand(4, 4, device=DEVICE)\n"
     "zero = torch.zeros((), device=DEVICE)\n"
     "w = torch.randn(3, 4, device=DEVICE)\n"
     "idx = torch.tensor([0, 2, 1], device=DEVICE)\n"
     "src = torch.randn(3, 4, device=DEVICE)\n"
+    "f64_a = torch.randn(33, 33, dtype=torch.float64, device=DEVICE)\n"
+    "f64_b = torch.randn(33, 33, dtype=torch.float64, device=DEVICE)\n"
 )
 
 #: conf op name -> the call that reaches it, on the device tensors in PRELUDE.
@@ -71,9 +79,8 @@ PRELUDE = (
 #: The conf is the oracle for which backend each of these must reach, so the
 #: call is the only thing stated here. These are the operators a FlagGems change
 #: can move on any chip: every one of them is routed to a FlagGems backend by at
-#: least one platform's conf, so the suite has something to measure wherever a
-#: chip claims the route, and skips with the conf's route as the reason
-#: elsewhere.
+#: least one platform's conf. Every configured platform executes every call and
+#: checks the observed route against its conf.
 FLAGGEMS_ROUTING_CALLS = {
     "neg": "torch.neg(a)",
     "abs": "torch.abs(a)",
@@ -83,8 +90,8 @@ FLAGGEMS_ROUTING_CALLS = {
     "rsqrt": "torch.rsqrt(a)",
     "tanh": "torch.tanh(a)",
     "sigmoid": "torch.sigmoid(a)",
-    "gelu": "torch.nn.functional.gelu(a)",
     "silu": "torch.nn.functional.silu(a)",
+    "gelu": "torch.nn.functional.gelu(a)",
     "all": "torch.all(a)",
     "any": "torch.any(a)",
     "amax": "torch.amax(a, 1)",
@@ -94,11 +101,32 @@ FLAGGEMS_ROUTING_CALLS = {
     "pow.Tensor_Tensor": "a ** b",
     "where.self": "torch.where(a > 0, a, b)",
     "masked_fill.Tensor": "a.masked_fill(a > 0, zero)",
-    "embedding": "torch.nn.functional.embedding(idx, w)",
-    "index_add_": "x = a.clone()\nx.index_add_(0, idx, src)",
+    "mm": "torch.mm(f64_a, f64_b)",
     "linspace": "torch.linspace(0.0, 1.0, 8, device=DEVICE)",
     "full": "torch.full((4, 4), 3.0, device=DEVICE)",
     "ones": "torch.ones((4, 4), device=DEVICE)",
+}
+
+#: Public API calls that every configured platform executes in the shared smoke
+#: group. Their returned value is irrelevant to routing: ``embedding`` logs its
+#: internal ``index_select`` (or fallback), and ``index_add_`` logs the
+#: dispatcher's ``index_add``. Keeping these calls here exercises those public
+#: APIs on every chip while the separate routing table checks the operators the
+#: dispatcher actually names.
+FLAGGEMS_EXECUTION_CALLS = {
+    "embedding": "torch.nn.functional.embedding(idx, w)",
+    "index_add_": "a.clone().index_add_(0, idx, src)",
+}
+
+#: Additional operator calls for the CPU equivalence checks.
+#:
+#: ``silu`` and ``gelu`` need their gradients at the allocation site: that is the
+#: state an operator's autograd node normally records, so checking the result
+#: also covers the backward route the generated C++ kernel owns.
+FLAGGEMS_RESULT_CALLS = {
+    "mm": "torch.mm(f64_a, f64_b)",
+    "silu": "torch.nn.functional.silu(x)",
+    "gelu": "torch.nn.functional.gelu(x)",
 }
 
 #: Operators each platform's conf pins OFF the FlagGems path, because a FlagGems
@@ -110,9 +138,19 @@ FLAGGEMS_ROUTING_CALLS = {
 #: Keyed by the accelerator the conf names. ``metax`` carries the set the MetaX
 #: re-measurement and its differential survey landed (see the ``BOXING_GAP_NOTES
 #: ["metax"]`` note in ``scripts/codegen/gen_vendor_confs.py`` for the per-op
-#: diagnosis); ``dcu`` carries the four shapes ``tests/integration/ops/
-#: test_dcu_flaggems_pinned_routes.py`` reproduces on hardware.
+#: diagnosis); ``dcu`` carries the shapes ``tests/integration/ops/
+#: test_dcu_flaggems_pinned_routes.py`` reproduces on hardware. The remaining
+#: platforms state an empty tuple so a missing exclusion table cannot pass for
+#: an empty one.
 FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
+    "ascend": (),
+    "cuda": (),
+    "gcu": (),
+    "iluvatar": (),
+    "kunlunxin": (),
+    "mps": (),
+    "musa": (),
+    "ppu": (),
     "metax": (
         "binary_cross_entropy",
         "binary_cross_entropy.out",
@@ -218,6 +256,57 @@ _LOG_NAME = {
 #: The backend names that mean "this operator took a FlagGems route".
 FLAGGEMS_BACKENDS = frozenset({"flaggems", "flaggems_cpp", "flaggems_python"})
 
+#: Platform keys whose native route on a CUDA-ABI wheel is spelled ``cuda``.
+CUDA_NATIVE_PLATFORMS = frozenset({"cuda", "dcu", "metax", "ppu", "tsingmicro"})
+
+#: Registration files each platform compiles. Mirror register.cc, whose optional
+#: native arms are selected by the wheel's build record in the helpers below.
+PLATFORM_REGISTRATION = {
+    "ascend": ("csrc/aten/backends/ascend/generated/ascend_register.inc",),
+    "gcu": (
+        "csrc/aten/backends/gcu/generated/gcu_register.inc",
+        "csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc",
+    ),
+    "iluvatar": (
+        "csrc/aten/backends/iluvatar/generated/iluvatar_register.inc",
+        "csrc/aten/backends/iluvatar/generated/iluvatar_flaggems_register.inc",
+    ),
+    "kunlunxin": ("csrc/aten/backends/kunlunxin/generated/kunlunxin_register.inc",),
+    "mps": ("csrc/aten/backends/mps/generated/mps_register.inc",),
+    "musa": (
+        "csrc/aten/backends/musa/generated/musa_register.inc",
+        "csrc/aten/backends/musa/generated/musa_flaggems_register.inc",
+    ),
+    "cuda": ("csrc/aten/generated/register.inc",),
+}
+
+FLAGGEMS_ONLY_REGISTRATION = {
+    "cuda": "csrc/aten/generated/register_flaggems_cuda.inc",
+    "dcu": "csrc/aten/generated/register_flaggems_dcu.inc",
+    "metax": "csrc/aten/generated/register_flaggems_metax.inc",
+    "ppu": "csrc/aten/generated/register_flaggems_ppu.inc",
+    "tsingmicro": "csrc/aten/generated/register_flaggems_tsingmicro.inc",
+}
+
+#: Ops claimed directly by register.cc rather than a generated .inc.
+EXTRA_NATIVE = {
+    "ascend": frozenset({"matmul", "matmul_backward"}),
+    "iluvatar": frozenset(
+        {"_conj", "view_as_real", "add_.Tensor", "add_.Scalar", "div_.Tensor"}
+    ),
+}
+
+CUDA_ABI_FIXED_REGISTRATION = {
+    "cuda": frozenset(
+        {"convolution_overrideable", "convolution_backward_overrideable"}
+    ),
+    "dcu": frozenset({"convolution_overrideable", "convolution_backward_overrideable"}),
+    "ppu": frozenset({"convolution_backward_overrideable"}),
+    "tsingmicro": frozenset(
+        {"convolution_overrideable", "convolution_backward_overrideable"}
+    ),
+}
+
 
 def conf_path() -> Path:
     """Path of the op-routing conf this wheel resolved."""
@@ -248,7 +337,8 @@ def accel_label() -> str:
     Read from ``backends_<platform>.conf`` rather than from ``detect_platform()``
     (or any vendor probe): it is the wheel's own statement of what it was built
     for, and it is the key the measurement tables above are stored under. A conf
-    with a user-chosen path has no row and the data-driven tests skip it.
+    with a user-chosen path has no row, which the shared suite treats as a
+    configuration failure.
     """
     name = conf_path().name
     if name.startswith("backends_") and name.endswith(".conf"):
@@ -256,20 +346,107 @@ def accel_label() -> str:
     return ""
 
 
+def source_root() -> Path:
+    """The checkout carrying the registration lists this wheel was built from.
+
+    The integration suite normally runs from a wheel-only copy of ``tests``.
+    The checkout is therefore named explicitly by the runner, never inferred
+    from the installed package or the current directory.
+    """
+    name = os.environ.get("TORCH_FL_SOURCE_ROOT", "")
+    if not name:
+        raise RuntimeError("TORCH_FL_SOURCE_ROOT must name the registration source")
+    root = Path(name).resolve()
+    source = root / "csrc/aten/generated/register.inc"
+    if not source.is_file():
+        raise RuntimeError(f"TORCH_FL_SOURCE_ROOT has no {source.relative_to(root)}")
+    return root
+
+
+def _registered_ops(source: Path) -> frozenset[str]:
+    """The m.impl names in one committed registration include."""
+    if not source.is_file():
+        raise FileNotFoundError(f"registration file does not exist: {source}")
+    text = source.read_text(encoding="utf-8")
+    return frozenset(re.findall(r'm\.impl\("([^"]+)"', text))
+
+
+def _registered_files(root: Path, files: tuple[str, ...]) -> frozenset[str]:
+    """Ops claimed by every included registration file."""
+    registered: frozenset[str] = frozenset()
+    for relative in files:
+        registered |= _registered_ops(root / relative)
+    return registered
+
+
+def _native_registration(
+    accel: str, route: str, kernels: frozenset[str], root: Path | None = None
+) -> frozenset[str]:
+    """Ops a wheel of this kind claims on PrivateUse1 for a native route.
+
+    The CUDA-ABI platforms select one of two generated lists. A boxing build
+    claims every generated op. A FlagGems-only build claims its platform list
+    plus the convolution wrappers in register.cc. Native vendor arms claim
+    their generated list only when their vendor kernel set was compiled. An
+    empty build record denotes an unbuilt source checkout and leaves every
+    vendor arm active. Native-list mismatches are checked separately by the
+    platform-agnostic conf/registration test, so this helper treats the source
+    lists as the wheel's registration for its configured platform.
+    """
+    root = source_root() if root is None else root
+    if accel not in CUDA_NATIVE_PLATFORMS:
+        native = _registered_files(root, PLATFORM_REGISTRATION[accel])
+        return native | EXTRA_NATIVE.get(accel, frozenset())
+    if route != "cuda":
+        return frozenset()
+    if "boxing" in kernels:
+        return _registered_files(root, PLATFORM_REGISTRATION["cuda"])
+    if "vendor" in kernels:
+        return frozenset()
+    flaggems = _registered_ops(root / FLAGGEMS_ONLY_REGISTRATION[accel])
+    return flaggems | CUDA_ABI_FIXED_REGISTRATION[accel]
+
+
+def _expected_route(
+    accel: str,
+    op: str,
+    raw: str | None,
+    kernels: frozenset[str],
+    root: Path | None = None,
+) -> tuple[str | None, str]:
+    """The backend the dispatcher should name, and why it is expected.
+
+    An accelerated route whose native arm this wheel does not register is
+    outside PrivateUse1. The dispatcher reports no backend for it and the CPU
+    fallback handles it. A FlagGems route is always expected to be registered,
+    so this rule cannot hide a missing FlagGems dispatcher.
+    """
+    if raw is None:
+        return _LOG_NAME["flaggems"], "unlisted"
+    if raw == "none":
+        return None, "conf_route_none"
+    if raw == "cuda":
+        target = "cuda"
+    elif raw == accel:
+        target = accel
+    else:
+        return _LOG_NAME.get(raw, raw), "routed"
+    if target not in PLATFORM_REGISTRATION:
+        return _LOG_NAME.get(raw, raw), "routed"
+    native = _native_registration(accel, target, kernels, root)
+    if op in native:
+        return _LOG_NAME.get(raw, raw), "routed"
+    return None, "conf_route_unregistered"
+
+
 def route_reason(op: str) -> tuple[str | None, str]:
     """The backend ``op`` dispatches to, plus why it resolved that way.
 
-    The backend is named the way ``[flagos dispatch]`` names it. The reason is
-    ``conf_route_none`` when the conf hands the operator to cpu_fallback (no
-    dispatch line is emitted for such an operator), ``unlisted`` when the conf
-    does not name it at all, and ``routed`` otherwise.
+    The backend is named the way ``[flagos dispatch]`` names it. A ``cuda``
+    conf row can reach PrivateUse1 only when this wheel's registration includes
+    the operator. Other rows remain conf-driven.
     """
-    raw = load_routes().get(op)
-    if raw is None:
-        return None, "unlisted"
-    if raw == "none":
-        return None, "conf_route_none"
-    return _LOG_NAME.get(raw, raw), "routed"
+    return _expected_route(accel_label(), op, conf_route(op), build_kernels())
 
 
 def conf_route(op: str) -> str | None:
@@ -306,22 +483,22 @@ def flaggems_route_count() -> int:
 def flaggems_runtime_unavailable() -> str:
     """Why a FlagGems kernel cannot run here, or ``""`` when it can.
 
-    Three facts, none of them a platform name: the build record has to carry the
-    kernel set, a flagos device has to exist, and the FlagGems package plus its
-    Triton compiler have to import in this interpreter. Anything else -- a vendor
-    Triton that raises on the first tile, an operator whose FlagGems entry point
-    does not exist -- is what the execution cases are for and is reported as a
-    failure, not hidden here.
+    Three facts, none of them a platform name: the FlagGems package plus its
+    Triton compiler have to import in this interpreter, a flagos device has to
+    exist, and the build record has to carry the kernel set. Imports come first
+    because the configured platform check already proves the device. A vendor
+    Triton that raises on the first tile, or an operator whose entry point does
+    not exist, is what the execution cases report as a failure.
     """
     import torch_fl
 
-    if not flaggems_kernel_compiled():
-        return "this wheel was not built with the FlagGems kernel set"
-    if torch_fl.flagos.device_count() < 1:
-        return "no flagos device is available"
     try:
         import triton  # noqa: F401
         import flag_gems  # noqa: F401
-    except Exception as exc:  # noqa: BLE001 -- any import failure means skip
+    except Exception as exc:  # noqa: BLE001 -- a missing runtime is a test failure
         return f"the FlagGems runtime is not importable: {exc}"
+    if torch_fl.flagos.device_count() < 1:
+        return "no flagos device is available"
+    if not flaggems_kernel_compiled():
+        return "this wheel was not built with the FlagGems kernel set"
     return ""

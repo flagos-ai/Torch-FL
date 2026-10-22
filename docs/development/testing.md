@@ -28,7 +28,7 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `main_ops` | Representative operator in the CI smoke subset | Applied to frequently-used ops (add, matmul, conv, etc.) for fast feedback |
 | `anyplatform` | Runs on any accelerator backend | Device-agnostic tests (operator registration, dispatch routing) |
 | `cuda` | Requires a CUDA boxing build (`FLAGOS_BUILD_BOXING=1`); the default FlagGems-primary wheel has no `cuda` route, so the CUDA lane skips these | Tests asserting `-> cuda` backend routing |
-| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (its lane builds the boxing wheel) |
+| `metax` | Runs only on the MetaX platform | MetaX regression tests, including those exercising the FlagGems and CUDA boxing routes in its CI wheel |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
@@ -82,25 +82,18 @@ Run only main operators (CI smoke subset):
 pytest tests/integration/ops/ -m main_ops -v
 ```
 
-Run FlagGems-routed operators:
+Run both passes of the shared FlagGems conformance suite. Every platform runs
+the same inventory in the native and FlagGems passes:
 
 ```bash
-pytest tests/integration/ops/ -m "flaggems and main_ops" -v
+python tests/integration/flaggems/run.py native
+python tests/integration/flaggems/run.py flaggems
 ```
 
-Run FlagGems C++ operators (requires a wheel built with
-`FLAGOS_BUILD_FLAGGEMS_CPP=ON`):
+The FlagGems pass requires a wheel built with
+`FLAGOS_BUILD_FLAGGEMS=ON`. A wheel without that kernel set fails when the
+pass is requested.
 
-```bash
-pytest tests/integration/ops/ -m "flaggems_cpp and main_ops" -v
-```
-
-Whether these tests are collected is decided by the build record, not by the
-environment: `conftest.py` reads `KERNELS` from `torch_fl/_build_config.py` and
-skips the mark when `flaggems_cpp` is not in it. A wheel with the C++ runtime
-compiled in therefore runs them, and a wheel without it skips them, with no
-variable to keep in step by hand. Actual routing still follows the conf's
-`flaggems_cpp` keys.
 
 ### Manual FlagGems Overload Survey
 
@@ -227,6 +220,12 @@ as `NOT_IN_VERSION` rather than as a failure.
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
+CI runs all six Qwen3 groups on every hardware platform. They use the same
+arguments, environment, and checkpoint at `/var/lib/torch-fl-ci/models/Qwen3-0.6B`
+inside Linux containers; no platform omits a model case because it lacks a
+mount. The integration job downloads and validates `Qwen/Qwen3-0.6B` at revision
+`c1899de289a04d12100db370d81485cdf75e47ca` before starting the platform
+commands. A cache miss is handled by a direct download.
 
 **Inference test**:
 
@@ -241,6 +240,25 @@ pytest tests/integration/test_qwen3_train.py --model <model-path> --steps 10 --b
 ```
 
 Replace `<model-path>` with a Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`) or a local directory containing model weights.
+
+The checkpoint, inference, fallback observation, and training arguments come
+from `.github/integration-manifest.yml`. The profiler group exports a Qwen3
+Chrome trace and requires a device capability that the platform's profiler
+declares. A platform without that capability fails the shared case with a
+specific error. The fallback groups run the same model work and report the
+dispatcher calls, direct backend routes, and CPU tensor operations observed
+inside kernel bodies; zero dispatcher or backend calls fail the group.
+
+The groups can also be run manually against a local checkpoint:
+
+```bash
+pytest tests/integration/test_fallback_trace.py --model <model-path> \
+  --max-new-tokens 8 -v -s
+pytest tests/integration/test_fallback_trace_train.py --model <model-path> \
+  --steps 2 --seq-len 32 -v -s
+pytest tests/integration/test_profiler_qwen3_infer.py --model <model-path> \
+  -v -s
+```
 
 ### Distributed Tests
 
@@ -351,11 +369,12 @@ ruff check --fix .
 GitHub Actions CI runs a subset of tests based on pytest marks:
 
 - **Smoke tests**: `-m main_ops` (CUDA boxing kernels only)
-- **FlagGems tests**: `-m "flaggems and main_ops"` (no env gate; the conf decides the route)
+- **FlagGems tests**: the native and FlagGems passes run
+  `tests/integration/flaggems/run.py`; both require the same case inventory
 - **Platform tests**: Vendor-specific runners filter by platform marker (e.g., `-m "ascend and main_ops"`)
 - **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
 
-To replicate CI behavior locally, use the same mark expressions shown above.
+To replicate CI behavior locally, run the commands shown above.
 
 `.github/configs/<platform>.yml` is the only place that defines what a platform runs. Ascend,
 cuda, dcu, gcu, metax, musa, ppu, and kunlunxin all use one parameterized pipeline,

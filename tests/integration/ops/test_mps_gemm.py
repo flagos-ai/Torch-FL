@@ -56,9 +56,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
-import torch_fl.flagos as flagos
+from device_init import torch, torch_fl  # noqa: F401
+from torch_fl import flagos
 
 from backend_conf import routed_backend_or_none
 from platform_support import detect_platform
@@ -519,7 +518,7 @@ class TestGemmDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "a = torch.randn(8, 16, device='flagos:0'); "
                 "b = torch.randn(16, 4, device='flagos:0'); "
                 "c = torch.randn(2, 8, 16, device='flagos:0'); "

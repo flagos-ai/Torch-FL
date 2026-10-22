@@ -31,8 +31,11 @@ is 3.10.12. Standard-library entries newer than that (`tomllib` is 3.11) are
 not available there; see `_pyproject_build_requirements`.
 """
 
+import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
@@ -96,16 +99,26 @@ def test_the_parameterized_workflow_provisions_every_platform():
     """One workflow provisions every platform, from that platform's config.
 
     There used to be a file per platform under `integration-test-<p>.yml`, each
-    repeating `bash .github/scripts/set_env.sh --platform <p>` and hard-coding
-    its stage. The pipeline reads setup_script/setup_platform/setup_stage from
-    the config now, so a platform that needs the `build` stage (Ascend,
-    Kunlunxin) is no longer the only shape the file can express.
+    hard-coding a shell and a platform. The pipeline reads setup_script,
+    setup_platform and setup_stage from the config now. It also resolves Bash
+    after loading the runner profile: the MPS runner has no `bash` on its
+    default PATH, although its profile exports an absolute interpreter path.
     """
     text = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
+    assert "SETUP_BASH: ${{ env.bash || '/bin/bash' }}" in text
+    assert "container_image=$(python3 -c" in text
+    assert "container_workspace=$(python3 -c" in text
+    assert "env -u BASH_ENV /bin/bash -c" in text
+    assert 'source "$INTEGRATION_PROFILE"' in text
     assert (
-        'bash "${{ needs.configuration.outputs.setup_script }}" '
-        '--platform "${{ needs.configuration.outputs.setup_platform }}"' in text
+        'unset CI_WORKSPACE; create_setup_entry "$5" "$3"; '
+        'entry=$(cat "$5"); exec env -u BASH_ENV bash -c "$entry" "$6"' in text
     )
+    assert 'source "$1" </dev/null; source "$2"' in text
+    assert "create_setup_entry" in text
+    assert "SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}" in text
+    assert "command -v bash" in text
+    assert '[[ "$selected_bash" = /* ]]' in text
     assert "CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}" in text
 
 
@@ -162,6 +175,68 @@ def test_runner_applies_the_pip_constraints():
         assert pin in constraints, pin
 
 
+@pytest.mark.parametrize("platform", ["gcu", "kunlunxin"])
+def test_onnx_platforms_install_the_shared_numpy_pin(platform):
+    hook = (HOOKS / f"set_env_{platform}.sh").read_text(encoding="utf-8")
+    assert "pip_retry --index-url \"$PIP_INDEX_URL_ARG\" 'numpy<2'" in hook
+
+
+def test_ascend_resolves_flag_gems_without_dropping_the_standard_library():
+    hook = (HOOKS / "set_env_ascend.sh").read_text(encoding="utf-8")
+    assert "sys.path[:] =" not in hook
+    assert 'distribution("flag-gems").locate_file("flag_gems")' in hook
+    assert (
+        "for site in sorted(sites, reverse=True):\n    sys.path.insert(0, str(site))"
+        in hook
+    )
+    assert "importlib.invalidate_caches()" in hook
+
+
+def test_ppu_children_load_torch_fl_before_torch():
+    hook = (HOOKS / "set_env_ppu.sh").read_text(encoding="utf-8")
+    parent = "import torch_fl  # noqa: F401\nimport torch\n\ntorch_path"
+    child = (
+        "import os, torch_fl; import torch; "
+        "assert torch.version.cuda == '13.0', torch.version.cuda; "
+        "print(os.path.realpath(torch.__file__))"
+    )
+    child_check = hook.index('"import os, torch_fl; import torch; "')
+    assert parent in hook[:child_check]
+    for statement in child.split("; "):
+        assert statement.strip() in hook[child_check:]
+
+
+def test_flag_gems_hooks_install_its_yaml_dependency_before_the_probe():
+    for platform in ("metax", "ppu"):
+        hook = (HOOKS / f"set_env_{platform}.sh").read_text(encoding="utf-8")
+        probe = hook.rindex("import flag_gems")
+        assert hook.index("pyyaml==6.0.1") < probe, platform
+
+
+def test_ppu_checks_runtime_cuda_metadata_after_loading_its_facade():
+    """The stock wheel's version.py reports None until torch_fl loads PPU libs."""
+    hook = (HOOKS / "set_env_ppu.sh").read_text(encoding="utf-8")
+    setup = hook.split("if ! command -v nvidia-smi", 1)[0]
+    checks = hook.split("import torch_fl  # noqa: F401", 1)[1]
+    assert checks.count('assert torch.version.cuda == "13.0"') == 1
+    assert "assert torch.version.cuda is None" not in checks
+    stock_check = setup.split('CPU_TORCH_ROOT="$("$VENV_PYTHON"', 1)[1].split(
+        "\nPY", 1
+    )[0]
+    assert "import torch_fl" not in stock_check
+    assert "assert torch.version.cuda is None" in stock_check
+    assert 'assert torch.version.cuda == "13.0"' not in stock_check
+
+
+def test_ppu_verification_uses_the_isolated_interpreter_after_the_import_probe():
+    hook = (HOOKS / "set_env_ppu.sh").read_text(encoding="utf-8")
+    import_probe = (
+        "import torch_fl  # noqa: F401  (selects the bundled PPU libtorch core)"
+    )
+    child_check = "  \"$VENV_PYTHON\" - <<'PY'\nimport os"
+    assert hook.index(import_probe) < hook.index(child_check)
+
+
 def test_mps_hook_selects_the_host_macos_toolchain():
     """The MPS hook fails before downloading torch when the runner is wrong.
 
@@ -213,6 +288,85 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
             f"{requirement} is a [build-system] requirement but the mps hook "
             f"never installs it; installs found: {installs}"
         )
+
+
+TEST_ONLY_PACKAGES = {
+    "onnx",
+    "onnxruntime",
+    "jq",
+    "transformers",
+    "huggingface-hub",
+    "hf-xet",
+    "tokenizers",
+    "safetensors",
+    "protobuf",
+    "ml_dtypes",
+    "coloredlogs",
+    "humanfriendly",
+    "flatbuffers",
+    "regex",
+    "requests",
+    "urllib3",
+    "charset-normalizer",
+    "certifi",
+    "idna",
+    "httpx",
+    "httpcore",
+    "h11",
+    "anyio",
+    "diffusers",
+    "pillow",
+    "pyyaml",
+    "typer",
+    "shellingham",
+    "annotated-doc",
+    "rich",
+    "markdown-it-py",
+    "pygments",
+    "mdurl",
+    "tqdm",
+    "filelock",
+    "packaging",
+    "importlib-metadata",
+    "zipp",
+    "click",
+    "fsspec",
+    "typing-extensions",
+    "sympy",
+    "sentencepiece",
+    "tiktoken",
+}
+
+
+def test_platform_hooks_leave_the_shared_test_cohort_to_the_pipeline():
+    """A platform hook must not install a different version of a shared package.
+
+    The pipeline installs the cohort with --no-deps after the hook. pip leaves
+    an already-satisfied version alone, so an earlier hook pin such as
+    transformers<5 survives the cohort install and fails its version check.
+    """
+    for platform in PLATFORMS:
+        hook = (HOOKS / f"set_env_{platform}.sh").read_text(encoding="utf-8")
+        installs = [
+            line
+            for line in hook.splitlines()
+            if re.search(r"\bpip(?:_retry)?\b.*\binstall\b", line)
+        ]
+        for requirement in TEST_ONLY_PACKAGES:
+            if requirement == "pyyaml" and platform in {"metax", "ppu"}:
+                continue
+            pattern = rf"(?<![\w-]){re.escape(requirement)}(?![\w-])"
+            conflicts = [line for line in installs if re.search(pattern, line)]
+            assert not conflicts, f"{platform}: {requirement} in {conflicts}"
+
+
+def test_ppu_setup_installs_flag_gems_sqlalchemy_before_torch_probe():
+    hook = (HOOKS / "set_env_ppu.sh").read_text(encoding="utf-8")
+    setup = hook.split('CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<\'PY\'', 1)[0]
+    integration = setup.split('if [[ "$CI_STAGE" == "integration" ]]; then', 1)[1]
+
+    assert '"sqlalchemy==2.0.48"' in integration
+    assert "import flag_gems" not in setup
 
 
 def _pyproject_build_requirements() -> list[str]:

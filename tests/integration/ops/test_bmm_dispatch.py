@@ -29,8 +29,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import routed_backend, routed_backend_or_none
 
@@ -77,7 +76,7 @@ def _run_bmm_subprocess(
     """Run a minimal bmm call in a subprocess and return the result."""
     env = os.environ.copy()
     env.update(extra_env)
-    setup = "import torch_fl, torch; "
+    setup = "from device_init import torch, torch_fl; "
     if stub_python_op:
         # This test only verifies routing; avoid triggering FlagGems BMM autotuning.
         setup += (

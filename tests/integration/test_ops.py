@@ -22,9 +22,8 @@ Usage:
 """
 
 import pytest
-import torch
+from device_init import torch, torch_fl
 import torch.nn.functional as F
-import torch_fl
 
 
 @pytest.fixture(scope="session")

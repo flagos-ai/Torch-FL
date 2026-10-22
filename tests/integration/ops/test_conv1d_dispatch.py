@@ -36,9 +36,8 @@ Usage:
 
 import pytest
 
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 
 DEVICE = "flagos:0"

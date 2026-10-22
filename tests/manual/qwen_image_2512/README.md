@@ -217,11 +217,11 @@ provides for exactly this case:
 angles, because that method is cached per device and returns the complex
 exponential for every device but `neuron`. The rotation it registers is
 numerically the same rotation the complex path performs, i.e.
-`apply_rotary_emb_qwen_neuron`'s contraction, asserted bit for bit in
-`tests/unit/test_ascend_qwenimage_rope.py`, with the GCU copy pinned the same way
-in `tests/unit/test_gcu_qwenimage_rope.py`; what differs is the spelling, which
-drops the stride-0 `repeat_interleave` broadcast that function expands each angle
-with.
+`apply_rotary_emb_qwen_neuron`'s contraction, asserted exactly for bf16 and
+within the vendor float32 trigonometric rounding tolerance in the shared
+`tests/unit/test_qwenimage_rope.py`; the implementation differs in its spelling,
+which drops the stride-0 `repeat_interleave` broadcast that function expands
+each angle with.
 `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` opts out and leaves the table as `diffusers`
 ships it — on Ascend that is the `Unsupported dtype for ACL` failure above rather
 than a second leg to measure.

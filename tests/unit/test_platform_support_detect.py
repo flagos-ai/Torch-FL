@@ -34,6 +34,7 @@ Run: pytest tests/unit/test_platform_support_detect.py -v
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,22 @@ def test_dcu_accelerator_is_recognized(isolated_torch_fl_import, tmp_path):
         sys.path.remove(str(tmp_path))
 
 
+def test_build_record_ignores_detector_modules_from_the_installed_build(
+    isolated_torch_fl_modules, tmp_path
+):
+    """The support module's own detector must not read the real build record."""
+    real_platform = types.ModuleType("torch_fl._platform")
+    real_platform.build_accelerator = lambda: "ppu"
+    sys.modules["torch_fl._platform"] = real_platform
+
+    _install_wheel(tmp_path, "ascend")
+    try:
+        isolated = _load_platform_support()
+        assert isolated.detect_platform() == "ascend"
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
 @pytest.fixture
 def isolated_torch_fl_import(monkeypatch):
     """Temporarily hide the real torch_fl module so detect_platform()'s
@@ -119,12 +136,40 @@ def isolated_torch_fl_import(monkeypatch):
     avoids re-triggering that import entirely.
     """
     real_torch_fl = sys.modules.pop("torch_fl", None)
+    cached = {
+        name: sys.modules.pop(name, None)
+        for name in ("torch_fl._build_config", "torch_fl._platform")
+    }
     try:
         yield
     finally:
         sys.modules.pop("torch_fl", None)
+        for name in cached:
+            sys.modules.pop(name, None)
         if real_torch_fl is not None:
             sys.modules["torch_fl"] = real_torch_fl
+        for name, module in cached.items():
+            if module is not None:
+                sys.modules[name] = module
+
+
+@pytest.fixture
+def isolated_torch_fl_modules(monkeypatch):
+    """Make the imported support module ignore an installed real detector."""
+    names = (
+        "torch_fl._build_config",
+        "torch_fl._platform",
+        "torch_fl._platform_under_test",
+    )
+    cached = {name: sys.modules.pop(name, None) for name in names}
+    try:
+        yield
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+        for name, module in cached.items():
+            if module is not None:
+                sys.modules[name] = module
 
 
 def test_marker_identifies_ascend_without_any_env_or_config(

@@ -41,6 +41,13 @@
 #                                               (after the wheel install)
 #   * what runs                              -> integration_tests, the manifest
 #                                               the shared runner executes
+#
+# A shared model group also needs a checkpoint on the host before the vendor
+# image starts. The integration job restores and verifies it after checking out
+# the source, then copies both the source and the checkpoint into its own mounted
+# workspace. A dependent job cannot hand over either path: GitHub may place each
+# job on a different hardware runner, and reusing a self-hosted runner instance
+# would make readiness depend on leftover files from an earlier run.
 
 name: Platform integration tests
 
@@ -58,6 +65,11 @@ on:
         default: ''
       checkout_ref:
         description: Immutable source commit to test
+        required: false
+        type: string
+        default: ''
+      expected_checkout_ref:
+        description: Source commit this workflow must check out
         required: false
         type: string
         default: ''
@@ -91,47 +103,777 @@ jobs:
   integration-tests:
     name: Build and test (${{ needs.configuration.outputs.display_name }})
     needs: configuration
+    if: ${{ needs.configuration.result == 'success' }}
     outputs:
       stages: ${{ steps.execution.outputs.stages }}
       run_attempt: ${{ steps.execution.outputs.run_attempt }}
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
-    # A platform without a `ci_image` runs directly on its runner. MPS needs a
-    # macOS host with its Metal GPU, and macOS jobs cannot use containers.
-    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":{0},"volumes":{1},"options":{2}}}', toJson(needs.configuration.outputs.ci_image), needs.configuration.outputs.container_volumes, toJson(needs.configuration.outputs.container_options))) || null }}
+    # MPS runs on macOS, which has no Docker. Linux starts one vendor image
+    # after the model and checkout are both present on the host.
     defaults:
       run:
         shell: bash
-
+    env:
+      INTEGRATION_PLATFORM: ${{ inputs.platform }}
+      # GitHub's cache action does not interpolate heredoc-delimited values, so
+      # step outputs cannot select the immutable cache key.
+      TORCH_FL_CHECKPOINT_CACHE_KEY: qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 12
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.ref }}
+          ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
+          # Leave enough time for a fresh checkout and the source archive when
+          # this transfer is cancelled.
+          fetch-depth: 1
 
-      # Discard host leftovers before restoring the managed pip download cache.
-      - name: Reset pip cache dir
-        shell: bash
+      - name: Retry checkout source
+        id: checkout-retry
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 12
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Fetch the source archive if checkout failed
+        if: ${{ steps.checkout.outcome == 'failure' && steps.checkout-retry.outcome != 'success' }}
+        id: source-archive
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          SOURCE_REPOSITORY_PATH: ${{ env.source_repository_path || '' }}
+          GIT_AUTHORIZATION_HEADER: ${{ env.git_authorization_header || '' }}
         run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
-          rm -rf "$PIP_CACHE_DIR"
-          mkdir -p "$PIP_CACHE_DIR"
-          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+          set -euo pipefail
+          export RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
+          if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::invalid checkout repository: $SOURCE_REPOSITORY"
+            exit 1
+          fi
+          if [[ ! "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the archive fallback requires a full commit SHA"
+            exit 1
+          fi
+          archive="$RUNNER_TEMP/torch-fl-source-${SOURCE_REF}.tar.gz"
+          cached_archive="$RUNNER_TEMP/torch-fl-source-cached-${SOURCE_REF}.tar.gz"
+          partial="$archive.partial"
+          mode_file="$RUNNER_TEMP/torch-fl-source-mode-${SOURCE_REF}"
+          rm -f "$archive" "$cached_archive" "$partial" "$mode_file"
+          # Git writes FETCH_HEAD without a lock. Remove a lock left by an
+          # interrupted source verification before probing the checkout.
+          rm -f "$GITHUB_WORKSPACE"/.git/FETCH_HEAD.lock
+          object_fetch="$RUNNER_TEMP/torch-fl-object-fetch-${SOURCE_REF}"
+          rm -rf "$object_fetch"
+          downloaded=0
+          for attempt in 1 2 3; do
+            for endpoint in "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REF}" \
+              "https://api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"; do
+              rm -f "$partial"
+              if curl --fail --silent --show-error --location \
+                --retry 2 --connect-timeout 20 --max-time 600 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                --output "$partial" \
+                "$endpoint" && tar -tzf "$partial" >/dev/null 2>&1; then
+                mv "$partial" "$archive"
+                downloaded=1
+                break 2
+              fi
+            done
+            if [[ "$attempt" == 3 ]]; then
+              echo "::error::could not download the source archive for $SOURCE_REF"
+              exit 1
+            fi
+            echo '::warning::source archive transfer failed; retrying on this runner'
+            sleep 5
+          done
+          if [[ "$downloaded" != 1 || ! -s "$archive" ]]; then
+            echo "::error::the source archive download did not produce a file"
+            exit 1
+          fi
+          # Validate and unpack through one Python process. Tar
+          # implementations differ in how they select members, reject links,
+          # and handle an interrupted extraction. Stage the entire tree first
+          # so a rejected archive cannot leave the existing source half deleted.
+          archive_path=$(python3 - "$archive" "$GITHUB_WORKSPACE" "$SOURCE_REF" "$mode_file" <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
 
-      # Look up first: a transfer timeout can return success with no matched key.
-      # A cold miss may save later; a failed matched transfer must not upload.
-      #
-      # hashFiles cannot interpolate inputs.setup_script, but it does evaluate a
-      # format() argument, so the hook and config paths are built from the
-      # platform this job was handed -- the same shape build-wheel-common.yml
-      # uses. The dedicated per-platform pipelines this replaced hashed their own
-      # workflow file; the single pipeline hashes itself instead.
-      #
-      # The restore-keys keep a display-name fallback because that is the lane the
-      # shared common workflow used before every platform had its own pipeline
-      # (GCU was the last one on it), so a warm cache from that era is still
-      # found on the first run instead of being re-downloaded.
+          archive, destination, revision, mode_file = sys.argv[1:]
+          archive = pathlib.Path(archive)
+          destination = pathlib.Path(destination).resolve()
+          parent = destination.parent
+          staging = pathlib.Path(
+              tempfile.mkdtemp(prefix=f".{destination.name}-extract-", dir=parent)
+          )
+          old_workspace = None
+          source_root = None
+
+          def inside(root, path):
+              try:
+                  path.relative_to(root)
+              except ValueError:
+                  return False
+              return True
+
+          def copy_file(source, target, mode):
+              if target.is_symlink() or target.is_file():
+                  target.unlink()
+              elif target.exists():
+                  shutil.rmtree(target)
+              with source, target.open("xb") as output:
+                  shutil.copyfileobj(source, output)
+              os.chmod(target, mode)
+
+          def remove(path):
+              if path.is_symlink() or path.is_file():
+                  path.unlink()
+              elif path.exists():
+                  shutil.rmtree(path)
+
+          try:
+              with tarfile.open(archive, "r:*") as stream:
+                  root = None
+                  entries = []
+                  seen = set()
+                  for entry in stream.getmembers():
+                      path = pathlib.PurePosixPath(entry.name)
+                      if (
+                          path.is_absolute()
+                          or not path.parts
+                          or ".." in path.parts
+                          or "" in path.parts
+                          or "." in path.parts
+                      ):
+                          raise ValueError(f"unsafe source archive entry: {entry.name!r}")
+                      if root is None:
+                          root = path.parts[0]
+                      elif path.parts[0] != root:
+                          raise ValueError(
+                              f"source archive has several roots: {root!r}, {path.parts[0]!r}"
+                          )
+                      relative = pathlib.PurePosixPath(*path.parts[1:])
+                      if not relative.parts or any(part == ".git" for part in relative.parts):
+                          continue
+                      if not entry.isdir() and not entry.isfile() and not entry.issym():
+                          raise ValueError(f"unsupported source archive entry: {entry.name!r}")
+                      key = relative.as_posix()
+                      if key in seen:
+                          raise ValueError(f"duplicate source archive entry: {key!r}")
+                      seen.add(key)
+                      entries.append((entry, relative))
+                  if not entries:
+                      raise ValueError("the source archive is empty")
+
+                  by_name = {relative.as_posix(): entry for entry, relative in entries}
+                  # Only a directory can contain another entry. Refuse a file
+                  # or symlink used as a prefix, even when that prefix is not
+                  # repeated later in the archive.
+                  for entry, relative in entries:
+                      parent = relative.parent
+                      while parent != pathlib.PurePosixPath("."):
+                          ancestor = by_name.get(parent.as_posix())
+                          if ancestor is not None and not ancestor.isdir():
+                              raise ValueError(
+                                  f"the archive entry {parent.as_posix()!r} contains another entry"
+                              )
+                          parent = parent.parent
+
+                  staging = staging.resolve()
+                  for entry, relative in entries:
+                      target = staging / relative
+                      if not inside(staging, target.parent.resolve()):
+                          raise ValueError(f"unsafe source archive target: {relative}")
+                      if entry.isdir():
+                          if target.is_symlink() or (target.exists() and not target.is_dir()):
+                              raise ValueError(f"conflicting source archive entry: {relative}")
+                          target.mkdir(parents=True, exist_ok=True)
+                          os.chmod(target, entry.mode & 0o777)
+                      elif entry.issym():
+                          link = pathlib.PurePosixPath(entry.linkname)
+                          if (
+                              not link.parts
+                              or link.is_absolute()
+                              or ".." in link.parts
+                              or "" in link.parts
+                          ):
+                              raise ValueError(
+                                  f"unsafe source archive symlink {relative}: {entry.linkname!r}"
+                              )
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          if target.exists() or target.is_symlink():
+                              raise ValueError(f"conflicting source archive entry: {relative}")
+                          target.symlink_to(entry.linkname)
+                      else:
+                          source = stream.extractfile(entry)
+                          if source is None:
+                              raise ValueError(f"cannot read source archive entry: {relative}")
+                          copy_file(source, target, entry.mode & 0o777)
+
+                  for entry, relative in entries:
+                      target = staging / relative
+                      if entry.isdir() and not target.is_dir():
+                          raise ValueError(f"conflicting source archive directory: {relative}")
+                      if not inside(staging, target.resolve()):
+                          raise ValueError(f"source archive symlink leaves the tree: {relative}")
+                  for relative in ("", *by_name):
+                      target = staging / relative
+                      if target.is_symlink() or not inside(staging, target.resolve()):
+                          raise ValueError(f"source archive symlink leaves the tree: {relative!r}")
+
+                  archive_metadata = pathlib.PurePosixPath(".git_archival.txt")
+                  metadata = staging / archive_metadata
+                  if metadata.is_file():
+                      fields = {}
+                      for line in metadata.read_text(encoding="utf-8").splitlines():
+                          name, separator, value = line.partition(":")
+                          if separator:
+                              fields[name.strip()] = value.strip()
+                      if not fields.get("node"):
+                          raise ValueError(
+                              "the source archive has archival metadata without a commit"
+                          )
+                      if fields["node"] != revision:
+                          raise ValueError(
+                              f"the source archive contains {fields['node']}, expected {revision}"
+                          )
+                      metadata.unlink()
+                      mode = "archival"
+                  else:
+                      mode = "download"
+                  mode_file_path = pathlib.Path(mode_file)
+                  mode_file_path.unlink(missing_ok=True)
+                  # A metadata node proves which commit exported the archive,
+                  # while comparing the tree catches corrupted or tampered
+                  # content. Extraction stays staged until both checks pass.
+                  git = None
+                  for candidate in os.environ["PATH"].split(os.pathsep):
+                      path = pathlib.Path(candidate or ".") / "git"
+                      if path.is_file() and os.access(path, os.X_OK):
+                          git = str(path.resolve())
+                          break
+                  if git is None:
+                      if mode == "download":
+                          raise ValueError(
+                              "the source archive cannot name its commit and this "
+                              "runner cannot compare it with Git"
+                          )
+                  else:
+                      git_root = pathlib.Path(
+                          os.environ["RUNNER_TEMP"]
+                      ) / f"torch-fl-object-fetch-{revision}"
+                      remove(git_root)
+                      git_root.mkdir(parents=True)
+                      git_environment = dict(os.environ)
+                      git_environment["GIT_CONFIG_NOSYSTEM"] = "1"
+                      git_environment["GIT_CONFIG_GLOBAL"] = os.devnull
+                      for name in (
+                          "GIT_DIR",
+                          "GIT_WORK_TREE",
+                          "GIT_INDEX_FILE",
+                          "GIT_OBJECT_DIRECTORY",
+                          "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                          "GIT_COMMON_DIR",
+                          "GIT_NAMESPACE",
+                          "GIT_PREFIX",
+                          "GIT_GLOB_PATHSPECS",
+                          "GIT_NOGLOB_PATHSPECS",
+                          "GIT_CONFIG_PARAMETERS",
+                      ):
+                          git_environment.pop(name, None)
+                      git_environment.pop("GIT_CEILING_DIRECTORIES", None)
+                      git_environment.pop("GIT_DISCOVERY_ACROSS_FILESYSTEM", None)
+                      git_environment["GIT_TERMINAL_PROMPT"] = "0"
+                      subprocess.run(
+                          [git, "init", "-q", str(git_root)],
+                          check=True,
+                          env=git_environment,
+                      )
+                      subprocess.run(
+                          [
+                              git,
+                              "-C",
+                              str(git_root),
+                              "remote",
+                              "add",
+                              "origin",
+                              f"https://github.com/{os.environ['SOURCE_REPOSITORY']}.git",
+                          ],
+                          check=True,
+                          env=git_environment,
+                      )
+                      authorization = os.environ.get("GIT_AUTHORIZATION_HEADER")
+                      if authorization:
+                          subprocess.run(
+                              [
+                                  git,
+                                  "-C",
+                                  str(git_root),
+                                  "config",
+                                  "http.https://github.com/.extraheader",
+                                  authorization,
+                              ],
+                              check=True,
+                              env=git_environment,
+                          )
+                      repository_path = os.environ.get("SOURCE_REPOSITORY_PATH")
+                      if repository_path:
+                          local = pathlib.Path(repository_path).resolve()
+                          subprocess.run(
+                              [
+                                  git,
+                                  "-C",
+                                  str(git_root),
+                                  "config",
+                                  f"url.file://{local}/.insteadOf",
+                                  f"https://github.com/{os.environ['SOURCE_REPOSITORY']}.git",
+                              ],
+                              check=True,
+                              env=git_environment,
+                          )
+                      subprocess.run(
+                          [
+                              git,
+                              "-C",
+                              str(git_root),
+                              "fetch",
+                              "--no-tags",
+                              "--depth=1",
+                              "origin",
+                              revision,
+                          ],
+                          check=True,
+                          env=git_environment,
+                          timeout=300,
+                      )
+                      run = lambda *arguments, **options: subprocess.run(
+                          [git, "-C", str(git_root), *arguments],
+                          check=True,
+                          env=git_environment,
+                          **options,
+                      )
+                      run("checkout", "--detach", "FETCH_HEAD")
+                      remote = {}
+                      for path in git_root.rglob("*"):
+                          relative = path.relative_to(git_root)
+                          if relative.parts[0] == ".git" or not (
+                              path.is_file() or path.is_symlink()
+                          ):
+                              continue
+                          payload = (
+                              os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+                          )
+                          remote[relative.as_posix()] = (payload, path.is_symlink())
+                      archive_files = set()
+                      for entry, relative in entries:
+                          if not entry.isfile():
+                              continue
+                          if relative == archive_metadata:
+                              continue
+                          archive_files.add(relative.as_posix())
+                      archive_links = {
+                          relative.as_posix() for entry, relative in entries if entry.issym()
+                      }
+                      if set(remote) != archive_files | archive_links:
+                          raise ValueError(
+                              f"the source archive does not match the files at {revision}"
+                          )
+                      for relative in archive_files:
+                          if remote[relative] != ((staging / relative).read_bytes(), False):
+                              raise ValueError(
+                                  f"the source archive differs from {revision} at {relative}"
+                              )
+                      for relative in archive_links:
+                          if remote[relative] != (
+                              os.readlink(staging / relative).encode(),
+                              True,
+                          ):
+                              raise ValueError(
+                                  f"the source archive differs from {revision} at {relative}"
+                              )
+                      remove(git_root)
+                  mode_file_path.write_text(mode + "\n")
+
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  old_workspace = destination.with_name(
+                      f".{destination.name}-old-{os.getpid()}"
+                  )
+                  remove(old_workspace)
+                  if destination.exists() or destination.is_symlink():
+                      os.replace(destination, old_workspace)
+                  try:
+                      os.replace(staging, destination)
+                  except Exception:
+                      if old_workspace.exists() or old_workspace.is_symlink():
+                          os.replace(old_workspace, destination)
+                      raise
+                  remove(old_workspace)
+                  old_workspace = None
+                  mode_file_path.write_text(mode + "\n")
+          except (OSError, tarfile.TarError) as error:
+              raise SystemExit(f"cannot extract the source archive: {error}")
+          except (
+              ValueError,
+              subprocess.CalledProcessError,
+              subprocess.TimeoutExpired,
+          ) as error:
+              raise SystemExit(f"cannot validate the source archive: {error}")
+          finally:
+              remove(staging)
+              if old_workspace is not None:
+                  remove(old_workspace)
+          print(destination)
+          PY
+          )
+          archive_sha256=$(python3 - "$archive" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+          )
+          echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
+          echo "source_mode=$(cat "$mode_file")" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+          echo "ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the checked-out source
+        id: source
+        env:
+          CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          CHECKOUT_REF: ${{ inputs.checkout_ref }}
+          EXPECTED_CHECKOUT_REF: ${{ inputs.expected_checkout_ref }}
+          EVENT_SHA: ${{ github.sha }}
+          SOURCE_MODE: ${{ steps.source-archive.outputs.source_mode }}
+          ARCHIVE_PATH: ${{ steps.source-archive.outputs.archive_path }}
+          ARCHIVE_SHA256: ${{ steps.source-archive.outputs.archive_sha256 }}
+        run: |
+          set -euo pipefail
+          export RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
+          EXPECTED_REF="$CHECKOUT_REF"
+          if [[ -z "$EXPECTED_REF" ]]; then
+            EXPECTED_REF="$EVENT_SHA"
+          fi
+          if [[ -n "$EXPECTED_CHECKOUT_REF" && "$EXPECTED_REF" != "$EXPECTED_CHECKOUT_REF" ]]; then
+            echo "::error::the requested checkout and its expected source disagree: $EXPECTED_REF != $EXPECTED_CHECKOUT_REF"
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          git_available=0
+          if command -v git >/dev/null 2>&1; then
+            git_available=1
+          fi
+          # An archive checkout has already selected EXPECTED_REF. Running git
+          # here would replace the checked source with whatever branch the
+          # unauthenticated refresh can reach.
+          if [[ -z "$SOURCE_MODE" ]] && [[ "$git_available" == 1 ]] &&
+            git -C "$GITHUB_WORKSPACE" rev-parse --show-toplevel >/dev/null 2>&1; then
+            git init -q "$GITHUB_WORKSPACE"
+            git -C "$GITHUB_WORKSPACE" remote add origin \
+              "https://github.com/${CHECKOUT_REPOSITORY}.git"
+            git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 \
+              origin "$EXPECTED_REF"
+            git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
+          fi
+          if [[ -n "$SOURCE_MODE" ]]; then
+            if [[ "$ARCHIVE_PATH" != /* || ! -s "$ARCHIVE_PATH" ]]; then
+              echo "::error::the verified source archive is unavailable"
+              exit 1
+            fi
+            if [[ ! "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::the source archive has no SHA-256 digest"
+              exit 1
+            fi
+            actual_sha256=$(python3 - "$ARCHIVE_PATH" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+            )
+            if [[ "$actual_sha256" != "$ARCHIVE_SHA256" ]]; then
+              echo "::error::the downloaded archive changed after it was verified"
+              exit 1
+            fi
+          else
+            repository_root=$(git -C "$GITHUB_WORKSPACE" rev-parse --show-toplevel 2>/dev/null || true)
+            if [[ "$(cd "$repository_root" 2>/dev/null && pwd || true)" != "$GITHUB_WORKSPACE" ]]; then
+              if [[ "$git_available" == 0 ]]; then
+                echo "::error::the source checkout has neither Git nor a verified archive"
+                exit 1
+              fi
+              git init -q "$GITHUB_WORKSPACE"
+              git -C "$GITHUB_WORKSPACE" remote add origin \
+                "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 \
+                origin "$EXPECTED_REF"
+              git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
+            fi
+            test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_REF"
+            test -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=no)"
+            archive="${RUNNER_TEMP:-/tmp}/torch-fl-source-${EXPECTED_REF}.tar.gz"
+            rm -f "$archive"
+            git archive --format=tar.gz --output "$archive" "$EXPECTED_REF"
+            actual_sha256=$(python3 - "$archive" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+            )
+          fi
+          echo "ref=$EXPECTED_REF" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$actual_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the fixed model bind root
+        id: model-storage
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"
+          root="$HOST_MODEL_ROOT/Qwen3-0.6B"
+          mkdir -p "$root"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
+
+      # GitHub cache entries are immutable. Restoring by the pinned key can
+      # recover an exact or prefix-matching checkpoint; the digest check below
+      # decides whether the files are usable. Restore into a staging directory
+      # so an incomplete cached file cannot look like an existing checkpoint.
+      - name: Restore the pinned Qwen3 checkpoint
+        id: model-cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '8'
+        with:
+          path: ${{ runner.temp }}/torch-fl-model-cache
+          key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
+
+      # A cache outage is not fatal. The fallback fetches on the workflow
+      # runner, before entering the vendor image: the pod proxy does not reach
+      # every Hub host. The same pinned revision, sizes and digests are checked
+      # here for every platform. The cached copy lands in a separate directory
+      # so partial transfer files cannot be mistaken for a checkpoint.
+      - name: Verify or download the pinned Qwen3 checkpoint
+        id: model-verified
+        env:
+          MODEL_SOURCE: ${{ steps.model-storage.outputs.root }}
+          MODEL_CACHE: ${{ runner.temp }}/torch-fl-model-cache/Qwen3-0.6B
+        # Hub is not reachable from every accelerator pod, while the workflow
+        # runner has a bounded request. The script checks every pinned file.
+        run: |
+          set -euo pipefail
+          MODEL_COMMAND=check MODEL_CACHE="$MODEL_CACHE" \
+            python3 .github/scripts/check_platform_environment.py \
+            stage-model --path "$MODEL_SOURCE"
+          if MODEL_COMMAND=verify \
+            python3 .github/scripts/check_platform_environment.py \
+            stage-model --path "$MODEL_SOURCE"; then
+            EXISTING=1
+          else
+            EXISTING=0
+          fi
+          if [[ "$(python3 - "$MODEL_CACHE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+          root = Path(sys.argv[1])
+          try:
+              config = json.loads((root / "config.json").read_text())
+          except (OSError, ValueError):
+              config = {}
+          if str(config.get("_commit_hash", "")) == revision:
+              print("complete")
+          else:
+              print("incomplete")
+          PY
+          )" == complete ]]; then
+            CACHE_READY=1
+          else
+            CACHE_READY=0
+          fi
+          for attempt in 1 2; do
+            if [[ "$attempt" == 1 &&
+              ( "$EXISTING" == 1 || "$CACHE_READY" == 1 ) ]] &&
+              MODEL_COMMAND=verify \
+                python3 .github/scripts/check_platform_environment.py \
+                stage-model --path "$MODEL_SOURCE"; then
+              break
+            fi
+            if MODEL_COMMAND=stage MODEL_CACHE="$MODEL_CACHE" \
+              python3 .github/scripts/check_platform_environment.py \
+              stage-model --path "$MODEL_SOURCE"; then
+              break
+            fi
+            if [[ "$attempt" == 2 ]]; then
+              exit 1
+            fi
+            echo '::warning::Qwen3 transfer failed; retrying once'
+            sleep 5
+          done
+          echo "root=$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
+
+      # Save only a verified, exact cache miss. A present cache is left alone.
+      - name: Save the pinned Qwen3 checkpoint
+        id: model-save
+        if: ${{ !cancelled() && steps.model-cache.outcome == 'success' && steps.model-cache.outputs.cache-hit != 'true' && steps.model-verified.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        timeout-minutes: 12
+        with:
+          path: ${{ runner.temp }}/torch-fl-model-cache
+          key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
+
+      # Copy before invoking setup. setup may install into the checked-out
+      # tree, and tests still need a clean source workspace to execute.
+      - name: Prepare the integration workspace
+        id: workspace
+        # Setup venvs and caches use the runner directories that are mounted
+        # into the vendor image.
+        env:
+          CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
+          CONTAINER_VOLUMES: ${{ needs.configuration.outputs.container_volumes }}
+          CONTAINER_OPTIONS: ${{ needs.configuration.outputs.container_options }}
+          HOST_MODEL_ROOT: ${{ env.TORCH_FL_MODEL_ROOT }}
+          MODEL_PATH: ${{ needs.configuration.outputs.model_path }}
+          CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          CHECKOUT_REF: ${{ steps.source.outputs.ref }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          test -d "$HOST_MODEL_ROOT/Qwen3-0.6B"
+          image="$CI_IMAGE"
+          digest="$image"
+          if [[ -n "$image" ]]; then
+            if [[ "$image" != *@sha256:* ]]; then
+              docker pull "$image"
+              digest=$(docker image inspect --format '{{json .RepoDigests}}' "$image" |
+                python3 -c '
+          import json
+          import re
+          import sys
+          image = sys.argv[1]
+          configured = image.partition("@")[0].rsplit(":", 1)[0]
+          digests = json.load(sys.stdin)
+          expected = configured + "@sha256:"
+          matching = [item for item in digests if isinstance(item, str) and item.startswith(expected) and len(item) == len(expected) + 64 and all(char in "0123456789abcdef" for char in item[len(expected):])]
+          if not matching:
+              raise SystemExit(f"no RepoDigest for {image}: {digests}")
+          if len(set(item.split("@", 1)[1] for item in matching)) != 1:
+              raise SystemExit(f"ambiguous RepoDigests for {image}: {matching}")
+          print(matching[0])
+          ' "$image")
+            fi
+          fi
+          args=(--checkout "$GITHUB_WORKSPACE" --runner-temp "${RUNNER_TEMP:-/tmp}")
+          args+=(--model-root "$HOST_MODEL_ROOT" --model-path "$MODEL_PATH")
+          args+=(--image "$image" --digest "$digest")
+          args+=(--volumes "$CONTAINER_VOLUMES" --options "$CONTAINER_OPTIONS")
+          python3 .github/scripts/container_workspace.py prepare "${args[@]}"
+          echo "config=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/config.json" >> "$GITHUB_OUTPUT"
+          echo "INTEGRATION_PROFILE=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/profile.sh" >> "$GITHUB_ENV"
+
+      # Docker's local RepoDigests may retain a tag-aware name on the hosted
+      # runner, but harbor strips the tag from the same image on Ascend.
+      - name: Match the configured image to its local repository digest
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          image="${{ needs.configuration.outputs.ci_image }}"
+          if [[ -z "$image" ]]; then
+            exit 0
+          fi
+          python3 - "$CONTAINER_CONFIG" "$image" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          config_path = Path(sys.argv[1])
+          image = sys.argv[2]
+          config = json.loads(config_path.read_text())
+          configured_repository, _, tag = image.rpartition(":")
+          if "/" in tag or "@" in image:
+              configured_repository = image.partition("@")[0]
+          resolved_repository, separator, resolved_digest = config["digest"].partition("@sha256:")
+          if (
+              not configured_repository
+              or not separator
+              or len(resolved_digest) != 64
+              or any(char not in "0123456789abcdef" for char in resolved_digest)
+              or resolved_repository.rsplit(":", 1)[0] != configured_repository
+          ):
+              raise SystemExit(
+                  f"the image name does not match its resolved digest: {image!r} "
+                  f"and {config['digest']!r}"
+              )
+          config["digest"] = f"{resolved_repository}@sha256:{resolved_digest}"
+          config_path.write_text(json.dumps(config))
+          PY
+
+      - name: Validate container image identity
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ needs.configuration.outputs.ci_image }}" ]]; then
+            exit 0
+          fi
+          python3 .github/scripts/container_workspace.py verify --config "$CONTAINER_CONFIG"
+
+      - name: Reset pip cache dir
+        run: |
+          set -euo pipefail
+          cache="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
+          python3 - "$cache" <<'PY'
+          import shutil
+          import sys
+          from pathlib import Path
+
+          cache = Path(sys.argv[1]).resolve()
+          if cache.name != "torch-fl-pip":
+              raise SystemExit(f"refusing to reset an unexpected cache: {cache}")
+          shutil.rmtree(cache, ignore_errors=True)
+          PY
+          mkdir -p "$cache"
+          echo "PIP_CACHE_DIR=$cache" >> "$GITHUB_ENV"
+
       - name: Look up pip downloads
         id: pip-cache-lookup
         uses: actions/cache/restore@v4
@@ -147,7 +889,6 @@ jobs:
             ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
-      # Cache downloads only; installation and tests always run.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
@@ -160,151 +901,550 @@ jobs:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
 
-      # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
-      # prebuild the native library in place only at `build`, and this job needs
-      # that library before it builds the wheel. Every other platform provisions
-      # device-dependent pieces at `integration`, which is what a job named this
-      # used to pass. See setup_stage in .github/configs/<p>.yml.
+      - name: Discard incomplete pip cache transfer
+        if: ${{ steps.pip-cache.outcome == 'failure' }}
+        run: |
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
+
+      # Start after restoration so a cache transfer cannot change the mount
+      # that was checked when the container was configured. MPS runs natively.
+      - name: Start the platform command environment
+        id: container
+        if: ${{ needs.configuration.outputs.ci_image != '' }}
+        # Setup must finish before the shared test cohort uses this interpreter.
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          container_id=$(python3 .github/scripts/container_workspace.py start --config "$CONTAINER_CONFIG")
+          python3 .github/scripts/container_workspace.py configure \
+            --config "$CONTAINER_CONFIG" --container "$container_id"
+          name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container_name"])' "$CONTAINER_CONFIG")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Setup, build, install, and tests execute inside the same vendor image.
+      # Every command is one container process; hook PATH and environment
+      # changes are copied back before this step returns so the next command
+      # uses the same interpreter.
       - name: Prepare ${{ needs.configuration.outputs.display_name }} build environment
         id: setup
         env:
           CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
-        run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          SETUP_SCRIPT: ${{ needs.configuration.outputs.setup_script }}
+          SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}
+          SETUP_BASH: ${{ env.bash || '/bin/bash' }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          state="$temp/torch-fl-preparation"
+          # The step runs from the checkout, but hosted runners without Git
+          # still need a fixed source directory before any profile changes
+          # GITHUB_WORKSPACE.
+          setup_helper="$PWD/.github/scripts/setup_entry.sh"
+          setup_path="$PWD/$SETUP_SCRIPT"
+          container_image=""
+          container_workspace=""
+          # Save the runner checkout before the native profile can replace the
+          # workspace address. Setup scripts stay in the checkout until setup
+          # has finished; the prepared copy receives the tests afterwards.
+          # The step can start with the prepared workspace, so retain both
+          # addresses and let the profile replace only the workspace it owns.
+          runner_workspace="$GITHUB_WORKSPACE"
+          if [[ -n "$CONTAINER_CONFIG" ]]; then
+            container_image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")
+            if [[ -n "$container_image" ]]; then
+              container_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$CONTAINER_CONFIG")
+            else
+              container_workspace="$runner_workspace"
+            fi
+          else
+            container_workspace="$runner_workspace"
+          fi
+          if [[ -n "$container_image" ]]; then
+            [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
+            source .github/scripts/setup_entry.sh
+            create_setup_entry "$setup_path" "$container_workspace"
+            cp "$temp/torch-fl-platform-setup.sh" "$container_workspace/"
+            python3 .github/scripts/publish_container_environment.py hook \
+              --config "$CONTAINER_CONFIG" --command torch-fl-platform-setup.sh \
+              --workspace "$container_workspace"
+          else
+            [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
+            selected_bash=$(env -u BASH_ENV /bin/bash -c \
+              'set -euo pipefail; source "$1" </dev/null; command -v bash; printf "%s\n" "$GITHUB_WORKSPACE"' \
+              -- "$INTEGRATION_PROFILE")
+            container_workspace="${selected_bash#*$'\n'}"
+            selected_bash="${selected_bash%%$'\n'*}"
+            [[ -n "$selected_bash" && -n "$container_workspace" ]]
+            [[ "$selected_bash" = /* ]] && test -x "$selected_bash"
+            [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
+            # Keep profile loading in a parent that does not read BASH_ENV.
+            # Its exported GITHUB_WORKSPACE must not replace the checkout
+            # address while the platform Bash command line is expanded.
+            setup_entry="$temp/torch-fl-platform-setup.sh"
+            env -u BASH_ENV /bin/bash -c \
+              'set -euo pipefail; source "$1" </dev/null; source "$2"; unset CI_WORKSPACE; create_setup_entry "$5" "$3"; entry=$(cat "$5"); exec env -u BASH_ENV bash -c "$entry" "$6"' \
+              -- "$INTEGRATION_PROFILE" "$setup_helper" "$runner_workspace" \
+              "$setup_entry" "$setup_path" "$selected_bash"
+          fi
 
-      # Kunlunxin's image ships no `build` module, and a missing one does not
-      # fail cleanly: the checkout's own CMake `build/` directory shadows it as
-      # a namespace package. Empty for every other platform.
       - name: Install build tools
         if: needs.configuration.outputs.integration_build_tools != ''
-        run: ${{ needs.configuration.outputs.integration_build_tools }}
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          BUILD_TOOLS: ${{ needs.configuration.outputs.integration_build_tools }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-build-tools.sh"
+          printf '%s\n' 'set -euo pipefail' "$BUILD_TOOLS" > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            status=0
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script" || status=$?
+            exit "$status"
+          fi
+          bash "$script"
 
       - name: Build wheel
         id: build
-        run: python -m build --wheel --no-isolation
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-build.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python -m build --wheel --no-isolation
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Validate wheel compatibility manifest
         id: validate
-        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-validate.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
+          python scripts/tools/torch-fl-preflight --wheel dist/*.whl \
+            --platform $(printf '%q' "$SETUP_PLATFORM") --check-build-env
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Install wheel
         id: install
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-install.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python -m pip install --force-reinstall --no-deps dist/*.whl' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # pytest, where the image does not already have it: GCU installs it here,
-      # Kunlunxin additionally upgrades pip first, and Ascend gets it from its
-      # own hook. A multi-line list of commands, one per line.
       - name: Install test dependencies
         if: needs.configuration.outputs.integration_test_dependencies != ''
-        run: ${{ needs.configuration.outputs.integration_test_dependencies }}
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          TEST_DEPENDENCIES: ${{ needs.configuration.outputs.integration_test_dependencies }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-test-dependencies.sh"
+          printf '%s\n' 'set -euo pipefail' "$TEST_DEPENDENCIES" > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
+
+      - name: Install shared test dependencies
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          FLAG_GEMS_REQUIREMENT: ${{ needs.configuration.outputs.flag_gems_requirement }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-shared-dependencies.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
+          unset PIP_CONSTRAINT
+          python .github/scripts/verify_shared_dependencies.py \
+            --platform $(printf '%q' "$INTEGRATION_PLATFORM") \
+            --flag-gems $(printf '%q' "$FLAG_GEMS_REQUIREMENT")
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
+
+      - name: Verify shared test dependencies
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          FLAG_GEMS_REQUIREMENT: ${{ needs.configuration.outputs.flag_gems_requirement }}
+          TORCH_FL_INSTALLED_PACKAGE_ROOT: ${{ needs.configuration.outputs.torch_fl_package_root }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-verify-dependencies.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
+          unset PIP_CONSTRAINT
+          python .github/scripts/verify_shared_dependencies.py \
+            --platform $(printf '%q' "$INTEGRATION_PLATFORM") \
+            --flag-gems $(printf '%q' "$FLAG_GEMS_REQUIREMENT") --check
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Prepare wheel-only test workspace
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
         run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-${{ inputs.platform }}.XXXXXX")
-          # The runner executes each configured command with this directory as
-          # its cwd, so what it holds is what those commands can reach. Keep it
-          # wheel-only: `Run unit tests (per file)` is a source-tree suite and
-          # changes back to the checkout itself, and every group that stays here
-          # runs against the installed wheel rather than the checkout it was
-          # built from. tests/unit/test_integration_workdir.py holds both ends of
-          # that arrangement.
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
-          REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
-          printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-workdir.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          test_root="$INTEGRATION_WORKDIR"
+          rm -rf "$test_root"
+          mkdir -p "$test_root"
+          cp -a tests pyproject.toml "$test_root/"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Install pytest JSON reporting
-        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-report-dependencies.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python -m pip install pytest-json-report==1.5.0 coverage==7.10.7' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
+
+      - name: Materialize shared test inventories
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          SHARED_TEST_INVENTORIES: ${{ needs.configuration.outputs.test_inventories }}
+          SHARED_TEST_INVENTORY_KINDS: ${{ needs.configuration.outputs.test_inventory_kinds }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-inventories.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          root="$INTEGRATION_INVENTORY_ROOT"
+          rm -rf "$root"
+          mkdir -p "$root"
+          python - "$root" "$SHARED_TEST_INVENTORIES" \
+            "$SHARED_TEST_INVENTORY_KINDS" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          inventories = json.loads(sys.argv[2])
+          required = set(sys.argv[3].split())
+          if (
+              not required
+              or not isinstance(inventories, dict)
+              or set(inventories) != required
+          ):
+              raise SystemExit(f"unexpected shared inventories: {inventories!r}")
+          for kind in sorted(required):
+              document = inventories[kind]
+              fields = {"cases", "aliases"}
+              if kind == "unit":
+                  fields.add("group")
+              if (
+                  not isinstance(document, dict)
+                  or set(document) != fields
+                  or not isinstance(document["cases"], list)
+                  or not document["cases"]
+                  or not isinstance(document["aliases"], dict)
+                  or (
+                      kind == "unit"
+                      and document["group"] != "unit_tests_per_file"
+                  )
+              ):
+                  raise SystemExit(f"the {kind} inventory is malformed")
+              cases = document["cases"]
+              path = root / kind / "google-test.json"
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+              print(f"{kind}: {len(cases)} cases -> {path}")
+          PY
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Prepare Python line coverage
         id: coverage-setup
         continue-on-error: true
         timeout-minutes: 1
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
         run: |
-          COVERAGE_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-coverage.XXXXXX")
-          python .github/scripts/python_coverage.py prepare --report-dir "$COVERAGE_DIR" --env-file "$GITHUB_ENV"
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          state="$temp/torch-fl-preparation"
+          script="$temp/torch-fl-command-coverage.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python .github/scripts/python_coverage.py prepare --report-dir "$FLAGCICD_COVERAGE_DIR" --env-file "$GITHUB_ENV"' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            cp "$script" "$state/${script##*/}"
+            python3 .github/scripts/publish_container_environment.py hook \
+              --config "$CONTAINER_CONFIG" --command "${script##*/}"
+          else
+            bash "$script"
+          fi
 
       - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
         id: integration-tests
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
+          INTEGRATION_INVENTORY_ARGUMENTS: ${{ needs.configuration.outputs.integration_inventory_arguments }}
           METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
           TORCH_FL_MPS_HIGH_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_HIGH_WATERMARK_RATIO }}
           TORCH_FL_MPS_LOW_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_LOW_WATERMARK_RATIO }}
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
-          export PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
-          # Only the MPS hook supplies these. An empty value is invalid, and a
-          # non-MPS platform must retain whatever its upstream image chose.
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-integration.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          command_environment=(
+            env
+            PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
+            PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
+          )
           if [[ -n "$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" ]]; then
             export PYTORCH_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
             export PYTORCH_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO"
           fi
-          python .github/scripts/run_integration_tests.py
+          read -r -a inventory_arguments <<< "$INTEGRATION_INVENTORY_ARGUMENTS"
+          "${command_environment[@]}" python .github/scripts/run_integration_tests.py \
+            "${inventory_arguments[@]}"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # Preserve failed sessions too; reporting never changes the test verdict.
+      - name: Read integration test verdict
+        id: integration-verdict
+        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-verdict.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python - "$FLAGCICD_VERDICT_FILE" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path, output = map(Path, sys.argv[1:])
+          verdict = json.loads(path.read_text(encoding="utf-8"))
+          outcome = verdict.get("outcome")
+          if outcome not in {"success", "failure"}:
+              raise SystemExit(f"invalid integration verdict in {path}: {verdict!r}")
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"outcome={outcome}\n")
+          PY
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
+
       - name: Merge pytest reports
         id: merge-report
-        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           REPORT_PLATFORM: ${{ inputs.platform }}
-          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
-          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
-        run: >-
-          python .github/scripts/merge_pytest_reports.py
-          --report-dir "$FLAGCICD_REPORT_DIR"
-          --output "$GITHUB_WORKSPACE/pytest-${REPORT_PLATFORM}.json"
-          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
-          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-merge-report.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python .github/scripts/merge_pytest_reports.py \
+            --report-dir "$FLAGCICD_REPORT_DIR" \
+            --output "$GITHUB_WORKSPACE/pytest-$REPORT_PLATFORM.json" \
+            --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME" \
+            --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # Resolve report paths inside the job container; github.workspace may
-      # contain the runner host's checkout path instead of its container mount.
       - name: Retain pytest reports
-        if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/torch-fl-workspace
+          PYTEST_REPORT_ROOT: ${{ runner.temp }}/torch-fl-pytest
         with:
           name: pytest-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            pytest-${{ inputs.platform }}.json
-            ${{ env.FLAGCICD_REPORT_DIR }}/
+            ${{ env.ARTIFACT_ROOT }}/pytest-${{ inputs.platform }}.json
+            ${{ env.PYTEST_REPORT_ROOT }}/
+          if-no-files-found: warn
+
+      - name: Retain shared test inventories
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          INVENTORY_ROOT: ${{ runner.temp }}/torch-fl-inventories
+        with:
+          name: inventories-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: ${{ env.INVENTORY_ROOT }}/
           if-no-files-found: warn
 
       - name: Merge Python line coverage
         id: merge-coverage
-        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-verdict.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           REPORT_PLATFORM: ${{ inputs.platform }}
-          TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
+          TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
-          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
-        run: >-
-          python .github/scripts/python_coverage.py merge
-          --report-dir "$FLAGCICD_COVERAGE_DIR"
-          --output "$GITHUB_WORKSPACE/coverage-${REPORT_PLATFORM}.json"
-          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
-          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-merge-coverage.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python .github/scripts/python_coverage.py merge \
+            --report-dir "$FLAGCICD_COVERAGE_DIR" \
+            --output "$GITHUB_WORKSPACE/coverage-$REPORT_PLATFORM.json" \
+            --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME" \
+            --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Retain Python coverage
-        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-verdict.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/torch-fl-workspace
+          COVERAGE_REPORT_ROOT: ${{ runner.temp }}/torch-fl-coverage
         with:
           name: coverage-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            coverage-${{ inputs.platform }}.json
-            ${{ env.FLAGCICD_COVERAGE_DIR }}/
+            ${{ env.ARTIFACT_ROOT }}/coverage-${{ inputs.platform }}.json
+            ${{ env.COVERAGE_REPORT_ROOT }}/
           if-no-files-found: warn
 
-      # A fork diagnostic run still retains reports, without giving its tested
-      # code an upload credential in the same job. Missing tokens are optional.
       - name: Check FlagCICD upload availability
         id: flagcicd-auth
         if: ${{ !cancelled() && (steps.merge-report.outcome == 'success' || steps.merge-coverage.outcome == 'success') && (inputs.checkout_repository == '' || inputs.checkout_repository == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -317,8 +1457,6 @@ jobs:
             echo '::warning::FLAGCICD_API_TOKEN is unavailable; report retained as an artifact.'
           fi
 
-      # The current MetaX Ubuntu image has no curl. Prepare it inside the job
-      # container, only for credentialed uploads; do not alter the test verdict.
       - name: Prepare MetaX upload tools
         if: ${{ !cancelled() && inputs.platform == 'metax' && steps.flagcicd-auth.outputs.available == 'true' }}
         continue-on-error: true
@@ -335,10 +1473,12 @@ jobs:
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         timeout-minutes: 2
+        env:
+          PYTEST_REPORT: ${{ runner.temp }}/torch-fl-workspace/pytest-${{ inputs.platform }}.json
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: 'pytest-${{ inputs.platform }}.json'
+          report_path: '${{ env.PYTEST_REPORT }}'
           file_type: pytest
           job_name: integration-tests-${{ inputs.platform }}
           fail_on_error: 'false'
@@ -348,10 +1488,12 @@ jobs:
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         timeout-minutes: 2
+        env:
+          COVERAGE_REPORT: ${{ runner.temp }}/torch-fl-workspace/coverage-${{ inputs.platform }}.json
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: 'coverage-${{ inputs.platform }}.json'
+          report_path: '${{ env.COVERAGE_REPORT }}'
           file_type: coverage
           job_name: coverage-${{ inputs.platform }}
           fail_on_error: 'false'
@@ -376,11 +1518,6 @@ jobs:
               output.write('run_attempt=' + os.environ['GITHUB_RUN_ATTEMPT'] + '\n')
           PY
 
-      # Save outside post-job cleanup so the upload has its own deadline.
-      # Keep downloaded dependencies even if a later build/test step fails:
-      # !cancelled() intentionally permits saving after failure (no success()).
-      # Skip exact hits, failed lookups/transfers and cancelled jobs.
-      # Cache errors must not change the build/test result.
       - name: Save pip downloads
         if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
@@ -389,6 +1526,21 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}
+
+      # The test copy is shared with the vendor container, whose files carry
+      # the image's uid. Finish with a cleanup process in that image before
+      # removing it, so a failed or interrupted run cannot leave unreadable
+      # files for the next checkout. This is the job's final step because later
+      # actions and cache saves need the runner's live environment files.
+      - name: Close the platform command environment
+        if: ${{ !cancelled() && steps.container.outcome == 'success' && steps.container.outputs.name != '' }}
+        env:
+          CONTAINER_NAME: ${{ steps.container.outputs.name }}
+        run: |
+          set -euo pipefail
+          docker exec "$CONTAINER_NAME" --env HOME=/tmp bash -e -c \
+            'find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" -xdev -depth -mindepth 1 -delete 2>/dev/null || true'
+          docker rm --force "$CONTAINER_NAME"
 
   flagcicd-report:
     name: FlagCICD outcome (${{ inputs.platform }})

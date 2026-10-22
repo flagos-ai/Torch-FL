@@ -13,8 +13,7 @@
 # limitations under the License.
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
 def _cuda_driver_error(msg: str) -> bool:

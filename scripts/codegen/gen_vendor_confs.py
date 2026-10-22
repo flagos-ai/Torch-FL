@@ -612,6 +612,19 @@ BOXING_TRITON_GAPS = {
         # case: the FlagGems route aborts at step 2 with that assertion; boxing
         # completes the same slice contract. --
         "slice.Tensor",
+        # -- `slice_backward` assumes a contiguous grad_output. Narrowing a
+        # transposed input hands it a stride-0 view: measured on PPU by
+        # tests/integration/ops/test_narrow_dispatch.py::
+        # test_narrow_backward_non_contiguous, whose gradient differed for 18
+        # of 32 elements. The same defect is recorded for Iluvatar below. --
+        "slice_backward",
+        # -- `where.self_out` does not grow an empty `out` to the broadcast
+        # result shape. FlagGems raises "out tensor at index 0 shape is invalid,
+        # should be (2, 4) but is torch.Size([0])!" in
+        # test_where_dispatch.py::TestWhereOutCorrectness::
+        # test_out_grows_from_empty. The existing-length out= cases pass; the
+        # CUDA boxing kernel implements the full out= contract. --
+        "where.self_out",
         # -- FlagGems' reflection-padding wrappers reject a flagos operand before
         # they reach a kernel, and the overload survey cannot see it: the harness
         # derives `padding` from the tensor rank, so ATen's arity check fails

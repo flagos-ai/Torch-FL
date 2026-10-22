@@ -355,7 +355,8 @@ row). Verified on sixteen caller spellings (rank 1, 2 and 4; windowed, square,
 strided, broadcast on either axis, 8-padded, additive bf16, additive fp32,
 transposed, causal): every admitted one returns a correct result from the leaf,
 every declined one a correct result from math, and none raises. The regression
-test is `tests/integration/ops/test_gcu_sdpa_mask.py`, which asserts the *route*
+test is the GCU row of `tests/integration/vendor_lanes/sdpa_lane_caps.py`, run by
+`tests/integration/vendor_lanes/test_sdpa_lanes.py`, which asserts the *route*
 rather than only the values — every decline here is a correct answer on the math
 path, so a values-only test would keep passing on a build where the fused lane had
 silently gone away.
@@ -400,9 +401,10 @@ Five things in the clause are there for a measured reason:
   a threshold on the constant's magnitude would be arbitrary, a row that is
   uniformly shifted is a degenerate input, and `-inf` is the spelling for "block
   this key" rather than a finite large negative. It is recorded instead, and
-  `tests/integration/ops/test_gcu_sdpa_mask.py` pins the deviation so that a
-  vendor op which stops deviating fails the test and forces these numbers to be
-  re-measured rather than silently outliving their measurement.
+  the GCU row of `tests/integration/vendor_lanes/sdpa_lane_caps.py` pins the
+  deviation so that a vendor op which stops deviating fails the test and forces
+  these numbers to be re-measured rather than silently outliving their
+  measurement.
 
 #### The VAE decode call is declined by the layout clause
 

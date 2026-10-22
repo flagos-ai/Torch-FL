@@ -27,6 +27,7 @@ whose device-claiming side effects must not run in a unit test.
 import importlib.machinery
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -57,14 +58,23 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture
 def isolated_torch_fl(monkeypatch):
-    """Hide any real torch_fl so find_spec() resolves a stub wheel instead."""
+    """Hide the real package and every detector cache a stub could reuse."""
     real = sys.modules.pop("torch_fl", None)
+    cached = {
+        name: sys.modules.pop(name, None)
+        for name in ("torch_fl._build_config", "torch_fl._platform")
+    }
     try:
         yield
     finally:
         sys.modules.pop("torch_fl", None)
+        for name in cached:
+            sys.modules.pop(name, None)
         if real is not None:
             sys.modules["torch_fl"] = real
+        for name, module in cached.items():
+            if module is not None:
+                sys.modules[name] = module
 
 
 def _install_wheel(tmp_path, accelerator=None, marker=None, lib_ppu=False):
@@ -173,5 +183,25 @@ def test_default_when_nothing_identifies_the_build(isolated_torch_fl, tmp_path):
     _install_wheel(tmp_path)
     try:
         assert platform.detect_platform() == "cuda"
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_stub_wheel_ignores_modules_loaded_by_an_installed_build(
+    isolated_torch_fl, tmp_path
+):
+    """A real build record already in sys.modules cannot answer for a stub."""
+    real_build_record = types.ModuleType("torch_fl._build_config")
+    real_build_record.ACCELERATOR = "ppu"
+    real_platform = types.ModuleType("torch_fl._platform")
+    real_platform._ACCELERATOR_TO_PLATFORM = {"ppu": "ppu"}
+    real_platform.build_accelerator = lambda: "ppu"
+    real_platform.DEFAULT_PLATFORM = "cuda"
+    sys.modules["torch_fl._build_config"] = real_build_record
+    sys.modules["torch_fl._platform"] = real_platform
+
+    _install_wheel(tmp_path, marker="ascend")
+    try:
+        assert platform.detect_platform() == "ascend"
     finally:
         sys.path.remove(str(tmp_path))

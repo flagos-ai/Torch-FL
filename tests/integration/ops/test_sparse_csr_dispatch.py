@@ -42,9 +42,8 @@ Every flagos result is compared against the same construction on CPU.
 """
 
 import pytest
-import torch
+from device_init import torch, torch_fl
 
-import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 

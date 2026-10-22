@@ -265,14 +265,10 @@ while "$VENV_PYTHON" -m pip show triton >/dev/null 2>&1; do
 done
 "$VENV_PYTHON" -m pip uninstall -y torch_xmlir 2>/dev/null || true
 
-# flagtree is the Triton build carrying the "xpu" backend. The version is local
-# to this hook rather than a FLAGTREE_VERSION_kunlunxin row in the pin table:
-# only platforms with a wheel segment carry an interpreter pin beside their
-# FlagTree pin, and kunlunxin publishes no wheel segment. Adding either row
-# without the other breaks the pin table's invariants, and adding both would
-# make setup.py declare a cp310-only FlagTree as a runtime requirement of a
-# wheel that builds and runs on a stock CPU torch.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.7.0+xpu3.6}"
+# flagtree is the Triton build carrying the "xpu" backend. Its version comes from
+# the shared pin table. It has no wheel segment or interpreter pin: kunlunxin
+# publishes this XPU build separately from the wheel's CPU torch runtime.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_kunlunxin}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 install_flagtree
 
@@ -284,8 +280,10 @@ FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/fl
 install_flag_gems
 
 # FlagGems' own runtime deps, installed one at a time for the same
-# IncompleteRead reason pip_retry exists for. numpy is deliberately not listed:
-# the CPU torch wheel does not pull it in, and nothing on this path imports it.
+# IncompleteRead reason pip_retry exists for. numpy stays <2 for the same reason
+# as the test deps: 2.x breaks the stock +cpu torch C extensions at import.
+# ONNX and the shared integration cohort also require it.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'

@@ -27,9 +27,8 @@ the two very different paths an op takes to get its randomness:
     no `torch._C._cuda_manualSeed` binding), so the generated kernels inject that
     same shared generator via `GetFlagosDefaultCudaGenerator()`.
 
-Because both paths now converge on one generator, these tests run under *both*
-backend configs -- pure vendor (`-m main_ops`) and FlagGems
-(`-m "flaggems and main_ops"`). The public device API is
+Because both paths now converge on one generator, the RNG checks run under both
+passes of the shared FlagGems conformance suite. The public device API is
 always `torch.flagos`; backend-specific generator representations are not part
 of the cross-backend test contract.
 
@@ -61,8 +60,7 @@ Usage:
 
 import pytest
 
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 
 def _is_musa() -> bool:
@@ -636,16 +634,6 @@ class TestRngMultiDevice:
 
     @pytest.mark.flaggems
     @pytest.mark.main_ops
-    @pytest.mark.xfail(
-        reason="FlagGems multinomial launches its Triton kernel against the wrong "
-        "device for any index != 0 -- 'Pointer argument (at 0) cannot be accessed "
-        "from Triton (cpu tensor?)' on flagos:1..7, fine on flagos:0. A device-context "
-        "bug on the FlagGems Triton path rather than an RNG one: the same op on the "
-        "native path is reproducible on every device. xfail (non-strict) so the "
-        "eventual fix surfaces as an xpass instead of being silently assumed.",
-        strict=False,
-        raises=(ValueError, AssertionError),
-    )
     def test_multinomial_on_second_device(self):
         dev = self._second_device()
 

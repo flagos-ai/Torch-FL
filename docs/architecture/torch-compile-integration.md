@@ -208,7 +208,7 @@ registration and vendor target selection but do not establish MUSA compiler
 support.
 ### Ascend (FlagTree, formerly triton-ascend)
 
-Ascend's FlagGems route now runs on **FlagTree** (`0.6.2a1+ascend3.5`, Triton
+Ascend's FlagGems route now runs on **FlagTree** (`0.7.1a1+ascend3.5`, Triton
 3.5), which installs itself as the `triton` package and registers an
 `AscendBackend`. `FLAGOS_USE_FLAGTREE=1` asserts that the active `triton` really
 is FlagTree — it cannot switch anything on, because the wheel replaces `triton`
@@ -252,8 +252,8 @@ incompatibility with the plugin model, not a packaging detail.
   Verified against a real FlagTree build (`triton_v3.5.x` @ `d2063b06`,
   `flagtree-0.6.0+ascend`, built with the prebuilt LLVM `7d5de303` and
   `TRITON_CODEGEN_BACKENDS=nvidia;amd;ascend` on aarch64/Python 3.10, and again
-  against the `flagtree-0.6.2a1+ascend3.5` wheel the Ascend FlagGems route now
-  runs on): after
+  against earlier FlagTree `0.6.x` Ascend wheels, and the policy is exercised
+  again by the `flagtree-0.7.1a1+ascend3.5` installation in CI): after
   `install_policy()`, the registry reports `['flagos', 'mindspore', 'torch_npu']`,
   `flagos` covers all 15 required strategies with no parity gap against
   `torch_npu`, and each signature matches upstream's. The generated output is
@@ -643,12 +643,12 @@ tests live alongside it:
       `test_compile.py` passes 30/32 with a cold cache, the two skips being the
       FlagTree-only and MetaX-only cases. Superseded for the FlagGems route by
       FlagTree, and not re-measured there
-- [x] FlagTree on Ascend, for the FlagGems eager route — `flagtree_ascend_policy.py`
+- [ ] FlagTree on Ascend, for the FlagGems eager route — `flagtree_ascend_policy.py`
       gives FlagTree's Ascend backend a torch_npu-free policy and `torch_fl.flagos`
       installs it during device init, so eagerly launched FlagGems kernels run on
-      FlagTree `0.6.2a1+ascend3.5`; the route table was re-measured op by op on
-      that stack (see
-      [`docs/reference/operator-support.md`](../reference/operator-support.md))
+      FlagTree `0.7.1a1+ascend3.5`. The operator route table has not been
+      re-measured on this newer FlagTree/FlagGems cohort, so the installed stack
+      is validated in CI, but per-operator results remain pending
 - [ ] FlagTree on Ascend, for the `torch.compile` path — the policy is in place
       and the emitted C++ compiles against ATen with every strategy resolving
       through FlagTree's real registry, but the compile suite itself has not been

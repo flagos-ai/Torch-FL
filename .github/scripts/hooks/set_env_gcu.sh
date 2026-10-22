@@ -231,11 +231,10 @@ if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
 fi
 
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
-# reason above. numpy is deliberately not listed: the CPU torch wheel does not
-# pull it in, and nothing on this path imports it -- FlagGems' GCU route and the
-# integration tests are both numpy-free. pip still warns that flag_gems declares
-# a numpy requirement it cannot satisfy; that warning is expected here and is not
-# a failure, because flag_gems is installed with --no-deps.
+# reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
+# the stock +cpu torch C extensions at import. ONNX and the shared integration
+# cohort also require numpy, which the CPU torch wheel does not pull in.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'

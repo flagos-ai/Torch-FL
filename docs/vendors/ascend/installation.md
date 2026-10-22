@@ -111,12 +111,21 @@ All three test groups are exercised in CI (see `.github/configs/ascend.yml` line
 FlagGems provides Triton-compiled kernels for the measured Ascend routes, with ACLNN remaining the native fallback. Ascend installations and CI enable this path by default; operators that FlagGems does not cover continue through ACLNN or CPU fallback.
 
 The Triton build underneath is **FlagTree** — the FlagOS Triton fork — on its
-Ascend 3.5 line (`flagtree 0.6.2a1+ascend3.5`, Triton 3.5). This replaced
+Ascend 3.5 line (`flagtree 0.7.1a1+ascend3.5`, Triton 3.5). This replaced
 `triton-ascend 3.2.x`, which lagged the Triton APIs current FlagGems uses, whose
 task-queue launch path calls `at_npu::native::OpCommand` (a `torch_npu` symbol
 this backend must not link), and whose removal from the environment is the whole
-reason the route was re-measured. Nothing in this path imports or links
-`torch_npu`.
+reason the route was re-measured. FlagGems `5.4.0` imports
+`triton.experimental.tle.language` in its Ascend backend, and FlagTree
+`0.7.1a1+ascend3.5` provides it. The previous `0.7.0+ascend3.5` wheel did not
+carry TLE, so it could not import the Ascend FlagGems backend.
+Nothing in this path imports or links `torch_npu`.
+
+FlagTree's TLE initializer imports AscendSHMEM as `shmem`, which neither the
+FlagTree wheel nor the 910C image provides. `torch_fl` registers an inert
+placeholder so the FlagGems modules can be imported. Distributed TLE
+shared-memory operations remain unavailable until AscendSHMEM is installed;
+calling the placeholder entry points raises `NotImplementedError`.
 
 ### No torch_npu
 
@@ -142,9 +151,12 @@ coupling is at the C++ and link level rather than a Python import. See
 
 ### Install FlagTree and FlagGems
 
-Both come from the FlagOS index. FlagTree installs the module named `triton`, so
-remove any stock or vendor Triton first — otherwise it is shadowed rather than
-replaced. The FlagTree Ascend 3.5 wheel is published for cp311 only.
+FlagTree comes from the common FlagOS index. FlagGems comes from the Ascend
+vendor index at
+`https://resource.flagos.net/repository/flagos-pypi-ascend/simple`. FlagTree
+installs the module named `triton`, so remove any stock or vendor Triton first —
+otherwise it is shadowed rather than replaced. The FlagTree Ascend 3.5 wheel is
+published for cp311 only.
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -152,19 +164,21 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 pip uninstall -y triton
 pip install --no-deps --index-url \
   https://resource.flagos.net/repository/flagos-pypi-hosted/simple \
-  'flagtree===0.6.2a1+ascend3.5'
+  'flagtree===0.7.1a1+ascend3.5'
 
-pip install --no-deps \
-  'git+https://github.com/FlagOpen/FlagGems.git@d45285ba6423a3400019aa330daa6877908bf3cf'
+pip install --no-deps --only-binary=:all: --index-url \
+  https://resource.flagos.net/repository/flagos-pypi-ascend/simple \
+  'flag-gems===5.4.0'
 
 pip install pybind11 packaging 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy<2'
 ```
 
-FlagGems is pinned to a master commit validated against the FlagTree wheel above,
-not to a release: an unpinned install is one upstream commit away from requiring
-a Triton API the pin does not provide. `.github/scripts/set_env_ascend.sh` sets
-both pins and is the authoritative recipe; `TORCH_FL_FLAGTREE_VERSION` and
-`TORCH_FL_FLAGGEMS_REVISION` override them.
+Both packages are pinned to a validated pair, and FlagGems is installed as a
+published wheel rather than from a moving Git checkout.
+`.github/scripts/hooks/set_env_ascend.sh` sets both pins and is the
+authoritative recipe; `TORCH_FL_FLAGTREE_VERSION`,
+`TORCH_FL_FLAGGEMS_VERSION`, `TORCH_FL_FLAGTREE_INDEX_URL`, and
+`TORCH_FL_FLAGGEMS_INDEX_URL` override them.
 
 `numpy` stays below 2.x: 2.x breaks the stock `+cpu` torch C extensions at
 import, and the Ascend test groups import both.
@@ -262,7 +276,7 @@ the installed Triton build. The Ascend profile is picked from the
 
 **Status: not revalidated on FlagTree.** The measured result quoted below was
 taken on `triton-ascend 3.2.0`; since Ascend's FlagGems route moved to FlagTree
-`0.6.2a1+ascend3.5` no CI step or hand run has re-measured the compile path, so
+`0.7.1a1+ascend3.5` no CI step or hand run has re-measured the compile path, so
 treat it as unvalidated on the current toolchain. The path is also not covered by
 CI at all — `tests/integration/test_compile.py` has no Ascend step in
 `.github/configs/ascend.yml` — so these are point measurements either way.
@@ -317,9 +331,13 @@ to FlagTree is unmeasured.
 
 ## Limitations
 
-### No model mount in CI
+### Qwen3 model groups in CI
 
-`.github/configs/ascend.yml` (line 110) explicitly defers Qwen3 inference/training smoke tests pending a model mount on the CI runner. Point measurements outside CI show training at 0.82x `torch_npu` performance on real Ascend 910 hardware (`tests/perf/e2e_qwen3_train_ascend.py`).
+The shared manifest runs the Qwen3 checkpoint, inference, training, fallback,
+and profiler groups on Ascend. The integration job stages the pinned checkpoint
+at the common model path before launching the platform commands. Point
+measurements outside CI show training at 0.82x `torch_npu` performance on real
+Ascend 910 hardware (`tests/perf/e2e_qwen3_train_ascend.py`).
 
 ### No device-side profiler parity yet
 

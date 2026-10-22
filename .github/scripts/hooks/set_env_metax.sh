@@ -209,12 +209,9 @@ PY
 if [[ "$CI_STAGE" == "integration" ]]; then
   VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
-  # Install FlagGems' runtime dependencies into the venv. flag_gems imports
-  # packaging, yaml (PyYAML), sqlalchemy and numpy at or shortly after import.
-  # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
-  # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
-  # (documented in set_env_musa.sh:176-178).
-  python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
+  # Install the FlagGems dependencies needed to import it. The remaining
+  # dependencies and test cohort come from the pipeline's shared install.
+  python -m pip install --no-deps 'pyyaml==6.0.1' 'sqlalchemy==2.0.48'
 
   # --- FlagTree: the Triton build carrying the "metax" backend ----------------
   #

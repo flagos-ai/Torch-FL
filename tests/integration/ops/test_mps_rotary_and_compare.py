@@ -21,8 +21,7 @@ They also check the CPU reference boundary for unsupported widths.
 """
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform

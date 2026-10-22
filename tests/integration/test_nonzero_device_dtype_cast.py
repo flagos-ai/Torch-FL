@@ -88,8 +88,7 @@ import sys
 import textwrap
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
 # Issue #409: a top-level file is reached by no manifest unless it carries a

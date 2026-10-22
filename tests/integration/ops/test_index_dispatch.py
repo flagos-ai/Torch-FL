@@ -24,9 +24,8 @@ device, look like a sequence to CPython.
 import ctypes
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 

@@ -95,6 +95,7 @@ def test_iluvatar_manifest_records_official_cpu_runtime(
 def clean_kernel_env(monkeypatch):
     """No build switch inherited from the ambient environment."""
     monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
+    monkeypatch.delenv("FLAGOS_SDK_VERSION", raising=False)
     for name in KERNEL_SWITCHES:
         monkeypatch.delenv(name, raising=False)
 

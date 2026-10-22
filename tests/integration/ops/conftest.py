@@ -54,39 +54,54 @@ def _load_platform():
 
 _platform = _load_platform()
 
-
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu"),
-    "ascend": ("cuda", "metax", "musa", "dcu"),
-    # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
-    # `-> cuda` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
-    # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
-    # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
-    # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
-    # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
-    # here -- same skip set as cuda, which is where PPU implicitly landed before
-    # it was named. Naming it makes the platform first-class in this gate
-    # instead of correct by accident of the fallback bucket. On a default
-    # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
-    # set, because that key has no kernel behind it.
-    "ppu": ("metax", "ascend", "musa", "dcu"),
-    # cuda -- and an unidentified wheel, which detect_platform() defaults to --
-    # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
-    # skips every other backend's. The build-record gate below covers the
-    # default FlagGems-primary wheel, where the `cuda` route has no kernels.
-    "cuda": ("metax", "ascend", "musa", "dcu"),
-    "dcu": ("metax", "ascend", "musa", "gcu"),
-    # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
-    # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
-    # `none` (CPU fallback), with no `cuda` route, so a `-> cuda` dispatch assertion
-    # cannot hold. Every other backend's marker is skipped for the same reason.
-    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
-    # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
-    # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
-    # Metal line, so every other backend's marked tests are skipped here.
+    "metax": ("cuda", "ascend", "musa", "dcu", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "ascend": ("cuda", "metax", "musa", "dcu", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "musa": (
+        "cuda",
+        "metax",
+        "ascend",
+        "dcu",
+        "flaggems_python",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "gcu": ("cuda", "metax", "ascend", "musa", "dcu", "iluvatar", "kunlunxin", "ppu"),
+    "ppu": (
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "cuda": (
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "dcu": ("metax", "ascend", "musa", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "kunlunxin": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "iluvatar",
+        "ppu",
+    ),
     "mps": (
         "cuda",
         "metax",
@@ -96,22 +111,32 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
         "gcu",
         "ppu",
         "flaggems_python",
+        "iluvatar",
+        "kunlunxin",
     ),
-    # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
-    # vendor op library, so `-> cuda` and every other backend's dispatch
-    # assertions cannot hold. Without this row the platform fell through to the
-    # empty skip set and the cuda/ascend-marked tests ran here and failed.
-    #
-    # `flaggems`/`flaggems_python` are deliberately NOT skipped: this platform
-    # does build the FlagGems Python path, so those tests are real coverage. They
-    # still fail on a TsingMicro host for an unrelated reason -- the TX runtime
-    # allows one process per device, and the tests that spawn a subprocess leave
-    # it on the device the parent already holds, so the child blocks until the
-    # test's 60 s subprocess timeout. Skipping them would hide that.
-    "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
-    # CoreX exposes a CUDA-shaped runtime, but Iluvatar uses its native vendor
-    # slot rather than CUDA boxing. Keep FlagGems coverage enabled.
-    "iluvatar": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "tsingmicro": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "ppu",
+        "iluvatar",
+        "kunlunxin",
+    ),
+    "iluvatar": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "ppu",
+        "kunlunxin",
+    ),
 }
 
 
@@ -145,18 +170,19 @@ def _boxing_enabled() -> bool:
     return "boxing" in _env.build_kernels()
 
 
+def _tileops_enabled() -> bool:
+    """True when this wheel recorded the generated TileOPs kernel set."""
+    from torch_fl import _env
+
+    return "tileops" in _env.build_kernels()
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
+    """Apply build-record gates to every ops case before collection finishes."""
     platform = _platform.detect_platform()
     markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
-    # MetaX builds are boxing-only: the hand-written mxcc backend is NOT
-    # compiled, so ops run through the CUDA boxing kernels (and optionally the
-    # FlagGems Python path). Tests asserting a `-> metax` dispatch (mark.metax)
-    # cannot pass, so skip them. No mode variable to consult -- the platform
-    # name already says it.
-    if platform == "metax":
-        markers_to_skip.append("metax")
     flaggems_cpp_on = _flaggems_cpp_enabled()
     # The `cuda` mark asserts a `-> cuda` dispatch, and on a CUDA-ABI platform
     # that route is served by the generated boxing kernels. A FlagGems-primary
@@ -169,10 +195,23 @@ def pytest_collection_modifyitems(
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
     for item in items:
+        if item.get_closest_marker("tileops") and not _tileops_enabled():
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "TileOPs kernels are not compiled into this wheel "
+                        "(rebuild with the tileops kernel set)"
+                    )
+                )
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             item.add_marker(
                 pytest.mark.skip(
-                    reason="software low-precision matrix path requires DCU or MetaX"
+                    reason=(
+                        "software low-precision matrix path is not compiled into this "
+                        "wheel for the DCU or MetaX platform"
+                    )
                 )
             )
             continue
@@ -198,12 +237,7 @@ def pytest_collection_modifyitems(
         for marker_name in markers_to_skip:
             if item.get_closest_marker(marker_name):
                 item.add_marker(
-                    pytest.mark.skip(
-                        reason=(
-                            f"Skipped on {platform} runtime: "
-                            f"requires @{marker_name} backend"
-                        )
-                    )
+                    pytest.mark.skip(reason=f"requires @{marker_name} backend")
                 )
                 break
 
@@ -211,7 +245,12 @@ def pytest_collection_modifyitems(
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
-    config.addinivalue_line("markers", "metax: requires MetaX platform")
+    config.addinivalue_line(
+        "markers", "tileops: requires the generated TileOPs kernels"
+    )
+    config.addinivalue_line(
+        "markers", "metax: runs only on MetaX (not a native MXCC route assertion)"
+    )
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")

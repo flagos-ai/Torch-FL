@@ -177,13 +177,15 @@ infer it from routing configuration alone.
 ## Running the tests
 
 ```bash
-pytest tests/integration/ops/ -m "flaggems and main_ops" -v
-pytest tests/integration/ops/ -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp" -v
+python tests/integration/flaggems/run.py native
+python tests/integration/flaggems/run.py flaggems
 pytest tests/unit/test_gen_vendor_confs.py -v
 pytest tests/integration/ops/test_flaggems_conf_consistency.py -v
 ```
 
-The `flaggems`-marked cases are collected unconditionally; routing comes from `backends_gcu.conf`, so no environment variable is needed. See the note in `.github/configs/gcu.yml`.
+Both conformance passes require the same complete case inventory, and the
+FlagGems pass requires a wheel built with the FlagGems kernel set. Routing comes
+from `backends_gcu.conf`, so no environment variable is needed.
 
 ## Troubleshooting
 

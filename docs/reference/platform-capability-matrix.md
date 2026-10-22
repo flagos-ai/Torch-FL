@@ -148,26 +148,63 @@ build opts into boxing.
   `csrc/aten/backends/iluvatar/`, whose kernels call corex's CUDA-named C ABI
   (ixdnn/ixblas) directly. Everything FlagGems covers still routes to the
   FlagGems Python/Triton path through FlagTree's iluvatar backend, and the rest
-  falls back to `none` (`cpu_fallback`). A BI-V150 overload survey (2026-10-15,
-  603-op cohort: the conf's own FlagGems routes) measured **STRICT 380 /
-  BASIC_ONLY 66 / FAILED 21 / UNTESTED 136**; the 37 defect ops the previous
-  639-op run measured failing are off the FlagGems route (to the native slot or
-  to `cpu_fallback`), so the conf routes **603** `flaggems`, not the shared 640
-  ceiling (`cat` measured separately in that earlier run, STRICT; in-band here).
-  Most of the 37 are the
+  falls back to `none` (`cpu_fallback`). The current generated conf routes
+  **585** overloads to FlagGems, eleven to the native slot and 1441 to `none`.
+  It sets `scaled_dot_product_attention` to `none`, which is the route its
+  shared SDPA row exercises. The earlier BI-V150 survey was measured against a
+  previous 603-route conf and remains historical evidence; it measured
+  **STRICT 380 / BASIC_ONLY 66 / FAILED 21 / UNTESTED 136**. The 37 defect ops
+  removed from that earlier cohort went to the native slot or to
+  `cpu_fallback` (`cat` was measured separately in an earlier run as STRICT and
+  is in-band in the historical cohort). Subsequent route changes produced the
+  current 585-route conf. Most of the 37 are the
   `device_name="cuda"` vs `flagos` mismatch the DCU `patch_flaggems_device_name()`
   realignment addresses; adding iluvatar to `_ALIGNED_VENDORS` and re-measuring is
-  the follow-up that would return them. It has no CI job and no runner lane — it
-  builds locally only — and its wheel carries the local version segment
-  `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
-  ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
-  BI-V150) but the full cohort has not been re-measured.
-- **CI covers 9 of 12**: TsingMicro, BPU and Iluvatar have no
-  `.github/configs/` entry. MPS gained one with its operator lane, the first
-  platform whose hardware job runs on a GitHub-hosted macOS runner rather than a
-  vendor image: its config leaves `ci_image` empty and the two consuming
-  workflows omit the `container:` key for that value, because a macOS runner
-  cannot start a container and the accelerator is the runner's own Metal GPU.
+  the follow-up that would return them. Its wheel carries the local version
+  segment `corex4.5.0`. The native kernel cohort is **not yet
+  hardware-revalidated**: the ixdnn/ixblas path has a proven end-to-end conv2d
+  result (bit-for-bit vs CPU on BI-V150) but the full cohort has not been
+  re-measured. Its shared SDPA numeric bounds are also **not revalidated** on
+  BI-V150.
+- **CI covers 10 of 12**: TsingMicro and BPU have no `.github/configs/` entry.
+  MPS gained one with its operator lane, the first platform whose hardware job
+  runs on a GitHub-hosted macOS runner rather than a vendor image: its config
+  leaves `ci_image` empty and the two consuming workflows omit the `container:`
+  key for that value, because a macOS runner cannot start a container and the
+  accelerator is the runner's own Metal GPU.
+
+## Integration coverage
+
+The ten platforms with a `.github/configs/<platform>.yml` run one integration
+pipeline: a single ordered list of groups in `.github/integration-manifest.yml`,
+composed for each platform by `.github/scripts/compose_integration_manifest.py`
+in the loader job. There is no per-platform step list any more, so the ten run
+the same groups, with the same commands, in the same order.
+
+What a platform contributes to a step is a *value*, in one of two config keys:
+
+- `environment_check` — the wheel, package and device expectations that
+  `check_platform_environment.py` asserts before the pipeline starts.
+- `step_environment` — a mapping of manifest step id to the environment
+  variables that step alone needs on this platform. Keys are step ids rather
+  than positions, so a step that moves in the manifest cannot silently carry
+  another step's environment.
+
+The `sdpa_lanes` and `flaggems_conformance` steps run on all ten configured
+platforms. `flaggems_kernel_conformance` runs the same cases on every platform
+whose build includes the FlagGems kernel set. MPS explicitly forbids that set,
+so the kernel pass does not apply to its wheel. `sdpa_lanes` drives the shared
+SDPA case set through each platform's configured route. The FlagGems SDPA route
+cases run every shared mask, shape, causal and math case on every platform too;
+a platform whose row, import contract or route is missing fails rather than
+removing cases from the run. Some platforms take an additional
+vendor-specific SDPA lane; those cases are additive and do not replace or
+filter the shared set.
+
+The two shared SDPA suites have no platform skips. The route row chooses the
+component a platform exercises, and a missing required component is a test
+failure. A platform adding SDPA support therefore inherits the complete shared
+coverage by providing a row, not by authoring another chip-specific test file.
 
 ## Directory inventory
 

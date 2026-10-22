@@ -32,9 +32,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
@@ -119,7 +118,7 @@ def test_route_is_the_aclnn_kernel():
     so this is the conf's own answer.
     """
     code = (
-        "import torch, torch_fl; "
+        "from device_init import torch, torch_fl; "
         "x = torch.randn(128, device='flagos:0'); "
         "torch.topk(x, 5)"
     )

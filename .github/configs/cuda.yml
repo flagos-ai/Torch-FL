@@ -42,11 +42,9 @@ paths_watch:
   - .github/scripts/set_env_cuda.sh
   - scripts/vendor/with_cuda_libtorch.sh
 
-container_volumes:
-  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+container_volumes: []
 
-integration_environment:
-  MODEL_PATH: /models/Qwen3-0.6B
+integration_environment: {}
 
 container_options: >-
   --gpus all
@@ -87,8 +85,9 @@ environment_check:
     - flaggems
   forbid_build_kernels:
     - boxing
+  flagos_devices:
+    at_least: 2
   flagtree:
     version_env: FLAGTREE_VERSION
-    version_default: 0.7.0rc2
+    version_default: 0.7.0
     triton_prefix: "3.6."
-  model_dir: true

@@ -189,9 +189,10 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build patchelf
   install_cpu_torch
   if [[ "$CI_STAGE" == "integration" ]]; then
-    # Pin numpy<2: the CPU torch wheel is built against the NumPy 1.x ABI, and
-    # transformers pulls numpy 2.x which breaks torch's C extensions at import.
-    "$VENV_PYTHON" -m pip install pytest transformers "numpy<2"
+    # pytest is a runner dependency. The pipeline installs the shared test
+    # cohort after this hook without --no-deps so it can keep this torch build;
+    # a separate transformers install here would leave a second version in place.
+    "$VENV_PYTHON" -m pip install pytest
   fi
 fi
 
@@ -291,7 +292,7 @@ export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+"$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
 
 CPU_TORCH_ROOT="$(CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import os

@@ -36,8 +36,7 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch, torch_fl
 
 
 DEVICE = "flagos:0"
@@ -84,7 +83,7 @@ def _run_dispatch_subprocess(expr: str, extra_env: dict) -> subprocess.Completed
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         f"a = torch.randn(8, 8, device='{DEVICE}'); "
         f"b = torch.randn(8, 8, device='{DEVICE}'); "
         f"r = {expr}; "
@@ -128,7 +127,7 @@ class TestMusaDispatch:
         env = os.environ.copy()
         env["FLAGOS_LOG"] = "dispatch"
         code = (
-            "import torch_fl, torch; "
+            "from device_init import torch, torch_fl; "
             f"a = torch.randn(8, 8, device='{DEVICE}'); "
             f"b = torch.randn(8, 8, device='{DEVICE}'); "
             f"out = torch.empty(8, 8, device='{DEVICE}'); "
@@ -177,7 +176,7 @@ def _op_env(op):
 # or the value, so one prologue serves every route under test, default and
 # pinned alike.
 _FP64_MATMUL_PROLOGUE = """
-import torch, torch_fl
+from device_init import torch, torch_fl
 torch.manual_seed(42)
 dev = torch.device({device!r})
 shape = (4, 64, 64) if {batched} else (64, 64)
@@ -643,7 +642,7 @@ def _run_cross_device_probe(body: str) -> subprocess.CompletedProcess:
     itself may raise while the damage shows up as every *later* op failing.
     """
     code = (
-        "import torch, torch_fl\n"
+        "from device_init import torch, torch_fl\n"
         f"a = torch.arange(16, dtype=torch.float32, device='{DEVICE}').reshape(4, 4)\n"
         f"b = torch.arange(16, dtype=torch.float32, device='{DEVICE_B}').reshape(4, 4)\n"
         "a_cpu, b_cpu = a.cpu(), b.cpu()\n"
@@ -699,7 +698,7 @@ def _run_ordering_probe(step: str, ref: str, iters: int) -> subprocess.Completed
     is what identifies one.
     """
     code = f"""
-import torch, torch_fl
+from device_init import torch, torch_fl
 
 srcs = [
     torch.arange({_ORDERING_NUMEL}, dtype=torch.int64, device='{DEVICE}'),

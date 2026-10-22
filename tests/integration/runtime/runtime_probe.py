@@ -305,8 +305,7 @@ _STREAM_SRC = """
 import json
 import sys
 
-import torch_fl  # noqa: F401  -- preloads the vendor runtime before torch is imported
-import torch
+from device_init import torch, torch_fl
 
 torch.manual_seed(0)
 a = torch.randn(64, 64)
@@ -358,8 +357,7 @@ _TRANSFER_SRC = """
 import json
 import sys
 
-import torch_fl  # noqa: F401  -- preloads the vendor runtime before torch is imported
-import torch
+from device_init import torch, torch_fl
 
 torch.manual_seed(0)
 cpu = torch.randn(8, 8)

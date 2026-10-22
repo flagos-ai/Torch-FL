@@ -29,9 +29,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend_or_none
 
@@ -45,7 +44,7 @@ def _run_silu_subprocess(
     env = os.environ.copy()
     env.update(extra_env)
     code = (
-        "import torch_fl, torch; "
+        "from device_init import torch, torch_fl; "
         "a = torch.randn(4,4,device='flagos:0'); "
         "torch.nn.functional.silu(a)"
     )

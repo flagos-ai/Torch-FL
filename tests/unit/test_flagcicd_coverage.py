@@ -63,6 +63,8 @@ def _setup(tmp_path, initializer="INITIAL = 1\n"):
         "PYTEST_PLUGINS",
         "FLAGCICD_REPORT_DIR",
         "FLAGCICD_COVERAGE_DIR",
+        "FLAGCICD_LAUNCHER",
+        "FLAGCICD_TEST_GROUP",
     ):
         environment.pop(name, None)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -90,6 +92,8 @@ def _setup(tmp_path, initializer="INITIAL = 1\n"):
     environment.update(
         FLAGCICD_COVERAGE_DIR=str(reports),
         FLAGCICD_REPORT_DIR=str(tmp_path / "pytest sessions"),
+        FLAGCICD_PYTHON_EXECUTABLE=sys.executable,
+        FLAGCICD_LAUNCHER="group",
         PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage",
         INTEGRATION_WORKDIR=str(workdir),
         INTEGRATION_ENVIRONMENT="{}",
@@ -155,7 +159,7 @@ def test_groups_union_executed_lines_and_count_unimported_modules(tmp_path):
     assert report["totals"]["percent_covered"] == pytest.approx(100 * 6 / 9)
     assert _metadata(reports)["complete"]
     assert {s["group"] for s in _metadata(reports)["sessions"]} == {"first", "second"}
-    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).glob("*.json"))) == 2
+    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).rglob("*.json"))) == 2
 
 
 def test_collection_imports_and_failed_test_lines_are_measured(tmp_path):
@@ -204,7 +208,7 @@ def test_per_file_runner_does_not_collect_fixture_sample_subprocesses(tmp_path):
     report = _merge(reports)
     assert len(_metadata(reports)["sessions"]) == 2
     assert report["files"]["torch_fl/model.py"]["missing_lines"] == [4, 7]
-    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).glob("*.json"))) == 2
+    assert len(list(Path(environment["FLAGCICD_REPORT_DIR"]).rglob("*.json"))) == 2
 
 
 @pytest.mark.parametrize("damage", ["crash", "corrupt"])
@@ -259,7 +263,7 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
         (ROOT / ".github/workflows/integration-tests.yml").read_text()
     )["jobs"]["integration-tests"]
     steps = {s.get("id", s.get("name")): s for s in job["steps"]}
-    workspace = tmp_path / "container workspace"
+    workspace = tmp_path / "torch-fl-workspace"
     workspace.mkdir()
     result = subprocess.run(
         ["bash", "-e", "-c", steps["merge-coverage"]["run"]],
@@ -272,6 +276,8 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
             "TEST_OUTCOME": "success",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
             "SOURCE_REF": "b" * 40,
+            "PIP_CACHE_DIR": str(tmp_path / "pip"),
+            "CONTAINER_CONFIG": "",
         },
         text=True,
         capture_output=True,
@@ -285,13 +291,23 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
     assert upload["continue-on-error"] is True
     assert "steps.merge-coverage.outcome == 'success'" in upload["if"]
     assert "steps.flagcicd-auth.outputs.available == 'true'" in upload["if"]
-    filename = upload["with"]["report_path"].replace("${{ inputs.platform }}", "cuda")
-    output = workspace / filename
+    filename = (
+        upload["with"]["report_path"]
+        .replace("${{ env.PIP_CACHE_DIR }}", str(tmp_path / "pip"))
+        .replace("${{ inputs.platform }}", "cuda")
+    )
+    for name, value in upload["env"].items():
+        value = value.replace("${{ runner.temp }}", str(tmp_path))
+        value = value.replace("${{ inputs.platform }}", "cuda")
+        filename = filename.replace(f"${{{{ env.{name} }}}}", value)
+    output = Path(filename).resolve()
     report = json.loads(output.read_text())
     assert _metadata(reports)["source_ref"] == "b" * 40
     assert report["totals"]["percent_covered"] > 0
+    retained = steps["Retain Python coverage"]
     assert (
-        upload["with"]["report_path"] in steps["Retain Python coverage"]["with"]["path"]
+        "${{ env.ARTIFACT_ROOT }}/coverage-${{ inputs.platform }}.json"
+        in retained["with"]["path"]
     )
 
 

@@ -33,11 +33,10 @@ import subprocess
 import sys
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
-pytestmark = pytest.mark.main_ops
+pytestmark = [pytest.mark.main_ops, pytest.mark.dcu]
 
 
 def _require_dcu() -> None:
@@ -98,8 +97,7 @@ def test_complex_escape_leaves_the_float_route_alone():
     """The runtime dtype escape must be dtype-scoped, not route-wide."""
     _require_dcu()
     code = """
-import torch_fl
-import torch
+from device_init import torch, torch_fl
 
 for dtype in (torch.float32, torch.complex64):
     value = torch.ones(4, dtype=dtype, device="flagos:0")

@@ -53,9 +53,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 import torch.nn.functional as F
-import torch_fl  # noqa: F401
 
 from backend_conf import dispatched_to_mps, routed_backend_or_none
 from platform_support import detect_platform
@@ -356,7 +355,7 @@ class TestEmbeddingDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "import torch.nn.functional as F; "
                 "w = torch.randn(32, 8, device='flagos:0'); "
                 "i = torch.randint(0, 32, (4, 16), device='flagos:0'); "
@@ -384,7 +383,7 @@ class TestEmbeddingDispatch:
             [
                 sys.executable,
                 "-c",
-                "import torch, torch_fl; "
+                "from device_init import torch, torch_fl; "
                 "import torch.nn.functional as F; "
                 "w = torch.randn(32, 8, dtype=torch.float64, device='flagos:0'); "
                 "i = torch.randint(0, 32, (4, 16), device='flagos:0'); "
@@ -427,7 +426,7 @@ class TestEmbeddingCost:
         reads = 10
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 import torch.nn.functional as F
 weight = torch.randn(151936, 1024, device='flagos:0')
 indices = torch.randint(0, 151936, (1, 512), device='flagos:0')
@@ -464,7 +463,7 @@ torch_fl._C._synchronize()
         """
         served = dispatched_to_mps(
             """
-import torch, torch_fl
+from device_init import torch, torch_fl
 import torch.nn.functional as F
 weight = torch.randn(4096, 128, dtype=torch.float64, device='flagos:0')
 indices = torch.randint(0, 4096, (1, 512), device='flagos:0')

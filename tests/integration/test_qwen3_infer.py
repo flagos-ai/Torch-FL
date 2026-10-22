@@ -24,8 +24,7 @@ Usage:
 import time
 
 import pytest
-import torch
-import torch_fl
+from device_init import torch, torch_fl
 
 
 @pytest.fixture(scope="module")

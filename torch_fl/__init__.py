@@ -1247,22 +1247,12 @@ def _patch_flaggems_codegen_config():
     if _build_accelerator() == "gcu" and os.environ.get("GEMS_VENDOR") != "ascend":
         from torch_fl.accelerator.gcu._gcu_compat import (
             install_gcu_rng_generators,
-            patch_diffusers_qwenimage_rope,
             patch_gcu_triton_for_flagos,
         )
 
         install_gcu_rng_generators()
         if patch_gcu_triton_for_flagos():
             _env.set_foreign("GEMS_VENDOR", "enflame")
-        # diffusers keys the Qwen-Image rotation on device type, so without this a
-        # flagos tensor multiplies by a complex exponential the topsaten stack
-        # serves slowly -- 57.5% of a transformer forward against 34.0% for the
-        # real-valued entry diffusers provides for a device with no complex dtype.
-        # It has to run here rather than at the call site: the operand half is
-        # cached per device on first use, and this is the last point that is
-        # reliably before the pipeline exists. Costs a diffusers import -- the
-        # call is a no-op when diffusers is not installed.
-        patch_diffusers_qwenimage_rope()
         return
 
     # --- Iluvatar branch ---
@@ -2530,6 +2520,15 @@ def _phase_vendor_compat() -> None:
     _install_musa_flaggems_compat()
     _install_tsingmicro_flaggems_compat()
 
+    # The Qwen-Image rotation depends on the completed device claim. In
+    # particular, _C has replaced the flagos entry in ROPE_PER_DEVICE before
+    # this runs. Install the real-valued consumer only on vendors that cannot
+    # use the complex path; all other vendors keep their existing behavior.
+    if _build_accelerator() in ("gcu", "iluvatar", "ascend"):
+        from .accelerator.qwenimage_rope import patch_diffusers_qwenimage_rope
+
+        patch_diffusers_qwenimage_rope()
+
     # torch::utils::device_lazy_init(PrivateUse1) imports the module named
     # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
     # library has called set_requires_device_init(PrivateUse1, true) -- which
@@ -2620,6 +2619,10 @@ def _phase_ecosystem() -> None:
     # going through them (`cat` among them) then fail with `module 'flag_gems'
     # has no attribute 'vendor_name'` for the life of the process.
     flagos._stand_down_foreign_triton_drivers()
+    # The dispatch patches in flagos._lazy_init wrap callables that FlagGems
+    # only binds after importing its ops package. Initialize the device before
+    # those patches and before the first routed op can cache an unpatched one.
+    flagos.init()
     _patch_flaggems_philox()
 
     # Correct flag_gems' layer-norm backward for 3-D+ inputs; must precede the

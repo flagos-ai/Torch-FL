@@ -24,9 +24,8 @@ elapsed time must be non-negative. Both are hardware-agnostic invariants.
 """
 
 import pytest
-import torch
+from device_init import torch, torch_fl
 
-import torch_fl
 
 DEVICE = "flagos:0"
 

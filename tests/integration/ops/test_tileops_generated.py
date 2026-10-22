@@ -21,9 +21,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
+from device_init import torch
 
-import torch_fl  # noqa: F401
 from torch_fl.tileops import runtime as tileops_runtime
 from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
 from torch_fl.tileops.generated.shims import SHIM_NAMES
@@ -93,9 +92,7 @@ def test_matches_aten(overload, recipe, module, cls_name, dtypes, extra):
         want = want[0]
     if dtype in TOL:
         rtol, atol = TOL[dtype]
-        torch.testing.assert_close(
-            got.cpu().float(), want.float(), rtol=rtol, atol=atol
-        )
+        torch.testing.assert_close(got.cpu(), want, rtol=rtol, atol=atol)
     else:
         # Integer and bool results must be bit-exact.
         assert torch.equal(got.cpu(), want)
@@ -139,7 +136,7 @@ def test_dispatches_through_cpp():
     there.
     """
     prog = (
-        "import torch, torch_fl; "
+        "from device_init import torch, torch_fl; "
         "torch.relu(torch.randn(64, 32, device='flagos', dtype=torch.float16))"
     )
     # Propagate this interpreter's import path: torch_fl and tileops are

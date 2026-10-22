@@ -14,7 +14,7 @@
 
 """Assert the wheel landed in the environment its platform config describes.
 
-This was eight hand-written heredocs, one per platform, each re-stating the
+This replaced the hand-written per-platform heredocs, each re-stating the
 same handful of facts about the environment and drifting from the others in
 which of them it stated. The facts are the platform's -- a stock +cpu torch,
 the vendor bundle in place of the CUDA one, so many devices -- so they live in
@@ -31,19 +31,48 @@ once, instead of ninety errors into the FlagGems group. Keep the messages
 specific enough to say which expectation failed.
 """
 
+import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
 import os
+import shutil
 import struct
 import sys
+import tempfile
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 
 ENVIRONMENT_VARIABLE = "FLAGOS_ENVIRONMENT_CHECK"
+FLAGGEMS_KERNEL_SET = "flaggems"
+
+QWEN3_REPOSITORY = "Qwen/Qwen3-0.6B"
+QWEN3_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+QWEN3_FILE_SIZES = {
+    "config.json": 726,
+    "generation_config.json": 239,
+    "merges.txt": 1671853,
+    "model.safetensors": 1503300328,
+    "tokenizer.json": 11422654,
+    "tokenizer_config.json": 9732,
+    "vocab.json": 2776833,
+}
+QWEN3_WEIGHT_BLOCK = 16 * 1024 * 1024
+QWEN3_SHA256 = {
+    "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+    "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+    "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+}
 
 _BOUNDS = ("at_least", "more_than", "exactly")
+_TLE_IMPORT_FAILURES = set()
 
 # Mach-O cputype -> the name distutils tags a wheel with. Only the two this
 # project can produce are named; anything else is reported by number, because a
@@ -58,7 +87,7 @@ FAT_ARCH_LIMIT = 64
 # Every key a platform may state. The list is closed on purpose: a misspelled
 # key reads as an expectation that was never checked, and the platform would
 # pass this step while asserting nothing about the fact it meant to assert.
-# tests/unit/test_integration_manifest.py holds the eight configs to this.
+# tests/unit/test_integration_manifest.py holds all configured platforms to this.
 SUPPORTED_KEYS = frozenset(
     {
         "torch_version_prefix",
@@ -75,11 +104,11 @@ SUPPORTED_KEYS = frozenset(
         "cuda_devices",
         "triton_backend",
         "flaggems_vendor",
+        "require_flaggems_tle_modules",
         "require_imports",
         "native_extensions_arch",
         "torch_musa_shim_only",
         "flagtree",
-        "model_dir",
     }
 )
 
@@ -146,11 +175,19 @@ def import_dependencies(spec):
         flag_gems=None,
         flagtree_is_active=None,
     )
-    if spec.get("triton_backend") or spec.get("flagtree"):
+    if (
+        spec.get("triton_backend")
+        or spec.get("flagtree")
+        or FLAGGEMS_KERNEL_SET in (spec.get("require_build_kernels") or [])
+    ):
         import triton
 
         dependencies.triton = triton
-    if spec.get("flaggems_vendor") or spec.get("flagtree"):
+    if (
+        spec.get("flaggems_vendor")
+        or spec.get("flagtree")
+        or FLAGGEMS_KERNEL_SET in (spec.get("require_build_kernels") or [])
+    ):
         import flag_gems
 
         dependencies.flag_gems = flag_gems
@@ -205,7 +242,7 @@ def assert_torch_path(spec, torch_path):
         assert forbidden not in str(torch_path), f"{forbidden} in {torch_path}"
 
 
-def assert_build_kernels(spec, torch_fl):
+def assert_build_kernels(spec, torch_fl, dependencies):
     """The kernel sets the wheel was built with, from the build record.
 
     `require_package_files` says what the wheel ships, which is one step removed
@@ -226,6 +263,21 @@ def assert_build_kernels(spec, torch_fl):
     for name in required:
         assert name in kernels, (
             f"expected the {name!r} kernel set, found {sorted(kernels)}"
+        )
+    if FLAGGEMS_KERNEL_SET in required:
+        if dependencies.triton is None:
+            import triton
+
+            dependencies.triton = triton
+        if dependencies.flag_gems is None:
+            import flag_gems
+
+            dependencies.flag_gems = flag_gems
+        available = sorted(dependencies.triton.backends.backends)
+        assert available, "the installed Triton has no backend for FlagGems"
+        print(
+            f"FlagGems runtime: {dependencies.flag_gems.__file__}; "
+            f"Triton backends: {available}"
         )
     for name in forbidden:
         assert name not in kernels, (
@@ -291,7 +343,7 @@ def assert_flaggems_vendor(dependencies, vendor):
 
 
 def assert_flagtree(dependencies, flagtree):
-    """CUDA: the FlagTree build is the one the wheel's Triton routes need.
+    """The FlagTree build is the one the wheel's Triton routes need.
 
     The FlagTree wheel is source-free: it ships its own Triton, and the
     expected version comes from the setup script so the two stay in step.
@@ -311,20 +363,306 @@ def assert_flagtree(dependencies, flagtree):
     return expected
 
 
-def assert_model_dir():
-    model_path = os.environ.get("MODEL_PATH", "")
-    model_root = Path(model_path) if model_path else None
-    assert model_root and model_root.is_dir(), model_path
-    config_path = model_root / "config.json"
-    assert config_path.is_file(), config_path
+def _flagtree_version_from_pin_table(platform):
+    """Read the selected FlagTree build from the shared setup environment."""
+
+    pins = Path(__file__).resolve().parents[1] / "version-pins.env"
+    for line in pins.read_text(encoding="utf-8").splitlines():
+        if line.startswith("FLAGTREE_VERSION_"):
+            name, separator, value = line.partition("=")
+            if separator and name.removeprefix("FLAGTREE_VERSION_") == platform:
+                return value
+    return None
+
+
+def assert_flaggems_tle(module_name, dependencies):
+    """Require the TLE package FlagGems imports rather than only its namespace.
+
+    A FlagTree release can carry ``triton.experimental`` without a ``tle``
+    submodule. A release can also ship a partial TLE package, so the configured
+    modules are imported rather than inferred from the parent namespace.
+
+    TLE's Ascend communicator needs AscendSHMEM, absent from FlagTree images.
+    The scripts that prepare a build run before ``torch_fl._C`` exists. Loading
+    FlagGems' concrete operator there starts FlagGems' package initializer,
+    which probes the accelerator before torch_fl can register it.
+    """
+    if not isinstance(module_name, str) or not module_name:
+        raise SystemExit(
+            f"require_flaggems_tle_modules must name modules: {module_name!r}"
+        )
+    if dependencies.flag_gems is None:
+        raise SystemExit("a FlagGems TLE check requires importing flag_gems")
+    if module_name in _TLE_IMPORT_FAILURES:
+        raise SystemExit(
+            f"{module_name} already failed to import in this process; run the "
+            "prepared environment in a fresh Python process"
+        )
     try:
-        config = json.loads(config_path.read_text())
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SystemExit(f"{config_path} is not valid JSON: {error}") from error
-    assert isinstance(config, dict), config_path
-    assert isinstance(config.get("model_type"), str) and config["model_type"], (
-        f"{config_path} has no model_type"
-    )
+        if importlib.import_module(module_name) is None:
+            raise SystemExit(f"{module_name} did not import")
+    except (ImportError, ModuleNotFoundError) as error:
+        _TLE_IMPORT_FAILURES.add(module_name)
+        if error.name != "shmem":
+            raise
+        path = Path(__file__).resolve().parents[2] / "torch_fl" / "compile"
+        spec = importlib.util.spec_from_file_location(
+            "flagtree_ascend_tle", path / "flagtree_ascend_tle.py"
+        )
+        if spec is None or spec.loader is None:
+            raise SystemExit(f"cannot load the TLE compatibility helper: {path}")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+
+        # A failed import may leave a parent package in sys.modules. Retrying
+        # here could then skip the old stopgap tester and appear successful.
+        helper.ensure_tle_importable()
+        try:
+            importlib.import_module(module_name)
+        except (ImportError, ModuleNotFoundError) as retry_error:
+            raise SystemExit(
+                f"{module_name} failed to import after the Ascend shmem "
+                f"placeholder was registered: {retry_error}"
+            ) from retry_error
+    print(f"FlagGems TLE imports succeeded: {module_name}")
+
+
+def assert_model_dir(model_path=None, verify_weights=False, verify_files=False):
+    """Check that the mount is a loadable Transformers checkpoint.
+
+    A directory can exist while its host mount is empty or carries an unrelated
+    image. Check the configuration before a model test starts, so the failure
+    names the checkpoint instead of appearing as an unrecognized model later.
+    Weight validation reads only the safetensors headers. It catches a truncated
+    transfer without loading the model into host memory.
+    """
+    model_path = model_path or os.environ.get("MODEL_PATH", "")
+    if not model_path:
+        raise AssertionError("MODEL_PATH is empty")
+    directory = Path(model_path)
+    if not directory.is_dir():
+        raise AssertionError(f"MODEL_PATH is not a directory: {model_path}")
+    config_path = directory / "config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise AssertionError(
+            f"MODEL_PATH has no Transformers config.json: {model_path}"
+        ) from error
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise AssertionError(
+            f"MODEL_PATH config.json cannot be read as JSON: {config_path}: {error}"
+        ) from error
+    if not isinstance(config, dict):
+        raise AssertionError(
+            f"MODEL_PATH config.json must be a JSON object: {config_path}"
+        )
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str) or not model_type.strip():
+        raise AssertionError(
+            f"MODEL_PATH config.json has no non-empty model_type: {config_path}"
+        )
+
+    if verify_weights:
+        assert_safetensors_header(directory)
+    if verify_files:
+        for name, expected_size in QWEN3_FILE_SIZES.items():
+            path = directory / name
+            try:
+                size = path.stat().st_size
+            except OSError as error:
+                raise AssertionError(
+                    f"MODEL_PATH lacks downloaded file {path}"
+                ) from error
+            if size != expected_size:
+                raise AssertionError(
+                    f"MODEL_PATH file has {size} bytes; {name} needs "
+                    f"{expected_size} from Qwen/{QWEN3_REVISION}"
+                )
+
+        # The safetensors header proves the checkpoint can be mapped. Pinned
+        # whole-file hashes cover every file, including tokenizer data that some
+        # model tests load without touching a weight tensor.
+        for name, expected_digest in QWEN3_SHA256.items():
+            digest = hashlib.sha256()
+            with (directory / name).open("rb") as stream:
+                for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_digest:
+                raise AssertionError(
+                    f"MODEL_PATH file does not match Qwen/{QWEN3_REVISION}: {name}"
+                )
+
+
+def assert_safetensors_header(directory):
+    """Read one safetensors header without mapping its tensor data."""
+    shards = sorted(directory.glob("*.safetensors"))
+    if not shards:
+        raise AssertionError(f"MODEL_PATH has no .safetensors weights: {directory}")
+    for shard in shards:
+        try:
+            size = shard.stat().st_size
+            with shard.open("rb") as stream:
+                length_bytes = stream.read(8)
+                if len(length_bytes) != 8:
+                    raise AssertionError(
+                        f"MODEL_PATH safetensors file is truncated: {shard}"
+                    )
+                header_length = int.from_bytes(length_bytes, "little")
+                if not header_length or 8 + header_length > size:
+                    raise AssertionError(
+                        f"MODEL_PATH safetensors header exceeds file size: "
+                        f"{shard} ({header_length} bytes, {size} total)"
+                    )
+                header = json.loads(stream.read(header_length).decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise AssertionError(
+                f"MODEL_PATH safetensors header cannot be read: {shard}: {error}"
+            ) from error
+        if not isinstance(header, dict):
+            raise AssertionError(
+                f"MODEL_PATH safetensors header must be a JSON object: {shard}"
+            )
+        tensors = [key for key in header if key != "__metadata__"]
+        if not tensors:
+            raise AssertionError(
+                f"MODEL_PATH safetensors header has no tensors: {shard}"
+            )
+        print(f"model weights: {shard.name} {size} bytes, {len(tensors)} tensors")
+
+
+def _checkpoint_error(model_path, verify_weights=True):
+    """Return the checkpoint defect, or None when the directory is complete."""
+    try:
+        assert_model_dir(
+            model_path,
+            verify_weights=verify_weights,
+            verify_files=True,
+        )
+    except AssertionError as error:
+        return str(error)
+    return None
+
+
+def _download_checkpoint_file(name, destination):
+    """Fetch one immutable Hub file into its final checkpoint directory.
+
+    The Hub redirects the weights to a content CDN. Its signed query string is
+    part of the redirect, so the original URL is requested instead of forwarding
+    a cached redirect. The outer runner supplies the route through a proxy when
+    the platform pod cannot connect directly.
+    """
+    url = f"https://huggingface.co/{QWEN3_REPOSITORY}/resolve/{QWEN3_REVISION}/{name}"
+    target = Path(destination) / name
+    if target.is_file() and target.stat().st_size == QWEN3_FILE_SIZES[name]:
+        if file_sha256(target) == QWEN3_SHA256[name]:
+            print(f"Keeping verified {name}", flush=True)
+            return
+
+    with tempfile.NamedTemporaryFile(
+        dir=destination, prefix=f".{name}.", delete=False
+    ) as download:
+        partial = Path(download.name)
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Torch-FL-CI-checkpoint"},
+            )
+            print(f"Downloading {name} at {QWEN3_REVISION}", flush=True)
+            with urllib.request.urlopen(request, timeout=120) as response:
+                commit = response.headers.get("X-Repo-Commit", "")
+                size = response.headers.get("X-Linked-Size")
+                if commit and commit != QWEN3_REVISION:
+                    raise RuntimeError(
+                        f"Hub returned {commit}, expected {QWEN3_REVISION}"
+                    )
+                if size and int(size) != QWEN3_FILE_SIZES[name]:
+                    raise RuntimeError(
+                        f"Hub reports {name} as {size} bytes, "
+                        f"expected {QWEN3_FILE_SIZES[name]}"
+                    )
+                digest = hashlib.sha256()
+                copied = 0
+                for block in iter(lambda: response.read(QWEN3_WEIGHT_BLOCK), b""):
+                    download.write(block)
+                    digest.update(block)
+                    copied += len(block)
+            if copied != QWEN3_FILE_SIZES[name]:
+                raise RuntimeError(
+                    f"{name} has {copied} bytes, expected {QWEN3_FILE_SIZES[name]}"
+                )
+            if digest.hexdigest() != QWEN3_SHA256[name]:
+                raise RuntimeError(f"SHA-256 mismatch for {name}")
+            download.close()
+            partial.replace(target)
+        except Exception:
+            download.close()
+            partial.unlink(missing_ok=True)
+            raise
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(QWEN3_WEIGHT_BLOCK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def stage_model(code, model_path, cache_path=None):
+    """Stage the pinned checkpoint using the workflow runner's interpreter."""
+    if code == "verify":
+        if _checkpoint_error(model_path) is None:
+            print(f"Qwen3 model: {model_path}")
+            return 0
+        return 1
+    if code == "check":
+        destination = Path(model_path)
+        if cache_path and Path(cache_path).is_dir():
+            for source in Path(cache_path).iterdir():
+                target = destination / source.name
+                if source.is_file() and not (
+                    target.is_file() and target.stat().st_size == source.stat().st_size
+                ):
+                    shutil.copy2(source, destination / source.name)
+        return 0
+    if code == "stage":
+        directory = Path(model_path)
+        directory.mkdir(parents=True, exist_ok=True)
+        if cache_path and Path(cache_path).is_dir():
+            for source in Path(cache_path).iterdir():
+                if source.is_file():
+                    target = directory / source.name
+                    if (
+                        target.is_file()
+                        and target.stat().st_size == source.stat().st_size
+                    ):
+                        continue
+                    shutil.copy2(source, target)
+        _remove_foreign_checkpoint_files(directory)
+        for name in QWEN3_FILE_SIZES:
+            _download_checkpoint_file(name, directory)
+        assert_model_dir(
+            model_path,
+            verify_weights=True,
+            verify_files=True,
+        )
+        print(f"Qwen3 model: {model_path}")
+        return 0
+    raise SystemExit(f"unknown model command: {code}")
+
+
+def _remove_foreign_checkpoint_files(directory):
+    """Remove an older Hub revision without touching live temporary files."""
+    if not (directory / "config.json").is_file():
+        return
+    for path in directory.iterdir():
+        if (
+            path.is_file()
+            and not path.name.startswith(".")
+            and path.name not in QWEN3_FILE_SIZES
+        ):
+            path.unlink()
 
 
 def macho_architectures(path):
@@ -405,7 +743,57 @@ def assert_native_extensions_arch(dependencies, expected):
     print(f"native extension: {path} built for {arches}")
 
 
-def main():
+class _ArgumentParser(argparse.ArgumentParser):
+    """Let pytest's ``-v`` pass through when the loader imports this CLI."""
+
+    def parse_args(self, args=None, namespace=None):
+        try:
+            return super().parse_args(args, namespace)
+        except SystemExit as error:
+            # Nested pytest configuration makes the plugin load every module in
+            # tests/unit. Patching sys.argv for that reason would be global
+            # state; this import-time call is the only invocation inside it.
+            if error.code == 0:
+                return argparse.Namespace(
+                    command="check", path=None, verify_weights=False, verify_files=False
+                )
+            raise
+
+
+def main(argv=None):
+    parser = _ArgumentParser()
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("check", "check-model", "stage-model"),
+        default="check",
+    )
+    parser.add_argument("--path")
+    parser.add_argument("--verify-weights", action="store_true")
+    parser.add_argument("--verify-files", action="store_true")
+    arguments = parser.parse_args(argv)
+    if arguments.command == "stage-model":
+        if not arguments.path:
+            raise SystemExit("stage-model requires --path")
+        return stage_model(
+            os.environ.pop("MODEL_COMMAND", "stage"),
+            arguments.path,
+            os.environ.pop("MODEL_CACHE", ""),
+        )
+    if arguments.command == "check-model":
+        if not arguments.path:
+            raise SystemExit("check-model requires --path")
+        assert_model_dir(
+            arguments.path,
+            verify_weights=arguments.verify_weights,
+            verify_files=arguments.verify_files,
+        )
+        print(f"Qwen3 model: {arguments.path}")
+        return 0
+    return real_main()
+
+
+def real_main():
     spec = load_spec()
     dependencies = import_dependencies(spec)
     torch = dependencies.torch
@@ -419,7 +807,7 @@ def main():
     package_root = torch_fl_path.parent
     assert_torch_path(spec, torch_path)
     assert_package_files(spec, package_root)
-    build_kernels = assert_build_kernels(spec, torch_fl)
+    build_kernels = assert_build_kernels(spec, torch_fl, dependencies)
 
     if spec.get("torch_musa_shim_only"):
         assert_torch_musa_shim()
@@ -442,11 +830,19 @@ def main():
         assert_triton_backend(dependencies, spec["triton_backend"])
     if spec.get("flaggems_vendor"):
         assert_flaggems_vendor(dependencies, spec["flaggems_vendor"])
+    tle_modules = spec.get("require_flaggems_tle_modules") or []
+    if not isinstance(tle_modules, list) or any(
+        not isinstance(name, str) or not name for name in tle_modules
+    ):
+        raise SystemExit(
+            "require_flaggems_tle_modules must be a list of module names: "
+            f"{tle_modules!r}"
+        )
+    for module_name in tle_modules:
+        assert_flaggems_tle(module_name, dependencies)
     flagtree_version = None
     if spec.get("flagtree"):
         flagtree_version = assert_flagtree(dependencies, spec["flagtree"])
-    if spec.get("model_dir"):
-        assert_model_dir()
     if spec.get("native_extensions_arch"):
         assert_native_extensions_arch(dependencies, spec["native_extensions_arch"])
 
