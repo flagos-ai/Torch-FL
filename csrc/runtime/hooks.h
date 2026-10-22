@@ -133,6 +133,9 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
     at::DataPtr new_data = allocator->allocate(newsize);
     TORCH_CHECK(new_data.get() != nullptr || newsize == 0,
                 "Failed to allocate ", newsize, " bytes for resize");
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    new_data.unsafe_set_device(storage_impl->device());
+#endif
 
     // Copy existing data if any
     if (old_nbytes > 0 && storage_impl->data()) {

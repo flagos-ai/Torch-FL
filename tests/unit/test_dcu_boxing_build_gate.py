@@ -116,4 +116,9 @@ def test_dcu_allocator_and_record_stream_keep_the_provider_identity():
     allocation = provider.split("c10::DataPtr Allocate(size_t size)", 1)[1]
     allocation = allocation.split("c10::DeleterFnPtr RawDeleter", 1)[0]
     assert "c10::DeviceType::PrivateUse1" in allocation
-    assert "ptr.get()" in allocation
+    assert "if (ptr.get())" in allocation
+
+    hooks = (ROOT / "csrc/runtime/hooks.h").read_text(encoding="utf-8")
+    resize = hooks.split("at::DataPtr new_data = allocator->allocate(newsize);", 1)[1]
+    resize = resize.split("storage_impl->set_data_ptr_noswap", 1)[0]
+    assert "new_data.unsafe_set_device(storage_impl->device());" in resize
