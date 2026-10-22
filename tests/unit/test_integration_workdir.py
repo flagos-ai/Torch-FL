@@ -494,6 +494,13 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
         assert _snapshot(workspace) == stale_files
         assert not output.exists()
 
+        rewrite_archive(None, damaged=True)
+        download_damaged = run(selected_environment=git_environment)
+        assert download_damaged.returncode != 0
+        assert "source archive differs" in download_damaged.stderr
+        assert _snapshot(workspace) == stale_files
+        assert not output.exists()
+
         rewrite_archive(f"node: {'0' * 40}\n".encode())
         mismatched = run()
         assert mismatched.returncode != 0
