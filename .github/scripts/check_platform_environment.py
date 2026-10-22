@@ -37,8 +37,11 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import shutil
 import struct
 import sys
+import tempfile
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,10 +60,15 @@ QWEN3_FILE_SIZES = {
     "tokenizer_config.json": 9732,
     "vocab.json": 2776833,
 }
+QWEN3_WEIGHT_BLOCK = 16 * 1024 * 1024
 QWEN3_SHA256 = {
     "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+    "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
     "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
     "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
 }
 
 _BOUNDS = ("at_least", "more_than", "exactly")
@@ -473,7 +481,8 @@ def assert_model_dir(model_path=None, verify_weights=False, verify_files=False):
                 )
 
         # The safetensors header proves the checkpoint can be mapped. Pinned
-        # whole-file hashes cover the tokenizer and weights content too.
+        # whole-file hashes cover every file, including tokenizer data that some
+        # model tests load without touching a weight tensor.
         for name, expected_digest in QWEN3_SHA256.items():
             digest = hashlib.sha256()
             with (directory / name).open("rb") as stream:
@@ -520,6 +529,140 @@ def assert_safetensors_header(directory):
                 f"MODEL_PATH safetensors header has no tensors: {shard}"
             )
         print(f"model weights: {shard.name} {size} bytes, {len(tensors)} tensors")
+
+
+def _checkpoint_error(model_path, verify_weights=True):
+    """Return the checkpoint defect, or None when the directory is complete."""
+    try:
+        assert_model_dir(
+            model_path,
+            verify_weights=verify_weights,
+            verify_files=True,
+        )
+    except AssertionError as error:
+        return str(error)
+    return None
+
+
+def _download_checkpoint_file(name, destination):
+    """Fetch one immutable Hub file into its final checkpoint directory.
+
+    The Hub redirects the weights to a content CDN. Its signed query string is
+    part of the redirect, so the original URL is requested instead of forwarding
+    a cached redirect. The outer runner supplies the route through a proxy when
+    the platform pod cannot connect directly.
+    """
+    url = f"https://huggingface.co/{QWEN3_REPOSITORY}/resolve/{QWEN3_REVISION}/{name}"
+    target = Path(destination) / name
+    if target.is_file() and target.stat().st_size == QWEN3_FILE_SIZES[name]:
+        if file_sha256(target) == QWEN3_SHA256[name]:
+            print(f"Keeping verified {name}", flush=True)
+            return
+
+    with tempfile.NamedTemporaryFile(
+        dir=destination, prefix=f".{name}.", delete=False
+    ) as download:
+        partial = Path(download.name)
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Torch-FL-CI-checkpoint"},
+            )
+            print(f"Downloading {name} at {QWEN3_REVISION}", flush=True)
+            with urllib.request.urlopen(request, timeout=120) as response:
+                commit = response.headers.get("X-Repo-Commit", "")
+                size = response.headers.get("X-Linked-Size")
+                if commit and commit != QWEN3_REVISION:
+                    raise RuntimeError(
+                        f"Hub returned {commit}, expected {QWEN3_REVISION}"
+                    )
+                if size and int(size) != QWEN3_FILE_SIZES[name]:
+                    raise RuntimeError(
+                        f"Hub reports {name} as {size} bytes, "
+                        f"expected {QWEN3_FILE_SIZES[name]}"
+                    )
+                digest = hashlib.sha256()
+                copied = 0
+                for block in iter(lambda: response.read(QWEN3_WEIGHT_BLOCK), b""):
+                    download.write(block)
+                    digest.update(block)
+                    copied += len(block)
+            if copied != QWEN3_FILE_SIZES[name]:
+                raise RuntimeError(
+                    f"{name} has {copied} bytes, expected {QWEN3_FILE_SIZES[name]}"
+                )
+            if digest.hexdigest() != QWEN3_SHA256[name]:
+                raise RuntimeError(f"SHA-256 mismatch for {name}")
+            download.close()
+            partial.replace(target)
+        except Exception:
+            download.close()
+            partial.unlink(missing_ok=True)
+            raise
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(QWEN3_WEIGHT_BLOCK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def stage_model(code, model_path, cache_path=None):
+    """Stage the pinned checkpoint using the workflow runner's interpreter."""
+    if code == "verify":
+        if _checkpoint_error(model_path) is None:
+            print(f"Qwen3 model: {model_path}")
+            return 0
+        return 1
+    if code == "check":
+        destination = Path(model_path)
+        if cache_path and Path(cache_path).is_dir():
+            for source in Path(cache_path).iterdir():
+                target = destination / source.name
+                if source.is_file() and not (
+                    target.is_file() and target.stat().st_size == source.stat().st_size
+                ):
+                    shutil.copy2(source, destination / source.name)
+        return 0
+    if code == "stage":
+        directory = Path(model_path)
+        directory.mkdir(parents=True, exist_ok=True)
+        if cache_path and Path(cache_path).is_dir():
+            for source in Path(cache_path).iterdir():
+                if source.is_file():
+                    target = directory / source.name
+                    if (
+                        target.is_file()
+                        and target.stat().st_size == source.stat().st_size
+                    ):
+                        continue
+                    shutil.copy2(source, target)
+        _remove_foreign_checkpoint_files(directory)
+        for name in QWEN3_FILE_SIZES:
+            _download_checkpoint_file(name, directory)
+        assert_model_dir(
+            model_path,
+            verify_weights=True,
+            verify_files=True,
+        )
+        print(f"Qwen3 model: {model_path}")
+        return 0
+    raise SystemExit(f"unknown model command: {code}")
+
+
+def _remove_foreign_checkpoint_files(directory):
+    """Remove an older Hub revision without touching live temporary files."""
+    if not (directory / "config.json").is_file():
+        return
+    for path in directory.iterdir():
+        if (
+            path.is_file()
+            and not path.name.startswith(".")
+            and path.name not in QWEN3_FILE_SIZES
+        ):
+            path.unlink()
 
 
 def macho_architectures(path):
@@ -620,12 +763,23 @@ class _ArgumentParser(argparse.ArgumentParser):
 def main(argv=None):
     parser = _ArgumentParser()
     parser.add_argument(
-        "command", nargs="?", choices=("check", "check-model"), default="check"
+        "command",
+        nargs="?",
+        choices=("check", "check-model", "stage-model"),
+        default="check",
     )
     parser.add_argument("--path")
     parser.add_argument("--verify-weights", action="store_true")
     parser.add_argument("--verify-files", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.command == "stage-model":
+        if not arguments.path:
+            raise SystemExit("stage-model requires --path")
+        return stage_model(
+            os.environ.pop("MODEL_COMMAND", "stage"),
+            arguments.path,
+            os.environ.pop("MODEL_CACHE", ""),
+        )
     if arguments.command == "check-model":
         if not arguments.path:
             raise SystemExit("check-model requires --path")

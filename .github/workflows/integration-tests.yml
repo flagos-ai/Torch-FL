@@ -128,6 +128,11 @@ jobs:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
+          # The source API is reachable through the proxy on the self-hosted
+          # runners. The archive host has returned cancelled requests there;
+          # use a bounded git fetch when a git binary is available. The next
+          # step supplies an archive fallback with the same source commit.
+          fetch-depth: 1
 
       - name: Retry checkout source
         if: ${{ steps.checkout.outcome == 'failure' }}
@@ -136,10 +141,66 @@ jobs:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
+          fetch-depth: 1
+
+      - name: Fetch the source archive if checkout failed
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        id: source-archive
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::invalid checkout repository: $SOURCE_REPOSITORY"
+            exit 1
+          fi
+          if [[ ! "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the archive fallback requires a full commit SHA"
+            exit 1
+          fi
+          archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"
+          cached_archive="${RUNNER_TEMP:-/tmp}/torch-fl-source-cached.tar.gz"
+          partial="${archive}.partial"
+          archive_root="${RUNNER_TEMP:-/tmp}/torch-fl-source-archive"
+          rm -rf "$archive_root"
+          if [[ -s "$cached_archive" ]] &&
+            ! tar -tzf "$cached_archive" >/dev/null 2>&1; then
+            mv -f "$cached_archive" "$archive"
+          fi
+          if ! [[ -s "$archive" ]] || ! tar -tzf "$archive" >/dev/null 2>&1; then
+            for attempt in 1 2 3; do
+              for endpoint in "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REF}" \
+                "https://api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"; do
+                rm -f "$partial"
+                if curl --fail --silent --show-error --location \
+                  --retry 2 --connect-timeout 20 --max-time 600 \
+                  --header "Authorization: Bearer $GH_TOKEN" \
+                  --header "Accept: application/vnd.github+json" \
+                  --output "$partial" \
+                  "$endpoint" && tar -tzf "$partial" >/dev/null 2>&1; then
+                  mv "$partial" "$archive"
+                  break 2
+                fi
+              done
+              if [[ "$attempt" == 3 ]]; then
+                echo "::error::could not download the source archive for $SOURCE_REF"
+                exit 1
+              fi
+              echo '::warning::source archive transfer failed; retrying on this runner'
+              sleep 5
+            done
+          fi
+          mkdir -p "$archive_root"
+          tar -xzf "$archive" -C "$archive_root" --strip-components=1
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          cp -a "$archive_root/." "$GITHUB_WORKSPACE/"
 
       - name: Verify the checked-out source
         id: source
         env:
+          CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           CHECKOUT_REF: ${{ inputs.checkout_ref }}
           EXPECTED_CHECKOUT_REF: ${{ inputs.expected_checkout_ref }}
           EVENT_SHA: ${{ github.sha }}
@@ -156,8 +217,44 @@ jobs:
           if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
             exit 1
           fi
+          export GIT_TERMINAL_PROMPT=0
+          if ! git rev-parse --git-dir >/dev/null 2>&1; then
+            git init -q "$GITHUB_WORKSPACE"
+            git -C "$GITHUB_WORKSPACE" remote add origin \
+              "https://github.com/${CHECKOUT_REPOSITORY}.git"
+            git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 \
+              origin "$EXPECTED_REF"
+            git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
+          fi
           test "$(git rev-parse HEAD)" = "$EXPECTED_REF"
           echo "ref=$EXPECTED_REF" >> "$GITHUB_OUTPUT"
+          archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"
+          # Compare directory contents rather than metadata. A cached archive
+          # from the same commit confirms that the fallback extracted every
+          # entry before Git creates a checkout that can report the commit.
+          if [[ -s "$archive" ]] && tar -tzf "$archive" >/dev/null 2>&1; then
+            archive_root="${RUNNER_TEMP:-/tmp}/torch-fl-source-check"
+            rm -rf "$archive_root"
+            mkdir -p "$archive_root"
+            tar -xzf "$archive" -C "$archive_root" --strip-components=1
+            if ! diff -r "$archive_root" "$GITHUB_WORKSPACE"; then
+              echo "::error::the extracted source archive differs from the checkout"
+              exit 1
+            fi
+            rm -rf "$archive_root"
+          fi
+          git archive --format=tar.gz --output "$archive" "$EXPECTED_REF"
+          echo "archive_sha256=$(python3 - "$archive" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+          )" >> "$GITHUB_OUTPUT"
 
       - name: Prepare the fixed model bind root
         id: model-storage
@@ -173,7 +270,8 @@ jobs:
 
       # GitHub cache entries are immutable. Restoring by the pinned key can
       # recover an exact or prefix-matching checkpoint; the digest check below
-      # decides whether it is usable. A cache outage falls through to download.
+      # decides whether the files are usable. Restore into a staging directory
+      # so an incomplete cached file cannot look like an existing checkpoint.
       - name: Restore the pinned Qwen3 checkpoint
         id: model-cache
         uses: actions/cache/restore@v4
@@ -182,59 +280,65 @@ jobs:
         env:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '8'
         with:
-          path: ${{ steps.model-storage.outputs.root }}
+          path: ${{ runner.temp }}/torch-fl-model-cache
           key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
 
-      - name: Remove an incomplete checkpoint transfer
-        if: ${{ steps.model-cache.outcome == 'failure' }}
-        run: |
-          find "${{ steps.model-storage.outputs.root }}" -mindepth 1 -delete
-
-      # A cache outage is not fatal. The fallback fetches with Hugging Face's
-      # ranged client, then applies the pinned versions, sizes, and digests.
+      # A cache outage is not fatal. The fallback fetches on the workflow
+      # runner, before entering the vendor image: the pod proxy does not reach
+      # every Hub host. The same pinned revision, sizes and digests are checked
+      # here for every platform. The cached copy lands in a separate directory
+      # so partial transfer files cannot be mistaken for a checkpoint.
       - name: Verify or download the pinned Qwen3 checkpoint
         id: model-verified
         env:
           MODEL_SOURCE: ${{ steps.model-storage.outputs.root }}
-          PINNED_REVISION: c1899de289a04d12100db370d81485cdf75e47ca
+          MODEL_CACHE: ${{ runner.temp }}/torch-fl-model-cache/Qwen3-0.6B
+        # Hub is not reachable from every accelerator pod, while the workflow
+        # runner has a bounded request. The script checks every pinned file.
         run: |
           set -euo pipefail
-          if python3 .github/scripts/check_platform_environment.py \
-            check-model --path "$MODEL_SOURCE" --verify-weights --verify-files; then
-            exit 0
+          MODEL_COMMAND=check MODEL_CACHE="$MODEL_CACHE" \
+            python3 .github/scripts/check_platform_environment.py \
+            stage-model --path "$MODEL_SOURCE"
+          if MODEL_COMMAND=verify \
+            python3 .github/scripts/check_platform_environment.py \
+            stage-model --path "$MODEL_SOURCE"; then
+            EXISTING=1
+          else
+            EXISTING=0
           fi
-          for attempt in 1 2; do
-            if python3 -m pip install --disable-pip-version-check -q \
-                "huggingface_hub==0.34.4" &&
-              python3 - "$MODEL_SOURCE" <<'PY'
+          if [[ "$(python3 - "$MODEL_CACHE" <<'PY'
+          import json
           import sys
           from pathlib import Path
 
-          from huggingface_hub import hf_hub_download
-
           revision = "c1899de289a04d12100db370d81485cdf75e47ca"
-          required = (
-              "config.json",
-              "generation_config.json",
-              "merges.txt",
-              "model.safetensors",
-              "tokenizer.json",
-              "tokenizer_config.json",
-              "vocab.json",
-          )
-          destination = Path(sys.argv[1]).resolve()
-          destination.mkdir(parents=True, exist_ok=True)
-          for name in required:
-              print(f"Downloading {name} at {revision}", flush=True)
-              source = hf_hub_download(
-                  "Qwen/Qwen3-0.6B",
-                  name,
-                  revision=revision,
-                  cache_dir=str(destination.parent / "qwen3-hub-cache"),
-              )
-              (destination / name).write_bytes(Path(source).read_bytes())
+          root = Path(sys.argv[1])
+          try:
+              config = json.loads((root / "config.json").read_text())
+          except (OSError, ValueError):
+              config = {}
+          if str(config.get("_commit_hash", "")) == revision:
+              print("complete")
+          else:
+              print("incomplete")
           PY
-            then
+          )" == complete ]]; then
+            CACHE_READY=1
+          else
+            CACHE_READY=0
+          fi
+          for attempt in 1 2; do
+            if [[ "$attempt" == 1 &&
+              ( "$EXISTING" == 1 || "$CACHE_READY" == 1 ) ]] &&
+              MODEL_COMMAND=verify \
+                python3 .github/scripts/check_platform_environment.py \
+                stage-model --path "$MODEL_SOURCE"; then
+              break
+            fi
+            if MODEL_COMMAND=stage MODEL_CACHE="$MODEL_CACHE" \
+              python3 .github/scripts/check_platform_environment.py \
+              stage-model --path "$MODEL_SOURCE"; then
               break
             fi
             if [[ "$attempt" == 2 ]]; then
@@ -243,8 +347,6 @@ jobs:
             echo '::warning::Qwen3 transfer failed; retrying once'
             sleep 5
           done
-          python3 .github/scripts/check_platform_environment.py \
-            check-model --path "$MODEL_SOURCE" --verify-weights --verify-files
           echo "root=$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
 
       # Save only a verified, exact cache miss. A present cache is left alone.
@@ -255,7 +357,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 12
         with:
-          path: ${{ steps.model-storage.outputs.root }}
+          path: ${{ runner.temp }}/torch-fl-model-cache
           key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
 
       # Copy before invoking setup. setup may install into the checked-out
@@ -305,6 +407,7 @@ jobs:
           args+=(--volumes "$CONTAINER_VOLUMES" --options "$CONTAINER_OPTIONS")
           python3 .github/scripts/container_workspace.py prepare "${args[@]}"
           echo "config=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/config.json" >> "$GITHUB_OUTPUT"
+          echo "INTEGRATION_PROFILE=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/profile.sh" >> "$GITHUB_ENV"
 
       - name: Reset pip cache dir
         run: |
@@ -383,24 +486,34 @@ jobs:
           CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           SETUP_SCRIPT: ${{ needs.configuration.outputs.setup_script }}
           SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}
+          SETUP_BASH: ${{ env.bash || '/bin/bash' }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
           temp="${RUNNER_TEMP:-/tmp}"
           state="$temp/torch-fl-preparation"
           script="$temp/torch-fl-command-setup.sh"
-          cat > "$script" <<'EOF'
+          cat > "$script" <<EOF
           set -euo pipefail
-          export CI_STAGE="$CI_STAGE"
-          export PATH="\${PATH}"
-          bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
+          export CI_STAGE=$(printf '%q' "$CI_STAGE")
+          cd "$${GITHUB_WORKSPACE:?}"
+          "$SETUP_BASH" $(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT") --platform "$(printf '%q' "$SETUP_PLATFORM")"
           EOF
           if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
             cp "$script" "$state/${script##*/}"
             python3 .github/scripts/publish_container_environment.py hook \
               --config "$CONTAINER_CONFIG" --command "${script##*/}"
           else
-            bash "$script"
+            # The workspace changes GITHUB_ENV and GITHUB_PATH for later
+            # steps. Reapply its profile, then select an absolute shell that is
+            # available in the workspace profile. macOS runner images can
+            # provide a newer bash than the system's portable bash 3.2.
+            [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
+            SETUP_BASH="$(/bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; command -v bash')"
+            [[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"
+            export SETUP_BASH
+            /bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' \
+              -- "$script"
           fi
 
       - name: Install build tools

@@ -66,9 +66,12 @@ FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
 """
 
 import io
+import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 import textwrap
 import tokenize
 import types
@@ -228,6 +231,120 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
     return None
 
 
+def test_the_archive_fallback_replaces_a_stale_workspace():
+    """Exercise the fallback that runs when both checkout attempts fail."""
+    workflow = _run_script_of_step(
+        (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8"),
+        "Fetch the source archive if checkout failed",
+    )
+    assert workflow is not None
+    assert "api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}" in (
+        workflow
+    )
+    script = workflow.replace(
+        '"https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REF}"',
+        '"unused-codeload-endpoint"',
+    ).replace(
+        '"https://api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"',
+        '"source-archive-endpoint"',
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source"
+        source.mkdir()
+        (source / "setup.sh").write_text("echo verified\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "add", "setup.sh"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Torch-FL CI",
+                "-c",
+                "user.email=ci@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        archive = root / "source.tar.gz"
+        outer = root / "Torch-FL-revision"
+        outer.mkdir()
+        inner = root / "source.tar"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "archive",
+                "--format=tar",
+                f"--output={inner}",
+                "HEAD",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["tar", "-xf", str(inner), "-C", str(outer)],
+            check=True,
+        )
+        subprocess.run(
+            ["tar", "-czf", str(archive), "-C", str(root), outer.name],
+            check=True,
+        )
+        workspace = root / "workspace"
+        workspace.mkdir()
+        (workspace / "stale.txt").write_text("stale\n", encoding="utf-8")
+        commands = root / "bin"
+        commands.mkdir()
+        curl = commands / "curl"
+        curl.write_text(
+            "#!/bin/sh\n"
+            'while [ "$#" -gt 0 ]; do\n'
+            '  if [ "$1" = "--output" ]; then\n'
+            '    shift; cp "$SOURCE_ARCHIVE" "$1"; exit 0\n'
+            "  fi\n"
+            "  shift\n"
+            "done\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        environment = {
+            **os.environ,
+            "PATH": f"{commands}:{os.defpath}",
+            "GIT_CEILING_DIRECTORIES": str(root),
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+            "GIT_DIR": "",
+            "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
+            "SOURCE_REF": revision,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GH_TOKEN": "test-token",
+            "SOURCE_ARCHIVE": str(archive),
+        }
+        result = subprocess.run(
+            ["bash", "-xc", script],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (workspace / "setup.sh").read_text(encoding="utf-8") == (
+            "echo verified\n"
+        )
+        assert not (workspace / "stale.txt").exists()
+
+
 def _manifest_platforms() -> list[str]:
     """Every platform manifest, by the name its file carries."""
     return platform_names()
@@ -301,16 +418,30 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     )
     assert restore["with"]["key"] == "${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}"
     assert integration["env"]["TORCH_FL_CHECKPOINT_CACHE_KEY"] == _MODEL_CACHE
-    assert restore["with"]["path"] == "${{ steps.model-storage.outputs.root }}"
+    assert restore["with"]["path"] == "${{ runner.temp }}/torch-fl-model-cache"
     verify = next(
         step
         for step in steps
         if step.get("name") == "Verify or download the pinned Qwen3 checkpoint"
     )
     assert verify["env"]["MODEL_SOURCE"] == "${{ steps.model-storage.outputs.root }}"
-    assert "--verify-weights" in verify["run"]
-    assert "hf_hub_download(" in verify["run"]
-    assert "revision=revision," in verify["run"]
+    assert "MODEL_COMMAND" not in verify["env"]
+    assert 'MODEL_COMMAND=check MODEL_CACHE="$MODEL_CACHE"' in verify["run"]
+    assert "stage-model --path" in verify["run"]
+    assert "MODEL_COMMAND=stage" in verify["run"]
+    assert "MODEL_COMMAND=verify" in verify["run"]
+    assert 'str(config.get("_commit_hash", "")) == revision' in verify["run"]
+    assert 'python3 - "$MODEL_CACHE"' in verify["run"]
+    assert "hf_hub_download" not in verify["run"]
+    setup = next(step for step in steps if step.get("id") == "setup")
+    assert 'cd "$${GITHUB_WORKSPACE:?}"' in setup["run"]
+    assert """$(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT")""" in setup["run"]
+    fallback = next(step for step in steps if step.get("id") == "source-archive")
+    assert (
+        "api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"
+        in (fallback["run"])
+    )
+    assert 'archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"' in fallback["run"]
     for step in steps:
         if step.get("id") in {"merge-report", "merge-coverage"}:
             assert step["env"]["SOURCE_REF"] == "${{ steps.source.outputs.ref }}"

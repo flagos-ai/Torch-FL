@@ -467,6 +467,61 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
         next(line for line in native_profile.splitlines() if line.startswith("PATH="))
     )[0].removeprefix("PATH=")
     assert all(Path(entry).is_absolute() for entry in native_path.split(os.pathsep))
+    # The setup step must use the workspace profile's absolute shell even when
+    # the host PATH has a relative entry or an incompatible system bash.
+    setup = next(
+        step
+        for step in _workflow("integration-tests.yml")["jobs"]["integration-tests"][
+            "steps"
+        ]
+        if step.get("id") == "setup"
+    )
+    assert 'source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' in setup["run"]
+    shell = tmp_path / "bin/bash"
+    shell.parent.mkdir()
+    shell.write_text('#!/bin/sh\nexec /bin/bash "$@"\n', encoding="utf-8")
+    shell.chmod(0o755)
+    helper = tmp_path / "setup-command.sh"
+    helper.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$(command -v bash)" > "$RUNNER_TEMP/setup-command"\n'
+        'if [[ ! -f "$GITHUB_WORKSPACE/nested/source.py" ]]; then exit 8; fi\n'
+        'printf "%s\\n" "$(command -v bash)" > "$WORKSPACE_TEMP/setup-command"\n'
+        'printf "%s\\n" "$CI_STAGE" > "$WORKSPACE_TEMP/setup-stage"\n',
+        encoding="utf-8",
+    )
+    setup_temp = Path(native["runtime"])
+    setup_environment = {
+        **os.environ,
+        "PATH": f"{shell.parent}:.",
+        "GITHUB_PATH": "",
+        "GITHUB_ENV": native["environment"],
+        "GITHUB_WORKSPACE": Path(native["workspace"]).resolve(),
+        "INTEGRATION_PROFILE": Path(native["state"], "profile.sh").resolve(),
+        "RUNNER_TEMP": str(setup_temp),
+        "CI_STAGE": "integration",
+        "SETUP_BASH": str(shell.resolve()),
+        "WORKSPACE_TEMP": str(tmp_path / "workspace-temp"),
+    }
+    Path(setup_environment["WORKSPACE_TEMP"]).mkdir()
+    launched = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'set -euo pipefail; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"',
+            "--",
+            str(helper),
+        ],
+        env=setup_environment,
+        capture_output=True,
+        text=True,
+    )
+    assert launched.returncode == 0, launched.stderr
+    assert Path(
+        setup_environment["WORKSPACE_TEMP"], "setup-stage"
+    ).read_text().strip() == ("integration")
+    assert Path(native["shell"]).read_text().startswith("#!/usr/bin/env bash")
     native_file = Path(native["environment"]).read_text().splitlines()
     model_line = next(
         line for line in native_file if line.startswith("INTEGRATION_MODEL=")

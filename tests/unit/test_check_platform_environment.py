@@ -15,6 +15,7 @@
 """Check the checkpoint mount assertion used by the model platform jobs."""
 
 import importlib
+import io
 import json
 import re
 import struct
@@ -114,6 +115,82 @@ def _write_safetensors_header(model, header):
     (model / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
     encoded = json.dumps(header).encode()
     (model / "model.safetensors").write_bytes(_safetensors(encoded) + b"\0" * 64)
+
+
+def test_model_cache_check_copies_files_without_accepting_the_checkpoint(
+    tmp_path, monkeypatch
+):
+    model = tmp_path / "Qwen3-0.6B"
+    model.mkdir()
+    cache = tmp_path / "cache" / "Qwen3-0.6B"
+    cache.mkdir(parents=True)
+    (cache / "config.json").write_text("cached")
+
+    def verify(*args, **kwargs):
+        raise AssertionError("the copied cache must be verified separately")
+
+    monkeypatch.setattr(environment_check, "assert_model_dir", verify)
+    assert environment_check.stage_model("check", str(model), str(cache)) == 0
+    assert (model / "config.json").read_text() == "cached"
+
+
+def test_model_cache_verification_reports_an_incomplete_checkpoint(tmp_path):
+    model = tmp_path / "Qwen3-0.6B"
+    model.mkdir()
+    assert environment_check.stage_model("verify", str(model)) == 1
+
+
+def test_model_stage_downloads_every_file_of_an_empty_directory(tmp_path, monkeypatch):
+    model = tmp_path / "Qwen3-0.6B"
+    model.mkdir()
+    downloaded = []
+
+    def download(name, destination):
+        downloaded.append(name)
+        (destination / name).write_bytes(name.encode())
+
+    monkeypatch.setattr(environment_check, "_download_checkpoint_file", download)
+    monkeypatch.setattr(environment_check, "assert_model_dir", lambda *a, **k: None)
+    assert environment_check.stage_model("stage", str(model)) == 0
+    assert downloaded == list(environment_check.QWEN3_FILE_SIZES)
+
+
+def test_model_download_uses_the_immutable_revision_and_checks_the_digest(
+    tmp_path, monkeypatch
+):
+    name = "config.json"
+    content = b"pinned config"
+    monkeypatch.setattr(environment_check, "QWEN3_FILE_SIZES", {name: len(content)})
+    monkeypatch.setattr(
+        environment_check,
+        "QWEN3_SHA256",
+        {name: environment_check.hashlib.sha256(content).hexdigest()},
+    )
+
+    class Response(io.BytesIO):
+        headers = {
+            "X-Repo-Commit": environment_check.QWEN3_REVISION,
+            "X-Linked-Size": str(len(content)),
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    def urlopen(request, timeout):
+        assert environment_check.QWEN3_REVISION in request.full_url
+        assert timeout == 120
+        return Response(content)
+
+    monkeypatch.setattr(environment_check.urllib.request, "urlopen", urlopen)
+    environment_check._download_checkpoint_file(name, tmp_path)
+    assert (tmp_path / name).read_bytes() == content
+
+    (tmp_path / name).write_bytes(b"tampered conf")
+    environment_check._download_checkpoint_file(name, tmp_path)
+    assert (tmp_path / name).read_bytes() == content
 
 
 def test_weight_validation_reads_a_safetensors_header(tmp_path):
