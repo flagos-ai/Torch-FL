@@ -299,12 +299,12 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     workspace = next(
         step for step in integration["steps"] if step.get("id") == "workspace"
     )
-    assert mount["outputs"]["HOST_MODEL_ROOT"] == (
+    assert mount["outputs"]["host_model_root"] == (
         "${{ steps.configure-model.outputs.root }}"
     )
     assert "root" not in mount["outputs"]
     assert workspace["env"]["HOST_MODEL_ROOT"] == (
-        "${{ needs.model-mount.outputs.HOST_MODEL_ROOT }}"
+        "${{ needs.model-mount.outputs.host_model_root }}"
     )
     assert workspace["env"]["MODEL_PATH"] == (
         "${{ needs.model-mount.outputs.model_path }}"
