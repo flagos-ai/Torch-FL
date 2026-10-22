@@ -286,6 +286,40 @@ void CrossDeviceMemcpy(
     size_t nbytes,
     const at::Tensor& src,
     const at::Tensor& dst) {
+#if defined(USE_KUNLUNXIN)
+  // Kunlunxin's `Memcpy` is `xpu_memcpy`, and its DEVICE_TO_DEVICE kind is a
+  // same-card copy: handed two pointers that live on different XPUs it returns
+  // -801 and writes nothing. Measured on a P800 (torch 2.10.0+cpu) with one
+  // float tensor of 2.0:
+  //
+  //     cpu     -> flagos:1   2.0   correct (host round trip)
+  //     flagos:1 -> flagos:0  2.0   correct
+  //     flagos:0 -> flagos:1  0.0   -- xpu_memcpy returned -801
+  //
+  // The direction is not what matters -- binding either device first gave the
+  // same -801 -- and `copy_` across that pair left the destination untouched.
+  // The SDK has a dedicated primitive, `xpu_memcpy_peer(dst_device, dst,
+  // src_device, src, sz)`, which returns 0 and delivers the data.
+  //
+  // Without this, BertModelTest::test_model_parallelism -- which splits a model
+  // across flagos:0 and flagos:1 through device_map="auto" -- fails with every
+  // one of its 2912 elements wrong.
+  if (src.device() != dst.device()) {
+    TORCH_CHECK(
+        MemcpyPeer(
+            static_cast<int>(dst.device().index()),
+            dst_ptr,
+            src.device().index(),
+            src_ptr,
+            nbytes) == Success,
+        "kunlunxin: cross-device copy from ",
+        src.device(),
+        " to ",
+        dst.device(),
+        " failed");
+    return;
+  }
+#endif
   BlockingCopyGuard barrier(src);
   Memcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
   SyncPeerCopyVisibility(src, dst);

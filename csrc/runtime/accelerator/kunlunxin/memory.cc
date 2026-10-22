@@ -349,6 +349,22 @@ Error_t Memcpy(void* dst, const void* src, size_t count, MemcpyKind kind) {
   return MemoryManager::getInstance().memcpy(dst, src, count, kind);
 }
 
+Error_t MemcpyPeer(int dst_device, void* dst, int src_device, const void* src,
+                   size_t count) {
+  if (!dst || !src || count == 0) {
+    return ErrorUnknown;
+  }
+
+  // `xpu_memcpy(..., XPU_DEVICE_TO_DEVICE)` is a same-device copy: handed two
+  // pointers that live on different XPUs it returns -801 and writes nothing.
+  // The SDK's peer form takes both device ids explicitly, so neither side has
+  // to be current for the transfer to land.
+  at::native::flagos::kunlunxin::DrainDefaultXpuStreams();
+  return (xpu_memcpy_peer(dst_device, dst, src_device, src, count) == 0)
+             ? Success
+             : ErrorUnknown;
+}
+
 Error_t MemcpyAsync(
     void* dst,
     const void* src,

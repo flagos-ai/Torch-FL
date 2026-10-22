@@ -77,6 +77,11 @@ FLAGOS_EXPORT Error_t MallocHost(void** hostPtr, size_t size);
 FLAGOS_EXPORT Error_t FreeHost(void* hostPtr);
 FLAGOS_EXPORT Error_t
 Memcpy(void* dst, const void* src, size_t count, MemcpyKind kind);
+// Copy between two accelerator devices, named explicitly. `Memcpy` with
+// MemcpyDeviceToDevice is a same-device copy on every backend that distinguishes
+// them; this is the form for a transfer whose ends live on different devices.
+FLAGOS_EXPORT Error_t MemcpyPeer(
+    int dst_device, void* dst, int src_device, const void* src, size_t count);
 FLAGOS_EXPORT Error_t MemcpyAsync(
     void* dst,
     const void* src,
