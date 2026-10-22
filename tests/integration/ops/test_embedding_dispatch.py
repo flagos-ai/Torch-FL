@@ -57,6 +57,7 @@ def _run_embedding_subprocess(
     env.update(extra_env)
     code = (
         "from device_init import torch, torch_fl; "
+        "import torch.nn.functional as F; "
         "w = torch.randn(100,32,device='flagos:0'); "
         "idx = torch.randint(0,100,(4,),device='flagos:0'); "
         "F.embedding(idx, w)"

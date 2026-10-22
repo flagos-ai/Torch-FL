@@ -46,6 +46,7 @@ def _run_subprocess_forward(
     env.update(extra_env)
     code = (
         "from device_init import torch, torch_fl; "
+        "import torch.nn.functional as F; "
         "inp = torch.randn(4,10,device='flagos:0').log_softmax(dim=1); "
         "target = torch.tensor([0,3,5,9], device='flagos:0'); "
         "F.nll_loss(inp, target)"
@@ -65,6 +66,7 @@ def _run_subprocess_backward(
     env.update(extra_env)
     code = (
         "from device_init import torch, torch_fl; "
+        "import torch.nn.functional as F; "
         "inp = torch.randn(4,10,device='flagos:0',requires_grad=True).log_softmax(dim=1); "
         "target = torch.tensor([0,3,5,9], device='flagos:0'); "
         "loss = F.nll_loss(inp, target); "

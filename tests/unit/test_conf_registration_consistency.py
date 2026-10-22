@@ -503,7 +503,10 @@ def test_conf_route_counts_are_stable():
         "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
-        "ppu": {"flaggems": 592, "cuda": 1445},
+        # slice_backward and where.self_out moved to the CUDA boxing route
+        # after the shared FlagGems tests found the defects recorded in
+        # BOXING_TRITON_GAPS["ppu"].
+        "ppu": {"flaggems": 590, "cuda": 1447},
         # Iluvatar adds a native, non-boxing vendor slot on top of FlagGems
         # (scripts/codegen/codegen_iluvatar.py). Its counts are DERIVED, not
         # pinned: the native cohort is a moving measurement -- the first landing
