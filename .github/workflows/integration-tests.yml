@@ -403,11 +403,11 @@ jobs:
           temp="${RUNNER_TEMP:-/tmp}"
           state="$temp/torch-fl-preparation"
           script="$temp/torch-fl-command-setup.sh"
-          cat > "$script" <<EOF
+          cat > "$script" <<'EOF'
           set -euo pipefail
-          export CI_STAGE=$(printf '%q' "$CI_STAGE")
+          export CI_STAGE="$CI_STAGE"
           export PATH="\${PATH}"
-          bash $(printf '%q' "$SETUP_SCRIPT") --platform $(printf '%q' "$SETUP_PLATFORM")
+          bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
           EOF
           if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
             cp "$script" "$state/${script##*/}"
@@ -876,16 +876,14 @@ jobs:
 
       - name: Prepare MetaX upload tools
         if: ${{ !cancelled() && inputs.platform == 'metax' && steps.flagcicd-auth.outputs.available == 'true' }}
-        env:
-          CONTAINER_NAME: ${{ steps.container.outputs.name }}
+        continue-on-error: true
+        timeout-minutes: 3
         run: |
-          docker exec "$CONTAINER_NAME" --env HOME=/tmp bash -c '
-            if ! command -v curl >/dev/null 2>&1; then
-              apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
-            fi
-            curl --version
-          '
+          if ! command -v curl >/dev/null 2>&1; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+          fi
+          curl --version
 
       - name: Upload pytest report to FlagCICD
         if: ${{ !cancelled() && steps.merge-report.outcome == 'success' && steps.flagcicd-auth.outputs.available == 'true' }}

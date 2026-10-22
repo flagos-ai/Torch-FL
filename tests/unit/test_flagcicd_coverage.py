@@ -263,7 +263,7 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
         (ROOT / ".github/workflows/integration-tests.yml").read_text()
     )["jobs"]["integration-tests"]
     steps = {s.get("id", s.get("name")): s for s in job["steps"]}
-    workspace = tmp_path / "container workspace"
+    workspace = tmp_path / "torch-fl-workspace"
     workspace.mkdir()
     result = subprocess.run(
         ["bash", "-e", "-c", steps["merge-coverage"]["run"]],
@@ -276,6 +276,8 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
             "TEST_OUTCOME": "success",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
             "SOURCE_REF": "b" * 40,
+            "PIP_CACHE_DIR": str(tmp_path / "pip"),
+            "CONTAINER_CONFIG": "",
         },
         text=True,
         capture_output=True,
@@ -289,8 +291,12 @@ def test_workflow_merger_and_uploader_use_same_container_relative_report(tmp_pat
     assert upload["continue-on-error"] is True
     assert "steps.merge-coverage.outcome == 'success'" in upload["if"]
     assert "steps.flagcicd-auth.outputs.available == 'true'" in upload["if"]
-    filename = upload["with"]["report_path"].replace("${{ inputs.platform }}", "cuda")
-    output = workspace / filename
+    filename = (
+        upload["with"]["report_path"]
+        .replace("${{ env.PIP_CACHE_DIR }}", str(tmp_path / "pip"))
+        .replace("${{ inputs.platform }}", "cuda")
+    )
+    output = Path(filename).resolve()
     report = json.loads(output.read_text())
     assert _metadata(reports)["source_ref"] == "b" * 40
     assert report["totals"]["percent_covered"] > 0

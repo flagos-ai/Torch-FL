@@ -7,7 +7,7 @@
 ## Summary
 This PR replaces chip-named FlagGems and SDPA test files with shared cases and per-platform data rows. All ten configured platforms—Ascend, CUDA, DCU, GCU, Iluvatar, Kunlunxin, MetaX, MPS, MUSA and PPU—use the same shared conformance paths. CI generates exact case inventories and fails when an expected case is missing, skipped, or unplanned. Platforms may still route different operators through FlagGems.
 
-The Qwen3 smoke groups now use one model contract on all ten platforms. A host-only model job on each platform's runner downloads a pinned Qwen3 revision and validates its files, size, and safetensors layout. Linux platforms populate the same read-only `/models/Qwen3-0.6B` mount before Docker resolves the integration job's volume, while MPS receives the validated checkpoint through an artifact. The model, inference, and training groups run on every platform.
+The Qwen3 smoke groups now use one model contract on all ten platforms. A model job on each platform's runner downloads a pinned Qwen3 revision and validates its files, size, and safetensors layout. Linux platforms populate the same read-only `/models/Qwen3-0.6B` bind source before Docker starts, while MPS validates the same checkpoint at that host path and runs it natively. The model, inference, and training groups run on every platform.
 
 The common dependency setup now takes precedence over vendor image versions. The former native-vendor collection gate is removed, so existing vendor regression files remain selected on every operator platform. The FlagGems routing contract follows the actual dispatcher names, while public wrappers such as `embedding` and `index_add_` run as shared execution cases. The routing expectation also accounts for operations omitted from a wheel's native registration set. Device initialization now precedes FlagGems' dispatch repairs, so CUDA-ABI wheels bind the patched callables before the first routed operation.
 
@@ -57,6 +57,7 @@ The chip-specific files preserved a bring-up model after all configured platform
 7. Verified the current local source against the files, installed package, and shared test tree used on H100. All six changed FlagGems test and startup files matched the expected SHA-256 values.
 8. Inspected the MPS job log from run `39731566307`. Five skipped BPU files printed their summary at `06:18:03` and were terminated five minutes later; the job reached its 60-minute timeout before the remaining files ran.
 9. Inspected run `39740142613`. PPU failed its first integration group because `/models/Qwen3-0.6B` had no configuration file on the runner. Each job also receives a separate runner, so a directory created in one job is not available to the next container job without a shared host path.
+10. Inspected run `39768810269`. The static gate rejected shell command generation that only worked after GitHub expression interpolation, and optional MetaX upload-tool preparation could change test status.
 
 ## Solution Design
 ### Implementation approach:
@@ -76,7 +77,7 @@ The unit runner launches each pytest file in its own process group. A temporary 
 
 The integration runner derives a per-group timeout from the platform job timeout and launches each group in a new process session. At the deadline it terminates the session, then forces the remaining process group to exit and reads the output that was already written. A completed group's report remains available for the merged result.
 
-The model job chooses storage from the platform config before downloading. Container platforms must provide a writable Linux host bind root; the checkpoint is written directly there and checked again before the container job starts. The checkpointless platform must be macOS and carries its checkpoint as a `qwen3-0.6b-<platform>` artifact to the integration job's workspace.
+The model job chooses storage from the platform config before downloading. Linux platforms must provide a writable `/var/lib/torch-fl-ci/models` bind root; the checkpoint is written directly there and checked again before the container job starts. MPS is macOS and validates the same host path without Docker. Every model job uses a hardware runner because the integration job runs on that platform's device.
 
 The checkpoint is pinned to Hugging Face revision `c1899de289a04d12100db370d81485cdf75e47ca`. Validation checks the required Transformers and tokenizer files, the exact size of `model.safetensors`, and the 8-byte safetensors header length, JSON document, and tensor entries. The integration container repeats the header check on every mounted copy.
 
@@ -87,7 +88,7 @@ The checkpoint is pinned to Hugging Face revision `c1899de289a04d12100db370d8148
 - Native route expectations follow the registration set compiled into the wheel. FlagGems route expectations remain unconditional.
 - The shared dependency cohort wins over image versions, while configured package indexes remain available for the install.
 - A completed pytest session can leave stalled vendor cleanup without consuming the next file's budget. Crashes and test failures retain their existing classification.
-- Docker receives a fully populated bind source from the runner. MPS uses an artifact because a validation job and an integration job do not share a temporary directory.
+- Docker receives a fully populated bind source from the runner. MPS runs natively on the validated host model path because macOS jobs cannot use Docker containers.
 - A timed-out group fails with its own name and a report that preserves earlier completed cases.
 
 ### Code changes by file:
@@ -97,7 +98,7 @@ The checkpoint is pinned to Hugging Face revision `c1899de289a04d12100db370d8148
 - `.github/scripts/{run_integration_tests.py,merge_pytest_reports.py,python_coverage.py,run_unit_tests.py}` and `.github/scripts/pytest_reporting/`: bind reports to their groups, preserve launch failures, and pass the registration source.
 - `.github/scripts/run_unit_tests.py` and `tests/unit/test_run_unit_tests.py`: bound interpreter exit after pytest's finish hooks, clean up leftover child processes, and preserve failure status and reports.
 - `.github/scripts/{check_platform_environment.py,verify_shared_dependencies.py,verify_shared_dependency_imports.py}`: validate the vendor environment and force-reinstall the exact shared Python and FlagGems runtime dependencies.
-- `.github/workflows/integration-tests.yml` and `.github/scripts/run_integration_tests.py`: prepare one pinned model on each platform host, check the bind root before download, hand MPS its checkpoint, and bound each integration group.
+- `.github/workflows/integration-tests.yml` and `.github/scripts/run_integration_tests.py`: prepare one pinned model on each platform host, check the bind root before download, use the same model path natively on MPS, and bound each integration group.
 - `.github/scripts/hooks/set_env_{metax,ppu}.sh`: make PyYAML available before either FlagGems import probe; PPU also receives its existing NumPy and SQLAlchemy prerequisites.
 - `tests/integration/flaggems/`: define shared routing, execution, public-wrapper, exclusion, device identity, and SDPA contracts. Route data remains per platform.
 - `tests/integration/shared_sdpa_caps.py` and `tests/integration/vendor_lanes/`: hold shared SDPA calls and platform route rows.
