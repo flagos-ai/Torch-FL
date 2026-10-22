@@ -77,7 +77,6 @@ from typing import NamedTuple
 from unittest import mock
 
 import pytest
-import torch
 import yaml
 from manifest_composer import composed_steps, load_module, platform_names
 
@@ -104,6 +103,10 @@ _CHECKOUT_CD_RE = re.compile(r"""\bcd\s+["']?\$GITHUB_WORKSPACE["']?""")
 
 def _model_test_module(relative: str, platform: str = "mps") -> types.ModuleType:
     """Load a model test without importing torch_fl's compiled extension."""
+    torch = pytest.importorskip(
+        "torch",
+        reason="Fallback tracer tests require the platform's PyTorch runtime",
+    )
     module = types.ModuleType(relative)
     module.__file__ = str(_REPO_ROOT / relative)
     init = types.ModuleType("integration_test_device_init")
@@ -142,6 +145,7 @@ def _model_test_module(relative: str, platform: str = "mps") -> types.ModuleType
 )
 def test_model_fallback_tracer_observes_calls_inside_kernel_bodies(relative):
     """A kernel body's CPU inputs are seen without a nested dispatch mode."""
+    torch = pytest.importorskip("torch")
     module = _model_test_module(relative)
     tracer = module.FallbackTracer()
     tracer.flagos_device_types = ("cpu",)
@@ -165,6 +169,7 @@ def test_model_fallback_tracer_observes_calls_inside_kernel_bodies(relative):
 )
 def test_model_fallback_tracer_records_cpu_input_dispatches(relative):
     """CPU kernel bodies are counted instead of losing a nested mode's calls."""
+    torch = pytest.importorskip("torch")
     module = _model_test_module(relative)
     tracer = module.FallbackTracer()
     tracer.flagos_device_types = ("cpu",)
@@ -177,6 +182,7 @@ def test_model_fallback_tracer_records_cpu_input_dispatches(relative):
 
 def test_model_profiler_recognizes_gpu_kernel_categories():
     """Device kernels are selected by name or category, not a text comparison."""
+    pytest.importorskip("torch")
     module = _model_test_module("tests/integration/test_profiler_qwen3_infer.py")
     events = (
         {"name": "aten::add", "cat": "cpu_op"},
