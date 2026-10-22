@@ -15,8 +15,7 @@
 """Softplus on Apple Silicon's MPSGraph backend."""
 
 import pytest
-import torch
-import torch_fl  # noqa: F401
+from device_init import torch
 
 from backend_conf import dispatched_to_mps
 import platform_support
