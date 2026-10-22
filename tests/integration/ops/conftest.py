@@ -57,36 +57,52 @@ _platform = _load_platform()
 
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu"),
-    "ascend": ("cuda", "metax", "musa", "dcu"),
-    # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
-    # `-> cuda` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
-    # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
-    # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
-    # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
-    # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
-    # here -- same skip set as cuda, which is where PPU implicitly landed before
-    # it was named. Naming it makes the platform first-class in this gate
-    # instead of correct by accident of the fallback bucket. On a default
-    # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
-    # set, because that key has no kernel behind it.
-    "ppu": ("metax", "ascend", "musa", "dcu"),
-    # cuda -- and an unidentified wheel, which detect_platform() defaults to --
-    # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
-    # skips every other backend's. The build-record gate below covers the
-    # default FlagGems-primary wheel, where the `cuda` route has no kernels.
-    "cuda": ("metax", "ascend", "musa", "dcu"),
-    "dcu": ("metax", "ascend", "musa", "gcu"),
-    # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
-    # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
-    # `none` (CPU fallback), with no `cuda` route, so a `-> cuda` dispatch assertion
-    # cannot hold. Every other backend's marker is skipped for the same reason.
-    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
-    # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
-    # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
-    # Metal line, so every other backend's marked tests are skipped here.
+    "metax": ("cuda", "ascend", "musa", "dcu", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "ascend": ("cuda", "metax", "musa", "dcu", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "musa": (
+        "cuda",
+        "metax",
+        "ascend",
+        "dcu",
+        "flaggems_python",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "gcu": ("cuda", "metax", "ascend", "musa", "dcu", "iluvatar", "kunlunxin", "ppu"),
+    "ppu": (
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "cuda": (
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "ppu",
+    ),
+    "dcu": ("metax", "ascend", "musa", "gcu", "iluvatar", "kunlunxin", "ppu"),
+    "kunlunxin": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "iluvatar",
+        "ppu",
+    ),
     "mps": (
         "cuda",
         "metax",
@@ -96,22 +112,32 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
         "gcu",
         "ppu",
         "flaggems_python",
+        "iluvatar",
+        "kunlunxin",
     ),
-    # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
-    # vendor op library, so `-> cuda` and every other backend's dispatch
-    # assertions cannot hold. Without this row the platform fell through to the
-    # empty skip set and the cuda/ascend-marked tests ran here and failed.
-    #
-    # `flaggems`/`flaggems_python` are deliberately NOT skipped: this platform
-    # does build the FlagGems Python path, so those tests are real coverage. They
-    # still fail on a TsingMicro host for an unrelated reason -- the TX runtime
-    # allows one process per device, and the tests that spawn a subprocess leave
-    # it on the device the parent already holds, so the child blocks until the
-    # test's 60 s subprocess timeout. Skipping them would hide that.
-    "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
-    # CoreX exposes a CUDA-shaped runtime, but Iluvatar uses its native vendor
-    # slot rather than CUDA boxing. Keep FlagGems coverage enabled.
-    "iluvatar": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "tsingmicro": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "ppu",
+        "iluvatar",
+        "kunlunxin",
+    ),
+    "iluvatar": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "ppu",
+        "kunlunxin",
+    ),
 }
 
 

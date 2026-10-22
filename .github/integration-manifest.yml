@@ -262,7 +262,7 @@ steps:
   # validates environment values as strings.
   - id: profiler_contract
     name: Unified profiler contract
-    platforms: [cuda, dcu, iluvatar, metax, musa, ppu]
+    platforms: [cuda, dcu, gcu, iluvatar, kunlunxin, metax, musa, ppu]
     command: python -m pytest tests/integration/test_profiler_contract.py -v -m profiler --tb=short
   - id: profiler_contract
     name: Unified profiler contract

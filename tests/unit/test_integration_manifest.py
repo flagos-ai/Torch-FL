@@ -111,7 +111,7 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "amp_contract": ("kunlunxin", "mps", "ppu"),
-    "profiler_contract": ("gcu", "kunlunxin", "mps"),
+    "profiler_contract": ("mps",),
     "profiler_parity": (
         "ascend",
         "gcu",

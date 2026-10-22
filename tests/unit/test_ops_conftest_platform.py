@@ -242,6 +242,35 @@ def test_no_platform_skips_the_plain_flaggems_mark():
         assert "flaggems" not in markers, platform
 
 
+# Each vendor marker from `vendor_ops` may run only on the platform whose native
+# route it asserts. The two exceptions are enforced outside this table: MetaX
+# adds `metax` in the collection hook, and the build record removes `cuda` when
+# boxing kernels are absent. That absence is the only state this CPU can read.
+_NATIVE_PLATFORMS = frozenset(
+    {"ascend", "dcu", "gcu", "iluvatar", "kunlunxin", "musa", "ppu"}
+)
+
+
+def test_shared_selection_gates_each_vendor_route():
+    """A backend marker runs only where its vendor kernel is available."""
+    assert (
+        ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
+        == ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
+    )
+    assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
+    for platform, skip_markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
+        if platform == "metax":
+            # The collection hook adds the metax marker after this table.
+            assert "metax" not in skip_markers
+            assert _NATIVE_PLATFORMS <= set(skip_markers)
+            continue
+        for marker in _NATIVE_PLATFORMS:
+            if marker == "cuda":
+                assert marker in skip_markers or platform in {"cuda", "dcu", "ppu"}
+            elif platform != marker:
+                assert marker in skip_markers, f"{platform} / {marker}"
+
+
 def test_tileops_gate_reads_the_build_record(monkeypatch):
     """The gate is metadata-only and does not try to import TileOPs itself."""
     env = type("Env", (), {"build_kernels": staticmethod(lambda: frozenset())})()

@@ -54,7 +54,7 @@ def _environment(directory):
     return env
 
 
-def _integration(tmp_path, groups, inventory=None):
+def _integration(tmp_path, groups, inventory=None, checkout=None):
     workdir = tmp_path / "wheel-only"
     workdir.mkdir(exist_ok=True)
     reports = tmp_path / "reports"
@@ -66,6 +66,11 @@ def _integration(tmp_path, groups, inventory=None):
     )
     if inventory:
         env["INTEGRATION_INVENTORY_ROOT"] = str(tmp_path)
+    if checkout:
+        env.update(
+            INTEGRATION_SOURCE_ROOT=str(checkout),
+            GITHUB_WORKSPACE=str(checkout),
+        )
     inventory_arguments = [
         argument
         for group, cases in (inventory or {}).items()
@@ -110,9 +115,9 @@ def test_inventory_verdict_uses_a_real_pytest_report(
     tmp_path, case_source, command_suffix, expected_message
 ):
     """Missing, extra and skipped cases make an otherwise clean run fail."""
-    workdir = tmp_path / "wheel-only"
-    workdir.mkdir()
-    (workdir / "test_cases.py").write_text(case_source)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "test_cases.py").write_text(case_source)
     inventory = tmp_path / "inventory"
     inventory.mkdir()
     (inventory / "google-test.json").write_text(
@@ -128,6 +133,7 @@ def test_inventory_verdict_uses_a_real_pytest_report(
             }
         ],
         inventory={"sdpa_lanes": "inventory"},
+        checkout=checkout,
     )
     if expected_message:
         assert process.returncode != 0
@@ -138,9 +144,9 @@ def test_inventory_verdict_uses_a_real_pytest_report(
 
 
 def test_complete_inventory_does_not_hide_a_command_failure(tmp_path):
-    workdir = tmp_path / "wheel-only"
-    workdir.mkdir()
-    (workdir / "test_cases.py").write_text("def test_shared(): pass\n")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "test_cases.py").write_text("def test_shared(): pass\n")
     inventory = tmp_path / "inventory"
     inventory.mkdir()
     (inventory / "google-test.json").write_text(
@@ -151,6 +157,7 @@ def test_complete_inventory_does_not_hide_a_command_failure(tmp_path):
         tmp_path,
         [{"id": "sdpa_lanes", "name": "shared", "command": command}],
         inventory={"sdpa_lanes": "inventory"},
+        checkout=checkout,
     )
     assert process.returncode == 4, process.stdout + process.stderr
     assert "Inventory met: 1 shared cases" in process.stdout
