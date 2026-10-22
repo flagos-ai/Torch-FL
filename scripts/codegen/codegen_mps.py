@@ -44,7 +44,9 @@ from pathlib import Path
 # REGISTER_IMPL_TO_DISPATCHER(FnType, dispatcher, ...) matches the
 # DECLARE_DISPATCHER in generated/ops.h exactly (otherwise the build won't link).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from codegen_ops import schema_to_cpp_name
+from codegen_ops import args_decl, call_args, parse_native_yaml, schema_to_cpp_name
+from codegen_ops import unified_sig
+from torchgen import local
 
 REPO = Path(__file__).resolve().parent.parent.parent
 OUT_MM = REPO / "csrc/aten/backends/mps/generated/mps_kernels.mm"
@@ -125,13 +127,6 @@ OPS = {
     # selector is exact on the integral widths as well (`-(-128)` wraps to
     # -128 there, exactly as aten does), so the body is the plain unary template.
     "neg": "unary",
-    # Qwen3.5's rotary embedding reaches sin and cos once each for every
-    # position tensor. They have direct MPSGraph selectors, so the shared unary
-    # body is sufficient, with a float gate because MPSGraph would retain an
-    # integral operand where aten promotes it to float32. T_COMPARE below covers
-    # the scalar and tensor predicates around the same embedding.
-    "sin": "trig",
-    "cos": "trig",
     # A scalar exponent. MPSGraph's power is a real selector rather than an
     # exp/log composition, which is what keeps the NaN of a negative base to a
     # fractional exponent -- the case the reference produces and a composition
@@ -476,12 +471,6 @@ OPS = {
     # selects on MPSGraph. See T_MASKED_FILL_SCALAR and T_MASKED_FILL_TENSOR.
     "masked_fill.Scalar": "masked_fill_scalar",
     "masked_fill.Tensor": "masked_fill_tensor",
-    # The ref and mask predicates in Qwen3.5's causal attention. These are the
-    # exact overloads the model dispatches, so the generated register file
-    # names the predicate rather than leaving it on the CPU reference.
-    "eq.Scalar": "compare_scalar",
-    "le.Tensor": "compare_tensor",
-    "ne.Scalar": "compare_scalar",
     # `cat` is the variadic concatenation, and the node is
     # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
     # node would otherwise answer with a broadcasted wrong answer.
@@ -492,6 +481,22 @@ OPS = {
     # with the unbiased batch variance and no graph node writes a caller's
     # buffer. See T_BATCH_NORM.
     "native_batch_norm": "batch_norm",
+}
+
+# View operations update only tensor metadata: sizes, strides and storage
+# offset. Their kernels live in csrc/aten/strided_ops.cc because MPSGraph would
+# copy the operand into new storage. The entries here add the PrivateUse1
+# claims and conf routes, while T_METADATA_VIEW generates one guarded kernel per
+# operation and delegates to those native metadata helpers.
+METADATA_VIEW_OPS = {
+    "_unsafe_view": "unsafe_view",
+    "select.int": "select_int",
+    "slice.Tensor": "slice_tensor",
+    "squeeze": "squeeze",
+    "squeeze.dim": "squeeze_dim",
+    "t": "t",
+    "transpose.int": "transpose_int",
+    "unsqueeze": "unsqueeze",
 }
 
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
@@ -518,15 +523,6 @@ AT_OP = {
     "softplus": "softplus",
     "_softmax": "_softmax",
     "neg": "neg",
-    # The CPU reference for a width the graph declines. Integral trigonometric
-    # operands need the reference's promotion to float32.
-    "sin": "sin",
-    "cos": "cos",
-    # Qwen3.5's causal mask and rotary path build the predicates with these
-    # three spellings. Each has the reference's own aten error contract.
-    "eq.Scalar": "eq",
-    "le.Tensor": "le",
-    "ne.Scalar": "ne",
     "pow.Tensor_Scalar": "pow",
     "mm": "mm",
     "bmm": "bmm",
@@ -654,7 +650,6 @@ AT_OP = {
 # The per-category dtype predicate each kernel gates on (mps_common.h).
 SUPPORTS = {
     "unary": "MpsSupportsUnaryDtype",
-    "trig": "MpsSupportsTrigDtype",
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
@@ -788,8 +783,6 @@ SUPPORTS = {
     # integral input takes the round-trip rather than a wrong answer. See
     # T_BATCH_NORM.
     "batch_norm": "MpsSupportsReduceDtype",
-    "compare_scalar": "MpsSupportsScalarDtype",
-    "compare_tensor": "MpsSupportsBinaryDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -827,11 +820,6 @@ CALLS = {
     "mm": "matrixMultiplicationWithPrimaryTensor:",
     "bmm": "matrixMultiplicationWithPrimaryTensor:",
     "neg": "negativeWithTensor:",
-    "sin": "sinWithTensor:",
-    "cos": "cosWithTensor:",
-    "eq.Scalar": "equalWithPrimaryTensor:",
-    "le.Tensor": "lessThanOrEqualToWithPrimaryTensor:",
-    "ne.Scalar": "notEqualWithPrimaryTensor:",
     "_softmax": "softMaxWithTensor:",
     "pow.Tensor_Scalar": "powerWithPrimaryTensor:",
     # The conv body picks between the 2-D and 3-D selectors on the operand's
@@ -980,13 +968,6 @@ ALPHA = {
 KEY_PARTS = {
     "abs": "",
     "neg": "",
-    "sin": "",
-    "cos": "",
-    # The scalar predicates bake their stored value into the graph; the tensor
-    # form is a function of its operands' signatures alone.
-    "eq.Scalar": ", other",
-    "le.Tensor": "",
-    "ne.Scalar": ", other",
     "add.Tensor": ", alpha",
     "sub.Tensor": ", alpha",
     "mul.Tensor": "",
@@ -3858,63 +3839,13 @@ T_BATCH_NORM = """\
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 """
 
-# The ref and mask spellings Qwen3.5 reaches have direct MPSGraph comparison
-# selectors. They accept one element type, while the scalar forms may store a
-# value that the operand's dtype cannot represent exactly. Those calls take the
-# reference's own conversion and error path.
-T_COMPARE_SCALAR = """\
-at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
-  if (!mps::{supports}(self.scalar_type(), other)) {{
-    return at::{at_op}(self.cpu(), other).to(self.device());
-  }}
-  at::Tensor self_c = self.contiguous();
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}"{key_parts}),
-      {{self_c}},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-        MPSGraphTensor* other_t =
-            mps::MpsConstant(graph, other, self_c.scalar_type());
-        if (other_t == nil) {{
-          return nil;
-        }}
-        return [graph {call}args[0] secondaryTensor:other_t name:nil];
-      }});
-  if (!ran) {{
-    return at::{at_op}(self.cpu(), other).to(self.device());
-  }}
-  return out;
-}}
-
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
-"""
-
-T_COMPARE_TENSOR = """\
-at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
-  if (!mps::{supports}(self.scalar_type(), other.scalar_type())) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
-  }}
-  at::Tensor self_c = self.contiguous();
-  at::Tensor other_c = other.contiguous();
-  std::vector<int64_t> out_shape;
-  try {{
-    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  }} catch (const std::exception&) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
-  }}
-  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}"{key_parts}),
-      {{self_c, other_c}},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-        return [graph {call}args[0] secondaryTensor:args[1] name:nil];
-      }});
-  if (!ran) {{
-    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
-  }}
-  return out;
+T_METADATA_VIEW = """\
+at::Tensor {kernel}({args}) {{
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::{helper}({call_args});
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
@@ -4647,7 +4578,6 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
 
 CATEGORIES = {
     "unary": T_UNARY,
-    "trig": T_UNARY,
     "binary": T_BINARY,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
@@ -4703,8 +4633,7 @@ CATEGORIES = {
     "masked_fill_tensor": T_MASKED_FILL_TENSOR,
     "cat": T_CAT,
     "batch_norm": T_BATCH_NORM,
-    "compare_scalar": T_COMPARE_SCALAR,
-    "compare_tensor": T_COMPARE_TENSOR,
+    "metadata_view": T_METADATA_VIEW,
 }
 
 FILE_HEADER = """\
@@ -4736,6 +4665,7 @@ FILE_HEADER = """\
 // This file is Objective-C++ and builds without ARC, like the Metal runtime.
 
 #include "../../../generated/ops.h"
+#include "../../../strided_ops.h"
 #include <ATen/ExpandUtils.h>
 #include <ATen/TensorIndexing.h>
 #include <ATen/core/Tensor.h>
@@ -4746,14 +4676,11 @@ FILE_HEADER = """\
 #include <ATen/ops/cat.h>
 #include <ATen/ops/cumsum.h>
 #include <ATen/ops/convolution.h>
-#include <ATen/ops/cos.h>
-#include <ATen/ops/eq.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/gather.h>
 #include <ATen/ops/index_select.h>
-#include <ATen/ops/le.h>
 #include <ATen/ops/masked_fill.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
@@ -4761,11 +4688,9 @@ FILE_HEADER = """\
 #include <ATen/ops/native_batch_norm.h>
 #include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
-#include <ATen/ops/ne.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
 #include <ATen/ops/rsqrt.h>
-#include <ATen/ops/sin.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
@@ -4828,6 +4753,13 @@ def render():
     set. Raises on an op with no wrapper, so a stale register.inc fails loudly
     instead of emitting a file that will not link."""
     wrappers = wrapper_map()
+    import torchgen
+
+    root = Path(torchgen.__file__).parent / "packaged" / "ATen" / "native"
+    native = parse_native_yaml(
+        str(root / "native_functions.yaml"), str(root / "tags.yaml")
+    )
+    native_functions = {str(func.func.name): func for func in native.native_functions}
     bodies = []
     covered = []
     for op, category in OPS.items():
@@ -4891,6 +4823,35 @@ def render():
             )
         )
         covered.append((op, category))
+
+    for op, helper in METADATA_VIEW_OPS.items():
+        wrapper = wrappers.get(op)
+        if wrapper is None:
+            raise SystemExit(
+                f"error: {op} has no wrapper in {REGISTER_INC.relative_to(REPO)}; "
+                "run scripts/codegen/codegen_ops.py first"
+            )
+        fn, disp = schema_to_cpp_name(op)
+        native_function = native_functions.get(op)
+        if native_function is None:
+            raise SystemExit(f"error: {op} is absent from native_functions.yaml")
+        with local.parametrize(
+            use_const_ref_for_mutable_tensors=False,
+            use_ilistref_for_tensor_lists=False,
+        ):
+            _, ret, args = unified_sig(native_function)
+        kernel = fn[:-2] + "KernelMps"
+        bodies.append(
+            CATEGORIES["metadata_view"].format(
+                kernel=kernel,
+                fn=fn,
+                disp=disp,
+                args=args_decl(args),
+                call_args=call_args(args),
+                helper=helper,
+            )
+        )
+        covered.append((op, "metadata_view"))
 
     return (
         FILE_HEADER + "\n\n".join(bodies) + FILE_FOOTER,

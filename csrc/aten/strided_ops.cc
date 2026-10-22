@@ -282,6 +282,9 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 //     `select.int` and `permute`), included at csrc/aten/register.cc:568 under
 //     `#elif defined(USE_ASCEND)`. That claim is what makes the kAscend slots
 //     here reachable.
+//   * MPS claims only the eight views in
+//     csrc/aten/backends/mps/generated/mps_register.inc; the remaining kMps
+//     slots stay unreachable because their routes remain `none`.
 //   * TsingMicro has NO equivalent .inc. It takes register.cc's `#else` arm:
 //     with FLAGOS_BUILD_BOXING=ON the generated/register.inc claims these ops
 //     and the kTsingMicro slots here are reachable; with boxing OFF (the
@@ -321,6 +324,13 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 
 FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kAscend)
 FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kTsingMicro)
+#if defined(USE_MPS)
+// Qwen3.5 repeatedly reshapes and slices attention tensors. These operations
+// only update sizes, strides and storage offsets, so their MPS route returns a
+// view of the shared Metal buffer rather than a CPU copy. The MPS registration
+// file claims the same metadata-only subset below.
+FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kMps)
+#endif
 
 #undef FLAGOS_REGISTER_METADATA_VIEW_OPS
 

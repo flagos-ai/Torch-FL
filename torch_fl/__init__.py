@@ -225,6 +225,8 @@ def _select_backend_config() -> None:
         conf_name = "backends_dcu.conf"
     elif _build_accelerator() == "kunlunxin":
         conf_name = "backends_kunlunxin.conf"
+    elif _build_accelerator() == "mps":
+        conf_name = "backends_mps.conf"
     elif _is_ppu_build():
         conf_name = "backends_ppu.conf"
     else:

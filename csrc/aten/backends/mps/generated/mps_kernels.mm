@@ -26,6 +26,7 @@
 // This file is Objective-C++ and builds without ARC, like the Metal runtime.
 
 #include "../../../generated/ops.h"
+#include "../../../strided_ops.h"
 #include <ATen/ExpandUtils.h>
 #include <ATen/TensorIndexing.h>
 #include <ATen/core/Tensor.h>
@@ -36,14 +37,11 @@
 #include <ATen/ops/cat.h>
 #include <ATen/ops/cumsum.h>
 #include <ATen/ops/convolution.h>
-#include <ATen/ops/cos.h>
-#include <ATen/ops/eq.h>
 #include <ATen/ops/div.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/embedding.h>
 #include <ATen/ops/gather.h>
 #include <ATen/ops/index_select.h>
-#include <ATen/ops/le.h>
 #include <ATen/ops/masked_fill.h>
 #include <ATen/ops/mean.h>
 #include <ATen/ops/mm.h>
@@ -51,11 +49,9 @@
 #include <ATen/ops/native_batch_norm.h>
 #include <ATen/ops/native_layer_norm.h>
 #include <ATen/ops/neg.h>
-#include <ATen/ops/ne.h>
 #include <ATen/ops/pow.h>
 #include <ATen/ops/reciprocal.h>
 #include <ATen/ops/rsqrt.h>
-#include <ATen/ops/sin.h>
 #include <ATen/ops/silu.h>
 #include <ATen/ops/silu_backward.h>
 #include <ATen/ops/sub.h>
@@ -1174,56 +1170,6 @@ at::Tensor NegKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kMps, NegKernelMps)
-
-
-at::Tensor SinKernelMps(const at::Tensor& self) {
-  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
-    return at::sin(self.cpu()).to(self.device());
-  }
-  at::Tensor self_c = self.contiguous();
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
-  if (out.numel() == 0) {
-    return out;
-  }
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("sin"),
-      {self_c},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        return [graph sinWithTensor:args[0] name:nil];
-      });
-  if (!ran) {
-    return at::sin(self.cpu()).to(self.device());
-  }
-  return out;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kMps, SinKernelMps)
-
-
-at::Tensor CosKernelMps(const at::Tensor& self) {
-  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
-    return at::cos(self.cpu()).to(self.device());
-  }
-  at::Tensor self_c = self.contiguous();
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
-  if (out.numel() == 0) {
-    return out;
-  }
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("cos"),
-      {self_c},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        return [graph cosWithTensor:args[0] name:nil];
-      });
-  if (!ran) {
-    return at::cos(self.cpu()).to(self.device());
-  }
-  return out;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kMps, CosKernelMps)
 
 
 at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -2688,89 +2634,6 @@ at::Tensor MaskedFillTensorKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(MaskedFillTensorFn, masked_fill_tensor_dispatcher, Backend::kMps, MaskedFillTensorKernelMps)
 
 
-at::Tensor EqScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
-  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
-    return at::eq(self.cpu(), other).to(self.device());
-  }
-  at::Tensor self_c = self.contiguous();
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("eq.Scalar", other),
-      {self_c},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        MPSGraphTensor* other_t =
-            mps::MpsConstant(graph, other, self_c.scalar_type());
-        if (other_t == nil) {
-          return nil;
-        }
-        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
-      });
-  if (!ran) {
-    return at::eq(self.cpu(), other).to(self.device());
-  }
-  return out;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kMps, EqScalarKernelMps)
-
-
-at::Tensor LeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
-  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
-    return at::le(self.cpu(), other.cpu()).to(self.device());
-  }
-  at::Tensor self_c = self.contiguous();
-  at::Tensor other_c = other.contiguous();
-  std::vector<int64_t> out_shape;
-  try {
-    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
-  } catch (const std::exception&) {
-    return at::le(self.cpu(), other.cpu()).to(self.device());
-  }
-  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("le.Tensor"),
-      {self_c, other_c},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        return [graph lessThanOrEqualToWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
-      });
-  if (!ran) {
-    return at::le(self.cpu(), other.cpu()).to(self.device());
-  }
-  return out;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kMps, LeTensorKernelMps)
-
-
-at::Tensor NeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
-  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
-    return at::ne(self.cpu(), other).to(self.device());
-  }
-  at::Tensor self_c = self.contiguous();
-  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("ne.Scalar", other),
-      {self_c},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        MPSGraphTensor* other_t =
-            mps::MpsConstant(graph, other, self_c.scalar_type());
-        if (other_t == nil) {
-          return nil;
-        }
-        return [graph notEqualWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
-      });
-  if (!ran) {
-    return at::ne(self.cpu(), other).to(self.device());
-  }
-  return out;
-}
-
-REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kMps, NeScalarKernelMps)
-
-
 at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
   // Materialise the list once: the reference and every check below read it more
   // than once, and `ITensorListRef` is a view whose lifetime is the caller's.
@@ -3081,4 +2944,92 @@ REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMps, CatKernelMps)
 }
 
 REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kMps, NativeBatchNormKernelMps)
+
+
+at::Tensor PrivUnsafeViewKernelMps(const at::Tensor & self, at::IntArrayRef size) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::unsafe_view(self, size);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivUnsafeViewFn, priv_unsafe_view_dispatcher, Backend::kMps, PrivUnsafeViewKernelMps)
+
+
+at::Tensor SelectIntKernelMps(const at::Tensor & self, int64_t dim, int64_t index) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::select_int(self, dim, index);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SelectIntFn, select_int_dispatcher, Backend::kMps, SelectIntKernelMps)
+
+
+at::Tensor SliceTensorKernelMps(const at::Tensor & self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::slice_tensor(self, dim, start, end, step);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SliceTensorFn, slice_tensor_dispatcher, Backend::kMps, SliceTensorKernelMps)
+
+
+at::Tensor SqueezeKernelMps(const at::Tensor & self) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::squeeze(self);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SqueezeFn, squeeze_dispatcher, Backend::kMps, SqueezeKernelMps)
+
+
+at::Tensor SqueezeDimKernelMps(const at::Tensor & self, int64_t dim) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::squeeze_dim(self, dim);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SqueezeDimFn, squeeze_dim_dispatcher, Backend::kMps, SqueezeDimKernelMps)
+
+
+at::Tensor TKernelMps(const at::Tensor & self) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::t(self);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TFn, t_dispatcher, Backend::kMps, TKernelMps)
+
+
+at::Tensor TransposeIntKernelMps(const at::Tensor & self, int64_t dim0, int64_t dim1) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::transpose_int(self, dim0, dim1);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TransposeIntFn, transpose_int_dispatcher, Backend::kMps, TransposeIntKernelMps)
+
+
+at::Tensor UnsqueezeKernelMps(const at::Tensor & self, int64_t dim) {
+  ::torch_fl_mps::DrainAll();
+  // MpsRunGraph hands an operand's storage without an allocation record for
+  // asynchronous graph work. Finish queued work before the returned view can
+  // release the last owner of an operand such as an expanded weight.
+  return at::native::flagos::unsqueeze(self, dim);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(UnsqueezeFn, unsqueeze_dispatcher, Backend::kMps, UnsqueezeKernelMps)
 } // namespace at::native::flagos

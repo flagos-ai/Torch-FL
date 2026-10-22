@@ -14,6 +14,7 @@
 // this file does not register.
 
   m.impl("_softmax", WrapperPrivSoftmax);
+  m.impl("_unsafe_view", WrapperPrivUnsafeView);
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
@@ -24,18 +25,15 @@
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
-  m.impl("cos", WrapperCos);
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("embedding", WrapperEmbedding);
-  m.impl("eq.Scalar", WrapperEqScalar);
   m.impl("erf", WrapperErf);
   m.impl("exp", WrapperExp);
   m.impl("gather", WrapperGather);
   m.impl("index.Tensor", WrapperIndexTensor);
   m.impl("index_select", WrapperIndexSelect);
-  m.impl("le.Tensor", WrapperLeTensor);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("log", WrapperLog);
   m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
@@ -46,21 +44,26 @@
   m.impl("mul.Tensor", WrapperMulTensor);
   m.impl("native_batch_norm", WrapperNativeBatchNorm);
   m.impl("native_layer_norm", WrapperNativeLayerNorm);
-  m.impl("ne.Scalar", WrapperNeScalar);
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("reciprocal", WrapperReciprocal);
   m.impl("rsqrt", WrapperRsqrt);
+  m.impl("select.int", WrapperSelectInt);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("silu", WrapperSilu);
   m.impl("silu_backward", WrapperSiluBackward);
-  m.impl("sin", WrapperSin);
+  m.impl("slice.Tensor", WrapperSliceTensor);
   m.impl("softplus", WrapperSoftplus);
   m.impl("sqrt", WrapperSqrt);
+  m.impl("squeeze", WrapperSqueeze);
+  m.impl("squeeze.dim", WrapperSqueezeDim);
   m.impl("sub.Scalar", WrapperSubScalar);
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
+  m.impl("t", WrapperT);
   m.impl("take", WrapperTake);
   m.impl("tanh", WrapperTanh);
+  m.impl("transpose.int", WrapperTransposeInt);
   m.impl("triu", WrapperTriu);
+  m.impl("unsqueeze", WrapperUnsqueeze);
   m.impl("where.self", WrapperWhereSelf);
