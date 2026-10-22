@@ -71,56 +71,48 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
     assert caller["with"]["checkout_ref"] == (
         "${{ needs.resolve-checkout.outputs.ref }}"
     )
+    assert caller["with"]["expected_checkout_ref"] == (
+        "${{ needs.resolve-checkout.outputs.ref }}"
+    )
 
     workflow = _workflow("integration-tests.yml")
     inputs = workflow[True]["workflow_call"]["inputs"]
-    assert {"checkout_repository", "checkout_ref"} <= inputs.keys()
+    assert {"checkout_repository", "checkout_ref", "expected_checkout_ref"} <= (
+        inputs.keys()
+    )
     config_call = workflow["jobs"]["configuration"]["with"]
     assert config_call["checkout_repository"] == "${{ inputs.checkout_repository }}"
     assert config_call["checkout_ref"] == "${{ inputs.checkout_ref }}"
-    for job_name in ("model-mount", "integration-tests"):
-        steps = workflow["jobs"][job_name]["steps"]
-        checkout = next(
-            step
-            for step in steps
-            if step.get("id") == "checkout"
-            and step.get("uses", "").startswith("actions/checkout@")
-        )
-        retries = [
-            step
-            for step in steps
-            if step.get("name") == "Retry checkout source"
-            and step.get("uses", "").startswith("actions/checkout@")
-        ]
-        assert len(retries) == 1
-        retry = retries[0]
-        assert checkout["continue-on-error"] is True
-        retry_outcome = (
-            steps[steps.index(retry) + 1]["if"]
-            if job_name == "integration-tests"
-            else retry["if"]
-        )
-        assert retry_outcome == "${{ steps.checkout.outcome == 'failure' }}"
-        for step in (checkout, retry):
-            assert step["with"]["repository"] == (
-                "${{ inputs.checkout_repository || github.repository }}"
-            )
-            assert step["with"]["ref"] == "${{ inputs.checkout_ref || github.ref }}"
-            assert step["with"]["persist-credentials"] is False
-
-        if job_name == "integration-tests":
-            verify = steps[steps.index(retry) + 1]
-            assert "git rev-parse HEAD" in verify["run"]
-            assert verify["env"]["EXPECTED_REF"] == (
-                "${{ inputs.checkout_ref || github.sha }}"
-            )
-
-    outputs = workflow["jobs"]["model-mount"]["outputs"]
-    assert set(outputs) == {"host_model_root", "model_path"}
-    assert outputs["host_model_root"] == (
-        "${{ steps.configure-model.outputs.host_model_root }}"
+    assert "model-mount" not in workflow["jobs"]
+    steps = workflow["jobs"]["integration-tests"]["steps"]
+    checkout = next(
+        step
+        for step in steps
+        if step.get("id") == "checkout"
+        and step.get("uses", "").startswith("actions/checkout@")
     )
-    assert outputs["model_path"] == "${{ steps.configure-model.outputs.model_path }}"
+    retry = next(
+        step
+        for step in steps
+        if step.get("name") == "Retry checkout source"
+        and step.get("uses", "").startswith("actions/checkout@")
+    )
+    assert retry["if"] == "${{ steps.checkout.outcome == 'failure' }}"
+    for step in (checkout, retry):
+        assert checkout["continue-on-error"] is True
+        assert step["with"]["repository"] == (
+            "${{ inputs.checkout_repository || github.repository }}"
+        )
+        assert step["with"]["ref"] == (
+            "${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}"
+        )
+        assert step["with"]["persist-credentials"] is False
+    verify = next(step for step in steps if step.get("id") == "source")
+    assert "git rev-parse HEAD" in verify["run"]
+    assert verify["env"]["EXPECTED_CHECKOUT_REF"] == (
+        "${{ inputs.expected_checkout_ref }}"
+    )
+    assert verify["env"]["EVENT_SHA"] == "${{ github.sha }}"
 
     config_workflow = _workflow("load-platform-config.yml")
     config_inputs = config_workflow[True]["workflow_call"]["inputs"]
@@ -268,8 +260,8 @@ def test_every_platform_uses_the_same_workspace_and_container_boundary():
     steps = integration["steps"]
     names = [step.get("name", "") for step in steps]
     assert "container" not in integration
-    assert integration["needs"] == ["configuration", "model-mount"]
-    assert "container" not in jobs["model-mount"]
+    assert integration["needs"] == "configuration"
+    assert "model-mount" not in jobs
     assert names.index("Prepare the integration workspace") < names.index(
         "Start the platform command environment"
     )

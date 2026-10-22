@@ -43,12 +43,11 @@
 #                                               the shared runner executes
 #
 # A shared model group also needs a checkpoint on the host before the vendor
-# image starts. A host-only job restores and checks it first, and a host-only
-# integration job launches the image from the runner. The integration job
-# copies its checkout into a runner-owned workspace while the model is being
-# prepared, then mounts that one workspace into the container for setup, build,
-# and tests. The container starts only after the checkpoint is verified, avoiding
-# GitHub's job-container setup, which runs before any step can prepare a bind.
+# image starts. The integration job restores and verifies it after checking out
+# the source, then copies both the source and the checkpoint into its own mounted
+# workspace. A dependent job cannot hand over either path: GitHub may place each
+# job on a different hardware runner, and reusing a self-hosted runner instance
+# would make readiness depend on leftover files from an earlier run.
 
 name: Platform integration tests
 
@@ -66,6 +65,11 @@ on:
         default: ''
       checkout_ref:
         description: Immutable source commit to test
+        required: false
+        type: string
+        default: ''
+      expected_checkout_ref:
+        description: Source commit this workflow must check out
         required: false
         type: string
         default: ''
@@ -96,18 +100,25 @@ jobs:
       checkout_repository: ${{ inputs.checkout_repository }}
       checkout_ref: ${{ inputs.checkout_ref }}
 
-  # Restore and validate the checkpoint in a job without a container. The
-  # integration job depends on this one, so a failed restore cannot proceed to
-  # a test run against an empty mount.
-  model-mount:
-    name: Prepare model mount (${{ needs.configuration.outputs.display_name }})
+  integration-tests:
+    name: Build and test (${{ needs.configuration.outputs.display_name }})
     needs: configuration
     if: ${{ needs.configuration.result == 'success' }}
-    runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
-    timeout-minutes: 30
     outputs:
-      host_model_root: ${{ steps.configure-model.outputs.host_model_root }}
-      model_path: ${{ steps.configure-model.outputs.model_path }}
+      stages: ${{ steps.execution.outputs.stages }}
+      run_attempt: ${{ steps.execution.outputs.run_attempt }}
+    runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
+    timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
+    # MPS runs on macOS, which has no Docker. Linux starts one vendor image
+    # after the model and checkout are both present on the host.
+    defaults:
+      run:
+        shell: bash
+    env:
+      INTEGRATION_PLATFORM: ${{ inputs.platform }}
+      # GitHub's cache action does not interpolate heredoc-delimited values, so
+      # step outputs cannot select the immutable cache key.
+      TORCH_FL_CHECKPOINT_CACHE_KEY: qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca
     steps:
       - name: Checkout source
         id: checkout
@@ -115,17 +126,38 @@ jobs:
         continue-on-error: true
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.ref }}
+          ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
 
       - name: Retry checkout source
         if: ${{ steps.checkout.outcome == 'failure' }}
         uses: actions/checkout@v4
-        id: checkout-retry
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.ref }}
+          ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
+
+      - name: Verify the checked-out source
+        id: source
+        env:
+          CHECKOUT_REF: ${{ inputs.checkout_ref }}
+          EXPECTED_CHECKOUT_REF: ${{ inputs.expected_checkout_ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          EXPECTED_REF="$CHECKOUT_REF"
+          if [[ -z "$EXPECTED_REF" ]]; then
+            EXPECTED_REF="$EVENT_SHA"
+          fi
+          if [[ -n "$EXPECTED_CHECKOUT_REF" && "$EXPECTED_REF" != "$EXPECTED_CHECKOUT_REF" ]]; then
+            echo "::error::the requested checkout and its expected source disagree: $EXPECTED_REF != $EXPECTED_CHECKOUT_REF"
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$EXPECTED_REF"
+          echo "ref=$EXPECTED_REF" >> "$GITHUB_OUTPUT"
 
       - name: Prepare the fixed model bind root
         id: model-storage
@@ -139,29 +171,11 @@ jobs:
           echo "root=$root" >> "$GITHUB_OUTPUT"
           echo "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
 
-      # Each dependent step writes to GITHUB_OUTPUT. Configure all job outputs
-      # before those steps so they cannot invalidate this step's output file.
-      - name: Configure the model job output
-        id: configure-model
-        run: |
-          echo "host_model_root=$TORCH_FL_MODEL_ROOT" >> "$GITHUB_OUTPUT"
-          echo "model_path=${{ needs.configuration.outputs.model_path }}" >> "$GITHUB_OUTPUT"
-
-      # A timed-out cache lookup can return success without a matched key. A
-      # failed matched transfer must not upload an incomplete checkpoint.
-      - name: Look up the pinned Qwen3 checkpoint
-        id: model-cache-lookup
-        uses: actions/cache/restore@v4
-        continue-on-error: true
-        timeout-minutes: 1
-        with:
-          path: ${{ steps.model-storage.outputs.root }}
-          key: qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca
-          lookup-only: true
-
+      # GitHub cache entries are immutable. Restoring by the pinned key can
+      # recover an exact or prefix-matching checkpoint; the digest check below
+      # decides whether it is usable. A cache outage falls through to download.
       - name: Restore the pinned Qwen3 checkpoint
         id: model-cache
-        if: ${{ steps.model-cache-lookup.outcome == 'success' && steps.model-cache-lookup.outputs.cache-matched-key != '' }}
         uses: actions/cache/restore@v4
         continue-on-error: true
         timeout-minutes: 12
@@ -169,19 +183,20 @@ jobs:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '8'
         with:
           path: ${{ steps.model-storage.outputs.root }}
-          key: ${{ steps.model-cache-lookup.outputs.cache-matched-key }}
+          key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
 
       - name: Remove an incomplete checkpoint transfer
         if: ${{ steps.model-cache.outcome == 'failure' }}
         run: |
           find "${{ steps.model-storage.outputs.root }}" -mindepth 1 -delete
 
-      # A cache outage is not fatal; the download below is checked by size,
-      # safetensors metadata, and pinned SHA-256 digests before tests see it.
+      # A cache outage is not fatal. The fallback fetches with Hugging Face's
+      # ranged client, then applies the pinned versions, sizes, and digests.
       - name: Verify or download the pinned Qwen3 checkpoint
         id: model-verified
         env:
           MODEL_SOURCE: ${{ steps.model-storage.outputs.root }}
+          PINNED_REVISION: c1899de289a04d12100db370d81485cdf75e47ca
         run: |
           set -euo pipefail
           if python3 .github/scripts/check_platform_environment.py \
@@ -189,73 +204,35 @@ jobs:
             exit 0
           fi
           for attempt in 1 2; do
-            if python3 - "$MODEL_SOURCE" <<'PY'
-          import json
-          import os
+            if python3 -m pip install --disable-pip-version-check -q \
+                "huggingface_hub==0.34.4" &&
+              python3 - "$MODEL_SOURCE" <<'PY'
           import sys
-          import time
-          import urllib.request
           from pathlib import Path
 
+          from huggingface_hub import hf_hub_download
+
           revision = "c1899de289a04d12100db370d81485cdf75e47ca"
-          required = {
-              "config.json": 726,
-              "generation_config.json": 239,
-              "merges.txt": 1671853,
-              "model.safetensors": 1503300328,
-              "tokenizer.json": 11422654,
-              "tokenizer_config.json": 9732,
-              "vocab.json": 2776833,
-          }
-          root = Path(sys.argv[1])
-          root.mkdir(parents=True, exist_ok=True)
-          api = (
-              "https://huggingface.co/api/models/Qwen/Qwen3-0.6B/"
-              f"revision/{revision}?blobs=true"
+          required = (
+              "config.json",
+              "generation_config.json",
+              "merges.txt",
+              "model.safetensors",
+              "tokenizer.json",
+              "tokenizer_config.json",
+              "vocab.json",
           )
-          with urllib.request.urlopen(api, timeout=60) as response:
-              metadata = json.load(response)
-          if metadata.get("sha") != revision:
-              raise SystemExit(f"Qwen3 returned revision {metadata.get('sha')}")
-          files = {item["rfilename"]: item for item in metadata["siblings"]}
-          for name, expected in required.items():
-              if files.get(name, {}).get("size") != expected:
-                  raise SystemExit(f"Qwen3 revision metadata disagrees for {name}")
-              destination = root / name
-              if destination.is_file() and destination.stat().st_size == expected:
-                  continue
-              url = (
-                  f"https://huggingface.co/Qwen/Qwen3-0.6B/resolve/{revision}/{name}"
+          destination = Path(sys.argv[1]).resolve()
+          destination.mkdir(parents=True, exist_ok=True)
+          for name in required:
+              print(f"Downloading {name} at {revision}", flush=True)
+              source = hf_hub_download(
+                  "Qwen/Qwen3-0.6B",
+                  name,
+                  revision=revision,
+                  cache_dir=str(destination.parent / "qwen3-hub-cache"),
               )
-              partial = destination.with_name(destination.name + ".partial")
-              for transfer in range(3):
-                  offset = partial.stat().st_size if partial.is_file() else 0
-                  request = urllib.request.Request(
-                      url,
-                      headers={"Range": f"bytes={offset}-"} if offset else {},
-                  )
-                  try:
-                      print(
-                          f"Downloading {name} from byte {offset} "
-                          f"(expected {expected} bytes)",
-                          flush=True,
-                      )
-                      with urllib.request.urlopen(request, timeout=300) as source:
-                          with partial.open("ab" if offset else "wb") as output:
-                              while chunk := source.read(1024 * 1024):
-                                  output.write(chunk)
-                      if partial.stat().st_size == expected:
-                          break
-                  except Exception as error:
-                      if transfer == 2:
-                          raise SystemExit(
-                              f"{name}: download failed: {error}"
-                          ) from error
-                      time.sleep(2**transfer)
-              if not partial.is_file() or partial.stat().st_size != expected:
-                  partial.unlink(missing_ok=True)
-                  raise SystemExit(f"{name}: transfer did not reach {expected} bytes")
-              os.replace(partial, destination)
+              (destination / name).write_bytes(Path(source).read_bytes())
           PY
             then
               break
@@ -272,58 +249,14 @@ jobs:
 
       # Save only a verified, exact cache miss. A present cache is left alone.
       - name: Save the pinned Qwen3 checkpoint
-        if: ${{ !cancelled() && steps.model-cache-lookup.outcome == 'success' && steps.model-cache-lookup.outputs.cache-primary-key != '' && steps.model-cache-lookup.outputs.cache-hit != 'true' && steps.model-verified.outcome == 'success' }}
+        id: model-save
+        if: ${{ !cancelled() && steps.model-cache.outcome == 'success' && steps.model-cache.outputs.cache-hit != 'true' && steps.model-verified.outcome == 'success' }}
         uses: actions/cache/save@v4
         continue-on-error: true
         timeout-minutes: 12
         with:
           path: ${{ steps.model-storage.outputs.root }}
-          key: ${{ steps.model-cache-lookup.outputs.cache-primary-key }}
-
-  integration-tests:
-    name: Build and test (${{ needs.configuration.outputs.display_name }})
-    needs: [configuration, model-mount]
-    if: ${{ always() && needs.configuration.result == 'success' && needs.model-mount.result == 'success' }}
-    outputs:
-      stages: ${{ steps.execution.outputs.stages }}
-      run_attempt: ${{ steps.execution.outputs.run_attempt }}
-    runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
-    timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
-    # MPS runs on macOS, which has no Docker. Linux starts one vendor image
-    # after the model and checkout are both present on the host.
-    defaults:
-      run:
-        shell: bash
-    env:
-      INTEGRATION_PLATFORM: ${{ inputs.platform }}
-    steps:
-      - name: Checkout source
-        id: checkout
-        uses: actions/checkout@v4
-        continue-on-error: true
-        with:
-          repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.ref }}
-          persist-credentials: false
-
-      - name: Retry checkout source
-        if: ${{ steps.checkout.outcome == 'failure' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.ref }}
-          persist-credentials: false
-
-      - name: Verify the checkout retry
-        if: ${{ steps.checkout.outcome == 'failure' }}
-        env:
-          EXPECTED_REF: ${{ inputs.checkout_ref || github.sha }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
-            exit 1
-          fi
-          test "$(git rev-parse HEAD)" = "$EXPECTED_REF"
+          key: ${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}
 
       # Copy before invoking setup. setup may install into the checked-out
       # tree, and tests still need a clean source workspace to execute.
@@ -335,10 +268,10 @@ jobs:
           CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
           CONTAINER_VOLUMES: ${{ needs.configuration.outputs.container_volumes }}
           CONTAINER_OPTIONS: ${{ needs.configuration.outputs.container_options }}
-          HOST_MODEL_ROOT: ${{ needs.model-mount.outputs.host_model_root }}
-          MODEL_PATH: ${{ needs.model-mount.outputs.model_path }}
+          HOST_MODEL_ROOT: ${{ env.TORCH_FL_MODEL_ROOT }}
+          MODEL_PATH: ${{ needs.configuration.outputs.model_path }}
           CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
-          CHECKOUT_REF: ${{ inputs.checkout_ref || github.sha }}
+          CHECKOUT_REF: ${{ steps.source.outputs.ref }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
@@ -827,7 +760,7 @@ jobs:
           REPORT_PLATFORM: ${{ inputs.platform }}
           TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
-          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
         run: |
           set -euo pipefail
           temp="${RUNNER_TEMP:-/tmp}"
@@ -886,7 +819,7 @@ jobs:
           REPORT_PLATFORM: ${{ inputs.platform }}
           TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
-          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
         run: |
           set -euo pipefail
           temp="${RUNNER_TEMP:-/tmp}"

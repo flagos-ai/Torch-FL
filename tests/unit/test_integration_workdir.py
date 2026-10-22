@@ -266,24 +266,22 @@ def _prepare_steps() -> list[tuple[str, str, str]]:
 
 
 def test_the_model_mount_is_prepared_on_its_platform_host():
-    """Restore and validate the checkpoint before this job starts Docker."""
+    """Restore the checkpoint on the runner that will start the vendor image."""
     workflow = yaml.safe_load(
         (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8")
     )
     jobs = workflow["jobs"]
-    mount = jobs["model-mount"]
     integration = jobs["integration-tests"]
-    assert "container" not in mount
+    assert "model-mount" not in jobs
     assert "container" not in integration
-    assert mount["needs"] == "configuration"
-    assert mount["runs-on"] == (
+    assert integration["needs"] == "configuration"
+    assert integration["runs-on"] == (
         "${{ fromJson(needs.configuration.outputs.runner_labels) }}"
     )
-    assert set(integration["needs"]) == {"configuration", "model-mount"}
-    assert "needs.model-mount.result == 'success'" in integration["if"]
+    steps = integration["steps"]
     locate = next(
         step
-        for step in mount["steps"]
+        for step in steps
         if step.get("name") == "Prepare the fixed model bind root"
     )
     assert "HOST_MODEL_ROOT" not in locate["env"]
@@ -291,51 +289,33 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in locate["run"]
     assert "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" in locate["run"]
     assert "root=$HOST_MODEL_ROOT" not in locate["run"]
-    configure = next(
-        step for step in mount["steps"] if step.get("id") == "configure-model"
-    )
-    assert "host_model_root=$TORCH_FL_MODEL_ROOT" in configure["run"]
-    assert (
-        "model_path=${{ needs.configuration.outputs.model_path }}" in configure["run"]
-    )
-    assert mount["outputs"]["model_path"] == (
-        "${{ steps.configure-model.outputs.model_path }}"
-    )
-    workspace = next(
-        step for step in integration["steps"] if step.get("id") == "workspace"
-    )
-    assert mount["outputs"]["host_model_root"] == (
-        "${{ steps.configure-model.outputs.host_model_root }}"
-    )
-    assert "root" not in mount["outputs"]
-    assert workspace["env"]["HOST_MODEL_ROOT"] == (
-        "${{ needs.model-mount.outputs.host_model_root }}"
-    )
+    workspace = next(step for step in steps if step.get("id") == "workspace")
+    assert workspace["env"]["HOST_MODEL_ROOT"] == ("${{ env.TORCH_FL_MODEL_ROOT }}")
     assert workspace["env"]["MODEL_PATH"] == (
-        "${{ needs.model-mount.outputs.model_path }}"
+        "${{ needs.configuration.outputs.model_path }}"
     )
     assert '--model-root "$HOST_MODEL_ROOT"' in workspace["run"]
     assert '--model-path "$MODEL_PATH"' in workspace["run"]
     restore = next(
-        step
-        for step in mount["steps"]
-        if step.get("uses") == "actions/cache/restore@v4"
+        step for step in steps if step.get("uses") == "actions/cache/restore@v4"
     )
-    assert restore["with"]["key"] == _MODEL_CACHE
+    assert restore["with"]["key"] == "${{ env.TORCH_FL_CHECKPOINT_CACHE_KEY }}"
+    assert integration["env"]["TORCH_FL_CHECKPOINT_CACHE_KEY"] == _MODEL_CACHE
     assert restore["with"]["path"] == "${{ steps.model-storage.outputs.root }}"
     verify = next(
         step
-        for step in mount["steps"]
+        for step in steps
         if step.get("name") == "Verify or download the pinned Qwen3 checkpoint"
     )
     assert verify["env"]["MODEL_SOURCE"] == "${{ steps.model-storage.outputs.root }}"
     assert "--verify-weights" in verify["run"]
-    test_step = next(
-        step for step in integration["steps"] if step.get("id") == "integration-tests"
-    )
-    container = next(
-        step for step in integration["steps"] if step.get("id") == "container"
-    )
+    assert "hf_hub_download(" in verify["run"]
+    assert "revision=revision," in verify["run"]
+    for step in steps:
+        if step.get("id") in {"merge-report", "merge-coverage"}:
+            assert step["env"]["SOURCE_REF"] == "${{ steps.source.outputs.ref }}"
+    test_step = next(step for step in steps if step.get("id") == "integration-tests")
+    container = next(step for step in steps if step.get("id") == "container")
     assert "container_workspace.py start" in container["run"]
     assert "docker run" not in test_step["run"]
     assert "docker exec" in test_step["run"]
@@ -348,7 +328,7 @@ def test_every_platform_restores_the_model_to_the_mount_path():
     )
     step = next(
         step
-        for step in workflow["jobs"]["model-mount"]["steps"]
+        for step in workflow["jobs"]["integration-tests"]["steps"]
         if step.get("id") == "model-storage"
     )
     assert "HOST_MODEL_ROOT" not in step["env"]

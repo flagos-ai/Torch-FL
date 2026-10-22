@@ -169,6 +169,11 @@ jobs:
 
   # One hardware pipeline per configured platform. The reusable workflow reads
   # runner, image, timeout, and test manifest values from that platform config.
+  #
+  # A pull request runs the workflow from the base branch and checks out the PR
+  # head separately. Passing the source SHA explicitly to the reusable workflow
+  # avoids resolving `github.ref`, which names the PR's synthetic merge commit
+  # on reruns, while the requested tests belong to `resolve-checkout.outputs.ref`.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
@@ -183,6 +188,7 @@ jobs:
       platform: ${{ matrix.platform }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+      expected_checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
 
   # Single required-check gate for branch protection.
   ci-complete:

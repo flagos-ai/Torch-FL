@@ -218,7 +218,12 @@ def test_cache_transfer_decisions(
     steps = _steps(workflow)
     lookup = next(step for step in steps if step.get("id") == "pip-cache-lookup")
     restore = next(step for step in steps if step.get("id") == "pip-cache")
-    upload = next(step for step in steps if step.get("uses") == "actions/cache/save@v4")
+    upload = next(
+        step
+        for step in steps
+        if step.get("uses") == "actions/cache/save@v4"
+        and step.get("id") != "model-save"
+    )
     states = {
         "pip-cache-lookup": {
             "outcome": lookup_outcome,
@@ -252,12 +257,21 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
     restore_maximum, segment_maximum = 3, 2
     save_maximum = 3
     for step in _steps(workflow):
-        if step.get("uses", "").startswith("actions/cache/"):
+        if workflow == "integration-tests.yml" and step.get("id") in {
+            "model-cache",
+            "model-save",
+        }:
+            # The checkpoint is required by model tests. Its cache action may
+            # fail throughout the remaining setup and test steps, and the
+            # bounded download below still has to run.
+            assert step.get("continue-on-error") is True
+            assert 0 < step["timeout-minutes"] <= 12
+            continue
+        elif step.get("uses", "").startswith("actions/cache/"):
             assert step["continue-on-error"] is True
             maximum = {
                 "pip-cache-lookup": 1,
                 "pip-cache": restore_maximum,
-                "model-cache": 8,
                 "model-cache-save": 8,
                 "model-save": 8,
             }.get(step.get("id"), save_maximum)
