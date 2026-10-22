@@ -1225,6 +1225,22 @@ def _rebind_flag_gems_name(name, original, wrapper):
             continue
 
 
+def _bind_flag_gems_callable(flag_gems, name, wrapper, namespace=None):
+    """Publish a patched callable to the bridge and normal FlagGems imports.
+
+    The C++ bridge resolves ``flag_gems.<name>`` on first use. Package-level
+    callables are written to the module dictionary so another package
+    ``__getattr__`` cannot reveal the original after this function returns. A
+    separate namespace covers functions re-exported by ``flag_gems.ops``, which
+    the bridge also checks. Package attributes that resolve to a submodule are
+    left in place, so ``import flag_gems.ops.<name>`` keeps working.
+    """
+    if getattr(flag_gems, name, None) is not None:
+        flag_gems.__dict__[name] = wrapper
+    if namespace is not None:
+        namespace.__dict__[name] = wrapper
+
+
 def _patch_flaggems_vector_norm():
     """Stop FlagGems' L2 ``vector_norm`` from materialising a transposed copy.
 
@@ -2665,11 +2681,8 @@ def _patch_flaggems_where_out():
     take down device init.
     """
     try:
-        from .. import _conf_routes_to_flaggems
-
-        if not _conf_routes_to_flaggems():
-            return
         import flag_gems
+        import flag_gems.ops as _gems_ops
 
         original = getattr(flag_gems, "where_self_out", None)
         if original is None:
@@ -2699,6 +2712,7 @@ def _patch_flaggems_where_out():
         where_self_out.__wrapped__ = original
         where_self_out._torch_fl_grows_where_out = True
         _rebind_flag_gems_name("where_self_out", original, where_self_out)
+        _bind_flag_gems_callable(flag_gems, "where_self_out", where_self_out, _gems_ops)
     except Exception:
         pass
 
@@ -2728,11 +2742,9 @@ def _patch_flaggems_slice_backward():
     be able to take down device init.
     """
     try:
-        from .. import _conf_routes_to_flaggems
-
-        if not _conf_routes_to_flaggems():
-            return
         import flag_gems
+        import flag_gems.ops as _gems_ops
+        import flag_gems.ops.slice_backward
 
         original = getattr(flag_gems, "slice_backward", None)
         if original is None:
@@ -2751,6 +2763,7 @@ def _patch_flaggems_slice_backward():
         slice_backward.__wrapped__ = original
         slice_backward._torch_fl_contiguous_slice_backward = True
         _rebind_flag_gems_name("slice_backward", original, slice_backward)
+        _bind_flag_gems_callable(flag_gems, "slice_backward", slice_backward, _gems_ops)
     except Exception:
         pass
 

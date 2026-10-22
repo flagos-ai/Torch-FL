@@ -49,6 +49,7 @@ import textwrap
 from flaggems_caps import (
     DEVICE,
     FLAGGEMS_EXECUTION_CALLS,
+    FLAGGEMS_RESULT_CALLS,
     FLAGGEMS_ROUTING_CALLS,
     PRELUDE,
 )
@@ -57,6 +58,39 @@ _MARKER_PREFIX = "### op "
 _END_PREFIX = "### end "
 _DISPATCH_PREFIX = "[flagos dispatch]"
 _FALLBACK_PREFIX = "[flagos cpu_fallback]"
+
+
+def _same_operator(logged: str, op: str) -> bool:
+    """Whether a dispatcher log names the conf row being checked.
+
+    Dispatch lines use the conf spelling, while the C++ fallback prints
+    ``op.schema().name()``. That adds an ``aten::`` qualifier to a fallback.
+    """
+    return logged.removeprefix("aten::") == op
+
+
+def _logged_operators(stderr: str, op: str) -> list[tuple[str, str]]:
+    """Return ``(kind, operator)`` for every dispatcher log under ``op``."""
+    logged = []
+    current: str | None = None
+    for line in stderr.splitlines():
+        if line.startswith(_MARKER_PREFIX):
+            current = line[len(_MARKER_PREFIX) :].strip()
+            continue
+        if line.startswith(_END_PREFIX):
+            current = None
+            continue
+        if current != op:
+            continue
+        if line.startswith(_FALLBACK_PREFIX):
+            logged.append(("fallback", line[len(_FALLBACK_PREFIX) :].strip()))
+        elif line.startswith(_DISPATCH_PREFIX):
+            body = line.split("]", 1)[1]
+            name, _, backend = body.partition("->")
+            if backend.strip():
+                logged.append(("dispatch", name.strip()))
+    return logged
+
 
 # The child program. Self-contained on purpose: it runs under ``python -c``,
 # where nothing from this package is on sys.path. torch_fl is imported *before*
@@ -101,7 +135,11 @@ def _child_source() -> str:
 
 def _call_table() -> dict:
     """The call bodies and their stable execution order."""
-    calls = {**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS}
+    calls = {
+        **FLAGGEMS_ROUTING_CALLS,
+        **FLAGGEMS_RESULT_CALLS,
+        **FLAGGEMS_EXECUTION_CALLS,
+    }
     return {
         "calls": calls,
         "order": sorted(calls),
@@ -156,8 +194,8 @@ def attribute_routes(stderr: str, ops: list[str]) -> dict[str, dict]:
     A dispatch line counts only inside the marker block of the operator it names,
     so an operator that internally calls others is not attributed their routes.
     A fallback line is the explicit ``none`` route. The result for each operator
-    has ``dispatched_backend`` and ``cpu_fallback``; both being false means no
-    route of its own was observed.
+    has ``dispatched_backend``, ``cpu_fallback``, and the dispatcher names it
+    logged; both route flags being false means no route of its own was observed.
     """
     blocks: dict[str, list[str]] = {}
     current: str | None = None
@@ -179,15 +217,17 @@ def attribute_routes(stderr: str, ops: list[str]) -> dict[str, dict]:
         cpu_fallback = False
         for line in blocks.get(op, ()):
             if line.startswith(_FALLBACK_PREFIX):
-                cpu_fallback = line[len(_FALLBACK_PREFIX) :].strip() == op
+                name = line[len(_FALLBACK_PREFIX) :].strip()
+                cpu_fallback = _same_operator(name, op)
                 continue
             body = line.split("]", 1)[1]
             opname, _, name = body.partition("->")
-            if opname.strip() == op:
+            if _same_operator(opname.strip(), op):
                 backend = name.strip()
         routes[op] = {
             "dispatched_backend": backend,
             "cpu_fallback": cpu_fallback,
+            "logged_operators": _logged_operators(stderr, op),
         }
     return routes
 
@@ -206,7 +246,11 @@ def probe_routes(
     one error entry per operator instead of raising, so a caller can report
     every operator it asked for.
     """
-    probe_table = {**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS}
+    probe_table = {
+        **FLAGGEMS_ROUTING_CALLS,
+        **FLAGGEMS_RESULT_CALLS,
+        **FLAGGEMS_EXECUTION_CALLS,
+    }
     selected = list(probe_table if ops is None else ops)
     env = os.environ.copy()
     env["FLAGOS_LOG"] = "dispatch,fallback"
@@ -225,6 +269,7 @@ def probe_routes(
             op: {
                 "dispatched_backend": None,
                 "cpu_fallback": False,
+                "logged_operators": [],
                 "error": message,
             }
             for op in selected
@@ -237,6 +282,7 @@ def probe_routes(
         report[op] = {
             "dispatched_backend": routes[op]["dispatched_backend"],
             "cpu_fallback": routes[op]["cpu_fallback"],
+            "logged_operators": routes[op]["logged_operators"],
             "error": entry.get("error"),
         }
     return report

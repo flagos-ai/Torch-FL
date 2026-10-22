@@ -34,6 +34,7 @@ for directory in (FLAGGEMS, INTEGRATION):
 import flaggems_probe  # noqa: E402
 from flaggems_caps import (  # noqa: E402
     FLAGGEMS_EXECUTION_CALLS,
+    FLAGGEMS_RESULT_CALLS,
     FLAGGEMS_ROUTING_CALLS,
 )
 
@@ -63,6 +64,7 @@ def test_generated_child_runs_every_shared_call(monkeypatch, capsys):
     prelude = "a = torch.tensor([-1.0, 2.0])\n"
     monkeypatch.setattr(flaggems_probe, "FLAGGEMS_ROUTING_CALLS", calls)
     monkeypatch.setattr(flaggems_probe, "FLAGGEMS_EXECUTION_CALLS", {})
+    monkeypatch.setattr(flaggems_probe, "FLAGGEMS_RESULT_CALLS", {})
     monkeypatch.setattr(flaggems_probe, "PRELUDE", prelude)
     monkeypatch.setattr(flaggems_probe, "DEVICE", "cpu")
     source = flaggems_probe._child_source()
@@ -106,7 +108,11 @@ def test_the_real_child_table_has_every_declared_case(monkeypatch):
     entries = [json.loads(line) for line in result.stdout.splitlines()]
 
     table = flaggems_probe._call_table()
-    calls = {**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS}
+    calls = {
+        **FLAGGEMS_ROUTING_CALLS,
+        **FLAGGEMS_RESULT_CALLS,
+        **FLAGGEMS_EXECUTION_CALLS,
+    }
     assert table == {"calls": calls, "order": sorted(calls)}
     assert [entry["op"] for entry in entries] == sorted(calls)
     assert [entry["error"] for entry in entries] == [None] * len(calls)
@@ -126,11 +132,65 @@ def test_extracting_the_call_table_rejects_a_missing_prelude():
         flaggems_probe._generated_table("CALLS = {}")
 
 
+def test_fallback_log_matches_its_aten_qualified_conf_row():
+    """A fallback names ``aten::log``; its conf row is ``log``."""
+    stderr = "\n".join(
+        [
+            "### op log",
+            "[flagos cpu_fallback] aten::log",
+            "### end log",
+        ]
+    )
+    routes = flaggems_probe.attribute_routes(stderr, ["log"])
+    assert routes["log"]["dispatched_backend"] is None
+    assert routes["log"]["cpu_fallback"] is True
+    assert routes == {
+        "log": {
+            "dispatched_backend": None,
+            "cpu_fallback": True,
+            "logged_operators": [("fallback", "aten::log")],
+        }
+    }
+
+
+def test_a_wrapper_records_its_internal_dispatcher_call():
+    """`F.embedding` is execute-only when its log names `index_select`."""
+    stderr = "\n".join(
+        [
+            "### op embedding",
+            "[flagos cpu_fallback] aten::index_select",
+            "### end embedding",
+        ]
+    )
+    routes = flaggems_probe.attribute_routes(stderr, ["embedding"])
+    assert routes["embedding"]["dispatched_backend"] is None
+    assert routes["embedding"]["cpu_fallback"] is False
+    assert routes == {
+        "embedding": {
+            "dispatched_backend": None,
+            "cpu_fallback": False,
+            "logged_operators": [("fallback", "aten::index_select")],
+        }
+    }
+
+
+def test_execute_only_results_do_not_need_a_route_for_the_wrapper():
+    """A successful wrapper with its own internal log is an execution pass."""
+    assert FLAGGEMS_EXECUTION_CALLS
+    assert not set(FLAGGEMS_EXECUTION_CALLS) & set(FLAGGEMS_ROUTING_CALLS)
+
+
+def test_every_result_case_also_has_a_routing_case():
+    """A CPU comparison needs its conf row on every configured platform."""
+    assert set(FLAGGEMS_RESULT_CALLS) <= set(FLAGGEMS_ROUTING_CALLS)
+
+
 def test_the_call_table_is_what_the_child_reads(monkeypatch):
     monkeypatch.setattr(
         flaggems_probe, "FLAGGEMS_ROUTING_CALLS", {"neg": "torch.neg(a)"}
     )
     monkeypatch.setattr(flaggems_probe, "FLAGGEMS_EXECUTION_CALLS", {})
+    monkeypatch.setattr(flaggems_probe, "FLAGGEMS_RESULT_CALLS", {})
     source = flaggems_probe._child_source()
     assert 'CALLS["order"]' in source
     assert 'CALLS["calls"]' in source

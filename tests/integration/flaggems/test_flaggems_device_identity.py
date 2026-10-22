@@ -172,12 +172,20 @@ def _assert_route_probe(*ops: str) -> None:
             failures.append(f"{op}: {entry['error']}")
             continue
         backend, why = route_reason(op)
-        if entry["dispatched_backend"] != backend or entry["cpu_fallback"]:
-            failures.append(
-                f"{op} ({why}) dispatched to {entry['dispatched_backend']!r} "
-                f"(cpu_fallback={entry['cpu_fallback']}); the "
-                f"{accel_label()} conf resolves it to {backend!r}"
-            )
+        expected_fallback = (
+            entry["dispatched_backend"] is None and entry["cpu_fallback"]
+        )
+        if (
+            backend is not None
+            and entry["dispatched_backend"] == backend
+            and not entry["cpu_fallback"]
+        ) or (backend is None and expected_fallback):
+            continue
+        failures.append(
+            f"{op} ({why}) dispatched to {entry['dispatched_backend']!r} "
+            f"(cpu_fallback={entry['cpu_fallback']}); the "
+            f"{accel_label()} route resolves it to {backend!r}"
+        )
     if failures:
         pytest.fail(
             "the configured guarded routes did not execute:\n" + "\n".join(failures)

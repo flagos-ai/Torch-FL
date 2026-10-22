@@ -277,19 +277,3 @@ def test_tileops_gate_reads_the_build_record(monkeypatch):
             sys.modules.pop("torch_fl", None)
         else:
             sys.modules["torch_fl"] = real_torch_fl
-
-
-def test_native_vendor_gate_reads_the_build_record():
-    """Vendor route cases follow the kernel set recorded by this wheel."""
-    env = type("Env", (), {"build_kernels": staticmethod(lambda: frozenset())})()
-    real_torch_fl = sys.modules.get("torch_fl")
-    sys.modules["torch_fl"] = type("TorchFl", (), {"_env": env})()
-    try:
-        assert not ops_conftest._native_vendor_enabled()
-        env.build_kernels = staticmethod(lambda: frozenset({"vendor"}))
-        assert ops_conftest._native_vendor_enabled()
-    finally:
-        if real_torch_fl is None:
-            sys.modules.pop("torch_fl", None)
-        else:
-            sys.modules["torch_fl"] = real_torch_fl

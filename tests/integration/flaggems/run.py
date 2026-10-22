@@ -129,6 +129,7 @@ def _launch_ci_group(suite):
 def _local_child_environment():
     """Keep a local invocation from joining its caller's CI report."""
     environment = os.environ.copy()
+    environment["TORCH_FL_SOURCE_ROOT"] = str(_ROOT)
     for name in (
         "FLAGCICD_REPORT_DIR",
         "FLAGCICD_COVERAGE_DIR",

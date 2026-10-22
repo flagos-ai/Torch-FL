@@ -14,13 +14,17 @@
 
 """The routing half of the contract: each operator dispatches where the conf says.
 
-For every operator in the shared routing and execution tables, this runs the
+For every operator in the shared routing table, this runs the
 call on the device in a fresh child with ``FLAGOS_LOG=dispatch,fallback`` and
 asserts the child's
 ``[flagos dispatch] <op> -> <backend>`` line names exactly the backend the active
 conf routes the operator to. A ``none`` route has to show the matching
 ``[flagos cpu_fallback] <op>`` line instead, and an unlisted route has to reach
 FlagGems, the dispatcher's default.
+
+The public wrappers in the execution table run in the same child, but their
+dispatch logs can name a different operator. That execution, and a failure
+inside it, is checked separately from the route of the named dispatcher row.
 
 Per-operator coverage is allowed to differ, so the case is always driven and
 then checked against the conf: an op the conf routes to FlagGems must reach that
@@ -53,9 +57,7 @@ def _probe() -> dict[str, dict]:
     return _PROBE
 
 
-@pytest.mark.parametrize(
-    "op", sorted({**FLAGGEMS_ROUTING_CALLS, **FLAGGEMS_EXECUTION_CALLS})
-)
+@pytest.mark.parametrize("op", sorted(FLAGGEMS_ROUTING_CALLS))
 def test_operator_dispatches_where_the_conf_routes_it(op: str):
     accel = accel_label()
     if not accel:
@@ -63,14 +65,14 @@ def test_operator_dispatches_where_the_conf_routes_it(op: str):
 
     entry = _probe()[op]
     assert entry["error"] is None, f"{op}: {entry['error']}"
-    if conf_route(op) == "none":
+    backend, why = route_reason(op)
+    if backend is None:
         assert entry["dispatched_backend"] is None and entry["cpu_fallback"], (
-            f"{op} is 'none' in the {accel} conf, but the dispatcher returned "
+            f"{op} ({why}) in the {accel} conf, but the dispatcher returned "
             f"backend={entry['dispatched_backend']!r}, "
             f"cpu_fallback={entry['cpu_fallback']}"
         )
     else:
-        backend, why = route_reason(op)
         assert entry["dispatched_backend"] == backend, (
             f"{op} ({why}) dispatched to {entry['dispatched_backend']!r}; the "
             f"{accel} conf ({conf_route(op)!r}) resolves it to {backend!r}"
@@ -80,3 +82,20 @@ def test_operator_dispatches_where_the_conf_routes_it(op: str):
             f"fallback; the {accel} conf ({conf_route(op)!r}) resolves it to "
             f"{backend!r}"
         )
+
+
+def test_public_wrapper_calls_execute():
+    """Every platform runs the wrappers even when their logs name another op."""
+    accel = accel_label()
+    if not accel:
+        pytest.fail("the active conf is not a named backends_<platform>.conf")
+    entries = _probe()
+    assert FLAGGEMS_EXECUTION_CALLS, "the shared execution table is empty"
+    failures = [
+        f"{op}: {entries[op]['error']}"
+        for op in FLAGGEMS_EXECUTION_CALLS
+        if entries[op]["error"] is not None
+    ]
+    assert not failures, (
+        "the shared execution calls failed on " + accel + ":\n" + ("\n".join(failures))
+    )

@@ -2619,6 +2619,10 @@ def _phase_ecosystem() -> None:
     # going through them (`cat` among them) then fail with `module 'flag_gems'
     # has no attribute 'vendor_name'` for the life of the process.
     flagos._stand_down_foreign_triton_drivers()
+    # The dispatch patches in flagos._lazy_init wrap callables that FlagGems
+    # only binds after importing its ops package. Initialize the device before
+    # those patches and before the first routed op can cache an unpatched one.
+    flagos.init()
     _patch_flaggems_philox()
 
     # Correct flag_gems' layer-norm backward for 3-D+ inputs; must precede the

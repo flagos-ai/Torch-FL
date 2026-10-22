@@ -142,6 +142,71 @@ def test_unit_group_fails_if_the_checkout_does_not_exist(monkeypatch, tmp_path):
         _RUNNER.main()
 
 
+def test_flaggems_group_receives_the_checkout_registration_source(
+    monkeypatch, tmp_path
+):
+    """The routing contract must inspect the checkout, not the wheel workspace."""
+    checkout = tmp_path / "checkout"
+    workspace = tmp_path / "wheel-only"
+    reports = tmp_path / "reports"
+    for directory in (checkout, workspace, reports):
+        directory.mkdir()
+    python = tmp_path / "python"
+    python.symlink_to(sys.executable)
+    tests = [
+        {
+            "id": "flaggems_conformance",
+            "name": "flaggems",
+            "command": "true",
+            "environment": {},
+        }
+    ]
+    monkeypatch.setenv("INTEGRATION_TESTS", json.dumps(tests))
+    monkeypatch.setenv("INTEGRATION_ENVIRONMENT", "{}")
+    monkeypatch.setenv("INTEGRATION_WORKDIR", str(workspace))
+    monkeypatch.setenv("INTEGRATION_INVENTORY_ROOT", str(checkout))
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(reports))
+    monkeypatch.setenv("TORCH_FL_SOURCE_ROOT", str(workspace))
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setattr(_RUNNER, "check_inventory_binding", lambda *_args: None)
+    monkeypatch.setattr(
+        _RUNNER,
+        "load_inventory",
+        lambda _paths: {"flaggems_conformance": {"cases": ["case"], "aliases": {}}},
+    )
+    monkeypatch.setattr(_RUNNER, "safe_report_directory", lambda _name: str(reports))
+    monkeypatch.setattr(
+        _RUNNER,
+        "inventory_environment",
+        lambda _test_id, _inventory: {"FLAGCICD_EXPECTED_CASES": "{}"},
+    )
+    monkeypatch.setattr(
+        _RUNNER, "report_cases", lambda *_args, **_kwargs: {"case": "passed"}
+    )
+    monkeypatch.setattr(_RUNNER, "verify_inventory", lambda *_args: None)
+
+    captured = []
+
+    def record_run(command, environment, workdir, prefix=""):
+        captured.append((command, environment.copy(), workdir, prefix))
+        return 0, "1 passed in 0.01s\n"
+
+    monkeypatch.setattr(_RUNNER, "run_command", record_run)
+
+    class Args:
+        validate_only = False
+        allow_empty = False
+        inventory = []
+
+    monkeypatch.setattr(_RUNNER, "parse_args", lambda: Args())
+
+    assert _RUNNER.main() == 0
+    _, environment, workdir, prefix = captured[0]
+    assert environment["TORCH_FL_SOURCE_ROOT"] == str(checkout)
+    assert "export FLAGCICD_LAUNCHER=group" in prefix
+    assert workdir == str(checkout)
+
+
 def _run_main(monkeypatch, tmp_path, tests):
     monkeypatch.setenv("INTEGRATION_TESTS", json.dumps(tests))
     monkeypatch.setenv("INTEGRATION_ENVIRONMENT", "{}")

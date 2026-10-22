@@ -54,18 +54,6 @@ def _load_platform():
 
 _platform = _load_platform()
 
-_NATIVE_VENDOR_MARKERS = (
-    "metax",
-    "ascend",
-    "musa",
-    "dcu",
-    "gcu",
-    "iluvatar",
-    "kunlunxin",
-    "ppu",
-)
-
-
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "metax": ("cuda", "ascend", "musa", "dcu", "gcu", "iluvatar", "kunlunxin", "ppu"),
@@ -189,18 +177,6 @@ def _tileops_enabled() -> bool:
     return "tileops" in _env.build_kernels()
 
 
-def _native_vendor_enabled() -> bool:
-    """True when this wheel recorded the platform's native kernel set.
-
-    A vendor route assertion needs the native set recorded by the wheel. Native
-    MXCC is not built into the MetaX wheel, even though MetaX remains the
-    platform lane for portable FlagGems and runtime cases.
-    """
-    from torch_fl import _env
-
-    return "vendor" in _env.build_kernels()
-
-
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -208,7 +184,6 @@ def pytest_collection_modifyitems(
     platform = _platform.detect_platform()
     markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
     flaggems_cpp_on = _flaggems_cpp_enabled()
-    native_vendor_on = _native_vendor_enabled()
     # The `cuda` mark asserts a `-> cuda` dispatch, and on a CUDA-ABI platform
     # that route is served by the generated boxing kernels. A FlagGems-primary
     # wheel (the default since #520, and the only wheel the CUDA-ABI CI lanes
@@ -219,10 +194,6 @@ def pytest_collection_modifyitems(
     # from the table above; appending it again is a no-op for them.
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
-    if not native_vendor_on:
-        markers_to_skip.extend(
-            marker for marker in _NATIVE_VENDOR_MARKERS if marker not in markers_to_skip
-        )
     for item in items:
         if item.get_closest_marker("tileops") and not _tileops_enabled():
             item.add_marker(

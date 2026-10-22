@@ -49,7 +49,9 @@ def test_metadata_ops_survive_registration_regeneration():
     hand-written REGISTER_IMPL_TO_DISPATCHER lines alone drops these entries,
     leaving ATen's CPU metadata kernels attached to flagos tensors.
     """
-    register = _read(REPO_ROOT / "csrc/aten/backends/ascend/generated/ascend_register.inc")
+    register = _read(
+        REPO_ROOT / "csrc/aten/backends/ascend/generated/ascend_register.inc"
+    )
     registered = set(re.findall(r'm\.impl\("([^"]+)"', register))
     expected = {
         "_conj",

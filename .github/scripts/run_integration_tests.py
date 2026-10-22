@@ -1020,6 +1020,8 @@ def main():
                 raise SystemExit(
                     f"integration source root does not exist: {group_workdir}"
                 )
+            if test.get("id", "").startswith("flaggems_"):
+                group_command_environment["TORCH_FL_SOURCE_ROOT"] = str(source)
         try:
             returncode, output = run_command(
                 test["command"],
