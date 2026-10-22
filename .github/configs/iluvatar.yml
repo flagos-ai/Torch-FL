@@ -30,6 +30,7 @@ container_volumes:
   - /usr/local/corex-4.5.0/lib64/libixml.so:/usr/local/corex/lib64/libixml.so:ro
   # The base's ixsmi is an empty placeholder. Triton matmul tuning calls it.
   - /usr/local/corex-4.5.0/bin/ixsmi:/usr/local/corex/bin/ixsmi:ro
+  - /var/lib/torch-fl-ci/models:/models:ro
 
 # These are the manually validated reservations on u121. The runner must keep
 # physical cards 8 and 9 reserved. Environment here applies to test commands;

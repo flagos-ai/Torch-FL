@@ -58,9 +58,10 @@
 # exactly the recorded list in that test.
 #
 # `{{display_name}}` is the one substitution the composer performs, from the
-# platform config. Everything else that looks like a variable -- $MODEL_PATH,
+# platform config. Everything else that looks like a variable --
 # ${ASCEND_MSPTI_PRELOAD}, $GITHUB_WORKSPACE -- is left for the shell or the
 # environment on the hardware runner, and is not the composer's to resolve.
+# MODEL_PATH is set explicitly on the model groups below.
 
 steps:
   # The environment the wheel landed in, asserted against the expectations the
@@ -80,8 +81,6 @@ steps:
   #   require_flaggems_tle_modules                TLE modules FlagGems needs
   #   torch_musa_shim_only                        the vendor package must not leak
   #   flagtree                                    the FlagTree build, as a nested map
-  #   model_dir                                   MODEL_PATH must be a mount carrying
-  #                                               a valid config.json model_type
   #
   # The vocabulary is documented on the script, not repeated per platform: what
   # a platform states is a value, and why it states it is in that platform's
@@ -325,24 +324,65 @@ steps:
     platforms: [gcu, kunlunxin, metax]
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
 
-  # The Qwen3 smoke groups need a mounted checkpoint, which is why they are the
-  # two steps whose platform set is a mount rather than a capability. Ascend,
-  # GCU, Kunlunxin, Iluvatar and MUSA record the gap as a missing model mount
-  # rather than a missing test; DCU's inference/training are deferred until its runner
-  # has the mount and the first CI run confirms the card count.
+  # GitHub creates a job container before its first step, so this stage runs
+  # after the workflow has populated the bind root on the runner.
+  - id: model
+    name: Verify Qwen3 checkpoint
+    command: >-
+      cd "$GITHUB_WORKSPACE" && python .github/scripts/check_platform_environment.py
+      check-model --path "$MODEL_PATH" --verify-weights
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
+
+  # The model load and one traced forward run report which operations reach a
+  # native kernel. This is an observation, not a fallback-free requirement.
+  - id: fallback_trace
+    name: Trace Qwen3 inference fallbacks
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
+    command: >-
+      python -m pytest tests/integration/test_fallback_trace.py
+      --model "$MODEL_PATH" --max-new-tokens 8 -v -s --tb=short
+
+  # The Qwen3 groups use the checkpoint published once by the integration
+  # workflow. MODEL_PATH is identical in every Linux container and on MPS; see
+  # configs/*.yml for the one model bind root and workflow for its population.
   - id: inference
     name: Run inference tests
-    platforms: [cuda, ppu]
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py --model "$MODEL_PATH"
       -v -s --tb=short
 
   - id: training
     name: Run training tests
-    platforms: [cuda, ppu]
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py --model "$MODEL_PATH"
       -v -s --tb=short
+
+  # Training runs with the per-platform optimizer path already exercised by the
+  # group above, then reports the operations reached during forward/backward.
+  - id: fallback_trace_train
+    name: Trace Qwen3 training fallbacks
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
+    command: >-
+      python -m pytest tests/integration/test_fallback_trace_train.py
+      --model "$MODEL_PATH" --steps 2 --seq-len 32 -v -s --tb=short
+
+  # The Qwen3 trace contract: export a real model trace everywhere, and require
+  # device kernels only on platforms whose profiler capability table says the
+  # tracer emits them. A platform with no device events fails, rather than skip.
+  - id: qwen3_profiler
+    name: Profile Qwen3 inference
+    environment:
+      MODEL_PATH: /models/Qwen3-0.6B
+    command: >-
+      python -m pytest tests/integration/test_profiler_qwen3_infer.py
+      --model "$MODEL_PATH" -v -s --tb=short
 
   # Issue #366: the native RCCL bridge has to be inside the installed wheel. This
   # group runs in the wheel-only workspace, so it is the completion bar stated in

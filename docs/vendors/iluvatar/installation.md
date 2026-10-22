@@ -97,9 +97,10 @@ Full hardware acceptance remains pending successful execution of all selected
 groups and verification of #570's reproductions. The existing groups cover
 environment, startup, multi-device, portable contracts, vendor/FlagGems ops,
 RNG, factory, AMP, math-bits, profiler contract/parity, compile, runtime and
-FlagGems conformance. AMP follows the capability table's existing guard. Qwen3
-inference/training still need a model mount; the DCU communication bridge,
-MUSA-specific checks and DCU per-file unit sweep keep their existing scopes.
+FlagGems conformance. AMP follows the capability table's existing guard. The
+shared model groups use the pinned checkpoint staged by the integration
+workflow; the DCU communication bridge, MUSA-specific checks and DCU per-file
+unit sweep keep their existing scopes.
 
 Use `platform:iluvatar` to select this lane for a PR against main; shared checks
 still run. Hardware dispatch for fork PRs follows the trusted-maintainer controls

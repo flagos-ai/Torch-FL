@@ -331,9 +331,13 @@ to FlagTree is unmeasured.
 
 ## Limitations
 
-### No model mount in CI
+### Qwen3 model groups in CI
 
-`.github/configs/ascend.yml` (line 110) explicitly defers Qwen3 inference/training smoke tests pending a model mount on the CI runner. Point measurements outside CI show training at 0.82x `torch_npu` performance on real Ascend 910 hardware (`tests/perf/e2e_qwen3_train_ascend.py`).
+The shared manifest runs the Qwen3 checkpoint, inference, training, fallback,
+and profiler groups on Ascend. The integration job stages the pinned checkpoint
+at the common model path before launching the platform commands. Point
+measurements outside CI show training at 0.82x `torch_npu` performance on real
+Ascend 910 hardware (`tests/perf/e2e_qwen3_train_ascend.py`).
 
 ### No device-side profiler parity yet
 

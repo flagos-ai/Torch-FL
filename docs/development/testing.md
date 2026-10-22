@@ -220,6 +220,12 @@ as `NOT_IN_VERSION` rather than as a failure.
 ### Model Tests
 
 Model integration tests accept command-line options for model path and hyperparameters.
+CI runs all six Qwen3 groups on every hardware platform. They use the same
+arguments, environment, and checkpoint at `/models/Qwen3-0.6B`; no platform
+omits a model case because it lacks a mount. The integration job downloads and
+validates `Qwen/Qwen3-0.6B` at revision
+`c1899de289a04d12100db370d81485cdf75e47ca` before starting the platform
+commands. A cache miss is handled by a direct download.
 
 **Inference test**:
 
@@ -234,6 +240,25 @@ pytest tests/integration/test_qwen3_train.py --model <model-path> --steps 10 --b
 ```
 
 Replace `<model-path>` with a Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`) or a local directory containing model weights.
+
+The checkpoint, inference, fallback observation, and training arguments come
+from `.github/integration-manifest.yml`. The profiler group exports a Qwen3
+Chrome trace and requires a device capability that the platform's profiler
+declares. A platform without that capability fails the shared case with a
+specific error. The fallback groups run the same model work and report the
+dispatcher calls, direct backend routes, and CPU tensor operations observed
+inside kernel bodies; zero dispatcher or backend calls fail the group.
+
+The groups can also be run manually against a local checkpoint:
+
+```bash
+pytest tests/integration/test_fallback_trace.py --model <model-path> \
+  --max-new-tokens 8 -v -s
+pytest tests/integration/test_fallback_trace_train.py --model <model-path> \
+  --steps 2 --seq-len 32 -v -s
+pytest tests/integration/test_profiler_qwen3_infer.py --model <model-path> \
+  -v -s
+```
 
 ### Distributed Tests
 

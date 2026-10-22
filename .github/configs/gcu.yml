@@ -40,7 +40,8 @@ paths_watch:
   - scripts/codegen/codegen_gcu.py
   - scripts/codegen/codegen_gcu_flaggems.py
 
-container_volumes: []
+container_volumes:
+  - /var/lib/torch-fl-ci/models:/models:ro
 
 integration_environment: {}
 

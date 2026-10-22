@@ -45,7 +45,8 @@ paths_watch:
   - .github/scripts/set_env_kunlunxin.sh
   - scripts/codegen/codegen_kunlunxin.py
 
-container_volumes: []
+container_volumes:
+  - /var/lib/torch-fl-ci/models:/models:ro
 
 integration_environment: {}
 

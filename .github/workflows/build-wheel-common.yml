@@ -111,7 +111,7 @@ jobs:
       - name: Reset pip cache dir
         shell: bash
         run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
+          PIP_CACHE_DIR="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
           rm -rf "$PIP_CACHE_DIR"
           mkdir -p "$PIP_CACHE_DIR"
           printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
@@ -282,6 +282,7 @@ jobs:
       # Skip exact hits, failed lookups/transfers and cancelled jobs.
       # Cache errors must not change the build/test result.
       - name: Save pip downloads
+        id: pip-cache-save
         if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
         continue-on-error: true

@@ -14,11 +14,15 @@
 
 """Keep matrix routing, checkout source and the required gate in agreement."""
 
+import argparse
+import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -166,26 +170,84 @@ def test_required_gate_rejects_skipped_shared_checks(name):
     assert f"{name}: skipped" in process.stdout
 
 
-def _container_expression(name):
-    job = next(j for j in _workflow(name)["jobs"].values() if "steps" in j)
-    return job["container"]
+def _integration_jobs():
+    return _workflow("integration-tests.yml")["jobs"]
+
+
+def _integration_steps(name):
+    jobs = _workflow(name)["jobs"]
+    return {
+        step.get("id", step.get("name")): step
+        for step in jobs["integration-tests"]["steps"]
+    }
 
 
 @pytest.mark.parametrize("name", ["build-wheel-common.yml", "integration-tests.yml"])
 def test_the_container_is_empty_when_the_config_names_no_image(name):
-    """A platform that uses the runner's own accelerator needs no container.
-
-    `container:` is a job field, not a step, and it cannot use `if:`. The
-    expression supplies the vendor image when the config has one and `null`
-    otherwise, which omits the field on a macOS runner.
-    """
-    expression = _container_expression(name)
+    """MPS runs natively; Linux starts exactly one vendor container."""
+    if name == "integration-tests.yml":
+        steps = _integration_steps(name)
+        assert "docker run" not in steps["integration-tests"]["run"]
+        assert "docker run" not in steps["workspace"]["run"]
+        assert (
+            ".github/scripts/container_workspace.py start" in steps["container"]["run"]
+        )
+        assert steps["container"]["if"] == (
+            "${{ needs.configuration.outputs.ci_image != '' }}"
+        )
+        return
+    expression = _workflow(name)["jobs"]["build"]["container"]
     assert isinstance(expression, str), expression
     assert expression.startswith("${{")
     assert "fromJson(format(" in expression
     assert " && " in expression and " || null }}" in expression
     assert expression.count("container_volumes") == 1
     assert expression.count("container_options") == 1
+
+
+def test_the_container_expression_uses_json_values_for_yaml_fields():
+    """Keep the generated image and options as strings when they contain YAML syntax."""
+    expression = _workflow("build-wheel-common.yml")["jobs"]["build"]["container"]
+    assert "toJson(" in expression
+    assert expression.count("toJson(") == 2
+    assert '"image":"{0}"' not in expression
+    assert '"options":"{2}"' not in expression
+    workspace = _integration_steps("integration-tests.yml")["workspace"]
+    assert "docker image inspect --format" in workspace["run"]
+    assert "CONTAINER_VOLUMES" in workspace["env"]
+
+
+def test_every_platform_uses_the_same_workspace_and_container_boundary():
+    """The model and checkout are prepared on the host before Docker starts."""
+    jobs = _integration_jobs()
+    integration = jobs["integration-tests"]
+    steps = integration["steps"]
+    names = [step.get("name", "") for step in steps]
+    assert "container" not in integration
+    assert integration["needs"] == ["configuration", "model-mount"]
+    assert "container" not in jobs["model-mount"]
+    assert names.index("Prepare the integration workspace") < names.index(
+        "Start the platform command environment"
+    )
+    workspace = _integration_steps("integration-tests.yml")["workspace"]
+    assert "container_workspace.py prepare" in workspace["run"]
+    assert "always()" not in str(workspace.get("if", ""))
+    for platform in PLATFORMS:
+        config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
+        assert isinstance(config.get("container_volumes"), list), platform
+        if platform == "mps":
+            assert config["ci_image"] == ""
+        else:
+            assert config["ci_image"]
+    for name in (
+        "build",
+        "validate",
+        "install",
+        "integration-tests",
+    ):
+        step = _integration_steps("integration-tests.yml")[name]
+        assert 'docker exec "$name" --env HOME=/tmp bash -e -c' in step["run"]
+        assert 'source "$INTEGRATION_PROFILE"' in step["run"]
 
 
 def test_the_container_expression_uses_empty_config_fields_as_placeholders():
@@ -196,19 +258,6 @@ def test_the_container_expression_uses_empty_config_fields_as_placeholders():
         values = yaml.safe_load(config.read_text(encoding="utf-8"))
         assert isinstance(values.get("container_options"), str), config
         assert isinstance(values.get("ci_image"), str), config
-
-
-def test_the_container_expression_uses_json_values_for_yaml_fields():
-    """Keep the generated image and options as strings when they contain YAML syntax."""
-    for name, job in (
-        ("build-wheel-common.yml", "build"),
-        ("integration-tests.yml", "integration-tests"),
-    ):
-        expression = _workflow(name)["jobs"][job]["container"]
-        assert "toJson(" in expression
-        assert expression.count("toJson(") == 2
-        assert '"image":"{0}"' not in expression
-        assert '"options":"{2}"' not in expression
 
 
 def test_the_one_platform_without_a_container_is_mps():
@@ -292,3 +341,213 @@ def test_mps_is_locked_to_the_standard_hosted_apple_silicon_runner():
     assert config["runner_labels"] == ["macos-15"]
     assert config["ci_image"] == ""
     assert config["environment_check"]["flagos_devices"] == {"at_least": 1}
+
+
+def _load_ci_script(relative, name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
+    tmp_path, monkeypatch
+):
+    host_env = tmp_path / "host-env"
+    monkeypatch.setenv("INTEGRATION_PLATFORM", "cuda")
+    monkeypatch.setenv("GITHUB_ENV", str(host_env))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "host-output"))
+    monkeypatch.setenv("GITHUB_PATH", str(tmp_path / "host-path"))
+    monkeypatch.delenv("INTEGRATION_PARENT_PATH", raising=False)
+    monkeypatch.setenv("CHECKOUT_REPOSITORY", "flagos-ai/Torch-FL")
+    monkeypatch.setenv("CHECKOUT_REF", "a" * 40)
+    host_env.write_text("BASE=1\n")
+    (tmp_path / "host-output").touch()
+    (tmp_path / "host-path").write_text("/base/bin\n")
+    workspace_script = _load_ci_script(
+        ".github/scripts/container_workspace.py", "ci_container_workspace"
+    )
+    source = tmp_path / "checkout"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested/source.py").write_text("source = True\n")
+    settings = workspace_script.prepare(
+        argparse.Namespace(
+            checkout=str(source),
+            runner_temp=str(tmp_path / "runner"),
+            image="vendor/image:tag",
+            digest="vendor/image@sha256:" + "a" * 64,
+            volumes='["/models:/models:ro", "/runtime:/runtime"]',
+            options="",
+        )
+    )
+    config = json.loads(Path(settings["state"], "config.json").read_text())
+    assert config["cache"] == str(tmp_path / "runner/torch-fl-pip")
+    assert config["platform"] == "cuda"
+    assert Path(settings["workspace"], "nested/source.py").is_file()
+    assert "MODEL_PATH=/models/Qwen3-0.6B" in Path(config["environment"]).read_text()
+    for value in config["inline_environment"]:
+        assert f"{value}=" in Path(config["environment"]).read_text(), value
+        assert f"{value}=" in host_env.read_text(), value
+    inline = {
+        line.split("=", 1)[0]
+        for line in host_env.read_text().splitlines()
+        if "=" in line
+    }
+    assert workspace_script.INLINE_ENVIRONMENT <= inline
+    assert (
+        f"RUNNER_TEMP={tmp_path / 'runner'}" in Path(config["environment"]).read_text()
+    )
+    volumes = workspace_script._container_volumes(config["volumes"], config)
+    assert "/models:/models:ro" not in volumes
+    assert "/var/lib/torch-fl-ci/models:/var/lib/torch-fl-ci/models:ro" in volumes
+    with pytest.raises(workspace_script.WorkspaceError, match="inside the checkout"):
+        workspace_script.prepare(
+            argparse.Namespace(
+                checkout=str(source),
+                runner_temp=str(source),
+                image="",
+                digest="",
+                volumes="[]",
+                options="",
+            )
+        )
+
+
+def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_path):
+    """Replay two container hooks with one inherited environment each."""
+    hook_module = _load_ci_script(
+        ".github/scripts/publish_container_environment.py", "ci_container_hook"
+    )
+    root = tmp_path / "hook"
+    state, workspace, runtime = (
+        root / name for name in ("state", "workspace", "runtime")
+    )
+    for directory in (state, workspace, runtime):
+        directory.mkdir(parents=True)
+    host_env, host_path = root / "host-env", root / "host-path"
+    host_env.write_text("BASE=1\n")
+    host_path.write_text("/base/bin\n")
+    container_env, container_path = root / "container-environment", root / "path"
+    container_env.write_text("BASE=1\n")
+    container_path.write_text("/base/bin\n")
+    settings = {
+        "state": str(state),
+        "workspace": str(workspace),
+        "runtime": str(runtime),
+        "environment": str(container_env),
+        "path": str(container_path),
+        "host_files": {"GITHUB_ENV": str(host_env), "GITHUB_PATH": str(host_path)},
+        "image": "vendor/image",
+        "container": "container",
+        "shell": str(state / "shell.sh"),
+    }
+    shell = state / "shell.sh"
+    shell.write_text(
+        "#!/bin/sh\n"
+        "set -euo pipefail\n"
+        'test "$INTEGRATION_PROFILE" = ' + str(state / "profile.sh") + "\n"
+        "export GITHUB_ENV=" + str(state / "command-env") + " "
+        "GITHUB_PATH=" + str(state / "command-path") + "\n"
+        'exec bash "$@"\n'
+    )
+    shell.chmod(0o755)
+    (state / "profile.sh").write_text(
+        'if [[ -n "${INTEGRATION_PARENT_PATH:-}" ]]; then\n'
+        '  PATH="$INTEGRATION_PARENT_PATH"\n'
+        "fi\n"
+        'if [[ -s "$GITHUB_ENV" ]]; then\n'
+        "  set -a\n"
+        '  . "$GITHUB_ENV"\n'
+        "  set +a\n"
+        "fi\n"
+        'if [[ -s "$GITHUB_PATH" ]]; then\n'
+        "  while IFS= read -r entry; do\n"
+        '    [[ -n "$entry" ]] && export PATH="$entry:$PATH"\n'
+        '  done < "$GITHUB_PATH"\n'
+        "fi\n"
+    )
+    (workspace / "second.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'test "${HOOKED:-}" = 1\n'
+        'test "${FIRST:-}" = 1\n'
+        'case ":$PATH:" in *:/vendor/bin:*) ;; *) exit 8 ;; esac\n'
+        "printf 'SECOND=1\\n' >> \"$GITHUB_ENV\"\n"
+    )
+    (workspace / "hook.sh").write_text(
+        "#!/bin/sh\n"
+        "set -euo pipefail\n"
+        'test "$GITHUB_WORKSPACE" = ' + shlex.quote(str(workspace)) + "\n"
+        'test "$INTEGRATION_PROFILE" = ' + shlex.quote(str(state / "profile.sh")) + "\n"
+        "printf 'HOOKED=1\\nFIRST=1\\n' >> \"$GITHUB_ENV\"\n"
+        "printf '/vendor/bin\\n' >> \"$GITHUB_PATH\"\n"
+        "exit 7\n"
+    )
+    environment = {
+        "HOME": "/tmp",
+        "GITHUB_WORKSPACE": str(workspace),
+        "GITHUB_ENV": str(container_env),
+        "GITHUB_PATH": str(container_path),
+        "INTEGRATION_PROFILE": str(state / "profile.sh"),
+        "INTEGRATION_RUNTIME": str(runtime),
+        "PATH": os.environ["PATH"],
+    }
+    command_environment = {
+        **environment,
+        "GITHUB_ENV": str(state / "command-env"),
+        "GITHUB_PATH": str(state / "command-path"),
+    }
+    for path in (state / "command-env", state / "command-path"):
+        path.write_bytes(
+            (
+                container_env if path.name == "command-env" else container_path
+            ).read_bytes()
+        )
+    commands = []
+    original_run = subprocess.run
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if command[:3] == ["bash", "-E", "-e"]:
+            return original_run(command, **kwargs)
+
+        assert command[:2] == ["docker", "exec"]
+        # Run the mapped command files exactly as the container shell would.
+        entrypoint = [command[command.index("bash")], "--norc"]
+        arguments = command[command.index("bash") + 2 :]
+        return original_run(
+            [
+                *entrypoint,
+                "-E",
+                "-e",
+                "-u",
+                "-o",
+                "pipefail",
+                *arguments,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=command_environment,
+            check=False,
+        )
+
+    with mock.patch.object(hook_module.subprocess, "run", side_effect=execute):
+        assert hook_module.hook(settings, "hook.sh") == 7
+        assert hook_module.hook(settings, "second.sh") == 0
+    assert len(commands) == 2
+    assert all(command[:2] == ["docker", "exec"] for command in commands)
+    assert host_env.read_text().splitlines() == [
+        "BASE=1",
+        "HOOKED=1",
+        "FIRST=1",
+        "SECOND=1",
+    ]
+    assert container_env.read_text() == host_env.read_text()
+    assert host_path.read_text().splitlines() == ["/base/bin", "/vendor/bin"]
+    assert (state / "env.command").read_text().splitlines() == [
+        "BASE=1",
+        "HOOKED=1",
+        "FIRST=1",
+        "SECOND=1",
+    ]
+    assert (state / "path.command").read_text() == host_path.read_text()

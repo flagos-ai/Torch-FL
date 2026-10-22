@@ -68,13 +68,16 @@ FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
 import io
 import re
 import shlex
+import sys
 import textwrap
 import tokenize
+import types
 from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
 import pytest
+import torch
 import yaml
 from manifest_composer import composed_steps, load_module, platform_names
 
@@ -87,6 +90,8 @@ _CONFTEST = load_module(_INTEGRATION_DIR / "conftest.py", "integration_conftest"
 _OPS_CONFTEST = load_module(_INTEGRATION_DIR / "ops/conftest.py", "ops_conftest")
 
 _PREPARE_STEP = "Prepare wheel-only test workspace"
+_MODEL_MOUNT = "/var/lib/torch-fl-ci/models/Qwen3-0.6B"
+_MODEL_CACHE = "qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca"
 # A repository script named by a manifest command.
 _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 # A repository script that owns a selection instead of naming every file.
@@ -95,6 +100,90 @@ _SCRIPT_RE = re.compile(r"\.github/scripts/[\w./-]+")
 _TEST_RUNNER_RE = re.compile(r"\btests/integration/[\w./-]+/run\.py\b")
 # A command that leaves the prepared workspace for the checkout.
 _CHECKOUT_CD_RE = re.compile(r"""\bcd\s+["']?\$GITHUB_WORKSPACE["']?""")
+
+
+def _model_test_module(relative: str, platform: str = "mps") -> types.ModuleType:
+    """Load a model test without importing torch_fl's compiled extension."""
+    module = types.ModuleType(relative)
+    module.__file__ = str(_REPO_ROOT / relative)
+    init = types.ModuleType("integration_test_device_init")
+    init.torch = torch
+    init.torch_fl = types.SimpleNamespace(
+        flagos=types.SimpleNamespace(synchronize=lambda: None)
+    )
+    capabilities = types.SimpleNamespace(platform=platform, device=True)
+    support = types.SimpleNamespace(
+        detect_platform=lambda: platform,
+        capabilities_for_platform=lambda _: capabilities,
+    )
+    profiler = types.ModuleType("integration_test_profiler_support")
+    profiler.capabilities_for_platform = support.capabilities_for_platform
+    injected = {
+        "device_init": init,
+        "platform_support": support,
+        "profiler_support": profiler,
+    }
+    with mock.patch.dict(sys.modules, injected):
+        exec(
+            compile(
+                (_REPO_ROOT / relative).read_text(encoding="utf-8"), relative, "exec"
+            ),
+            module.__dict__,
+        )
+    return module
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "tests/integration/test_fallback_trace.py",
+        "tests/integration/test_fallback_trace_train.py",
+    ),
+)
+def test_model_fallback_tracer_observes_calls_inside_kernel_bodies(relative):
+    """A kernel body's CPU inputs are seen without a nested dispatch mode."""
+    module = _model_test_module(relative)
+    tracer = module.FallbackTracer()
+    tracer.flagos_device_types = ("cpu",)
+    tracer._is_native = lambda _: True
+
+    x = torch.ones(2)
+    with tracer, torch.no_grad():
+        imported = torch.mul(x, x)
+        torch.reshape(imported, (2,))
+
+    assert tracer.native_ops
+    assert tracer.total_ops >= 2
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "tests/integration/test_fallback_trace.py",
+        "tests/integration/test_fallback_trace_train.py",
+    ),
+)
+def test_model_fallback_tracer_records_cpu_input_dispatches(relative):
+    """CPU kernel bodies are counted instead of losing a nested mode's calls."""
+    module = _model_test_module(relative)
+    tracer = module.FallbackTracer()
+    tracer.flagos_device_types = ("cpu",)
+
+    with tracer:
+        torch.add(torch.ones(2), torch.ones(2))
+
+    assert tracer.cpu_input_calls
+
+
+def test_model_profiler_recognizes_gpu_kernel_categories():
+    """Device kernels are selected by name or category, not a text comparison."""
+    module = _model_test_module("tests/integration/test_profiler_qwen3_infer.py")
+    events = (
+        {"name": "aten::add", "cat": "cpu_op"},
+        {"name": "kernel", "cat": "gpu_kernel"},
+        {"name": "Memcpy", "cat": "gpu_memcpy"},
+    )
+    assert module._kernel_events(events) == [events[1]]
 
 
 def _indent(line: str) -> int:
@@ -168,6 +257,69 @@ def _prepare_steps() -> list[tuple[str, str, str]]:
     if script is None:
         return []
     return [(workflow.name, platform, script) for platform in _manifest_platforms()]
+
+
+def test_the_model_mount_is_prepared_on_its_platform_host():
+    """Restore and validate the checkpoint before this job starts Docker."""
+    workflow = yaml.safe_load(
+        (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8")
+    )
+    jobs = workflow["jobs"]
+    mount = jobs["model-mount"]
+    integration = jobs["integration-tests"]
+    assert "container" not in mount
+    assert "container" not in integration
+    assert mount["needs"] == "configuration"
+    assert mount["runs-on"] == (
+        "${{ fromJson(needs.configuration.outputs.runner_labels) }}"
+    )
+    assert set(integration["needs"]) == {"configuration", "model-mount"}
+    assert "needs.model-mount.result == 'success'" in integration["if"]
+    locate = next(
+        step
+        for step in mount["steps"]
+        if step.get("name") == "Prepare the fixed model bind root"
+    )
+    assert locate["env"]["HOST_MODEL_ROOT"] == "/var/lib/torch-fl-ci/models"
+    assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in locate["run"]
+    restore = next(
+        step
+        for step in mount["steps"]
+        if step.get("uses") == "actions/cache/restore@v4"
+    )
+    assert restore["with"]["key"] == _MODEL_CACHE
+    assert restore["with"]["path"] == "${{ steps.model-storage.outputs.root }}"
+    verify = next(
+        step
+        for step in mount["steps"]
+        if step.get("name") == "Verify or download the pinned Qwen3 checkpoint"
+    )
+    assert verify["env"]["MODEL_SOURCE"] == "${{ steps.model-storage.outputs.root }}"
+    assert "--verify-weights" in verify["run"]
+    test_step = next(
+        step for step in integration["steps"] if step.get("id") == "integration-tests"
+    )
+    container = next(
+        step for step in integration["steps"] if step.get("id") == "container"
+    )
+    assert "container_workspace.py start" in container["run"]
+    assert "docker run" not in test_step["run"]
+    assert "docker exec" in test_step["run"]
+
+
+def test_every_platform_restores_the_model_to_the_mount_path():
+    """MPS uses the same cache and model path as every container lane."""
+    workflow = yaml.safe_load(
+        (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8")
+    )
+    step = next(
+        step
+        for step in workflow["jobs"]["model-mount"]["steps"]
+        if step.get("id") == "model-storage"
+    )
+    assert step["env"]["HOST_MODEL_ROOT"] == "/var/lib/torch-fl-ci/models"
+    assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in step["run"]
+    assert "NETS" not in step["run"]
 
 
 def _logical_lines(script: str) -> list[str]:
@@ -1095,17 +1247,6 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "NVIDIA: flagos boxes its device onto CUDA while carrying a CPU "
         "PyTorch, as cuda.yml's own version assertion states. Accepted "
         "exclusion unless a job that installs apex is added"
-    ),
-    "tests/integration/test_fallback_trace.py": (
-        "needs --model and a mounted Qwen3 checkpoint, which only the CUDA "
-        "runner mounts; wiring it in needs a step on that manifest and a "
-        "decision about what the other six do with it"
-    ),
-    "tests/integration/test_fallback_trace_train.py": (
-        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
-    ),
-    "tests/integration/test_profiler_qwen3_infer.py": (
-        "needs --model and a mounted Qwen3 checkpoint; same as test_fallback_trace.py"
     ),
     "tests/integration/ops/test_flaggems_cpp_dispatch.py": (
         "carries only flaggems_cpp, and every set_env_*.sh builds FlagGems "

@@ -527,9 +527,11 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
         step.get("id", step.get("name")): step
         for step in workflow["jobs"]["integration-tests"]["steps"]
     }
-    container_workspace = tmp_path / "container-workspace"
+    container_workspace = tmp_path / "torch-fl-workspace"
     container_workspace.mkdir()
     host_workspace = tmp_path / "host-workspace"
+    cache = tmp_path / "torch-fl-pip"
+    cache.mkdir()
     result = subprocess.run(
         ["bash", "-e", "-c", steps["merge-report"]["run"]],
         cwd=ROOT,
@@ -537,7 +539,9 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
             **os.environ,
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
             "GITHUB_WORKSPACE": str(container_workspace),
+            "CONTAINER_CONFIG": "",
             "FLAGCICD_REPORT_DIR": str(reports),
+            "PIP_CACHE_DIR": str(cache),
             "REPORT_PLATFORM": "cuda",
             "TEST_OUTCOME": "success",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
@@ -552,12 +556,14 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
     def container_path(value):
         # github.workspace can name a host-only path in a job container.
         value = value.replace("${{ github.workspace }}", str(host_workspace))
+        value = value.replace("${{ env.PIP_CACHE_DIR }}", str(cache))
         value = value.replace("${{ inputs.platform }}", "cuda")
         return container_workspace / value
 
     output = container_path(
         steps["Upload pytest report to FlagCICD"]["with"]["report_path"]
     )
+    assert output.is_file(), (output, list(tmp_path.rglob("*.json")))
     report = json.loads(output.read_text())
     assert report["exitcode"] == 0
     assert report["flagcicd"]["source_ref"] == "a" * 40
@@ -613,7 +619,11 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         is False
     )
     job = workflow["jobs"]["integration-tests"]
-    assert "toJson(needs.configuration.outputs.container_options)" in job["container"]
+    assert "container" not in job
+    assert (
+        "CONTAINER_OPTIONS"
+        in next(step for step in job["steps"] if step.get("id") == "workspace")["env"]
+    )
     steps = {step.get("id", step.get("name")): step for step in job["steps"]}
     assert "!cancelled()" in steps["merge-report"]["if"]
     assert "steps.integration-verdict" in steps["merge-report"]["if"]
@@ -624,7 +634,13 @@ def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
         "steps.integration-tests.outcome != 'skipped' }}"
     )
     runner = steps["integration-tests"]
-    assert "FLAGCICD_VERDICT_FILE" in runner["env"]
+    workspace = next(step for step in job["steps"] if step.get("id") == "workspace")
+    assert "python3 .github/scripts/container_workspace.py prepare" in workspace["run"]
+    assert "RUNNER_TEMP:-/tmp" in workspace["run"]
+    assert (
+        "FLAGCICD_VERDICT_FILE"
+        in (ROOT / ".github/scripts/container_workspace.py").read_text()
+    )
     assert "PYTEST_PLUGINS" in runner["run"]
     assert "flagcicd_instance" not in runner["run"]
     auth = steps["flagcicd-auth"]

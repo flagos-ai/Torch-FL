@@ -4,7 +4,7 @@
 
 MetaX is **FlagGems-primary by default**: the wheel routes the ops `backends_metax.conf` names to FlagGems and sends the rest to `cpu_fallback`, with no vendor torch package. An opt-in **boxing** wheel (`FLAGOS_BUILD_BOXING=1`) instead reuses PyTorch's CUDA boxing kernels (compiled with host `g++`, no `mxcc`) and bundles the MetaX-forked libtorch C++ runtime inside the wheel; that target machine needs only the stock `torch==2.10.0+cpu` wheel, this `torch_fl` wheel, and the `/opt/maca` driver runtime. Unless a section says otherwise, the rest of this guide describes the boxing wheel.
 
-**Status:** Stable. CI validates representative operator dispatch and factory/autograd tests on 8-GPU MetaX runners. FlagGems and model-level validation are not covered in CI.
+**Status:** Stable. CI validates representative operator dispatch and factory/autograd tests on 8-GPU MetaX runners. FlagGems and the shared Qwen3 model groups run in CI.
 
 ## Prerequisites
 
@@ -317,9 +317,12 @@ Without FlagTree or FlagGems installed, the 604 ops routed to a FlagGems backend
 
 Multi-GPU distributed training routes through the NCCL-shaped `mccl` fallback. The routing exists architecturally (see `_VENDOR_PROFILES["metax"]` in `torch_fl/comm/process_group.py`), but collective-level validation is not covered in CI. Manual verification on MetaX hardware is required.
 
-## Model Inference and Training (Manual)
+## Model Inference and Training
 
-MetaX carries FSDP2 and Qwen3 training parity work in repository history, but these tests are not part of the CI manifest. Model-level validation remains a manual exercise on MetaX hardware.
+The shared integration manifest runs the Qwen3 checkpoint, inference, training,
+fallback, and profiler groups on MetaX CI. These use the same commands and
+pinned checkpoint as every platform. FSDP2 coverage and additional model
+performance measurements remain manual exercises on MetaX hardware.
 
 ## fp32 Matmul Precision (TF32)
 

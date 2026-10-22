@@ -41,6 +41,14 @@
 #                                               (after the wheel install)
 #   * what runs                              -> integration_tests, the manifest
 #                                               the shared runner executes
+#
+# A shared model group also needs a checkpoint on the host before the vendor
+# image starts. A host-only job restores and checks it first, and a host-only
+# integration job launches the image from the runner. The integration job
+# copies its checkout into a runner-owned workspace while the model is being
+# prepared, then mounts that one workspace into the container for setup, build,
+# and tests. The container starts only after the checkpoint is verified, avoiding
+# GitHub's job-container setup, which runs before any step can prepare a bind.
 
 name: Platform integration tests
 
@@ -88,21 +96,17 @@ jobs:
       checkout_repository: ${{ inputs.checkout_repository }}
       checkout_ref: ${{ inputs.checkout_ref }}
 
-  integration-tests:
-    name: Build and test (${{ needs.configuration.outputs.display_name }})
+  # Restore and validate the checkpoint in a job without a container. The
+  # integration job depends on this one, so a failed restore cannot proceed to
+  # a test run against an empty mount.
+  model-mount:
+    name: Prepare model mount (${{ needs.configuration.outputs.display_name }})
     needs: configuration
-    outputs:
-      stages: ${{ steps.execution.outputs.stages }}
-      run_attempt: ${{ steps.execution.outputs.run_attempt }}
+    if: ${{ needs.configuration.result == 'success' }}
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
-    timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
-    # A platform without a `ci_image` runs directly on its runner. MPS needs a
-    # macOS host with its Metal GPU, and macOS jobs cannot use containers.
-    container: ${{ needs.configuration.outputs.ci_image && fromJson(format('{{"image":{0},"volumes":{1},"options":{2}}}', toJson(needs.configuration.outputs.ci_image), needs.configuration.outputs.container_volumes, toJson(needs.configuration.outputs.container_options))) || null }}
-    defaults:
-      run:
-        shell: bash
-
+    timeout-minutes: 30
+    outputs:
+      root: ${{ steps.configure-model.outputs.root }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,28 +114,229 @@ jobs:
           ref: ${{ inputs.checkout_ref || github.ref }}
           persist-credentials: false
 
-      # Discard host leftovers before restoring the managed pip download cache.
-      - name: Reset pip cache dir
-        shell: bash
+      - name: Prepare the fixed model bind root
+        id: model-storage
+        env:
+          HOST_MODEL_ROOT: /var/lib/torch-fl-ci/models
         run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
-          rm -rf "$PIP_CACHE_DIR"
-          mkdir -p "$PIP_CACHE_DIR"
-          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+          set -euo pipefail
+          root="$HOST_MODEL_ROOT/Qwen3-0.6B"
+          mkdir -p "$root"
+          chmod u+rwx "$HOST_MODEL_ROOT"
+          chmod u+rwx "$root"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
 
-      # Look up first: a transfer timeout can return success with no matched key.
-      # A cold miss may save later; a failed matched transfer must not upload.
-      #
-      # hashFiles cannot interpolate inputs.setup_script, but it does evaluate a
-      # format() argument, so the hook and config paths are built from the
-      # platform this job was handed -- the same shape build-wheel-common.yml
-      # uses. The dedicated per-platform pipelines this replaced hashed their own
-      # workflow file; the single pipeline hashes itself instead.
-      #
-      # The restore-keys keep a display-name fallback because that is the lane the
-      # shared common workflow used before every platform had its own pipeline
-      # (GCU was the last one on it), so a warm cache from that era is still
-      # found on the first run instead of being re-downloaded.
+      # A timed-out cache lookup can return success without a matched key. A
+      # failed matched transfer must not upload an incomplete checkpoint.
+      - name: Look up the pinned Qwen3 checkpoint
+        id: model-cache-lookup
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 1
+        with:
+          path: ${{ steps.model-storage.outputs.root }}
+          key: qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca
+          lookup-only: true
+
+      - name: Restore the pinned Qwen3 checkpoint
+        id: model-cache
+        if: ${{ steps.model-cache-lookup.outcome == 'success' && steps.model-cache-lookup.outputs.cache-matched-key != '' }}
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '8'
+        with:
+          path: ${{ steps.model-storage.outputs.root }}
+          key: ${{ steps.model-cache-lookup.outputs.cache-matched-key }}
+
+      - name: Remove an incomplete checkpoint transfer
+        if: ${{ steps.model-cache.outcome == 'failure' }}
+        run: |
+          find "${{ steps.model-storage.outputs.root }}" -mindepth 1 -delete
+
+      # A cache outage is not fatal; the download below is checked by size,
+      # safetensors metadata, and pinned SHA-256 digests before tests see it.
+      - name: Verify or download the pinned Qwen3 checkpoint
+        id: model-verified
+        env:
+          MODEL_SOURCE: ${{ steps.model-storage.outputs.root }}
+        run: |
+          set -euo pipefail
+          if python3 .github/scripts/check_platform_environment.py \
+            check-model --path "$MODEL_SOURCE" --verify-weights --verify-files; then
+            exit 0
+          fi
+          for attempt in 1 2; do
+            if python3 - "$MODEL_SOURCE" <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+          required = {
+              "config.json": 726,
+              "generation_config.json": 239,
+              "merges.txt": 1671853,
+              "model.safetensors": 1503300328,
+              "tokenizer.json": 11422654,
+              "tokenizer_config.json": 9732,
+              "vocab.json": 2776833,
+          }
+          root = Path(sys.argv[1])
+          root.mkdir(parents=True, exist_ok=True)
+          api = (
+              "https://huggingface.co/api/models/Qwen/Qwen3-0.6B/"
+              f"revision/{revision}?blobs=true"
+          )
+          with urllib.request.urlopen(api, timeout=60) as response:
+              metadata = json.load(response)
+          if metadata.get("sha") != revision:
+              raise SystemExit(f"Qwen3 returned revision {metadata.get('sha')}")
+          files = {item["rfilename"]: item for item in metadata["siblings"]}
+          for name, expected in required.items():
+              if files.get(name, {}).get("size") != expected:
+                  raise SystemExit(f"Qwen3 revision metadata disagrees for {name}")
+              destination = root / name
+              if destination.is_file() and destination.stat().st_size == expected:
+                  continue
+              url = (
+                  f"https://huggingface.co/Qwen/Qwen3-0.6B/resolve/{revision}/{name}"
+              )
+              partial = destination.with_name(destination.name + ".partial")
+              for transfer in range(3):
+                  offset = partial.stat().st_size if partial.is_file() else 0
+                  request = urllib.request.Request(
+                      url,
+                      headers={"Range": f"bytes={offset}-"} if offset else {},
+                  )
+                  try:
+                      print(
+                          f"Downloading {name} from byte {offset} "
+                          f"(expected {expected} bytes)",
+                          flush=True,
+                      )
+                      with urllib.request.urlopen(request, timeout=300) as source:
+                          with partial.open("ab" if offset else "wb") as output:
+                              while chunk := source.read(1024 * 1024):
+                                  output.write(chunk)
+                      if partial.stat().st_size == expected:
+                          break
+                  except Exception as error:
+                      if transfer == 2:
+                          raise SystemExit(
+                              f"{name}: download failed: {error}"
+                          ) from error
+                      time.sleep(2**transfer)
+              if not partial.is_file() or partial.stat().st_size != expected:
+                  partial.unlink(missing_ok=True)
+                  raise SystemExit(f"{name}: transfer did not reach {expected} bytes")
+              os.replace(partial, destination)
+          PY
+            then
+              break
+            fi
+            if [[ "$attempt" == 2 ]]; then
+              exit 1
+            fi
+            echo '::warning::Qwen3 transfer failed; retrying once'
+            sleep 5
+          done
+          python3 .github/scripts/check_platform_environment.py \
+            check-model --path "$MODEL_SOURCE" --verify-weights --verify-files
+          echo "root=$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
+
+      # The restored directory is made read-only for the container, but the
+      # cache exporter must be able to read and write its own archive metadata.
+      - name: Publish the verified model path
+        id: configure-model
+        run: echo "root=${{ steps.model-storage.outputs.root }}" >> "$GITHUB_OUTPUT"
+
+      # Save only a verified, exact cache miss. A present cache is left alone.
+      - name: Save the pinned Qwen3 checkpoint
+        if: ${{ !cancelled() && steps.model-cache-lookup.outcome == 'success' && steps.model-cache-lookup.outputs.cache-primary-key != '' && steps.model-cache-lookup.outputs.cache-hit != 'true' && steps.model-verified.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        timeout-minutes: 12
+        with:
+          path: ${{ steps.model-storage.outputs.root }}
+          key: ${{ steps.model-cache-lookup.outputs.cache-primary-key }}
+
+  integration-tests:
+    name: Build and test (${{ needs.configuration.outputs.display_name }})
+    needs: [configuration, model-mount]
+    if: ${{ always() && needs.configuration.result == 'success' && needs.model-mount.result == 'success' }}
+    outputs:
+      stages: ${{ steps.execution.outputs.stages }}
+      run_attempt: ${{ steps.execution.outputs.run_attempt }}
+    runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
+    timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
+    # MPS runs on macOS, which has no Docker. Linux starts one vendor image
+    # after the model and checkout are both present on the host.
+    defaults:
+      run:
+        shell: bash
+    env:
+      INTEGRATION_PLATFORM: ${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      # Copy before invoking setup. setup may install into the checked-out
+      # tree, and tests still need a clean source workspace to execute.
+      - name: Prepare the integration workspace
+        id: workspace
+        # Setup venvs and caches use the runner directories that are mounted
+        # into the vendor image.
+        env:
+          CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
+          CONTAINER_VOLUMES: ${{ needs.configuration.outputs.container_volumes }}
+          CONTAINER_OPTIONS: ${{ needs.configuration.outputs.container_options }}
+          CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
+          CHECKOUT_REF: ${{ inputs.checkout_ref || github.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          image="$CI_IMAGE"
+          digest="$image"
+          if [[ -n "$image" ]]; then
+            if [[ "$image" != *@sha256:* ]]; then
+              docker pull "$image"
+              digest=$(docker image inspect --format '{{json .RepoDigests}}' "$image" |
+                python3 -c '
+          import json
+          import sys
+          image = sys.argv[1]
+          digests = json.load(sys.stdin)
+          matching = [item for item in digests if item.split("@", 1)[0] == image]
+          if not matching:
+              raise SystemExit(f"no RepoDigest for {image}: {digests}")
+          if len(set(item.split("@", 1)[1] for item in matching)) != 1:
+              raise SystemExit(f"ambiguous RepoDigests for {image}: {matching}")
+          print(matching[0])
+          ' "$image")
+            fi
+          fi
+          args=(--checkout "$GITHUB_WORKSPACE" --runner-temp "${RUNNER_TEMP:-/tmp}")
+          args+=(--image "$image" --digest "$digest")
+          args+=(--volumes "$CONTAINER_VOLUMES" --options "$CONTAINER_OPTIONS")
+          python3 .github/scripts/container_workspace.py prepare "${args[@]}"
+          echo "config=${RUNNER_TEMP:-/tmp}/torch-fl-preparation/config.json" >> "$GITHUB_OUTPUT"
+
+      - name: Reset pip cache dir
+        run: |
+          set -euo pipefail
+          cache="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
+          rm -rf "$cache"
+          mkdir -p "$cache"
+          echo "PIP_CACHE_DIR=$cache" >> "$GITHUB_ENV"
+
       - name: Look up pip downloads
         id: pip-cache-lookup
         uses: actions/cache/restore@v4
@@ -147,9 +352,6 @@ jobs:
             ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
-      # Cache downloads only; installation and tests always run.
-      # On a transfer timeout, clear partial files so pip does not extract an
-      # incomplete wheel from the cache and fail later during an import.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
@@ -164,108 +366,264 @@ jobs:
 
       - name: Discard incomplete pip cache transfer
         if: ${{ steps.pip-cache.outcome == 'failure' }}
-        shell: bash
         run: |
           rm -rf "$PIP_CACHE_DIR"
           mkdir -p "$PIP_CACHE_DIR"
 
-      # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
-      # prebuild the native library in place only at `build`, and this job needs
-      # that library before it builds the wheel. Every other platform provisions
-      # device-dependent pieces at `integration`, which is what a job named this
-      # used to pass. See setup_stage in .github/configs/<p>.yml.
+      # Start after restoration so a cache transfer cannot change the mount
+      # that was checked when the container was configured. MPS runs natively.
+      - name: Start the platform command environment
+        id: container
+        if: ${{ needs.configuration.outputs.ci_image != '' }}
+        # Setup must finish before the shared test cohort uses this interpreter.
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          name=$(python3 .github/scripts/container_workspace.py start --config "$CONTAINER_CONFIG")
+          python3 .github/scripts/container_workspace.py configure \
+            --config "$CONTAINER_CONFIG" --container "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Setup, build, install, and tests execute inside the same vendor image.
+      # Every command is one container process; hook PATH and environment
+      # changes are copied back before this step returns so the next command
+      # uses the same interpreter.
       - name: Prepare ${{ needs.configuration.outputs.display_name }} build environment
         id: setup
         env:
           CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
-        run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          SETUP_SCRIPT: ${{ needs.configuration.outputs.setup_script }}
+          SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          state="$temp/torch-fl-preparation"
+          script="$temp/torch-fl-command-setup.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
+          export CI_STAGE=$(printf '%q' "$CI_STAGE")
+          export PATH="\${PATH}"
+          bash $(printf '%q' "$SETUP_SCRIPT") --platform $(printf '%q' "$SETUP_PLATFORM")
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            cp "$script" "$state/${script##*/}"
+            python3 .github/scripts/publish_container_environment.py hook \
+              --config "$CONTAINER_CONFIG" --command "${script##*/}"
+          else
+            bash "$script"
+          fi
 
-      # Kunlunxin's image ships no `build` module, and a missing one does not
-      # fail cleanly: the checkout's own CMake `build/` directory shadows it as
-      # a namespace package. Empty for every other platform.
       - name: Install build tools
         if: needs.configuration.outputs.integration_build_tools != ''
-        run: ${{ needs.configuration.outputs.integration_build_tools }}
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          BUILD_TOOLS: ${{ needs.configuration.outputs.integration_build_tools }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-build-tools.sh"
+          printf '%s\n' 'set -euo pipefail' "$BUILD_TOOLS" > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            status=0
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script" || status=$?
+            exit "$status"
+          fi
+          bash "$script"
 
       - name: Build wheel
         id: build
-        run: python -m build --wheel --no-isolation
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-build.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python -m build --wheel --no-isolation
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Validate wheel compatibility manifest
         id: validate
-        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-validate.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
+          python scripts/tools/torch-fl-preflight --wheel dist/*.whl \
+            --platform $(printf '%q' "$SETUP_PLATFORM") --check-build-env
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Install wheel
         id: install
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-install.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python -m pip install --force-reinstall --no-deps dist/*.whl' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # pytest, where the image does not already have it: GCU installs it here,
-      # Kunlunxin additionally upgrades pip first, and Ascend gets it from its
-      # own hook. A multi-line list of commands, one per line.
       - name: Install test dependencies
         if: needs.configuration.outputs.integration_test_dependencies != ''
-        run: ${{ needs.configuration.outputs.integration_test_dependencies }}
-
-      # Shared source tests run on every hardware lane. Their optional
-      # dependencies are part of the common contract: a platform missing one
-      # would either skip shared cases or fail while importing a test file.
-      # Resolve the pins together so pip checks them before changing the
-      # environment. A newer image version can satisfy a dependency's exact
-      # pin without an upgrade, which leaves a mismatch to replace below.
-      # The script lists every runtime import explicitly and verifies the
-      # result in a fresh process. It replaces every mismatching pin.
-      - name: Install shared test dependencies
-        # The platform hook may export a PIP_CONSTRAINT that pip keeps through
-        # GITHUB_ENV. Its floors can leave image versions below exact cohort
-        # pins. Each command on its own line avoids a folded shell command.
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          TEST_DEPENDENCIES: ${{ needs.configuration.outputs.integration_test_dependencies }}
         run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-test-dependencies.sh"
+          printf '%s\n' 'set -euo pipefail' "$TEST_DEPENDENCIES" > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
+
+      - name: Install shared test dependencies
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          FLAG_GEMS_REQUIREMENT: ${{ needs.configuration.outputs.flag_gems_requirement }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-shared-dependencies.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
           unset PIP_CONSTRAINT
-          # The script prints its install commands. That operation log
-          # distinguishes the current install path from stale runner state.
           python .github/scripts/verify_shared_dependencies.py \
-            --platform "${{ inputs.platform }}" \
-            --flag-gems "${{ needs.configuration.outputs.flag_gems_requirement }}"
+            --platform $(printf '%q' "$INTEGRATION_PLATFORM") \
+            --flag-gems $(printf '%q' "$FLAG_GEMS_REQUIREMENT")
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Verify shared test dependencies
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+          FLAG_GEMS_REQUIREMENT: ${{ needs.configuration.outputs.flag_gems_requirement }}
           TORCH_FL_INSTALLED_PACKAGE_ROOT: ${{ needs.configuration.outputs.torch_fl_package_root }}
         run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-verify-dependencies.sh"
+          cat > "$script" <<EOF
+          set -euo pipefail
           unset PIP_CONSTRAINT
           python .github/scripts/verify_shared_dependencies.py \
-            --platform "${{ inputs.platform }}" \
-            --flag-gems "${{ needs.configuration.outputs.flag_gems_requirement }}" \
-            --check
+            --platform $(printf '%q' "$INTEGRATION_PLATFORM") \
+            --flag-gems $(printf '%q' "$FLAG_GEMS_REQUIREMENT") --check
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Prepare wheel-only test workspace
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
         run: |
-          TEST_ROOT=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-${{ inputs.platform }}.XXXXXX")
-          # The runner executes each configured command with this directory as
-          # its cwd, so what it holds is what those commands can reach. Keep it
-          # wheel-only: `Run unit tests (per file)` is a source-tree suite and
-          # changes back to the checkout itself, and every group that stays here
-          # runs against the installed wheel rather than the checkout it was
-          # built from. tests/unit/test_integration_workdir.py holds both ends of
-          # that arrangement.
-          cp -a tests pyproject.toml "$TEST_ROOT/"
-          printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
-          REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
-          printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
-          VERDICT_FILE=$(mktemp "${RUNNER_TEMP:-/tmp}/torch-fl-verdict.XXXXXX")
-          printf '%s\n' '{"outcome":"failure"}' > "$VERDICT_FILE"
-          printf 'FLAGCICD_VERDICT_FILE=%s\n' "$VERDICT_FILE" >> "$GITHUB_ENV"
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-workdir.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          test_root="$INTEGRATION_WORKDIR"
+          rm -rf "$test_root"
+          mkdir -p "$test_root"
+          cp -a tests pyproject.toml "$test_root/"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Install pytest JSON reporting
-        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-report-dependencies.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python -m pip install pytest-json-report==1.5.0 coverage==7.10.7' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Materialize shared test inventories
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           SHARED_TEST_INVENTORIES: ${{ needs.configuration.outputs.test_inventories }}
           SHARED_TEST_INVENTORY_KINDS: ${{ needs.configuration.outputs.test_inventory_kinds }}
         run: |
-          INVENTORY_ROOT="${RUNNER_TEMP:-/tmp}/torch-fl-inventories"
-          rm -rf "$INVENTORY_ROOT"
-          mkdir -p "$INVENTORY_ROOT"
-          python - "$INVENTORY_ROOT" "$SHARED_TEST_INVENTORIES" \
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-inventories.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          root="$INTEGRATION_INVENTORY_ROOT"
+          rm -rf "$root"
+          mkdir -p "$root"
+          python - "$root" "$SHARED_TEST_INVENTORIES" \
             "$SHARED_TEST_INVENTORY_KINDS" <<'PY'
           import json
           import sys
@@ -273,8 +631,6 @@ jobs:
 
           root = Path(sys.argv[1])
           inventories = json.loads(sys.argv[2])
-          # Only the kinds this plan runs are materialized: MPS forbids the
-          # FlagGems kernel set, so that group is absent from its plan.
           required = set(sys.argv[3].split())
           if (
               not required
@@ -305,62 +661,86 @@ jobs:
               path.write_text(json.dumps(document) + "\n", encoding="utf-8")
               print(f"{kind}: {len(cases)} cases -> {path}")
           PY
-          printf 'INTEGRATION_INVENTORY_ROOT=%s\n' "$INVENTORY_ROOT" >> "$GITHUB_ENV"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Prepare Python line coverage
         id: coverage-setup
         continue-on-error: true
         timeout-minutes: 1
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
         run: |
-          COVERAGE_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-coverage.XXXXXX")
-          python .github/scripts/python_coverage.py prepare --report-dir "$COVERAGE_DIR" --env-file "$GITHUB_ENV"
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          state="$temp/torch-fl-preparation"
+          script="$temp/torch-fl-command-coverage.sh"
+          printf '%s\n' 'set -euo pipefail' \
+            'python .github/scripts/python_coverage.py prepare --report-dir "$FLAGCICD_COVERAGE_DIR" --env-file "$GITHUB_ENV"' > "$script"
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            cp "$script" "$state/${script##*/}"
+            python3 .github/scripts/publish_container_environment.py hook \
+              --config "$CONTAINER_CONFIG" --command "${script##*/}"
+          else
+            bash "$script"
+          fi
 
       - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
         id: integration-tests
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
-          FLAGCICD_VERDICT_FILE: ${{ env.FLAGCICD_VERDICT_FILE }}
-          FLAGCICD_REPORT_DIR: ${{ env.FLAGCICD_REPORT_DIR }}
-          FLAGCICD_COVERAGE_DIR: ${{ env.FLAGCICD_COVERAGE_DIR }}
+          INTEGRATION_INVENTORY_ARGUMENTS: ${{ needs.configuration.outputs.integration_inventory_arguments }}
           METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
           TORCH_FL_MPS_HIGH_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_HIGH_WATERMARK_RATIO }}
           TORCH_FL_MPS_LOW_WATERMARK_RATIO: ${{ env.TORCH_FL_MPS_LOW_WATERMARK_RATIO }}
         run: |
-          # GITHUB_ENV values written by earlier steps are not necessarily
-          # visible to a container job's shell. Pass them explicitly and keep
-          # the native per-session pytest-json-report plugin unchanged.
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-integration.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
           command_environment=(
             env
             PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts/pytest_reporting${PYTHONPATH:+:$PYTHONPATH}"
             PYTEST_PLUGINS="flagcicd_report,flagcicd_coverage${PYTEST_PLUGINS:+,$PYTEST_PLUGINS}"
           )
-          for name in FLAGCICD_VERDICT_FILE FLAGCICD_REPORT_DIR FLAGCICD_COVERAGE_DIR; do
-            value="${!name}"
-            if [[ -n "$value" ]]; then
-              command_environment+=("$name=$value")
-            fi
-          done
-          # Only the MPS hook supplies these. An empty value is invalid, and a
-          # non-MPS platform must retain whatever its upstream image chose.
           if [[ -n "$TORCH_FL_MPS_HIGH_WATERMARK_RATIO" ]]; then
             export PYTORCH_MPS_HIGH_WATERMARK_RATIO="$TORCH_FL_MPS_HIGH_WATERMARK_RATIO"
             export PYTORCH_MPS_LOW_WATERMARK_RATIO="$TORCH_FL_MPS_LOW_WATERMARK_RATIO"
           fi
-          # Group-to-kind bindings come from the composer's inventory plan,
-          # so the loader validated exactly what this runner will check.
-          INVENTORY_ARGUMENTS="${{ needs.configuration.outputs.integration_inventory_arguments }}"
-          read -r -a inventory_arguments <<< "$INVENTORY_ARGUMENTS"
+          read -r -a inventory_arguments <<< "$INTEGRATION_INVENTORY_ARGUMENTS"
           "${command_environment[@]}" python .github/scripts/run_integration_tests.py \
             "${inventory_arguments[@]}"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # A failed shell command still has to preserve the groups that ran
-      # before it. The runner owns this verdict, rather than deriving it from
-      # the final shell exit status or one pytest summary.
       - name: Read integration test verdict
         id: integration-verdict
         if: ${{ !cancelled() && steps.integration-tests.outcome != 'skipped' }}
+        env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
         run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-verdict.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
           python - "$FLAGCICD_VERDICT_FILE" "$GITHUB_OUTPUT" <<'PY'
           import json
           import sys
@@ -374,27 +754,48 @@ jobs:
           with output.open("a", encoding="utf-8") as stream:
               stream.write(f"outcome={outcome}\n")
           PY
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # Preserve failed sessions too; reporting never changes the test verdict.
       - name: Merge pytest reports
         id: merge-report
         if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           REPORT_PLATFORM: ${{ inputs.platform }}
           TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
-        run: >-
-          python .github/scripts/merge_pytest_reports.py
-          --report-dir "$FLAGCICD_REPORT_DIR"
-          --output "$GITHUB_WORKSPACE/pytest-${REPORT_PLATFORM}.json"
-          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
-          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-merge-report.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python .github/scripts/merge_pytest_reports.py \
+            --report-dir "$FLAGCICD_REPORT_DIR" \
+            --output "$GITHUB_WORKSPACE/pytest-$REPORT_PLATFORM.json" \
+            --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME" \
+            --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
-      # Resolve report paths inside the job container; github.workspace may
-      # contain the runner host's checkout path instead of its container mount.
       - name: Retain pytest reports
         if: ${{ !cancelled() && steps.integration-verdict.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
@@ -403,8 +804,8 @@ jobs:
         with:
           name: pytest-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            pytest-${{ inputs.platform }}.json
-            ${{ env.FLAGCICD_REPORT_DIR }}/
+            ${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/pytest-${{ inputs.platform }}.json
+            ${{ env.PIP_CACHE_DIR }}/../torch-fl-pytest/
           if-no-files-found: warn
 
       - name: Retain shared test inventories
@@ -414,7 +815,7 @@ jobs:
         timeout-minutes: 2
         with:
           name: inventories-${{ inputs.platform }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/torch-fl-inventories/
+          path: ${{ env.PIP_CACHE_DIR }}/../torch-fl-inventories/
           if-no-files-found: warn
 
       - name: Merge Python line coverage
@@ -423,16 +824,31 @@ jobs:
         continue-on-error: true
         timeout-minutes: 2
         env:
+          CONTAINER_CONFIG: ${{ steps.workspace.outputs.config }}
           REPORT_PLATFORM: ${{ inputs.platform }}
           TEST_OUTCOME: ${{ steps.integration-verdict.outputs.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
-        run: >-
-          python .github/scripts/python_coverage.py merge
-          --report-dir "$FLAGCICD_COVERAGE_DIR"
-          --output "$GITHUB_WORKSPACE/coverage-${REPORT_PLATFORM}.json"
-          --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
-          --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+        run: |
+          set -euo pipefail
+          temp="${RUNNER_TEMP:-/tmp}"
+          script="$temp/torch-fl-command-merge-coverage.sh"
+          cat > "$script" <<'EOF'
+          set -euo pipefail
+          python .github/scripts/python_coverage.py merge \
+            --report-dir "$FLAGCICD_COVERAGE_DIR" \
+            --output "$GITHUB_WORKSPACE/coverage-$REPORT_PLATFORM.json" \
+            --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME" \
+            --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+          EOF
+          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
+            name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container"])' "$CONTAINER_CONFIG")
+            docker exec "$name" --env HOME=/tmp bash -e -c \
+              'cd "$GITHUB_WORKSPACE"; source "$INTEGRATION_PROFILE"; bash "$1"' \
+              -- "$script"
+          else
+            bash "$script"
+          fi
 
       - name: Retain Python coverage
         if: ${{ !cancelled() && steps.coverage-setup.outcome == 'success' && steps.integration-verdict.outcome != 'skipped' }}
@@ -442,12 +858,10 @@ jobs:
         with:
           name: coverage-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            coverage-${{ inputs.platform }}.json
-            ${{ env.FLAGCICD_COVERAGE_DIR }}/
+            ${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/coverage-${{ inputs.platform }}.json
+            ${{ env.PIP_CACHE_DIR }}/../torch-fl-coverage/
           if-no-files-found: warn
 
-      # A fork diagnostic run still retains reports, without giving its tested
-      # code an upload credential in the same job. Missing tokens are optional.
       - name: Check FlagCICD upload availability
         id: flagcicd-auth
         if: ${{ !cancelled() && (steps.merge-report.outcome == 'success' || steps.merge-coverage.outcome == 'success') && (inputs.checkout_repository == '' || inputs.checkout_repository == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -460,18 +874,18 @@ jobs:
             echo '::warning::FLAGCICD_API_TOKEN is unavailable; report retained as an artifact.'
           fi
 
-      # The current MetaX Ubuntu image has no curl. Prepare it inside the job
-      # container, only for credentialed uploads; do not alter the test verdict.
       - name: Prepare MetaX upload tools
         if: ${{ !cancelled() && inputs.platform == 'metax' && steps.flagcicd-auth.outputs.available == 'true' }}
-        continue-on-error: true
-        timeout-minutes: 3
+        env:
+          CONTAINER_NAME: ${{ steps.container.outputs.name }}
         run: |
-          if ! command -v curl >/dev/null 2>&1; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
-          fi
-          curl --version
+          docker exec "$CONTAINER_NAME" --env HOME=/tmp bash -c '
+            if ! command -v curl >/dev/null 2>&1; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+            fi
+            curl --version
+          '
 
       - name: Upload pytest report to FlagCICD
         if: ${{ !cancelled() && steps.merge-report.outcome == 'success' && steps.flagcicd-auth.outputs.available == 'true' }}
@@ -481,7 +895,7 @@ jobs:
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: 'pytest-${{ inputs.platform }}.json'
+          report_path: '${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/pytest-${{ inputs.platform }}.json'
           file_type: pytest
           job_name: integration-tests-${{ inputs.platform }}
           fail_on_error: 'false'
@@ -494,7 +908,7 @@ jobs:
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: 'coverage-${{ inputs.platform }}.json'
+          report_path: '${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/coverage-${{ inputs.platform }}.json'
           file_type: coverage
           job_name: coverage-${{ inputs.platform }}
           fail_on_error: 'false'
@@ -519,11 +933,6 @@ jobs:
               output.write('run_attempt=' + os.environ['GITHUB_RUN_ATTEMPT'] + '\n')
           PY
 
-      # Save outside post-job cleanup so the upload has its own deadline.
-      # Keep downloaded dependencies even if a later build/test step fails:
-      # !cancelled() intentionally permits saving after failure (no success()).
-      # Skip exact hits, failed lookups/transfers and cancelled jobs.
-      # Cache errors must not change the build/test result.
       - name: Save pip downloads
         if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4

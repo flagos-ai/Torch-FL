@@ -1,0 +1,381 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Prepare the host paths and the single vendor container for integration."""
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+MODEL_ROOT = Path("/var/lib/torch-fl-ci/models")
+MODEL_PATH = Path("/models/Qwen3-0.6B")
+INLINE_ENVIRONMENT = {
+    "GITHUB_ENV",
+    "GITHUB_OUTPUT",
+    "GITHUB_PATH",
+    "GITHUB_WORKSPACE",
+    "HOME",
+    "INTEGRATION_RUNTIME",
+    "INTEGRATION_PROFILE",
+    "INTEGRATION_CONTAINER",
+    "INTEGRATION_MODEL",
+    "MODEL_PATH",
+    "RUNNER_TEMP",
+}
+REPORT_DIRS = ("test-workdir", "pytest", "coverage", "inventories", "junit")
+
+
+class WorkspaceError(Exception):
+    """A runner or image cannot provide the shared integration workspace."""
+
+
+def _publish_inline(settings, values):
+    """Write inline values by importing the mounted script the same way CI does."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from publish_container_environment import publish_inline
+
+        publish_inline(settings, values, "host-profile.sh")
+    finally:
+        del sys.path[0]
+
+
+def _write_environment(path, settings):
+    values = {
+        "GITHUB_ENV": settings["state"] + "/container-environment",
+        "GITHUB_OUTPUT": settings["state"] + "/output",
+        "GITHUB_PATH": settings["state"] + "/path",
+        "GITHUB_WORKSPACE": settings["workspace"],
+        "HOME": "/tmp",
+        "INTEGRATION_RUNTIME": settings["runtime"],
+        "INTEGRATION_PROFILE": settings["state"] + "/profile.sh",
+        "INTEGRATION_CONTAINER": settings.get("container", ""),
+        "PIP_CACHE_DIR": settings["cache"],
+        "INTEGRATION_WORKDIR": settings["reports"]["test-workdir"],
+        "FLAGCICD_REPORT_DIR": settings["reports"]["pytest"],
+        "FLAGCICD_COVERAGE_DIR": settings["reports"]["coverage"],
+        "FLAGCICD_VERDICT_FILE": settings["verdict"],
+        "INTEGRATION_INVENTORY_ROOT": settings["reports"]["inventories"],
+        "INTEGRATION_PLATFORM": os.environ["INTEGRATION_PLATFORM"],
+        "INTEGRATION_IMAGE": settings["digest"],
+        "INTEGRATION_MODEL": str(MODEL_PATH),
+        "MODEL_PATH": str(MODEL_PATH),
+        # Keep setup venvs and caches in mounted runner directories outside the
+        # source copy so every container command sees the same installation.
+        "RUNNER_TEMP": str(Path(settings["workspace"]).parent),
+        "CHECKOUT_REPOSITORY": os.environ["CHECKOUT_REPOSITORY"],
+        "CHECKOUT_REF": os.environ["CHECKOUT_REF"],
+    }
+    Path(path).write_text(
+        "".join(
+            f"{name}={shlex.quote(value)}\n"
+            for name, value in values.items()
+            if (value or name == "INTEGRATION_CONTAINER")
+        ),
+        encoding="utf-8",
+    )
+    _publish_inline(
+        settings,
+        {name: values[name] for name in INLINE_ENVIRONMENT},
+    )
+    shell = Path(settings["state"]) / "shell.sh"
+    shell.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'cd "$GITHUB_WORKSPACE"\n'
+        'source "$INTEGRATION_PROFILE"\n'
+        'exec bash "$@"\n',
+        encoding="utf-8",
+    )
+    shell.chmod(0o755)
+    settings["shell"] = str(shell)
+
+
+def _host_files(state):
+    names = ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH")
+    live = {}
+    for name in names:
+        source = os.environ.get(name, "")
+        if not source:
+            raise WorkspaceError(f"the runner supplied no {name}")
+        path = Path(source).resolve()
+        live[name] = path
+    return live
+
+
+def _volume(item):
+    parts = item.split(":")
+    if len(parts) < 2 or not Path(parts[0]).is_absolute():
+        raise WorkspaceError(f"container volume has no absolute source: {item}")
+    source, destination = Path(parts[0]).resolve(), parts[1]
+    if not destination.startswith("/"):
+        raise WorkspaceError(f"container volume has no absolute target: {item}")
+    return item, source, destination
+
+
+def _container_volumes(volumes, settings):
+    """Keep platform mounts and replace the model root with its validated host path."""
+    output = []
+    for item in volumes:
+        entry, source, destination = _volume(item)
+        if source == MODEL_ROOT or destination == "/models":
+            continue
+        if not destination.startswith(str(MODEL_ROOT) + "/"):
+            output.append(entry)
+    output.append(f"{MODEL_ROOT}:{MODEL_ROOT}:ro")
+    output.extend(
+        (
+            f"{settings['workspace']}:{settings['workspace']}",
+            f"{settings['cache']}:{settings['cache']}",
+            f"{settings['state']}:{settings['state']}",
+            f"{settings['reports']['test-workdir']}:{settings['reports']['test-workdir']}",
+            f"{settings['reports']['pytest']}:{settings['reports']['pytest']}",
+            f"{settings['reports']['coverage']}:{settings['reports']['coverage']}",
+            f"{settings['reports']['inventories']}:{settings['reports']['inventories']}",
+            f"{settings['reports']['junit']}:{settings['reports']['junit']}",
+            f"{settings['verdict']}:{settings['verdict']}",
+            f"{settings['artifacts']}:{settings['artifacts']}",
+        )
+    )
+    return output
+
+
+def prepare(arguments):
+    """Copy the checkout and prepare paths shared by the host and container."""
+    checkout = Path(arguments.checkout).resolve()
+    runner_temp = Path(arguments.runner_temp).resolve()
+    if not checkout.is_dir():
+        raise WorkspaceError(f"the checkout is missing: {checkout}")
+    if runner_temp == checkout or runner_temp.is_relative_to(checkout):
+        raise WorkspaceError("RUNNER_TEMP must not be inside the checkout")
+    if arguments.image and not arguments.digest:
+        raise WorkspaceError("a configured image has no resolved RepoDigest")
+    try:
+        volumes = json.loads(arguments.volumes)
+    except json.JSONDecodeError as error:
+        raise WorkspaceError(f"container volumes are not JSON: {error}") from error
+    if not isinstance(volumes, list) or not all(
+        isinstance(item, str) and item for item in volumes
+    ):
+        raise WorkspaceError("container volumes must be a list of non-empty strings")
+
+    settings = {
+        "workspace": str(runner_temp / "torch-fl-workspace"),
+        "state": str(runner_temp / "torch-fl-preparation"),
+        "runtime": str(runner_temp / "torch-fl-runtime"),
+        "profile_home": str(runner_temp / "torch-fl-profile-home"),
+        "cache": str(runner_temp / "torch-fl-pip"),
+        "artifacts": str(runner_temp / "torch-fl-artifacts"),
+        "reports": {
+            name: str(runner_temp / f"torch-fl-{name}") for name in REPORT_DIRS
+        },
+        "verdict": str(runner_temp / "torch-fl-verdict.json"),
+        "image": arguments.image,
+        "digest": arguments.digest,
+        "volumes": volumes,
+        "options": arguments.options,
+        "platform": os.environ["INTEGRATION_PLATFORM"],
+    }
+    paths = [
+        settings["workspace"],
+        settings["state"],
+        settings["runtime"],
+        settings["profile_home"],
+        settings["cache"],
+        settings["artifacts"],
+        Path(settings["verdict"]),
+        *map(Path, settings["reports"].values()),
+    ]
+    if len(set(paths)) != len(paths):
+        raise WorkspaceError("integration storage paths overlap")
+    paths = list(map(Path, paths))
+    for path in paths:
+        if path == checkout or checkout.is_relative_to(path):
+            raise WorkspaceError(f"preparation path contains the checkout: {path}")
+        if path.exists():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    Path(settings["state"]).mkdir(parents=True)
+    live = _host_files(Path(settings["state"]))
+    settings["host_files"] = {name: str(path) for name, path in live.items()}
+    settings["inline_environment"] = sorted(INLINE_ENVIRONMENT)
+    for path in settings["reports"].values():
+        Path(path).mkdir(parents=True)
+    Path(settings["artifacts"]).mkdir(parents=True)
+    Path(settings["runtime"]).mkdir()
+    Path(settings["cache"]).mkdir()
+    Path(settings["profile_home"]).mkdir()
+    shutil.copytree(
+        checkout,
+        settings["workspace"],
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".git", "build", "dist", ".ci"),
+    )
+    profile = Path(settings["state"]) / "profile.sh"
+    profile.write_text(
+        f"PATH={shlex.quote(os.environ.get('PATH', ''))}\n"
+        'if [[ -s "$GITHUB_ENV" ]]; then\n'
+        "  set -a\n"
+        '  . "$GITHUB_ENV"\n'
+        "  set +a\n"
+        "fi\n"
+        'if [[ -s "$GITHUB_PATH" ]]; then\n'
+        "  while IFS= read -r entry; do\n"
+        '    [[ -n "$entry" ]] && export PATH="$entry:$PATH"\n'
+        '  done < "$GITHUB_PATH"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    environment = Path(settings["state"]) / "container-environment"
+    settings["environment"] = str(environment)
+    _write_environment(environment, settings)
+    settings["environment"] = str(environment)
+    config = Path(settings["state"]) / "config.json"
+    config.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    Path(settings["verdict"]).write_text('{"outcome":"failure"}\n')
+    print(f"Integration workspace: {settings['workspace']}")
+    print(f"Integration config: {config}")
+    return settings
+
+
+def configure(settings, container):
+    """Persist the address of an already-running container."""
+    if settings.get("container") or not container:
+        raise WorkspaceError("configuration needs one new container")
+    probe = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container,
+            "--env",
+            "HOME=/tmp",
+            "bash",
+            settings["shell"],
+            "-c",
+            'test -d "$PIP_CACHE_DIR" && test -w "$GITHUB_WORKSPACE" && '
+            'test -d "$INTEGRATION_MODEL" && test -d "$MODEL_PATH"',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    if probe.returncode:
+        logs = subprocess.run(
+            ["docker", "logs", container], capture_output=True, text=True
+        ).stdout
+        raise WorkspaceError(
+            "the vendor container cannot use the integration mount:\n"
+            + probe.stderr
+            + logs
+        )
+    settings["container"] = container
+    settings["environment"] = str(Path(settings["state"]) / "container-environment")
+    _write_environment(settings["environment"], settings)
+    Path(settings["state"], "config.json").write_text(
+        json.dumps(settings, indent=2), encoding="utf-8"
+    )
+    print(f"Integration container: {container}")
+    return settings
+
+
+def start(settings):
+    """Start exactly one new vendor container; never attach to an old one."""
+    if "container" in settings:
+        raise WorkspaceError("the integration container was already started")
+    image, digest = settings["image"], settings["digest"]
+    if not image or not digest:
+        raise WorkspaceError("starting a container requires image and digest")
+    if image and not image.startswith(digest.split("@", 1)[0]):
+        raise WorkspaceError("the image name does not match its resolved digest")
+    name = (
+        f"torch-fl-{os.environ['GITHUB_RUN_ID']}-"
+        f"{os.environ['GITHUB_RUN_ATTEMPT']}-"
+        f"{os.environ['INTEGRATION_PLATFORM']}"
+    )
+    subprocess.run(
+        ["docker", "rm", "--force", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    volumes = _container_volumes(settings["volumes"], settings)
+    state = Path(settings["state"])
+    command = [
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        name,
+        "--workdir",
+        settings["workspace"],
+        "--env-file",
+        settings["environment"],
+        "--env",
+        "HOME=/tmp",
+        *sum((["--volume", value] for value in volumes), []),
+        *shlex.split(settings["options"]),
+        "--volume",
+        f"{state}:{state}",
+        "--volume",
+        f"{settings['runtime']}:{settings['runtime']}",
+        "--volume",
+        f"{settings['profile_home']}:/github/home",
+        # This entrypoint works even when the vendor image has no init process
+        # or a different default command.
+        digest,
+        "tail",
+        "-f",
+        "/dev/null",
+    ]
+    subprocess.run(command, check=True)
+    return name
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("prepare", "start", "configure"))
+    parser.add_argument("--config")
+    parser.add_argument("--container", default="")
+    parser.add_argument("--checkout")
+    parser.add_argument("--runner-temp")
+    parser.add_argument("--image", default="")
+    parser.add_argument("--digest", default="")
+    parser.add_argument("--volumes", default="[]")
+    parser.add_argument("--options", default="")
+    arguments = parser.parse_args(argv)
+    try:
+        if arguments.command in ("start", "configure"):
+            settings = json.loads(Path(arguments.config).read_text(encoding="utf-8"))
+            if arguments.command == "start":
+                print(start(settings))
+            else:
+                configure(settings, arguments.container)
+        else:
+            if not arguments.checkout or not arguments.runner_temp:
+                raise WorkspaceError("--checkout and --runner-temp are required")
+            prepare(arguments)
+    except (KeyError, OSError, TypeError, ValueError, WorkspaceError) as error:
+        print(f"::error::{error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

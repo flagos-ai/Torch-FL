@@ -22,6 +22,8 @@ import signal
 import shlex
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -852,14 +854,26 @@ def required_mpirun(command, test_environment):
     )
 
 
-def run_command(command, test_environment, workdir, command_prefix=""):
+def run_command(
+    command,
+    test_environment,
+    workdir,
+    command_prefix="",
+    timeout_seconds=None,
+):
     """Run one group command, streaming its output live while capturing it.
 
     Streaming (not print-at-end) keeps long hardware groups observable and
     leaves the log behind if the runner itself is killed; the captured copy
-    feeds the teardown-crash check.
+    feeds the teardown-crash check. A positive ``timeout_seconds`` kills the
+    shell's process group at that limit, including children that would retain
+    the output pipe. The group then fails under its own name rather than
+    disappearing into the job's outer timeout.
     """
     required_mpirun(command, test_environment)
+    deadline = None
+    if timeout_seconds is not None:
+        deadline = time.monotonic() + timeout_seconds
     process = subprocess.Popen(
         [
             "bash",
@@ -871,27 +885,100 @@ def run_command(command, test_environment, workdir, command_prefix=""):
         text=True,
         env=test_environment,
         cwd=workdir,
+        start_new_session=True,
     )
-    assert process.stdout is not None
+    stdout = process.stdout
+    assert stdout is not None
+    lines = []
+    output_reader = threading.Thread(
+        target=_read_output,
+        args=(stdout, lines),
+        daemon=True,
+    )
+    output_reader.start()
     try:
-        lines = []
-        for line in process.stdout:
-            sys.stdout.write(line)
-            lines.append(line)
-        sys.stdout.flush()
-        returncode = process.wait()
+        timed_out = False
+        while process.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                # Even when poll() observes the shell already gone, its
+                # descendants stay in the session. Stop that whole group so a
+                # child holding this pipe cannot delay the report.
+                _kill_process_group(process)
+                process.wait()
+                print(
+                    f"::error::Integration command did not finish within "
+                    f"{timeout_seconds}s; its process group was killed",
+                    flush=True,
+                )
+                # Return normally into main's report handling. An exit raised
+                # here would skip pytest's report and lose every completed case.
+                timed_out = True
+                break
+            time.sleep(0.1)
+        returncode = 124 if timed_out else process.returncode
     except KeyboardInterrupt:
         # A cancelled runner must not leave a pytest process writing to the
         # report directory or to a retry's workspace.
-        process.kill()
+        _kill_process_group(process)
         process.wait()
         raise
+    finally:
+        # Descendants may retain a copy of the pipe. Close this read end and
+        # let the goroutine finish instead of waiting for every vendor child.
+        output_reader.join(timeout=1)
+        if output_reader.is_alive():
+            stdout.close()
+        output_reader.join(timeout=1)
     return returncode, "".join(lines)
+
+
+def _read_output(stream, lines):
+    """Forward child output live, including output already buffered at exit."""
+    for line in stream:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        lines.append(line)
+
+
+def _kill_process_group(process):
+    """Terminate every test process started for this one group."""
+    try:
+        # SIGTERM lets pytest finish its session hooks and publish the cases
+        # it completed. The timeout remains a failure.
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pass
+    # The shell may already be reaped while a background child in its process
+    # group keeps the output pipe open. Signal the group once more before
+    # returning that observation, rather than leaving the child running.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def group_timeout_seconds():
+    """Read the per-group bound derived from the job's timeout."""
+    value = os.environ.get("INTEGRATION_GROUP_TIMEOUT_SECONDS", "").strip()
+    if not value:
+        return None
+    if not value.isdigit() or int(value) <= 0:
+        raise SystemExit("INTEGRATION_GROUP_TIMEOUT_SECONDS must be a positive integer")
+    return int(value)
 
 
 def main():
     args = parse_args()
     tests, environment = load_configuration(args.allow_empty)
+    timeout_seconds = group_timeout_seconds()
     inventory_by_group = load_inventory(
         [os.path.expandvars(path) for path in getattr(args, "inventory", [])]
     )
@@ -1028,6 +1115,7 @@ def main():
                 group_command_environment,
                 group_workdir,
                 command_prefix,
+                timeout_seconds=timeout_seconds,
             )
         except BaseException as error:
             prepare_failed_reports(test["name"], source, group_report)

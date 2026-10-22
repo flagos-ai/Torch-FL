@@ -9,7 +9,7 @@ Hygon DCU (DTK) is **FlagGems-primary by default** and additionally supports an 
 
 The default build compiles the FlagGems Python path and leaves the rest of the conf on `cpu_fallback`, with no vendor torch package. Setting `FLAGOS_BUILD_BOXING=1` builds the **boxing** wheel instead: the generated PrivateUse1 → CUDA boxing kernels compile and dispatch into `libtorch_hip.so`. `FLAGOS_BUILD_VENDOR` stays a no-op either way (there is no DCU backend directory to enable) and the FlagGems C++ path stays off (`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`, since DTK ships no liboperators.so). Unless a section says otherwise, the rest of this guide describes the boxing build.
 
-**Status:** Beta. CI validates vendor-backend and FlagGems-runtime operator suites, general tests, and profiler parity on DCU runners. Inference and training smoke tests are deferred pending model mount and card-count confirmation.
+**Status:** Beta. CI validates vendor-backend and FlagGems-runtime operator suites, general tests, profiler parity, and the Qwen3 inference and training groups on DCU runners. The model groups use the checkpoint staged by the shared integration workflow.
 
 ## Prerequisites
 

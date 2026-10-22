@@ -51,7 +51,8 @@ paths_watch:
   - scripts/vendor/patch_triton_ascend.py
   - scripts/codegen/codegen_ascend.py
 
-container_volumes: []
+container_volumes:
+  - /var/lib/torch-fl-ci/models:/models:ro
 
 integration_environment: {}
 

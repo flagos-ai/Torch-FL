@@ -43,10 +43,9 @@ paths_watch:
   - scripts/vendor/with_cuda_libtorch.sh
 
 container_volumes:
-  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+  - /var/lib/torch-fl-ci/models:/models:ro
 
-integration_environment:
-  MODEL_PATH: /models/Qwen3-0.6B
+integration_environment: {}
 
 container_options: >-
   --gpus all
@@ -93,4 +92,3 @@ environment_check:
     version_env: FLAGTREE_VERSION
     version_default: 0.7.0
     triton_prefix: "3.6."
-  model_dir: true

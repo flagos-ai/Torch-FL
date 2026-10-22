@@ -23,12 +23,11 @@ composer is exercised through its real entry point, and every deviation that
 remains is a number in `_KNOWN_GAPS` rather than a difference nobody wrote
 down.
 
-The gaps are recorded rather than asserted away on purpose. This is the first
-of three changes; the platforms still differ in coverage, and a test that
-demanded uniformity today would fail until the last of them lands. What it
-demands *now* is that the difference is a written decision: adding a platform
-to a step's `platforms:` list has to be paired with editing `_KNOWN_GAPS`, and
-that edit is where a reviewer sees how much is still per-platform.
+The gaps are recorded rather than asserted away on purpose. Platform coverage
+still differs for groups whose backend capability does not exist yet, so adding
+a platform to a step's `platforms:` list has to be paired with editing
+`_KNOWN_GAPS`. Model groups have no such gap: all ten platforms run the same
+six Qwen3 groups through one path and checkpoint.
 """
 
 import copy
@@ -40,6 +39,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
 import yaml
 
@@ -79,6 +79,8 @@ _REPO = Path(__file__).resolve().parents[2]
 _CONFIG_DIR = _REPO / ".github/configs"
 _LOADER = _REPO / ".github/workflows/load-platform-config.yml"
 _HARDWARE = _REPO / ".github/workflows/integration-tests.yml"
+
+
 RUNNER_VALIDATION = "--validate-only"
 _HELPER = _REPO / ".github/scripts/integration_inventory_plan.py"
 
@@ -122,26 +124,6 @@ _KNOWN_GAPS = {
         "ppu",
     ),
     "torch_compile": ("ascend", "dcu", "mps", "musa", "ppu"),
-    "inference": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
-    "training": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
     "native_comm_bridge": (
         "ascend",
         "cuda",
@@ -320,6 +302,50 @@ def test_the_only_substitution_is_the_display_name():
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_platform_has_the_same_model_groups_and_environment(platform):
+    """A model case runs everywhere and reads one published checkpoint."""
+    config = platform_config(platform)
+    groups = {step["id"]: step for step in composed_steps(platform)}
+    model_groups = (
+        "model",
+        "fallback_trace",
+        "inference",
+        "training",
+        "fallback_trace_train",
+        "qwen3_profiler",
+    )
+    assert set(model_groups) <= groups.keys()
+    for group in model_groups:
+        assert groups[group]["environment"]["MODEL_PATH"] == "/models/Qwen3-0.6B"
+
+    if config["ci_image"]:
+        assert "/var/lib/torch-fl-ci/models:/models:ro" in config["container_volumes"]
+    else:
+        assert config["container_volumes"] == []
+
+
+def test_every_platform_runs_the_same_model_cases():
+    """The same model files and arguments run on every hardware platform."""
+    model_groups = {
+        "model",
+        "fallback_trace",
+        "inference",
+        "training",
+        "fallback_trace_train",
+        "qwen3_profiler",
+    }
+    expected = [
+        step for step in composed_steps(_PLATFORMS[0]) if step["id"] in model_groups
+    ]
+    assert len(expected) == len(model_groups)
+    for platform in _PLATFORMS[1:]:
+        actual = [
+            step for step in composed_steps(platform) if step["id"] in model_groups
+        ]
+        assert actual == expected, platform
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
 def test_the_environment_step_is_handed_this_platforms_expectations(platform):
     """One check per platform, and the data it asserts on is the config's.
 
@@ -472,11 +498,7 @@ def test_no_platform_config_carries_a_step_list_of_its_own(platform):
 
 
 def test_the_steps_that_do_not_run_everywhere_are_exactly_the_recorded_ones():
-    """The remaining per-platform coverage, held to the list above.
-
-    Read the failure as a to-do list: each entry is a step one platform runs
-    and another does not, which this layer's follow-ups close one at a time.
-    """
+    """Only the recorded backend gaps differ between platform plans."""
     assigned = _assigned()
     gaps = {
         step_id: tuple(p for p in _PLATFORMS if p not in platforms)
@@ -1014,8 +1036,7 @@ def test_the_hardware_job_materializes_and_retains_each_inventory():
     run = materialize.split("- name:", 1)[0]
     assert "SHARED_TEST_INVENTORY_KINDS" in run
     assert "set(inventories) != required" in run
-    assert "INTEGRATION_INVENTORY_ROOT=%s" in run
-    assert '"$INVENTORY_ROOT"' in run
+    assert 'root="$INTEGRATION_INVENTORY_ROOT"' in run
     assert "tests/$kind/google-test.json" not in run.replace(" ", "")
 
     folded = " ".join(source.split())
@@ -1023,7 +1044,7 @@ def test_the_hardware_job_materializes_and_retains_each_inventory():
     assert '"${inventory_arguments[@]}"' in folded
     retained = source.split("- name: Retain shared test inventories", 1)
     assert len(retained) == 2, "the hardware job does not retain the inventories"
-    assert "${{ runner.temp }}/torch-fl-inventories/" in retained[1]
+    assert "${{ env.PIP_CACHE_DIR }}/../torch-fl-inventories/" in retained[1]
     assert "shared-test-inventory-" not in source
 
 

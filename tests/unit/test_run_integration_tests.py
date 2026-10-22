@@ -103,7 +103,7 @@ def test_unit_group_runs_from_the_checkout_instead_of_the_wheel_workspace(
 
     captured = []
 
-    def record_run(command, _environment, workdir, _prefix=""):
+    def record_run(command, _environment, workdir, _prefix="", **_kwargs):
         captured.append(workdir)
         return 0, "1 passed in 0.01s\n"
 
@@ -187,7 +187,7 @@ def test_flaggems_group_receives_the_checkout_registration_source(
 
     captured = []
 
-    def record_run(command, environment, workdir, prefix=""):
+    def record_run(command, environment, workdir, prefix="", **_kwargs):
         captured.append((command, environment.copy(), workdir, prefix))
         return 0, "1 passed in 0.01s\n"
 
@@ -378,6 +378,51 @@ def test_ordinary_failure_stops_the_run(monkeypatch, tmp_path):
 
     assert error.value.code == 5
     assert not (tmp_path / "should_not_run").exists()
+
+
+def test_an_integration_group_has_a_bounded_process_lifetime(monkeypatch, tmp_path):
+    """A hung group fails by its own name, and its children are terminated."""
+    pid_file = tmp_path / "child.pid"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    completed_report = reports / "completed.json"
+    completed_report.write_text('{"outcome": "passed"}\n')
+    tests = [
+        {
+            "name": "bounded",
+            "command": f"sleep 30 & echo $! > {pid_file}; wait",
+        }
+    ]
+    monkeypatch.setenv("INTEGRATION_GROUP_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("FLAGCICD_REPORT_DIR", str(reports))
+    monkeypatch.setenv(
+        "PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+
+    with pytest.raises(SystemExit) as error:
+        _run_main(monkeypatch, tmp_path, tests)
+
+    assert error.value.code == 124
+    assert completed_report.read_text() == '{"outcome": "passed"}\n'
+    child = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_group_timeout_cleans_up_after_the_shell_has_exited(tmp_path):
+    """A background child cannot keep a timed-out group's output pipe open."""
+    pid_file = tmp_path / "background.pid"
+    command = f"sleep 30 & printf '%s\\n' $! > {pid_file}; wait"
+
+    assert _RUNNER.run_command(
+        command,
+        dict(os.environ),
+        tmp_path,
+        timeout_seconds=1,
+    ) == (124, "")
+    child = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
 
 
 def test_failure_summary_is_not_tolerated_even_when_opted_in(monkeypatch, tmp_path):

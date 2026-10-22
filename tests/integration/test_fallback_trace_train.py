@@ -38,7 +38,7 @@ def sync():
 
 
 def _has_privateuse1_kernel(op_name: str) -> bool:
-    """Check if an op has a dedicated PrivateUse1 kernel (not just the catch-all fallback)."""
+    """Check for a PrivateUse1 kernel before deciding whether it is native."""
     try:
         return torch._C._dispatch_has_kernel_for_dispatch_key(op_name, "PrivateUse1")
     except RuntimeError:
@@ -46,13 +46,17 @@ def _has_privateuse1_kernel(op_name: str) -> bool:
 
 
 class FallbackTracer(torch.utils._python_dispatch.TorchDispatchMode):
-    """Intercept all aten dispatches and classify as native vs fallback."""
+    """Observe flagos calls and their kernel-body dispatches."""
+
+    flagos_device_types = ("privateuseone", "flagos")
 
     def __init__(self):
         super().__init__()
         self._cache: dict[str, bool] = {}
         self.fallback_ops = defaultdict(int)
         self.native_ops = defaultdict(int)
+        self.total_ops = 0
+        self.cpu_input_calls = set()
 
     def _is_native(self, op_name: str) -> bool:
         if op_name not in self._cache:
@@ -65,9 +69,9 @@ class FallbackTracer(torch.utils._python_dispatch.TorchDispatchMode):
 
         has_flagos = False
         for a in torch.utils._pytree.tree_leaves((args, kwargs)):
-            if isinstance(a, torch.Tensor) and a.device.type in (
-                "privateuseone",
-                "flagos",
+            if (
+                isinstance(a, torch.Tensor)
+                and a.device.type in self.flagos_device_types
             ):
                 has_flagos = True
                 break
@@ -77,8 +81,11 @@ class FallbackTracer(torch.utils._python_dispatch.TorchDispatchMode):
                 self.native_ops[op_name] += 1
             else:
                 self.fallback_ops[op_name] += 1
+        self.total_ops += 1
 
-        return func(*args, **(kwargs or {}))
+        if not has_flagos:
+            self.cpu_input_calls.add(op_name)
+        return func(*args, **kwargs)
 
     def report(self, title="CPU FALLBACK TRACE REPORT"):
         lines = []
@@ -88,15 +95,18 @@ class FallbackTracer(torch.utils._python_dispatch.TorchDispatchMode):
 
         total_native = sum(self.native_ops.values())
         total_fallback = sum(self.fallback_ops.values())
-        total = total_native + total_fallback
+        total_routed = len(self.native_ops) + len(self.fallback_ops)
+        total = self.total_ops
 
-        lines.append(f"Total op calls on flagos tensors: {total}")
+        lines.append(f"Total dispatcher calls: {total}")
+        lines.append(f"  Direct backend calls: {total_routed}")
         lines.append(
-            f"  Native (GPU):      {total_native} ({100 * total_native / max(total, 1):.1f}%)"
+            f"  Native (GPU):      {total_native} ({100 * total_native / max(total_routed, 1):.1f}%)"
         )
         lines.append(
-            f"  CPU fallback:      {total_fallback} ({100 * total_fallback / max(total, 1):.1f}%)"
+            f"  CPU fallback:      {total_fallback} ({100 * total_fallback / max(total_routed, 1):.1f}%)"
         )
+        lines.append(f"  Dispatched CPU ops: {len(self.cpu_input_calls)} unique")
 
         if self.fallback_ops:
             lines.append(f"\n{'─' * 70}")
@@ -252,6 +262,13 @@ def test_trace_fallback_train(train_ctx):
     # Assert: all losses finite
     assert all(torch.isfinite(torch.tensor(val)) for val in losses), (
         "Some losses are not finite"
+    )
+    assert tracer.total_ops > 0, (
+        "the training fallback trace recorded no dispatcher calls"
+    )
+    assert tracer.native_ops or tracer.fallback_ops, (
+        "no Qwen3 training operation dispatched from a flagos tensor "
+        "reached a backend route"
     )
 
     # Warn (but don't fail) if there are fallback ops

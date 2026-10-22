@@ -17,6 +17,7 @@
 import importlib
 import json
 import re
+import struct
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -82,6 +83,72 @@ def test_model_mount_requires_an_existing_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("MODEL_PATH", str(tmp_path / "missing"))
     with pytest.raises(AssertionError, match="is not a directory"):
         environment_check.assert_model_dir()
+
+
+def test_model_cli_checks_its_explicit_path(monkeypatch, tmp_path, capsys):
+    """The model group states its path instead of depending on shell state."""
+    model = tmp_path / "Qwen3-0.6B"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+
+    assert environment_check.main(["check-model", "--path", str(model)]) == 0
+    assert "MODEL_PATH is empty" not in capsys.readouterr().out
+    assert "MODEL_PATH" not in importlib.import_module("os").environ
+
+    with pytest.raises(SystemExit, match="requires --path"):
+        environment_check.main(["check-model"])
+
+
+def test_model_cli_rejects_an_empty_checkpoint(tmp_path):
+    with pytest.raises(AssertionError, match="has no Transformers config.json"):
+        environment_check.main(["check-model", "--path", str(tmp_path)])
+
+
+def _safetensors(header):
+    return struct.pack("<Q", len(header)) + header
+
+
+def _write_safetensors_header(model, header):
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    encoded = json.dumps(header).encode()
+    (model / "model.safetensors").write_bytes(_safetensors(encoded) + b"\0" * 64)
+
+
+def test_weight_validation_reads_a_safetensors_header(tmp_path):
+    model = tmp_path / "Qwen3-0.6B"
+    _write_safetensors_header(model, {"weight": {}})
+
+    assert (
+        environment_check.main(
+            ["check-model", "--path", str(model), "--verify-weights"]
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("weights", "message"),
+    [
+        (None, "has no .safetensors weights"),
+        (b"short", "is truncated"),
+        (struct.pack("<Q", 8), "header exceeds file size"),
+        (struct.pack("<Q", 1_000_000), "header exceeds file size"),
+        (_safetensors(b"{bad}") + b"\0" * 16, "cannot be read"),
+        (_safetensors(b"[]") + b"\0" * 16, "must be a JSON object"),
+        (_safetensors(b"{}") + b"\0" * 16, "header has no tensors"),
+    ],
+)
+def test_weight_validation_rejects_a_truncated_snapshot(tmp_path, weights, message):
+    model = tmp_path / "Qwen3-0.6B"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    if weights is not None:
+        (model / "model.safetensors").write_bytes(weights)
+
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        environment_check.assert_model_dir(str(model), verify_weights=True)
 
 
 def _runtime(monkeypatch, kernels, *, triton=True, flag_gems=True):

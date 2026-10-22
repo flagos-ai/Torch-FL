@@ -23,10 +23,11 @@ Usage:
 """
 
 import json
-import tempfile
 
 import pytest
 from device_init import torch
+from platform_support import detect_platform
+from profiler_support import capabilities_for_platform
 from torch.profiler import ProfilerActivity, profile
 
 
@@ -53,15 +54,30 @@ def model_and_tokenizer(request):
     return model, tokenizer
 
 
+def _profile_activities():
+    if capabilities_for_platform(detect_platform()).device:
+        return [ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+    return [ProfilerActivity.CPU]
+
+
+def _kernel_events(events):
+    """Device kernel records; ``gpu_kernel`` is a category on several tracers."""
+    return [
+        event
+        for event in events
+        if any(
+            "kernel" in str(event.get(field, "")).lower() for field in ("name", "cat")
+        )
+    ]
+
+
 def test_profiler_qwen3_basic(model_and_tokenizer):
     """Basic profiler test: confirm no crash under profiling."""
     model, tokenizer = model_and_tokenizer
     ids = tokenizer("Hello world", return_tensors="pt").input_ids.to("flagos")
 
     torch.flagos.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
-    ) as prof:
+    with profile(activities=_profile_activities()) as prof:
         with torch.no_grad():
             model(ids)
         torch.flagos.synchronize()
@@ -72,39 +88,37 @@ def test_profiler_qwen3_basic(model_and_tokenizer):
     print(f"Captured {len(events)} profiler events")
 
 
-def test_profiler_qwen3_chrome_trace_kernels(model_and_tokenizer):
-    """Chrome trace test: verify GPU kernel events appear in trace."""
+def test_profiler_qwen3_chrome_trace_kernels(model_and_tokenizer, tmp_path):
+    """Export a Chrome trace and require named device kernels everywhere."""
     model, tokenizer = model_and_tokenizer
     ids = tokenizer("Hello world", return_tensors="pt").input_ids.to("flagos")
+    capabilities = capabilities_for_platform(detect_platform())
+    if not capabilities.device:
+        pytest.fail(
+            f"{capabilities.platform} has no device profiler activity; "
+            "the shared model trace requires device kernels"
+        )
 
     torch.flagos.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
-    ) as prof:
+    with profile(activities=_profile_activities()) as prof:
         with torch.no_grad():
             model(ids)
         torch.flagos.synchronize()
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
+    path = str(tmp_path / "qwen3-trace.json")
     prof.export_chrome_trace(path)
 
     with open(path) as fh:
         trace_data = json.load(fh)
 
     events = trace_data["traceEvents"]
-    kernels = [
-        e
-        for e in events
-        if "kernel" in str(e.get("name", "")).lower()
-        or e.get("cat") in ("kernel", "Kernel")
-    ]
+    kernels = _kernel_events(events)
 
     print(f"qwen3 trace: {len(kernels)} kernel events, saved to {path}")
     print(f"Total trace events: {len(events)}")
 
-    assert len(events) > 0, "Chrome trace is empty"
     assert "traceEvents" in trace_data, "Invalid chrome trace format"
+    assert len(events) > 0, "Chrome trace is empty"
 
     # Stage B core goal: a real model inference must surface GPU kernels in the
     # trace, with real CUPTI-decoded names and non-zero durations, on the
@@ -124,3 +138,24 @@ def test_profiler_qwen3_chrome_trace_kernels(model_and_tokenizer):
         f"✓ GPU kernel timeline captured: {len(named)} named kernels, "
         f"sample={named[0].get('name')[:60]!r} dur={named[0].get('dur')}"
     )
+
+
+def test_profiler_qwen3_dispatch_trace(model_and_tokenizer):
+    """A Qwen3 forward pass on every platform reaches the dispatcher."""
+    model, tokenizer = model_and_tokenizer
+    ids = tokenizer("Hello world", return_tensors="pt").input_ids.to("flagos")
+    calls = 0
+
+    class DispatchCounter(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            nonlocal calls
+            calls += 1
+            return func(*args, **(kwargs or {}))
+
+    torch.flagos.synchronize()
+    with torch.no_grad(), DispatchCounter():
+        model(ids)
+        torch.flagos.synchronize()
+
+    print(f"qwen3 dispatch calls: {calls}")
+    assert calls > 0, "the Qwen3 forward pass recorded no dispatcher calls"

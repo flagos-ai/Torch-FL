@@ -31,6 +31,8 @@ once, instead of ninety errors into the FlagGems group. Keep the messages
 specific enough to say which expectation failed.
 """
 
+import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -43,6 +45,23 @@ from types import SimpleNamespace
 
 ENVIRONMENT_VARIABLE = "FLAGOS_ENVIRONMENT_CHECK"
 FLAGGEMS_KERNEL_SET = "flaggems"
+
+QWEN3_REPOSITORY = "Qwen/Qwen3-0.6B"
+QWEN3_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+QWEN3_FILE_SIZES = {
+    "config.json": 726,
+    "generation_config.json": 239,
+    "merges.txt": 1671853,
+    "model.safetensors": 1503300328,
+    "tokenizer.json": 11422654,
+    "tokenizer_config.json": 9732,
+    "vocab.json": 2776833,
+}
+QWEN3_SHA256 = {
+    "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+    "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+}
 
 _BOUNDS = ("at_least", "more_than", "exactly")
 _TLE_IMPORT_FAILURES = set()
@@ -82,7 +101,6 @@ SUPPORTED_KEYS = frozenset(
         "native_extensions_arch",
         "torch_musa_shim_only",
         "flagtree",
-        "model_dir",
     }
 )
 
@@ -401,14 +419,16 @@ def assert_flaggems_tle(module_name, dependencies):
     print(f"FlagGems TLE imports succeeded: {module_name}")
 
 
-def assert_model_dir():
+def assert_model_dir(model_path=None, verify_weights=False, verify_files=False):
     """Check that the mount is a loadable Transformers checkpoint.
 
     A directory can exist while its host mount is empty or carries an unrelated
     image. Check the configuration before a model test starts, so the failure
     names the checkpoint instead of appearing as an unrecognized model later.
+    Weight validation reads only the safetensors headers. It catches a truncated
+    transfer without loading the model into host memory.
     """
-    model_path = os.environ.get("MODEL_PATH", "")
+    model_path = model_path or os.environ.get("MODEL_PATH", "")
     if not model_path:
         raise AssertionError("MODEL_PATH is empty")
     directory = Path(model_path)
@@ -434,6 +454,72 @@ def assert_model_dir():
         raise AssertionError(
             f"MODEL_PATH config.json has no non-empty model_type: {config_path}"
         )
+
+    if verify_weights:
+        assert_safetensors_header(directory)
+    if verify_files:
+        for name, expected_size in QWEN3_FILE_SIZES.items():
+            path = directory / name
+            try:
+                size = path.stat().st_size
+            except OSError as error:
+                raise AssertionError(
+                    f"MODEL_PATH lacks downloaded file {path}"
+                ) from error
+            if size != expected_size:
+                raise AssertionError(
+                    f"MODEL_PATH file has {size} bytes; {name} needs "
+                    f"{expected_size} from Qwen/{QWEN3_REVISION}"
+                )
+
+        # The safetensors header proves the checkpoint can be mapped. Pinned
+        # whole-file hashes cover the tokenizer and weights content too.
+        for name, expected_digest in QWEN3_SHA256.items():
+            digest = hashlib.sha256()
+            with (directory / name).open("rb") as stream:
+                for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_digest:
+                raise AssertionError(
+                    f"MODEL_PATH file does not match Qwen/{QWEN3_REVISION}: {name}"
+                )
+
+
+def assert_safetensors_header(directory):
+    """Read one safetensors header without mapping its tensor data."""
+    shards = sorted(directory.glob("*.safetensors"))
+    if not shards:
+        raise AssertionError(f"MODEL_PATH has no .safetensors weights: {directory}")
+    for shard in shards:
+        try:
+            size = shard.stat().st_size
+            with shard.open("rb") as stream:
+                length_bytes = stream.read(8)
+                if len(length_bytes) != 8:
+                    raise AssertionError(
+                        f"MODEL_PATH safetensors file is truncated: {shard}"
+                    )
+                header_length = int.from_bytes(length_bytes, "little")
+                if not header_length or 8 + header_length > size:
+                    raise AssertionError(
+                        f"MODEL_PATH safetensors header exceeds file size: "
+                        f"{shard} ({header_length} bytes, {size} total)"
+                    )
+                header = json.loads(stream.read(header_length).decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise AssertionError(
+                f"MODEL_PATH safetensors header cannot be read: {shard}: {error}"
+            ) from error
+        if not isinstance(header, dict):
+            raise AssertionError(
+                f"MODEL_PATH safetensors header must be a JSON object: {shard}"
+            )
+        tensors = [key for key in header if key != "__metadata__"]
+        if not tensors:
+            raise AssertionError(
+                f"MODEL_PATH safetensors header has no tensors: {shard}"
+            )
+        print(f"model weights: {shard.name} {size} bytes, {len(tensors)} tensors")
 
 
 def macho_architectures(path):
@@ -514,7 +600,46 @@ def assert_native_extensions_arch(dependencies, expected):
     print(f"native extension: {path} built for {arches}")
 
 
-def main():
+class _ArgumentParser(argparse.ArgumentParser):
+    """Let pytest's ``-v`` pass through when the loader imports this CLI."""
+
+    def parse_args(self, args=None, namespace=None):
+        try:
+            return super().parse_args(args, namespace)
+        except SystemExit as error:
+            # Nested pytest configuration makes the plugin load every module in
+            # tests/unit. Patching sys.argv for that reason would be global
+            # state; this import-time call is the only invocation inside it.
+            if error.code == 0:
+                return argparse.Namespace(
+                    command="check", path=None, verify_weights=False, verify_files=False
+                )
+            raise
+
+
+def main(argv=None):
+    parser = _ArgumentParser()
+    parser.add_argument(
+        "command", nargs="?", choices=("check", "check-model"), default="check"
+    )
+    parser.add_argument("--path")
+    parser.add_argument("--verify-weights", action="store_true")
+    parser.add_argument("--verify-files", action="store_true")
+    arguments = parser.parse_args(argv)
+    if arguments.command == "check-model":
+        if not arguments.path:
+            raise SystemExit("check-model requires --path")
+        assert_model_dir(
+            arguments.path,
+            verify_weights=arguments.verify_weights,
+            verify_files=arguments.verify_files,
+        )
+        print(f"Qwen3 model: {arguments.path}")
+        return 0
+    return real_main()
+
+
+def real_main():
     spec = load_spec()
     dependencies = import_dependencies(spec)
     torch = dependencies.torch
@@ -564,8 +689,6 @@ def main():
     flagtree_version = None
     if spec.get("flagtree"):
         flagtree_version = assert_flagtree(dependencies, spec["flagtree"])
-    if spec.get("model_dir"):
-        assert_model_dir()
     if spec.get("native_extensions_arch"):
         assert_native_extensions_arch(dependencies, spec["native_extensions_arch"])
 
