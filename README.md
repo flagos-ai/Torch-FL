@@ -84,7 +84,7 @@ Capability availability and validation status vary by platform. A feature existi
 | Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | FlagGems-first Triton kernels, native mudnn fallback, CPU fallback for unrouted ops | Eager, FP16/BF16 AMP | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |
 | D-Robotics BPU | No eager kernels; `torch.compile` graph path via hbdk4 | Graph compilation only | **Runtime only** | [BPU](docs/vendors/bpu/installation.md) |
-| TsingMicro | Runtime build selector exists | Setup not documented | **Runtime only** | — |
+| TsingMicro | FlagGems-primary over the Kuiper TX runtime; no vendor-native operator library | Eager (FlagGems routes), RNG (host-draw kernels), Qwen-Image-2.1 rotary embedding | **Experimental** | [TsingMicro](docs/vendors/tsingmicro/installation.md) |
 
 **Status definitions:**
 
