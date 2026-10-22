@@ -286,8 +286,27 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
         for step in mount["steps"]
         if step.get("name") == "Prepare the fixed model bind root"
     )
-    assert locate["env"]["HOST_MODEL_ROOT"] == "/var/lib/torch-fl-ci/models"
+    assert "HOST_MODEL_ROOT" not in locate["env"]
+    assert 'HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"' in locate["run"]
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in locate["run"]
+    publish = next(
+        step for step in mount["steps"] if step.get("id") == "configure-model"
+    )
+    assert "model_path=${{ needs.configuration.outputs.model_path }}" in publish["run"]
+    assert mount["outputs"]["model_path"] == (
+        "${{ steps.configure-model.outputs.model_path }}"
+    )
+    workspace = next(
+        step for step in integration["steps"] if step.get("id") == "workspace"
+    )
+    assert (
+        workspace["env"]["HOST_MODEL_ROOT"] == "${{ needs.model-mount.outputs.root }}"
+    )
+    assert workspace["env"]["MODEL_PATH"] == (
+        "${{ needs.model-mount.outputs.model_path }}"
+    )
+    assert '--model-root "$HOST_MODEL_ROOT"' in workspace["run"]
+    assert '--model-path "$MODEL_PATH"' in workspace["run"]
     restore = next(
         step
         for step in mount["steps"]
@@ -323,7 +342,8 @@ def test_every_platform_restores_the_model_to_the_mount_path():
         for step in workflow["jobs"]["model-mount"]["steps"]
         if step.get("id") == "model-storage"
     )
-    assert step["env"]["HOST_MODEL_ROOT"] == "/var/lib/torch-fl-ci/models"
+    assert "HOST_MODEL_ROOT" not in step["env"]
+    assert 'HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"' in step["run"]
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in step["run"]
     assert "NETS" not in step["run"]
 

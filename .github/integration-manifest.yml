@@ -331,34 +331,35 @@ steps:
     command: >-
       cd "$GITHUB_WORKSPACE" && python .github/scripts/check_platform_environment.py
       check-model --path "$MODEL_PATH" --verify-weights
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
 
   # The model load and one traced forward run report which operations reach a
   # native kernel. This is an observation, not a fallback-free requirement.
   - id: fallback_trace
     name: Trace Qwen3 inference fallbacks
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_fallback_trace.py
       --model "$MODEL_PATH" --max-new-tokens 8 -v -s --tb=short
 
   # The Qwen3 groups use the checkpoint published once by the integration
   # workflow. MODEL_PATH is identical in every Linux container and on MPS; see
-  # configs/*.yml for the one model bind root and workflow for its population.
+  # workflow for the job-specific host path and container_workspace.py for its
+  # replacement of the static mount.
   - id: inference
     name: Run inference tests
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py --model "$MODEL_PATH"
       -v -s --tb=short
 
   - id: training
     name: Run training tests
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py --model "$MODEL_PATH"
       -v -s --tb=short
@@ -367,8 +368,8 @@ steps:
   # group above, then reports the operations reached during forward/backward.
   - id: fallback_trace_train
     name: Trace Qwen3 training fallbacks
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_fallback_trace_train.py
       --model "$MODEL_PATH" --steps 2 --seq-len 32 -v -s --tb=short
@@ -378,8 +379,8 @@ steps:
   # tracer emits them. A platform with no device events fails, rather than skip.
   - id: qwen3_profiler
     name: Profile Qwen3 inference
-    environment:
-      MODEL_PATH: /models/Qwen3-0.6B
+    environment_from_job:
+      MODEL_PATH: /var/lib/torch-fl-ci/models/Qwen3-0.6B
     command: >-
       python -m pytest tests/integration/test_profiler_qwen3_infer.py
       --model "$MODEL_PATH" -v -s --tb=short

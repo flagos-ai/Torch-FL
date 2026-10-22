@@ -221,9 +221,9 @@ as `NOT_IN_VERSION` rather than as a failure.
 
 Model integration tests accept command-line options for model path and hyperparameters.
 CI runs all six Qwen3 groups on every hardware platform. They use the same
-arguments, environment, and checkpoint at `/models/Qwen3-0.6B`; no platform
-omits a model case because it lacks a mount. The integration job downloads and
-validates `Qwen/Qwen3-0.6B` at revision
+arguments, environment, and checkpoint at `/var/lib/torch-fl-ci/models/Qwen3-0.6B`
+inside Linux containers; no platform omits a model case because it lacks a
+mount. The integration job downloads and validates `Qwen/Qwen3-0.6B` at revision
 `c1899de289a04d12100db370d81485cdf75e47ca` before starting the platform
 commands. A cache miss is handled by a direct download.
 

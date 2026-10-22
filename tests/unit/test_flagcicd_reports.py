@@ -542,6 +542,8 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
             "CONTAINER_CONFIG": "",
             "FLAGCICD_REPORT_DIR": str(reports),
             "PIP_CACHE_DIR": str(cache),
+            "PYTEST_REPORT": str(container_workspace / "pytest-cuda.json"),
+            "COVERAGE_REPORT": str(container_workspace / "coverage-cuda.json"),
             "REPORT_PLATFORM": "cuda",
             "TEST_OUTCOME": "success",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
@@ -557,6 +559,11 @@ def test_merger_cli_writes_the_report_path_used_by_the_workflow(tmp_path):
         # github.workspace can name a host-only path in a job container.
         value = value.replace("${{ github.workspace }}", str(host_workspace))
         value = value.replace("${{ env.PIP_CACHE_DIR }}", str(cache))
+        value = value.replace("${{ env.ARTIFACT_ROOT }}", str(container_workspace))
+        value = value.replace("${{ env.PYTEST_REPORT_ROOT }}", str(tmp_path / "pytest"))
+        value = value.replace(
+            "${{ env.PYTEST_REPORT }}", str(container_workspace / "pytest-cuda.json")
+        )
         value = value.replace("${{ inputs.platform }}", "cuda")
         return container_workspace / value
 

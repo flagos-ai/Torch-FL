@@ -36,16 +36,13 @@ paths_watch:
   - .github/scripts/set_env_ppu.sh
   - scripts/vendor/bundle_ppu_libtorch.sh
 
-container_volumes:
+container_volumes: []
   # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
   # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
   # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
   # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
   # installs the FlagGems stack into the job venv from published FlagOS wheels,
   # so the environment is reproducible from the image plus those indexes alone.
-  # The integration workflow fills this stable bind root before the job
-  # container starts. RUNNER_TEMP changes per job and cannot be named here.
-  - /var/lib/torch-fl-ci/models:/models:ro
 
 integration_environment: {}
 

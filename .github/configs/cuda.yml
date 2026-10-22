@@ -42,8 +42,7 @@ paths_watch:
   - .github/scripts/set_env_cuda.sh
   - scripts/vendor/with_cuda_libtorch.sh
 
-container_volumes:
-  - /var/lib/torch-fl-ci/models:/models:ro
+container_volumes: []
 
 integration_environment: {}
 

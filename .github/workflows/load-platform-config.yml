@@ -92,6 +92,9 @@ on:
       integration_tests:
         description: The integration test manifest, as JSON
         value: ${{ jobs.configuration.outputs.integration_tests }}
+      model_path:
+        description: Checkpoint directory in the shared container namespace
+        value: ${{ jobs.configuration.outputs.model_path }}
       test_inventories:
         description: Exact shared test case inventories, as JSON
         value: ${{ jobs.configuration.outputs.test_inventories }}
@@ -144,6 +147,7 @@ jobs:
       integration_timeout_minutes: ${{ steps.config.outputs.integration_timeout_minutes }}
       wheel_artifact_name: ${{ steps.config.outputs.wheel_artifact_name }}
       integration_tests: ${{ steps.config.outputs.integration_tests }}
+      model_path: ${{ steps.config.outputs.model_path }}
       test_inventories: ${{ steps.config.outputs.test_inventories }}
       test_inventory_kinds: ${{ steps.config.outputs.test_inventory_kinds }}
       integration_inventories: ${{ steps.config.outputs.integration_inventories }}
@@ -241,6 +245,13 @@ jobs:
             > "$COMPOSER_STDOUT" 2> "$COMPOSER_NOTES"
           INTEGRATION_TESTS=$(<"$COMPOSER_STDOUT")
           cat "$COMPOSER_NOTES" >&2
+          MODEL_PATH=$(awk '
+            /^model-path=/ {sub(/^model-path=/, ""); print; exit}
+          ' "$COMPOSER_NOTES")
+          if [[ -z "$MODEL_PATH" || "$MODEL_PATH" != /* ]]; then
+            echo "::error::the composed integration plan has no absolute model path"
+            exit 1
+          fi
 
           # The composer's inventory plan is the one place that decides which
           # shared inventory groups this platform runs. The helper turns it
@@ -386,6 +397,7 @@ jobs:
           emit integration_timeout_minutes "$INTEGRATION_TIMEOUT"
           emit wheel_artifact_name "$ARTIFACT_NAME"
           emit integration_tests "$INTEGRATION_TESTS"
+          emit model_path "$MODEL_PATH"
           cat "$INVENTORY_OUTPUTS" >> "$GITHUB_OUTPUT"
           emit integration_environment "$INTEGRATION_ENVIRONMENT"
           emit_list integration_build_tools "$BUILD_TOOLS"

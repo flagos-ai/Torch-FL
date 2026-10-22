@@ -39,8 +39,7 @@ paths_watch:
   - scripts/codegen/codegen_musa_flaggems.py
   - scripts/codegen/codegen_mudnn.py
 
-container_volumes:
-  - /var/lib/torch-fl-ci/models:/models:ro
+container_volumes: []
 
 integration_environment: {}
 

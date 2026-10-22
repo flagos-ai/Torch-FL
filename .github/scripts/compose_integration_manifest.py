@@ -53,6 +53,7 @@ _ENTRY_KEYS = {
     "platforms",
     "environment",
     "environment_from_config",
+    "environment_from_job",
     "requires_build_kernels",
 }
 
@@ -207,6 +208,30 @@ def validate_manifest(manifest, known):
                 _require_string(
                     variable, f"steps[{index}].environment_from_config[{key}]"
                 )
+        environment_from_job = entry.get("environment_from_job")
+        if environment_from_job is not None:
+            if not isinstance(environment_from_job, dict) or not environment_from_job:
+                raise ManifestError(
+                    f"steps[{index}].environment_from_job must be a non-empty mapping"
+                )
+            for variable, value in environment_from_job.items():
+                if variable in {"INTEGRATION_MODEL", "RUNNER_TEMP"}:
+                    raise ManifestError(
+                        f"steps[{index}].environment_from_job cannot set {variable}; "
+                        "the shared container workspace owns it"
+                    )
+                _require_string(variable, f"steps[{index}].environment_from_job key")
+                _require_string(
+                    value, f"steps[{index}].environment_from_job[{variable}]"
+                )
+                if not value.startswith("/") or any(
+                    part in {"", ".", ".."} for part in value.split("/")[1:]
+                ):
+                    raise ManifestError(
+                        f"steps[{index}].environment_from_job[{variable}] must be "
+                        "an absolute path without parent components"
+                    )
+
         required = entry.get("requires_build_kernels")
         if required is not None:
             if (
@@ -298,6 +323,8 @@ def compose(manifest, config, platform, known):
                 block, separators=(",", ":"), sort_keys=True
             )
             consumed_from_config.add(key)
+        for variable, value in (entry.get("environment_from_job") or {}).items():
+            environment[variable] = value
         step = {
             "id": entry["id"],
             "name": entry["name"].replace(DISPLAY_NAME_TOKEN, display_name),
@@ -395,6 +422,11 @@ def main(argv=None):
     parser.add_argument("--manifest", required=True, help="manifest as JSON")
     parser.add_argument("--platform-config", required=True, help="config as JSON")
     parser.add_argument(
+        "--model-path-group",
+        default="model",
+        help="group whose MODEL_PATH describes the prepared checkpoint",
+    )
+    parser.add_argument(
         "--config-dir",
         default=".github/configs",
         help="directory the platform list is read from",
@@ -407,6 +439,18 @@ def main(argv=None):
         known = known_platforms(args.config_dir)
         steps, _ids, assigned = validate_manifest(manifest, known)
         composed = compose(manifest, config, args.platform, known)
+        model_groups = [
+            step
+            for step in composed
+            if step["id"] == args.model_path_group
+            and "MODEL_PATH" in step.get("environment", {})
+        ]
+        if len(model_groups) != 1:
+            raise ManifestError(
+                f"the composed {args.platform} plan must contain exactly one "
+                f"{args.model_path_group!r} group with MODEL_PATH"
+            )
+        model_path = model_groups[0]["environment"]["MODEL_PATH"]
         excluded = {
             entry["id"]
             for entry in steps
@@ -450,6 +494,7 @@ def main(argv=None):
         f"loader-inventory-arguments={source_inventory_arguments(composed)}",
         file=sys.stderr,
     )
+    print(f"model-path={model_path}", file=sys.stderr)
     print(
         "inventory-plan="
         + json.dumps(

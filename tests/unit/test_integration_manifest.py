@@ -316,12 +316,15 @@ def test_every_platform_has_the_same_model_groups_and_environment(platform):
     )
     assert set(model_groups) <= groups.keys()
     for group in model_groups:
-        assert groups[group]["environment"]["MODEL_PATH"] == "/models/Qwen3-0.6B"
+        assert (
+            groups[group]["environment"]["MODEL_PATH"]
+            == "/var/lib/torch-fl-ci/models/Qwen3-0.6B"
+        )
 
-    if config["ci_image"]:
-        assert "/var/lib/torch-fl-ci/models:/models:ro" in config["container_volumes"]
-    else:
-        assert config["container_volumes"] == []
+    assert not any(
+        mount.split(":", 2)[1].startswith("/var/lib/torch-fl-ci/models")
+        for mount in config["container_volumes"]
+    )
 
 
 def test_every_platform_runs_the_same_model_cases():
@@ -715,7 +718,12 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
         == 0
     )
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == composed_steps("cuda")
+    groups = json.loads(captured.out)
+    assert groups == composed_steps("cuda")
+    model = next(step for step in groups if step["id"] == "model")
+    assert (
+        f"model-path={model['environment']['MODEL_PATH']}" in captured.err.splitlines()
+    )
     # The loader prints how far the platforms still differ, once per platform.
     assert "cuda:" in captured.err
     assert "do not run on every platform yet" in captured.err
@@ -927,6 +935,7 @@ def test_the_configuration_step_writes_every_declared_output(tmp_path):
             "INTEGRATION_TIMEOUT": "90",
             "ARTIFACT_NAME": "wheel-cuda",
             "INTEGRATION_TESTS": "[]",
+            "MODEL_PATH": "/var/lib/torch-fl-ci/models/Qwen3-0.6B",
             "INTEGRATION_ENVIRONMENT": "{}",
             "BUILD_TOOLS": "",
             "TEST_DEPENDENCIES": "",
@@ -1044,7 +1053,8 @@ def test_the_hardware_job_materializes_and_retains_each_inventory():
     assert '"${inventory_arguments[@]}"' in folded
     retained = source.split("- name: Retain shared test inventories", 1)
     assert len(retained) == 2, "the hardware job does not retain the inventories"
-    assert "${{ env.PIP_CACHE_DIR }}/../torch-fl-inventories/" in retained[1]
+    assert "${{ env.INVENTORY_ROOT }}/" in retained[1]
+    assert "${{ runner.temp }}/torch-fl-inventories" in retained[1]
     assert "shared-test-inventory-" not in source
 
 
@@ -1175,3 +1185,41 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
         == 1
     )
     assert "::error::" in capsys.readouterr().err
+
+
+def test_the_model_root_comes_from_the_model_mount_job():
+    """The container replacement uses the source prepared by its sibling job."""
+    for platform in _PLATFORMS:
+        groups = {step["id"]: step for step in composed_steps(platform)}
+        assert groups["model"]["environment"]["MODEL_PATH"] == (
+            "/var/lib/torch-fl-ci/models/Qwen3-0.6B"
+        )
+        config = platform_config(platform)
+        model_mounts = [
+            mount
+            for mount in config["container_volumes"]
+            if mount.split(":", 2)[1].startswith("/var/lib/torch-fl-ci/models")
+        ]
+        assert model_mounts == []
+
+
+def test_artifacts_use_runner_paths_without_parent_components():
+    workflow = yaml.safe_load(
+        (_REPO / ".github/workflows/integration-tests.yml").read_text()
+    )
+    steps = {
+        step.get("name"): step
+        for step in workflow["jobs"]["integration-tests"]["steps"]
+    }
+    for name in (
+        "Retain pytest reports",
+        "Retain shared test inventories",
+        "Retain Python coverage",
+    ):
+        step = steps[name]
+        values = "\n".join(step["with"]["path"].splitlines())
+        assert "/../" not in values
+        roots = {key: step["env"][key] for key in step["env"] if key.endswith("ROOT")}
+        assert roots
+        assert all(value.startswith("${{ runner.temp }}/") for value in roots.values())
+        assert all(f"${{{{ env.{key} }}}}" in values for key in roots)

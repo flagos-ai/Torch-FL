@@ -370,13 +370,17 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     source = tmp_path / "checkout"
     (source / "nested").mkdir(parents=True)
     (source / "nested/source.py").write_text("source = True\n")
+    model_root = tmp_path / "models"
+    (model_root / "Qwen3-0.6B").mkdir(parents=True)
     settings = workspace_script.prepare(
         argparse.Namespace(
             checkout=str(source),
             runner_temp=str(tmp_path / "runner"),
+            model_root=str(model_root),
+            model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
             image="vendor/image:tag",
             digest="vendor/image@sha256:" + "a" * 64,
-            volumes='["/models:/models:ro", "/runtime:/runtime"]',
+            volumes='["/models:/models:ro", "/runtime:/runtime", "/var/lib/torch-fl-ci/models:/old/models:ro"]',
             options="",
         )
     )
@@ -384,7 +388,9 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     assert config["cache"] == str(tmp_path / "runner/torch-fl-pip")
     assert config["platform"] == "cuda"
     assert Path(settings["workspace"], "nested/source.py").is_file()
-    assert "MODEL_PATH=/models/Qwen3-0.6B" in Path(config["environment"]).read_text()
+    environment = Path(config["environment"]).read_text()
+    model_path = shlex.split(environment.split("MODEL_PATH=", 1)[1].splitlines()[0])[0]
+    assert model_path == str(model_root / "Qwen3-0.6B")
     for value in config["inline_environment"]:
         assert f"{value}=" in Path(config["environment"]).read_text(), value
         assert f"{value}=" in host_env.read_text(), value
@@ -399,12 +405,14 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     )
     volumes = workspace_script._container_volumes(config["volumes"], config)
     assert "/models:/models:ro" not in volumes
-    assert "/var/lib/torch-fl-ci/models:/var/lib/torch-fl-ci/models:ro" in volumes
+    assert f"{model_root}:/var/lib/torch-fl-ci/models:ro" in volumes
     with pytest.raises(workspace_script.WorkspaceError, match="inside the checkout"):
         workspace_script.prepare(
             argparse.Namespace(
                 checkout=str(source),
                 runner_temp=str(source),
+                model_root=str(model_root),
+                model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
                 image="",
                 digest="",
                 volumes="[]",
@@ -551,3 +559,37 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
         "SECOND=1",
     ]
     assert (state / "path.command").read_text() == host_path.read_text()
+
+
+def test_unqualified_image_tags_resolve_to_their_repository_digest():
+    """Docker reports an unqualified pull by repository, not by tag.
+
+    The PPU image is configured as ``registry/image:tag`` yet Docker's
+    RepoDigests entry omits the tag. Requiring a literal match stopped the job
+    before its device was inspected; the resolver must accept that repository
+    digest without accepting a different repository.
+    """
+    workflow = _workflow("integration-tests.yml")
+    run = next(
+        step
+        for step in workflow["jobs"]["integration-tests"]["steps"]
+        if step.get("id") == "workspace"
+    )["run"]
+    resolver = run.split("python3 -c '", 1)[1].split('\' "$image")', 1)[0]
+    resolver = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in resolver.splitlines()
+    )
+    digest = "sha256:" + "a" * 64
+    image = "harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev"
+    repository = image.rsplit(":", 1)[0]
+    misleading = "harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl-misleading@" + digest
+    result = subprocess.run(
+        [sys.executable, "-c", resolver, image],
+        input=json.dumps([misleading, f"{repository}@{digest}"]),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{repository}@{digest}"

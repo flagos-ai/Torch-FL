@@ -107,6 +107,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       root: ${{ steps.configure-model.outputs.root }}
+      model_path: ${{ steps.configure-model.outputs.model_path }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,14 +118,14 @@ jobs:
       - name: Prepare the fixed model bind root
         id: model-storage
         env:
-          HOST_MODEL_ROOT: /var/lib/torch-fl-ci/models
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
+          HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"
           root="$HOST_MODEL_ROOT/Qwen3-0.6B"
           mkdir -p "$root"
-          chmod u+rwx "$HOST_MODEL_ROOT"
-          chmod u+rwx "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "root=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
 
       # A timed-out cache lookup can return success without a matched key. A
       # failed matched transfer must not upload an incomplete checkpoint.
@@ -249,11 +250,13 @@ jobs:
             check-model --path "$MODEL_SOURCE" --verify-weights --verify-files
           echo "root=$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
 
-      # The restored directory is made read-only for the container, but the
-      # cache exporter must be able to read and write its own archive metadata.
-      - name: Publish the verified model path
+      # Publish the directory containing the validated checkpoint. The
+      # integration job replaces the static mount with this job-specific path.
+      - name: Publish the verified model root
         id: configure-model
-        run: echo "root=${{ steps.model-storage.outputs.root }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "root=$HOST_MODEL_ROOT" >> "$GITHUB_OUTPUT"
+          echo "model_path=${{ needs.configuration.outputs.model_path }}" >> "$GITHUB_OUTPUT"
 
       # Save only a verified, exact cache miss. A present cache is left alone.
       - name: Save the pinned Qwen3 checkpoint
@@ -298,11 +301,14 @@ jobs:
           CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
           CONTAINER_VOLUMES: ${{ needs.configuration.outputs.container_volumes }}
           CONTAINER_OPTIONS: ${{ needs.configuration.outputs.container_options }}
+          HOST_MODEL_ROOT: ${{ needs.model-mount.outputs.root }}
+          MODEL_PATH: ${{ needs.model-mount.outputs.model_path }}
           CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           CHECKOUT_REF: ${{ inputs.checkout_ref || github.sha }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
+          test -d "$HOST_MODEL_ROOT/Qwen3-0.6B"
           image="$CI_IMAGE"
           digest="$image"
           if [[ -n "$image" ]]; then
@@ -311,10 +317,13 @@ jobs:
               digest=$(docker image inspect --format '{{json .RepoDigests}}' "$image" |
                 python3 -c '
           import json
+          import re
           import sys
           image = sys.argv[1]
+          configured = image.partition("@")[0].rsplit(":", 1)[0]
           digests = json.load(sys.stdin)
-          matching = [item for item in digests if item.split("@", 1)[0] == image]
+          expected = configured + "@sha256:"
+          matching = [item for item in digests if isinstance(item, str) and item.startswith(expected) and len(item) == len(expected) + 64 and all(char in "0123456789abcdef" for char in item[len(expected):])]
           if not matching:
               raise SystemExit(f"no RepoDigest for {image}: {digests}")
           if len(set(item.split("@", 1)[1] for item in matching)) != 1:
@@ -324,6 +333,7 @@ jobs:
             fi
           fi
           args=(--checkout "$GITHUB_WORKSPACE" --runner-temp "${RUNNER_TEMP:-/tmp}")
+          args+=(--model-root "$HOST_MODEL_ROOT" --model-path "$MODEL_PATH")
           args+=(--image "$image" --digest "$digest")
           args+=(--volumes "$CONTAINER_VOLUMES" --options "$CONTAINER_OPTIONS")
           python3 .github/scripts/container_workspace.py prepare "${args[@]}"
@@ -810,11 +820,14 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/torch-fl-workspace
+          PYTEST_REPORT_ROOT: ${{ runner.temp }}/torch-fl-pytest
         with:
           name: pytest-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            ${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/pytest-${{ inputs.platform }}.json
-            ${{ env.PIP_CACHE_DIR }}/../torch-fl-pytest/
+            ${{ env.ARTIFACT_ROOT }}/pytest-${{ inputs.platform }}.json
+            ${{ env.PYTEST_REPORT_ROOT }}/
           if-no-files-found: warn
 
       - name: Retain shared test inventories
@@ -822,9 +835,11 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 2
+        env:
+          INVENTORY_ROOT: ${{ runner.temp }}/torch-fl-inventories
         with:
           name: inventories-${{ inputs.platform }}-${{ github.run_attempt }}
-          path: ${{ env.PIP_CACHE_DIR }}/../torch-fl-inventories/
+          path: ${{ env.INVENTORY_ROOT }}/
           if-no-files-found: warn
 
       - name: Merge Python line coverage
@@ -864,11 +879,14 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         timeout-minutes: 3
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/torch-fl-workspace
+          COVERAGE_REPORT_ROOT: ${{ runner.temp }}/torch-fl-coverage
         with:
           name: coverage-${{ inputs.platform }}-${{ github.run_attempt }}
           path: |
-            ${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/coverage-${{ inputs.platform }}.json
-            ${{ env.PIP_CACHE_DIR }}/../torch-fl-coverage/
+            ${{ env.ARTIFACT_ROOT }}/coverage-${{ inputs.platform }}.json
+            ${{ env.COVERAGE_REPORT_ROOT }}/
           if-no-files-found: warn
 
       - name: Check FlagCICD upload availability
@@ -899,10 +917,12 @@ jobs:
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         timeout-minutes: 2
+        env:
+          PYTEST_REPORT: ${{ runner.temp }}/torch-fl-workspace/pytest-${{ inputs.platform }}.json
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: '${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/pytest-${{ inputs.platform }}.json'
+          report_path: '${{ env.PYTEST_REPORT }}'
           file_type: pytest
           job_name: integration-tests-${{ inputs.platform }}
           fail_on_error: 'false'
@@ -912,10 +932,12 @@ jobs:
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         timeout-minutes: 2
+        env:
+          COVERAGE_REPORT: ${{ runner.temp }}/torch-fl-workspace/coverage-${{ inputs.platform }}.json
         with:
           backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
           api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
-          report_path: '${{ env.PIP_CACHE_DIR }}/../torch-fl-workspace/coverage-${{ inputs.platform }}.json'
+          report_path: '${{ env.COVERAGE_REPORT }}'
           file_type: coverage
           job_name: coverage-${{ inputs.platform }}
           fail_on_error: 'false'

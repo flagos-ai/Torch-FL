@@ -74,8 +74,8 @@ def _write_environment(path, settings):
         "INTEGRATION_INVENTORY_ROOT": settings["reports"]["inventories"],
         "INTEGRATION_PLATFORM": os.environ["INTEGRATION_PLATFORM"],
         "INTEGRATION_IMAGE": settings["digest"],
-        "INTEGRATION_MODEL": str(MODEL_PATH),
-        "MODEL_PATH": str(MODEL_PATH),
+        "INTEGRATION_MODEL": settings["model_path"],
+        "MODEL_PATH": settings["model_path"],
         # Keep setup venvs and caches in mounted runner directories outside the
         # source copy so every container command sees the same installation.
         "RUNNER_TEMP": str(Path(settings["workspace"]).parent),
@@ -130,15 +130,15 @@ def _volume(item):
 
 
 def _container_volumes(volumes, settings):
-    """Keep platform mounts and replace the model root with its validated host path."""
+    """Keep platform mounts and replace the model path with the prepared host path."""
     output = []
     for item in volumes:
-        entry, source, destination = _volume(item)
-        if source == MODEL_ROOT or destination == "/models":
+        entry, _source, destination = _volume(item)
+        if destination == str(MODEL_ROOT) or destination == "/models":
             continue
         if not destination.startswith(str(MODEL_ROOT) + "/"):
             output.append(entry)
-    output.append(f"{MODEL_ROOT}:{MODEL_ROOT}:ro")
+    output.append(f"{settings['model_root']}:{MODEL_ROOT}:ro")
     output.extend(
         (
             f"{settings['workspace']}:{settings['workspace']}",
@@ -160,10 +160,22 @@ def prepare(arguments):
     """Copy the checkout and prepare paths shared by the host and container."""
     checkout = Path(arguments.checkout).resolve()
     runner_temp = Path(arguments.runner_temp).resolve()
+    model_root = Path(arguments.model_root) if arguments.model_root else MODEL_ROOT
+    model_path = Path(arguments.model_path)
     if not checkout.is_dir():
         raise WorkspaceError(f"the checkout is missing: {checkout}")
     if runner_temp == checkout or runner_temp.is_relative_to(checkout):
         raise WorkspaceError("RUNNER_TEMP must not be inside the checkout")
+    if not model_root.is_absolute() or not model_root.is_dir():
+        raise WorkspaceError(f"the prepared model root is missing: {model_root}")
+    model_root = model_root.resolve()
+    if not (model_root / MODEL_PATH.name).is_dir():
+        raise WorkspaceError(f"the prepared checkpoint is missing: {model_root}")
+    expected_path = model_root / MODEL_PATH.name
+    if not model_path.is_absolute() or model_path.parent != MODEL_ROOT:
+        raise WorkspaceError(f"the model path must be below {MODEL_ROOT}: {model_path}")
+    if model_path.name != expected_path.name:
+        raise WorkspaceError(f"the model path and checkpoint disagree: {model_path}")
     if arguments.image and not arguments.digest:
         raise WorkspaceError("a configured image has no resolved RepoDigest")
     try:
@@ -181,6 +193,8 @@ def prepare(arguments):
         "runtime": str(runner_temp / "torch-fl-runtime"),
         "profile_home": str(runner_temp / "torch-fl-profile-home"),
         "cache": str(runner_temp / "torch-fl-pip"),
+        "model_root": str(model_root),
+        "model_path": str(expected_path),
         "artifacts": str(runner_temp / "torch-fl-artifacts"),
         "reports": {
             name: str(runner_temp / f"torch-fl-{name}") for name in REPORT_DIRS
@@ -303,7 +317,7 @@ def start(settings):
     image, digest = settings["image"], settings["digest"]
     if not image or not digest:
         raise WorkspaceError("starting a container requires image and digest")
-    if image and not image.startswith(digest.split("@", 1)[0]):
+    if image and digest.split("@", 1)[0] != image.split("@", 1)[0]:
         raise WorkspaceError("the image name does not match its resolved digest")
     name = (
         f"torch-fl-{os.environ['GITHUB_RUN_ID']}-"
@@ -355,6 +369,8 @@ def main(argv=None):
     parser.add_argument("--container", default="")
     parser.add_argument("--checkout")
     parser.add_argument("--runner-temp")
+    parser.add_argument("--model-root")
+    parser.add_argument("--model-path", default=str(MODEL_ROOT / MODEL_PATH.name))
     parser.add_argument("--image", default="")
     parser.add_argument("--digest", default="")
     parser.add_argument("--volumes", default="[]")

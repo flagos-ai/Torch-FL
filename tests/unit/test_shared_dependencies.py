@@ -487,8 +487,9 @@ def test_shared_dependency_checks_use_the_loaded_platform_contract():
         if step.get("name") == "Install shared test dependencies"
     )
     assert "--flag-gems" in step["run"]
-    assert "needs.configuration.outputs.flag_gems_requirement" in step["run"]
-    assert "${{ needs.configuration.outputs.flag_gems_requirement }}" in step["run"]
+    assert step["env"]["FLAG_GEMS_REQUIREMENT"] == (
+        "${{ needs.configuration.outputs.flag_gems_requirement }}"
+    )
     # PyYAML 1.1 reads the unquoted `on` key as a boolean.
     workflow_call = loader.get("on") or loader[True]
     assert "flag_gems_requirement" in workflow_call["workflow_call"]["outputs"]
