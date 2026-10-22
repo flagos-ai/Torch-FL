@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 MODEL_ROOT = Path("/var/lib/torch-fl-ci/models")
-MODEL_PATH = Path("/models/Qwen3-0.6B")
+MODEL_NAME = Path("Qwen3-0.6B")
 INLINE_ENVIRONMENT = {
     "GITHUB_ENV",
     "GITHUB_OUTPUT",
@@ -56,7 +56,7 @@ def _publish_inline(settings, values):
         del sys.path[0]
 
 
-def _write_environment(path, settings):
+def _write_environment(path, settings, *, native):
     values = {
         "GITHUB_ENV": settings["state"] + "/container-environment",
         "GITHUB_OUTPUT": settings["state"] + "/output",
@@ -74,8 +74,10 @@ def _write_environment(path, settings):
         "INTEGRATION_INVENTORY_ROOT": settings["reports"]["inventories"],
         "INTEGRATION_PLATFORM": os.environ["INTEGRATION_PLATFORM"],
         "INTEGRATION_IMAGE": settings["digest"],
-        "INTEGRATION_MODEL": settings["model_path"],
-        "MODEL_PATH": settings["model_path"],
+        "INTEGRATION_MODEL": (
+            settings["host_model_path"] if native else settings["model_path"]
+        ),
+        "MODEL_PATH": settings["model_path"] if native else settings["host_model_path"],
         # Keep setup venvs and caches in mounted runner directories outside the
         # source copy so every container command sees the same installation.
         "RUNNER_TEMP": str(Path(settings["workspace"]).parent),
@@ -169,9 +171,9 @@ def prepare(arguments):
     if not model_root.is_absolute() or not model_root.is_dir():
         raise WorkspaceError(f"the prepared model root is missing: {model_root}")
     model_root = model_root.resolve()
-    if not (model_root / MODEL_PATH.name).is_dir():
+    if not (model_root / MODEL_NAME).is_dir():
         raise WorkspaceError(f"the prepared checkpoint is missing: {model_root}")
-    expected_path = model_root / MODEL_PATH.name
+    expected_path = model_root / MODEL_NAME
     if not model_path.is_absolute() or model_path.parent != MODEL_ROOT:
         raise WorkspaceError(f"the model path must be below {MODEL_ROOT}: {model_path}")
     if model_path.name != expected_path.name:
@@ -194,7 +196,9 @@ def prepare(arguments):
         "profile_home": str(runner_temp / "torch-fl-profile-home"),
         "cache": str(runner_temp / "torch-fl-pip"),
         "model_root": str(model_root),
-        "model_path": str(expected_path),
+        # Hosted macOS validates the runner path; containers see the bind target.
+        "model_path": str(model_path),
+        "host_model_path": str(expected_path),
         "artifacts": str(runner_temp / "torch-fl-artifacts"),
         "reports": {
             name: str(runner_temp / f"torch-fl-{name}") for name in REPORT_DIRS
@@ -260,7 +264,7 @@ def prepare(arguments):
     )
     environment = Path(settings["state"]) / "container-environment"
     settings["environment"] = str(environment)
-    _write_environment(environment, settings)
+    _write_environment(environment, settings, native=not bool(arguments.image))
     settings["environment"] = str(environment)
     config = Path(settings["state"]) / "config.json"
     config.write_text(json.dumps(settings, indent=2), encoding="utf-8")
@@ -302,7 +306,7 @@ def configure(settings, container):
         )
     settings["container"] = container
     settings["environment"] = str(Path(settings["state"]) / "container-environment")
-    _write_environment(settings["environment"], settings)
+    _write_environment(settings["environment"], settings, native=False)
     Path(settings["state"], "config.json").write_text(
         json.dumps(settings, indent=2), encoding="utf-8"
     )
@@ -370,7 +374,7 @@ def main(argv=None):
     parser.add_argument("--checkout")
     parser.add_argument("--runner-temp")
     parser.add_argument("--model-root")
-    parser.add_argument("--model-path", default=str(MODEL_ROOT / MODEL_PATH.name))
+    parser.add_argument("--model-path", default=str(MODEL_ROOT / MODEL_NAME))
     parser.add_argument("--image", default="")
     parser.add_argument("--digest", default="")
     parser.add_argument("--volumes", default="[]")

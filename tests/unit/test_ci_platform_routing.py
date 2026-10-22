@@ -406,6 +406,41 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     volumes = workspace_script._container_volumes(config["volumes"], config)
     assert "/models:/models:ro" not in volumes
     assert f"{model_root}:/var/lib/torch-fl-ci/models:ro" in volumes
+    expected = {
+        "INTEGRATION_MODEL": "/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+        "MODEL_PATH": str(model_root / "Qwen3-0.6B"),
+    }
+    for name, value in expected.items():
+        line = next(item for item in environment.splitlines() if name + "=" in item)
+        assert shlex.split(line)[0] == f"{name}={value}"
+    native = workspace_script.prepare(
+        argparse.Namespace(
+            checkout=str(source),
+            runner_temp=str(tmp_path / "native"),
+            model_root=str(model_root),
+            model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+            image="",
+            digest="",
+            volumes="[]",
+            options="",
+        )
+    )
+    assert native["host_model_path"] == str(model_root / "Qwen3-0.6B")
+    missing = tmp_path / "missing-model"
+    missing.mkdir()
+    with pytest.raises(workspace_script.WorkspaceError, match="prepared checkpoint"):
+        workspace_script.prepare(
+            argparse.Namespace(
+                checkout=str(source),
+                runner_temp=str(tmp_path / "missing-runner"),
+                model_root=str(missing),
+                model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+                image="",
+                digest="",
+                volumes="[]",
+                options="",
+            )
+        )
     with pytest.raises(workspace_script.WorkspaceError, match="inside the checkout"):
         workspace_script.prepare(
             argparse.Namespace(
