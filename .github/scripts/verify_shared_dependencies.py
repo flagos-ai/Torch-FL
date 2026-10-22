@@ -531,6 +531,19 @@ def import_flag_gems():
     return flag_gems
 
 
+def prepare_flag_gems_import(platform):
+    """Apply the same Triton compatibility setup used by torch_fl startup."""
+
+    if platform != "ascend":
+        return
+    # FlagGems imports its Ascend vendor backend during package initialization.
+    # That backend imports FlagTree's TLE package, which may need the same inert
+    # shmem placeholder that torch_fl registers before its own FlagGems import.
+    from torch_fl.compile.flagtree_ascend_tle import ensure_tle_importable
+
+    ensure_tle_importable()
+
+
 def flag_gems_vendor(*, flag_gems_required=False):
     """Return the accelerator selected by FlagGems, or None when optional."""
 
@@ -548,13 +561,14 @@ def flag_gems_vendor(*, flag_gems_required=False):
     return value.lower()
 
 
-def check(module_imports, *, flag_gems_required):
+def check(module_imports, *, platform, flag_gems_required):
     # Vendors such as MetaX and PPU replace torch during torch_fl startup. Load
     # torch_fl before any dependency that can trigger torch initialization:
     # FlagGems imports torch as part of its own initialization.
     imported_torch_fl = _import_torch_fl()
     probe = probe_environment()
 
+    prepare_flag_gems_import(platform)
     vendor = flag_gems_vendor(flag_gems_required=flag_gems_required)
     if flag_gems_required and vendor is None:
         raise SystemExit("FlagGems is required by this platform's build")
@@ -681,6 +695,7 @@ def main():
         module_imports.loader.exec_module(imports)
         check(
             imports.module_imports(PACKAGES),
+            platform=options.platform,
             flag_gems_required=options.flag_gems == "required",
         )
         return

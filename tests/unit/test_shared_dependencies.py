@@ -172,7 +172,7 @@ def test_unloadable_flag_gems_fails_after_torch_startup(monkeypatch):
         lambda: imports.append("environment") or {},
     )
     with pytest.raises(SystemExit, match="FlagGems is required"):
-        module.check({}, flag_gems_required=True)
+        module.check({}, platform="cuda", flag_gems_required=True)
     assert imports == ["torch_fl", "environment", "flag_gems"]
 
 
@@ -191,7 +191,7 @@ def test_qwen_rotation_none_is_not_treated_as_an_import_error(monkeypatch):
         ),
     )
     with pytest.raises(AssertionError, match="startup not reached"):
-        module.check({}, flag_gems_required=True)
+        module.check({}, platform="cuda", flag_gems_required=True)
 
 
 def test_flag_gems_vendor_comes_from_the_startup_contract(monkeypatch):
@@ -200,6 +200,30 @@ def test_flag_gems_vendor_comes_from_the_startup_contract(monkeypatch):
     flag_gems.vendor_name = "Iluvatar"
     monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
     assert module.flag_gems_vendor() == "iluvatar"
+
+
+def test_ascend_registers_flag_tree_tle_before_loading_flag_gems(monkeypatch):
+    module = _load()
+
+    monkeypatch.delitem(sys.modules, "shmem", raising=False)
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "flag_gems",
+        SimpleNamespace(
+            vendor_name="ascend",
+            __getattr__=lambda name: calls.append(name),
+        ),
+    )
+    helper = ModuleType("torch_fl.compile.flagtree_ascend_tle")
+    helper.ensure_tle_importable = lambda: sys.modules.__setitem__("shmem", object())
+    monkeypatch.setitem(sys.modules, "torch_fl.compile.flagtree_ascend_tle", helper)
+
+    module.prepare_flag_gems_import("ascend")
+    assert sys.modules["shmem"]
+    flag_gems = module.import_flag_gems()
+    assert flag_gems.vendor_name == "ascend"
+    assert calls == []
 
 
 def test_qwen_rotation_is_checked_for_its_startup_vendors(monkeypatch, tmp_path):
@@ -260,11 +284,19 @@ def test_qwen_rotation_is_checked_for_its_startup_vendors(monkeypatch, tmp_path)
     rotator.rotator = lambda: lambda x, freqs: x
     monkeypatch.setitem(sys.modules, "verify_shared_dependency_rotator", rotator)
     with pytest.raises(SystemExit, match="iluvatar: torch_fl did not install"):
-        module.check({}, flag_gems_required=True)
+        module.check({}, platform="cuda", flag_gems_required=True)
 
 
 def _raise(error):
     raise error
+
+
+@pytest.mark.parametrize("platform", ["cuda", "metax", "ppu"])
+def test_other_platforms_do_not_load_the_ascend_tle_helper(monkeypatch, platform):
+    module = _load()
+    monkeypatch.setitem(sys.modules, "torch_fl.compile.flagtree_ascend_tle", None)
+
+    module.prepare_flag_gems_import(platform)
 
 
 def test_import_probe_failure_reports_the_child_error(monkeypatch):
@@ -278,7 +310,7 @@ def test_import_probe_failure_reports_the_child_error(monkeypatch):
     monkeypatch.setattr(module, "_installed_package_root", lambda: None)
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: result)
     with pytest.raises(SystemExit) as error:
-        module.check({"onnx": "onnx"}, flag_gems_required=False)
+        module.check({"onnx": "onnx"}, platform="cuda", flag_gems_required=False)
     assert "onnx: shared import probe failed" in str(error.value)
     assert "ImportError: shared probe failed" in str(error.value)
 
