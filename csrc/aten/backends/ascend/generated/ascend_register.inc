@@ -52,7 +52,9 @@
   m.impl("acosh", WrapperAcosh);
   m.impl("acosh_", WrapperAcoshInplace);
   m.impl("add.Scalar", WrapperAddScalar);
+  m.impl("add.Scalar_out", WrapperAddScalarOut);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add.out", WrapperAddOut);
   m.impl("add_.Scalar", WrapperAddInplaceScalar);
   m.impl("add_.Tensor", WrapperAddInplaceTensor);
   m.impl("addcdiv", WrapperAddcdiv);
