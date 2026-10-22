@@ -498,7 +498,10 @@ jobs:
           cat > "$script" <<EOF
           set -euo pipefail
           export CI_STAGE=$(printf '%q' "$CI_STAGE")
-          cd "$${GITHUB_WORKSPACE:?}"
+          # Supplying this path here keeps the fallback shell usable even when
+          # the workspace profile replaces the directory.
+          export GITHUB_WORKSPACE=$(printf '%q' "$GITHUB_WORKSPACE")
+          cd "\$GITHUB_WORKSPACE"
           "$SETUP_BASH" $(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT") --platform "$(printf '%q' "$SETUP_PLATFORM")"
           EOF
           if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
@@ -514,7 +517,7 @@ jobs:
             SETUP_BASH="$(/bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; command -v bash')"
             [[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"
             export SETUP_BASH
-            /bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' \
+            /bin/bash -c 'set -euo pipefail; export GITHUB_WORKSPACE; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' \
               -- "$script"
           fi
 

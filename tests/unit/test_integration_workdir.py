@@ -382,6 +382,77 @@ def _prepare_steps() -> list[tuple[str, str, str]]:
     return [(workflow.name, platform, script) for platform in _manifest_platforms()]
 
 
+def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
+    """Exercise the script that GitHub generates for a native setup lane.
+
+    The old heredoc wrote ``$${GITHUB_WORKSPACE:?}``. GitHub's shell rewrites
+    ``$$`` to its own process ID, so MPS ran ``cd 1468{GITHUB_WORKSPACE:?}``
+    before it reached the platform setup. The generated script must use an
+    absolute script path and a workspace path that survives a profile that
+    changes the current directory.
+    """
+    workflow = _run_script_of_step(
+        (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8"),
+        "Prepare ${{ needs.configuration.outputs.display_name }} build environment",
+    )
+    assert workflow is not None
+    assert "$${" not in workflow
+    assert 'cd "\\$GITHUB_WORKSPACE"' in workflow
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        checkout = root / "checkout with spaces"
+        setup = checkout / ".github/scripts/set_env.sh"
+        setup.parent.mkdir(parents=True)
+        setup.write_text(
+            "#!/bin/bash\n"
+            "set -euo pipefail\n"
+            '[[ "$CI_STAGE" == build ]]\n'
+            '[[ "$1" == --platform && "$2" == mps ]]\n'
+            '[[ "$PWD" == "$EXPECTED_WORKSPACE" ]]\n'
+            'echo MPS_PROFILE=loaded >> "$GITHUB_ENV"\n'
+            "echo setup-ok\n",
+            encoding="utf-8",
+        )
+        setup.chmod(0o755)
+        profile = root / "profile.sh"
+        profile.write_text(
+            'if [[ -s "$GITHUB_ENV" ]]; then\n'
+            "  set -a\n"
+            '  source "$GITHUB_ENV"\n'
+            "  set +a\n"
+            "fi\n"
+            'export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
+            'cd "$GITHUB_WORKSPACE"\n',
+            encoding="utf-8",
+        )
+        expected_workspace = root / "platform-profile-workspace"
+        expected_workspace.mkdir()
+        result = subprocess.run(
+            ["/bin/bash", "-c", workflow],
+            cwd=root,
+            env={
+                "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
+                "CI_STAGE": "build",
+                "CONTAINER_CONFIG": "",
+                "EXPECTED_WORKSPACE": str(expected_workspace),
+                "INTEGRATION_PROFILE": str(profile),
+                "GITHUB_ENV": str(root / "github-env"),
+                "GITHUB_WORKSPACE": str(checkout),
+                "RUNNER_TEMP": str(runner_temp),
+                "SETUP_BASH": "/bin/bash",
+                "SETUP_PLATFORM": "mps",
+                "SETUP_SCRIPT": ".github/scripts/set_env.sh",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "setup-ok" in result.stdout
+        assert "MPS_PROFILE=loaded" in (root / "github-env").read_text()
+
+
 def test_the_model_mount_is_prepared_on_its_platform_host():
     """Restore the checkpoint on the runner that will start the vendor image."""
     workflow = yaml.safe_load(
@@ -434,7 +505,11 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert 'python3 - "$MODEL_CACHE"' in verify["run"]
     assert "hf_hub_download" not in verify["run"]
     setup = next(step for step in steps if step.get("id") == "setup")
-    assert 'cd "$${GITHUB_WORKSPACE:?}"' in setup["run"]
+    assert (
+        "export GITHUB_WORKSPACE=$(printf '%q' \"$GITHUB_WORKSPACE\")" in (setup["run"])
+    )
+    assert 'cd "\\$GITHUB_WORKSPACE"' in setup["run"]
+    assert "$${" not in setup["run"]
     assert """$(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT")""" in setup["run"]
     fallback = next(step for step in steps if step.get("id") == "source-archive")
     assert (
