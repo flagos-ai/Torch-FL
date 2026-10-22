@@ -6,6 +6,7 @@
 
 #include "contiguous_ops.h"
 #include "copy_ops.h"
+#include "stream_copy.h"
 
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
